@@ -2,11 +2,12 @@
 
 use ene_ai::LlmProvider;
 use ene_mind::{
-    ProactiveConfig, ProactiveObservation, ProactiveSuppressionState, build_proactive_context,
-    decide_proactive_speech,
+    ActiveCommitmentPrompt, ProactiveConfig, ProactiveObservation, ProactiveSuppressionState,
+    ScreenSummaryStatus, build_proactive_context, decide_proactive_speech,
 };
+use ene_store::AffectState as StoreAffectState;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Mutable scheduler counters owned by the actor.
 #[derive(Debug)]
@@ -86,6 +87,35 @@ pub(crate) struct ProactiveDecisionResult {
     pub detail: String,
 }
 
+/// Drop stale activity/screen payloads so decisions do not act on old host signals.
+#[must_use]
+pub(crate) fn sanitize_observation(
+    config: &ProactiveConfig,
+    mut observation: ProactiveObservation,
+) -> ProactiveObservation {
+    if observation.captured_at_unix_ms == 0 {
+        observation.activity = None;
+        observation.screen_summary = None;
+        observation.screen_summary_status = ScreenSummaryStatus::Unavailable;
+        return observation;
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let max_age_secs = config.interval_seconds.saturating_mul(3).max(1);
+    let age_secs = now_ms
+        .saturating_sub(observation.captured_at_unix_ms)
+        .saturating_div(1000);
+    if age_secs > max_age_secs {
+        observation.activity = None;
+        observation.screen_summary = None;
+        if config.sources.screen_summary {
+            observation.screen_summary_status = ScreenSummaryStatus::Unavailable;
+        }
+    }
+    observation
+}
+
 /// Run a decision against the current session snapshot (spawned off the actor).
 pub(crate) async fn run_decision_task(
     config: ProactiveConfig,
@@ -94,8 +124,18 @@ pub(crate) async fn run_decision_task(
     suppression: ProactiveSuppressionState,
     provider: Option<Arc<dyn LlmProvider>>,
     epoch: u64,
+    affect: Option<StoreAffectState>,
+    commitments: Vec<ActiveCommitmentPrompt>,
 ) -> ProactiveDecisionResult {
-    let context = build_proactive_context(&config, &history, &observation, None, &[], suppression);
+    let observation = sanitize_observation(&config, observation);
+    let context = build_proactive_context(
+        &config,
+        &history,
+        &observation,
+        affect.as_ref(),
+        &commitments,
+        suppression,
+    );
     let outcome = decide_proactive_speech(&config, &context, provider).await;
     let should_generate = outcome.skip.is_none()
         && outcome
@@ -131,4 +171,30 @@ pub(crate) fn proactive_generation_hint(topic_hint: &str) -> String {
 #[must_use]
 pub(crate) fn tick_period(config: &ProactiveConfig) -> Duration {
     Duration::from_secs(config.interval_seconds.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_observation_clears_activity() {
+        let config = ProactiveConfig {
+            enabled: true,
+            interval_seconds: 10,
+            min_idle_seconds: 0,
+            cooldown_seconds: 0,
+            max_turns_per_session: 5,
+            ..ProactiveConfig::default()
+        };
+        let mut obs = ProactiveObservation::default();
+        obs.captured_at_unix_ms = 1;
+        obs.activity = Some(ene_mind::ActivitySnapshot {
+            idle_seconds: None,
+            active_window_label: "app".into(),
+            recent_change: String::new(),
+        });
+        let sanitized = sanitize_observation(&config, obs);
+        assert!(sanitized.activity.is_none());
+    }
 }

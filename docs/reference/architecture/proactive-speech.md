@@ -46,7 +46,7 @@ The decision model must return JSON only (no utterance body). Normalized fields:
 | Field | Type | Notes |
 |---|---|---|
 | `should_speak` | bool | Required; missing → `false` |
-| `confidence` | f64 | Clamped to `[0.0, 1.0]`; missing/invalid → `0.0` |
+| `confidence` | f64 | Must be finite and in `[0.0, 1.0]`; out-of-range → fail-closed (`should_speak = false`); missing → `0.0` |
 | `reason` | string | Internal diagnostic; never spoken verbatim |
 | `topic_hint` | string | Optional hint for generation; empty if missing |
 | `urgency` | string | One of `low` / `normal` / `high`; unknown → `normal` |
@@ -59,6 +59,10 @@ Unknown fields are ignored. Parse / timeout / provider failures are fail-closed:
 - Proactive turns **must not** insert a synthetic user message into `ConversationSession`.
 - Only the assistant response is written to history / `conversation_logs` so later user turns can see it.
 - `PostTurnInput` / memory writer must not treat an empty user message as a memory candidate.
+- Proactive generation uses `provider.proactive.generation_model` when set (via OpenAI-compatible chat provider override); otherwise `provider.model`.
+- Internal companion directives are injected as **system** messages during generation; they are not stored as user history, not embedded, and not passed to memory writers.
+- `generation_timeout_seconds` caps proactive generation wall time (outer timeout wins over provider defaults).
+- In-flight decision tasks are aborted when a user turn starts or the actor shuts down.
 - Proactive generation defaults to `allow_tools = false`.
 
 ### Suppression policy (configurable)
@@ -79,8 +83,8 @@ Unknown fields are ignored. Parse / timeout / provider failures are fail-closed:
 | Source | Content | Privacy |
 |---|---|---|
 | `conversation` | Recent `HistoryEntry` list, truncated by char budget | Session history only |
-| `activity` | Idle seconds, privacy-safe active-window label, recent activity change | No keylogging; titles redacted/capped |
-| `screen_summary` | Short-lived **text** summary only | Raw screenshot bytes are never persisted, logged, or sent in diagnostics |
+| `activity` | Optional idle hint, **app name only** (no raw window title), recent focus change | No keylogging; titles never collected in V1 |
+| `screen_summary` | Short-lived **text** summary when a desktop summarizer is available | V1 desktop reports `unavailable` when enabled but no provider is bundled; raw screenshot bytes are never persisted, logged, or sent in diagnostics |
 
 Each source has an independent enable flag. When disabled, desktop must not capture that source, and mind must not include it in the decision prompt.
 

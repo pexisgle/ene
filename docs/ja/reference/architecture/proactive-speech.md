@@ -46,7 +46,7 @@ Timer / observation update
 | フィールド | 型 | 備考 |
 |---|---|---|
 | `should_speak` | bool | 必須。欠落時は `false` |
-| `confidence` | f64 | `[0.0, 1.0]` に clamp。欠落・不正は `0.0` |
+| `confidence` | f64 | 有限かつ `[0.0, 1.0]` 内であること。範囲外は fail-closed（`should_speak = false`）。欠落は `0.0` |
 | `reason` | string | 内部診断用。そのまま発話しない |
 | `topic_hint` | string | 生成用の任意ヒント。欠落時は空 |
 | `urgency` | string | `low` / `normal` / `high`。未知は `normal` |
@@ -59,6 +59,10 @@ Timer / observation update
 - 能動発話は偽の user message を `ConversationSession` に追加しない。
 - assistant 応答のみを history / `conversation_logs` に書き、以降の通常対話の文脈にする。
 - `PostTurnInput` / memory writer は空の user message を記憶候補にしない。
+- 能動発話の生成は `provider.proactive.generation_model`（設定時）を OpenAI 互換チャットの model override で使用。未設定なら `provider.model`。
+- 内部 companion 指示は生成時に **system** メッセージとして注入。ユーザー履歴・embedding・memory writer には渡さない。
+- `generation_timeout_seconds` が能動発話生成の壁時計上限（外側 timeout が優先）。
+- ユーザー turn 開始または actor 終了時に進行中の decision タスクを abort する。
 - 能動発話の生成は既定で `allow_tools = false`。
 
 ### 抑制ポリシー（設定化）
@@ -79,8 +83,8 @@ Timer / observation update
 | ソース | 内容 | プライバシー |
 |---|---|---|
 | `conversation` | 直近の `HistoryEntry`（文字数上限で truncate） | セッション履歴のみ |
-| `activity` | idle 秒、privacy-safe なアクティブウィンドウラベル、直近の活動変化 | キーログなし。タイトルは redact / 上限付き |
-| `screen_summary` | 短命な **テキスト** 要約のみ | raw screenshot は永続化・ログ・diagnostic に出さない |
+| `activity` | 任意の idle ヒント、**アプリ名のみ**（生ウィンドウタイトルなし）、直近フォーカス変化 | キーログなし。V1 ではタイトルは収集しない |
+| `screen_summary` | デスクトップ要約プロバイダが利用可能なときの短命 **テキスト** 要約 | V1 デスクトップは有効でも要約器未同梱のため `unavailable`。raw screenshot は永続化・ログ・diagnostic に出さない |
 
 各ソースは個別に有効 / 無効。無効時は desktop が収集せず、mind も判定プロンプトに含めない。
 

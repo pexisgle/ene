@@ -151,6 +151,7 @@ pub use output::{
 pub use proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveContext, ProactiveDecision,
     ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
+    ScreenSummaryStatus,
     ProactiveUrgency, build_decision_messages, build_proactive_context, decide_proactive_speech,
     decision_schema, evaluate_deterministic_gates, parse_decision_json,
 };

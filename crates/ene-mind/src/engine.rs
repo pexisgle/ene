@@ -264,6 +264,73 @@ impl CognitionEngine {
         })
     }
 
+    /// Lightweight pre-turn for proactive speech: affect + commitments only (no recall / embedding).
+    pub async fn before_proactive_turn(
+        &self,
+        ctx: TurnContext<'_>,
+    ) -> Result<PreTurnOutput, CognitionError> {
+        use crate::recall::{
+            RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints,
+        };
+
+        let store = ctx.store.ok_or_else(|| {
+            CognitionError::Other("Memory store required for cognitive path".into())
+        })?;
+
+        let affect = store
+            .get_affect_state(ctx.character_id)
+            .await
+            .map_err(CognitionError::Memory)?;
+
+        let commitment_rows =
+            match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(
+                        component = "CognitionEngine",
+                        error = %error,
+                        "Failed to list active commitments for proactive pre-turn"
+                    );
+                    vec![]
+                }
+            };
+        let commitments = CommitmentLedger::active_prompt_candidates(&commitment_rows);
+
+        let recall_plan = RecallPlan {
+            current_topic: "proactive".to_string(),
+            semantic_queries: Vec::new(),
+            episodic_queries: Vec::new(),
+            required_kinds: Vec::new(),
+            scope: RecallScopeFilter {
+                character_id: ctx.character_id.to_string(),
+                user_id: Some(ctx.user_name.to_string()),
+            },
+            budget: RecallBudgetHints {
+                memory_budget_tokens: 0,
+                semantic_budget_tokens: 0,
+                result_limit: 0,
+            },
+            search: RecallSearchHints {
+                primary_query_text: String::new(),
+                similarity_threshold: 0.0,
+                min_score: 0.0,
+                decay_half_life_days: 30.0,
+                query_affect: None,
+            },
+            use_hyde: false,
+        };
+
+        Ok(PreTurnOutput {
+            recall_plan,
+            affect,
+            recalled: Vec::new(),
+            commitments,
+            classifier_expression_hint: None,
+        })
+    }
+
     /// Persist affect state after pre-turn update (survives stream cancel/failure).
     pub async fn persist_affect_snapshot(
         store: &MemoryStore,

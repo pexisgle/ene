@@ -3,7 +3,7 @@
 use ene_ai::LlmToolCallChunk;
 use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
-use ene_mind::{CognitionEngine, EngineMode, HistoryEntry, MindConfig, PostTurnInput, TurnContext};
+use ene_mind::{CognitionEngine, CognitionError, EngineMode, HistoryEntry, MindConfig, PostTurnInput, TurnContext};
 use tokio_stream::StreamExt;
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
@@ -15,6 +15,8 @@ use crate::streaming::{
     accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
     select_relevant_tools,
 };
+use crate::types::TurnOrigin;
+use ene_ai::{LlmMessage, UserMessagePart};
 use ene_mind::{
     CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority, strip_markers,
 };
@@ -53,6 +55,28 @@ fn build_turn_context<'a>(
     }
 }
 
+fn apply_proactive_prompt(messages: &mut Vec<LlmMessage>, directive: Option<&str>) {
+    if let Some(ene_ai::LlmMessage::User { parts }) = messages.last() {
+        let empty = parts.iter().all(|p| match p {
+            UserMessagePart::Text { text } => text.trim().is_empty(),
+            UserMessagePart::Image { .. } => true,
+        });
+        if empty {
+            messages.pop();
+        }
+    }
+    if let Some(dir) = directive.filter(|s| !s.trim().is_empty()) {
+        messages.push(LlmMessage::System {
+            content: format!("[Companion directive]\n{dir}"),
+        });
+        messages.push(LlmMessage::User {
+            parts: vec![UserMessagePart::Text {
+                text: "(The companion speaks unprompted; respond in character.)".into(),
+            }],
+        });
+    }
+}
+
 /// Run the streaming loop using the cognitive runtime lifecycle.
 pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationSession {
     let StreamContext {
@@ -72,8 +96,19 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         turn,
         origin,
         allow_tools,
+        runtime_directive,
+        generation_timeout,
         classifier_tx,
     } = ctx;
+
+    let is_proactive = origin == TurnOrigin::Proactive;
+    if let Some(timeout) = generation_timeout {
+        let token = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            token.cancel();
+        });
+    }
 
     session.reset_display_buffer();
 
@@ -115,7 +150,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         },
     );
 
-    let query_embedding = if let Some(emb_prov) = &embedder {
+    let query_embedding = if is_proactive {
+        None
+    } else if let Some(emb_prov) = &embedder {
         tracing::info!(%turn, "Generating user query embedding...");
         match ene_ai::embed_query(emb_prov.as_ref(), &user_input).await {
             Ok(emb) => {
@@ -142,6 +179,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     };
 
     let history: Vec<HistoryEntry> = session.history().to_vec();
+    let recall_query = if is_proactive { "" } else { user_input.as_str() };
+    let compose_query = recall_query;
 
     let prompts = PromptLibrary::load(&mind.emotion.classifier_language);
     let post_history_phi =
@@ -155,14 +194,16 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         },
     );
 
-    if let (Some(_store), Some(embedder)) = (mem_store.as_deref(), embedder.as_ref()) {
+    if !is_proactive
+        && let (Some(_store), Some(embedder)) = (mem_store.as_deref(), embedder.as_ref())
+    {
         let sync_ctx = build_turn_context(
             &mind,
             &card,
             &card_name,
             &user_name,
             session_id.as_str(),
-            &user_input,
+            compose_query,
             &history,
             &mem_store,
             query_embedding.as_deref(),
@@ -217,7 +258,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         &card_name,
         &user_name,
         session_id.as_str(),
-        &user_input,
+        compose_query,
         &history,
         &mem_store,
         query_embedding.as_deref(),
@@ -227,16 +268,27 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     );
 
     tracing::info!(%turn, "Retrieving memory recall context and selecting relevant tools...");
-    let (pre_turn_result, tools) = tokio::join!(
-        engine.before_turn(turn_ctx),
-        select_relevant_tools(
-            registry.as_ref(),
-            tool_rag.as_deref(),
-            &user_input,
-            query_embedding.as_deref(),
-            tool_calling_enabled,
+    let (pre_turn_result, tools) = if is_proactive {
+        let pre = if mem_store.is_some() {
+            engine.before_proactive_turn(turn_ctx).await
+        } else {
+            Err(CognitionError::Other(
+                "Memory store required for proactive cognitive path".into(),
+            ))
+        };
+        (pre, Vec::new())
+    } else {
+        tokio::join!(
+            engine.before_turn(turn_ctx),
+            select_relevant_tools(
+                registry.as_ref(),
+                tool_rag.as_deref(),
+                recall_query,
+                query_embedding.as_deref(),
+                tool_calling_enabled,
+            )
         )
-    );
+    };
 
     let pre_turn = match pre_turn_result {
         Ok(v) => {
@@ -270,7 +322,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         );
     }
 
-    if mem_config.enabled
+    if !is_proactive
+        && mem_config.enabled
         && let Some(store) = &mem_store
     {
         ene_store::MemoryStore::spawn_insert_log(
@@ -296,7 +349,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         &card_name,
         &user_name,
         session_id.as_str(),
-        &user_input,
+        compose_query,
         &history,
         &mem_store,
         query_embedding.as_deref(),
@@ -326,6 +379,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     };
 
     let mut messages = composed.messages;
+    if is_proactive {
+        apply_proactive_prompt(&mut messages, runtime_directive.as_deref());
+    }
     let max_rounds = tool_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
     let mut round = 0usize;
@@ -539,9 +595,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             }
 
             if let Some(store) = mem_store.as_deref() {
+                let post_user = if is_proactive { "" } else { user_input.as_str() };
                 let post = PostTurnInput {
                     turn: TurnInput {
-                        user_message: &user_input,
+                        user_message: post_user,
                         assistant_message: Some(&clean_content),
                         tool_results: &turn_tool_results,
                     },
@@ -599,7 +656,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 TerminalReason::Done,
             );
 
-            if let Some(classifier_store) = mem_store.clone()
+            if !is_proactive
+                && let Some(classifier_store) = mem_store.clone()
                 && mind.emotion.enabled
                 && matches!(mind.emotion.engine, EngineMode::Llm | EngineMode::Hybrid)
                 && !assistant_content.trim().is_empty()

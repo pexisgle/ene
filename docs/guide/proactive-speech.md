@@ -14,8 +14,9 @@ Proactive speech (#103) uses a **lightweight decision model** and the normal cha
 2. Configure sources under `mind.proactive.sources`.
 3. Set `provider.proactive.decision.backend` to `llama_cpp` or `cloud`.
 4. For local: set `model_path` to a Gemma 4 E2B/E4B (or other) GGUF. Optional `acceleration` / `gpu_layers` for Vulkan/CUDA.
+5. Optional: set `provider.proactive.generation_model` to use a different chat model for proactive utterances.
 
-Weights are **not** bundled (no external `llama-server` binary either). See [spike notes](../reference/architecture/proactive-local-llm-spike.md) and the [ADR](../reference/architecture/proactive-speech.md).
+Weights are **not** bundled. Local inference is **in-process llama-cpp-2** (no `llama-server` subprocess). See [spike notes](../reference/architecture/proactive-local-llm-spike.md) and the [ADR](../reference/architecture/proactive-speech.md).
 
 ## Smoke test (optional)
 
@@ -28,5 +29,5 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 ## Privacy
 
 - Desktop never writes raw screenshots to disk, logs, or SQLite.
-- Screen summary is optional; when no summarizer is available the source is treated as unavailable.
-- Activity uses privacy-safe active-window labels only (no keylogging).
+- Screen summary is optional; when enabled, V1 desktop reports the source as **unavailable** until a summarizer is integrated (no silent empty summaries).
+- Activity uses **application name only** (no raw window titles; no keylogging).

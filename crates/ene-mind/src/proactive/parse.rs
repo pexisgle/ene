@@ -3,24 +3,30 @@
 use crate::proactive::{ProactiveDecision, ProactiveUrgency};
 use serde_json::{Value, json};
 
-/// JSON Schema passed to providers that support structured output.
+/// Inner JSON Schema object (grammar / strict validation).
+#[must_use]
+pub fn decision_schema_object() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["should_speak", "confidence", "reason", "topic_hint", "urgency"],
+        "properties": {
+            "should_speak": { "type": "boolean" },
+            "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "reason": { "type": "string" },
+            "topic_hint": { "type": "string" },
+            "urgency": { "type": "string", "enum": ["low", "normal", "high"] }
+        }
+    })
+}
+
+/// JSON Schema passed to cloud providers that support structured output wrappers.
 #[must_use]
 pub fn decision_schema() -> Value {
     json!({
         "name": "proactive_decision",
         "strict": true,
-        "schema": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["should_speak", "confidence", "reason", "topic_hint", "urgency"],
-            "properties": {
-                "should_speak": { "type": "boolean" },
-                "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-                "reason": { "type": "string" },
-                "topic_hint": { "type": "string" },
-                "urgency": { "type": "string", "enum": ["low", "normal", "high"] }
-            }
-        }
+        "schema": decision_schema_object(),
     })
 }
 
@@ -46,11 +52,13 @@ pub fn parse_decision_json(raw: &str) -> ProactiveDecision {
         .get("should_speak")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let confidence = obj
-        .get("confidence")
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0)
-        .clamp(0.0, 1.0);
+    let confidence = match obj.get("confidence").and_then(Value::as_f64) {
+        Some(c) if c.is_finite() && (0.0..=1.0).contains(&c) => c,
+        Some(_) => {
+            return ProactiveDecision::silent("confidence out of range");
+        }
+        None => 0.0,
+    };
     let reason = obj
         .get("reason")
         .and_then(Value::as_str)
@@ -106,9 +114,10 @@ mod tests {
     }
 
     #[test]
-    fn confidence_is_clamped() {
+    fn confidence_out_of_range_fails_closed() {
         let d = parse_decision_json(r#"{"should_speak":true,"confidence":2.5}"#);
-        assert!((d.confidence - 1.0).abs() < f64::EPSILON);
+        assert!(!d.should_speak);
+        assert!(d.reason.contains("confidence"));
     }
 
     #[test]

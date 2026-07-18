@@ -14,8 +14,9 @@
 2. `mind.proactive.sources` を設定する。
 3. `provider.proactive.decision.backend` を `llama_cpp` または `cloud` にする。
 4. ローカル時は GGUF の `model_path`。任意で `acceleration` / `gpu_layers`（Vulkan/CUDA）。
+5. 任意: `provider.proactive.generation_model` で能動発話専用のチャットモデルを指定。
 
-重みはアプリに **同梱しない**（外部 `llama-server` も不要）。[スパイク](../reference/architecture/proactive-local-llm-spike.md) と [ADR](../reference/architecture/proactive-speech.md) を参照。
+重みは **同梱しない**。ローカル推論は **プロセス内 llama-cpp-2**（`llama-server` 子プロセスなし）。[スパイク](../reference/architecture/proactive-local-llm-spike.md) と [ADR](../reference/architecture/proactive-speech.md) を参照。
 
 ## スモーク（任意）
 
@@ -28,5 +29,5 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 ## プライバシー
 
 - Desktop は生スクリーンショットをディスク・ログ・SQLite に書かない。
-- 画面要約は任意。要約器が無い場合はそのソースを利用不可として扱う。
-- アクティビティはプライバシー安全なアクティブウィンドウラベルのみ（キーロギングなし）。
+- 画面要約は任意。有効時も V1 デスクトップは要約器未同梱のため **unavailable** を報告する（空要約を黙って送らない）。
+- アクティビティは **アプリ名のみ**（生ウィンドウタイトルなし。キーロギングなし）。

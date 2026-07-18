@@ -489,7 +489,7 @@ Policy for unsolicited companion utterances. Default is **off**. See [Proactive 
 | `generation_timeout_seconds` | int | `60` | High-quality generation timeout |
 | `sources.conversation` | bool | `true` | Include recent chat history |
 | `sources.activity` | bool | `true` | Include privacy-safe activity / idle |
-| `sources.screen_summary` | bool | `false` | Include short-lived screen text summary |
+| `sources.screen_summary` | bool | `false` | Include short-lived screen text summary when a desktop summarizer is available (V1: always unavailable) |
 | `decision.min_confidence` | float | `0.55` | Minimum confidence to start generation (`0.0..=1.0`) |
 | `allow_tools` | bool | `false` | Allow tool selection during proactive generation |
 | `max_conversation_chars` | int | `4000` | Conversation budget in the decision prompt |

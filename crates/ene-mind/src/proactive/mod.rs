@@ -8,7 +8,7 @@ mod parse;
 mod prompt;
 
 pub use gate::{GateRejectReason, evaluate_deterministic_gates};
-pub use parse::{decision_schema, parse_decision_json};
+pub use parse::{decision_schema, decision_schema_object, parse_decision_json};
 pub use prompt::build_decision_messages;
 
 use std::sync::Arc;
@@ -24,12 +24,25 @@ use crate::lifecycle::HistoryEntry;
 /// Privacy-safe activity snapshot from the host (desktop).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActivitySnapshot {
-    /// Seconds since the last user input or OS activity signal.
-    pub idle_seconds: u64,
-    /// Redacted / capped active-window label (never a keylog).
+    /// Seconds since the last OS activity signal when available.
+    pub idle_seconds: Option<u64>,
+    /// Privacy-safe app label (never a raw window title).
     pub active_window_label: String,
     /// Short description of recent activity change (optional).
     pub recent_change: String,
+}
+
+/// Screen summary availability from the host (#168).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenSummaryStatus {
+    /// Source disabled in settings.
+    #[default]
+    Disabled,
+    /// Source enabled but no summarizer is available on this host.
+    Unavailable,
+    /// Short-lived text summary (never raw image bytes).
+    Available,
 }
 
 /// Host-supplied observation used to build decision context (#166 / #168).
@@ -39,8 +52,10 @@ pub struct ProactiveObservation {
     pub captured_at_unix_ms: u64,
     /// Activity signals when the activity source is enabled.
     pub activity: Option<ActivitySnapshot>,
-    /// Short-lived screen **text** summary (never raw image bytes).
+    /// Short-lived screen **text** summary when [`ScreenSummaryStatus::Available`].
     pub screen_summary: Option<String>,
+    /// Whether screen summary was requested but unavailable.
+    pub screen_summary_status: ScreenSummaryStatus,
 }
 
 /// Runtime suppression counters passed into the decision pipeline.
@@ -186,7 +201,9 @@ pub fn build_proactive_context(
         None
     };
 
-    let screen_summary = if config.sources.screen_summary {
+    let screen_summary = if config.sources.screen_summary
+        && observation.screen_summary_status == ScreenSummaryStatus::Available
+    {
         observation
             .screen_summary
             .as_ref()
@@ -420,11 +437,12 @@ mod tests {
         let observation = ProactiveObservation {
             captured_at_unix_ms: 1,
             activity: Some(ActivitySnapshot {
-                idle_seconds: 99,
+                idle_seconds: Some(99),
                 active_window_label: "Editor".into(),
                 recent_change: "focus".into(),
             }),
             screen_summary: Some("secret".into()),
+            screen_summary_status: ScreenSummaryStatus::Available,
         };
         let ctx = build_proactive_context(
             &config,
@@ -483,7 +501,7 @@ mod tests {
             }],
             seconds_since_user_input: 200,
             activity: Some(ActivitySnapshot {
-                idle_seconds: 200,
+                idle_seconds: Some(200),
                 active_window_label: "Browser".into(),
                 recent_change: String::new(),
             }),

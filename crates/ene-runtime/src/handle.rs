@@ -5,9 +5,10 @@ use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
 use chrono::{DateTime, Utc};
-use ene_ai::LlmProviderRegistry;
+use ene_ai::{LlmProviderRegistry, create_openai_compatible_chat_provider};
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
+use ene_mind::commitments::CommitmentLedger;
 use ene_mind::{CardName, SessionId};
 use ene_mind::{
     CompressionLevel, CompressionTaskInput, HistoryEntry as MindHistoryEntry,
@@ -505,6 +506,7 @@ impl EneHandle {
             _diag_rx: diag_rx,
             proactive: crate::proactive::ProactiveScheduler::default(),
             proactive_decision_rx: None,
+            proactive_decision_handle: None,
             proactive_llm: None,
             active_origin: crate::types::TurnOrigin::User,
         };
@@ -672,6 +674,8 @@ struct EneActor {
     proactive: crate::proactive::ProactiveScheduler,
     /// In-flight decision result channel.
     proactive_decision_rx: Option<oneshot::Receiver<crate::proactive::ProactiveDecisionResult>>,
+    /// Join handle for the in-flight decision task (aborted on user turn / shutdown).
+    proactive_decision_handle: Option<tokio::task::JoinHandle<()>>,
     /// Local / cloud decision provider handles (lazy).
     proactive_llm: Option<ene_ai::ProactiveLlmHandles>,
     /// Origin of the active stream turn (for cancel Terminal).
@@ -843,6 +847,13 @@ impl EneActor {
         guard.clear();
     }
 
+    fn abort_proactive_decision(&mut self) {
+        if let Some(handle) = self.proactive_decision_handle.take() {
+            handle.abort();
+        }
+        self.proactive_decision_rx = None;
+    }
+
     async fn maybe_spawn_proactive_decision(&mut self) {
         if self.stream_handle.is_some() || self.proactive_decision_rx.is_some() {
             return;
@@ -887,13 +898,30 @@ impl EneActor {
 
         let decision_provider = self.proactive_llm.as_ref().map(|h| Arc::clone(&h.decision));
         let epoch = self.proactive.epoch;
-        let suppression = self.proactive.suppression(false);
+        let user_turn_busy = self.stream_handle.is_some()
+            || !self.pending_permissions.lock().await.is_empty()
+            || !self.pending_user_inputs.lock().await.is_empty();
+        let suppression = self.proactive.suppression(user_turn_busy);
         let observation = self.proactive.observation.clone();
         let history = self.session.history().to_vec();
+        let card_name = self.session.card_name().to_string();
+        let user_name = self.config.user_name.clone();
+        let mem_store = self.session.memory.memory_store.clone();
+        let (affect, commitments) = if let Some(store) = mem_store.as_ref() {
+            let affect = store.get_affect_state(&card_name).await.ok();
+            let raw = store
+                .list_active_commitments(&card_name, Some(user_name.as_str()), 10)
+                .await
+                .unwrap_or_default();
+            let commitments = CommitmentLedger::active_prompt_candidates(&raw);
+            (affect, commitments)
+        } else {
+            (None, Vec::new())
+        };
         let (tx, rx) = oneshot::channel();
         self.proactive_decision_rx = Some(rx);
         let config = mind.proactive.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let result = crate::proactive::run_decision_task(
                 config,
                 history,
@@ -901,10 +929,13 @@ impl EneActor {
                 suppression,
                 decision_provider,
                 epoch,
+                affect,
+                commitments,
             )
             .await;
             let _ = tx.send(result);
         });
+        self.proactive_decision_handle = Some(handle);
     }
 
     async fn handle_proactive_decision(
@@ -947,12 +978,16 @@ impl EneActor {
         let _ = self.event_tx.send(EneEvent::StatusChanged {
             status: EneStatus::Running,
         });
+        let generation_timeout =
+            std::time::Duration::from_secs(mind.proactive.generation_timeout_seconds.max(1));
         self.start_stream(
-            hint,
+            String::new(),
             turn,
             crate::types::TurnOrigin::Proactive,
             false,
             mind.proactive.allow_tools,
+            Some(hint),
+            Some(generation_timeout),
         );
     }
 
@@ -970,7 +1005,7 @@ impl EneActor {
                 }
                 // Discard any in-flight proactive decision.
                 self.proactive.on_user_turn_started();
-                self.proactive_decision_rx = None;
+                self.abort_proactive_decision();
                 self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
@@ -979,7 +1014,15 @@ impl EneActor {
                 let _ = self.event_tx.send(EneEvent::StatusChanged {
                     status: EneStatus::Running,
                 });
-                self.start_stream(input, turn, crate::types::TurnOrigin::User, true, true);
+                self.start_stream(
+                    input,
+                    turn,
+                    crate::types::TurnOrigin::User,
+                    true,
+                    true,
+                    None,
+                    None,
+                );
                 true
             }
             EneCommand::Cancel { turn } => {
@@ -1046,7 +1089,7 @@ impl EneActor {
             EneCommand::Shutdown => {
                 self.classifier_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
-                self.proactive_decision_rx = None;
+                self.abort_proactive_decision();
                 if let Some(handles) = self.proactive_llm.take() {
                     handles.shutdown().await;
                 }
@@ -1056,7 +1099,7 @@ impl EneActor {
             EneCommand::SetCharacter { card, reply } => {
                 self.session.set_card(&card);
                 self.proactive.reset_session();
-                self.proactive_decision_rx = None;
+                self.abort_proactive_decision();
                 let _ = reply.send(Ok(()));
                 true
             }
@@ -1161,10 +1204,16 @@ impl EneActor {
         origin: crate::types::TurnOrigin,
         record_user_message: bool,
         allow_tools: bool,
+        runtime_directive: Option<String>,
+        generation_timeout: Option<std::time::Duration>,
     ) {
         // Create the provider before mutating history so a failed open leaves
         // the session unchanged.
-        let provider = match self.create_provider() {
+        let provider = match if origin == crate::types::TurnOrigin::Proactive {
+            self.create_proactive_provider()
+        } else {
+            self.create_provider()
+        } {
             Ok(p) => p,
             Err(e) => {
                 if self
@@ -1238,6 +1287,8 @@ impl EneActor {
                 turn: turn_for_stream,
                 origin,
                 allow_tools,
+                runtime_directive,
+                generation_timeout,
                 classifier_tx,
             })
             .await;
@@ -1249,6 +1300,14 @@ impl EneActor {
     fn create_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
         let provider_config = self.config.get_section::<ene_ai::ProviderConfig>()?;
         LlmProviderRegistry::create_provider(&provider_config.name, &self.config)
+            .map(Arc::from)
+            .map_err(EneRuntimeError::from)
+    }
+
+    fn create_proactive_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
+        let provider_config = self.config.get_section::<ene_ai::ProviderConfig>()?;
+        let model = provider_config.proactive_generation_model();
+        create_openai_compatible_chat_provider(&self.config, Some(model), None)
             .map(Arc::from)
             .map_err(EneRuntimeError::from)
     }

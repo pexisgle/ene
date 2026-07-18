@@ -42,9 +42,12 @@ fn format_context_block(context: &ProactiveContext) -> String {
     }
 
     if let Some(activity) = &context.activity {
+        let idle = activity
+            .idle_seconds
+            .map_or_else(|| "unknown".to_string(), |s| s.to_string());
         lines.push(format!(
-            "activity: idle_seconds={} window=\"{}\" change=\"{}\"",
-            activity.idle_seconds, activity.active_window_label, activity.recent_change
+            "activity: idle_seconds={idle} window=\"{}\" change=\"{}\"",
+            activity.active_window_label, activity.recent_change
         ));
     }
 
@@ -106,7 +109,7 @@ mod tests {
             history: vec![],
             seconds_since_user_input: 90,
             activity: Some(ActivitySnapshot {
-                idle_seconds: 90,
+                idle_seconds: Some(90),
                 active_window_label: "Code".into(),
                 recent_change: "focus".into(),
             }),

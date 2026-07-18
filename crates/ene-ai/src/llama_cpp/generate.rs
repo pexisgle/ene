@@ -55,7 +55,13 @@ pub(crate) fn generate_chat(
             )));
         }
 
-        let mut batch = LlamaBatch::new(512, 1);
+        let mut batch = LlamaBatch::new(
+            tokens
+                .len()
+                .saturating_add(MAX_DECISION_TOKENS as usize)
+                .max(512),
+            1,
+        );
         let last_index = i32::try_from(tokens.len().saturating_sub(1)).unwrap_or(0);
         for (i, token) in (0_i32..).zip(tokens.iter().copied()) {
             batch
@@ -112,8 +118,9 @@ fn build_sampler(
 ) -> Result<LlamaSampler, LlmProviderError> {
     let mut chain: Vec<LlamaSampler> = Vec::new();
     if let Some(schema) = json_schema {
-        let schema_str =
-            serde_json::to_string(schema).map_err(|e| map_llama_err("serialize json schema", e))?;
+        let grammar_schema = schema.get("schema").unwrap_or(schema);
+        let schema_str = serde_json::to_string(grammar_schema)
+            .map_err(|e| map_llama_err("serialize json schema", e))?;
         let grammar = json_schema_to_grammar(&schema_str)
             .map_err(|e| map_llama_err("json_schema_to_grammar", e))?;
         let grammar_sampler = LlamaSampler::grammar(model, &grammar, "root")

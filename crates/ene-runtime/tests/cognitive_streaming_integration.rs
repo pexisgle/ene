@@ -138,6 +138,8 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         turn: turn.clone(),
         origin: ene_runtime::TurnOrigin::User,
         allow_tools: true,
+        runtime_directive: None,
+        generation_timeout: None,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 

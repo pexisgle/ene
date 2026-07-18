@@ -103,6 +103,10 @@ pub struct StreamContext {
     pub origin: TurnOrigin,
     /// When false, tool selection is skipped (proactive default).
     pub allow_tools: bool,
+    /// Internal companion directive for proactive turns (never stored as user history).
+    pub runtime_directive: Option<String>,
+    /// Wall-clock cap for proactive generation (outer timeout wins over provider defaults).
+    pub generation_timeout: Option<std::time::Duration>,
     /// Sender for classifier `JoinHandles` spawned after Terminal emission.
     /// The actor drains this into its classifier `JoinSet` for lifecycle management.
     pub classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,

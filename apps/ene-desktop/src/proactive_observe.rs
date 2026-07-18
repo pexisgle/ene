@@ -5,12 +5,16 @@
 //! never persisted; screen summary is omitted when no safe summarizer is
 //! available (source unavailable).
 
+mod screen_summary;
+
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ene_mind::{ActivitySnapshot, MindConfig, ProactiveObservation};
+use ene_mind::{ActivitySnapshot, MindConfig, ProactiveObservation, ScreenSummaryStatus};
 use ene_runtime::EneHandle;
 use parking_lot::Mutex;
+
+use screen_summary::ScreenSummaryProvider;
 
 /// Shared knobs so settings UI can pause / retarget observation without
 /// restarting the desktop process.
@@ -64,7 +68,8 @@ pub fn spawn_proactive_observer(
     let control = ProactiveObserveControl::from_mind(mind);
     let control_task = control.clone();
     runtime.spawn(async move {
-        let mut last_window = String::new();
+        let screen_provider = ScreenSummaryProvider::v1_unavailable();
+        let mut last_app = String::new();
         loop {
             let cfg = control_task.snapshot();
             let sleep_for = Duration::from_secs(cfg.interval_seconds.max(1));
@@ -73,7 +78,7 @@ pub fn spawn_proactive_observer(
                 continue;
             }
 
-            let observation = collect_observation(&cfg, &mut last_window);
+            let observation = collect_observation(&cfg, screen_provider, &mut last_app);
             if let Err(e) = handle.update_proactive_observation(observation) {
                 tracing::debug!(
                     component = "ProactiveObserve",
@@ -88,70 +93,74 @@ pub fn spawn_proactive_observer(
     control
 }
 
-fn collect_observation(cfg: &ObserveConfig, last_window: &mut String) -> ProactiveObservation {
+fn collect_observation(
+    cfg: &ObserveConfig,
+    screen_provider: ScreenSummaryProvider,
+    last_app: &mut String,
+) -> ProactiveObservation {
     let captured_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
     let activity = if cfg.activity {
-        Some(collect_activity(last_window))
+        Some(collect_activity(last_app))
     } else {
         None
     };
 
-    // V1: no local OCR / vision summarizer — always unavailable so mind does
-    // not invent screen content. `screen_summary` flag still gates whether we
-    // would attempt capture in a future revision.
-    let _ = cfg.screen_summary;
-    let screen_summary = None;
+    let (screen_summary, screen_summary_status) = if cfg.screen_summary {
+        match screen_provider.summarize() {
+            Some(text) => (Some(text), ScreenSummaryStatus::Available),
+            None => (None, ScreenSummaryStatus::Unavailable),
+        }
+    } else {
+        (None, ScreenSummaryStatus::Disabled)
+    };
 
     ProactiveObservation {
         captured_at_unix_ms,
         activity,
         screen_summary,
+        screen_summary_status,
     }
 }
 
-fn collect_activity(last_window: &mut String) -> ActivitySnapshot {
-    match active_window_label() {
+fn collect_activity(last_app: &mut String) -> ActivitySnapshot {
+    match active_app_label() {
         Some(label) => {
-            let recent_change = if last_window == &label {
+            let recent_change = if last_app == &label {
                 String::new()
-            } else if last_window.is_empty() {
-                last_window.clone_from(&label);
+            } else if last_app.is_empty() {
+                last_app.clone_from(&label);
                 "focus".to_string()
             } else {
-                let change = format!("switched from {last_window}");
-                last_window.clone_from(&label);
+                let change = format!("switched from {last_app}");
+                last_app.clone_from(&label);
                 change
             };
             ActivitySnapshot {
-                idle_seconds: 0,
+                idle_seconds: None,
                 active_window_label: truncate(&label, 120),
                 recent_change: truncate(&recent_change, 160),
             }
         }
         None => ActivitySnapshot {
-            idle_seconds: 0,
+            idle_seconds: None,
             active_window_label: "unavailable".into(),
             recent_change: String::new(),
         },
     }
 }
 
-fn active_window_label() -> Option<String> {
+fn active_app_label() -> Option<String> {
     match active_win_pos_rs::get_active_window() {
         Ok(win) => {
-            let title = win.title.trim();
             let app = win.app_name.trim();
-            let label = if title.is_empty() {
-                app.to_string()
-            } else if app.is_empty() {
-                title.to_string()
+            if app.is_empty() {
+                None
             } else {
-                format!("{app}: {title}")
-            };
-            Some(redact_paths(&label))
+                Some(redact_paths(app))
+            }
         }
         Err(()) => None,
     }
@@ -193,5 +202,29 @@ mod tests {
         assert!(!snap.enabled);
         assert!(snap.activity);
         assert!(!snap.screen_summary);
+    }
+
+    #[test]
+    fn screen_summary_unavailable_when_enabled_but_no_provider() {
+        let cfg = ObserveConfig {
+            enabled: true,
+            activity: false,
+            screen_summary: true,
+            interval_seconds: 30,
+        };
+        let provider = ScreenSummaryProvider::v1_unavailable();
+        let obs = collect_observation(&cfg, provider, &mut String::new());
+        assert_eq!(obs.screen_summary_status, ScreenSummaryStatus::Unavailable);
+        assert!(obs.screen_summary.is_none());
+    }
+
+    #[test]
+    fn activity_uses_app_name_only() {
+        let snap = ActivitySnapshot {
+            idle_seconds: None,
+            active_window_label: "firefox".into(),
+            recent_change: String::new(),
+        };
+        assert!(!snap.active_window_label.contains(':'));
     }
 }

@@ -493,7 +493,7 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 | `generation_timeout_seconds` | int | `60` | 発話生成のタイムアウト |
 | `sources.conversation` | bool | `true` | 直近会話を入力に使う |
 | `sources.activity` | bool | `true` | privacy-safe な活動 / idle を使う |
-| `sources.screen_summary` | bool | `false` | 短命な画面テキスト要約を使う |
+| `sources.screen_summary` | bool | `false` | 短命な画面テキスト要約（デスクトップ要約器が利用可能な場合。V1 は常に unavailable） |
 | `decision.min_confidence` | float | `0.55` | 生成へ進む最低信頼度（`0.0..=1.0`） |
 | `allow_tools` | bool | `false` | 能動発話で tool 選択を許可 |
 | `max_conversation_chars` | int | `4000` | 判定プロンプトの会話文字数上限 |
