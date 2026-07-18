@@ -419,7 +419,8 @@ impl EneHandle {
         let tool_config = config
             .get_section::<ene_tool_host::ToolConfig>()
             .unwrap_or_default();
-        let needs_embedder = mem_config.enabled || tool_config.enabled;
+        let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
+        let needs_embedder = mem_config.enabled || (tool_config.enabled && rag_config.enabled);
 
         // Fail-closed: memory / tool-RAG features require a working embedder.
         let embedder = if needs_embedder {
@@ -1171,6 +1172,10 @@ impl EneActor {
                     let _ = self.config.set_section(&mind_cfg);
                 }
                 self.abort_proactive_decision();
+                // Drop handles so the next ensure rebuilds from current AiConfig.
+                if let Some(handles) = self.proactive_llm.take() {
+                    handles.shutdown().await;
+                }
                 true
             }
             EneCommand::PermissionDecision {
@@ -1765,7 +1770,7 @@ async fn init_memory_store(
 
 /// Builds the `ToolRag` pipeline from the current config, embedder, and session state.
 ///
-/// Returns `None` when tool calling is disabled. Logs an error
+/// Returns `None` when the pipeline is disabled. Logs an error
 /// and returns `None` when the config has an invalid `forced`
 /// tool name (the malformed entry is dropped so a single bad
 /// name does not prevent the rest of the tool RAG from
@@ -1776,14 +1781,11 @@ fn init_tool_rag(
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
     session: &ConversationSession,
 ) -> Option<Arc<ToolRag>> {
-    let tool_config = config
-        .get_section::<ene_tool_host::ToolConfig>()
-        .unwrap_or_default();
-    if !tool_config.enabled {
+    let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
+
+    if !rag_config.enabled {
         return None;
     }
-
-    let rag_config = ToolRagConfig::default();
 
     let store = session.memory.memory_store.clone();
     let opts = match ToolRagOptions::try_from(rag_config) {
@@ -1792,9 +1794,6 @@ fn init_tool_rag(
             tracing::error!(
                 "[ToolRag] Invalid tool name in rag.forced config: {e}; building pipeline without forced tools"
             );
-            // Build with the default options (which has a
-            // sane `forced` set compiled in). The bad name
-            // is logged but does not block the pipeline.
             ToolRagOptions::default()
         }
     };

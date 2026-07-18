@@ -11,27 +11,33 @@ Tool RAG（Retrieval-Augmented Generation）は、ベクトル埋め込みを使
   ↓
 1. クエリを埋め込み → query_embedding
   ↓
-2. 各ツールについて重み付き類似度を計算:
-   score = Σ (weight_i × cosine_sim(query_embedding, tool_field_i))
+2. 任意の HyDE: 仮説文書埋め込みを生成してクエリとブレンド
+  ↓
+3. 各ツールについて重み付き類似度を計算:
+   score = Σ (weight_i × cosine_sim(blended_query, tool_field_i))
    フィールド: summary, description, capability, example, negative
   ↓
-3. カテゴリ別上限を適用（例: Filesystem は最大 3 件）
+4. カテゴリ別上限を適用（例: Filesystem は最大 3 件）
   ↓
-4. スコア順に並べ、top_k 候補を取得
+5. スコア順に並べ、top_k 候補を取得
   ↓
-5. 候補が複数ある場合は embedding cosine rerank → final_n を選択
+6. 候補が複数ある場合は任意の embedding rerank → final_n を選択
   ↓
-6. forced ツールはスコアに関係なく常に含める
+7. forced ツールはスコアに関係なく常に含める
   ↓
 Vec<ToolSpec> → LLM に渡す
 ```
 
 ## 設定
 
-`tools.enabled` と embedding プロバイダの両方が利用可能なとき、Tool RAG は自動的に構築されます。チューニング値は公開 `settings.json` ではなく、コード既定値（`ene-tool-rag` の `ToolRagConfig`）にあります。
+`settings.json` の `tools.rag` で設定します（[設定リファレンス](../configuration/settings.md) を参照）。`tools.rag.enabled` が true で embedding プロバイダがあるときに構築されます。
 
 | オプション | 型 | 既定 | 説明 |
 |--------|------|---------|-------------|
+| `enabled` | bool | `true` | Tool RAG パイプラインを有効化 |
+| `use_hyde` | bool | `true` | 仮説文書埋め込みによるクエリ拡張 |
+| `use_rerank` | bool | `true` | 埋め込みベースの候補リランク |
+| `background_index_on_startup` | bool | `true` | 起動時にインデックスをウォームアップ |
 | `top_k` | int | `12` | リランク前の候補数 |
 | `final_n` | int | `6` | LLM に送る最終ツール数 |
 | `rerank_candidates` | int | `24` | embedding rerank で考慮する候補数 |

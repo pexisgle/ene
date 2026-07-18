@@ -4,9 +4,9 @@ use ene_ai::LlmToolCallChunk;
 use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_mind::{
-    CognitionEngine, ComposePrefetch, HistoryEntry, MindConfig, OwnedPostTurnInput,
-    OwnedTurnInput, PostTurnInput, TurnContext, character::CharacterProcessor,
-    character::compute_card_memory_hash, load_active_scene_summary,
+    CognitionEngine, ComposePrefetch, HistoryEntry, MindConfig, OwnedPostTurnInput, OwnedTurnInput,
+    PostTurnInput, TurnContext, character::CharacterProcessor, character::compute_card_memory_hash,
+    load_active_scene_summary,
 };
 use tokio_stream::StreamExt;
 

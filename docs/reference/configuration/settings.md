@@ -28,17 +28,17 @@ pub struct EneConfig {
 
 ### Migration (version 1 → 2)
 
-Set `"version": 2` and rename the top-level `provider` key to `ai`. The old flat `provider` block maps to the new shape as follows:
+**No automatic migration.** Rewrite `settings.json` by hand: set `"version": 2` and replace the top-level `provider` block with `ai` (`providers` + `tasks`). Old `provider` keys are ignored.
 
 | Old (`provider`) | New (`ai`) |
 |------------------|------------|
-| `name`, `base_url`, `api_key` | `providers.default` with `"kind": "openai_compatible"` |
+| `name`, `base_url`, `api_key` | `providers.<name>` with `"kind": "openai_compatible"` |
 | `model`, `max_tokens` | `tasks.chat` |
-| `embedding.*` | `tasks.embedding` + provider kind (`openai_compatible` or `local_gguf`) |
+| `embedding.*` | `tasks.embedding` (+ optional `query_prefix`) |
 | `proactive.generation_model` | `tasks.proactive` (optional `TaskRef`; `null` = use chat) |
 | `proactive.decision.*` | `providers.<name>` with `"kind": "local_gguf"` and `model_path`, referenced from `tasks.proactive` |
 
-Removed from public settings (use code defaults): top-level `session`, `web_config`, `tools.rag`, `tools.max_rounds` / `timeout_ms`, `mind.context`, `mind.memory`, `mind.character`, extended `mind.proactive` / `mind.emotion` knobs, `store.db_path`, `runtime_rules`.
+Still code-defaults only (not in the thin public UI surface, but some remain JSON-configurable): top-level `session`, `web_config`, `tools.max_rounds` / `timeout_ms`, `mind.context`, most of `mind.memory` / `mind.character`, extended `mind.proactive` / `mind.emotion` knobs, `store.db_path`, `runtime_rules`. **Configurable again:** `tools.rag`, filesystem sandbox limits under `tools.list.fs`.
 
 ## Complete Example
 
@@ -132,6 +132,7 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 | `model` | string | Model name (required for `openai_compatible` chat/embedding) |
 | `max_tokens` | int | Max completion tokens for chat workloads (`0` = omit from request). OpenRouter reserves credit collateral against this ceiling |
 | `dimensions` | int | Expected embedding dimensions (cloud embedding) |
+| `query_prefix` | string or null | Optional prefix prepended to embedding retrieval queries (e.g. `"Query: "`) |
 
 #### `ai.providers` — Provider Kinds
 
@@ -193,7 +194,7 @@ Local GGUF via in-process llama-cpp-2. Used for **embedding** (Hub model name) a
 - `tasks.embedding` may use either kind.
 - `tasks.classifier: null` → classifier reuses `tasks.chat` provider and model.
 - `tasks.proactive: null` → proactive **generation** reuses `tasks.chat`.
-- Proactive **decision**: if `tasks.proactive` points at a `local_gguf` provider with a non-empty `model_path`, the in-process GGUF runs locally; otherwise the chat provider is used for a lightweight cloud decision call. See [Proactive Speech ADR](../architecture/proactive-speech.md).
+- Proactive **decision**: if `tasks.proactive` points at a `local_gguf` provider with a non-empty `model_path`, the in-process GGUF runs locally (load failure falls back to cloud when an OpenAI-compatible chat/proactive task exists). If `tasks.proactive` points at `openai_compatible`, that task's model is used for the cloud decision call; otherwise `tasks.chat` is used. See [Proactive Speech ADR](../architecture/proactive-speech.md).
 
 GGUF weights are not bundled; paths are user-supplied. No external `llama-server` binary is required.
 
@@ -277,7 +278,7 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
 | `list` | object | (built-in tools) | Per-tool enable map with optional flattened config |
 | `mcp_servers` | array | `[]` | MCP servers list |
 
-`max_rounds`, `timeout_ms`, and the Tool RAG pipeline (`tools.rag`) use **code defaults** and are not in the public schema.
+`max_rounds` and `timeout_ms` use **code defaults** and are not in the thin public UI schema. Tool RAG is configured under `tools.rag` (see below).
 
 #### `tools.list` — Per-Tool Entries
 
@@ -293,7 +294,13 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
   "fs": {
     "enable": true,
     "allowed_directories": ["."],
-    "writable_directories": ["."]
+    "writable_directories": ["."],
+    "blocked_commands": ["rm\\s+-rf\\s+/", "dd\\s+if=", "mkfs", "sudo\\s+", ":\\s*\\{\\s*\\|\\s*&\\s*;\\s*\\}"],
+    "max_read_bytes": 51200,
+    "max_write_bytes": 1048576,
+    "shell_timeout_ms": 120000,
+    "max_shell_output_bytes": 51200,
+    "max_shell_output_lines": 2000
   }
 }
 ```
@@ -302,8 +309,36 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
 |-------|------|---------|-------------|
 | `allowed_directories` | string[] | `["."]` | Directories allowed for read access |
 | `writable_directories` | string[] | `["."]` | Directories allowed for write access |
+| `blocked_commands` | string[] | (dangerous-command regexes) | Regex patterns for blocked shell commands |
+| `max_read_bytes` | int | `51200` | Maximum bytes per read |
+| `max_write_bytes` | int | `1048576` | Maximum bytes per write |
+| `shell_timeout_ms` | int | `120000` | Shell command timeout |
+| `max_shell_output_bytes` | int | `51200` | Maximum shell output bytes |
+| `max_shell_output_lines` | int | `2000` | Maximum shell output lines |
 
-Additional sandbox limits (`blocked_commands`, `max_read_bytes`, shell timeouts, etc.) use code defaults and are not in the public schema.
+##### `tools.rag` — Tool RAG Pipeline
+
+```json
+{
+  "rag": {
+    "enabled": true,
+    "use_hyde": true,
+    "use_rerank": true,
+    "top_k": 12,
+    "final_n": 6,
+    "background_index_on_startup": true
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable Tool RAG (when tools are enabled, embedder is required if this is true) |
+| `use_hyde` | bool | `true` | Hypothetical document embedding expansion |
+| `use_rerank` | bool | `true` | Embedding-based candidate rerank |
+| `top_k` | int | `12` | Pre-rerank candidate count |
+| `final_n` | int | `6` | Final tools returned |
+| `background_index_on_startup` | bool | `true` | Warm the index at startup |
 
 ##### `tools.list.web` — Web Search API Keys
 
@@ -432,12 +467,11 @@ The following are controlled by code defaults and are intentionally absent from 
 | `runtime_rules` | Overlay behavioural instructions (`DEFAULT_RUNTIME_RULES`) |
 | `session` | Auto-split, summarization model overrides |
 | `mind.context` | Token budgets, rolling compression thresholds |
-| `mind.memory` | Extraction, hybrid recall, MMR, HyDE, decay |
+| `mind.memory` | Extraction, hybrid recall, MMR (memory HyDE/LLM rerank intentionally omitted) |
 | `mind.character` | CCv3 compilation, identity kernel budget |
 | `mind.emotion` / `mind.proactive` | Engine mode, classifier timeouts, source flags, confidence gates |
-| `tools` | `max_rounds`, `timeout_ms`, Tool RAG pipeline |
+| `tools` | `max_rounds`, `timeout_ms` |
 | `store` | `db_path` |
-| `tools.list.fs` | `blocked_commands`, byte limits, shell timeouts |
 
 ## Loading Order
 

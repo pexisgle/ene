@@ -140,6 +140,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proactive_openai_task_drives_generation_model() {
+        let mut cfg = test_config();
+        cfg.tasks.proactive = Some(TaskRef {
+            provider: "default".to_string(),
+            model: Some("gpt-4o".to_string()),
+            max_tokens: None,
+            dimensions: None,
+            query_prefix: None,
+        });
+        let handles = build_proactive_llm_handles(&cfg).await.expect("build");
+        assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
+        assert_eq!(handles.generation_model, "gpt-4o");
+        handles.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_missing_weights_fall_back_to_cloud() {
+        let mut cfg = test_config();
+        cfg.tasks.proactive = Some(TaskRef {
+            provider: "local".to_string(),
+            model: None,
+            max_tokens: None,
+            dimensions: None,
+            query_prefix: None,
+        });
+        cfg.providers.insert(
+            "local".to_string(),
+            AiProviderDef::LocalGguf {
+                model: String::new(),
+                quantization: "F16".to_string(),
+                model_path: "/nonexistent/ene-missing-decision.gguf".to_string(),
+                acceleration: ProactiveAcceleration::Cpu,
+                gpu_layers: "auto".to_string(),
+                context_size: 2048,
+            },
+        );
+        let handles = build_proactive_llm_handles(&cfg)
+            .await
+            .expect("missing weights fall back to cloud");
+        assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
+        handles.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn missing_model_path_fails_closed_for_llama_cpp() {
         let mut cfg = test_config();
         cfg.tasks.proactive = Some(TaskRef {
@@ -147,6 +191,7 @@ mod tests {
             model: None,
             max_tokens: None,
             dimensions: None,
+            query_prefix: None,
         });
         cfg.providers.insert(
             "local".to_string(),

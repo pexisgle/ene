@@ -106,6 +106,8 @@ pub struct TaskRef {
     pub max_tokens: Option<u32>,
     /// Expected embedding dimensions (cloud workloads).
     pub dimensions: Option<usize>,
+    /// Optional query prefix for embedding retrieval queries (e.g. `"Query: "`).
+    pub query_prefix: Option<String>,
 }
 
 impl Default for TaskRef {
@@ -115,6 +117,7 @@ impl Default for TaskRef {
             model: None,
             max_tokens: None,
             dimensions: None,
+            query_prefix: None,
         }
     }
 }
@@ -142,12 +145,14 @@ impl Default for AiTasksConfig {
                 model: Some("gpt-4o-mini".to_string()),
                 max_tokens: Some(8192),
                 dimensions: None,
+                query_prefix: None,
             },
             embedding: TaskRef {
                 provider: "default".to_string(),
                 model: Some("text-embedding-3-small".to_string()),
                 max_tokens: None,
                 dimensions: Some(1536),
+                query_prefix: None,
             },
             classifier: None,
             proactive: None,
@@ -212,6 +217,19 @@ mod tests {
         assert!(cfg.tasks.classifier.is_none());
         assert!(cfg.tasks.proactive.is_none());
         assert_eq!(ApiKeyConfig::default().source, "env");
+    }
+
+    #[test]
+    fn resolve_embedding_honors_query_prefix() {
+        let mut cfg = test_config();
+        cfg.tasks.embedding.query_prefix = Some("Query: ".to_string());
+        let embed = cfg.resolve_embedding().expect("resolve embedding");
+        match embed {
+            ResolvedEmbedding::Cloud { query_prefix, .. } => {
+                assert_eq!(query_prefix.as_deref(), Some("Query: "));
+            }
+            ResolvedEmbedding::Local { .. } => panic!("expected cloud embedding"),
+        }
     }
 
     #[test]

@@ -100,53 +100,60 @@ impl MemoryWriter {
         let mut used_llm = false;
 
         if let Some(provider) = providers.llm {
+            // Soft tool hints include successes even when auto-persist is off.
             let mut llm_hints = pattern_candidates.clone();
+            let tool_hint_cfg = crate::config::ToolGroundingConfig {
+                persist_success_procedure: true,
+                persist_failure_reflection: true,
+                persist_user_visible_episodic: false,
+                ..config.memory.tool_grounding.clone()
+            };
             llm_hints.extend(tool_grounding::extract_tool_candidates(
                 turn.tool_results,
-                &config.memory.tool_grounding,
+                &tool_hint_cfg,
             ));
 
             match llm::extract_with_timeout(
-                    provider,
-                    &turn,
-                    locale,
-                    config.memory.extraction_timeout_secs,
-                    &llm_hints,
-                )
-                .await
-                {
-                    Ok(llm_candidates) => {
+                provider,
+                &turn,
+                locale,
+                config.memory.extraction_timeout_secs,
+                &llm_hints,
+            )
+            .await
+            {
+                Ok(llm_candidates) => {
+                    tracing::info!(
+                        component = "MemoryWriter",
+                        character_id = %input.character_id,
+                        user_id = %input.user_id,
+                        candidate_count = llm_candidates.len(),
+                        pattern_hint_count = pattern_candidates.len(),
+                        "LLM memory extraction completed"
+                    );
+                    if llm_candidates.is_empty() {
+                        // Leave `used_llm` false so remember/forget
+                        // safety-net patterns still reach the arbiter.
                         tracing::info!(
                             component = "MemoryWriter",
                             character_id = %input.character_id,
-                            user_id = %input.user_id,
-                            candidate_count = llm_candidates.len(),
-                            pattern_hint_count = pattern_candidates.len(),
-                            "LLM memory extraction completed"
+                            "LLM returned no candidates; will use remember/forget patterns if any"
                         );
-                        if llm_candidates.is_empty() {
-                            // Leave `used_llm` false so remember/forget
-                            // safety-net patterns still reach the arbiter.
-                            tracing::info!(
-                                component = "MemoryWriter",
-                                character_id = %input.character_id,
-                                "LLM returned no candidates; will use remember/forget patterns if any"
-                            );
-                        } else {
-                            used_llm = true;
-                            batches.push((llm_candidates, CandidateProvenance::LlmExtracted));
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            component = "MemoryWriter",
-                            error = %error,
-                            character_id = %input.character_id,
-                            user_id = %input.user_id,
-                            "LLM memory extraction failed; falling back to deterministic candidates"
-                        );
+                    } else {
+                        used_llm = true;
+                        batches.push((llm_candidates, CandidateProvenance::LlmExtracted));
                     }
                 }
+                Err(error) => {
+                    tracing::warn!(
+                        component = "MemoryWriter",
+                        error = %error,
+                        character_id = %input.character_id,
+                        user_id = %input.user_id,
+                        "LLM memory extraction failed; falling back to deterministic candidates"
+                    );
+                }
+            }
         } else {
             tracing::warn!(
                 component = "MemoryWriter",

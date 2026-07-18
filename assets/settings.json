@@ -1,7 +1,7 @@
 {
   "version": 2,
   "character": "Alicia",
-  "user_name": "pexisgle",
+  "user_name": "User",
   "$schema": "./schema/settings.schema.json",
   "ai": {
     "providers": {

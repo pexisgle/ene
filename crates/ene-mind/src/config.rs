@@ -173,8 +173,25 @@ pub struct MindMemoryConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ToolGroundingConfig {
+    /// Enable grounding tool call results into cognitive memory (#92).
+    pub enabled: bool,
     /// Maximum characters kept for each tool summary stored in memory.
     pub max_summary_chars: usize,
+    /// Persist successful tool calls as procedure memories.
+    ///
+    /// Default `false`: lasting value is decided by the post-turn LLM
+    /// extractor. Enable only as a deterministic fallback when LLM extraction
+    /// is disabled or returns nothing.
+    pub persist_success_procedure: bool,
+    /// Persist failed tool calls as reflection memories.
+    ///
+    /// Used as a fallback when LLM extraction does not own the turn; the LLM
+    /// path may still choose to persist important failures itself.
+    pub persist_failure_reflection: bool,
+    /// Persist concise user-visible tool outcomes as episodic memories.
+    ///
+    /// Default `false` for the same reason as [`Self::persist_success_procedure`].
+    pub persist_user_visible_episodic: bool,
     /// Minimum confidence for tool-derived candidates.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub min_confidence: f32,
@@ -232,7 +249,13 @@ impl Default for MindMemoryConfig {
 impl Default for ToolGroundingConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             max_summary_chars: 500,
+            // Successes are judged by the post-turn LLM extractor by default.
+            // These flags are fallbacks when LLM extraction is off/empty/failed.
+            persist_success_procedure: false,
+            persist_failure_reflection: true,
+            persist_user_visible_episodic: false,
             min_confidence: 0.60,
         }
     }

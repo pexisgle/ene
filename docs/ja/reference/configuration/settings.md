@@ -28,17 +28,17 @@ pub struct EneConfig {
 
 ### マイグレーション（version 1 → 2）
 
-`"version": 2` を設定し、トップレベルの `provider` キーを `ai` にリネームします。旧フラット `provider` ブロックは次のように対応します:
+**自動移行はありません。** `settings.json` を手で書き換えてください。`"version": 2` を設定し、トップレベルの `provider` ブロックを `ai`（`providers` + `tasks`）に置き換えます。旧 `provider` キーは無視されます。
 
 | 旧 (`provider`) | 新 (`ai`) |
 |-----------------|-----------|
-| `name`, `base_url`, `api_key` | `"kind": "openai_compatible"` の `providers.default` |
+| `name`, `base_url`, `api_key` | `"kind": "openai_compatible"` の `providers.<name>` |
 | `model`, `max_tokens` | `tasks.chat` |
-| `embedding.*` | `tasks.embedding` + プロバイダ種別（`openai_compatible` または `local_gguf`） |
+| `embedding.*` | `tasks.embedding`（任意で `query_prefix`） |
 | `proactive.generation_model` | `tasks.proactive`（任意の `TaskRef`；`null` = chat を使用） |
 | `proactive.decision.*` | `model_path` 付き `"kind": "local_gguf"` の `providers.<name>` を `tasks.proactive` から参照 |
 
-公開設定から削除（コードデフォルトを使用）: トップレベル `session`、`web_config`、`tools.rag`、`tools.max_rounds` / `timeout_ms`、`mind.context`、`mind.memory`、`mind.character`、拡張 `mind.proactive` / `mind.emotion` ノブ、`store.db_path`、`runtime_rules`。
+引き続きコードデフォルト中心（薄い公開 UI には出さないが、一部は JSON で設定可能）: トップレベル `session`、`web_config`、`tools.max_rounds` / `timeout_ms`、`mind.context`、大半の `mind.memory` / `mind.character`、拡張 `mind.proactive` / `mind.emotion` ノブ、`store.db_path`、`runtime_rules`。**再び設定可能:** `tools.rag`、`tools.list.fs` のサンドボックス制限。
 
 ## 完全な例
 
@@ -132,6 +132,7 @@ pub struct EneConfig {
 | `model` | string | モデル名（`openai_compatible` の chat/embedding で必須） |
 | `max_tokens` | int | チャット完了の最大トークン数（`0` = リクエストから省略）。OpenRouter はこの上限に対してクレジット担保を確保 |
 | `dimensions` | int | 埋め込みベクトルの次元数（クラウド埋め込み） |
+| `query_prefix` | string または null | 埋め込み検索クエリに前置する任意プレフィックス（例: `"Query: "`） |
 
 #### `ai.providers` — プロバイダ種別
 
@@ -193,7 +194,7 @@ pub struct EneConfig {
 - `tasks.embedding` はどちらの種別も使用可能。
 - `tasks.classifier: null` → 分類器は `tasks.chat` のプロバイダとモデルを再利用。
 - `tasks.proactive: null` → 能動発話の**生成**は `tasks.chat` を再利用。
-- 能動**判定**: `tasks.proactive` が非空 `model_path` 付き `local_gguf` を指す場合はプロセス内 GGUF；それ以外は chat プロバイダで軽量クラウド判定。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
+- 能動**判定**: `tasks.proactive` が非空 `model_path` 付き `local_gguf` を指す場合はプロセス内 GGUF（ロード失敗時は OpenAI 互換の chat/proactive があればクラウドへフォールバック）。`tasks.proactive` が `openai_compatible` を指す場合はそのモデルでクラウド判定；それ以外は `tasks.chat`。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
 
 GGUF は同梱されず、パスはユーザー指定。外部 `llama-server` バイナリは不要。
 
@@ -277,7 +278,7 @@ OpenRouter で chat + classifier、ローカル埋め込み:
 | `list` | object | (組み込みツール) | ツール個別有効化マップとフラット化された任意設定 |
 | `mcp_servers` | array | `[]` | MCP サーバーリスト |
 
-`max_rounds`、`timeout_ms`、Tool RAG パイプライン（`tools.rag`）は**コードデフォルト**で、公開スキーマには含まれません。
+`max_rounds` と `timeout_ms` は**コードデフォルト**で、薄い公開 UI スキーマには含まれません。Tool RAG は `tools.rag` で設定します（下記）。
 
 #### `tools.list` — ツール個別エントリ
 
@@ -293,7 +294,13 @@ OpenRouter で chat + classifier、ローカル埋め込み:
   "fs": {
     "enable": true,
     "allowed_directories": ["."],
-    "writable_directories": ["."]
+    "writable_directories": ["."],
+    "blocked_commands": ["rm\\s+-rf\\s+/", "dd\\s+if=", "mkfs", "sudo\\s+", ":\\s*\\{\\s*\\|\\s*&\\s*;\\s*\\}"],
+    "max_read_bytes": 51200,
+    "max_write_bytes": 1048576,
+    "shell_timeout_ms": 120000,
+    "max_shell_output_bytes": 51200,
+    "max_shell_output_lines": 2000
   }
 }
 ```
@@ -302,8 +309,36 @@ OpenRouter で chat + classifier、ローカル埋め込み:
 |-----------|------|---------|------|
 | `allowed_directories` | string[] | `["."]` | 読み取りアクセスが許可されたディレクトリ |
 | `writable_directories` | string[] | `["."]` | 書き込みアクセスが許可されたディレクトリ |
+| `blocked_commands` | string[] | （危険コマンドの正規表現） | ブロックするシェルコマンドの正規表現 |
+| `max_read_bytes` | int | `51200` | 1 回の読み取り上限バイト |
+| `max_write_bytes` | int | `1048576` | 1 回の書き込み上限バイト |
+| `shell_timeout_ms` | int | `120000` | シェルコマンドのタイムアウト |
+| `max_shell_output_bytes` | int | `51200` | シェル出力の最大バイト数 |
+| `max_shell_output_lines` | int | `2000` | シェル出力の最大行数 |
 
-その他のサンドボックス制限（`blocked_commands`、バイト上限、シェルタイムアウトなど）はコードデフォルトで、公開スキーマには含まれません。
+##### `tools.rag` — Tool RAG パイプライン
+
+```json
+{
+  "rag": {
+    "enabled": true,
+    "use_hyde": true,
+    "use_rerank": true,
+    "top_k": 12,
+    "final_n": 6,
+    "background_index_on_startup": true
+  }
+}
+```
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `enabled` | bool | `true` | Tool RAG を有効化（ツール有効時、これが true なら embedder 必須） |
+| `use_hyde` | bool | `true` | 仮説文書埋め込みによるクエリ拡張 |
+| `use_rerank` | bool | `true` | 埋め込みベースの候補リランク |
+| `top_k` | int | `12` | リランク前の候補数 |
+| `final_n` | int | `6` | 最終返却ツール数 |
+| `background_index_on_startup` | bool | `true` | 起動時にインデックスをウォームアップ |
 
 ##### `tools.list.web` — ウェブ検索 API キー
 
@@ -432,12 +467,11 @@ OpenRouter で chat + classifier、ローカル埋め込み:
 | `runtime_rules` | オーバーレイ向け振る舞い指示（`DEFAULT_RUNTIME_RULES`） |
 | `session` | 自動分割、要約モデル override |
 | `mind.context` | トークン予算、rolling compression しきい値 |
-| `mind.memory` | 抽出、ハイブリッド recall、MMR、HyDE、減衰 |
+| `mind.memory` | 抽出、ハイブリッド recall、MMR（memory HyDE/LLM rerank は意図的に非搭載） |
 | `mind.character` | CCv3 コンパイル、Identity Kernel 予算 |
 | `mind.emotion` / `mind.proactive` | エンジンモード、分類器タイムアウト、ソースフラグ、信頼度ゲート |
-| `tools` | `max_rounds`、`timeout_ms`、Tool RAG パイプライン |
+| `tools` | `max_rounds`、`timeout_ms` |
 | `store` | `db_path` |
-| `tools.list.fs` | `blocked_commands`、バイト上限、シェルタイムアウト |
 
 ## 読み込み順序
 

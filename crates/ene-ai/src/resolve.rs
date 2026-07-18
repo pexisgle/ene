@@ -211,7 +211,12 @@ impl AiConfig {
                     api_key: api_key.resolve_api_key(),
                     model: model.to_string(),
                     dimensions,
-                    query_prefix: None,
+                    query_prefix: self
+                        .tasks
+                        .embedding
+                        .query_prefix
+                        .clone()
+                        .filter(|p| !p.trim().is_empty()),
                 })
             }
             AiProviderDef::LocalGguf {

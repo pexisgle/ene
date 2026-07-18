@@ -40,28 +40,16 @@ ene_config::define_tool_config!(
         /// Directories allowed for write access.
         pub writable_directories: Vec<String> = vec![".".to_string()],
         /// Regex patterns for blocked shell commands.
-        #[serde(skip_deserializing, default = "default_blocked_commands", skip_serializing)]
-        #[schemars(skip)]
         pub blocked_commands: Vec<String> = default_blocked_commands(),
         /// Maximum bytes per read operation.
-        #[serde(skip_deserializing, default = "default_max_read_bytes", skip_serializing)]
-        #[schemars(skip)]
         pub max_read_bytes: usize = default_max_read_bytes(),
         /// Maximum bytes per write operation.
-        #[serde(skip_deserializing, default = "default_max_write_bytes", skip_serializing)]
-        #[schemars(skip)]
         pub max_write_bytes: usize = default_max_write_bytes(),
         /// Shell command timeout in milliseconds.
-        #[serde(skip_deserializing, default = "default_shell_timeout_ms", skip_serializing)]
-        #[schemars(skip)]
         pub shell_timeout_ms: u64 = default_shell_timeout_ms(),
         /// Maximum bytes in shell output.
-        #[serde(skip_deserializing, default = "default_max_shell_output_bytes", skip_serializing)]
-        #[schemars(skip)]
         pub max_shell_output_bytes: usize = default_max_shell_output_bytes(),
         /// Maximum lines in shell output.
-        #[serde(skip_deserializing, default = "default_max_shell_output_lines", skip_serializing)]
-        #[schemars(skip)]
         pub max_shell_output_lines: usize = default_max_shell_output_lines(),
         /// Path to the per-tool DB socket. Tool binaries connect to this
         /// Unix socket to access the core DB server for typed CRUD operations.
@@ -95,45 +83,21 @@ mod tests {
         };
         let json = serde_json::to_string(&config).unwrap();
         let deser: SandboxConfigData = serde_json::from_str(&json).unwrap();
-        assert_eq!(config.enabled, deser.enabled);
-        assert_eq!(config.allowed_directories, deser.allowed_directories);
-        assert_eq!(config.db_socket, deser.db_socket);
-        assert_eq!(config.db_auth_token, deser.db_auth_token);
-        // Hidden fields always use code defaults on deserialize.
-        let defaults = SandboxConfigData::default();
-        assert_eq!(deser.blocked_commands, defaults.blocked_commands);
-        assert_eq!(deser.max_read_bytes, defaults.max_read_bytes);
-        assert_eq!(deser.max_write_bytes, defaults.max_write_bytes);
-        assert_eq!(deser.shell_timeout_ms, defaults.shell_timeout_ms);
-        assert_eq!(
-            deser.max_shell_output_bytes,
-            defaults.max_shell_output_bytes
-        );
-        assert_eq!(
-            deser.max_shell_output_lines,
-            defaults.max_shell_output_lines
-        );
+        assert_eq!(config, deser);
     }
 
     #[test]
     fn sandbox_config_data_default_enabled_false() {
         let json = r#"{"enabled":false,"allowed_directories":[],"writable_directories":[],"blocked_commands":[],"max_read_bytes":0,"max_write_bytes":0,"shell_timeout_ms":0,"max_shell_output_bytes":0,"max_shell_output_lines":0}"#;
         let config: SandboxConfigData = serde_json::from_str(json).unwrap();
-        let defaults = SandboxConfigData::default();
         assert!(!config.enabled);
         assert!(config.allowed_directories.is_empty());
+        assert!(config.blocked_commands.is_empty());
+        assert_eq!(config.max_read_bytes, 0);
+        assert_eq!(config.max_write_bytes, 0);
+        assert_eq!(config.shell_timeout_ms, 0);
+        assert_eq!(config.max_shell_output_bytes, 0);
+        assert_eq!(config.max_shell_output_lines, 0);
         assert!(config.db_socket.is_none());
-        assert_eq!(config.blocked_commands, defaults.blocked_commands);
-        assert_eq!(config.max_read_bytes, defaults.max_read_bytes);
-        assert_eq!(config.max_write_bytes, defaults.max_write_bytes);
-        assert_eq!(config.shell_timeout_ms, defaults.shell_timeout_ms);
-        assert_eq!(
-            config.max_shell_output_bytes,
-            defaults.max_shell_output_bytes
-        );
-        assert_eq!(
-            config.max_shell_output_lines,
-            defaults.max_shell_output_lines
-        );
     }
 }

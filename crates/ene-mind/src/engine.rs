@@ -156,8 +156,7 @@ impl CognitionEngine {
                 } else {
                     let proposal = pending_to_affect_proposal(pending);
                     if proposal.confidence >= ctx.config.emotion.classifier_min_confidence {
-                        classifier_expression_hint =
-                            Some(proposal.recommended_expression.clone());
+                        classifier_expression_hint = Some(proposal.recommended_expression.clone());
                     }
                     if proposal.confidence > 0.0 {
                         classifier_estimate_for_log = Some(proposal.clone());
@@ -353,8 +352,7 @@ impl CognitionEngine {
         Self::validate_config(ctx.config)?;
 
         let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
-        let kernel =
-            CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens);
+        let kernel = CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens);
 
         let style_examples = if let Some(examples) = prefetch.style_examples {
             examples

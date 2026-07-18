@@ -561,11 +561,11 @@ pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
 /// # Env-var case folding
 ///
 /// The `ENE_` env provider applies `.map(|k| k.to_lowercase())` so that
-/// `ENE_PROVIDER__API_KEY` resolves to the `provider.api_key` field on
-/// [`EneConfig`] (lowercase). Without the case-folding, Figment stored
-/// the path as `PROVIDER.api_key` and the value was silently dropped
-/// because `get_section::<ProviderConfig>()` looks up `T::path() =
-/// ["provider"]` (lowercase).
+/// `ENE_AI__TASKS__CHAT__MODEL` resolves to the `ai.tasks.chat.model` path
+/// on [`EneConfig`] (lowercase). Without the case-folding, Figment stored
+/// the path as `AI.tasks.chat.model` and the value was silently dropped
+/// because `get_section::<AiConfig>()` looks up `T::path() = ["ai"]`
+/// (lowercase).
 pub fn load_full_config_from(
     assets_dir: &Path,
     config_path: &Path,
@@ -579,7 +579,7 @@ pub fn load_full_config_from(
         .merge(Json::file(config_path))
         // `.map(...)` makes env vars case-insensitive against the
         // lowercase config keys, matching the documented
-        // `ENE_PROVIDER__API_KEY` examples.
+        // `ENE_AI__TASKS__CHAT__MODEL` examples.
         .merge(
             Env::prefixed("ENE_")
                 .split("__")
@@ -692,8 +692,8 @@ mod tests {
     /// Regression for #40: the case-folding `.map(|k| k.to_lowercase())`
     /// must turn `ENE_TEST_PROVIDER__API_KEY` into the lowercase
     /// `provider.api_key` path. Pre-fix, the path was stored as
-    /// `PROVIDER.api_key` and `get_section::<ProviderConfig>()` looked
-    /// it up under `provider` (lowercase) and silently got nothing.
+    /// `PROVIDER.api_key` and section lookups under the lowercase key
+    /// silently got nothing. (Same folding applies to `ENE_AI__…` paths.)
     #[test]
     fn env_uppercase_folds_to_lowercase_path() {
         let _guard = ENV_LOCK

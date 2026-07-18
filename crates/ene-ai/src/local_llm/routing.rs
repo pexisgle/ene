@@ -89,7 +89,9 @@ impl ProactiveLlmHandles {
 
 /// Build decision + generation routing from [`AiConfig`].
 ///
-/// Local GGUF load failures fall back to [`DisabledDecisionProvider`] (fail-closed).
+/// Local GGUF load failures fall back to a cloud decision provider when an
+/// OpenAI-compatible chat/proactive task is available; otherwise fail-closed
+/// to [`DisabledDecisionProvider`].
 pub async fn build_proactive_llm_handles(
     config: &AiConfig,
 ) -> Result<ProactiveLlmHandles, LlmProviderError> {
@@ -124,17 +126,31 @@ pub async fn build_proactive_llm_handles(
                     })
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        component = "LocalLlamaCpp",
-                        error = %e,
-                        "Local decision backend failed; falling back to disabled"
-                    );
-                    Ok(ProactiveLlmHandles {
-                        decision: Arc::new(DisabledDecisionProvider),
-                        decision_kind: DecisionProviderKind::Disabled,
-                        local: None,
-                        generation_model,
-                    })
+                    if let Ok(cloud) = build_cloud_decision_provider(config) {
+                        tracing::warn!(
+                            component = "LocalLlamaCpp",
+                            error = %e,
+                            "Local decision backend failed; falling back to cloud"
+                        );
+                        Ok(ProactiveLlmHandles {
+                            decision: cloud,
+                            decision_kind: DecisionProviderKind::Cloud,
+                            local: None,
+                            generation_model,
+                        })
+                    } else {
+                        tracing::warn!(
+                            component = "LocalLlamaCpp",
+                            error = %e,
+                            "Local decision backend failed; falling back to disabled"
+                        );
+                        Ok(ProactiveLlmHandles {
+                            decision: Arc::new(DisabledDecisionProvider),
+                            decision_kind: DecisionProviderKind::Disabled,
+                            local: None,
+                            generation_model,
+                        })
+                    }
                 }
             }
         }
@@ -179,8 +195,18 @@ async fn start_local(
 fn build_cloud_decision_provider(
     config: &AiConfig,
 ) -> Result<Arc<dyn LlmProvider>, LlmProviderError> {
-    let chat = config.resolve_chat()?;
-    Ok(Arc::new(cloud_decision_from_resolved(&chat)))
+    let resolved = match config.tasks.proactive.as_ref() {
+        Some(proactive)
+            if matches!(
+                config.get_provider(&proactive.provider).ok(),
+                Some(AiProviderDef::OpenaiCompatible { .. })
+            ) =>
+        {
+            config.resolve_chat_task(Some(proactive))?
+        }
+        _ => config.resolve_chat()?,
+    };
+    Ok(Arc::new(cloud_decision_from_resolved(&resolved)))
 }
 
 fn cloud_decision_from_resolved(chat: &ResolvedChat) -> OpenAiProvider {
@@ -224,6 +250,7 @@ mod smoke {
             model: None,
             max_tokens: None,
             dimensions: None,
+            query_prefix: None,
         });
         cfg.providers.insert(
             "local".to_string(),

@@ -11,27 +11,33 @@ User query
   ↓
 1. Embed query → query_embedding
   ↓
-2. For each tool, compute weighted similarity:
-   score = Σ (weight_i × cosine_sim(query_embedding, tool_field_i))
+2. Optional HyDE: generate hypothetical document embedding and blend with query
+  ↓
+3. For each tool, compute weighted similarity:
+   score = Σ (weight_i × cosine_sim(blended_query, tool_field_i))
    where fields are: summary, description, capability, example, negative
   ↓
-3. Apply per-category limits (e.g. max 3 Filesystem tools)
+4. Apply per-category limits (e.g. max 3 Filesystem tools)
   ↓
-4. Sort by score, take top_k candidates
+5. Sort by score, take top_k candidates
   ↓
-5. When multiple candidates remain, apply embedding cosine rerank → pick final_n
+6. Optional embedding rerank when multiple candidates remain → pick final_n
   ↓
-6. Always include forced tools regardless of score
+7. Always include forced tools regardless of score
   ↓
 Vec<ToolSpec> → passed to LLM
 ```
 
 ## Configuration
 
-Tool RAG is built automatically when both `tools.enabled` and an embedding provider are available. Tuning values live in code defaults (`ToolRagConfig` in `ene-tool-rag`), not in public `settings.json`.
+Configure under `tools.rag` in `settings.json` (see [Settings](../configuration/settings.md#toolsrag--tool-rag-pipeline)). Built when `tools.rag.enabled` is true and an embedding provider is available.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the Tool RAG pipeline |
+| `use_hyde` | bool | `true` | Hypothetical document embedding expansion |
+| `use_rerank` | bool | `true` | Embedding-based candidate rerank |
+| `background_index_on_startup` | bool | `true` | Warm the index at startup |
 | `top_k` | int | `12` | Number of candidates before reranking |
 | `final_n` | int | `6` | Final number of tools sent to LLM |
 | `rerank_candidates` | int | `24` | Number of candidates considered during embedding rerank |

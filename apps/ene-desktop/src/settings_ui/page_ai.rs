@@ -11,10 +11,22 @@ use bevy_ecs::world::World;
 use ene_ai::{AiConfig, AiProviderDef, ProactiveAcceleration};
 use std::sync::Arc;
 
-const LOCAL_EMBED_PROVIDER: &str = "embedding_local";
+const LOCAL_EMBED_PROVIDER: &str = "local_embed";
+
+fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
+    ai.providers.iter().find_map(|(name, def)| {
+        matches!(def, AiProviderDef::OpenaiCompatible { .. }).then(|| name.clone())
+    })
+}
+
+fn first_local_gguf_provider(ai: &AiConfig) -> Option<String> {
+    ai.providers.iter().find_map(|(name, def)| {
+        matches!(def, AiProviderDef::LocalGguf { .. }).then(|| name.clone())
+    })
+}
 
 fn ensure_local_embedding_provider(ai: &mut AiConfig) {
-    if !ai.providers.contains_key(LOCAL_EMBED_PROVIDER) {
+    let provider_key = first_local_gguf_provider(ai).unwrap_or_else(|| {
         ai.providers.insert(
             LOCAL_EMBED_PROVIDER.to_string(),
             AiProviderDef::LocalGguf {
@@ -26,15 +38,30 @@ fn ensure_local_embedding_provider(ai: &mut AiConfig) {
                 context_size: 2048,
             },
         );
-    }
-    ai.tasks.embedding.provider = LOCAL_EMBED_PROVIDER.to_string();
+        LOCAL_EMBED_PROVIDER.to_string()
+    });
+    ai.tasks.embedding.provider = provider_key;
     if ai.tasks.embedding.model.is_none() {
         ai.tasks.embedding.model = Some("jina-embeddings-v5-text-small".to_string());
     }
 }
 
 fn set_embedding_cloud(ai: &mut AiConfig) {
-    ai.tasks.embedding.provider = "default".to_string();
+    let chat_key = ai.tasks.chat.provider.clone();
+    let provider_key = match ai.providers.get(&chat_key) {
+        Some(AiProviderDef::OpenaiCompatible { .. }) => chat_key,
+        _ => first_openai_compatible_provider(ai).unwrap_or_else(|| {
+            ai.providers.insert(
+                chat_key.clone(),
+                AiProviderDef::OpenaiCompatible {
+                    base_url: String::new(),
+                    api_key: ene_ai::ApiKeyConfig::default(),
+                },
+            );
+            chat_key
+        }),
+    };
+    ai.tasks.embedding.provider = provider_key;
     if ai.tasks.embedding.model.is_none() {
         ai.tasks.embedding.model = Some("text-embedding-3-small".to_string());
     }
@@ -259,7 +286,7 @@ pub fn render(
                 ai_cfg.tasks.embedding.model = Some(input.ai_embedding_model.trim().to_string());
                 if input.ai_embedding_provider == "local"
                     && let Some(AiProviderDef::LocalGguf { model, .. }) =
-                        ai_cfg.providers.get_mut(LOCAL_EMBED_PROVIDER)
+                        ai_cfg.providers.get_mut(&ai_cfg.tasks.embedding.provider)
                 {
                     *model = input.ai_embedding_model.trim().to_string();
                 }

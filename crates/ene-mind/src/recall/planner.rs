@@ -494,5 +494,4 @@ mod tests {
                 .any(|query| query.contains("active commitment: discuss design"))
         );
     }
-
 }
