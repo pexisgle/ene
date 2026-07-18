@@ -15,7 +15,7 @@
 1. **`TurnId` は必須。** `run(input) -> Result<TurnId, Busy | ActorDead>`。ターンスコープのイベントと `cancel(turn)` はその id を運ぶ。
 2. **並行性:** single-flight。ターン実行中の二度目の `run` は `Busy` — 暗黙 abort や broadcast だけの相関はしない。
 3. **ライフサイクル:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`。公開の未準備 `new` + 多段 `load_config` / `load_character` は置かない。設定ファイル I/O は `ConfigStore` / `ene-config` 側。
-4. **`Terminal` はチャット経路のターン完了**を意味する（返信をブロックする memory write / forgetting / affect persist の後）。ポストターンの LLM affect **分類**は `Terminal` 後の fire-and-forget であり、Done を遅らせたりターンゲートを占有してはならない。
+4. **`Terminal` はチャット経路のターン完了**を意味する（会話履歴のコミットと同期 `finalize_turn`（affect 永続化）の後）。LLM 記憶抽出（`write_memories`）、自然忘却、ポストターン affect **分類**は `Terminal` 後の fire-and-forget であり、Done を遅らせたりターンゲートを占有してはならない。
 
 ### イベント
 

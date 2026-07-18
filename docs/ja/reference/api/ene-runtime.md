@@ -454,7 +454,7 @@ if ctx.embedder.is_none() {
 streaming_cognitive::run_stream_cognitive(ctx).await
 ```
 
-- **Mind パス**（`streaming_cognitive::run_stream_cognitive`、非公開モジュール）: プロンプト構築、リコール、感情、ターン後のメモリ書き込みを `ene-mind` の `CognitionEngine`（`before_turn` → `compose_prompt_packet` → LLMストリーム → `resolve_expression_turn` → `after_turn`）に委譲します。[`ene-mind`](./ene-mind.md) を参照してください。
+- **Mind パス**（`streaming_cognitive::run_stream_cognitive`、非公開モジュール）: プロンプト構築、リコール、感情、ターン後処理を `ene-mind` の `CognitionEngine`（Phase A embed∥CCv3 sync → Phase B `before_turn`∥Tool RAG∥style∥scene → Phase C affect persist∥`compose_prompt_packet` → LLMストリーム → `resolve_expression_turn` → `finalize_turn_post`（affect）→ 履歴コミット → `Terminal` → 遅延 `write_memories_deferred`（抽出 + forgetting）+ affect 分類）に委譲します。[`ene-mind`](./ene-mind.md) を参照してください。
 - store または embedder の前提条件が欠けている場合、`run_stream` は `EneRuntimeError::MindPrerequisite` を返し、失敗した terminal イベントを発行します。レガシー・ストリーミングへのフォールバックはありません。
 
 Mind パスは共有ツール実行機構（`select_relevant_tools`、`perform_tool_executions`、`accumulate_tool_calls`、`finalize_tool_calls`）と terminal イベント保証（`emit_terminal`）を使用します。

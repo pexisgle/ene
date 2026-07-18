@@ -6,7 +6,7 @@
 
 The dispatch requires an enabled and initialized store plus an embedding provider. Missing prerequisites return `EneRuntimeError::MindPrerequisite` and emit a failed `Terminal` event; the runtime never falls back to a legacy stream.
 
-Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns that id (or `RunError::Busy` if a turn is already in flight). Turn-scoped chat events carry the same `turn` field. `Terminal` is emitted only after awaited `after_turn` work completes.
+Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns that id (or `RunError::Busy` if a turn is already in flight). Turn-scoped chat events carry the same `turn` field. `Terminal` is emitted after conversation history commit and synchronous `finalize_turn` (affect persist); deferred LLM memory extraction and forgetting may still be in flight.
 
 ## Chat `EneEvent` variants
 
@@ -17,7 +17,7 @@ Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns t
 | `ToolCallStart` / `ToolCallResult` | Tool execution lifecycle (when the UI needs them). |
 | `PermissionRequired` / `UserInputRequired` | Interactive tool gates. |
 | `ContextCompressed { turn, level }` | Thin signal that compression ran; details live on diagnostics. |
-| `Terminal { turn, reason }` | Exactly one per `Run`, after `after_turn` (memory write, forgetting, affect persist). |
+| `Terminal { turn, reason }` | Exactly one per `Run`, after history commit and synchronous `finalize_turn` (affect persist). |
 | `StatusChanged { status }` | Actor-level Idle / Running / Error. |
 
 ### Not on the chat bus

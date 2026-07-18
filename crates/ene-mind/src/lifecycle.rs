@@ -6,8 +6,9 @@ use ene_ai::{EmbeddingProvider, LlmMessage, LlmProvider, Role};
 use ene_config::CharacterCardV3;
 use ene_store::{ActiveCommitmentPrompt, AffectState, MemoryStore};
 
+use crate::character::StyleExample;
 use crate::config::MindConfig;
-use crate::memory_writer::candidate::TurnInput;
+use crate::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use crate::recall::{RecallPlan, RecallTurn, RecalledMemory};
 
 /// A single history entry for prompt composition.
@@ -101,6 +102,18 @@ pub struct ComposedPrompt {
     pub meta: PromptPacketMeta,
 }
 
+/// Optional prefetched inputs for [`crate::CognitionEngine::compose_prompt_packet`].
+///
+/// When a field is `None`, compose fetches it internally (test / legacy callers).
+/// When `Some`, the prefetched value is used and the internal fetch is skipped.
+#[derive(Debug, Clone, Default)]
+pub struct ComposePrefetch {
+    /// Prefetched style examples (`Some(vec![])` means none selected).
+    pub style_examples: Option<Vec<StyleExample>>,
+    /// Prefetched scene summary text (`Some(None)` means no active scene).
+    pub scene_summary: Option<Option<String>>,
+}
+
 /// Post-turn input for memory writing and affect persistence.
 pub struct PostTurnInput<'a> {
     /// Turn extraction input.
@@ -111,6 +124,46 @@ pub struct PostTurnInput<'a> {
     pub character_id: &'a str,
     /// User identifier.
     pub user_id: &'a str,
+}
+
+/// Owned turn input for deferred post-turn memory writing.
+#[derive(Debug, Clone)]
+pub struct OwnedTurnInput {
+    /// The user's message text.
+    pub user_message: String,
+    /// The assistant's response (if available).
+    pub assistant_message: Option<String>,
+    /// Tool call results from this turn.
+    pub tool_results: Vec<ToolResultSummary>,
+}
+
+/// Owned post-turn input for deferred memory writing.
+#[derive(Debug, Clone)]
+pub struct OwnedPostTurnInput {
+    /// Turn extraction input.
+    pub turn: OwnedTurnInput,
+    /// Affect state after the turn.
+    pub affect: AffectState,
+    /// Character identifier.
+    pub character_id: String,
+    /// User identifier.
+    pub user_id: String,
+}
+
+impl OwnedPostTurnInput {
+    /// Borrows as a [`PostTurnInput`] for synchronous memory-writer calls.
+    pub fn as_borrowed(&self) -> PostTurnInput<'_> {
+        PostTurnInput {
+            turn: TurnInput {
+                user_message: &self.turn.user_message,
+                assistant_message: self.turn.assistant_message.as_deref(),
+                tool_results: &self.turn.tool_results,
+            },
+            affect: self.affect.clone(),
+            character_id: &self.character_id,
+            user_id: &self.user_id,
+        }
+    }
 }
 
 impl TurnContext<'_> {

@@ -388,7 +388,7 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for FixedProvider {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "fixed"
         }
 

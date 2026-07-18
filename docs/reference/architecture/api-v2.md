@@ -15,7 +15,7 @@ The library surface grew dual streaming pipelines (legacy + cognitive), an unrea
 1. **`TurnId` is mandatory.** `run(input) -> Result<TurnId, Busy | ActorDead>`. Every turn-scoped event and `cancel(turn)` carry that id.
 2. **Concurrency:** single-flight. A second `run` while a turn is active returns `Busy` — never silent abort or broadcast-only correlation.
 3. **Lifecycle:** `EneHandle::open(config, card) -> Result<ReadyHandle, _>`. No public unready `new` + multi-step `load_config` / `load_character`. Config file I/O stays in `ConfigStore` / `ene-config`.
-4. **`Terminal` means chat-path turn completion** after memory write / forgetting / affect *persist that blocks the reply*. Post-turn LLM affect **classification** is fire-and-forget after `Terminal` and must not delay Done or keep the turn gate busy.
+4. **`Terminal` means chat-path turn completion** after conversation history commit and synchronous `finalize_turn` (affect persist). LLM memory extraction (`write_memories`), natural forgetting, and post-turn affect **classification** are fire-and-forget after `Terminal` and must not delay Done or keep the turn gate busy.
 
 ### Events
 

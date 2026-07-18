@@ -40,8 +40,7 @@ pub async fn sync_character_memories(
     config: &CharacterMemoryConfig,
     previous_card_memory_hash: Option<u64>,
 ) -> Result<(CharacterMemorySyncReport, u64), CognitionError> {
-    let lore_hash = LorebookIndexer::content_hash(card);
-    let style_hash = style_content_hash(card);
+    let hash = compute_card_memory_hash(card);
 
     if !config.compile_ccv3_to_semantic_memory && !config.style_retrieval {
         return Ok((
@@ -49,17 +48,17 @@ pub async fn sync_character_memories(
                 skipped: true,
                 ..Default::default()
             },
-            card_memory_hash_combined(lore_hash, style_hash),
+            hash,
         ));
     }
 
-    if previous_card_memory_hash == Some(card_memory_hash_combined(lore_hash, style_hash)) {
+    if previous_card_memory_hash == Some(hash) {
         return Ok((
             CharacterMemorySyncReport {
                 skipped: true,
                 ..Default::default()
             },
-            card_memory_hash_combined(lore_hash, style_hash),
+            hash,
         ));
     }
 
@@ -170,8 +169,19 @@ pub async fn sync_character_memories(
             archived,
             skipped: false,
         },
-        card_memory_hash_combined(lore_hash, style_hash),
+        hash,
     ))
+}
+
+/// Combined content hash for `CCv3` lorebook + style indices.
+///
+/// Used to skip per-turn sync when the session already holds a matching hash.
+#[must_use]
+pub fn compute_card_memory_hash(card: &CharacterCardV3) -> u64 {
+    card_memory_hash_combined(
+        LorebookIndexer::content_hash(card),
+        style_content_hash(card),
+    )
 }
 
 fn ccv3_item_matches(existing: &MemoryItem, desired: &NewMemoryItem) -> bool {
@@ -192,4 +202,60 @@ fn style_content_hash(card: &CharacterCardV3) -> u64 {
 
 const fn card_memory_hash_combined(lore: u64, style: u64) -> u64 {
     lore ^ style.rotate_left(17)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ene_ai::{EmbeddingKind, EmbeddingProvider};
+    use ene_config::CharacterCardV3;
+
+    use super::*;
+    use crate::config::CharacterMemoryConfig;
+
+    #[test]
+    fn compute_card_memory_hash_is_stable_for_same_card() {
+        let card = CharacterCardV3::default();
+        let a = compute_card_memory_hash(&card);
+        let b = compute_card_memory_hash(&card);
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn sync_skips_when_previous_hash_matches() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedder);
+        let card = CharacterCardV3::default();
+        let config = CharacterMemoryConfig::default();
+        let hash = compute_card_memory_hash(&card);
+
+        let (report, returned) =
+            sync_character_memories(&store, &embedder, "ene", "user", &card, &config, Some(hash))
+                .await
+                .expect("sync");
+
+        assert!(report.skipped);
+        assert_eq!(returned, hash);
+    }
+
+    struct MockEmbedder;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for MockEmbedder {
+        fn model_name(&self) -> &'static str {
+            "mock"
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        async fn embed_batch(
+            &self,
+            items: &[(&str, EmbeddingKind)],
+        ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+            Ok(items.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        }
+    }
 }

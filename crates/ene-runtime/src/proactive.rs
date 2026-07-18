@@ -187,13 +187,15 @@ mod tests {
             max_turns_per_session: 5,
             ..ProactiveConfig::default()
         };
-        let mut obs = ProactiveObservation::default();
-        obs.captured_at_unix_ms = 1;
-        obs.activity = Some(ene_mind::ActivitySnapshot {
-            idle_seconds: None,
-            active_window_label: "app".into(),
-            recent_change: String::new(),
-        });
+        let obs = ProactiveObservation {
+            captured_at_unix_ms: 1,
+            activity: Some(ene_mind::ActivitySnapshot {
+                idle_seconds: None,
+                active_window_label: "app".into(),
+                recent_change: String::new(),
+            }),
+            ..ProactiveObservation::default()
+        };
         let sanitized = sanitize_observation(&config, obs);
         assert!(sanitized.activity.is_none());
     }

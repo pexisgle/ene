@@ -6,7 +6,7 @@
 
 ディスパッチには有効かつ初期化済みのストアと埋め込みプロバイダーが必要です。前提条件が欠ける場合、`EneRuntimeError::MindPrerequisite` を返し、失敗した `Terminal` イベントを発行します。レガシー・ストリームへのフォールバックはありません。
 
-各ターンは [`TurnId`](../api/ene-runtime.md) で識別されます。`run` はその id を返します（既にターン実行中なら `RunError::Busy`）。ターン範囲のチャットイベントは同じ `turn` フィールドを持ちます。`Terminal` は待機済みの `after_turn` 完了後にのみ発行されます。
+各ターンは [`TurnId`](../api/ene-runtime.md) で識別されます。`run` はその id を返します（既にターン実行中なら `RunError::Busy`）。ターン範囲のチャットイベントは同じ `turn` フィールドを持ちます。`Terminal` は会話履歴のコミットと同期 `finalize_turn`（affect 永続化）の後に発行されます。遅延 LLM 記憶抽出と自然忘却はまだ実行中の場合があります。
 
 ## チャット `EneEvent` バリアント
 
@@ -17,7 +17,7 @@
 | `ToolCallStart` / `ToolCallResult` | ツール実行ライフサイクル（UI が必要な場合）。 |
 | `PermissionRequired` / `UserInputRequired` | 対話型ツールのゲート。 |
 | `ContextCompressed { turn, level }` | 圧縮実行の薄い信号。詳細は diagnostics。 |
-| `Terminal { turn, reason }` | `Run` ごとに正確に1回。`after_turn`（記憶書き込み、忘却、感情永続化）の後。 |
+| `Terminal { turn, reason }` | `Run` ごとに正確に1回。履歴コミットと同期 `finalize_turn`（感情永続化）の後。 |
 | `StatusChanged { status }` | Idle / Running / Error。 |
 
 ### チャットバスにないもの

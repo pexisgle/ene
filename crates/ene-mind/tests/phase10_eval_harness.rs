@@ -264,6 +264,7 @@ async fn scenario_identity_kernel_survives_long_history() {
                 post_history_block: None,
             },
             &pre,
+            ene_mind::ComposePrefetch::default(),
         )
         .await
         .unwrap();

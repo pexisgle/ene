@@ -62,7 +62,7 @@ pub enum EneEvent {
 
 - `TextDelta` is plain text only; markers are stripped.
 - Presentation cues arrive as `Performance`, not `SpecialToken` / standalone `Expression`.
-- `Terminal` is emitted exactly once per `Run`, after chat-path `after_turn` (memory write / forgetting). Post-turn LLM affect **classification** is spawned after `Terminal` and must not delay Done.
+- `Terminal` is emitted exactly once per `Run`, after conversation history commit and synchronous `finalize_turn` (affect persist). LLM memory extraction (`write_memories`), natural forgetting, and post-turn affect **classification** are spawned after `Terminal` and must not delay Done.
 - `cancel(turn)` aborts the stream immediately and discards in-flight session updates; hosts must not expect cancelled turns to merge partial assistant history.
 - Desktop: on broadcast `Lagged`, cancel the active turn (free the gate) while unlocking input; Cancel stays available while `active_turn` is set even if `processing` was cleared.
 - Pipeline phases / metrics live on `diagnostics().subscribe()`, not the chat bus.
@@ -76,13 +76,14 @@ The actor validates mind prerequisites (store + embedder), then runs the cogniti
 ```
 Run { input, turn }
   ↓
-1. before_turn (recall plan + affect)
-2. compose_prompt_packet
-3. Select relevant tools (Tool RAG)
+1. Phase A: query embedding || CCv3 sync (skipped when session card hash matches)
+2. Phase B: before_turn || Tool RAG || style examples || scene summary
+3. Phase C: pre-turn affect persist || compose_prompt_packet (with prefetch)
 4. Main loop (up to max_tool_call_rounds):
       ├── LLM streaming → TextDelta / Performance
       ├── If tool_calls → ToolCallStart / execute / ToolCallResult → continue
-      └── Else → after_turn (memory write, forgetting) → Terminal → spawn affect classifier
+      └── Else → finalize_turn (affect) → commit history → Terminal
+           → spawn deferred memory write + forgetting + affect classifier
 5. Terminal { turn, Done | Failed | Cancelled }
 ```
 

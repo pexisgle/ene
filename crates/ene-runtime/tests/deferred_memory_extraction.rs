@@ -1,4 +1,4 @@
-//! Integration smoke test for cognitive streaming via `run_stream` (#100).
+//! Deferred post-turn memory extraction must not block Terminal (#100).
 
 #![expect(
     clippy::unwrap_used,
@@ -12,13 +12,15 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
+use ene_mind::MindConfig;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
-use ene_runtime::{EneEvent, TerminalReason};
+use ene_runtime::{EneEvent, TerminalReason, TurnOrigin};
 use ene_store::MemoryStore;
 use ene_tool_host::{ToolHostError, ToolRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
 
@@ -42,34 +44,26 @@ impl EmbeddingProvider for MockEmbedder {
     }
 }
 
-struct MockLlm {
-    response: String,
+struct SlowExtractionLlm {
+    extraction_delay: Duration,
 }
 
 #[async_trait]
-impl LlmProvider for MockLlm {
+impl LlmProvider for SlowExtractionLlm {
     fn name(&self) -> &'static str {
-        "mock"
+        "slow-extraction-mock"
     }
 
     async fn create_chat_stream(
         &self,
-        messages: &[LlmMessage],
+        _messages: &[LlmMessage],
         _tools: &[ene_tool_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
     > {
-        assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, LlmMessage::System { content } if content.contains("Ene"))),
-            "identity kernel should be in system prompt"
-        );
-
-        let response = self.response.clone();
         let chunks = vec![Ok(LlmResponseChunk {
-            text_delta: Some(response),
+            text_delta: Some("Hello back.".into()),
             tool_calls_delta: None,
         })];
         Ok(Box::pin(tokio_stream::iter(chunks)))
@@ -80,7 +74,8 @@ impl LlmProvider for MockLlm {
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
     ) -> Result<String, LlmProviderError> {
-        Ok(self.response.clone())
+        tokio::time::sleep(self.extraction_delay).await;
+        Ok(r#"{"candidates": []}"#.into())
     }
 }
 
@@ -100,7 +95,7 @@ impl ToolRegistry for EmptyRegistry {
 }
 
 #[tokio::test]
-async fn run_stream_cognitive_path_completes_with_logs() {
+async fn terminal_does_not_wait_for_deferred_memory_extraction() {
     let store = Arc::new(MemoryStore::open_in_memory(4).await.unwrap());
     let mut card = CharacterCardV3::default();
     card.data.name = "Ene".into();
@@ -108,26 +103,32 @@ async fn run_stream_cognitive_path_completes_with_logs() {
 
     let mut session = ene_mind::ConversationSession::new();
     session.character_card = Some(card);
-    session.memory.memory_store = Some(store.clone());
+    session.memory.memory_store = Some(store);
 
     let mut config = EneConfig::default();
+    let mut mind = MindConfig::default();
+    mind.memory.llm_extraction_enabled = true;
+    mind.emotion.enabled = false;
+    config.set_section(&mind).expect("mind config");
     let mut mem_config = ene_store::StoreConfig::default();
     mem_config.enabled = true;
     config.set_section(&mem_config).expect("memory config");
+
     let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(64);
     let (diag_tx, _diag_rx) = tokio::sync::broadcast::channel(16);
+    let (memory_writer_tx, mut memory_writer_rx) = tokio::sync::mpsc::unbounded_channel();
     let terminal_emitted = Arc::new(AtomicBool::new(false));
     let turn = ene_runtime::TurnId::new();
 
     let ctx = StreamContext {
         config,
         session,
-        user_input: "Hello Ene".into(),
+        user_input: "Hello".into(),
         embedder: Some(Arc::new(MockEmbedder)),
         registry: Arc::new(EmptyRegistry) as Arc<dyn ToolRegistry>,
         tool_rag: None,
-        provider: Arc::new(MockLlm {
-            response: "Hi there!".into(),
+        provider: Arc::new(SlowExtractionLlm {
+            extraction_delay: Duration::from_secs(2),
         }),
         event_tx,
         diag_tx,
@@ -136,15 +137,31 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         terminal_emitted,
         turn: turn.clone(),
-        origin: ene_runtime::TurnOrigin::User,
-        allow_tools: true,
+        origin: TurnOrigin::User,
+        allow_tools: false,
         runtime_directive: None,
         generation_timeout: None,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
-        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx,
     };
 
-    let _session = run_stream_cognitive(ctx).await;
+    let started = Instant::now();
+    let outcome = run_stream_cognitive(ctx).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(outcome.terminal, TerminalReason::Done);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "stream should finish before slow extraction ({elapsed:?})"
+    );
+    assert!(
+        outcome
+            .session
+            .history()
+            .iter()
+            .any(|entry| entry.content.contains("Hello back.")),
+        "assistant reply should be committed to session history before Terminal"
+    );
 
     let mut saw_done = false;
     while let Ok(event) = event_rx.try_recv() {
@@ -160,6 +177,14 @@ async fn run_stream_cognitive_path_completes_with_logs() {
     }
     assert!(saw_done, "expected terminal Done event");
 
-    let counts = store.count_legacy_rows("Ene").await.unwrap();
-    assert!(counts.logs >= 2, "user and assistant logs should be saved");
+    let writer_handle = memory_writer_rx
+        .recv()
+        .await
+        .expect("deferred memory writer handle");
+    let writer_started = Instant::now();
+    writer_handle.await.expect("writer task join");
+    assert!(
+        writer_started.elapsed() >= Duration::from_millis(1500),
+        "deferred extraction should still run to completion in the background"
+    );
 }

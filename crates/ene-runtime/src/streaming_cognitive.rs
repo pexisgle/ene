@@ -4,8 +4,9 @@ use ene_ai::LlmToolCallChunk;
 use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_mind::{
-    CognitionEngine, EngineMode, HistoryEntry, MindConfig, PostTurnInput,
-    TurnContext,
+    CognitionEngine, ComposePrefetch, EngineMode, HistoryEntry, MindConfig, OwnedPostTurnInput,
+    OwnedTurnInput, PostTurnInput, TurnContext, character::CharacterProcessor,
+    character::compute_card_memory_hash, load_active_scene_summary,
 };
 use tokio_stream::StreamExt;
 
@@ -97,6 +98,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         runtime_directive,
         generation_timeout,
         classifier_tx,
+        memory_writer_tx,
     } = ctx;
 
     let is_proactive = origin == TurnOrigin::Proactive;
@@ -140,42 +142,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let session_id = session.memory.session_id.clone();
     let mem_store = session.memory.memory_store.clone();
 
-    emit_diag(
-        &diag_tx,
-        DiagnosticEvent::PipelinePhase {
-            turn: turn.clone(),
-            phase: PHASE_EMBEDDING.to_string(),
-        },
-    );
-
-    let query_embedding = if is_proactive {
-        None
-    } else if let Some(emb_prov) = &embedder {
-        tracing::info!(%turn, "Generating user query embedding...");
-        match ene_ai::embed_query(emb_prov.as_ref(), &user_input).await {
-            Ok(emb) => {
-                session.set_pending_embedding(emb.clone());
-                session.set_last_input_embedding(emb.clone());
-                tracing::info!(%turn, "User query embedding generated successfully");
-                Some(emb)
-            }
-            Err(e) => {
-                return stream_finish(
-                    session,
-                    &event_tx,
-                    &terminal_emitted,
-                    &turn,
-                    origin,
-                    TerminalReason::Failed {
-                        message: format!("Embedding failed: {e}"),
-                    },
-                );
-            }
-        }
-    } else {
-        None
-    };
-
     let history: Vec<HistoryEntry> = session.history().to_vec();
     let recall_query = if is_proactive {
         ""
@@ -188,17 +154,48 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let post_history_phi =
         build_cognitive_output_contract(&card, &prompts, mind.emotion.enabled, &user_name);
 
+    // Phase A: query embedding || CCv3 sync (when hash mismatches).
     emit_diag(
         &diag_tx,
         DiagnosticEvent::PipelinePhase {
             turn: turn.clone(),
-            phase: PHASE_CONTEXT_SEARCH.to_string(),
+            phase: PHASE_EMBEDDING.to_string(),
         },
     );
 
-    if !is_proactive
-        && let (Some(_store), Some(embedder)) = (mem_store.as_deref(), embedder.as_ref())
-    {
+    let card_hash = compute_card_memory_hash(&card);
+    let sync_needed = !is_proactive
+        && mem_store.is_some()
+        && embedder.is_some()
+        && session.memory.ccv3_memory_hash != Some(card_hash);
+
+    let embed_fut = async {
+        if is_proactive {
+            return Ok::<Option<Vec<f32>>, String>(None);
+        }
+        let Some(emb_prov) = embedder.as_ref() else {
+            return Ok(None);
+        };
+        tracing::info!(%turn, "Generating user query embedding...");
+        match ene_ai::embed_query(emb_prov.as_ref(), &user_input).await {
+            Ok(emb) => {
+                tracing::info!(%turn, "User query embedding generated successfully");
+                Ok(Some(emb))
+            }
+            Err(e) => Err(format!("Embedding failed: {e}")),
+        }
+    };
+
+    let sync_fut = async {
+        if !sync_needed {
+            if !is_proactive && session.memory.ccv3_memory_hash == Some(card_hash) {
+                tracing::info!(%turn, "Character card memories already up-to-date");
+            }
+            return None;
+        }
+        let (Some(_store), Some(sync_embedder)) = (mem_store.as_deref(), embedder.as_ref()) else {
+            return None;
+        };
         let sync_ctx = build_turn_context(
             &mind,
             &card,
@@ -208,8 +205,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             compose_query,
             &history,
             &mem_store,
-            query_embedding.as_deref(),
-            Some(embedder),
+            None,
+            Some(sync_embedder),
             &provider,
             post_history_phi.as_deref(),
         );
@@ -219,7 +216,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             .await
         {
             Ok((report, hash)) => {
-                session.memory.ccv3_memory_hash = Some(hash);
                 if report.skipped {
                     tracing::info!(%turn, "Character card memories already up-to-date");
                 } else {
@@ -243,6 +239,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     archived = report.archived,
                     "CCv3 character memory sync complete"
                 );
+                Some(hash)
             }
             Err(error) => {
                 tracing::warn!(
@@ -250,30 +247,100 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     error = %error,
                     "CCv3 character memory sync failed; continuing turn"
                 );
+                None
             }
         }
+    };
+
+    let (embed_result, sync_hash) = tokio::join!(embed_fut, sync_fut);
+    let query_embedding = match embed_result {
+        Ok(emb) => {
+            if let Some(ref emb) = emb {
+                session.set_pending_embedding(emb.clone());
+                session.set_last_input_embedding(emb.clone());
+            }
+            emb
+        }
+        Err(message) => {
+            return stream_finish(
+                session,
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Failed { message },
+            );
+        }
+    };
+    if let Some(hash) = sync_hash {
+        session.memory.ccv3_memory_hash = Some(hash);
     }
 
-    let turn_ctx = build_turn_context(
-        &mind,
-        &card,
-        &card_name,
-        &user_name,
-        session_id.as_str(),
-        compose_query,
-        &history,
-        &mem_store,
-        query_embedding.as_deref(),
-        embedder.as_ref(),
-        &provider,
-        post_history_phi.as_deref(),
+    // Phase B: recall || tools || style examples || scene summary.
+    emit_diag(
+        &diag_tx,
+        DiagnosticEvent::PipelinePhase {
+            turn: turn.clone(),
+            phase: PHASE_CONTEXT_SEARCH.to_string(),
+        },
     );
 
     tracing::info!(%turn, "Retrieving memory recall context and selecting relevant tools...");
-    let (pre_turn_result, tools) = if is_proactive {
-        let pre = engine.before_proactive_turn(turn_ctx).await;
-        (pre, Vec::new())
+    let (pre_turn_result, tools, style_examples, scene_summary) = if is_proactive {
+        let turn_ctx = build_turn_context(
+            &mind,
+            &card,
+            &card_name,
+            &user_name,
+            session_id.as_str(),
+            compose_query,
+            &history,
+            &mem_store,
+            query_embedding.as_deref(),
+            embedder.as_ref(),
+            &provider,
+            post_history_phi.as_deref(),
+        );
+        let (pre, style, scene) = tokio::join!(
+            engine.before_proactive_turn(turn_ctx),
+            CharacterProcessor::select_style_examples(
+                &card,
+                &user_name,
+                compose_query,
+                &history,
+                mem_store.as_deref(),
+                embedder.as_ref(),
+                &mind.character,
+                2,
+            ),
+            async {
+                if let Some(store) = mem_store.as_deref() {
+                    load_active_scene_summary(store, session_id.as_str())
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|s| s.text)
+                } else {
+                    None
+                }
+            },
+        );
+        (pre, Vec::new(), style, scene)
     } else {
+        let turn_ctx = build_turn_context(
+            &mind,
+            &card,
+            &card_name,
+            &user_name,
+            session_id.as_str(),
+            compose_query,
+            &history,
+            &mem_store,
+            query_embedding.as_deref(),
+            embedder.as_ref(),
+            &provider,
+            post_history_phi.as_deref(),
+        );
         tokio::join!(
             engine.before_turn(turn_ctx),
             select_relevant_tools(
@@ -282,7 +349,28 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 recall_query,
                 query_embedding.as_deref(),
                 tool_calling_enabled,
-            )
+            ),
+            CharacterProcessor::select_style_examples(
+                &card,
+                &user_name,
+                recall_query,
+                &history,
+                mem_store.as_deref(),
+                embedder.as_ref(),
+                &mind.character,
+                2,
+            ),
+            async {
+                if let Some(store) = mem_store.as_deref() {
+                    load_active_scene_summary(store, session_id.as_str())
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|s| s.text)
+                } else {
+                    None
+                }
+            },
         )
     };
 
@@ -307,17 +395,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 
     let mut turn_affect = pre_turn.affect.clone();
 
-    if mind.emotion.enabled
-        && let Some(store) = mem_store.as_deref()
-        && let Err(error) = CognitionEngine::persist_affect_snapshot(store, &turn_affect).await
-    {
-        tracing::warn!(
-            component = "CognitionEngine",
-            error = %error,
-            "Failed to persist pre-turn affect snapshot"
-        );
-    }
-
     if !is_proactive
         && mem_config.enabled
         && let Some(store) = &mem_store
@@ -331,6 +408,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         );
     }
 
+    // Phase C: affect persist || prompt pack (with prefetched style/scene).
     emit_diag(
         &diag_tx,
         DiagnosticEvent::PipelinePhase {
@@ -353,9 +431,34 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         &provider,
         post_history_phi.as_deref(),
     );
+    let prefetch = ComposePrefetch {
+        style_examples: Some(style_examples),
+        scene_summary: Some(scene_summary),
+    };
 
     tracing::info!(%turn, "Building prompt packet context...");
-    let composed = match engine.compose_prompt_packet(compose_ctx, &pre_turn).await {
+    let (persist_result, composed_result) = tokio::join!(
+        async {
+            if mind.emotion.enabled
+                && let Some(store) = mem_store.as_deref()
+            {
+                CognitionEngine::persist_affect_snapshot(store, &turn_affect).await
+            } else {
+                Ok(())
+            }
+        },
+        engine.compose_prompt_packet(compose_ctx, &pre_turn, prefetch),
+    );
+
+    if let Err(error) = persist_result {
+        tracing::warn!(
+            component = "CognitionEngine",
+            error = %error,
+            "Failed to persist pre-turn affect snapshot"
+        );
+    }
+
+    let composed = match composed_result {
         Ok(v) => {
             tracing::info!(%turn, "Prompt packet context assembled successfully");
             v
@@ -590,40 +693,30 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 }
             }
 
-            if let Some(store) = mem_store.as_deref() {
-                let post_user = if is_proactive {
-                    ""
-                } else {
-                    user_input.as_str()
-                };
-                let post = PostTurnInput {
-                    turn: TurnInput {
-                        user_message: post_user,
-                        assistant_message: Some(&clean_content),
-                        tool_results: &turn_tool_results,
-                    },
-                    affect: turn_affect,
-                    character_id: &card_name,
-                    user_id: &user_name,
-                };
-                if let Err(error) = engine
-                    .after_turn(
-                        store,
-                        &mind,
-                        post,
-                        ene_mind::MemoryWriteProviders {
-                            llm: Some(provider.as_ref()),
-                            embedder: embedder.as_ref().map(std::convert::AsRef::as_ref),
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        component = "CognitionEngine",
-                        error = %error,
-                        "Post-turn after_turn failed"
-                    );
-                }
+            let post_user = if is_proactive {
+                ""
+            } else {
+                user_input.as_str()
+            };
+            let post = PostTurnInput {
+                turn: TurnInput {
+                    user_message: post_user,
+                    assistant_message: Some(&clean_content),
+                    tool_results: &turn_tool_results,
+                },
+                affect: turn_affect.clone(),
+                character_id: &card_name,
+                user_id: &user_name,
+            };
+
+            if let Some(store) = mem_store.as_deref()
+                && let Err(error) = engine.finalize_turn_post(store, &mind, &post).await
+            {
+                tracing::warn!(
+                    component = "CognitionEngine",
+                    error = %error,
+                    "Post-turn finalize_turn failed"
+                );
             }
 
             log_empty_response_if_needed(&EmptyResponseContext {
@@ -642,12 +735,68 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 prompt_meta: Some(&composed.meta),
             });
 
-            // Finalize and emit Terminal before the affect classifier so the
-            // chat UI is not blocked for up to classifier_timeout_secs, and so
-            // a cancel abort cannot drop an already-streamed assistant reply
-            // from history.
+            // Commit assistant history before Terminal so the next turn's prompt
+            // includes this exchange even when memory extraction is deferred.
             session.finalize_response();
             session.record_assistant_response();
+
+            if let Some(store) = mem_store.clone() {
+                let deferred_input = OwnedPostTurnInput {
+                    turn: OwnedTurnInput {
+                        user_message: post_user.to_string(),
+                        assistant_message: Some(clean_content.clone()),
+                        tool_results: turn_tool_results.clone(),
+                    },
+                    affect: turn_affect,
+                    character_id: card_name.clone(),
+                    user_id: user_name.clone(),
+                };
+                let deferred_mind = mind.clone();
+                let deferred_provider = provider.clone();
+                let deferred_embedder = embedder.clone();
+                let memory_writer_handle = tokio::spawn(async move {
+                    let engine = CognitionEngine::new();
+                    tracing::info!(
+                        component = "MemoryWriter",
+                        character_id = %deferred_input.character_id,
+                        user_id = %deferred_input.user_id,
+                        "Post-turn memory extraction and forgetting starting"
+                    );
+                    match engine
+                        .write_memories_deferred(
+                            store.as_ref(),
+                            &deferred_mind,
+                            &deferred_input,
+                            ene_mind::MemoryWriteProviders {
+                                llm: Some(deferred_provider.as_ref()),
+                                embedder: deferred_embedder
+                                    .as_ref()
+                                    .map(std::convert::AsRef::as_ref),
+                            },
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::info!(
+                                component = "MemoryWriter",
+                                character_id = %deferred_input.character_id,
+                                user_id = %deferred_input.user_id,
+                                "Post-turn memory extraction and forgetting completed"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                component = "MemoryWriter",
+                                error = %error,
+                                character_id = %deferred_input.character_id,
+                                user_id = %deferred_input.user_id,
+                                "Post-turn memory extraction failed"
+                            );
+                        }
+                    }
+                });
+                let _ = memory_writer_tx.send(memory_writer_handle);
+            }
 
             if !is_proactive
                 && let Some(classifier_store) = mem_store.clone()

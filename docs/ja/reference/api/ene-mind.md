@@ -186,8 +186,10 @@ pub struct CognitionEngine {
 | `sync_character_memories` | `async fn sync_character_memories(&self, ctx: TurnContext<'_>, previous_hash: Option<u64>) -> Result<(CharacterMemorySyncReport, u64), CognitionError>` | カードのコンテンツハッシュが変化した際にCCv3ロアブック/スタイルエントリを型付きメモリに再インデックスする。`ctx.store` と `ctx.embedder` が必要。 |
 | `before_turn` | `async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>` | アフェクトをロードし、感情エンジンを実行し、ハイブリッドリコールを計画・実行し、アクティブなコミットメントを収集する。 |
 | `persist_affect_snapshot` | `async fn persist_affect_snapshot(store: &MemoryStore, affect: &AffectState) -> Result<(), CognitionError>` | プレターン更新の直後にアフェクト状態を永続化する（ストリームのキャンセル/失敗時にも生き残る）。 |
-| `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput) -> Result<ComposedPrompt, CognitionError>` | Identity Kernelをコンパイルし、スタイル例を選択し、シーンサマリーをロードし、予算内にすべてをパッキングして `Vec<LlmMessage>` に変換する。 |
-| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | ホスト（`ene-runtime`）からの**唯一の製品向け書き込み入口**。`MemoryWriter::after_turn` に委譲する — 抽出、調停、忘却ライフサイクル、アフェクト永続化。ランタイムは `MemoryWriter` を直接呼んではならない。 |
+| `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput, prefetch: ComposePrefetch) -> Result<ComposedPrompt, CognitionError>` | Identity Kernelをコンパイルし、スタイル例/シーン（`prefetch` または内部取得）をパッキングし、予算内にまとめて `Vec<LlmMessage>` に変換する。 |
+| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | 完全同期のポストターンパス（`write_memories` → forgetting → affect 永続化）。単一 await が必要なテスト・呼び出し元向け。 |
+| `finalize_turn_post` | `async fn finalize_turn_post(&self, store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>` | 同期ポストターン finalize: `upsert_affect_state` のみ。`ene-runtime` は `Terminal` の前に呼ぶ。 |
+| `write_memories_deferred` | `async fn write_memories_deferred(&self, store: &MemoryStore, config: &MindConfig, input: &OwnedPostTurnInput, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | 遅延 LLM 抽出 + arbiter、続けて自然忘却。`ene-runtime` は `Terminal` 後に spawn し、ターンゲートをブロックしてはならない。 |
 | `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | 完了したアシスタントターンの最終的なキャラクター表情を `OutputArbiter` 経由で解決する。判定結果と、`last_expression` が更新された `AffectState` を返す。 |
 
 ---
@@ -311,6 +313,7 @@ CCv3キャラクターカードを決定論的に `IdentityKernel` にコンパ�
 | `StyleExampleSelector::compile_items(card, user_name) -> Vec<NewMemoryItem>` | `mes_example` の対話チャンクを `ccv3:style:*` プロシージャメモリにコンパイルする。 |
 | `StyleExampleSelector::select(...) -> Vec<StyleExample>` | 決定論的な意図ヒューリスティック（挨拶、慰め、ジョークなど）に基づき、現在のターン用のスタイル例を選択する。 |
 | `sync_character_memories(store, embedder, character_id, user_name, card, config, previous_hash) -> Result<(CharacterMemorySyncReport, u64), CognitionError>` | 完全な同期を行う: 結合コンテンツハッシュを計算し、変更がない場合は処理をスキップし、古い行をアーカイブし、変更されたエントリを挿入/上書きする。 |
+| `compute_card_memory_hash(card) -> u64` | lorebook+style の結合コンテンツハッシュ。セッション hash 一致時に毎ターン sync をスキップするために使う。 |
 
 ```rust
 pub struct CharacterMemorySyncReport {
@@ -637,11 +640,12 @@ pub struct MemoryWriter;
 impl MemoryWriter {
     pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
     pub async fn finalize_turn(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn apply_forgetting(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
     pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
 }
 ```
 
-`after_turn` = `write_memories`（LLM 主経路、覚えて／忘れて安全ネット、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `finalize_turn`（`ForgettingLifecycle::apply` → `upsert_affect_state`）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（`finalize_turn` は `after_turn` から常に実行されます）。ホスト（`ene-runtime`）は `CognitionEngine::after_turn` のみを呼び、`MemoryWriter` メソッドを直接呼んではなりません（#121）。
+`after_turn` = `write_memories`（LLM 主経路、覚えて／忘れて安全ネット、ツールグラウンディングを含む → `MemoryArbiter` → `CommitmentLedger` 同期）に続いて `apply_forgetting`、続けて `finalize_turn`（`upsert_affect_state` のみ）です。`mind.memory.write_every_turn` が `false` の場合、抽出のみがスキップされます（forgetting + affect 永続化は `after_turn` から常に実行されます）。本番ストリーミングの `ene-runtime` は `Terminal` の前に `finalize_turn_post`（affect のみ）を await し、その後 `write_memories_deferred`（抽出 + forgetting）を spawn します。ホストは `MemoryWriter` ではなく `CognitionEngine` のメソッドのみを呼びます（#121）。
 
 ### `MemoryCandidate`
 
@@ -786,7 +790,7 @@ async fn run_turn(
     let pre = engine.before_turn(TurnContext { ..ctx }).await?;
 
     // 2. セクション化されたプロンプトパケットをLLMメッセージに構成する。
-    let composed = engine.compose_prompt_packet(TurnContext { ..ctx }, &pre).await?;
+    let composed = engine.compose_prompt_packet(TurnContext { ..ctx }, &pre, ComposePrefetch::default()).await?;
 
     // 3. ene-runtime が `composed.messages` を使ってLLM補完をストリーミングする
     //    （このクレートの範囲外）。

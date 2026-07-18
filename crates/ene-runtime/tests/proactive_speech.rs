@@ -1,5 +1,11 @@
 //! Proactive speech runtime integration tests (#169).
 
+#![expect(
+    clippy::expect_used,
+    clippy::field_reassign_with_default,
+    reason = "integration tests use expect and default-then-assign fixtures"
+)]
+
 use async_trait::async_trait;
 use ene_ai::{LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
 use ene_config::{CharacterCardV3, EneConfig};
@@ -20,7 +26,7 @@ struct EchoProvider {
 
 #[async_trait]
 impl LlmProvider for EchoProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "echo"
     }
 
@@ -116,6 +122,7 @@ async fn proactive_stream_does_not_add_user_history() {
         runtime_directive: Some("Speak briefly.".into()),
         generation_timeout: Some(std::time::Duration::from_secs(30)),
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
     let outcome = run_stream_cognitive(ctx).await;
@@ -182,6 +189,7 @@ async fn proactive_stream_without_memory_store() {
         runtime_directive: Some("Check in briefly.".into()),
         generation_timeout: Some(std::time::Duration::from_secs(30)),
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
     let outcome = run_stream_cognitive(ctx).await;

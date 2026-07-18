@@ -495,6 +495,7 @@ impl EneHandle {
 
         let turn_gate = Arc::new(TurnGate::new());
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
+        let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
 
         let actor = EneActor {
             cmd_rx,
@@ -514,9 +515,12 @@ impl EneHandle {
             pending_compression: None,
             call_tool_tasks: tokio::task::JoinSet::new(),
             classifier_tasks: tokio::task::JoinSet::new(),
+            memory_writer_tasks: tokio::task::JoinSet::new(),
             classifier_rx,
+            memory_writer_rx,
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             classifier_tx,
+            memory_writer_tx,
             _diag_rx: diag_rx,
             proactive: crate::proactive::ProactiveScheduler::default(),
             proactive_decision_rx: None,
@@ -687,9 +691,13 @@ struct EneActor {
     pending_compression: Option<PendingCompressionTask>,
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
+    memory_writer_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
+    memory_writer_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     /// Sender for classifier `JoinHandles` from the stream task.
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
+    /// Sender for deferred memory-writer `JoinHandles` from the stream task.
+    memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
     /// Held so the broadcast channel retains buffered diagnostic events until the
@@ -735,6 +743,17 @@ impl EneActor {
                 }
             }
 
+            // Reap completed deferred memory-writer tasks.
+            while let Some(joined) = self.memory_writer_tasks.try_join_next() {
+                if let Err(e) = joined {
+                    tracing::error!(
+                        component = "MemoryWriterReaper",
+                        error = %e,
+                        "Deferred memory-writer task panicked"
+                    );
+                }
+            }
+
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {
                 self.classifier_tasks.spawn(async move {
@@ -743,6 +762,19 @@ impl EneActor {
                             component = "EmotionEngine",
                             error = %e,
                             "Post-turn affect classifier panicked"
+                        );
+                    }
+                });
+            }
+
+            // Drain deferred memory-writer JoinHandles sent from the stream.
+            while let Ok(handle) = self.memory_writer_rx.try_recv() {
+                self.memory_writer_tasks.spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::error!(
+                            component = "MemoryWriter",
+                            error = %e,
+                            "Deferred memory-writer task panicked"
                         );
                     }
                 });
@@ -854,9 +886,10 @@ impl EneActor {
         if let Some(handles) = self.proactive_llm.take() {
             handles.shutdown().await;
         }
-        // Abort any in-flight direct CallTool and classifier tasks, and clear
-        // any pending prompt oneshot senders.
+        // Abort any in-flight direct CallTool, classifier, and memory-writer tasks,
+        // and clear any pending prompt oneshot senders.
         self.classifier_tasks.abort_all();
+        self.memory_writer_tasks.abort_all();
         self.call_tool_tasks.abort_all();
         self.drain_pending().await;
     }
@@ -1116,6 +1149,7 @@ impl EneActor {
             }
             EneCommand::Shutdown => {
                 self.classifier_tasks.abort_all();
+                self.memory_writer_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
                 self.abort_proactive_decision();
                 if let Some(handles) = self.proactive_llm.take() {
@@ -1312,6 +1346,7 @@ impl EneActor {
         let terminal_emitted = self.terminal_emitted.clone();
         let turn_for_stream = turn.clone();
         let classifier_tx = self.classifier_tx.clone();
+        let memory_writer_tx = self.memory_writer_tx.clone();
         self.active_origin = origin;
 
         let _ = self.event_tx.send(EneEvent::TurnStarted {
@@ -1343,6 +1378,7 @@ impl EneActor {
                 runtime_directive,
                 generation_timeout,
                 classifier_tx,
+                memory_writer_tx,
             })
             .await;
             let _ = session_tx.send(outcome);

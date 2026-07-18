@@ -17,7 +17,7 @@ pub use lorebook::{
 pub use style::{
     STYLE_SOURCE_PREFIX, StyleExample, StyleExampleSelector, StyleIntent, infer_style_intent,
 };
-pub use sync::{CharacterMemorySyncReport, sync_character_memories};
+pub use sync::{CharacterMemorySyncReport, compute_card_memory_hash, sync_character_memories};
 
 use std::sync::Arc;
 

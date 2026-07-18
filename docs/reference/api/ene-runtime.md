@@ -122,7 +122,7 @@ pub enum EneEvent {
     PermissionRequired { turn: TurnId, request_id: RequestId, action: String, target: String, description: String },
     UserInputRequired { turn: TurnId, request_id: RequestId, prompt: UserInputPrompt },
     ContextCompressed { turn: TurnId, level: String },  // thin signal
-    Terminal { turn: TurnId, reason: TerminalReason },  // exactly once after after_turn
+    Terminal { turn: TurnId, reason: TerminalReason },  // exactly once after history commit + affect finalize_turn
     StatusChanged { status: EneStatus },
 }
 ```
@@ -458,7 +458,7 @@ if ctx.embedder.is_none() {
 streaming_cognitive::run_stream_cognitive(ctx).await
 ```
 
-- **Mind path** (`streaming_cognitive::run_stream_cognitive`, private module): delegates prompt composition, recall, affect, and post-turn memory writing to `ene-mind`'s `CognitionEngine` (`before_turn` → `compose_prompt_packet` → LLM stream → `resolve_expression_turn` → `after_turn`). See [`ene-mind`](./ene-mind.md).
+- **Mind path** (`streaming_cognitive::run_stream_cognitive`, private module): delegates prompt composition, recall, affect, and post-turn work to `ene-mind`'s `CognitionEngine` (Phase A embed∥CCv3 sync → Phase B `before_turn`∥Tool RAG∥style∥scene → Phase C affect persist∥`compose_prompt_packet` → LLM stream → `resolve_expression_turn` → `finalize_turn_post` (affect) → commit history → `Terminal` → deferred `write_memories_deferred` (extraction + forgetting) + affect classifier). See [`ene-mind`](./ene-mind.md).
 - If the store or embedder prerequisite is unavailable, `run_stream` returns `EneRuntimeError::MindPrerequisite` and emits a failed terminal event. There is no legacy streaming fallback.
 
 The mind path uses the shared tool-execution machinery (`select_relevant_tools`, `perform_tool_executions`, `accumulate_tool_calls`, `finalize_tool_calls`) and the terminal-event guarantee (`emit_terminal`).

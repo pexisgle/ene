@@ -126,7 +126,8 @@ pub use engine::CognitionEngine;
 pub use error::{CognitionError, EneCognitionError, MindError};
 /// Turn lifecycle types for streaming integration.
 pub use lifecycle::{
-    ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
+    ComposePrefetch, ComposedPrompt, HistoryEntry, OwnedPostTurnInput, OwnedTurnInput,
+    PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
 };
 /// Journal-style scored memory search (#123).
 #[doc(no_inline)]

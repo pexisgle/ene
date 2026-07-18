@@ -10,12 +10,14 @@ The actor model remains the execution shell (`EneHandle` / actor), while turn in
 
 ```text
 User input
-  -> before_turn (recall planning + affect update)
-  -> compose_prompt_packet (sectioned context + budgeting)
+  -> before_turn (recall planning + affect update; parallel with Tool RAG / style / scene prefetch)
+  -> compose_prompt_packet (sectioned context + budgeting; parallel with pre-turn affect persist)
   -> LLM streaming
   -> output arbitration (Performance cues)
-  -> after_turn (memory write + forgetting + affect persist)
-  -> Terminal (chat event after after_turn completes)
+  -> finalize_turn (affect persist; synchronous)
+  -> commit session history
+  -> Terminal (chat event)
+  -> deferred write_memories + forgetting + affect classifier (background)
 ```
 
 `ene-runtime` integrates this flow and emits a **minimal** chat event bus; diagnostics are separate.

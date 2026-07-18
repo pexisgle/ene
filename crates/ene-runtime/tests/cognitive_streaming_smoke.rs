@@ -155,7 +155,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
     };
 
     let composed = engine
-        .compose_prompt_packet(compose_ctx, &pre)
+        .compose_prompt_packet(compose_ctx, &pre, ene_mind::ComposePrefetch::default())
         .await
         .expect("prompt composition succeeds");
 
@@ -245,7 +245,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         post_history_block: phi.as_deref(),
     };
     let composed = engine
-        .compose_prompt_packet(compose_ctx, &pre)
+        .compose_prompt_packet(compose_ctx, &pre, ene_mind::ComposePrefetch::default())
         .await
         .expect("prompt composition succeeds");
 
@@ -321,7 +321,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         post_history_block: None,
     };
     let composed = engine
-        .compose_prompt_packet(compose_ctx, &pre)
+        .compose_prompt_packet(compose_ctx, &pre, ene_mind::ComposePrefetch::default())
         .await
         .expect("prompt composition succeeds");
 

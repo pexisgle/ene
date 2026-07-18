@@ -10,12 +10,14 @@ ene は API v2 ホスト契約（`ene-runtime`）と `ene-mind` 認知ターン�
 
 ```text
 User input
-  -> before_turn (recall planning + affect update)
-  -> compose_prompt_packet (sectioned context + budgeting)
+  -> before_turn (recall planning + affect update; Tool RAG / style / scene prefetch と並列)
+  -> compose_prompt_packet (sectioned context + budgeting; pre-turn affect persist と並列)
   -> LLM streaming
   -> output arbitration (Performance cues)
-  -> after_turn (memory write + forgetting + affect persist)
-  -> Terminal（after_turn 完了後のチャットイベント）
+  -> finalize_turn (affect persist; 同期)
+  -> セッション履歴をコミット
+  -> Terminal（チャットイベント）
+  -> 遅延 write_memories + forgetting + affect 分類（バックグラウンド）
 ```
 
 `ene-runtime` がこのフローを統合し、**最小**のチャットイベントバスを発行します。診断は別経路です。

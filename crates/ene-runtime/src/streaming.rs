@@ -136,6 +136,8 @@ pub struct StreamContext {
     /// Sender for classifier `JoinHandles` spawned after Terminal emission.
     /// The actor drains this into its classifier `JoinSet` for lifecycle management.
     pub classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
+    /// Sender for deferred memory-writer `JoinHandles` spawned after Terminal emission.
+    pub memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, optional memory

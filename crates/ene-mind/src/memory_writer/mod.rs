@@ -305,19 +305,12 @@ impl MemoryWriter {
         Ok(())
     }
 
-    /// Apply forgetting lifecycle and persist affect state.
+    /// Persist affect state only (forgetting runs on the deferred path).
     pub async fn finalize_turn(
         store: &MemoryStore,
-        config: &MindConfig,
+        _config: &MindConfig,
         input: &PostTurnInput<'_>,
     ) -> Result<(), CognitionError> {
-        let forgetting_ctx = ForgettingContext {
-            character_id: input.character_id,
-            user_id: Some(input.user_id),
-            now: Utc::now(),
-        };
-        let _report = ForgettingLifecycle::apply(store, &forgetting_ctx, &config.memory).await?;
-
         store
             .upsert_affect_state(&input.affect)
             .await
@@ -336,6 +329,21 @@ impl MemoryWriter {
         Ok(())
     }
 
+    /// Apply natural forgetting lifecycle for the turn scope.
+    pub async fn apply_forgetting(
+        store: &MemoryStore,
+        config: &MindConfig,
+        input: &PostTurnInput<'_>,
+    ) -> Result<(), CognitionError> {
+        let forgetting_ctx = ForgettingContext {
+            character_id: input.character_id,
+            user_id: Some(input.user_id),
+            now: Utc::now(),
+        };
+        let _report = ForgettingLifecycle::apply(store, &forgetting_ctx, &config.memory).await?;
+        Ok(())
+    }
+
     /// Extract, arbitrate, persist memories, apply forgetting, and update affect.
     pub async fn after_turn(
         store: &MemoryStore,
@@ -344,6 +352,7 @@ impl MemoryWriter {
         providers: MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
         Self::write_memories(store, config, &input, providers).await?;
+        Self::apply_forgetting(store, config, &input).await?;
         Self::finalize_turn(store, config, &input).await
     }
 }
@@ -599,6 +608,29 @@ mod tests {
 
         let loaded = store.get_affect_state("ene").await.unwrap();
         assert_eq!(loaded.character_id, affect.character_id);
+    }
+
+    #[tokio::test]
+    async fn apply_forgetting_runs_when_write_every_turn_disabled() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.memory.write_every_turn = false;
+        config.memory.decay_enabled = true;
+
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "hello",
+                assistant_message: Some("hi"),
+                tool_results: &[],
+            },
+            affect: AffectState::neutral("ene"),
+            character_id: "ene",
+            user_id: "user",
+        };
+
+        MemoryWriter::apply_forgetting(&store, &config, &post)
+            .await
+            .expect("apply_forgetting");
     }
 
     #[tokio::test]

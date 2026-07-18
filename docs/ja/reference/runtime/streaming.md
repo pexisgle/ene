@@ -62,7 +62,7 @@ pub enum EneEvent {
 
 - `TextDelta` はプレーンテキストのみ。マーカーは除去済み。
 - 提示 cue は `Performance`。`SpecialToken` / 単独 `Expression` ではない。
-- `Terminal` は `Run` ごとに正確に1回、チャット経路の `after_turn`（記憶書き込み / 忘却）の後。ポストターン LLM affect **分類**は `Terminal` 後に spawn され、Done を遅らせてはならない。
+- `Terminal` は `Run` ごとに正確に1回、会話履歴のコミットと同期 `finalize_turn`（affect 永続化）の後。LLM 記憶抽出（`write_memories`）、自然忘却、ポストターン affect **分類**は `Terminal` 後に spawn され、Done を遅らせてはならない。
 - `cancel(turn)` はストリームを即 abort し、進行中の session 更新は破棄する。キャンセルされたターンの部分アシスタント履歴のマージを期待してはならない。
 - Desktop: broadcast `Lagged` 時はアクティブターンを cancel（ゲート解放）しつつ入力を開ける。`processing` がクリアされても `active_turn` がある間は Cancel を有効にする。
 - パイプライン位相 / メトリクスは `diagnostics().subscribe()`。
@@ -76,13 +76,14 @@ pub enum EneEvent {
 ```
 Run { input, turn }
   ↓
-1. before_turn（想起計画 + 感情）
-2. compose_prompt_packet
-3. 関連ツール選択（Tool RAG）
+1. Phase A: query embedding || CCv3 sync（セッションのカード hash 一致時はスキップ）
+2. Phase B: before_turn || Tool RAG || style examples || scene summary
+3. Phase C: pre-turn affect persist || compose_prompt_packet（prefetch 付き）
 4. メインループ（max_tool_call_rounds まで）:
       ├── LLM ストリーミング → TextDelta / Performance
       ├── tool_calls あり → ToolCallStart / 実行 / ToolCallResult → 継続
-      └── なし → after_turn（記憶書き込み、忘却）→ Terminal → affect 分類を spawn
+      └── なし → finalize_turn（affect）→ 履歴コミット → Terminal
+           → 遅延記憶抽出 + forgetting + affect 分類を spawn
 5. Terminal { turn, Done | Failed | Cancelled }
 ```
 

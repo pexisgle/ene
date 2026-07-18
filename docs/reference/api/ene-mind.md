@@ -186,8 +186,10 @@ pub struct CognitionEngine {
 | `sync_character_memories` | `async fn sync_character_memories(&self, ctx: TurnContext<'_>, previous_hash: Option<u64>) -> Result<(CharacterMemorySyncReport, u64), CognitionError>` | Re-indexes CCv3 lorebook/style entries into typed memory when the card's content hash changes. Requires `ctx.store` and `ctx.embedder`. |
 | `before_turn` | `async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>` | Loads affect, runs the Emotion Engine, plans + executes hybrid recall, and gathers active commitments. |
 | `persist_affect_snapshot` | `async fn persist_affect_snapshot(store: &MemoryStore, affect: &AffectState) -> Result<(), CognitionError>` | Persists the affect state immediately after pre-turn update (survives stream cancel/failure). |
-| `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput) -> Result<ComposedPrompt, CognitionError>` | Compiles the Identity Kernel, selects style examples, loads the scene summary, packs everything under budget, and converts to `Vec<LlmMessage>`. |
-| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | **Sole product write entry** from the host (`ene-runtime`). Delegates to `MemoryWriter::after_turn` — extraction, arbitration, forgetting lifecycle, affect persistence. Runtime must not call `MemoryWriter` directly. |
+| `compose_prompt_packet` | `async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput, prefetch: ComposePrefetch) -> Result<ComposedPrompt, CognitionError>` | Compiles the Identity Kernel, packs style/scene (from `prefetch` or fetched internally), packs everything under budget, and converts to `Vec<LlmMessage>`. |
+| `after_turn` | `async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | Full synchronous post-turn path (`write_memories` → forgetting → affect persist). Used by tests and callers that need a single await. |
+| `finalize_turn_post` | `async fn finalize_turn_post(&self, store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>` | Synchronous post-turn finalize: `upsert_affect_state` only. `ene-runtime` calls this before `Terminal`. |
+| `write_memories_deferred` | `async fn write_memories_deferred(&self, store: &MemoryStore, config: &MindConfig, input: &OwnedPostTurnInput, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>` | Deferred LLM extraction + arbiter, then natural forgetting. `ene-runtime` spawns this after `Terminal`; must not block the turn gate. |
 | `resolve_expression_turn` | `fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (ExpressionDecision, AffectState)` | Resolves the final character expression for a completed assistant turn via the `OutputArbiter`. Returns the decision plus an `AffectState` with `last_expression` updated. |
 
 ---
@@ -311,6 +313,7 @@ Deterministically compiles a CCv3 character card into an `IdentityKernel`. Core 
 | `StyleExampleSelector::compile_items(card, user_name) -> Vec<NewMemoryItem>` | Compiles `mes_example` dialogue chunks into `ccv3:style:*` procedure memories. |
 | `StyleExampleSelector::select(...) -> Vec<StyleExample>` | Selects style examples for the current turn via deterministic intent heuristics (greeting, comforting, joking, …). |
 | `sync_character_memories(store, embedder, character_id, user_name, card, config, previous_hash) -> Result<(CharacterMemorySyncReport, u64), CognitionError>` | Full sync: computes a combined content hash, skips work when unchanged, archives stale rows, and inserts/supersedes changed entries. |
+| `compute_card_memory_hash(card) -> u64` | Cheap combined lorebook+style content hash for skipping per-turn sync when the session hash already matches. |
 
 ```rust
 pub struct CharacterMemorySyncReport {
@@ -637,11 +640,12 @@ pub struct MemoryWriter;
 impl MemoryWriter {
     pub async fn write_memories(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
     pub async fn finalize_turn(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
+    pub async fn apply_forgetting(store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>;
     pub async fn after_turn(store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: MemoryWriteProviders<'_>) -> Result<(), CognitionError>;
 }
 ```
 
-`after_turn` = `write_memories` (LLM-first; remember/forget safety net + tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `finalize_turn` (`ForgettingLifecycle::apply` → `upsert_affect_state`). Extraction is skipped when `mind.memory.write_every_turn` is `false` (`finalize_turn` still runs from `after_turn`). Hosts (`ene-runtime`) must call only `CognitionEngine::after_turn` — not `MemoryWriter` methods directly (#121).
+`after_turn` = `write_memories` (LLM-first; remember/forget safety net + tool grounding → `MemoryArbiter` → `CommitmentLedger` sync) then `apply_forgetting` then `finalize_turn` (`upsert_affect_state` only). Extraction is skipped when `mind.memory.write_every_turn` is `false` (forgetting + affect persist still run from `after_turn`). Production streaming in `ene-runtime` awaits `finalize_turn_post` (affect only) before `Terminal` and spawns `write_memories_deferred` (extraction + forgetting) afterward. Hosts must call `CognitionEngine` methods — not `MemoryWriter` directly (#121).
 
 ### `MemoryCandidate`
 
@@ -786,7 +790,7 @@ async fn run_turn(
     let pre = engine.before_turn(TurnContext { ..ctx }).await?;
 
     // 2. Compose the sectioned prompt packet into LLM messages.
-    let composed = engine.compose_prompt_packet(TurnContext { ..ctx }, &pre).await?;
+    let composed = engine.compose_prompt_packet(TurnContext { ..ctx }, &pre, ComposePrefetch::default()).await?;
 
     // 3. ene-runtime streams the LLM completion using `composed.messages`
     //    (not part of this crate).

@@ -13,7 +13,9 @@ use crate::context::{
 };
 use crate::emotion::TurnAffectInput;
 use crate::error::CognitionError;
-use crate::lifecycle::{ComposedPrompt, PostTurnInput, PreTurnOutput, TurnContext};
+use crate::lifecycle::{
+    ComposePrefetch, ComposedPrompt, PostTurnInput, PreTurnOutput, TurnContext,
+};
 use crate::memory_writer::MemoryWriter;
 use crate::recall::{ExecuteRecallInput, execute_hybrid_recall};
 
@@ -347,10 +349,14 @@ impl CognitionEngine {
     }
 
     /// Compose a sectioned prompt packet into LLM messages.
+    ///
+    /// Pass [`ComposePrefetch`] fields from a parallel pre-LLM phase to skip
+    /// redundant style/scene fetches. Default prefetch fetches them here.
     pub async fn compose_prompt_packet(
         &self,
         ctx: TurnContext<'_>,
         pre: &PreTurnOutput,
+        prefetch: ComposePrefetch,
     ) -> Result<ComposedPrompt, CognitionError> {
         Self::validate_config(ctx.config)?;
 
@@ -365,24 +371,30 @@ impl CognitionEngine {
             }
         };
 
-        let style_examples = CharacterProcessor::select_style_examples(
-            ctx.card,
-            ctx.user_name,
-            ctx.user_input,
-            ctx.history,
-            ctx.store,
-            ctx.embedder,
-            &ctx.config.character,
-            2,
-        )
-        .await;
+        let style_examples = if let Some(examples) = prefetch.style_examples {
+            examples
+        } else {
+            CharacterProcessor::select_style_examples(
+                ctx.card,
+                ctx.user_name,
+                ctx.user_input,
+                ctx.history,
+                ctx.store,
+                ctx.embedder,
+                &ctx.config.character,
+                2,
+            )
+            .await
+        };
 
         let affect_summary = Some(format!(
             "mood={}; valence={:.2}; arousal={:.2}",
             pre.affect.mood_label, pre.affect.valence, pre.affect.arousal
         ));
 
-        let scene_summary = if let Some(store) = ctx.store {
+        let scene_summary = if let Some(prefetched) = prefetch.scene_summary {
+            prefetched
+        } else if let Some(store) = ctx.store {
             load_active_scene_summary(store, ctx.session_id)
                 .await?
                 .map(|s| s.text)
@@ -451,6 +463,31 @@ impl CognitionEngine {
         providers: crate::memory_writer::MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
         MemoryWriter::after_turn(store, config, input, providers).await
+    }
+
+    /// Synchronous post-turn finalize: persist affect state only.
+    ///
+    /// Forgetting runs on the deferred path via [`Self::write_memories_deferred`].
+    pub async fn finalize_turn_post(
+        &self,
+        store: &MemoryStore,
+        config: &MindConfig,
+        input: &PostTurnInput<'_>,
+    ) -> Result<(), CognitionError> {
+        MemoryWriter::finalize_turn(store, config, input).await
+    }
+
+    /// Deferred post-turn memory extraction (LLM + arbiter) then forgetting lifecycle.
+    pub async fn write_memories_deferred(
+        &self,
+        store: &MemoryStore,
+        config: &MindConfig,
+        input: &crate::lifecycle::OwnedPostTurnInput,
+        providers: crate::memory_writer::MemoryWriteProviders<'_>,
+    ) -> Result<(), CognitionError> {
+        let borrowed = input.as_borrowed();
+        MemoryWriter::write_memories(store, config, &borrowed, providers).await?;
+        MemoryWriter::apply_forgetting(store, config, &borrowed).await
     }
 
     /// Resolve the final character expression after an assistant turn (#89).
@@ -657,5 +694,83 @@ mod turn_id_tests {
         assert!(ctx.conversation.contains("user: thanks"));
         assert!(ctx.conversation.contains("assistant: you're welcome"));
         assert!(ctx.current_affect.to_prompt_json().contains("valence"));
+    }
+
+    #[tokio::test]
+    async fn compose_prompt_packet_uses_prefetch_without_store() {
+        use crate::character::{StyleExample, StyleIntent};
+        use crate::lifecycle::{ComposePrefetch, PreTurnOutput};
+        use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
+        use ene_config::CharacterCardV3;
+        use ene_store::AffectState;
+
+        let engine = CognitionEngine::new();
+        let config = MindConfig::default();
+        let card = CharacterCardV3::default();
+        let pre = PreTurnOutput {
+            recall_plan: RecallPlan {
+                current_topic: "test".into(),
+                semantic_queries: Vec::new(),
+                episodic_queries: Vec::new(),
+                required_kinds: Vec::new(),
+                scope: RecallScopeFilter {
+                    character_id: "ene".into(),
+                    user_id: Some("user".into()),
+                },
+                budget: RecallBudgetHints {
+                    memory_budget_tokens: 256,
+                    semantic_budget_tokens: 128,
+                    result_limit: 4,
+                },
+                search: RecallSearchHints {
+                    primary_query_text: "hi".into(),
+                    similarity_threshold: 0.0,
+                    min_score: 0.0,
+                    decay_half_life_days: 30.0,
+                    query_affect: None,
+                },
+                use_hyde: false,
+            },
+            affect: AffectState::neutral("ene"),
+            recalled: Vec::new(),
+            commitments: Vec::new(),
+            classifier_expression_hint: None,
+        };
+        let prefetch = ComposePrefetch {
+            style_examples: Some(vec![StyleExample {
+                text: "PREFETCHED_STYLE_MARKER".into(),
+                intent: StyleIntent::Greeting,
+            }]),
+            scene_summary: Some(Some("PREFETCHED_SCENE_MARKER".into())),
+        };
+        let ctx = TurnContext {
+            config: &config,
+            card: &card,
+            character_id: "ene",
+            user_name: "user",
+            session_id: "sess",
+            user_input: "hi",
+            history: &[],
+            store: None,
+            query_embedding: None,
+            embedder: None,
+            llm_provider: None,
+            post_history_block: None,
+        };
+        let composed = engine
+            .compose_prompt_packet(ctx, &pre, prefetch)
+            .await
+            .expect("compose");
+        let blob = format!("{composed:?}");
+        assert!(
+            blob.contains("PREFETCHED_STYLE_MARKER"),
+            "prefetched style should appear in prompt: {blob}"
+        );
+        assert!(
+            blob.contains("PREFETCHED_SCENE_MARKER"),
+            "prefetched scene should appear in prompt: {blob}"
+        );
+        assert_eq!(composed.meta.style_example_count, 1);
+        assert!(composed.meta.scene_summary_included);
     }
 }
