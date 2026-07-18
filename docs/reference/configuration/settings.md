@@ -104,7 +104,8 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `providers` | object | Map of provider name → provider definition |
+| `local_models` | object | Map of local model name → GGUF definition |
+| `providers` | object | Map of cloud provider name → provider definition |
 | `tasks.chat` | object | Main conversation model (required) |
 | `tasks.embedding` | object | Embedding model (required) |
 | `tasks.classifier` | object or `null` | Affect classifier; `null` → falls back to `tasks.chat` |
@@ -114,11 +115,36 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `provider` | string | Key in `ai.providers` |
-| `model` | string | Model name (required for `openai_compatible` chat/embedding) |
+| `provider` | string | Key in `ai.providers`, or `"local"` to resolve against `ai.local_models` |
+| `model` | string | Cloud model name, or a key in `ai.local_models` when `provider` is `"local"` |
 | `max_tokens` | int | Max completion tokens for chat workloads (`0` = omit from request). OpenRouter reserves credit collateral against this ceiling |
 | `dimensions` | int | Expected embedding dimensions (cloud embedding) |
 | `query_prefix` | string or null | Optional prefix prepended to embedding retrieval queries (e.g. `"Query: "`) |
+
+#### `ai.local_models` — Local GGUF Registry
+
+Named local GGUF models referenced by tasks with `provider: "local"`. Weights are downloaded from `url` into `{assets_dir}/models/gguf/` on first use (prefetched in parallel during `EneHandle::open`). In debug builds `assets_dir` is the source-tree `assets/` folder; in release it is the OS app data directory.
+
+```json
+{
+  "jina-v5-small": {
+    "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+    "quantization": "F16",
+    "acceleration": "auto",
+    "gpu_layers": "auto",
+    "context_size": 2048
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | `""` | HTTPS URL for the GGUF weights |
+| `quantization` | string | `"F16"` | Quantization label (embedding metadata) |
+| `model_path` | string | `""` | Explicit filesystem path override (skips download) |
+| `acceleration` | string | `"auto"` | `"auto"`, `"vulkan"`, `"cuda"`, or `"cpu"` |
+| `gpu_layers` | string | `"auto"` | `"auto"` or an integer string for GPU layer offload |
+| `context_size` | int | `2048` | Context size for decision workloads |
 
 #### `ai.providers` — Provider Kinds
 
@@ -149,62 +175,43 @@ Cloud chat, embedding, classifier, and cloud proactive decision via an OpenAI-co
 | `inline` | string | `""` | API key when `source = "inline"` (use with caution) |
 | `env` | string | `"OPENAI_API_KEY"` | Env var name when `source = "env"` |
 
-##### `local_gguf`
-
-Local GGUF via in-process llama-cpp-2. Used for **embedding** (Hub model name) and/or **proactive decision** (`model_path`).
-
-```json
-{
-  "kind": "local_gguf",
-  "model": "jina-embeddings-v5-text-small",
-  "quantization": "F16",
-  "model_path": "",
-  "acceleration": "auto",
-  "gpu_layers": "auto",
-  "context_size": 2048
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `model` | string | `"jina-embeddings-v5-text-small"` | Hub model name for embedding |
-| `quantization` | string | `"F16"` | Quantization level (e.g. `"F16"`, `"Q4_K_M"`) |
-| `model_path` | string | `""` | Filesystem path to decision GGUF. Empty = embedding-only / Hub download |
-| `acceleration` | string | `"auto"` | `"auto"`, `"vulkan"`, `"cuda"`, or `"cpu"` |
-| `gpu_layers` | string | `"auto"` | `"auto"` or an integer string for GPU layer offload |
-| `context_size` | int | `2048` | Context size for the decision model |
-
 **Routing rules:**
 
 - `tasks.chat` and `tasks.classifier` must use `openai_compatible` providers.
-- `tasks.embedding` may use either kind.
+- `tasks.embedding` may use `provider: "local"` with a `local_models` key, or a cloud provider.
 - `tasks.classifier: null` → classifier reuses `tasks.chat` provider and model.
 - `tasks.proactive: null` → proactive **generation** reuses `tasks.chat`.
-- Proactive **decision**: if `tasks.proactive` points at a `local_gguf` provider with a non-empty `model_path`, the in-process GGUF runs locally (load failure falls back to cloud when an OpenAI-compatible chat/proactive task exists). If `tasks.proactive` points at `openai_compatible`, that task's model is used for the cloud decision call; otherwise `tasks.chat` is used. See [Proactive Speech ADR](../architecture/proactive-speech.md).
+- Proactive **decision**: when `tasks.proactive` uses `provider: "local"`, the named `local_models` entry runs in-process via llama-cpp-2 (load failure falls back to cloud when an OpenAI-compatible chat/proactive task exists). When `tasks.proactive` uses `openai_compatible`, that task's model is used for the cloud decision call; otherwise `tasks.chat` is used. See [Proactive Speech ADR](../architecture/proactive-speech.md).
 
-GGUF weights are not bundled; paths are user-supplied. No external `llama-server` binary is required.
+GGUF weights are **not** bundled. Set `url` in `ai.local_models` (or explicit `model_path`) — files download into `{assets_dir}/models/gguf/` on first startup with progress logged as `[GgufDownload]`. No external `llama-server` binary is required.
 
 #### Multi-Provider Example
 
-OpenRouter for chat + classifier, local embedding:
+OpenRouter for chat + classifier, local embedding and proactive decision:
 
 ```json
 {
   "ai": {
+    "local_models": {
+      "jina-v5-small": {
+        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+        "quantization": "F16",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      },
+      "gemma-4-e2b": {
+        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      }
+    },
     "providers": {
       "openrouter": {
         "kind": "openai_compatible",
         "base_url": "https://openrouter.ai/api/v1",
         "api_key": { "source": "env", "env": "OPENROUTER_API_KEY", "inline": "" }
-      },
-      "local_embed": {
-        "kind": "local_gguf",
-        "model": "jina-embeddings-v5-text-small",
-        "quantization": "F16",
-        "model_path": "",
-        "acceleration": "auto",
-        "gpu_layers": "auto",
-        "context_size": 2048
       }
     },
     "tasks": {
@@ -213,12 +220,12 @@ OpenRouter for chat + classifier, local embedding:
         "model": "xiaomi/mimo-v2.5",
         "max_tokens": 8192
       },
-      "embedding": { "provider": "local_embed" },
+      "embedding": { "provider": "local", "model": "jina-v5-small" },
       "classifier": {
         "provider": "openrouter",
         "model": "google/gemini-2.5-flash-lite"
       },
-      "proactive": null
+      "proactive": { "provider": "local", "model": "gemma-4-e2b" }
     }
   }
 }

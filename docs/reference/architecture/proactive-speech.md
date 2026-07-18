@@ -95,9 +95,9 @@ Model routing lives under `ai.tasks` in settings (see [Configuration](../configu
 |---|---|
 | Generation | `ai.tasks.proactive` if set, else `ai.tasks.chat` |
 | Classifier (affect) | `ai.tasks.classifier` if set, else `ai.tasks.chat` |
-| Decision | Provider referenced by `ai.tasks.proactive` (or chat provider when `proactive` is `null`): `local_gguf` with non-empty `model_path` → in-process GGUF; otherwise cloud decision via the chat provider |
+| Decision | `ai.tasks.proactive` with `provider: "local"` resolves the named `local_models` entry → in-process GGUF; otherwise cloud decision via the chat provider |
 
-`local_gguf` loads a GGUF in-process via llama-cpp-2. `acceleration` is `auto` / `vulkan` / `cuda` / `cpu`. On local load failure the decision backend falls back to disabled (fail-closed) — never silently upload observation context to the cloud.
+`provider: "local"` loads a GGUF in-process via llama-cpp-2. Set `url` in `ai.local_models`; weights download into `{assets_dir}/models/gguf/` on first startup (parallel prefetch, progress logged as `[GgufDownload]`). `acceleration` is `auto` / `vulkan` / `cuda` / `cpu`. On local load failure the decision backend falls back to disabled (fail-closed) — never silently upload observation context to the cloud.
 
 GGUF weights are **not** bundled with the app; paths are configured by the user. No external `llama-server` binary is required.
 

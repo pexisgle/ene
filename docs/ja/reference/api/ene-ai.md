@@ -60,10 +60,12 @@ pub async fn embed_query(
 ## ローカル GGUF（`GgufEmbeddingProvider`）
 
 ```rust
-pub fn create_local_provider(...) -> Result<Box<dyn EmbeddingProvider>, EneEmbeddingError>;
+pub fn create_local_provider(
+    local: &ResolvedLocalModel,
+) -> Result<Box<dyn EmbeddingProvider>, EneEmbeddingError>;
 ```
 
-**マルチスレッド** tokio ランタイムが必要（`block_in_place`）。推論は **llama-cpp-2**（Jina v5 向け last-token pooling）。旧 Candle 経路からの移行時はローカルベクトルストアの再インデックスが必要になる場合がある。
+`tasks.embedding.provider` が `"local"` のとき `AiConfig::resolve_embedding()` から得られる `ResolvedLocalModel` を渡します。初回利用時に `models/gguf/` へダウンロード（メモリ / Tool RAG が必要な場合は `EneHandle::open` で並列プリフェッチ）。進捗は `[GgufDownload] filename ████████░░ 82% 2.6/3.2 GB` 形式でログ出力。
 
 ## `Role` / `HistoryEntry`
 

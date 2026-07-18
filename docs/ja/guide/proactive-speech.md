@@ -1,26 +1,43 @@
 # 能動発話 — ローカル判定モデル
 
-能動発話（#103）は **軽量な判定モデル** と通常チャットモデルで発話します。判定バックエンド:
-
-| `provider.proactive.decision.backend` | 挙動 |
-|---|---|
-| `disabled`（既定） | 判定なし。`mind.proactive.enabled` でも沈黙 |
-| `llama_cpp` | プロセス内 llama-cpp-2 で `model_path` の GGUF を読み込む |
-| `cloud` | `provider.base_url` / `api_key` と任意の `cloud_model` |
+能動発話（#103）は **軽量な判定モデル** と通常のチャットモデルで発話します。
 
 ## 有効化
 
 1. `mind.proactive.enabled` を `true` にする。
-2. `mind.proactive.sources` を設定する。
-3. `provider.proactive.decision.backend` を `llama_cpp` または `cloud` にする。
-4. ローカル時は GGUF の `model_path`。任意で `acceleration` / `gpu_layers`（Vulkan/CUDA）。
-5. 任意: `provider.proactive.generation_model` で能動発話専用のチャットモデルを指定。
+2. `ai.local_models` に判定モデルエントリを追加する（例: HTTPS `.gguf` URL 付き `gemma-4-e2b`）。
+3. `ai.tasks.proactive` を `provider: "local"`、`model` をそのレジストリキーに設定する（`null` のままなら生成のみ `tasks.chat` を再利用）。
+4. 任意: 既にローカルにある場合は `local_models` エントリの `model_path` を指定。
+5. 任意: Vulkan/CUDA 用に `acceleration` / `gpu_layers` を設定。
 
-デスクトップの設定は再起動なしで実行中の actor に即時反映されます（`UpdateProactiveSettings`）。
+例（`assets/settings.json`）:
 
-重みは **同梱しない**。ローカル推論は **プロセス内 llama-cpp-2**（`llama-server` 子プロセスなし）。[ADR](../reference/architecture/proactive-speech.md) を参照。
+```json
+{
+  "ai": {
+    "local_models": {
+      "gemma-4-e2b": {
+        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      }
+    },
+    "tasks": {
+      "proactive": { "provider": "local", "model": "gemma-4-e2b" }
+    }
+  },
+  "mind": {
+    "proactive": { "enabled": true }
+  }
+}
+```
 
-## スモーク（任意）
+デスクトップ設定は再起動なしで実行中のアクターに反映されます。デスクトップオブザーバーとランタイムスケジューラは `UpdateProactiveSettings` 経由で更新を受け取ります。
+
+重みは **同梱されません**。起動時に並列ダウンロードされ、`[GgufDownload]` で進捗がログ出力されます。ローカル推論は **プロセス内 llama-cpp-2**（`llama-server` サブプロセス不要）。[ADR](../reference/architecture/proactive-speech.md) を参照。
+
+## スモークテスト（任意）
 
 ```bash
 export ENE_LOCAL_LLM_MODEL=/path/to/model.gguf
@@ -30,12 +47,12 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 
 ## プライバシー
 
-- Desktop は生スクリーンショットをディスク・ログ・SQLite に書かない。
-- 画面要約は任意。有効時も V1 デスクトップは要約器未同梱のため **unavailable** を報告する（空要約を黙って送らない）。
-- アクティビティは **アプリ名のみ**（生ウィンドウタイトルなし。キーロギングなし）。
+- デスクトップは生のスクリーンショットをディスク・ログ・SQLite に書き込みません。
+- 画面サマリーは任意。有効時、V1 デスクトップはサマライザー統合までソースを **利用不可** と報告します（空サマリーを黙って送りません）。
+- アクティビティは **アプリ名のみ**（生のウィンドウタイトルなし、キーロギングなし）。
 
 ## デスクトップ統合
 
-- 能動ターンはストリーム前に `EneEvent::TurnStarted` を emit する。デスクトップはこれで `active_turn` を設定し、`TextDelta` / `Terminal` をチャット UI へ届ける。
-- クールダウンとセッション上限は `TerminalReason::Done` で終了した能動発話のみに適用する（失敗・キャンセルは消費しない）。
-- ローカル llama-cpp の embedding と判定はプロセス全体の推論ロックで直列化される。
+- 能動ターンはストリーミング前に `EneEvent::TurnStarted` を発行。デスクトップはこのイベントから `active_turn` を設定し、`TextDelta` / `Terminal` がチャット UI に届きます。
+- クールダウンとセッション上限は、能動ターンが `TerminalReason::Done` で終了した後にのみ適用（失敗・キャンセルした生成はクールダウンを消費しません）。
+- ローカル llama-cpp の埋め込みと判定パスはプロセス全体の推論ロックを共有（直列、同時実行なし）。

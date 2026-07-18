@@ -62,13 +62,11 @@ pub async fn embed_query(
 
 ```rust
 pub fn create_local_provider(
-    model: &str,
-    quantization: &str,
-    model_dir: PathBuf,
+    local: &ResolvedLocalModel,
 ) -> Result<Box<dyn EmbeddingProvider>, EneEmbeddingError>;
 ```
 
-Requires a **multi-thread** tokio runtime (`block_in_place`). Inference uses **llama-cpp-2** with last-token pooling (Jina v5). Supported Hub fetch families are the Jina v5 retrieval models; other GGUFs need direct `GgufEmbeddingProvider::load`. Migrating from the former Candle path may require re-indexing local vector stores.
+`ResolvedLocalModel` comes from `AiConfig::resolve_embedding()` when `tasks.embedding.provider` is `"local"`. The GGUF is downloaded into `models/gguf/` on first use (prefetched in parallel during `EneHandle::open` when memory or tool-RAG needs an embedder). Download progress is logged as `[GgufDownload] filename ████████░░ 82% 2.6/3.2 GB`.
 
 ## `Role` / `HistoryEntry`
 

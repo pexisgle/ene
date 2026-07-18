@@ -1,24 +1,41 @@
 # Proactive companion speech — local decision model
 
-Proactive speech (#103) uses a **lightweight decision model** and the normal chat model for utterances. Decision backends:
-
-| `provider.proactive.decision.backend` | Behaviour |
-|---|---|
-| `disabled` (default) | No decisions; feature stays silent even if `mind.proactive.enabled` |
-| `llama_cpp` | In-process llama-cpp-2 load of a GGUF on `model_path` |
-| `cloud` | Uses `provider.base_url` / `api_key` with optional `cloud_model` |
+Proactive speech (#103) uses a **lightweight decision model** and the normal chat model for utterances.
 
 ## Enabling
 
 1. Set `mind.proactive.enabled` to `true`.
-2. Configure sources under `mind.proactive.sources`.
-3. Set `provider.proactive.decision.backend` to `llama_cpp` or `cloud`.
-4. For local: set `model_path` to a Gemma 4 E2B/E4B (or other) GGUF. Optional `acceleration` / `gpu_layers` for Vulkan/CUDA.
-5. Optional: set `provider.proactive.generation_model` to use a different chat model for proactive utterances.
+2. Add a decision model entry under `ai.local_models` (for example `gemma-4-e2b` with an HTTPS `.gguf` URL).
+3. Point `ai.tasks.proactive` at `provider: "local"` with `model` set to that registry key (or leave `null` to reuse `tasks.chat` for generation only).
+4. Optional: set `model_path` on the local model entry when you already have the weights on disk.
+5. Optional: set `acceleration` / `gpu_layers` for Vulkan/CUDA.
+
+Example (`assets/settings.json`):
+
+```json
+{
+  "ai": {
+    "local_models": {
+      "gemma-4-e2b": {
+        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      }
+    },
+    "tasks": {
+      "proactive": { "provider": "local", "model": "gemma-4-e2b" }
+    }
+  },
+  "mind": {
+    "proactive": { "enabled": true }
+  }
+}
+```
 
 Desktop settings apply to the running actor immediately (no restart). The desktop observer and runtime scheduler both receive updates via `UpdateProactiveSettings`.
 
-Weights are **not** bundled. Local inference is **in-process llama-cpp-2** (no `llama-server` subprocess). See the [ADR](../reference/architecture/proactive-speech.md).
+Weights are **not** bundled. Downloads run in parallel at startup with `[GgufDownload]` progress logs. Local inference is **in-process llama-cpp-2** (no `llama-server` subprocess). See the [ADR](../reference/architecture/proactive-speech.md).
 
 ## Smoke test (optional)
 

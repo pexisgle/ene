@@ -104,7 +104,8 @@ pub struct EneConfig {
 
 | フィールド | 型 | 説明 |
 |-----------|------|------|
-| `providers` | object | プロバイダ名 → 定義のマップ |
+| `local_models` | object | ローカルモデル名 → GGUF 定義のマップ |
+| `providers` | object | クラウドプロバイダ名 → 定義のマップ |
 | `tasks.chat` | object | メイン会話モデル（必須） |
 | `tasks.embedding` | object | 埋め込みモデル（必須） |
 | `tasks.classifier` | object または `null` | 感情分類器；`null` → `tasks.chat` にフォールバック |
@@ -114,11 +115,36 @@ pub struct EneConfig {
 
 | フィールド | 型 | 説明 |
 |-----------|------|------|
-| `provider` | string | `ai.providers` のキー |
-| `model` | string | モデル名（`openai_compatible` の chat/embedding で必須） |
+| `provider` | string | `ai.providers` のキー、または `"local"`（`ai.local_models` を参照） |
+| `model` | string | クラウドモデル名、または `provider` が `"local"` のとき `ai.local_models` のキー |
 | `max_tokens` | int | チャット完了の最大トークン数（`0` = リクエストから省略）。OpenRouter はこの上限に対してクレジット担保を確保 |
 | `dimensions` | int | 埋め込みベクトルの次元数（クラウド埋め込み） |
 | `query_prefix` | string または null | 埋め込み検索クエリに前置する任意プレフィックス（例: `"Query: "`） |
+
+#### `ai.local_models` — ローカル GGUF レジストリ
+
+`provider: "local"` のタスクが参照する名前付きローカル GGUF。`url` から初回利用時に `{assets_dir}/models/gguf/` へダウンロード（`EneHandle::open` で並列プリフェッチ）。デバッグビルドでは `assets_dir` はソースツリーの `assets/`、リリースでは OS のアプリデータディレクトリ。
+
+```json
+{
+  "jina-v5-small": {
+    "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+    "quantization": "F16",
+    "acceleration": "auto",
+    "gpu_layers": "auto",
+    "context_size": 2048
+  }
+}
+```
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `url` | string | `""` | GGUF 重みの HTTPS URL |
+| `quantization` | string | `"F16"` | 量子化ラベル（埋め込みメタデータ） |
+| `model_path` | string | `""` | 明示的なファイルシステムパス（ダウンロードをスキップ） |
+| `acceleration` | string | `"auto"` | `"auto"` / `"vulkan"` / `"cuda"` / `"cpu"` |
+| `gpu_layers` | string | `"auto"` | `"auto"` または GPU オフロード層数の整数文字列 |
+| `context_size` | int | `2048` | 判定ワークロードのコンテキストサイズ |
 
 #### `ai.providers` — プロバイダ種別
 
@@ -149,62 +175,43 @@ pub struct EneConfig {
 | `inline` | string | `""` | API キー（`source = "inline"` 時、注意して使用） |
 | `env` | string | `"OPENAI_API_KEY"` | `source = "env"` 時の環境変数名 |
 
-##### `local_gguf`
-
-プロセス内 llama-cpp-2 によるローカル GGUF。**埋め込み**（Hub モデル名）および/または **能動判定**（`model_path`）に使用します。
-
-```json
-{
-  "kind": "local_gguf",
-  "model": "jina-embeddings-v5-text-small",
-  "quantization": "F16",
-  "model_path": "",
-  "acceleration": "auto",
-  "gpu_layers": "auto",
-  "context_size": 2048
-}
-```
-
-| フィールド | 型 | デフォルト | 説明 |
-|-----------|------|---------|------|
-| `model` | string | `"jina-embeddings-v5-text-small"` | 埋め込み用 Hub モデル名 |
-| `quantization` | string | `"F16"` | 量子化レベル（例: `"F16"`, `"Q4_K_M"`） |
-| `model_path` | string | `""` | 判定用 GGUF のファイルシステムパス。空 = 埋め込みのみ / Hub ダウンロード |
-| `acceleration` | string | `"auto"` | `"auto"`, `"vulkan"`, `"cuda"`, `"cpu"` |
-| `gpu_layers` | string | `"auto"` | `"auto"` または GPU layer offload 用の整数文字列 |
-| `context_size` | int | `2048` | 判定モデルのコンテキストサイズ |
-
 **ルーティング規則:**
 
 - `tasks.chat` と `tasks.classifier` は `openai_compatible` プロバイダのみ使用可能。
-- `tasks.embedding` はどちらの種別も使用可能。
+- `tasks.embedding` は `provider: "local"` と `local_models` キー、またはクラウドプロバイダを使用可能。
 - `tasks.classifier: null` → 分類器は `tasks.chat` のプロバイダとモデルを再利用。
 - `tasks.proactive: null` → 能動発話の**生成**は `tasks.chat` を再利用。
-- 能動**判定**: `tasks.proactive` が非空 `model_path` 付き `local_gguf` を指す場合はプロセス内 GGUF（ロード失敗時は OpenAI 互換の chat/proactive があればクラウドへフォールバック）。`tasks.proactive` が `openai_compatible` を指す場合はそのモデルでクラウド判定；それ以外は `tasks.chat`。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
+- 能動**判定**: `tasks.proactive` が `provider: "local"` の場合、指定した `local_models` エントリをプロセス内 GGUF で実行（ロード失敗時は OpenAI 互換の chat/proactive があればクラウドへフォールバック）。`tasks.proactive` が `openai_compatible` の場合はそのモデルでクラウド判定；それ以外は `tasks.chat`。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
 
-GGUF は同梱されず、パスはユーザー指定。外部 `llama-server` バイナリは不要。
+GGUF は **同梱されません**。`ai.local_models` の `url`（または明示 `model_path`）を設定すると、初回起動時に `{assets_dir}/models/gguf/` へダウンロードされます（`[GgufDownload]` として進捗ログ出力）。外部 `llama-server` バイナリは不要です。
 
 #### マルチプロバイダの例
 
-OpenRouter で chat + classifier、ローカル埋め込み:
+OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 
 ```json
 {
   "ai": {
+    "local_models": {
+      "jina-v5-small": {
+        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
+        "quantization": "F16",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      },
+      "gemma-4-e2b": {
+        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      }
+    },
     "providers": {
       "openrouter": {
         "kind": "openai_compatible",
         "base_url": "https://openrouter.ai/api/v1",
         "api_key": { "source": "env", "env": "OPENROUTER_API_KEY", "inline": "" }
-      },
-      "local_embed": {
-        "kind": "local_gguf",
-        "model": "jina-embeddings-v5-text-small",
-        "quantization": "F16",
-        "model_path": "",
-        "acceleration": "auto",
-        "gpu_layers": "auto",
-        "context_size": 2048
       }
     },
     "tasks": {
@@ -213,12 +220,12 @@ OpenRouter で chat + classifier、ローカル埋め込み:
         "model": "xiaomi/mimo-v2.5",
         "max_tokens": 8192
       },
-      "embedding": { "provider": "local_embed" },
+      "embedding": { "provider": "local", "model": "jina-v5-small" },
       "classifier": {
         "provider": "openrouter",
         "model": "google/gemini-2.5-flash-lite"
       },
-      "proactive": null
+      "proactive": { "provider": "local", "model": "gemma-4-e2b" }
     }
   }
 }

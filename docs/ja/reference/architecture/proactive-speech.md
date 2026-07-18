@@ -95,9 +95,9 @@ Timer / observation update
 |---|---|
 | 生成 | `ai.tasks.proactive` があればそれ、なければ `ai.tasks.chat` |
 | 分類器（感情） | `ai.tasks.classifier` があればそれ、なければ `ai.tasks.chat` |
-| 判定 | `ai.tasks.proactive` が参照するプロバイダ（`proactive` が `null` のときは chat プロバイダ）: 非空 `model_path` 付き `local_gguf` → プロセス内 GGUF；それ以外は chat プロバイダ経由のクラウド判定 |
+| 判定 | `ai.tasks.proactive` が `provider: "local"` の場合は指定した `local_models` エントリ → プロセス内 GGUF；それ以外は chat プロバイダ経由のクラウド判定 |
 
-`local_gguf` は llama-cpp-2 で GGUF をプロセス内ロードする。`acceleration` は `auto` / `vulkan` / `cuda` / `cpu`。ローカル load 失敗時は判定バックエンドが disabled にフォールバック（fail-closed）— 観測コンテキストを黙ってクラウドへ送らない。
+`provider: "local"` は llama-cpp-2 で GGUF をプロセス内ロードする。`ai.local_models` の `url` を設定すると、初回起動時に `{assets_dir}/models/gguf/` へ並列ダウンロード（`[GgufDownload]` で進捗ログ）。`acceleration` は `auto` / `vulkan` / `cuda` / `cpu`。ローカル load 失敗時は判定バックエンドが disabled にフォールバック（fail-closed）— 観測コンテキストを黙ってクラウドへ送らない。
 
 GGUF 重みはアプリに同梱しない。外部 `llama-server` も不要。パスはユーザー設定。
 
