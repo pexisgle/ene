@@ -270,7 +270,6 @@ fn normalize_title(title: &str) -> String {
 #[cfg(test)]
 #[expect(
     clippy::default_trait_access,
-    deprecated,
     reason = "explicit Default for test fixture clarity; deprecated API retained for migration"
 )]
 mod tests {
