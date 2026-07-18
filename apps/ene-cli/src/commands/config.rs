@@ -61,7 +61,7 @@ impl CliCommand for ConfigCommand {
         println!("Memory Enabled: {}", mem_config.enabled);
         match provider_config.resolve_embedding() {
             Ok(embed) => {
-                let (local_model, _) = embed.local_fields();
+                let (local_model, _, _) = embed.local_fields();
                 if local_model.is_empty() {
                     let (_, _, cloud_model, dimensions, _) = embed.cloud_fields();
                     println!("Embedding Backend: cloud");

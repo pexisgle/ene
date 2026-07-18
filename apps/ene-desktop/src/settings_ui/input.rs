@@ -78,11 +78,12 @@ impl SettingsInputState {
             self.ai_api_key.clear();
             self.ai_api_key_env = "OPENAI_API_KEY".to_string();
         }
-        self.ai_embedding_provider = match ai_cfg.get_provider(&ai_cfg.tasks.embedding.provider) {
-            Ok(AiProviderDef::LocalGguf { .. }) => "local".to_string(),
-            Ok(AiProviderDef::OpenaiCompatible { .. }) => "cloud".to_string(),
-            Err(_) => "cloud".to_string(),
-        };
+        self.ai_embedding_provider =
+            if ene_ai::AiConfig::is_local_provider(&ai_cfg.tasks.embedding.provider) {
+                "local".to_string()
+            } else {
+                "cloud".to_string()
+            };
         self.ai_embedding_model = ai_cfg.tasks.embedding.model.clone().unwrap_or_default();
         self.ai_embedding_dimensions = if self.ai_embedding_provider == "local" {
             "auto".to_string()

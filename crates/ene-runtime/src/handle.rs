@@ -422,6 +422,25 @@ impl EneHandle {
         let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
         let needs_embedder = mem_config.enabled || (tool_config.enabled && rag_config.enabled);
 
+        // Prefetch configured GGUF weights in parallel before backends load them.
+        if let Ok(ai_config) = config.get_section::<ene_ai::AiConfig>() {
+            let needs_decision = mind.proactive.enabled;
+            if (needs_embedder || needs_decision)
+                && let Err(e) = ene_ai::prefetch_configured_gguf(
+                    &ai_config,
+                    needs_embedder,
+                    needs_decision,
+                )
+                .await
+            {
+                tracing::warn!(
+                    component = "GgufPrefetch",
+                    error = %e,
+                    "GGUF prefetch failed; will retry on load"
+                );
+            }
+        }
+
         // Fail-closed: memory / tool-RAG features require a working embedder.
         let embedder = if needs_embedder {
             Some(init_embedding(&config)?)
@@ -1720,12 +1739,8 @@ fn init_embedding(
         .resolve_embedding()
         .map_err(|e| ene_ai::EmbeddingError::Init(e.to_string()))?
     {
-        ResolvedEmbedding::Local {
-            model,
-            quantization,
-        } => {
-            let model_dir = ene_config::models_dir();
-            let provider = ene_ai::create_local_provider(&model, &quantization, model_dir)?;
+        ResolvedEmbedding::Local(local) => {
+            let provider = ene_ai::create_local_provider(&local)?;
             Ok(Arc::from(provider))
         }
         ResolvedEmbedding::Cloud {

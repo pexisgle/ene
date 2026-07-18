@@ -1,6 +1,8 @@
 //! Resolved provider settings from [`AiConfig`] task routing.
 
-use crate::config::{AiConfig, AiProviderDef, ApiKeyConfig, TaskRef};
+use crate::config::{
+    AiConfig, AiProviderDef, ApiKeyConfig, LocalModelDef, TaskRef, LOCAL_PROVIDER,
+};
 use crate::error::LlmProviderError;
 
 /// Fully resolved OpenAI-compatible chat settings for a task.
@@ -14,6 +16,39 @@ pub struct ResolvedChat {
     pub model: String,
     /// Optional completion token cap (`None` = omit on requests).
     pub max_tokens: Option<u32>,
+}
+
+/// Fully resolved local GGUF model settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLocalModel {
+    /// Registry key in [`AiConfig::local_models`].
+    pub name: String,
+    /// HTTPS download URL.
+    pub url: String,
+    /// Optional filesystem path override.
+    pub model_path: String,
+    /// Quantization label.
+    pub quantization: String,
+    /// Preferred acceleration backend.
+    pub acceleration: crate::config::ProactiveAcceleration,
+    /// GPU layer offload setting.
+    pub gpu_layers: String,
+    /// Context size for decision workloads.
+    pub context_size: u32,
+}
+
+impl ResolvedLocalModel {
+    pub(crate) fn from_named(name: &str, def: &LocalModelDef) -> Self {
+        Self {
+            name: name.to_string(),
+            url: def.url.clone(),
+            model_path: def.model_path.clone(),
+            quantization: def.quantization.clone(),
+            acceleration: def.acceleration,
+            gpu_layers: def.gpu_layers.clone(),
+            context_size: def.context_size,
+        }
+    }
 }
 
 /// Fully resolved embedding backend settings.
@@ -33,12 +68,7 @@ pub enum ResolvedEmbedding {
         query_prefix: Option<String>,
     },
     /// Local GGUF embedding via llama-cpp-2.
-    Local {
-        /// Hub model name or identifier.
-        model: String,
-        /// Quantization format.
-        quantization: String,
-    },
+    Local(ResolvedLocalModel),
 }
 
 impl ResolvedEmbedding {
@@ -59,7 +89,7 @@ impl ResolvedEmbedding {
                 *dimensions,
                 query_prefix.as_deref(),
             ),
-            Self::Local { .. } => {
+            Self::Local(_) => {
                 debug_assert!(false, "ResolvedEmbedding::cloud_fields on Local variant");
                 ("", "", "", 0, None)
             }
@@ -68,16 +98,26 @@ impl ResolvedEmbedding {
 
     /// Local embedding fields (panics in debug if cloud).
     #[must_use]
-    pub fn local_fields(&self) -> (&str, &str) {
+    pub fn local_fields(&self) -> (&str, &str, &str) {
         match self {
-            Self::Local {
-                model,
-                quantization,
-            } => (model.as_str(), quantization.as_str()),
+            Self::Local(local) => (
+                local.name.as_str(),
+                local.quantization.as_str(),
+                local.url.as_str(),
+            ),
             Self::Cloud { .. } => {
                 debug_assert!(false, "ResolvedEmbedding::local_fields on Cloud variant");
-                ("", "")
+                ("", "", "")
             }
+        }
+    }
+
+    /// Resolved local model reference.
+    #[must_use]
+    pub fn as_local(&self) -> Option<&ResolvedLocalModel> {
+        match self {
+            Self::Local(local) => Some(local),
+            Self::Cloud { .. } => None,
         }
     }
 }
@@ -124,32 +164,63 @@ impl ApiKeyConfig {
         } else if !self.inline.trim().is_empty() {
             self.inline.clone()
         } else {
-            #[cfg(debug_assertions)]
-            {
-                if let Ok(token) = std::env::var("API_TOKEN")
-                    && !token.trim().is_empty()
-                {
-                    return token;
-                }
-            }
             String::new()
         }
     }
 }
 
 impl AiConfig {
-    /// Look up a named provider definition.
+    /// Whether `name` is the reserved local provider.
+    #[must_use]
+    pub fn is_local_provider(name: &str) -> bool {
+        name == LOCAL_PROVIDER
+    }
+
+    /// Look up a named cloud provider definition.
     pub fn get_provider(&self, name: &str) -> Result<&AiProviderDef, LlmProviderError> {
         self.providers
             .get(name)
             .ok_or_else(|| LlmProviderError::Provider(format!("unknown AI provider: {name:?}")))
     }
 
-    /// Resolve a [`TaskRef`] to its provider and effective overrides.
+    /// Look up a named entry in [`AiConfig::local_models`].
+    pub fn get_local_model(&self, name: &str) -> Result<&LocalModelDef, LlmProviderError> {
+        self.local_models
+            .get(name)
+            .ok_or_else(|| LlmProviderError::Provider(format!("unknown local model: {name:?}")))
+    }
+
+    /// Resolve a local model for a task with `provider: "local"`.
+    pub fn resolve_local_model_for_task(
+        &self,
+        task: &TaskRef,
+    ) -> Result<ResolvedLocalModel, LlmProviderError> {
+        if !Self::is_local_provider(&task.provider) {
+            return Err(LlmProviderError::Provider(format!(
+                "task provider {:?} is not {:?}",
+                task.provider, LOCAL_PROVIDER
+            )));
+        }
+        let name = task.model.as_deref().filter(|m| !m.trim().is_empty()).ok_or_else(|| {
+            LlmProviderError::Provider(format!(
+                "task with provider {LOCAL_PROVIDER:?} requires model (local_models key)"
+            ))
+        })?;
+        let def = self.get_local_model(name)?;
+        Ok(ResolvedLocalModel::from_named(name, def))
+    }
+
+    /// Resolve a [`TaskRef`] to its cloud provider and effective overrides.
     pub fn resolve_task_ref<'a>(
         &'a self,
         task: &'a TaskRef,
     ) -> Result<ResolvedTaskRef<'a>, LlmProviderError> {
+        if Self::is_local_provider(&task.provider) {
+            return Err(LlmProviderError::Provider(format!(
+                "task provider {:?} is local; use resolve_local_model_for_task",
+                task.provider
+            )));
+        }
         let provider = self.get_provider(&task.provider)?;
         let model = task.model.as_deref().filter(|m| !m.trim().is_empty());
         Ok(ResolvedTaskRef {
@@ -181,21 +252,28 @@ impl AiConfig {
 
     /// Resolve proactive generation chat settings (falls back to chat task).
     ///
-    /// Generation must use an OpenAI-compatible provider; local GGUF is decision-only.
+    /// Generation must use an OpenAI-compatible provider; `provider: "local"` is decision-only.
     pub fn resolve_proactive_generation(&self) -> Result<ResolvedChat, LlmProviderError> {
-        if let Some(proactive) = self.tasks.proactive.as_ref()
-            && matches!(
+        if let Some(proactive) = self.tasks.proactive.as_ref() {
+            if Self::is_local_provider(&proactive.provider) {
+                return self.resolve_chat();
+            }
+            if matches!(
                 self.get_provider(&proactive.provider)?,
                 AiProviderDef::OpenaiCompatible { .. }
-            )
-        {
-            return self.resolve_openai_chat_task(proactive);
+            ) {
+                return self.resolve_openai_chat_task(proactive);
+            }
         }
         self.resolve_chat()
     }
 
     /// Resolve embedding backend settings for [`AiConfig::tasks`] embedding task.
     pub fn resolve_embedding(&self) -> Result<ResolvedEmbedding, LlmProviderError> {
+        if Self::is_local_provider(&self.tasks.embedding.provider) {
+            let local = self.resolve_local_model_for_task(&self.tasks.embedding)?;
+            return Ok(ResolvedEmbedding::Local(local));
+        }
         let resolved = self.resolve_task_ref(&self.tasks.embedding)?;
         match resolved.provider {
             AiProviderDef::OpenaiCompatible { base_url, api_key } => {
@@ -219,18 +297,15 @@ impl AiConfig {
                         .filter(|p| !p.trim().is_empty()),
                 })
             }
-            AiProviderDef::LocalGguf {
-                model,
-                quantization,
-                ..
-            } => Ok(ResolvedEmbedding::Local {
-                model: model.clone(),
-                quantization: quantization.clone(),
-            }),
         }
     }
 
     fn resolve_openai_chat_task(&self, task: &TaskRef) -> Result<ResolvedChat, LlmProviderError> {
+        if Self::is_local_provider(&task.provider) {
+            return Err(LlmProviderError::Provider(
+                "chat tasks cannot use local provider; use openai_compatible".to_string(),
+            ));
+        }
         let resolved = self.resolve_task_ref(task)?;
         match resolved.provider {
             AiProviderDef::OpenaiCompatible { base_url, api_key } => {
@@ -248,9 +323,6 @@ impl AiConfig {
                     max_tokens: resolved.max_tokens,
                 })
             }
-            AiProviderDef::LocalGguf { .. } => Err(LlmProviderError::Provider(
-                "chat tasks cannot use local_gguf provider; use openai_compatible".to_string(),
-            )),
         }
     }
 }

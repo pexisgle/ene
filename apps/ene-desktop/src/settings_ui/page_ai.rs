@@ -8,10 +8,10 @@ use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_ai::{AiConfig, AiProviderDef, ProactiveAcceleration};
+use ene_ai::{AiConfig, AiProviderDef, LocalModelDef, LOCAL_PROVIDER};
 use std::sync::Arc;
 
-const LOCAL_EMBED_PROVIDER: &str = "local_embed";
+const DEFAULT_LOCAL_EMBED_MODEL: &str = "jina-v5-small";
 
 fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
     ai.providers.iter().find_map(|(name, def)| {
@@ -19,30 +19,20 @@ fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
     })
 }
 
-fn first_local_gguf_provider(ai: &AiConfig) -> Option<String> {
-    ai.providers.iter().find_map(|(name, def)| {
-        matches!(def, AiProviderDef::LocalGguf { .. }).then(|| name.clone())
-    })
-}
-
 fn ensure_local_embedding_provider(ai: &mut AiConfig) {
-    let provider_key = first_local_gguf_provider(ai).unwrap_or_else(|| {
-        ai.providers.insert(
-            LOCAL_EMBED_PROVIDER.to_string(),
-            AiProviderDef::LocalGguf {
-                model: "jina-embeddings-v5-text-small".to_string(),
+    if !ai.local_models.contains_key(DEFAULT_LOCAL_EMBED_MODEL) {
+        ai.local_models.insert(
+            DEFAULT_LOCAL_EMBED_MODEL.to_string(),
+            LocalModelDef {
+                url: "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf".to_string(),
                 quantization: "F16".to_string(),
-                model_path: String::new(),
-                acceleration: ProactiveAcceleration::default(),
-                gpu_layers: "auto".to_string(),
-                context_size: 2048,
+                ..LocalModelDef::default()
             },
         );
-        LOCAL_EMBED_PROVIDER.to_string()
-    });
-    ai.tasks.embedding.provider = provider_key;
+    }
+    ai.tasks.embedding.provider = LOCAL_PROVIDER.to_string();
     if ai.tasks.embedding.model.is_none() {
-        ai.tasks.embedding.model = Some("jina-embeddings-v5-text-small".to_string());
+        ai.tasks.embedding.model = Some(DEFAULT_LOCAL_EMBED_MODEL.to_string());
     }
 }
 
@@ -284,12 +274,6 @@ pub fn render(
             );
             if response.changed() {
                 ai_cfg.tasks.embedding.model = Some(input.ai_embedding_model.trim().to_string());
-                if input.ai_embedding_provider == "local"
-                    && let Some(AiProviderDef::LocalGguf { model, .. }) =
-                        ai_cfg.providers.get_mut(&ai_cfg.tasks.embedding.provider)
-                {
-                    *model = input.ai_embedding_model.trim().to_string();
-                }
                 let _ = settings.ai.ai.set_section(&ai_cfg);
                 settings.mark_dirty();
             }

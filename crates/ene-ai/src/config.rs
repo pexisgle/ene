@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 
 use ene_config::schemars;
 
+/// Reserved task provider name that resolves against [`AiConfig::local_models`].
+pub const LOCAL_PROVIDER: &str = "local";
+
 ene_config::define_config!(
     AiConfig,
     "api_key",
@@ -41,7 +44,7 @@ ene_config::define_label_enum!(
     }
 );
 
-/// Provider definition: cloud OpenAI-compatible API or local GGUF weights.
+/// OpenAI-compatible cloud provider definition.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", tag = "kind", rename_all = "snake_case")]
 #[schemars(crate = "::ene_config::schemars")]
@@ -54,34 +57,46 @@ pub enum AiProviderDef {
         /// API key configuration.
         api_key: ApiKeyConfig,
     },
-    /// Local GGUF model via llama-cpp-2 (embedding and/or proactive decision).
-    LocalGguf {
-        /// Hub model name for embedding (e.g. `"jina-embeddings-v5-text-small"`).
-        #[serde(default = "default_local_gguf_model")]
-        model: String,
-        /// Quantization level (e.g. `"F16"`, `"Q4_K_M"`).
-        #[serde(default = "default_local_gguf_quantization")]
-        quantization: String,
-        /// Filesystem path for local decision LLM GGUF (empty = embedding-only / HF Hub).
-        #[serde(default = "default_string")]
-        model_path: String,
-        /// Preferred acceleration backend.
-        #[serde(default)]
-        acceleration: ProactiveAcceleration,
-        /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
-        #[serde(default = "default_gpu_layers")]
-        gpu_layers: String,
-        /// Context size for the decision model (small is preferred).
-        #[serde(default = "default_context_size")]
-        context_size: u32,
-    },
 }
 
-fn default_local_gguf_model() -> String {
-    "jina-embeddings-v5-text-small".to_string()
+/// Named local GGUF model entry under [`AiConfig::local_models`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct LocalModelDef {
+    /// HTTPS URL for the GGUF weights (downloaded on first use).
+    pub url: String,
+    /// Quantization label (e.g. `"F16"`, `"Q4_0"`).
+    #[serde(default = "default_local_quantization")]
+    pub quantization: String,
+    /// Explicit filesystem path override (skips download when non-empty).
+    #[serde(default = "default_string")]
+    pub model_path: String,
+    /// Preferred acceleration backend.
+    #[serde(default)]
+    pub acceleration: ProactiveAcceleration,
+    /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
+    #[serde(default = "default_gpu_layers")]
+    pub gpu_layers: String,
+    /// Context size for decision workloads.
+    #[serde(default = "default_context_size")]
+    pub context_size: u32,
 }
 
-fn default_local_gguf_quantization() -> String {
+impl Default for LocalModelDef {
+    fn default() -> Self {
+        Self {
+            url: default_string(),
+            quantization: default_local_quantization(),
+            model_path: default_string(),
+            acceleration: ProactiveAcceleration::default(),
+            gpu_layers: default_gpu_layers(),
+            context_size: default_context_size(),
+        }
+    }
+}
+
+fn default_local_quantization() -> String {
     "F16".to_string()
 }
 
@@ -98,9 +113,9 @@ const fn default_context_size() -> u32 {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct TaskRef {
-    /// Named entry in [`AiConfig::providers`].
+    /// Named entry in [`AiConfig::providers`] or [`LOCAL_PROVIDER`].
     pub provider: String,
-    /// Model override (empty / absent → provider default or error at resolve time).
+    /// Cloud model name, or a key in [`AiConfig::local_models`] when `provider` is [`LOCAL_PROVIDER`].
     pub model: Option<String>,
     /// Max completion tokens for chat workloads.
     pub max_tokens: Option<u32>,
@@ -177,7 +192,9 @@ ene_config::define_config!(
     "ai",
     /// AI provider registry and per-task routing.
     pub struct AiConfig {
-        /// Named provider definitions.
+        /// Named local GGUF model registry.
+        pub local_models: BTreeMap<String, LocalModelDef> = BTreeMap::new(),
+        /// Named cloud provider definitions.
         pub providers: BTreeMap<String, AiProviderDef> = default_providers(),
         /// Task → provider/model routing.
         pub tasks: AiTasksConfig,
@@ -202,6 +219,7 @@ mod tests {
     #[test]
     fn ai_config_defaults() {
         let cfg = AiConfig::default();
+        assert!(cfg.local_models.is_empty());
         assert_eq!(cfg.providers.len(), 1);
         assert!(matches!(
             cfg.providers.get("default"),
@@ -228,7 +246,7 @@ mod tests {
             ResolvedEmbedding::Cloud { query_prefix, .. } => {
                 assert_eq!(query_prefix.as_deref(), Some("Query: "));
             }
-            ResolvedEmbedding::Local { .. } => panic!("expected cloud embedding"),
+            ResolvedEmbedding::Local(_) => panic!("expected cloud embedding"),
         }
     }
 
@@ -247,7 +265,7 @@ mod tests {
                 assert_eq!(model, "text-embedding-3-small");
                 assert_eq!(dimensions, 1536);
             }
-            ResolvedEmbedding::Local { .. } => panic!("expected cloud embedding"),
+            ResolvedEmbedding::Local(_) => panic!("expected cloud embedding"),
         }
     }
 
@@ -282,15 +300,44 @@ mod tests {
     }
 
     #[test]
-    fn ai_provider_def_deserializes_tagged() {
-        let def: AiProviderDef =
-            serde_json::from_str(r#"{"kind":"local_gguf","model_path":"/tmp/m.gguf"}"#)
-                .expect("deserialize");
-        match def {
-            AiProviderDef::LocalGguf { model_path, .. } => {
-                assert_eq!(model_path, "/tmp/m.gguf");
+    fn local_task_resolves_from_local_models() {
+        let mut cfg = test_config();
+        cfg.local_models.insert(
+            "jina-v5-small".to_string(),
+            LocalModelDef {
+                url: "https://example.com/v5-small.gguf".to_string(),
+                quantization: "F16".to_string(),
+                ..LocalModelDef::default()
+            },
+        );
+        cfg.tasks.embedding = TaskRef {
+            provider: LOCAL_PROVIDER.to_string(),
+            model: Some("jina-v5-small".to_string()),
+            max_tokens: None,
+            dimensions: None,
+            query_prefix: None,
+        };
+        let embed = cfg.resolve_embedding().expect("resolve local embedding");
+        match embed {
+            ResolvedEmbedding::Local(local) => {
+                assert_eq!(local.name, "jina-v5-small");
+                assert_eq!(local.quantization, "F16");
+                assert_eq!(local.url, "https://example.com/v5-small.gguf");
             }
-            AiProviderDef::OpenaiCompatible { .. } => panic!("expected local_gguf"),
+            ResolvedEmbedding::Cloud { .. } => panic!("expected local embedding"),
+        }
+    }
+
+    #[test]
+    fn ai_provider_def_deserializes_tagged() {
+        let def: AiProviderDef = serde_json::from_str(
+            r#"{"kind":"openai_compatible","base_url":"https://api.example.com/v1","api_key":{"source":"env","env":"OPENAI_API_KEY","inline":""}}"#,
+        )
+        .expect("deserialize");
+        match def {
+            AiProviderDef::OpenaiCompatible { base_url, .. } => {
+                assert_eq!(base_url, "https://api.example.com/v1");
+            }
         }
     }
 }

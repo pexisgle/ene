@@ -4,40 +4,74 @@
   "user_name": "User",
   "$schema": "./schema/settings.schema.json",
   "ai": {
-    "providers": {
-      "openrouter": {
-        "kind": "openai_compatible",
-        "base_url": "https://openrouter.ai/api/v1",
-        "api_key": {
-          "source": "inline",
-          "env": "OPENAI_API_KEY",
-          "inline": ""
-        }
-      },
-      "local_embed": {
-        "kind": "local_gguf",
-        "model": "jina-embeddings-v5-text-small",
+    "local_models": {
+      "jina-v5-small": {
+        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf",
         "quantization": "F16",
-        "model_path": "",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      },
+      "gemma-4-e2b": {
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        "acceleration": "auto",
+        "gpu_layers": "auto",
+        "context_size": 2048
+      },
+      "gemma-4-e4b": {
+        "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf",
         "acceleration": "auto",
         "gpu_layers": "auto",
         "context_size": 2048
       }
     },
+    "providers": {
+      "openrouter": {
+        "api_key": {
+          "env": "OPENROUTER_API_KEY",
+          "inline": "",
+          "source": "env"
+        },
+        "base_url": "https://openrouter.ai/api/v1",
+        "kind": "openai_compatible"
+      }
+    },
     "tasks": {
       "chat": {
-        "provider": "openrouter",
+        "max_tokens": 8192,
         "model": "xiaomi/mimo-v2.5",
-        "max_tokens": 8192
-      },
-      "embedding": {
-        "provider": "local_embed"
+        "provider": "openrouter"
       },
       "classifier": {
-        "provider": "openrouter",
-        "model": "google/gemini-2.5-flash-lite"
+        "model": "google/gemini-2.5-flash-lite",
+        "provider": "openrouter"
       },
-      "proactive": null
+      "embedding": {
+        "model": "jina-v5-small",
+        "provider": "local"
+      },
+      "proactive": {
+        "model": "gemma-4-e4b",
+        "provider": "local"
+      }
+    }
+  },
+  "desktop": {
+    "graphics": {
+      "quality": "medium"
+    },
+    "language": "ja"
+  },
+  "mind": {
+    "emotion": {
+      "enabled": true,
+      "classifier_language": "ja"
+    },
+    "proactive": {
+      "enabled": true,
+      "interval_seconds": 60,
+      "min_idle_seconds": 120,
+      "cooldown_seconds": 300
     }
   },
   "store": {
@@ -46,35 +80,25 @@
   "tools": {
     "enabled": true,
     "list": {
-      "app": { "enable": true },
-      "browser": { "enable": true },
-      "fs": { "enable": true },
-      "utility": { "enable": true },
+      "app": {
+        "enable": true
+      },
+      "browser": {
+        "enable": true
+      },
+      "fs": {
+        "enable": true
+      },
+      "utility": {
+        "enable": true
+      },
       "web": {
-        "enable": true,
         "brave_api_key": "",
+        "enable": true,
         "exa_api_key": "",
         "tavily_api_key": ""
       }
     },
     "mcp_servers": []
-  },
-  "mind": {
-    "emotion": {
-      "enabled": true,
-      "classifier_language": "ja"
-    },
-    "proactive": {
-      "enabled": false,
-      "interval_seconds": 60,
-      "min_idle_seconds": 120,
-      "cooldown_seconds": 300
-    }
-  },
-  "desktop": {
-    "language": "ja",
-    "graphics": {
-      "quality": "medium"
-    }
   }
 }

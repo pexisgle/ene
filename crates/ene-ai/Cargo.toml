@@ -15,7 +15,7 @@ cuda = ["llama-cpp-2/cuda"]
 
 [dependencies]
 async-openai = { workspace = true, default-features = false }
-tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt"] }
+tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt", "fs"] }
 parking_lot = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
@@ -32,13 +32,11 @@ encoding_rs = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-openai = { workspace = true, default-features = false, features = ["rustls", "byot"] }
-reqwest = { workspace = true, features = ["rustls", "json"] }
-hf-hub = { workspace = true, features = ["rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls", "json", "stream"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 async-openai = { workspace = true, default-features = false, features = ["native-tls", "byot"] }
-reqwest = { workspace = true, features = ["native-tls", "json"] }
-hf-hub = { workspace = true }
+reqwest = { workspace = true, features = ["native-tls", "json", "stream"] }
 
 [lints]
 workspace = true

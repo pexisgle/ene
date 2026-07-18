@@ -1,30 +1,35 @@
 //! Local embedding example using ene-ai (llama-cpp-2).
 //!
-//! Demonstrates loading a GGUF-quantized model from disk and computing
-//! embeddings with cosine similarity comparison.
-//!
-//! Requires a GGUF model file in the `models/` directory (or HF cache).
+//! Set `ENE_EMBEDDING_MODEL_URL` to an HTTPS `.gguf` URL, or pass one as the first CLI arg.
 //!
 //! Requires a multi-thread tokio runtime (`block_in_place`).
 
-use ene_ai::EmbeddingProvider;
 use ene_ai::cosine_similarity;
-use ene_ai::{GgufEmbeddingProvider, resolve_gguf_path};
+use ene_ai::create_local_provider;
+use ene_ai::{ProactiveAcceleration, ResolvedLocalModel};
+
+const DEFAULT_URL: &str = "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let model_name = "jina-embeddings-v5-text-small";
-    let quantization = "F16";
-    let model_dir = std::path::PathBuf::from("./models");
+    let embedding_model_url = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("ENE_EMBEDDING_MODEL_URL").ok())
+        .unwrap_or_else(|| DEFAULT_URL.to_string());
 
-    let gguf_path = resolve_gguf_path(model_name, quantization, model_dir)?;
+    let local = ResolvedLocalModel {
+        name: "jina-v5-small".to_string(),
+        url: embedding_model_url,
+        model_path: String::new(),
+        quantization: "F16".to_string(),
+        acceleration: ProactiveAcceleration::Cpu,
+        gpu_layers: "auto".to_string(),
+        context_size: 2048,
+    };
 
-    println!("Loading model: {model_name}");
-    println!("GGUF path: {}", gguf_path.display());
-
-    let provider =
-        GgufEmbeddingProvider::load(model_name, gguf_path.to_str().unwrap_or(""), quantization)?;
-
+    ene_ai::ensure_gguf_available(&local).await?;
+    let provider = create_local_provider(&local)?;
+    println!("Loading model: {}", local.name);
     println!("Model dimensions: {}", provider.dimensions());
     println!("Model name: {}", provider.model_name());
 
@@ -32,9 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let text2 = "A feline rested on a rug.";
     let text3 = "The stock market crashed today.";
 
-    let emb1 = ene_ai::embed_query(&provider, text1).await?;
-    let emb2 = ene_ai::embed_query(&provider, text2).await?;
-    let emb3 = ene_ai::embed_query(&provider, text3).await?;
+    let emb1 = ene_ai::embed_query(provider.as_ref(), text1).await?;
+    let emb2 = ene_ai::embed_query(provider.as_ref(), text2).await?;
+    let emb3 = ene_ai::embed_query(provider.as_ref(), text3).await?;
 
     let similarity = cosine_similarity(&emb1, &emb2);
     let similarity_unrelated = cosine_similarity(&emb1, &emb3);

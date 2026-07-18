@@ -3,6 +3,7 @@
 use super::{LocalGgufLoadParams, LocalLlamaCppProvider};
 use crate::config::{AiConfig, AiProviderDef};
 use crate::error::LlmProviderError;
+use crate::gguf::ensure_gguf_available;
 use crate::message::{LlmMessage, LlmResponseChunk};
 use crate::openai::OpenAiProvider;
 use crate::resolve::ResolvedChat;
@@ -98,81 +99,74 @@ pub async fn build_proactive_llm_handles(
     let generation = config.resolve_proactive_generation()?;
     let generation_model = generation.model.clone();
 
-    let decision_provider = decision_provider_def(config)?;
-    match decision_provider {
-        AiProviderDef::LocalGguf {
-            model_path,
-            acceleration,
-            gpu_layers,
-            context_size,
-            ..
-        } if !model_path.trim().is_empty() => {
-            let params = LocalGgufLoadParams {
-                model_path: model_path.clone(),
-                acceleration: *acceleration,
-                gpu_layers: gpu_layers.clone(),
-                context_size: *context_size,
-                request_timeout_seconds: LOCAL_REQUEST_TIMEOUT_SECS,
-            };
-            match start_local(&params).await {
-                Ok(local) => {
-                    let arc = Arc::new(local);
-                    let decision: Arc<dyn LlmProvider> = arc.clone();
-                    Ok(ProactiveLlmHandles {
-                        decision,
-                        decision_kind: DecisionProviderKind::LlamaCpp,
-                        local: Some(arc),
-                        generation_model,
-                    })
-                }
-                Err(e) => {
-                    if let Ok(cloud) = build_cloud_decision_provider(config) {
-                        tracing::warn!(
-                            component = "LocalLlamaCpp",
-                            error = %e,
-                            "Local decision backend failed; falling back to cloud"
-                        );
-                        Ok(ProactiveLlmHandles {
-                            decision: cloud,
-                            decision_kind: DecisionProviderKind::Cloud,
-                            local: None,
-                            generation_model,
-                        })
-                    } else {
-                        tracing::warn!(
-                            component = "LocalLlamaCpp",
-                            error = %e,
-                            "Local decision backend failed; falling back to disabled"
-                        );
-                        Ok(ProactiveLlmHandles {
-                            decision: Arc::new(DisabledDecisionProvider),
-                            decision_kind: DecisionProviderKind::Disabled,
-                            local: None,
-                            generation_model,
-                        })
-                    }
-                }
-            }
-        }
-        _ => {
+    if let Some(proactive) = config.tasks.proactive.as_ref()
+        && AiConfig::is_local_provider(&proactive.provider)
+    {
+        let local = config.resolve_local_model_for_task(proactive)?;
+        let Ok(resolved_path) = ensure_gguf_available(&local).await else {
             let cloud = build_cloud_decision_provider(config)?;
-            Ok(ProactiveLlmHandles {
+            return Ok(ProactiveLlmHandles {
                 decision: cloud,
                 decision_kind: DecisionProviderKind::Cloud,
                 local: None,
                 generation_model,
-            })
+            });
+        };
+        let params = LocalGgufLoadParams {
+            model_path: resolved_path.to_string_lossy().into_owned(),
+            acceleration: local.acceleration,
+            gpu_layers: local.gpu_layers.clone(),
+            context_size: local.context_size,
+            request_timeout_seconds: LOCAL_REQUEST_TIMEOUT_SECS,
+        };
+        match start_local(&params).await {
+            Ok(local_provider) => {
+                let arc = Arc::new(local_provider);
+                let decision: Arc<dyn LlmProvider> = arc.clone();
+                Ok(ProactiveLlmHandles {
+                    decision,
+                    decision_kind: DecisionProviderKind::LlamaCpp,
+                    local: Some(arc),
+                    generation_model,
+                })
+            }
+            Err(e) => {
+                if let Ok(cloud) = build_cloud_decision_provider(config) {
+                    tracing::warn!(
+                        component = "LocalLlamaCpp",
+                        error = %e,
+                        "Local decision backend failed; falling back to cloud"
+                    );
+                    Ok(ProactiveLlmHandles {
+                        decision: cloud,
+                        decision_kind: DecisionProviderKind::Cloud,
+                        local: None,
+                        generation_model,
+                    })
+                } else {
+                    tracing::warn!(
+                        component = "LocalLlamaCpp",
+                        error = %e,
+                        "Local decision backend failed; falling back to disabled"
+                    );
+                    Ok(ProactiveLlmHandles {
+                        decision: Arc::new(DisabledDecisionProvider),
+                        decision_kind: DecisionProviderKind::Disabled,
+                        local: None,
+                        generation_model,
+                    })
+                }
+            }
         }
+    } else {
+        let cloud = build_cloud_decision_provider(config)?;
+        Ok(ProactiveLlmHandles {
+            decision: cloud,
+            decision_kind: DecisionProviderKind::Cloud,
+            local: None,
+            generation_model,
+        })
     }
-}
-
-fn decision_provider_def(config: &AiConfig) -> Result<&AiProviderDef, LlmProviderError> {
-    if let Some(proactive) = config.tasks.proactive.as_ref()
-        && let Ok(provider) = config.get_provider(&proactive.provider)
-    {
-        return Ok(provider);
-    }
-    config.get_provider(&config.tasks.chat.provider)
 }
 
 async fn start_local(
@@ -197,10 +191,11 @@ fn build_cloud_decision_provider(
 ) -> Result<Arc<dyn LlmProvider>, LlmProviderError> {
     let resolved = match config.tasks.proactive.as_ref() {
         Some(proactive)
-            if matches!(
-                config.get_provider(&proactive.provider).ok(),
-                Some(AiProviderDef::OpenaiCompatible { .. })
-            ) =>
+            if !AiConfig::is_local_provider(&proactive.provider)
+                && matches!(
+                    config.get_provider(&proactive.provider).ok(),
+                    Some(AiProviderDef::OpenaiCompatible { .. })
+                ) =>
         {
             config.resolve_chat_task(Some(proactive))?
         }
@@ -219,8 +214,7 @@ fn cloud_decision_from_resolved(chat: &ResolvedChat) -> OpenAiProvider {
 #[cfg(test)]
 mod smoke {
     use super::*;
-    use crate::config::{AiConfig, AiProviderDef, ProactiveAcceleration, TaskRef};
-    use crate::message::UserMessagePart;
+    use crate::config::{AiConfig, LocalModelDef, ProactiveAcceleration, TaskRef, LOCAL_PROVIDER};
 
     fn env_smoke_enabled() -> Option<(String, ProactiveAcceleration)> {
         let model = std::env::var("ENE_LOCAL_LLM_MODEL").ok()?;
@@ -245,24 +239,23 @@ mod smoke {
             return;
         };
         let mut cfg = AiConfig::default();
-        cfg.tasks.proactive = Some(TaskRef {
-            provider: "local".to_string(),
-            model: None,
-            max_tokens: None,
-            dimensions: None,
-            query_prefix: None,
-        });
-        cfg.providers.insert(
-            "local".to_string(),
-            AiProviderDef::LocalGguf {
-                model: String::new(),
-                quantization: "F16".to_string(),
+        cfg.local_models.insert(
+            "smoke".to_string(),
+            LocalModelDef {
                 model_path: model,
                 acceleration: accel,
                 gpu_layers: "auto".to_string(),
                 context_size: 1024,
+                ..LocalModelDef::default()
             },
         );
+        cfg.tasks.proactive = Some(TaskRef {
+            provider: LOCAL_PROVIDER.to_string(),
+            model: Some("smoke".to_string()),
+            max_tokens: None,
+            dimensions: None,
+            query_prefix: None,
+        });
         let handles = build_proactive_llm_handles(&cfg)
             .await
             .expect("local llama smoke start");
@@ -274,7 +267,7 @@ mod smoke {
                         .into(),
             },
             LlmMessage::User {
-                parts: vec![UserMessagePart::Text {
+                parts: vec![crate::message::UserMessagePart::Text {
                     text: "seconds_since_user_input: 400\nactivity: idle".into(),
                 }],
             },

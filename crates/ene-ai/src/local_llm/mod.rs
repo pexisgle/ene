@@ -117,7 +117,7 @@ impl LlmProvider for LocalLlamaCppProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AiConfig, AiProviderDef, ProactiveAcceleration, TaskRef};
+    use crate::config::{AiConfig, LocalModelDef, ProactiveAcceleration, TaskRef, LOCAL_PROVIDER};
     use crate::local_llm::routing::build_proactive_llm_handles;
 
     fn test_config() -> AiConfig {
@@ -158,24 +158,21 @@ mod tests {
     #[tokio::test]
     async fn local_missing_weights_fall_back_to_cloud() {
         let mut cfg = test_config();
+        cfg.local_models.insert(
+            "missing".to_string(),
+            LocalModelDef {
+                model_path: "/nonexistent/ene-missing-decision.gguf".to_string(),
+                acceleration: ProactiveAcceleration::Cpu,
+                ..LocalModelDef::default()
+            },
+        );
         cfg.tasks.proactive = Some(TaskRef {
-            provider: "local".to_string(),
-            model: None,
+            provider: LOCAL_PROVIDER.to_string(),
+            model: Some("missing".to_string()),
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
         });
-        cfg.providers.insert(
-            "local".to_string(),
-            AiProviderDef::LocalGguf {
-                model: String::new(),
-                quantization: "F16".to_string(),
-                model_path: "/nonexistent/ene-missing-decision.gguf".to_string(),
-                acceleration: ProactiveAcceleration::Cpu,
-                gpu_layers: "auto".to_string(),
-                context_size: 2048,
-            },
-        );
         let handles = build_proactive_llm_handles(&cfg)
             .await
             .expect("missing weights fall back to cloud");
@@ -186,24 +183,20 @@ mod tests {
     #[tokio::test]
     async fn missing_model_path_fails_closed_for_llama_cpp() {
         let mut cfg = test_config();
+        cfg.local_models.insert(
+            "empty".to_string(),
+            LocalModelDef {
+                acceleration: ProactiveAcceleration::Cpu,
+                ..LocalModelDef::default()
+            },
+        );
         cfg.tasks.proactive = Some(TaskRef {
-            provider: "local".to_string(),
-            model: None,
+            provider: LOCAL_PROVIDER.to_string(),
+            model: Some("empty".to_string()),
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
         });
-        cfg.providers.insert(
-            "local".to_string(),
-            AiProviderDef::LocalGguf {
-                model: String::new(),
-                quantization: "F16".to_string(),
-                model_path: String::new(),
-                acceleration: ProactiveAcceleration::Cpu,
-                gpu_layers: "auto".to_string(),
-                context_size: 2048,
-            },
-        );
         let handles = build_proactive_llm_handles(&cfg)
             .await
             .expect("empty model_path falls back to cloud");

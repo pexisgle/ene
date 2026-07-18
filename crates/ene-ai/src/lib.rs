@@ -40,16 +40,16 @@ pub mod openai;
 pub mod resolve;
 /// Provider traits and registry.
 pub mod traits;
+/// GGUF download and path resolution (#171).
+pub mod gguf;
 
 pub mod role;
 
 pub use config::{
-    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, ProactiveAcceleration, TaskRef,
+    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, LocalModelDef, ProactiveAcceleration,
+    TaskRef, LOCAL_PROVIDER,
 };
-pub use embedding::{
-    EneEmbeddingError, GgufEmbeddingProvider, create_local_provider, resolve_gguf_path,
-    resolve_gguf_paths,
-};
+pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
 pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
 pub use local_llm::{
@@ -61,7 +61,14 @@ pub use openai::{
     AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
     create_chat_provider_from_resolved, create_task_chat_provider,
 };
-pub use resolve::{ResolvedChat, ResolvedEmbedding, ResolvedTaskRef, resolve_base_url};
+pub use gguf::{
+    ensure_gguf_available, prefetch_configured_gguf, prefetch_decision_gguf,
+    prefetch_embedding_gguf, resolve_decision_gguf_path, resolve_embedding_gguf_path,
+    resolve_local_gguf_path,
+};
+pub use resolve::{
+    ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedTaskRef, resolve_base_url,
+};
 pub use role::Role;
 pub use traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
