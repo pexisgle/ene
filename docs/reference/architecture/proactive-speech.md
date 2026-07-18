@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-18
-- **Epic:** [#103](https://github.com/pexisgle/ene/issues/103) — Proactive companion speech
 
 ## Context & Problem
 
@@ -110,17 +109,7 @@ GGUF weights are **not** bundled with the app; paths are configured by the user.
 - User `run()` during decision → discard decision; prefer the user turn.
 - Shutdown cancels timer, in-flight decision, generation, and releases local llama.cpp handles.
 
-## Consequences
-
-- Default settings preserve existing chat behavior (proactive off).
-- Desktop must own OS-specific observation and pass a normalized `ProactiveObservation` into runtime.
-- CLI/desktop `EneEvent` consumers must handle `TurnStarted` and `TurnOrigin` without breaking existing match arms (additive fields / new variants handled carefully).
-- Desktop settings changes push `UpdateProactiveSettings` into the actor (no restart required).
-- Guide docs must document local model placement, Vulkan/RADV requirements, and privacy implications.
-
 ## Related
 
-- Epic [#103](https://github.com/pexisgle/ene/issues/103)
-- Sub-issues #162–#170
 - [Cognitive Runtime ADR](cognitive-runtime.md)
 - [API v1 ADR](api-v1.md)

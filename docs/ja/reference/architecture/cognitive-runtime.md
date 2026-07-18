@@ -2,19 +2,10 @@
 
 - **ステータス:** Accepted
 - **日付:** 2026-06-28
-- **Epic:** #63 — AI ランタイムを Ene Cognitive Runtime として再設計
 
-## 背景と課題
+## 背景
 
-現在の Ene の AI ランタイムは、会話履歴・長期記憶・感情・プロンプト構築が比較的単純なパイプラインにまとまっており、長時間稼働する AI Companion / AITuber 的な体験として以下の課題がある。
-
-1. **感情制御が LLM の `<|emo:name|>` トークンに強く依存している。** エンジン側に永続的な感情状態がなく、LLM がトークンを出力しないと表情が更新されない。
-2. **記憶が `conversation_summaries` / `conversation_keyfacts` に限定されている。** 記憶種別・信頼度・新しさ・感情的重要度・矛盾解決の概念がない。
-3. **セッション分割が記憶保存と会話継続感を分断する。** サマリーは分割境界でのみ作られ、分割のたびにセッションがリセットされ、継続的な関係性の感覚が失われる。
-4. **プロンプトの層構造が弱い。** 長文脈で Character Drift（キャラクター性の逸脱）が起きやすい。履歴が増えるほど中核的人格定義が埋もれる。
-5. **CCv3 の lorebook / semantic 設定が検索対象として十分活用されていない。** インラインテキストとして含まれるのみで、semantic retrieval されない。
-6. **忘却はレガシー keyfacts ではハードデリートである。** typed memory は faded / archived / superseded ライフサイクルに対応済み（#76）。レガシー `conversation_keyfacts` の移行は #98 で予定。
-7. **Codex 的な明示的状态管理（context packing / task ledger / tool result grounding）が companion 体験に統合されていない。**
+Ene の認知ランタイムは、LLM を明示的に管理された状態（アイデンティティカーネル、型付き記憶、感情、パフォーマンスキュー、コンテキスト予算、コミットメント台帳）の上で発話を生成するエンジンとして扱う。ターンパイプラインは `ene-mind`、ストリーミング統合は `ene-runtime`、永続化は `ene-store` が担う。
 
 ## 決定
 
@@ -190,11 +181,11 @@ hybrid search の後に決定論的 MMR 多様化 stage（`MemoryDiversifyPipeli
 - `source_quote` がターン内テキストに含まれる（tool result 由来の procedure 記憶で `source_quote` が空の場合は例外）
 - 削除候補には `deletion_target_key` が必須
 
-重複排除は正規化した完全一致を先に適用し、オプションの意味的マッチ（ベクトル検索結果）で近傍重複の統合や supersede/dispute を行う。MemoryWriter オーケストレーション（#100）が埋め込み検索を接続するまで、呼び出し側は `ArbiterContext::semantic_matches` を自前で設定する必要がある（例: `MemoryJournal` スコア付き検索から）。
+重複排除は正規化した完全一致を先に適用し、オプションの意味的マッチ（ベクトル検索結果）で近傍重複の統合や supersede/dispute を行う。
 
-### Tool Result Grounding（#92）
+### Tool Result Grounding
 
-Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続する:
+ツール呼び出し結果を安全に typed memory へ接続する:
 
 - `ene-runtime::streaming::perform_tool_executions` が各呼び出しごとに境界付き `ToolResultSummary` を生成する。
 - `ene-mind::memory_writer::tool_grounding` が生の出力を sanitize/truncate（`max_summary_chars`）し、スクリーンショット payload などの巨大データをそのまま保存しない。
@@ -216,38 +207,16 @@ Phase 8 では、ツール呼び出し結果を安全に typed memory へ接続�
 
 **ライフサイクル:** `active` → `done` | `cancelled` | `stale`。`due_at` が設定され期限切れの active 行は `mark_stale_commitments` で `stale` に遷移できる。
 
-**プロンプト注入:** active commitment は `list_active_commitments` / `CommitmentLedger::active_prompt_candidates` でベクトル類似度に関係なく取得され、常に `PromptPacket` の Active Commitments セクション候補になる（#87）。
+**プロンプト注入:** active commitment は `list_active_commitments` / `CommitmentLedger::active_prompt_candidates` でベクトル類似度に関係なく取得され、常に `PromptPacket` の Active Commitments セクション候補になる。
 
 ### Context Compression（文脈圧縮）
-古い会話ターンをコンパクトな記憶スパンに要約する rolling compression。セッション分割とは異なり、圧縮は継続性を保持する — セッション ID は変わらず、継続的な会話の感覚が維持される。
 
-## 結果と移行戦略
-
-### ポジティブな影響
-- **Character Drift の低減** — Identity Kernel が常に存在し、決して切り詰められない
-- **記憶の継続性** — セッション分割による分断がなく、圧縮が文脈を保持
-- **リッチな意味記憶** — CCv3 lorebook が検索可能な意味記憶インデックスに
-- **高度な想起** — 多要素スコアリング（vector + recency + salience + confidence + affect + commitments）
-- **永続的感情** — エンジン管理の感情状態、LLM トークン非依存
-- **ユーザー主体性** — 記憶の inspect / pin / archive / forget / dispute UX
-- **自然な忘却** — ハードデリートではなく faded / archived / superseded ライフサイクル
-
-### 移行パス
-- **Phase 0–10** は実装済み — `ene-mind` は `ene-runtime::streaming.rs` の唯一のストリーミング実装
-- **#98（移行方針）**:
-  - レガシー summary/keyfact テーブルは **read-only**（新規 summary/keyfact 書き込みなし）
-  - 未移行の summaries/keyfacts は通常の mind recall にマージせず、`/memory migrate legacy` を明示的に実行する
-  - 任意 one-shot CLI migration（トランザクション）で summaries → `Episodic`、keyfacts → `UserProfile`/`Preference`、logs → `memory_spans`
-  - migration 完了後は typed-only recall。レガシー行は reset まで監査用に残る
-  - affect **永続化**は毎ターン実行。affect **計算**は `EmotionEngine`（#86）、オプション LLM 分類器（#88）、`OutputArbiter` による表情解決（#89, #91）で実装済み
-- **#80** で自動セッション分割を rolling context compression トリガーに置き換え
+古い会話ターンをコンパクトな記憶スパンに要約する rolling compression。セッション ID は変わらず会話の継続性を保つ。
 
 ## 参照
 
-- Epic: #63 — AI ランタイムを Ene Cognitive Runtime として再設計
-- 全 Phase & 依存関係マップ: `#63` issue body
-- 現行アーキテクチャ: `docs/ja/reference/architecture/overview.md`
-- 記憶システム: `docs/ja/reference/memory/memory.md`
-- プロンプト構築: `docs/ja/reference/runtime/prompt.md`
-- セッション分割: `docs/ja/reference/runtime/session-split.md`
-- 感情処理: `docs/ja/reference/runtime/emotions.md`
+- [アーキテクチャ概要](overview.md)
+- [記憶システム](../memory/memory.md)
+- [プロンプト構築](../runtime/prompt.md)
+- [セッション分割](../runtime/session-split.md)
+- [感情処理](../runtime/emotions.md)

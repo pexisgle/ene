@@ -2,19 +2,10 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-28
-- **Epic:** #63 — Redesign AI runtime as Ene Cognitive Runtime
 
-## Context & Problem
+## Context
 
-The current Ene AI runtime bundles conversation history, long-term memory, emotions, and prompt construction into a relatively simple pipeline. This creates several issues for a long-running AI Companion / AITuber experience:
-
-1. **Emotion control depends heavily on LLM `<|emo:name|>` tokens.** There is no engine-side persistent emotional state; if the LLM omits the token, the expression does not update.
-2. **Memory is limited to `conversation_summaries` / `conversation_keyfacts`.** There is no support for memory kind, confidence, recency, emotional salience, or contradiction resolution.
-3. **Session splits fragment memory and conversation continuity.** Summaries are created at split boundaries, and each split resets the session, losing the sense of an ongoing relationship.
-4. **The prompt layer structure is weak.** Long contexts cause Character Drift — the LLM gradually forgets the character's core identity as the prompt fills with history.
-5. **CCv3 lorebook / semantic settings are underutilized.** They are only included as inline text, not indexed for semantic retrieval.
-6. **Forgetting is a hard delete for legacy keyfacts.** Typed memories support a faded / archived / superseded lifecycle (#76); legacy `conversation_keyfacts` migration is planned in #98.
-7. **Codex-style explicit state (context packing, task ledger, tool result grounding) is not integrated** into the companion experience.
+Ene's cognitive runtime treats the LLM as an utterance generator over explicitly managed state: identity kernel, typed memory, affect, performance cues, context budgeting, and commitment ledger. `ene-mind` owns the turn pipeline; `ene-runtime` integrates it into streaming and events; `ene-store` persists typed memory and the commitment ledger.
 
 ## Decision
 
@@ -190,11 +181,11 @@ Validation gates:
 - `source_quote` must appear in the turn text (procedure memories from tool results are exempt when `source_quote` is empty)
 - Deletion candidates require `deletion_target_key`
 
-Deduplication uses normalized exact match first; optional pre-computed semantic matches (vector search) can collapse near-duplicates or trigger supersede/dispute logic. Until MemoryWriter orchestration (#100) wires embedding search, callers must populate `ArbiterContext::semantic_matches` themselves (e.g. from `MemoryJournal` scored search).
+Deduplication uses normalized exact match first; optional pre-computed semantic matches (vector search) can collapse near-duplicates or trigger supersede/dispute logic.
 
-### Tool Result Grounding (#92)
+### Tool Result Grounding
 
-Phase 8 grounds tool-call outcomes into typed memory with explicit safety constraints:
+Tool-call outcomes are grounded into typed memory with explicit safety constraints:
 
 - `ene-runtime::streaming::perform_tool_executions` emits bounded `ToolResultSummary` entries for each call.
 - `ene-mind::memory_writer::tool_grounding` sanitizes/truncates raw outputs (`max_summary_chars`) and masks screenshot payloads so large blobs are not persisted verbatim.
@@ -216,38 +207,16 @@ Promises, tasks, and follow-ups (e.g. “let’s discuss this next time”) are 
 
 **Lifecycle:** `active` → `done` | `cancelled` | `stale`. Overdue rows with a parsed `due_at` can be transitioned to `stale` via `mark_stale_commitments`.
 
-**Prompt injection:** Active commitments are returned by `list_active_commitments` / `CommitmentLedger::active_prompt_candidates` **without** vector similarity — they are always candidates for the Active Commitments section of `PromptPacket` (#87).
+**Prompt injection:** Active commitments are returned by `list_active_commitments` / `CommitmentLedger::active_prompt_candidates` **without** vector similarity — they are always candidates for the Active Commitments section of `PromptPacket`.
 
 ### Context Compression
-Rolling compression that summarizes old conversation turns into compact memory spans. Unlike session splits, compression preserves continuity — the session ID remains the same, and the sense of an ongoing conversation is maintained.
 
-## Consequences & Migration Strategy
-
-### Positive
-- **Character Drift reduction** — Identity Kernel is always present, never truncated
-- **Memory continuity** — No session split breaking; compression preserves context
-- **Rich semantic memory** — CCv3 lorebook becomes a searchable memory index
-- **Sophisticated recall** — Multi-factor scoring (vector + recency + salience + confidence + affect + commitments)
-- **Persistent emotion** — Engine-managed affect state, not dependent on LLM tokens
-- **User agency** — Memory inspect / pin / archive / forget / dispute UX
-- **Natural forgetting** — Faded / archived / superseded lifecycle instead of hard delete
-
-### Migration Path
-- **Phase 0–10** are implemented — `ene-mind` is the sole streaming implementation in `ene-runtime::streaming.rs`
-- **#98 (migration policy)**:
-  - Legacy summary/keyfact tables are **read-only** (no new summaries/keyfacts)
-  - Unmigrated legacy summaries/keyfacts are not merged into normal mind recall; use `/memory migrate legacy` explicitly
-  - Optional one-shot CLI migration maps summaries → `Episodic`, keyfacts → `UserProfile`/`Preference`, logs → `memory_spans` (transactional)
-  - After migration, recall uses typed memory only; legacy rows remain for audit unless reset
-  - Affect **persistence** runs each turn; affect **computation** is implemented by `EmotionEngine` (#86) with optional LLM classifier (#88) and `OutputArbiter` expression resolution (#89, #91)
-- **#80** replaces automatic session splits with rolling context compression triggers
+Rolling compression summarizes old conversation turns into compact memory spans. The session ID stays the same so conversation continuity is preserved.
 
 ## References
 
-- Epic: #63 — Redesign AI runtime as Ene Cognitive Runtime
-- Full Phase & Dependency Map: `#63` issue body
-- Current architecture: `docs/reference/architecture/overview.md`
-- Memory system: `docs/reference/memory/memory.md`
-- Prompt construction: `docs/reference/runtime/prompt.md`
-- Session splitting: `docs/reference/runtime/session-split.md`
-- Emotion handling: `docs/reference/runtime/emotions.md`
+- [Architecture overview](overview.md)
+- [Memory system](../memory/memory.md)
+- [Prompt construction](../runtime/prompt.md)
+- [Session split](../runtime/session-split.md)
+- [Emotion handling](../runtime/emotions.md)

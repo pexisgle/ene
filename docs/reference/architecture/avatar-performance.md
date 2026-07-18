@@ -2,8 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-14
-- **Epic:** [#126](https://github.com/pexisgle/ene/issues/126)
-- **Sub-issues:** [#128](https://github.com/pexisgle/ene/issues/128) (marker grammar), [#129](https://github.com/pexisgle/ene/issues/129) (arbiter), [#130](https://github.com/pexisgle/ene/issues/130) (motion catalog), [#131](https://github.com/pexisgle/ene/issues/131) (LayerComposer), [#132](https://github.com/pexisgle/ene/issues/132) (expression compositor), [#133](https://github.com/pexisgle/ene/issues/133) (desktop wiring), [#134](https://github.com/pexisgle/ene/issues/134) (prompt contract)
 
 ## Overview
 
@@ -30,7 +28,7 @@ Character config ────┼────────────────
 
 ## Data Flow
 
-### 1. Stream Marker Parsing (`#128`)
+### 1. Stream Marker Parsing
 
 The LLM may emit `<|perf:…|>` tokens inline in streaming text. `<|emo:NAME|>` is the shorthand expression form of `<|perf:expr=NAME|>`.
 
@@ -45,7 +43,7 @@ The LLM may emit `<|perf:…|>` tokens inline in streaming text. `<|emo:NAME|>` 
 
 See `ene_mind::session::special_token::parse_performance_marker()` and `extract_emotion_from_token()`.
 
-### 2. Performance Arbiter (`#129`)
+### 2. Performance Arbiter
 
 `PerformanceArbiter` collects cues during a turn and resolves the final set at turn-end.
 
@@ -64,7 +62,7 @@ See `ene_mind::session::special_token::parse_performance_marker()` and `extract_
 
 See `ene_mind::output::performance_arbiter::PerformanceArbiter`.
 
-### 3. Motion Catalog (`#130`)
+### 3. Motion Catalog
 
 Character cards declare available motions under `extensions.ene`:
 
@@ -89,7 +87,7 @@ Character cards declare available motions under `extensions.ene`:
 - `MotionLayer::Full` — full-body override, preempts upper and lower
 - `idle_lower` — default idle loop name for desktop rendering
 
-### 4. Layer Composer (`#131`)
+### 4. Layer Composer
 
 `LayerComposer` manages three motion layers:
 
@@ -101,7 +99,7 @@ Lower ──▶ coexists with Upper (idle loop)
 
 See `ene_vrm::layer_composer::LayerComposer`.
 
-### 5. Expression Compositor (`#132`)
+### 5. Expression Compositor
 
 `ExpressionCompositor` merges card-defined expression weights with runtime overrides:
 
@@ -111,14 +109,14 @@ See `ene_vrm::layer_composer::LayerComposer`.
 
 See `ene_vrm::expression_compositor::ExpressionCompositor`.
 
-### 6. Desktop Wiring (`#133`)
+### 6. Desktop Wiring
 
 - `EneEvent::Performance` → `ai_bridge.rs` routes to `AppEvent::PerformanceCue` (expressions) or `AppEvent::MotionCue` (motions)
 - Expression path: `EmotionPipelineState` (hold/fade) → VRM `ExpressionsLayer`
 - Motion path: `MotionLayerState` (wraps `LayerComposer`) → VRM `VrmaPlayer`
 - `cue_source_to_u8()` maps `CueSource` to integer priority
 
-## Prompt Contract (`#134`)
+## Prompt Contract
 
 When the emotion engine is **disabled**, the LLM receives performance grammar instructions in the post-history PHI block (replacing the old `<|emo:NAME|>` contract):
 

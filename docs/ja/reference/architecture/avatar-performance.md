@@ -2,8 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-14
-- **Epic:** [#126](https://github.com/pexisgle/ene/issues/126)
-- **サブ課題:** [#128](https://github.com/pexisgle/ene/issues/128)（マーカー文法）, [#129](https://github.com/pexisgle/ene/issues/129)（Arbiter）, [#130](https://github.com/pexisgle/ene/issues/130)（モーションカタログ）, [#131](https://github.com/pexisgle/ene/issues/131)（LayerComposer）, [#132](https://github.com/pexisgle/ene/issues/132)（表情コンポジター）, [#133](https://github.com/pexisgle/ene/issues/133)（デスクトップ結線）, [#134](https://github.com/pexisgle/ene/issues/134)（プロンプト契約）
 
 ## 概要
 
@@ -30,7 +28,7 @@ Performance システムは、表情、モーション、視線制御を単一�
 
 ## データフロー
 
-### 1. ストリームマーカー解析（`#128`）
+### 1. ストリームマーカー解析
 
 LLM はストリーミングテキスト中に `<|perf:…|>` トークンをインラインで出力できます。`<|emo:NAME|>` は `<|perf:expr=NAME|>` の表情省略形です。
 
@@ -45,7 +43,7 @@ LLM はストリーミングテキスト中に `<|perf:…|>` トークンをイ
 
 `ene_mind::session::special_token::parse_performance_marker()` と `extract_emotion_from_token()` を参照。
 
-### 2. Performance Arbiter（`#129`）
+### 2. Performance Arbiter
 
 `PerformanceArbiter` はターン中に Cue を収集し、ターン終了時に最終セットを解決します。
 
@@ -64,7 +62,7 @@ LLM はストリーミングテキスト中に `<|perf:…|>` トークンをイ
 
 `ene_mind::output::performance_arbiter::PerformanceArbiter` を参照。
 
-### 3. モーションカタログ（`#130`）
+### 3. モーションカタログ
 
 キャラクターカードは `extensions.ene` で利用可能なモーションを宣言します:
 
@@ -89,7 +87,7 @@ LLM はストリーミングテキスト中に `<|perf:…|>` トークンをイ
 - `MotionLayer::Full` — 全身オーバーライド。Upper と Lower をプリエンプト
 - `idle_lower` — デスクトップレンダリング用のデフォルトアイドルループ名
 
-### 4. Layer Composer（`#131`）
+### 4. Layer Composer
 
 `LayerComposer` は3つのモーションレイヤーを管理します:
 
@@ -101,7 +99,7 @@ Lower ──▶ Upper と共存（アイドルループ）
 
 `ene_vrm::layer_composer::LayerComposer` を参照。
 
-### 5. Expression Compositor（`#132`）
+### 5. Expression Compositor
 
 `ExpressionCompositor` はカード定義の表情ウェイトとランタイムオーバーライドをマージします:
 
@@ -111,14 +109,14 @@ Lower ──▶ Upper と共存（アイドルループ）
 
 `ene_vrm::expression_compositor::ExpressionCompositor` を参照。
 
-### 6. デスクトップ結線（`#133`）
+### 6. デスクトップ結線
 
 - `EneEvent::Performance` → `ai_bridge.rs` が `AppEvent::PerformanceCue`（表情）または `AppEvent::MotionCue`（モーション）にルーティング
 - Expression パス: `EmotionPipelineState`（保持/フェード） → VRM `ExpressionsLayer`
 - Motion パス: `MotionLayerState`（`LayerComposer` をラップ） → VRM `VrmaPlayer`
 - `cue_source_to_u8()` が `CueSource` を整数優先度にマッピング
 
-## Prompt 契約（`#134`）
+## Prompt 契約
 
 感情エンジンが**無効**の場合、LLM は post-history PHI ブロックで Performance 文法指示を受け取ります（旧来の `<|emo:NAME|>` 契約を置換）:
 

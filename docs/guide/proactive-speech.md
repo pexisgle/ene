@@ -18,7 +18,7 @@ Proactive speech (#103) uses a **lightweight decision model** and the normal cha
 
 Desktop settings apply to the running actor immediately (no restart). The desktop observer and runtime scheduler both receive updates via `UpdateProactiveSettings`.
 
-Weights are **not** bundled. Local inference is **in-process llama-cpp-2** (no `llama-server` subprocess). See [spike notes](../reference/architecture/proactive-local-llm-spike.md) and the [ADR](../reference/architecture/proactive-speech.md).
+Weights are **not** bundled. Local inference is **in-process llama-cpp-2** (no `llama-server` subprocess). See the [ADR](../reference/architecture/proactive-speech.md).
 
 ## Smoke test (optional)
 

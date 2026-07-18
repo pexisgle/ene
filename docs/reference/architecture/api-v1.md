@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-13
-- **Epic:** [#111](https://github.com/pexisgle/ene/issues/111)
 
 ## Context
 
@@ -54,13 +53,12 @@ ene exposes a minimal host contract with clear crate ownership: a ready `EneHand
 - All recall / write / decay / MMR / emotion / performance knobs under `mind.*`
 - Corrupt JSON: CLI fail-hard (`ConfigStore::try_load`); desktop may soft-fallback via `ConfigStore::load` only
 
-### Related epics
+### Related contracts
 
 - [#119](https://github.com/pexisgle/ene/issues/119) Memory — ledger sole SoT; store has no embedder
 - [#126](https://github.com/pexisgle/ene/issues/126) Performance — `PerformanceCue` in mind; no `CueSource::Host` without explicit `perform`
 - [#135](https://github.com/pexisgle/ene/issues/135) Tools — name collision = hard error at every registry layer; wire vs host traits; `ToolSpec` LLM-facing only (`name`, `description`, `parameters`), internal RAG fields `#[doc(hidden)]` + `#[serde(skip)]`
 - [#138](https://github.com/pexisgle/ene/issues/138) IPC — 9 request / 7 response variants; `UserInput` surfaced through `ToolError`
-- [#158](https://github.com/pexisgle/ene/issues/158) ABI reconciliation — #135 contracts aligned with implementation: `CompositeToolRegistry` hard error, `SingleActionProvider` added
 
 ## Target Dependency Graph
 
@@ -125,16 +123,8 @@ Diagnostics-only (not on the chat bus): `PipelinePhase`, `PipelineMetrics`, and 
 - One public `thiserror` enum per crate; no `anyhow` / bare `String` / `Box<dyn Error>` at library boundaries
 - No `unwrap` / `expect` outside tests
 
-## Acceptance
-
-- [ ] Sub-issues #112–#118 closed or explicitly deferred
-- [ ] Locked decisions reflected in EN+JA docs
-- [ ] Docs EN+JA match target contracts
-- [ ] Workspace clippy/tests green under `direnv exec .`
-
 ## References
 
-- Epic #111 and sub-issues #112–#118
 - [Cognitive Runtime ADR](cognitive-runtime.md)
 - [API Index](../api/index.md)
 - [Streaming Events](../runtime/streaming-events.md)

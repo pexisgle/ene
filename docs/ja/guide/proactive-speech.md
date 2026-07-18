@@ -18,7 +18,7 @@
 
 デスクトップの設定は再起動なしで実行中の actor に即時反映されます（`UpdateProactiveSettings`）。
 
-重みは **同梱しない**。ローカル推論は **プロセス内 llama-cpp-2**（`llama-server` 子プロセスなし）。[スパイク](../reference/architecture/proactive-local-llm-spike.md) と [ADR](../reference/architecture/proactive-speech.md) を参照。
+重みは **同梱しない**。ローカル推論は **プロセス内 llama-cpp-2**（`llama-server` 子プロセスなし）。[ADR](../reference/architecture/proactive-speech.md) を参照。
 
 ## スモーク（任意）
 

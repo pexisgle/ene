@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-13
-- **Epic:** [#111](https://github.com/pexisgle/ene/issues/111)
 
 ## 背景
 
@@ -54,13 +53,12 @@ ene は最小ホスト契約と明確なクレート所有を公開する: 準�
 - recall / write / decay / MMR / emotion / performance はすべて `mind.*`
 - JSON 破損: CLI は fail-hard（`ConfigStore::try_load`）；desktop のみ必要なら `ConfigStore::load` の soft-fallback
 
-### 関連 epic
+### 関連契約
 
 - [#119](https://github.com/pexisgle/ene/issues/119) Memory — ledger が唯一の SoT；store に embedder なし
 - [#126](https://github.com/pexisgle/ene/issues/126) Performance — `PerformanceCue` は mind；明示 `perform` なしに `CueSource::Host` は置かない
 - [#135](https://github.com/pexisgle/ene/issues/135) Tools — name 衝突は全レジストリ層で hard error；wire / host トレイト分離；`ToolSpec` は LLM 向けのみ（`name`, `description`, `parameters`）、内部 RAG フィールドは `#[doc(hidden)]` + `#[serde(skip)]`
 - [#138](https://github.com/pexisgle/ene/issues/138) IPC — 9 request / 7 response バリアント；`UserInput` は `ToolError` 経由で送出
-- [#158](https://github.com/pexisgle/ene/issues/158) ABI 整合 — #135 契約を実装に一致：`CompositeToolRegistry` を hard error 化、`SingleActionProvider` を追加
 
 ## 目標依存グラフ
 
@@ -123,16 +121,8 @@ handle.diagnostics() -> &EneDiagnostics;
 - クレートごとに公開 `thiserror` 列挙を一つ；ライブラリ境界に `anyhow` / 生 `String` / `Box<dyn Error>` なし
 - テスト以外で `unwrap` / `expect` なし
 
-## 受入
-
-- [ ] サブ issue #112–#118 がクローズまたは明示延期
-- [ ] ロック事項が EN+JA docs に反映
-- [ ] docs EN+JA が目標契約と一致
-- [ ] `direnv exec .` 下で workspace clippy/tests が緑
-
 ## 参照
 
-- Epic #111 とサブ issue #112–#118
 - [認知ランタイム ADR](cognitive-runtime.md)
 - [API Index](../api/index.md)
 - [ストリーミングイベント](../runtime/streaming-events.md)

@@ -38,7 +38,7 @@ See [API v1](api-v1.md) for locked decisions and the dependency graph.
 
 ## Memory Model
 
-Typed memory (`episodic`, `semantic`, `preference`, `commitment`, …) with lifecycle statuses. The commitment ledger is the sole source of truth for commitments. Hybrid recall (vector + lexical + recency + salience) is planned and executed by **mind**; **store** accepts text / optional precomputed vectors / filters only.
+Typed memory (`episodic`, `semantic`, `preference`, `commitment`, …) with lifecycle statuses. The commitment ledger is the sole source of truth for commitments. Hybrid recall (vector + lexical + recency + salience) is executed by **mind**; **store** accepts text / optional precomputed vectors / filters only.
 
 ## Prompt Model
 

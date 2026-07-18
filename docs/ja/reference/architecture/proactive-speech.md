@@ -2,7 +2,6 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-18
-- **Epic:** [#103](https://github.com/pexisgle/ene/issues/103) — 能動発話
 
 ## 背景と課題
 
@@ -110,17 +109,7 @@ GGUF 重みはアプリに同梱しない。外部 `llama-server` も不要。�
 - 判定中のユーザー `run()` → decision を破棄し、ユーザーターンを優先。
 - shutdown で timer・判定・生成を止め、ローカル llama.cpp handle を解放。
 
-## 影響
-
-- デフォルト設定では既存の通常会話挙動が変わらない（能動発話オフ）。
-- Desktop が OS 固有の観測を正規化した `ProactiveObservation` として runtime へ渡す。
-- CLI / desktop の `EneEvent` 消費者は `TurnStarted` と `TurnOrigin` を壊さずに扱える必要がある（加算的な拡張）。
-- デスクトップの設定変更は `UpdateProactiveSettings` で actor に即時反映される（再起動不要）。
-- Guide にローカルモデル配置、Vulkan/RADV 要件、プライバシー注意を記載する。
-
 ## 関連
 
-- Epic [#103](https://github.com/pexisgle/ene/issues/103)
-- Sub-issues #162–#170
 - [認知 Runtime ADR](cognitive-runtime.md)
 - [API v1 ADR](api-v1.md)

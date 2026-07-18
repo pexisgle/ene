@@ -38,7 +38,7 @@ User input
 
 ## メモリモデル
 
-型付きメモリ（`episodic`、`semantic`、`preference`、`commitment` など）とライフサイクル状態。コミットメントは ledger が唯一の SoT。ハイブリッド recall は **mind** が計画・実行し、**store** はテキスト / 任意の事前計算ベクトル / フィルタのみを受け取る。
+型付きメモリ（`episodic`、`semantic`、`preference`、`commitment` など）とライフサイクル状態。コミットメントは ledger が唯一の SoT。ハイブリッド recall は **mind** が実行し、**store** はテキスト / 任意の事前計算ベクトル / フィルタのみを受け取る。
 
 ## プロンプトモデル
 
