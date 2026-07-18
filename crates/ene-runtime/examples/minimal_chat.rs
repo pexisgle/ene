@@ -57,7 +57,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         match rx.recv().await? {
-            EneEvent::TextDelta { delta, turn: t } => {
+            EneEvent::TextDelta {
+                delta,
+                turn: t,
+                origin: _,
+            } => {
                 if t != turn {
                     return Err(format!("unexpected turn id: {t:?}").into());
                 }
@@ -110,7 +114,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("\n[Status: Error]");
                 }
             }
-            EneEvent::Terminal { turn: t, reason } => {
+            EneEvent::Terminal {
+                turn: t,
+                origin: _,
+                reason,
+            } => {
                 if t != turn {
                     return Err(format!("unexpected turn id: {t:?}").into());
                 }

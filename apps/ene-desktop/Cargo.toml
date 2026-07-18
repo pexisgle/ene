@@ -17,6 +17,7 @@ egui-wgpu = "0.35"
 egui-winit = "0.35"
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
+ene-ai = { workspace = true }
 ene-store = { workspace = true }
 ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }
@@ -36,6 +37,7 @@ device_query = "4"
 rust-embed = "8.11"
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
+active-win-pos-rs = "0.11.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"

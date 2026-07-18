@@ -44,6 +44,7 @@ pub mod handle;
 /// module-scoped prompt builders (`build_system_prompt`,
 /// `build_expression_phi`) directly for its `/prompt` debug command.
 pub mod message_builder;
+mod proactive;
 /// Permission types and streaming engine internals.
 ///
 /// Kept `pub` for contributor/integration-test use. Application code should
@@ -104,6 +105,9 @@ pub use ene_mind::CardName;
 /// Unified history entry (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::HistoryEntry;
+/// Host observation DTO for proactive speech (#103).
+#[doc(no_inline)]
+pub use ene_mind::ProactiveObservation;
 /// Unique session identifier (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::SessionId;
@@ -112,8 +116,8 @@ pub use ene_mind::SessionId;
 pub use ene_mind::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 /// Unique permission request identifier.
 pub use types::RequestId;
-/// Turn identity and run/cancel errors.
-pub use types::{CancelError, RunError, TurnId};
+/// Turn identity, origin, and run/cancel errors.
+pub use types::{CancelError, RunError, TurnId, TurnOrigin};
 
 // ── Tool types ──
 /// `ToolSpec` type (re-exported from `ene-tool-proto`).

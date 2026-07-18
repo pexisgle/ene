@@ -14,7 +14,7 @@ pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     _animation: &mut AnimationControl,
-    _ai: &Arc<AiBridge>,
+    ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     _world: &mut World,
     _ui_entity: Entity,
@@ -257,6 +257,182 @@ pub fn render(
                 input.ai_memory_enabled = checked;
                 memory.enabled = checked;
                 let _ = settings.ai.ai.set_section(&memory);
+                settings.mark_dirty();
+            }
+        });
+
+        ui.separator();
+        ui.label(crate::i18n::proactive_speech());
+
+        let mut mind = settings
+            .ai
+            .ai
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        let mut provider_for_proactive = settings
+            .ai
+            .ai
+            .get_section::<ene_runtime::ProviderConfig>()
+            .unwrap_or_default();
+
+        ui.horizontal(|ui| {
+            let mut enabled = mind.proactive.enabled;
+            ui.checkbox(&mut enabled, crate::i18n::proactive_enabled());
+            if enabled != mind.proactive.enabled {
+                mind.proactive.enabled = enabled;
+                let _ = settings.ai.ai.set_section(&mind);
+                settings.mark_dirty();
+                ai.sync_proactive_observe(&mind);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::proactive_interval());
+            let mut value = mind.proactive.interval_seconds as i32;
+            if ui
+                .add(egui::DragValue::new(&mut value).range(1..=3600))
+                .changed()
+            {
+                mind.proactive.interval_seconds = value.max(1) as u64;
+                let _ = settings.ai.ai.set_section(&mind);
+                settings.mark_dirty();
+                ai.sync_proactive_observe(&mind);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::proactive_cooldown());
+            let mut value = mind.proactive.cooldown_seconds as i32;
+            if ui
+                .add(egui::DragValue::new(&mut value).range(0..=86_400))
+                .changed()
+            {
+                mind.proactive.cooldown_seconds = value.max(0) as u64;
+                let _ = settings.ai.ai.set_section(&mind);
+                settings.mark_dirty();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::proactive_min_idle());
+            let mut value = mind.proactive.min_idle_seconds as i32;
+            if ui
+                .add(egui::DragValue::new(&mut value).range(0..=86_400))
+                .changed()
+            {
+                mind.proactive.min_idle_seconds = value.max(0) as u64;
+                let _ = settings.ai.ai.set_section(&mind);
+                settings.mark_dirty();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            let mut conversation = mind.proactive.sources.conversation;
+            ui.checkbox(
+                &mut conversation,
+                crate::i18n::proactive_source_conversation(),
+            );
+            if conversation != mind.proactive.sources.conversation {
+                mind.proactive.sources.conversation = conversation;
+                let _ = settings.ai.ai.set_section(&mind);
+                settings.mark_dirty();
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut activity = mind.proactive.sources.activity;
+            ui.checkbox(&mut activity, crate::i18n::proactive_source_activity());
+            if activity != mind.proactive.sources.activity {
+                mind.proactive.sources.activity = activity;
+                let _ = settings.ai.ai.set_section(&mind);
+                settings.mark_dirty();
+                ai.sync_proactive_observe(&mind);
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut screen = mind.proactive.sources.screen_summary;
+            ui.checkbox(&mut screen, crate::i18n::proactive_source_screen());
+            if screen != mind.proactive.sources.screen_summary {
+                mind.proactive.sources.screen_summary = screen;
+                let _ = settings.ai.ai.set_section(&mind);
+                settings.mark_dirty();
+                ai.sync_proactive_observe(&mind);
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::proactive_decision_backend());
+            let mut backend = match provider_for_proactive.proactive.decision.backend {
+                ene_ai::ProactiveDecisionBackend::Disabled => "disabled",
+                ene_ai::ProactiveDecisionBackend::LlamaCpp => "llama_cpp",
+                ene_ai::ProactiveDecisionBackend::Cloud => "cloud",
+            }
+            .to_string();
+            let before = backend.clone();
+            egui::ComboBox::from_id_salt("proactive_decision_backend")
+                .selected_text(backend.as_str())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut backend, "disabled".into(), "disabled");
+                    ui.selectable_value(&mut backend, "llama_cpp".into(), "llama_cpp");
+                    ui.selectable_value(&mut backend, "cloud".into(), "cloud");
+                });
+            if backend != before {
+                provider_for_proactive.proactive.decision.backend = match backend.as_str() {
+                    "llama_cpp" => ene_ai::ProactiveDecisionBackend::LlamaCpp,
+                    "cloud" => ene_ai::ProactiveDecisionBackend::Cloud,
+                    _ => ene_ai::ProactiveDecisionBackend::Disabled,
+                };
+                let _ = settings.ai.ai.set_section(&provider_for_proactive);
+                settings.mark_dirty();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::proactive_fallback());
+            let mut fallback = match provider_for_proactive.proactive.decision.fallback {
+                ene_ai::ProactiveDecisionFallback::Disabled => "disabled",
+                ene_ai::ProactiveDecisionFallback::Cloud => "cloud",
+            }
+            .to_string();
+            let before = fallback.clone();
+            egui::ComboBox::from_id_salt("proactive_fallback")
+                .selected_text(fallback.as_str())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut fallback, "disabled".into(), "disabled");
+                    ui.selectable_value(&mut fallback, "cloud".into(), "cloud");
+                });
+            if fallback != before {
+                provider_for_proactive.proactive.decision.fallback = match fallback.as_str() {
+                    "cloud" => ene_ai::ProactiveDecisionFallback::Cloud,
+                    _ => ene_ai::ProactiveDecisionFallback::Disabled,
+                };
+                let _ = settings.ai.ai.set_section(&provider_for_proactive);
+                settings.mark_dirty();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::proactive_model_path());
+            let mut path = provider_for_proactive.proactive.decision.model_path.clone();
+            if ui
+                .add(egui::TextEdit::singleline(&mut path).desired_width(f32::INFINITY))
+                .changed()
+            {
+                provider_for_proactive.proactive.decision.model_path = path.trim().to_string();
+                let _ = settings.ai.ai.set_section(&provider_for_proactive);
+                settings.mark_dirty();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            ui.label(crate::i18n::proactive_generation_model());
+            let mut generation_model = provider_for_proactive.proactive.generation_model.clone();
+            if ui
+                .add(egui::TextEdit::singleline(&mut generation_model).desired_width(f32::INFINITY))
+                .changed()
+            {
+                provider_for_proactive.proactive.generation_model =
+                    generation_model.trim().to_string();
+                let _ = settings.ai.ai.set_section(&provider_for_proactive);
                 settings.mark_dirty();
             }
         });

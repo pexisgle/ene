@@ -2,6 +2,8 @@ const fn default_string() -> String {
     String::new()
 }
 
+use ene_config::schemars;
+
 ene_config::define_config!(
     ProviderConfig,
     "api_key",
@@ -57,6 +59,102 @@ ene_config::define_config!(
     }
 );
 
+ene_config::define_label_enum!(
+    /// Backend used for proactive speech decisions (#103 / #165).
+    pub enum ProactiveDecisionBackend {
+        /// Local `llama-server` subprocess (OpenAI-compatible on loopback).
+        LlamaCpp => "llama_cpp",
+        /// Existing cloud OpenAI-compatible provider with an optional model override.
+        Cloud => "cloud",
+        /// Decision path disabled (no proactive speech).
+        #[default]
+        Disabled => "disabled",
+    }
+);
+
+ene_config::define_label_enum!(
+    /// GPU / CPU acceleration preference for local llama.cpp (#165).
+    pub enum ProactiveAcceleration {
+        /// Pick from OS / available backends / startup result.
+        #[default]
+        Auto => "auto",
+        /// Force Vulkan (AMD RADV / cross-vendor Vulkan).
+        Vulkan => "vulkan",
+        /// Force CUDA.
+        Cuda => "cuda",
+        /// CPU only.
+        Cpu => "cpu",
+    }
+);
+
+ene_config::define_label_enum!(
+    /// Fallback when the local decision backend fails (#165).
+    pub enum ProactiveDecisionFallback {
+        /// Do not speak; never silently upload to cloud.
+        #[default]
+        Disabled => "disabled",
+        /// Retry decision via the cloud OpenAI-compatible provider.
+        Cloud => "cloud",
+    }
+);
+
+/// Local / cloud decision model settings for proactive speech (#103 / #165).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ProactiveDecisionProviderConfig {
+    /// Decision backend: `llama_cpp`, `cloud`, or `disabled`.
+    pub backend: ProactiveDecisionBackend,
+    /// Absolute or relative path to the decision GGUF weights.
+    pub model_path: String,
+    /// Path to `llama-server` (empty = resolve from `PATH`).
+    pub executable: String,
+    /// Preferred acceleration backend.
+    pub acceleration: ProactiveAcceleration,
+    /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
+    pub gpu_layers: String,
+    /// Context size for the decision server (small is preferred).
+    pub context_size: u32,
+    /// Bounded wait for `llama-server` health ready.
+    pub startup_timeout_seconds: u64,
+    /// Per-request timeout for decision completion.
+    pub request_timeout_seconds: u64,
+    /// What to do when the local backend fails.
+    pub fallback: ProactiveDecisionFallback,
+    /// Optional cloud model override when `backend` or `fallback` is cloud.
+    pub cloud_model: String,
+}
+
+impl Default for ProactiveDecisionProviderConfig {
+    fn default() -> Self {
+        Self {
+            backend: ProactiveDecisionBackend::Disabled,
+            model_path: String::new(),
+            executable: String::new(),
+            acceleration: ProactiveAcceleration::Auto,
+            gpu_layers: "auto".to_string(),
+            context_size: 2048,
+            startup_timeout_seconds: 60,
+            request_timeout_seconds: 20,
+            fallback: ProactiveDecisionFallback::Disabled,
+            cloud_model: String::new(),
+        }
+    }
+}
+
+/// Proactive speech model routing under `provider.proactive` (#103).
+#[derive(
+    Debug, Clone, Default, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ProactiveProviderConfig {
+    /// Lightweight decision model settings.
+    pub decision: ProactiveDecisionProviderConfig,
+    /// Optional generation model override (empty = use `provider.model`).
+    pub generation_model: String,
+}
+
 ene_config::define_config!(
     settings,
     "provider",
@@ -75,6 +173,8 @@ ene_config::define_config!(
         pub api_key: ApiKeyConfig,
         /// Embedding configuration.
         pub embedding: EmbeddingConfig,
+        /// Proactive companion speech model routing (#103).
+        pub proactive: ProactiveProviderConfig,
     }
 );
 
@@ -118,5 +218,46 @@ impl ProviderConfig {
             }
             String::new()
         }
+    }
+
+    /// Effective chat model for proactive generation (empty override → `model`).
+    #[must_use]
+    pub fn proactive_generation_model(&self) -> &str {
+        let override_model = self.proactive.generation_model.trim();
+        if override_model.is_empty() {
+            self.model.as_str()
+        } else {
+            override_model
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proactive_provider_defaults_are_disabled() {
+        let cfg = ProviderConfig::default();
+        assert_eq!(
+            cfg.proactive.decision.backend,
+            ProactiveDecisionBackend::Disabled
+        );
+        assert!(cfg.proactive.generation_model.is_empty());
+        assert_eq!(cfg.proactive_generation_model(), "gpt-4o-mini");
+    }
+
+    #[test]
+    fn proactive_generation_model_override() {
+        let mut cfg = ProviderConfig::default();
+        cfg.proactive.generation_model = "gpt-4o".to_string();
+        assert_eq!(cfg.proactive_generation_model(), "gpt-4o");
+    }
+
+    #[test]
+    fn proactive_decision_backend_deserializes() {
+        let cfg: ProactiveDecisionProviderConfig =
+            serde_json::from_str(r#"{"backend":"llama_cpp"}"#).expect("deserialize");
+        assert_eq!(cfg.backend, ProactiveDecisionBackend::LlamaCpp);
     }
 }

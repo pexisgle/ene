@@ -70,6 +70,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         pending_user_inputs,
         terminal_emitted,
         turn,
+        origin,
+        allow_tools,
         classifier_tx,
     } = ctx;
 
@@ -81,7 +83,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     let tool_config = config
         .get_section::<ene_tool_host::ToolConfig>()
         .unwrap_or_default();
-    let tool_calling_enabled = tool_config.enabled;
+    let tool_calling_enabled = tool_config.enabled && allow_tools;
 
     let mem_config = config
         .get_section::<ene_store::StoreConfig>()
@@ -92,6 +94,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             &event_tx,
             &terminal_emitted,
             &turn,
+            origin,
             TerminalReason::Failed {
                 message: "No character card loaded".into(),
             },
@@ -126,6 +129,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     &event_tx,
                     &terminal_emitted,
                     &turn,
+                    origin,
                     TerminalReason::Failed {
                         message: format!("Embedding failed: {e}"),
                     },
@@ -244,6 +248,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 &event_tx,
                 &terminal_emitted,
                 &turn,
+                origin,
                 TerminalReason::Failed {
                     message: e.to_string(),
                 },
@@ -311,6 +316,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 &event_tx,
                 &terminal_emitted,
                 &turn,
+                origin,
                 TerminalReason::Failed {
                     message: e.to_string(),
                 },
@@ -331,6 +337,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 &event_tx,
                 &terminal_emitted,
                 &turn,
+                origin,
                 TerminalReason::Cancelled,
             );
             return session;
@@ -341,6 +348,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 &event_tx,
                 &terminal_emitted,
                 &turn,
+                origin,
                 TerminalReason::Failed {
                     message: "Max tool call rounds exceeded".into(),
                 },
@@ -356,6 +364,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     &event_tx,
                     &terminal_emitted,
                     &turn,
+                    origin,
                     TerminalReason::Failed {
                         message: e.to_string(),
                     },
@@ -378,6 +387,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     &event_tx,
                     &terminal_emitted,
                     &turn,
+                    origin,
                     TerminalReason::Cancelled,
                 );
                 return session;
@@ -400,6 +410,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                         for text in text_deltas {
                             let _ = event_tx.send(EneEvent::TextDelta {
                                 turn: turn.clone(),
+                                origin,
                                 delta: text,
                             });
                         }
@@ -446,6 +457,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                         &event_tx,
                         &terminal_emitted,
                         &turn,
+                        origin,
                         TerminalReason::Failed {
                             message: e.to_string(),
                         },
@@ -519,6 +531,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 if let Some(source) = primary_source {
                     let _ = event_tx.send(EneEvent::Performance {
                         turn: turn.clone(),
+                        origin,
                         cues,
                         source,
                     });
@@ -578,7 +591,13 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             // from history.
             session.finalize_response();
             session.record_assistant_response();
-            emit_terminal(&event_tx, &terminal_emitted, &turn, TerminalReason::Done);
+            emit_terminal(
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Done,
+            );
 
             if let Some(classifier_store) = mem_store.clone()
                 && mind.emotion.enabled
@@ -695,6 +714,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             &assistant_content,
             &event_tx,
             &turn,
+            origin,
             &pending_permissions,
             &pending_user_inputs,
             tool_config.timeout_ms,
@@ -713,6 +733,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     &event_tx,
                     &terminal_emitted,
                     &turn,
+                    origin,
                     TerminalReason::Failed {
                         message: e.to_string(),
                     },

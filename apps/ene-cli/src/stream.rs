@@ -17,14 +17,23 @@ pub async fn process_stream(
 ) {
     loop {
         match rx.recv().await {
-            Ok(EneEvent::TextDelta { turn, delta }) => {
+            Ok(EneEvent::TextDelta {
+                turn,
+                origin: _,
+                delta,
+            }) => {
                 if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 print!("{delta}");
                 let _ = io::stdout().flush();
             }
-            Ok(EneEvent::Performance { turn, cues, source }) => {
+            Ok(EneEvent::Performance {
+                turn,
+                origin: _,
+                cues,
+                source,
+            }) => {
                 if !turn_matches(active_turn, &turn) {
                     continue;
                 }
@@ -48,6 +57,7 @@ pub async fn process_stream(
             }
             Ok(EneEvent::ToolCallStart {
                 turn,
+                origin: _,
                 name,
                 arguments,
             }) => {
@@ -56,7 +66,12 @@ pub async fn process_stream(
                 }
                 tracing::info!(%turn, tool = %name, arguments = %arguments, "Tool calling started");
             }
-            Ok(EneEvent::ToolCallResult { turn, name, result }) => {
+            Ok(EneEvent::ToolCallResult {
+                turn,
+                origin: _,
+                name,
+                result,
+            }) => {
                 if !turn_matches(active_turn, &turn) {
                     continue;
                 }
@@ -68,7 +83,11 @@ pub async fn process_stream(
                 }
                 tracing::info!(%turn, level = %level, "Context compressed");
             }
-            Ok(EneEvent::Terminal { turn, reason }) => {
+            Ok(EneEvent::Terminal {
+                turn,
+                origin: _,
+                reason,
+            }) => {
                 if !turn_matches(active_turn, &turn) {
                     continue;
                 }
@@ -81,6 +100,7 @@ pub async fn process_stream(
             }
             Ok(EneEvent::PermissionRequired {
                 turn,
+                origin: _,
                 request_id,
                 action,
                 target,
@@ -121,6 +141,7 @@ pub async fn process_stream(
             }
             Ok(EneEvent::UserInputRequired {
                 turn,
+                origin: _,
                 request_id,
                 prompt,
             }) => {

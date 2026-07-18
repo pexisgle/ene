@@ -135,6 +135,18 @@ auto-from-model = auto (from model)
 memory-settings = Memory Settings
 enable-long-term-memory = Enable Long-term Memory
 latest-response = Latest Response
+proactive-speech = Proactive Speech
+proactive-enabled = Enable proactive companion speech
+proactive-interval = Decision interval (seconds)
+proactive-cooldown = Cooldown after speech (seconds)
+proactive-min-idle = Min idle before speech (seconds)
+proactive-source-conversation = Use conversation history
+proactive-source-activity = Use activity / active window
+proactive-source-screen = Use screen summary (when available)
+proactive-decision-backend = Decision backend
+proactive-fallback = Local failure fallback
+proactive-model-path = Local decision model path (GGUF)
+proactive-generation-model = Generation model override (optional)
 
 # Permission
 permission-requested = Permission Requested

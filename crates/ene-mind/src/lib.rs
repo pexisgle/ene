@@ -77,6 +77,8 @@ pub mod memory_writer;
 pub mod output;
 /// Pre-turn input analysis and turn intent classification.
 pub mod pre_turn;
+/// Proactive companion speech decision pipeline (#103).
+pub mod proactive;
 /// Sectioned prompt packet composition with budget-aware assembly.
 pub mod prompt_packet;
 /// Memory recall planning and hybrid search orchestration.
@@ -100,7 +102,7 @@ pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Mind configuration section.
 pub use config::{
     CharacterMemoryConfig, ContextConfig, EmotionConfig, EngineMode, MindConfig, MindMemoryConfig,
-    ToolGroundingConfig,
+    ProactiveConfig, ProactiveDecisionConfig, ProactiveSourcesConfig, ToolGroundingConfig,
 };
 /// Context budget and compression types.
 #[doc(no_inline)]
@@ -143,6 +145,14 @@ pub use output::{CueSource, MotionLayer, PerfKind, PerformanceCue, cue_source_pr
 #[doc(no_inline)]
 pub use output::{
     ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter, PerformanceArbiter,
+};
+/// Proactive companion speech decision types (#103).
+#[doc(no_inline)]
+pub use proactive::{
+    ActivitySnapshot, GateRejectReason, ProactiveContext, ProactiveDecision,
+    ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
+    ProactiveUrgency, build_decision_messages, build_proactive_context, decide_proactive_speech,
+    decision_schema, evaluate_deterministic_gates, parse_decision_json,
 };
 /// Prompt packet section types.
 #[doc(no_inline)]

@@ -1,6 +1,6 @@
 use crate::diagnostics::DiagnosticEvent;
 use crate::handle::{EneEvent, TerminalReason};
-use crate::types::{RequestId, TurnId};
+use crate::types::{RequestId, TurnId, TurnOrigin};
 use ene_ai::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_config::EneConfig;
 use ene_mind::ConversationSession;
@@ -65,6 +65,7 @@ pub(crate) fn emit_terminal(
     event_tx: &broadcast::Sender<EneEvent>,
     guard: &AtomicBool,
     turn: &TurnId,
+    origin: TurnOrigin,
     reason: TerminalReason,
 ) {
     if guard
@@ -73,6 +74,7 @@ pub(crate) fn emit_terminal(
     {
         let _ = event_tx.send(EneEvent::Terminal {
             turn: turn.clone(),
+            origin,
             reason,
         });
     }
@@ -97,6 +99,10 @@ pub struct StreamContext {
     pub terminal_emitted: Arc<std::sync::atomic::AtomicBool>,
     /// Active turn id for all turn-scoped events.
     pub turn: TurnId,
+    /// Whether this turn was user- or proactive-initiated.
+    pub origin: TurnOrigin,
+    /// When false, tool selection is skipped (proactive default).
+    pub allow_tools: bool,
     /// Sender for classifier `JoinHandles` spawned after Terminal emission.
     /// The actor drains this into its classifier `JoinSet` for lifecycle management.
     pub classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
@@ -157,6 +163,7 @@ pub(crate) async fn perform_tool_executions(
     assistant_content: &str,
     event_tx: &broadcast::Sender<EneEvent>,
     turn: &crate::types::TurnId,
+    origin: TurnOrigin,
     pending_permissions: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     timeout_ms: u64,
@@ -187,6 +194,7 @@ pub(crate) async fn perform_tool_executions(
 
         let _ = event_tx.send(EneEvent::ToolCallStart {
             turn: turn.clone(),
+            origin,
             name: name.clone(),
             arguments: args.clone(),
         });
@@ -239,6 +247,7 @@ pub(crate) async fn perform_tool_executions(
 
                     let _ = event_tx.send(EneEvent::PermissionRequired {
                         turn: turn.clone(),
+                        origin,
                         request_id: req_id.clone(),
                         action: action.clone(),
                         target: target.clone(),
@@ -283,6 +292,7 @@ pub(crate) async fn perform_tool_executions(
 
                     let _ = event_tx.send(EneEvent::UserInputRequired {
                         turn: turn.clone(),
+                        origin,
                         request_id: req_id.clone(),
                         prompt: prompt.clone(),
                     });
@@ -313,6 +323,7 @@ pub(crate) async fn perform_tool_executions(
 
         let _ = event_tx.send(EneEvent::ToolCallResult {
             turn: turn.clone(),
+            origin,
             name: name.clone(),
             result: result_str.clone(),
         });
@@ -446,6 +457,7 @@ fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String {
 )]
 mod tests {
     use super::*;
+    use crate::types::TurnOrigin;
 
     fn sample_answers() -> Vec<MultiAnswer> {
         vec![
@@ -547,6 +559,7 @@ mod tests {
             "",
             &event_tx,
             &turn,
+            TurnOrigin::User,
             &pending_permissions,
             &pending_user_inputs,
             5_000,
@@ -656,6 +669,7 @@ mod tests {
             "",
             &event_tx,
             &turn,
+            TurnOrigin::User,
             &pending_permissions,
             &pending_user_inputs,
             5_000,
@@ -794,6 +808,7 @@ mod tests {
             "",
             &event_tx,
             &turn,
+            TurnOrigin::User,
             &pending_permissions,
             &pending_user_inputs,
             5_000,
@@ -824,12 +839,25 @@ mod tests {
 
         // Both the cancel-side and the stream-side try to emit a
         // terminal; the guard must let only the first one through.
-        emit_terminal(&event_tx, &guard, &turn, TerminalReason::Cancelled);
-        emit_terminal(&event_tx, &guard, &turn, TerminalReason::Done);
         emit_terminal(
             &event_tx,
             &guard,
             &turn,
+            TurnOrigin::User,
+            TerminalReason::Cancelled,
+        );
+        emit_terminal(
+            &event_tx,
+            &guard,
+            &turn,
+            TurnOrigin::User,
+            TerminalReason::Done,
+        );
+        emit_terminal(
+            &event_tx,
+            &guard,
+            &turn,
+            TurnOrigin::User,
             TerminalReason::Failed {
                 message: "late".to_string(),
             },

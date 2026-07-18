@@ -85,6 +85,17 @@ impl From<&str> for TurnId {
     }
 }
 
+/// Who initiated a turn (#103 proactive speech).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnOrigin {
+    /// Normal user-driven turn (`EneHandle::run`).
+    #[default]
+    User,
+    /// Unsolicited companion utterance (no synthetic user message in history).
+    Proactive,
+}
+
 /// Error returned by [`crate::EneHandle::run`].
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum RunError {

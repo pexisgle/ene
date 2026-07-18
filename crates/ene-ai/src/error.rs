@@ -70,6 +70,10 @@ pub enum LlmProviderError {
     /// categories above. Prefer the typed variants when possible.
     #[error("provider error: {0}")]
     Provider(String),
+
+    /// Local `llama-server` (or similar) process lifecycle / health failure (#165).
+    #[error("local LLM process error: {0}")]
+    LocalProcess(String),
 }
 
 /// Single public error type for the `ene-ai` crate boundary (API v2 / #118).

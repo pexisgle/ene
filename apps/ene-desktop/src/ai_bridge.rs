@@ -17,6 +17,7 @@ use ene_runtime::{
 
 use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
 use crate::memory_journal::{MemoryJournalAction, MemoryJournalPresenter};
+use crate::proactive_observe::{ProactiveObserveControl, spawn_proactive_observer};
 use crate::settings::MemoryJournalRecallRow;
 
 /// Owns the actor handle. The runtime can also send user input
@@ -28,6 +29,8 @@ pub struct AiBridge {
     processing: Arc<AtomicBool>,
     /// Active turn id for cancel correlation.
     active_turn: Arc<Mutex<Option<TurnId>>>,
+    /// Proactive observation control (#168).
+    proactive_observe: ProactiveObserveControl,
 }
 
 impl AiBridge {
@@ -45,6 +48,9 @@ impl AiBridge {
         bootstrap_handle: &tokio::runtime::Handle,
         config: EneConfig,
     ) -> Self {
+        let mind = config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
         let handle = match bootstrap_handle.block_on(open_with_config(config)) {
             Ok(h) => h,
             Err(e) => {
@@ -62,11 +68,13 @@ impl AiBridge {
         let receiver = handle.subscribe();
         let processing = Arc::new(AtomicBool::new(false));
         let active_turn = Arc::new(Mutex::new(None));
+        let proactive_observe = spawn_proactive_observer(bootstrap_handle, handle.clone(), &mind);
         let bridge = Self {
             handle: handle.clone(),
             runtime: bootstrap_handle.clone(),
             processing: processing.clone(),
             active_turn: active_turn.clone(),
+            proactive_observe,
         };
 
         bootstrap_handle.spawn(pump_events(
@@ -127,6 +135,11 @@ impl AiBridge {
     /// after broadcast lag so Cancel remains available).
     pub fn has_active_turn(&self) -> bool {
         self.active_turn.lock().is_ok_and(|g| g.is_some())
+    }
+
+    /// Refresh proactive observation flags from the latest mind config.
+    pub fn sync_proactive_observe(&self, mind: &ene_mind::MindConfig) {
+        self.proactive_observe.apply_mind(mind);
     }
 
     /// Forward a `PermissionDecision` for the request
@@ -341,13 +354,22 @@ async fn pump_events(
 ) {
     loop {
         match receiver.recv().await {
-            Ok(EneEvent::TextDelta { turn, delta }) => {
+            Ok(EneEvent::TextDelta {
+                turn,
+                origin: _,
+                delta,
+            }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(delta)));
             }
-            Ok(EneEvent::Performance { turn, cues, source }) => {
+            Ok(EneEvent::Performance {
+                turn,
+                origin: _,
+                cues,
+                source,
+            }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
@@ -387,6 +409,7 @@ async fn pump_events(
             }
             Ok(EneEvent::ToolCallStart {
                 turn,
+                origin: _,
                 name,
                 arguments,
             }) => {
@@ -398,7 +421,12 @@ async fn pump_events(
                     arguments,
                 }));
             }
-            Ok(EneEvent::ToolCallResult { turn, name, result }) => {
+            Ok(EneEvent::ToolCallResult {
+                turn,
+                origin: _,
+                name,
+                result,
+            }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
@@ -409,6 +437,7 @@ async fn pump_events(
             }
             Ok(EneEvent::PermissionRequired {
                 turn,
+                origin: _,
                 request_id,
                 action,
                 target,
@@ -426,6 +455,7 @@ async fn pump_events(
             }
             Ok(EneEvent::UserInputRequired {
                 turn,
+                origin: _,
                 request_id,
                 prompt,
             }) => {
@@ -440,6 +470,7 @@ async fn pump_events(
             Ok(EneEvent::ContextCompressed { .. } | EneEvent::StatusChanged { .. }) => {}
             Ok(EneEvent::Terminal {
                 turn,
+                origin: _,
                 reason: ene_runtime::TerminalReason::Done | ene_runtime::TerminalReason::Cancelled,
             }) => {
                 if !turn_matches(&active_turn, &turn) {
@@ -451,6 +482,7 @@ async fn pump_events(
             }
             Ok(EneEvent::Terminal {
                 turn,
+                origin: _,
                 reason: ene_runtime::TerminalReason::Failed { message },
             }) => {
                 if !turn_matches(&active_turn, &turn) {

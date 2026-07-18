@@ -9,7 +9,8 @@ crate-type = ["lib"]
 
 [dependencies]
 async-openai = { workspace = true, default-features = false }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "macros", "rt"] }
+parking_lot = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }

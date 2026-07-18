@@ -119,6 +119,7 @@ async fn cancel_emits_terminal_exactly_once_with_matching_turn() {
     while let Ok(ev) = rx.try_recv() {
         if let EneEvent::Terminal {
             turn: ref t,
+            origin: _,
             reason,
         } = ev
         {
@@ -190,12 +191,14 @@ async fn store_off_run_emits_terminal() {
             match ev {
                 EneEvent::Terminal {
                     turn: ref t,
+                    origin: _,
                     reason: TerminalReason::Done | TerminalReason::Failed { .. },
                 } if t == &turn => {
                     saw_terminal = true;
                 }
                 EneEvent::Terminal {
                     turn: ref t,
+                    origin: _,
                     reason: TerminalReason::Cancelled,
                 } if t == &turn => {
                     panic!("store-off contract must not rely on Cancel; got Cancelled for {t}");

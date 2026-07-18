@@ -2558,6 +2558,7 @@ dependencies = [
  "ene-config",
  "ene-tool-proto",
  "hf-hub",
+ "parking_lot",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -2616,6 +2617,7 @@ dependencies = [
 name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
+ "active-win-pos-rs",
  "bevy_app",
  "bevy_ecs",
  "bitflags 2.13.1",
@@ -2625,6 +2627,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "ene-ai",
  "ene-config",
  "ene-mind",
  "ene-runtime",

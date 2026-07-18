@@ -15,7 +15,7 @@ ene_config::define_config!(
     /// Configuration for the Ene mind runtime.
     ///
     /// Controls context budget, memory extraction/retention, emotion processing,
-    /// and character compilation.
+    /// character compilation, and proactive companion speech.
     pub struct MindConfig {
         /// Context and token budget management.
         pub context: ContextConfig,
@@ -28,6 +28,9 @@ ene_config::define_config!(
 
         /// Character card compilation settings.
         pub character: CharacterMemoryConfig,
+
+        /// Proactive companion speech policy (#103).
+        pub proactive: ProactiveConfig,
     }
 );
 
@@ -405,6 +408,148 @@ impl Default for CharacterMemoryConfig {
     }
 }
 
+/// Input sources for proactive speech decisions (#103).
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ProactiveSourcesConfig {
+    /// Include recent conversation history in the decision context.
+    pub conversation: bool,
+    /// Include privacy-safe activity / idle / active-window signals.
+    pub activity: bool,
+    /// Include a short-lived screen text summary (never raw image bytes).
+    pub screen_summary: bool,
+}
+
+impl Default for ProactiveSourcesConfig {
+    fn default() -> Self {
+        Self {
+            conversation: true,
+            activity: true,
+            screen_summary: false,
+        }
+    }
+}
+
+impl ProactiveSourcesConfig {
+    /// Returns true when at least one source is enabled.
+    #[must_use]
+    pub const fn any_enabled(&self) -> bool {
+        self.conversation || self.activity || self.screen_summary
+    }
+}
+
+/// Decision confidence threshold for proactive speech (#103).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ProactiveDecisionConfig {
+    /// Minimum confidence required before generation starts.
+    #[serde(deserialize_with = "deserialize_unit_interval")]
+    pub min_confidence: f64,
+}
+
+impl Default for ProactiveDecisionConfig {
+    fn default() -> Self {
+        Self {
+            min_confidence: 0.55,
+        }
+    }
+}
+
+/// Proactive companion speech policy (#103).
+///
+/// Default is disabled so existing chat behaviour is unchanged until the user
+/// explicitly opts in.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ProactiveConfig {
+    /// Master switch for proactive companion speech.
+    pub enabled: bool,
+    /// Observation / decision tick interval in seconds.
+    #[serde(deserialize_with = "deserialize_positive_u64")]
+    pub interval_seconds: u64,
+    /// Suppress decisions until this many seconds after the last user input.
+    #[serde(deserialize_with = "deserialize_non_negative_u64")]
+    pub min_idle_seconds: u64,
+    /// Suppress further proactive speech after a proactive utterance.
+    #[serde(deserialize_with = "deserialize_non_negative_u64")]
+    pub cooldown_seconds: u64,
+    /// Maximum proactive utterances per conversation session.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub max_turns_per_session: usize,
+    /// Timeout for the lightweight decision call.
+    #[serde(deserialize_with = "deserialize_positive_u64")]
+    pub decision_timeout_seconds: u64,
+    /// Timeout for high-quality proactive generation.
+    #[serde(deserialize_with = "deserialize_positive_u64")]
+    pub generation_timeout_seconds: u64,
+    /// Per-source enable flags.
+    pub sources: ProactiveSourcesConfig,
+    /// Decision confidence gate.
+    pub decision: ProactiveDecisionConfig,
+    /// When true, proactive generation may select tools (default false).
+    pub allow_tools: bool,
+    /// Max characters of conversation history included in the decision prompt.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub max_conversation_chars: usize,
+    /// Max characters of activity snapshot text.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub max_activity_chars: usize,
+    /// Max characters of screen summary text.
+    #[serde(deserialize_with = "deserialize_positive_usize")]
+    pub max_screen_summary_chars: usize,
+}
+
+impl Default for ProactiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: 60,
+            min_idle_seconds: 120,
+            cooldown_seconds: 300,
+            max_turns_per_session: 6,
+            decision_timeout_seconds: 15,
+            generation_timeout_seconds: 60,
+            sources: ProactiveSourcesConfig::default(),
+            decision: ProactiveDecisionConfig::default(),
+            allow_tools: false,
+            max_conversation_chars: 4_000,
+            max_activity_chars: 500,
+            max_screen_summary_chars: 800,
+        }
+    }
+}
+
+fn deserialize_positive_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: ::ene_config::serde::Deserializer<'de>,
+{
+    use ::ene_config::serde::Deserialize;
+    let value = u64::deserialize(deserializer)?;
+    Ok(value.max(1))
+}
+
+fn deserialize_non_negative_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: ::ene_config::serde::Deserializer<'de>,
+{
+    use ::ene_config::serde::Deserialize;
+    u64::deserialize(deserializer)
+}
+
+fn deserialize_positive_usize<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: ::ene_config::serde::Deserializer<'de>,
+{
+    use ::ene_config::serde::Deserialize;
+    let value = usize::deserialize(deserializer)?;
+    Ok(value.max(1))
+}
+
 #[cfg(test)]
 #[cfg_attr(
     test,
@@ -464,5 +609,29 @@ mod tests {
         )
         .expect("deserialize");
         assert!((cfg.tool_grounding.min_confidence - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn proactive_defaults_are_disabled() {
+        let cfg = MindConfig::default();
+        assert!(!cfg.proactive.enabled);
+        assert!(!cfg.proactive.allow_tools);
+        assert_eq!(cfg.proactive.interval_seconds, 60);
+        assert!(cfg.proactive.sources.conversation);
+        assert!(!cfg.proactive.sources.screen_summary);
+    }
+
+    #[test]
+    fn proactive_zero_interval_is_clamped_to_one() {
+        let cfg: ProactiveConfig =
+            serde_json::from_str(r#"{"interval_seconds": 0}"#).expect("deserialize");
+        assert_eq!(cfg.interval_seconds, 1);
+    }
+
+    #[test]
+    fn proactive_decision_confidence_is_clamped() {
+        let cfg: ProactiveConfig =
+            serde_json::from_str(r#"{"decision":{"min_confidence": 1.5}}"#).expect("deserialize");
+        assert!((cfg.decision.min_confidence - 1.0).abs() < f64::EPSILON);
     }
 }

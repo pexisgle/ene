@@ -62,6 +62,45 @@ pub struct EneConfig {
 | `max_tokens` | int | `8192` | Max completion tokens for chat (`0` = omit from the request). OpenRouter reserves credit collateral against this ceiling; omitting it can make the provider assume the model max (often 65536) and return HTTP 402 on modest balances |
 | `api_key` | object | (see below) | API key configuration |
 | `embedding` | object | (see below) | Embedding configuration |
+| `proactive` | object | (see below) | Proactive companion speech model routing (#103) |
+
+#### `provider.proactive` — Proactive Model Routing
+
+```json
+{
+  "proactive": {
+    "decision": {
+      "backend": "disabled",
+      "model_path": "",
+      "executable": "",
+      "acceleration": "auto",
+      "gpu_layers": "auto",
+      "context_size": 2048,
+      "startup_timeout_seconds": 60,
+      "request_timeout_seconds": 20,
+      "fallback": "disabled",
+      "cloud_model": ""
+    },
+    "generation_model": ""
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `decision.backend` | string | `"disabled"` | `"llama_cpp"`, `"cloud"`, or `"disabled"` |
+| `decision.model_path` | string | `""` | Path to decision GGUF weights (required for `llama_cpp`) |
+| `decision.executable` | string | `""` | Path to `llama-server` (empty = `PATH`) |
+| `decision.acceleration` | string | `"auto"` | `"auto"`, `"vulkan"`, `"cuda"`, or `"cpu"` |
+| `decision.gpu_layers` | string | `"auto"` | `"auto"` or an integer string for `--n-gpu-layers` |
+| `decision.context_size` | int | `2048` | Small context for decision prompts |
+| `decision.startup_timeout_seconds` | int | `60` | Wait for local server health |
+| `decision.request_timeout_seconds` | int | `20` | Per-decision request timeout |
+| `decision.fallback` | string | `"disabled"` | On local failure: `"disabled"` or `"cloud"` (never silent cloud upload when disabled) |
+| `decision.cloud_model` | string | `""` | Optional cloud model override for decision |
+| `generation_model` | string | `""` | Proactive utterance model; empty uses `provider.model` |
+
+Connection credentials reuse `provider.base_url` / `provider.api_key`. Binary and GGUF weights are not bundled; see the [Proactive Speech ADR](../architecture/proactive-speech.md).
 
 #### `provider.api_key` — API Key Config
 
@@ -408,6 +447,27 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
       "always_include_identity_kernel": true,
       "identity_kernel_max_tokens": 400,
       "style_retrieval": true
+    },
+    "proactive": {
+      "enabled": false,
+      "interval_seconds": 60,
+      "min_idle_seconds": 120,
+      "cooldown_seconds": 300,
+      "max_turns_per_session": 6,
+      "decision_timeout_seconds": 15,
+      "generation_timeout_seconds": 60,
+      "sources": {
+        "conversation": true,
+        "activity": true,
+        "screen_summary": false
+      },
+      "decision": {
+        "min_confidence": 0.55
+      },
+      "allow_tools": false,
+      "max_conversation_chars": 4000,
+      "max_activity_chars": 500,
+      "max_screen_summary_chars": 800
     }
   }
 }
@@ -415,6 +475,28 @@ Configuration for the Ene Cognitive Runtime, controlling context budget, memory 
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+
+#### `mind.proactive` — Proactive Companion Speech
+
+Policy for unsolicited companion utterances. Default is **off**. See [Proactive Speech ADR](../architecture/proactive-speech.md).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master switch |
+| `interval_seconds` | int | `60` | Decision tick interval (minimum 1) |
+| `min_idle_seconds` | int | `120` | Suppress until this idle after last user input |
+| `cooldown_seconds` | int | `300` | Suppress after a proactive utterance |
+| `max_turns_per_session` | int | `6` | Cap per conversation session |
+| `decision_timeout_seconds` | int | `15` | Lightweight decision timeout |
+| `generation_timeout_seconds` | int | `60` | High-quality generation timeout |
+| `sources.conversation` | bool | `true` | Include recent chat history |
+| `sources.activity` | bool | `true` | Include privacy-safe activity / idle |
+| `sources.screen_summary` | bool | `false` | Include short-lived screen text summary |
+| `decision.min_confidence` | float | `0.55` | Minimum confidence to start generation (`0.0..=1.0`) |
+| `allow_tools` | bool | `false` | Allow tool selection during proactive generation |
+| `max_conversation_chars` | int | `4000` | Conversation budget in the decision prompt |
+| `max_activity_chars` | int | `500` | Activity text budget |
+| `max_screen_summary_chars` | int | `800` | Screen summary budget |
 
 #### `mind.context` — Context Budget
 

@@ -62,6 +62,45 @@ pub struct EneConfig {
 | `max_tokens` | int | `8192` | チャット完了の最大トークン数（`0` = リクエストから省略）。OpenRouter はこの上限に対してクレジット担保を確保するため、省略するとモデル上限（しばしば 65536）が仮定され、残高が少ないと HTTP 402 になることがある |
 | `api_key` | object | (下記参照) | API キー設定 |
 | `embedding` | object | (下記参照) | 埋め込み設定 |
+| `proactive` | object | (下記参照) | 能動発話のモデルルーティング (#103) |
+
+#### `provider.proactive` — 能動発話モデルルーティング
+
+```json
+{
+  "proactive": {
+    "decision": {
+      "backend": "disabled",
+      "model_path": "",
+      "executable": "",
+      "acceleration": "auto",
+      "gpu_layers": "auto",
+      "context_size": 2048,
+      "startup_timeout_seconds": 60,
+      "request_timeout_seconds": 20,
+      "fallback": "disabled",
+      "cloud_model": ""
+    },
+    "generation_model": ""
+  }
+}
+```
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `decision.backend` | string | `"disabled"` | `"llama_cpp"` / `"cloud"` / `"disabled"` |
+| `decision.model_path` | string | `""` | 判定用 GGUF のパス（`llama_cpp` 時に必要） |
+| `decision.executable` | string | `""` | `llama-server` のパス（空なら `PATH`） |
+| `decision.acceleration` | string | `"auto"` | `"auto"` / `"vulkan"` / `"cuda"` / `"cpu"` |
+| `decision.gpu_layers` | string | `"auto"` | `"auto"` または `--n-gpu-layers` 用の整数文字列 |
+| `decision.context_size` | int | `2048` | 判定用の小さなコンテキスト |
+| `decision.startup_timeout_seconds` | int | `60` | ローカル server の health 待機 |
+| `decision.request_timeout_seconds` | int | `20` | 判定リクエストのタイムアウト |
+| `decision.fallback` | string | `"disabled"` | ローカル失敗時: `"disabled"` または `"cloud"`（disabled 時は黙ってクラウドへ送らない） |
+| `decision.cloud_model` | string | `""` | 判定用クラウドモデルの任意 override |
+| `generation_model` | string | `""` | 能動発話の生成モデル。空なら `provider.model` |
+
+接続先と認証は `provider.base_url` / `provider.api_key` を再利用する。実行ファイルと GGUF は同梱しない。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
 
 #### `provider.api_key` — API キー設定
 
@@ -412,6 +451,27 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
       "always_include_identity_kernel": true,
       "identity_kernel_max_tokens": 400,
       "style_retrieval": true
+    },
+    "proactive": {
+      "enabled": false,
+      "interval_seconds": 60,
+      "min_idle_seconds": 120,
+      "cooldown_seconds": 300,
+      "max_turns_per_session": 6,
+      "decision_timeout_seconds": 15,
+      "generation_timeout_seconds": 60,
+      "sources": {
+        "conversation": true,
+        "activity": true,
+        "screen_summary": false
+      },
+      "decision": {
+        "min_confidence": 0.55
+      },
+      "allow_tools": false,
+      "max_conversation_chars": 4000,
+      "max_activity_chars": 500,
+      "max_screen_summary_chars": 800
     }
   }
 }
@@ -419,6 +479,29 @@ Ene Cognitive Runtime の設定です。コンテキスト予算、記憶抽出�
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
+
+#### `mind.proactive` — 能動発話
+
+ユーザー入力なしの companion 発話ポリシー。デフォルトは **オフ**。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `enabled` | bool | `false` | 機能全体の on/off |
+| `interval_seconds` | int | `60` | 判定 tick 間隔（最小 1） |
+| `min_idle_seconds` | int | `120` | 最後のユーザー入力からの最低待機 |
+| `cooldown_seconds` | int | `300` | 能動発話後の抑制時間 |
+| `max_turns_per_session` | int | `6` | セッションあたりの上限 |
+| `decision_timeout_seconds` | int | `15` | 軽量判定のタイムアウト |
+| `generation_timeout_seconds` | int | `60` | 発話生成のタイムアウト |
+| `sources.conversation` | bool | `true` | 直近会話を入力に使う |
+| `sources.activity` | bool | `true` | privacy-safe な活動 / idle を使う |
+| `sources.screen_summary` | bool | `false` | 短命な画面テキスト要約を使う |
+| `decision.min_confidence` | float | `0.55` | 生成へ進む最低信頼度（`0.0..=1.0`） |
+| `allow_tools` | bool | `false` | 能動発話で tool 選択を許可 |
+| `max_conversation_chars` | int | `4000` | 判定プロンプトの会話文字数上限 |
+| `max_activity_chars` | int | `500` | 活動テキスト上限 |
+| `max_screen_summary_chars` | int | `800` | 画面要約上限 |
+
 #### `mind.context` — コンテキスト予算
 
 | フィールド | 型 | デフォルト | 説明 |

@@ -50,6 +50,7 @@ mod physics;
 #[cfg(target_os = "linux")]
 mod platform;
 mod plugin;
+mod proactive_observe;
 mod raycast_debug;
 mod resource;
 mod runtime;

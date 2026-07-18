@@ -136,6 +136,8 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         terminal_emitted,
         turn: turn.clone(),
+        origin: ene_runtime::TurnOrigin::User,
+        allow_tools: true,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
@@ -145,6 +147,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
     while let Ok(event) = event_rx.try_recv() {
         if let EneEvent::Terminal {
             turn: ref t,
+            origin: _,
             reason: TerminalReason::Done,
         } = event
         {

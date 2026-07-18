@@ -102,6 +102,11 @@ pub enum EneCommand {
         /// Confirmation channel.
         reply: oneshot::Sender<Result<(), EneRuntimeError>>,
     },
+    /// Update host-side proactive observation snapshot (#166).
+    UpdateProactiveObservation {
+        /// Normalized observation from desktop (no raw screenshots).
+        observation: ene_mind::ProactiveObservation,
+    },
 }
 
 /// Events emitted from the actor to all consumers via broadcast channel.
@@ -114,6 +119,8 @@ pub enum EneEvent {
     TextDelta {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// The raw text delta.
         delta: String,
     },
@@ -121,6 +128,8 @@ pub enum EneEvent {
     Performance {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// Cue list (usually one expression).
         cues: Vec<ene_mind::PerformanceCue>,
         /// How the cues were chosen.
@@ -130,6 +139,8 @@ pub enum EneEvent {
     ToolCallStart {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// The tool name (e.g. "fs.write").
         name: String,
         /// JSON-encoded arguments.
@@ -139,6 +150,8 @@ pub enum EneEvent {
     ToolCallResult {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// The tool name.
         name: String,
         /// The tool's output as a string.
@@ -148,6 +161,8 @@ pub enum EneEvent {
     PermissionRequired {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// Unique identifier for this permission request.
         request_id: RequestId,
         /// The category of operation (e.g. "write", "delete").
@@ -161,6 +176,8 @@ pub enum EneEvent {
     UserInputRequired {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// Unique identifier for this input request.
         request_id: RequestId,
         /// The prompt describing the question, options, and free-text allowance.
@@ -170,6 +187,8 @@ pub enum EneEvent {
     ContextCompressed {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// Compression level label (e.g. "scene").
         level: String,
     },
@@ -177,6 +196,8 @@ pub enum EneEvent {
     Terminal {
         /// Active turn.
         turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
         /// Why the run terminated.
         reason: TerminalReason,
     },
@@ -482,6 +503,10 @@ impl EneHandle {
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             classifier_tx,
             _diag_rx: diag_rx,
+            proactive: crate::proactive::ProactiveScheduler::default(),
+            proactive_decision_rx: None,
+            proactive_llm: None,
+            active_origin: crate::types::TurnOrigin::User,
         };
         let join = tokio::spawn(actor.run());
 
@@ -595,6 +620,16 @@ impl EneHandle {
             })
             .map_err(|_| ActorDeadError)
     }
+
+    /// Push a privacy-safe proactive observation from the host (#166 / #168).
+    pub fn update_proactive_observation(
+        &self,
+        observation: ene_mind::ProactiveObservation,
+    ) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::UpdateProactiveObservation { observation })
+            .map_err(|_| ActorDeadError)
+    }
 }
 
 impl Drop for EneHandle {
@@ -633,6 +668,14 @@ struct EneActor {
     /// Held so the broadcast channel retains buffered diagnostic events until the
     /// first subscriber attaches via [`EneHandle::diagnostics().subscribe()`].
     _diag_rx: broadcast::Receiver<DiagnosticEvent>,
+    /// Proactive speech scheduler state (#166).
+    proactive: crate::proactive::ProactiveScheduler,
+    /// In-flight decision result channel.
+    proactive_decision_rx: Option<oneshot::Receiver<crate::proactive::ProactiveDecisionResult>>,
+    /// Local / cloud decision provider handles (lazy).
+    proactive_llm: Option<ene_ai::ProactiveLlmHandles>,
+    /// Origin of the active stream turn (for cancel Terminal).
+    active_origin: crate::types::TurnOrigin,
 }
 
 impl EneActor {
@@ -703,9 +746,13 @@ impl EneActor {
                         if let Ok(updated_session) = res {
                             self.session = updated_session;
                         }
+                        if self.active_origin == crate::types::TurnOrigin::Proactive {
+                            self.proactive.on_proactive_completed();
+                        }
                         self.stream_handle = None;
                         self.stream_session_rx = None;
                         self.active_turn = None;
+                        self.active_origin = crate::types::TurnOrigin::User;
                         self.turn_gate.end();
                         let _ = self.event_tx.send(EneEvent::StatusChanged {
                             status: EneStatus::Idle,
@@ -713,13 +760,57 @@ impl EneActor {
                     }
                 }
             } else {
-                match self.cmd_rx.recv().await {
-                    Some(cmd) => {
-                        if !self.handle_command(cmd).await {
-                            break;
+                let mind = self
+                    .config
+                    .get_section::<ene_mind::MindConfig>()
+                    .unwrap_or_default();
+                let proactive_enabled = mind.proactive.enabled;
+                let tick = crate::proactive::tick_period(&mind.proactive);
+
+                if let Some(rx) = self.proactive_decision_rx.as_mut() {
+                    tokio::select! {
+                        cmd = self.cmd_rx.recv() => {
+                            match cmd {
+                                Some(cmd) => {
+                                    if !self.handle_command(cmd).await {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        decision = &mut *rx => {
+                            self.proactive_decision_rx = None;
+                            if let Ok(result) = decision {
+                                self.handle_proactive_decision(result).await;
+                            }
                         }
                     }
-                    None => break,
+                } else if proactive_enabled {
+                    tokio::select! {
+                        cmd = self.cmd_rx.recv() => {
+                            match cmd {
+                                Some(cmd) => {
+                                    if !self.handle_command(cmd).await {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                        () = tokio::time::sleep(tick) => {
+                            self.maybe_spawn_proactive_decision().await;
+                        }
+                    }
+                } else {
+                    match self.cmd_rx.recv().await {
+                        Some(cmd) => {
+                            if !self.handle_command(cmd).await {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
                 }
             }
         }
@@ -727,6 +818,9 @@ impl EneActor {
         // Clean up any running stream
         if let Some(handle) = self.stream_handle.take() {
             handle.abort();
+        }
+        if let Some(handles) = self.proactive_llm.take() {
+            handles.shutdown().await;
         }
         // Abort any in-flight direct CallTool and classifier tasks, and clear
         // any pending prompt oneshot senders.
@@ -749,6 +843,119 @@ impl EneActor {
         guard.clear();
     }
 
+    async fn maybe_spawn_proactive_decision(&mut self) {
+        if self.stream_handle.is_some() || self.proactive_decision_rx.is_some() {
+            return;
+        }
+        if !self.pending_permissions.lock().await.is_empty()
+            || !self.pending_user_inputs.lock().await.is_empty()
+        {
+            return;
+        }
+        let mind = self
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        if !mind.proactive.enabled {
+            return;
+        }
+
+        if self.proactive_llm.is_none() {
+            let provider_cfg = match self.config.get_section::<ene_ai::ProviderConfig>() {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(
+                        component = "Proactive",
+                        error = %e,
+                        "Proactive provider config unavailable"
+                    );
+                    return;
+                }
+            };
+            match ene_ai::build_proactive_llm_handles(&provider_cfg).await {
+                Ok(handles) => self.proactive_llm = Some(handles),
+                Err(e) => {
+                    tracing::warn!(
+                        component = "Proactive",
+                        error = %e,
+                        "Failed to start proactive decision provider"
+                    );
+                    return;
+                }
+            }
+        }
+
+        let decision_provider = self.proactive_llm.as_ref().map(|h| Arc::clone(&h.decision));
+        let epoch = self.proactive.epoch;
+        let suppression = self.proactive.suppression(false);
+        let observation = self.proactive.observation.clone();
+        let history = self.session.history().to_vec();
+        let (tx, rx) = oneshot::channel();
+        self.proactive_decision_rx = Some(rx);
+        let config = mind.proactive.clone();
+        tokio::spawn(async move {
+            let result = crate::proactive::run_decision_task(
+                config,
+                history,
+                observation,
+                suppression,
+                decision_provider,
+                epoch,
+            )
+            .await;
+            let _ = tx.send(result);
+        });
+    }
+
+    async fn handle_proactive_decision(
+        &mut self,
+        result: crate::proactive::ProactiveDecisionResult,
+    ) {
+        if result.epoch != self.proactive.epoch {
+            tracing::debug!(
+                component = "Proactive",
+                "Discarding stale proactive decision after user turn"
+            );
+            return;
+        }
+        if self.stream_handle.is_some() {
+            return;
+        }
+        if !result.should_generate {
+            tracing::debug!(
+                component = "Proactive",
+                detail = %result.detail,
+                "Proactive decision suppressed"
+            );
+            return;
+        }
+
+        let turn = TurnId::new();
+        if !self.turn_gate.try_begin(&turn) {
+            return;
+        }
+        let mind = self
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        let hint = crate::proactive::proactive_generation_hint(&result.topic_hint);
+        self.drain_pending().await;
+        self.cancel_token = CancellationToken::new();
+        self.terminal_emitted = Arc::new(AtomicBool::new(false));
+        self.active_turn = Some(turn.clone());
+        self.active_origin = crate::types::TurnOrigin::Proactive;
+        let _ = self.event_tx.send(EneEvent::StatusChanged {
+            status: EneStatus::Running,
+        });
+        self.start_stream(
+            hint,
+            turn,
+            crate::types::TurnOrigin::Proactive,
+            false,
+            mind.proactive.allow_tools,
+        );
+    }
+
     async fn handle_command(&mut self, cmd: EneCommand) -> bool {
         match cmd {
             EneCommand::Run { input, turn } => {
@@ -761,14 +968,18 @@ impl EneActor {
                     );
                     return true;
                 }
+                // Discard any in-flight proactive decision.
+                self.proactive.on_user_turn_started();
+                self.proactive_decision_rx = None;
                 self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
                 self.active_turn = Some(turn.clone());
+                self.active_origin = crate::types::TurnOrigin::User;
                 let _ = self.event_tx.send(EneEvent::StatusChanged {
                     status: EneStatus::Running,
                 });
-                self.start_stream(input, turn);
+                self.start_stream(input, turn, crate::types::TurnOrigin::User, true, true);
                 true
             }
             EneCommand::Cancel { turn } => {
@@ -821,6 +1032,7 @@ impl EneActor {
                 {
                     let _ = self.event_tx.send(EneEvent::Terminal {
                         turn: cancelled_turn,
+                        origin: self.active_origin,
                         reason: TerminalReason::Cancelled,
                     });
                 }
@@ -834,12 +1046,22 @@ impl EneActor {
             EneCommand::Shutdown => {
                 self.classifier_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
+                self.proactive_decision_rx = None;
+                if let Some(handles) = self.proactive_llm.take() {
+                    handles.shutdown().await;
+                }
                 self.drain_pending().await;
                 false
             }
             EneCommand::SetCharacter { card, reply } => {
                 self.session.set_card(&card);
+                self.proactive.reset_session();
+                self.proactive_decision_rx = None;
                 let _ = reply.send(Ok(()));
+                true
+            }
+            EneCommand::UpdateProactiveObservation { observation } => {
+                self.proactive.observation = observation;
                 true
             }
             EneCommand::PermissionDecision {
@@ -932,7 +1154,14 @@ impl EneActor {
         }
     }
 
-    fn start_stream(&mut self, user_input: String, turn: TurnId) {
+    fn start_stream(
+        &mut self,
+        user_input: String,
+        turn: TurnId,
+        origin: crate::types::TurnOrigin,
+        record_user_message: bool,
+        allow_tools: bool,
+    ) {
         // Create the provider before mutating history so a failed open leaves
         // the session unchanged.
         let provider = match self.create_provider() {
@@ -950,6 +1179,7 @@ impl EneActor {
                 {
                     let _ = self.event_tx.send(EneEvent::Terminal {
                         turn,
+                        origin,
                         reason: TerminalReason::Failed {
                             message: e.to_string(),
                         },
@@ -966,10 +1196,11 @@ impl EneActor {
 
         self.apply_pending_compression();
 
-        self.session.record_user_input();
-        self.session.add_user_message(&user_input);
-
-        self.check_and_perform_split(&user_input);
+        if record_user_message {
+            self.session.record_user_input();
+            self.session.add_user_message(&user_input);
+            self.check_and_perform_split(&user_input);
+        }
 
         let config = self.config.clone();
         let session = self.session.clone();
@@ -984,6 +1215,7 @@ impl EneActor {
         let terminal_emitted = self.terminal_emitted.clone();
         let turn_for_stream = turn;
         let classifier_tx = self.classifier_tx.clone();
+        self.active_origin = origin;
 
         let (session_tx, session_rx) = oneshot::channel();
         self.stream_session_rx = Some(session_rx);
@@ -1004,6 +1236,8 @@ impl EneActor {
                 pending_user_inputs,
                 terminal_emitted,
                 turn: turn_for_stream,
+                origin,
+                allow_tools,
                 classifier_tx,
             })
             .await;
@@ -1485,6 +1719,7 @@ mod tests {
         for i in 0..1025 {
             let _ = handle.event_tx.send(EneEvent::TextDelta {
                 turn: TurnId::new(),
+                origin: crate::types::TurnOrigin::User,
                 delta: format!("delta {i}"),
             });
         }

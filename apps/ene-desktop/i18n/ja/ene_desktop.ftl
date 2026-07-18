@@ -135,6 +135,18 @@ auto-from-model = 自動 (モデルから取得)
 memory-settings = メモリ設定
 enable-long-term-memory = 長期メモリを有効化
 latest-response = 最新の応答
+proactive-speech = 能動発話
+proactive-enabled = 能動発話を有効化
+proactive-interval = 判定間隔（秒）
+proactive-cooldown = 発話後のクールダウン（秒）
+proactive-min-idle = 発話前の最低待機（秒）
+proactive-source-conversation = 会話履歴を使う
+proactive-source-activity = 活動 / アクティブウィンドウを使う
+proactive-source-screen = 画面要約を使う（利用可能な場合）
+proactive-decision-backend = 判定バックエンド
+proactive-fallback = ローカル失敗時のフォールバック
+proactive-model-path = ローカル判定モデルパス（GGUF）
+proactive-generation-model = 生成モデル override（任意）
 
 # Permission
 permission-requested = 権限が要求されました

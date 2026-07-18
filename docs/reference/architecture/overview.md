@@ -58,3 +58,4 @@ Prompt construction is sectioned (`PromptPacket`) with explicit budgets. Identit
 - [API v2 ADR](api-v2.md)
 - [Cognitive Runtime ADR](cognitive-runtime.md)
 - [Avatar Performance ADR](avatar-performance.md)
+- [Proactive Companion Speech ADR](proactive-speech.md)
