@@ -72,7 +72,6 @@ pub struct EneConfig {
     "decision": {
       "backend": "disabled",
       "model_path": "",
-      "executable": "",
       "acceleration": "auto",
       "gpu_layers": "auto",
       "context_size": 2048,
@@ -90,17 +89,16 @@ pub struct EneConfig {
 |-------|------|---------|-------------|
 | `decision.backend` | string | `"disabled"` | `"llama_cpp"`, `"cloud"`, or `"disabled"` |
 | `decision.model_path` | string | `""` | Path to decision GGUF weights (required for `llama_cpp`) |
-| `decision.executable` | string | `""` | Path to `llama-server` (empty = `PATH`) |
 | `decision.acceleration` | string | `"auto"` | `"auto"`, `"vulkan"`, `"cuda"`, or `"cpu"` |
-| `decision.gpu_layers` | string | `"auto"` | `"auto"` or an integer string for `--n-gpu-layers` |
+| `decision.gpu_layers` | string | `"auto"` | `"auto"` or an integer string for GPU layer offload |
 | `decision.context_size` | int | `2048` | Small context for decision prompts |
-| `decision.startup_timeout_seconds` | int | `60` | Wait for local server health |
+| `decision.startup_timeout_seconds` | int | `60` | Bounded wait for local GGUF model load |
 | `decision.request_timeout_seconds` | int | `20` | Per-decision request timeout |
 | `decision.fallback` | string | `"disabled"` | On local failure: `"disabled"` or `"cloud"` (never silent cloud upload when disabled) |
 | `decision.cloud_model` | string | `""` | Optional cloud model override for decision |
 | `generation_model` | string | `""` | Proactive utterance model; empty uses `provider.model` |
 
-Connection credentials reuse `provider.base_url` / `provider.api_key`. Binary and GGUF weights are not bundled; see the [Proactive Speech ADR](../architecture/proactive-speech.md).
+Connection credentials reuse `provider.base_url` / `provider.api_key`. GGUF weights are not bundled (no external `llama-server`); see the [Proactive Speech ADR](../architecture/proactive-speech.md).
 
 #### `provider.api_key` — API Key Config
 
@@ -114,7 +112,7 @@ Connection credentials reuse `provider.base_url` / `provider.api_key`. Binary an
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `backend` | string | `"cloud"` | `"cloud"` uses the provider's embedding API; `"local"` uses a local GGUF model |
+| `backend` | string | `"cloud"` | `"cloud"` uses the provider's embedding API; `"local"` uses a local GGUF via llama-cpp-2 |
 | `query_prefix` | string or null | `null` | Optional prefix prepended to search queries |
 | `cloud` | object | (see below) | Cloud embedding model config |
 | `local` | object | (see below) | Local GGUF embedding config |

@@ -47,12 +47,15 @@
             ++ lib.optionals (lib.strings.hasInfix "linux" system) [
               mold
               clang
+              cmake
               pkgs.pkgsCross.mingwW64.stdenv.cc
               alsa-lib
               libayatana-appindicator
               mesa
               vulkan-loader
+              vulkan-headers
               vulkan-tools
+              shaderc
               libudev-zero
               libgbm
               libx11

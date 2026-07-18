@@ -1,70 +1,53 @@
-//! Local `llama-server` subprocess provider for proactive decisions (#165).
-//!
-//! Starts an OpenAI-compatible server on loopback only. Does not implement GPU
-//! kernels; acceleration is delegated to the external binary.
+//! In-process llama-cpp-2 provider for proactive decisions (#165 / #171).
 
-mod process;
 mod routing;
 
-pub use process::{LlamaServerHandle, LlamaServerSpec, resolve_llama_server_executable};
 pub use routing::{
     DecisionProviderKind, DisabledDecisionProvider, ProactiveLlmHandles,
     build_proactive_llm_handles,
 };
 
+use crate::config::ProactiveDecisionProviderConfig;
+use crate::error::LlmProviderError;
+use crate::llama_cpp::{LoadSpec, LoadedModel, generate_chat};
+use crate::message::{LlmMessage, LlmResponseChunk};
+use crate::traits::LlmProvider;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_stream::Stream;
 
-use crate::error::LlmProviderError;
-use crate::message::{LlmMessage, LlmResponseChunk};
-use crate::openai::OpenAiProvider;
-use crate::traits::LlmProvider;
-
-/// OpenAI-compatible client backed by a managed local `llama-server`.
+/// Local decision provider backed by an in-process llama.cpp model.
 pub struct LocalLlamaCppProvider {
-    inner: OpenAiProvider,
-    server: Arc<Mutex<Option<LlamaServerHandle>>>,
+    model: Arc<Mutex<LoadedModel>>,
+    request_timeout: Duration,
 }
 
 impl LocalLlamaCppProvider {
-    /// Start `llama-server` from `spec` and wrap it as an [`LlmProvider`].
-    pub async fn start(spec: LlamaServerSpec) -> Result<Self, LlmProviderError> {
-        let handle = LlamaServerHandle::spawn(spec).await?;
-        let base = format!("http://127.0.0.1:{}", handle.port());
-        // llama-server accepts any non-empty key (or none); use a placeholder.
-        let inner = OpenAiProvider::new(&base, "local", "local")
-            .with_chat_max_tokens(256)
-            .with_thinking_disabled(true);
+    /// Load GGUF weights from `cfg` and wrap as an [`LlmProvider`].
+    pub fn load(cfg: &ProactiveDecisionProviderConfig) -> Result<Self, LlmProviderError> {
+        let model_path = LoadSpec::validate_model_path(&cfg.model_path)?;
+        let spec = LoadSpec {
+            model_path,
+            acceleration: cfg.acceleration,
+            gpu_layers: cfg.gpu_layers.clone(),
+            context_size: cfg.context_size.max(256),
+        };
+        let loaded = LoadedModel::load(&spec)?;
         Ok(Self {
-            inner,
-            server: Arc::new(Mutex::new(Some(handle))),
+            model: Arc::new(Mutex::new(loaded)),
+            request_timeout: Duration::from_secs(cfg.request_timeout_seconds.max(1)),
         })
     }
 
-    /// Gracefully stop the child process (preferred over relying on `Drop`).
-    pub async fn shutdown(&self) {
-        let handle = { self.server.lock().take() };
-        if let Some(handle) = handle {
-            handle.shutdown().await;
-        }
-    }
-
-    /// Loopback port the server listens on (for tests / diagnostics).
-    #[must_use]
-    pub fn port(&self) -> Option<u16> {
-        self.server.lock().as_ref().map(LlamaServerHandle::port)
-    }
-}
-
-impl Drop for LocalLlamaCppProvider {
-    fn drop(&mut self) {
-        if let Some(handle) = self.server.lock().take() {
-            handle.kill_blocking();
-        }
-    }
+    /// No-op for API compatibility with the former subprocess provider.
+    #[expect(
+        clippy::unused_async,
+        reason = "async kept for ProactiveLlmHandles::shutdown API"
+    )]
+    pub async fn shutdown(&self) {}
 }
 
 #[async_trait]
@@ -85,13 +68,17 @@ impl LlmProvider for LocalLlamaCppProvider {
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
     > {
-        // Decision path must not use tools.
         if !tools.is_empty() {
             return Err(LlmProviderError::Provider(
                 "local decision provider does not allow tool calls".to_string(),
             ));
         }
-        self.inner.create_chat_stream(messages, &[]).await
+        let text = self.chat_completion(messages, None).await?;
+        let stream = tokio_stream::once(Ok(LlmResponseChunk {
+            text_delta: Some(text),
+            tool_calls_delta: None,
+        }));
+        Ok(Box::pin(stream))
     }
 
     async fn chat_completion(
@@ -99,7 +86,16 @@ impl LlmProvider for LocalLlamaCppProvider {
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
     ) -> Result<String, LlmProviderError> {
-        self.inner.chat_completion(messages, json_schema).await
+        let messages = messages.to_vec();
+        let schema = json_schema;
+        let model = Arc::clone(&self.model);
+        let timeout = self.request_timeout;
+        tokio::task::spawn_blocking(move || {
+            let guard = model.lock();
+            generate_chat(&guard, &messages, schema.as_ref(), timeout)
+        })
+        .await
+        .map_err(|e| LlmProviderError::LocalLlm(format!("decision task join error: {e}")))?
     }
 }
 
@@ -145,7 +141,6 @@ mod tests {
                 decision: ProactiveDecisionProviderConfig {
                     backend: ProactiveDecisionBackend::LlamaCpp,
                     model_path: String::new(),
-                    executable: "/nonexistent/llama-server".into(),
                     acceleration: ProactiveAcceleration::Cpu,
                     fallback: ProactiveDecisionFallback::Disabled,
                     ..ProactiveDecisionProviderConfig::default()
@@ -158,9 +153,6 @@ mod tests {
             Ok(_) => panic!("expected empty model path to fail"),
             Err(e) => e,
         };
-        assert!(
-            matches!(err, LlmProviderError::LocalProcess(_)),
-            "got {err:?}"
-        );
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)), "got {err:?}");
     }
 }

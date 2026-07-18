@@ -68,7 +68,7 @@ pub fn create_local_provider(
 ) -> Result<Box<dyn EmbeddingProvider>, EneEmbeddingError>;
 ```
 
-Requires a **multi-thread** tokio runtime (`block_in_place`). Supported Hub fetch families are the Jina v5 retrieval models; other GGUF layouts need direct `GgufEmbeddingProvider::load`.
+Requires a **multi-thread** tokio runtime (`block_in_place`). Inference uses **llama-cpp-2** with last-token pooling (Jina v5). Supported Hub fetch families are the Jina v5 retrieval models; other GGUFs need direct `GgufEmbeddingProvider::load`. Migrating from the former Candle path may require re-indexing local vector stores.
 
 ## `Role` / `HistoryEntry`
 

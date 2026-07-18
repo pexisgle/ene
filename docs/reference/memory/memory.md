@@ -195,7 +195,7 @@ pub enum EmbeddingError {
 
 Implementations:
 - `CloudEmbeddingProvider` — OpenAI-compatible API with batch embedding and optional HyDE via LLM.
-- `GgufEmbeddingProvider` — Local GGUF inference via Candle (GPU-free), serial batch.
+- `GgufEmbeddingProvider` — Local GGUF inference via llama-cpp-2 (last-token pooling), serial batch.
 - `HybridRerankProvider` — Wraps a primary embedder with optional LLM for HyDE / rerank.
 
 ## Summarization

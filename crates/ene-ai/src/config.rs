@@ -60,9 +60,9 @@ ene_config::define_config!(
 );
 
 ene_config::define_label_enum!(
-    /// Backend used for proactive speech decisions (#103 / #165).
+    /// Backend used for proactive speech decisions (#103 / #165 / #171).
     pub enum ProactiveDecisionBackend {
-        /// Local `llama-server` subprocess (OpenAI-compatible on loopback).
+        /// In-process llama-cpp-2 (GGUF on `model_path`).
         LlamaCpp => "llama_cpp",
         /// Existing cloud OpenAI-compatible provider with an optional model override.
         Cloud => "cloud",
@@ -98,7 +98,7 @@ ene_config::define_label_enum!(
     }
 );
 
-/// Local / cloud decision model settings for proactive speech (#103 / #165).
+/// Local / cloud decision model settings for proactive speech (#103 / #165 / #171).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -107,15 +107,13 @@ pub struct ProactiveDecisionProviderConfig {
     pub backend: ProactiveDecisionBackend,
     /// Absolute or relative path to the decision GGUF weights.
     pub model_path: String,
-    /// Path to `llama-server` (empty = resolve from `PATH`).
-    pub executable: String,
     /// Preferred acceleration backend.
     pub acceleration: ProactiveAcceleration,
     /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
     pub gpu_layers: String,
-    /// Context size for the decision server (small is preferred).
+    /// Context size for the decision model (small is preferred).
     pub context_size: u32,
-    /// Bounded wait for `llama-server` health ready.
+    /// Bounded wait for local GGUF model load.
     pub startup_timeout_seconds: u64,
     /// Per-request timeout for decision completion.
     pub request_timeout_seconds: u64,
@@ -130,7 +128,6 @@ impl Default for ProactiveDecisionProviderConfig {
         Self {
             backend: ProactiveDecisionBackend::Disabled,
             model_path: String::new(),
-            executable: String::new(),
             acceleration: ProactiveAcceleration::Auto,
             gpu_layers: "auto".to_string(),
             context_size: 2048,

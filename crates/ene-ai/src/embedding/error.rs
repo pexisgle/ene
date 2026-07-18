@@ -3,9 +3,9 @@ use thiserror::Error;
 /// Errors that can occur during local embedding generation.
 #[derive(Error, Debug)]
 pub enum EneEmbeddingError {
-    /// Error from the Candle ML inference engine (model load, forward pass, tokenizer).
-    #[error("Candle ML error: {0}")]
-    CandleError(String),
+    /// Error from the local llama.cpp embedding path (model load, forward, tokenize).
+    #[error("local embedding error: {0}")]
+    LocalLlm(String),
     /// A pre-existing typed embedding error, propagated unchanged.
     #[error(transparent)]
     Provider(#[from] crate::EmbeddingError),
@@ -14,8 +14,17 @@ pub enum EneEmbeddingError {
 impl From<EneEmbeddingError> for crate::EmbeddingError {
     fn from(e: EneEmbeddingError) -> Self {
         match e {
-            EneEmbeddingError::CandleError(msg) => Self::Init(msg),
+            EneEmbeddingError::LocalLlm(msg) => Self::Init(msg),
             EneEmbeddingError::Provider(inner) => inner,
+        }
+    }
+}
+
+impl From<crate::error::LlmProviderError> for EneEmbeddingError {
+    fn from(e: crate::error::LlmProviderError) -> Self {
+        match e {
+            crate::error::LlmProviderError::LocalLlm(msg) => Self::LocalLlm(msg),
+            other => Self::LocalLlm(other.to_string()),
         }
     }
 }

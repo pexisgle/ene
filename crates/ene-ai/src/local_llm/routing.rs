@@ -1,6 +1,6 @@
-//! Decision provider routing for proactive speech (#165).
+//! Decision provider routing for proactive speech (#165 / #171).
 
-use super::{LlamaServerSpec, LocalLlamaCppProvider};
+use super::LocalLlamaCppProvider;
 use crate::config::{
     ProactiveDecisionBackend, ProactiveDecisionFallback, ProactiveDecisionProviderConfig,
     ProviderConfig,
@@ -17,7 +17,7 @@ use tokio_stream::Stream;
 /// Which decision backend is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionProviderKind {
-    /// Local llama-server.
+    /// In-process llama-cpp-2.
     LlamaCpp,
     /// Cloud OpenAI-compatible.
     Cloud,
@@ -63,20 +63,20 @@ impl LlmProvider for DisabledDecisionProvider {
     }
 }
 
-/// Owned proactive LLM handles (decision + optional local process).
+/// Owned proactive LLM handles (decision + optional local model).
 pub struct ProactiveLlmHandles {
     /// Provider used for structured decisions.
     pub decision: Arc<dyn LlmProvider>,
     /// Backend kind in use.
     pub decision_kind: DecisionProviderKind,
-    /// Local server (if any) for explicit shutdown.
+    /// Local model (if any) for explicit shutdown.
     local: Option<Arc<LocalLlamaCppProvider>>,
     /// Effective generation model name for proactive utterances.
     pub generation_model: String,
 }
 
 impl ProactiveLlmHandles {
-    /// Shut down any local `llama-server` child.
+    /// Shut down any local resources (model drop is sufficient; kept for API stability).
     pub async fn shutdown(&self) {
         if let Some(local) = &self.local {
             local.shutdown().await;
@@ -145,8 +145,18 @@ pub async fn build_proactive_llm_handles(
 async fn start_local(
     decision_cfg: &ProactiveDecisionProviderConfig,
 ) -> Result<LocalLlamaCppProvider, LlmProviderError> {
-    let spec = LlamaServerSpec::from_config(decision_cfg)?;
-    LocalLlamaCppProvider::start(spec).await
+    let cfg = decision_cfg.clone();
+    let load_timeout = std::time::Duration::from_secs(cfg.startup_timeout_seconds.max(1));
+    let join = tokio::task::spawn_blocking(move || LocalLlamaCppProvider::load(&cfg));
+    match tokio::time::timeout(load_timeout, join).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(LlmProviderError::LocalLlm(format!(
+            "local model load join error: {e}"
+        ))),
+        Err(_) => Err(LlmProviderError::LocalLlm(format!(
+            "local model load timed out after {load_timeout:?}"
+        ))),
+    }
 }
 
 fn build_cloud_decision_provider(
@@ -168,8 +178,7 @@ fn build_cloud_decision_provider(
     Ok(Arc::new(cloud))
 }
 
-/// Optional env-gated smoke: only runs when `ENE_LOCAL_LLM_BIN` and
-/// `ENE_LOCAL_LLM_MODEL` are set.
+/// Optional env-gated smoke: only runs when `ENE_LOCAL_LLM_MODEL` is set.
 #[cfg(test)]
 mod smoke {
     use super::*;
@@ -179,10 +188,9 @@ mod smoke {
     };
     use crate::message::UserMessagePart;
 
-    fn env_smoke_enabled() -> Option<(String, String, ProactiveAcceleration)> {
-        let bin = std::env::var("ENE_LOCAL_LLM_BIN").ok()?;
+    fn env_smoke_enabled() -> Option<(String, ProactiveAcceleration)> {
         let model = std::env::var("ENE_LOCAL_LLM_MODEL").ok()?;
-        if bin.trim().is_empty() || model.trim().is_empty() {
+        if model.trim().is_empty() {
             return None;
         }
         let accel = match std::env::var("ENE_LOCAL_LLM_BACKEND")
@@ -194,12 +202,12 @@ mod smoke {
             "cuda" => ProactiveAcceleration::Cuda,
             _ => ProactiveAcceleration::Cpu,
         };
-        Some((bin, model, accel))
+        Some((model, accel))
     }
 
     #[tokio::test]
     async fn optional_local_llama_smoke() {
-        let Some((bin, model, accel)) = env_smoke_enabled() else {
+        let Some((model, accel)) = env_smoke_enabled() else {
             return;
         };
         let provider_cfg = ProviderConfig {
@@ -207,7 +215,6 @@ mod smoke {
                 decision: ProactiveDecisionProviderConfig {
                     backend: ProactiveDecisionBackend::LlamaCpp,
                     model_path: model,
-                    executable: bin,
                     acceleration: accel,
                     fallback: ProactiveDecisionFallback::Disabled,
                     context_size: 1024,

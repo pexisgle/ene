@@ -17,14 +17,14 @@ Companion / AITuber 体験では、ユーザーが明示的に話しかけたと
 | Crate | 責務 |
 |---|---|
 | `ene-mind` | `ProactiveContext` の構築、決定論的ゲート、判定プロンプト、`ProactiveDecision` の解析・正規化。OS API・スケジューラ・UI には依存しない。 |
-| `ene-ai` | 判定モデルのルーティング: `llama_cpp`（loopback 上の `llama-server` 子プロセス）、`cloud`（OpenAI 互換の model override）、`disabled`。発話生成は既存の chat `LlmProvider` を再利用。子プロセスは明示的な async shutdown。 |
+| `ene-ai` | 判定モデルのルーティング: `llama_cpp`（プロセス内 llama-cpp-2 GGUF）、`cloud`（OpenAI 互換の model override）、`disabled`。発話生成は既存の chat `LlmProvider` を再利用。ローカル handle は明示的な async shutdown。 |
 | `ene-runtime` | interval スケジューリング、ユーザー turn との `TurnGate` 統合、`TurnOrigin`、履歴・イベント、観測投入 API、diagnostics。 |
 | `ene-desktop` | プライバシー配慮の OS 観測、設定 UI、能動発話の chat 表示。 |
 
 ### 依存ルール
 
 - `ene-mind` は `ene-runtime` / `ene-tool-host` / OS 観測クレートに依存しない。
-- `ene-ai` は chat 用 GPU kernel や GGUF forward を自前実装せず、`llama-server` の lifecycle と OpenAI 互換クライアントのみを持つ。
+- `ene-ai` は判定（およびローカル embedding）に llama-cpp-2 を埋め込む。`llama-server` を起動せず、Candle グラフも持たない。
 - Desktop 観測は `ene-desktop`（または desktop 内 platform module）に閉じる。raw screenshot は `ene-mind` / `ene-store` に入らない。
 
 ### 判定から発話まで
@@ -91,17 +91,17 @@ Timer / observation update
 | 判定 | `provider.proactive.decision.backend`: `llama_cpp` \| `cloud` \| `disabled` |
 | 生成 | `provider.proactive.generation_model` があればそれ、なければ `provider.model` |
 
-`llama_cpp` は loopback 限定で `llama-server` を起動する。`acceleration` は `auto` / `vulkan` / `cuda` / `cpu`。ローカル失敗時は設定された `fallback`（`disabled` または `cloud`）のみに従う。fallback が `disabled` のとき、観測コンテキストを黙ってクラウドへ送らない。
+`llama_cpp` は llama-cpp-2 で GGUF をプロセス内ロードする。`acceleration` は `auto` / `vulkan` / `cuda` / `cpu`。ローカル失敗時は設定された `fallback`（`disabled` または `cloud`）のみに従う。fallback が `disabled` のとき、観測コンテキストを黙ってクラウドへ送らない。
 
-実行ファイルと GGUF はアプリに同梱しない。パスはユーザー設定。
+GGUF 重みはアプリに同梱しない。外部 `llama-server` も不要。パスはユーザー設定。
 
 ### Fail-closed まとめ
 
 - 不正な設定 → 安全な default / clamp。明示的に有効化するまで機能はオフ。
-- ローカル server 不在・health timeout・process crash → typed error → 発話しない（cloud fallback は設定時のみ）。
+- ローカルモデル欠如・load 失敗・timeout → typed error → 発話しない（cloud fallback は設定時のみ）。
 - 不正な Decision JSON → `should_speak = false`。
 - 判定中のユーザー `run()` → decision を破棄し、ユーザーターンを優先。
-- shutdown で timer・判定・生成・`llama-server` をすべて停止。
+- shutdown で timer・判定・生成を止め、ローカル llama.cpp handle を解放。
 
 ## 影響
 

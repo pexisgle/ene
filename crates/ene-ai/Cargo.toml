@@ -7,9 +7,15 @@ description = "LLM and embedding providers for the ene platform"
 [lib]
 crate-type = ["lib"]
 
+[features]
+default = []
+# GPU backends for llama-cpp-2 (decision + local embedding).
+vulkan = ["llama-cpp-2/vulkan"]
+cuda = ["llama-cpp-2/cuda"]
+
 [dependencies]
 async-openai = { workspace = true, default-features = false }
-tokio = { workspace = true, features = ["process", "io-util", "sync", "time", "macros", "rt"] }
+tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt"] }
 parking_lot = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
@@ -21,10 +27,8 @@ ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }
 ctor = { workspace = true }
 thiserror = { workspace = true }
-candle-core = { workspace = true }
-candle-nn = { workspace = true }
-tokenizers = { workspace = true }
-
+llama-cpp-2 = { workspace = true, default-features = false, features = ["common"] }
+encoding_rs = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-openai = { workspace = true, default-features = false, features = ["rustls", "byot"] }

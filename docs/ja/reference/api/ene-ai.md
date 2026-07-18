@@ -63,7 +63,7 @@ pub async fn embed_query(
 pub fn create_local_provider(...) -> Result<Box<dyn EmbeddingProvider>, EneEmbeddingError>;
 ```
 
-**マルチスレッド** tokio ランタイムが必要（`block_in_place`）。
+**マルチスレッド** tokio ランタイムが必要（`block_in_place`）。推論は **llama-cpp-2**（Jina v5 向け last-token pooling）。旧 Candle 経路からの移行時はローカルベクトルストアの再インデックスが必要になる場合がある。
 
 ## `Role` / `HistoryEntry`
 

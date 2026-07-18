@@ -15,10 +15,9 @@ tokio-util = "0.7"
 
 # ── AI / LLM ──
 async-openai = { version = "0.41", default-features = false, features = ["chat-completion", "embedding", "byot"] }
-candle-core = "0.11"
-candle-nn = "0.11"
 hf-hub = { version = "1.0.0-rc.1", default-features = false }
-tokenizers = "0.23"
+llama-cpp-2 = { version = "0.1.151", default-features = false }
+encoding_rs = "0.8"
 
 # ── GUI / Rendering / 3D ──
 bytemuck = { version = "1", features = ["derive"] }

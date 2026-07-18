@@ -5,7 +5,7 @@
 //! Defines generic message and streaming types (`LlmMessage`, `LlmResponseChunk`),
 //! provider traits (`LlmProvider`, `EmbeddingProvider`, `LlmProviderFactory`),
 //! a global provider registry, the built-in OpenAI-compatible implementation,
-//! and local GGUF embedding via Candle.
+//! and local GGUF embedding / decision inference via llama-cpp-2.
 #![warn(missing_docs)]
 #![expect(
     clippy::option_if_let_else,
@@ -28,7 +28,9 @@ pub mod embedding;
 pub mod error;
 /// Hybrid HyDE / rerank helpers (primary embedder + optional LLM).
 pub mod hybrid;
-/// Local `llama-server` decision provider (#165).
+/// Shared llama-cpp-2 adapter (decision + embedding).
+pub(crate) mod llama_cpp;
+/// In-process llama.cpp decision provider (#165 / #171).
 pub mod local_llm;
 /// Unified chat message and streaming types.
 pub mod message;
@@ -45,14 +47,14 @@ pub use config::{
     ProactiveDecisionProviderConfig, ProactiveProviderConfig, ProviderConfig,
 };
 pub use embedding::{
-    EneEmbeddingError, GgufEmbeddingProvider, create_local_provider, resolve_gguf_paths,
+    EneEmbeddingError, GgufEmbeddingProvider, create_local_provider, resolve_gguf_path,
+    resolve_gguf_paths,
 };
 pub use error::{AiError, LlmProviderError};
 pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
 pub use local_llm::{
-    DecisionProviderKind, DisabledDecisionProvider, LlamaServerHandle, LlamaServerSpec,
-    LocalLlamaCppProvider, ProactiveLlmHandles, build_proactive_llm_handles,
-    resolve_llama_server_executable,
+    DecisionProviderKind, DisabledDecisionProvider, LocalLlamaCppProvider, ProactiveLlmHandles,
+    build_proactive_llm_handles,
 };
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{

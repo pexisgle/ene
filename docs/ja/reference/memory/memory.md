@@ -188,7 +188,7 @@ pub enum EmbeddingError {
 
 実装:
 - `CloudEmbeddingProvider` — バッチ埋め込みと LLM による HyDE を備えた OpenAI 互換 API
-- `GgufEmbeddingProvider` — Candle によるローカル GGUF 推論 (GPU 不要)、シリアルバッチ
+- `GgufEmbeddingProvider` — llama-cpp-2 によるローカル GGUF 推論（last-token pooling）、シリアルバッチ
 - `HybridRerankProvider` — HyDE / リランキング用にオプションの LLM を備えたプライマリ埋め込みラッパー
 
 ## 要約

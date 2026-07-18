@@ -1,24 +1,15 @@
-//! Local embedding example using ene-ai.
+//! Local embedding example using ene-ai (llama-cpp-2).
 //!
 //! Demonstrates loading a GGUF-quantized model from disk and computing
 //! embeddings with cosine similarity comparison.
 //!
-//! Requires a GGUF model file in the `models/` directory.
-//! Download from `HuggingFace`:
-//!   huggingface-cli download jinaai/jina-embeddings-v5-text-small
+//! Requires a GGUF model file in the `models/` directory (or HF cache).
 //!
-//! Requires a multi-thread tokio runtime. The GGUF forward
-//! pass uses `tokio::task::block_in_place`, which panics on
-//! a `current_thread` runtime (or outside any runtime). The
-//! `#[tokio::main]` macro below uses the default
-//! multi-thread flavor, so this example is correct as
-//! written; consumers porting the example to their own
-//! `Runtime::new()` must pass an explicit
-//! `Builder::new_multi_thread()`.
+//! Requires a multi-thread tokio runtime (`block_in_place`).
 
 use ene_ai::EmbeddingProvider;
 use ene_ai::cosine_similarity;
-use ene_ai::{GgufEmbeddingProvider, resolve_gguf_paths};
+use ene_ai::{GgufEmbeddingProvider, resolve_gguf_path};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,34 +17,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let quantization = "F16";
     let model_dir = std::path::PathBuf::from("./models");
 
-    // Resolve GGUF and tokenizer file paths
-    let (gguf_path, tokenizer_path) = resolve_gguf_paths(model_name, quantization, model_dir)?;
+    let gguf_path = resolve_gguf_path(model_name, quantization, model_dir)?;
 
     println!("Loading model: {model_name}");
     println!("GGUF path: {}", gguf_path.display());
-    println!("Tokenizer path: {}", tokenizer_path.display());
 
-    // Load the model (GPU-free, runs on CPU via Candle)
-    let max_length = 8192;
-    let provider = GgufEmbeddingProvider::load(
-        model_name,
-        gguf_path.to_str().unwrap_or(""),
-        tokenizer_path.to_str().unwrap_or(""),
-        max_length,
-        quantization,
-    )?;
+    let provider =
+        GgufEmbeddingProvider::load(model_name, gguf_path.to_str().unwrap_or(""), quantization)?;
 
     println!("Model dimensions: {}", provider.dimensions());
     println!("Model name: {}", provider.model_name());
 
-    // Compute embeddings for three sentences. We
-    // reuse the same provider and the same tokio
-    // runtime (the one #[tokio::main] installed)
-    // across all three calls; the previous form
-    // constructed a fresh `Runtime::new()` per
-    // embed_query, which is wasteful and would
-    // panic on a `block_in_place` call from a
-    // current_thread flavor.
     let text1 = "The cat sat on the mat.";
     let text2 = "A feline rested on a rug.";
     let text3 = "The stock market crashed today.";

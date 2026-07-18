@@ -72,7 +72,6 @@ pub struct EneConfig {
     "decision": {
       "backend": "disabled",
       "model_path": "",
-      "executable": "",
       "acceleration": "auto",
       "gpu_layers": "auto",
       "context_size": 2048,
@@ -90,17 +89,16 @@ pub struct EneConfig {
 |-----------|------|---------|------|
 | `decision.backend` | string | `"disabled"` | `"llama_cpp"` / `"cloud"` / `"disabled"` |
 | `decision.model_path` | string | `""` | 判定用 GGUF のパス（`llama_cpp` 時に必要） |
-| `decision.executable` | string | `""` | `llama-server` のパス（空なら `PATH`） |
 | `decision.acceleration` | string | `"auto"` | `"auto"` / `"vulkan"` / `"cuda"` / `"cpu"` |
-| `decision.gpu_layers` | string | `"auto"` | `"auto"` または `--n-gpu-layers` 用の整数文字列 |
+| `decision.gpu_layers` | string | `"auto"` | `"auto"` または GPU layer offload 用の整数文字列 |
 | `decision.context_size` | int | `2048` | 判定用の小さなコンテキスト |
-| `decision.startup_timeout_seconds` | int | `60` | ローカル server の health 待機 |
+| `decision.startup_timeout_seconds` | int | `60` | ローカル GGUF ロードの待機上限 |
 | `decision.request_timeout_seconds` | int | `20` | 判定リクエストのタイムアウト |
 | `decision.fallback` | string | `"disabled"` | ローカル失敗時: `"disabled"` または `"cloud"`（disabled 時は黙ってクラウドへ送らない） |
 | `decision.cloud_model` | string | `""` | 判定用クラウドモデルの任意 override |
 | `generation_model` | string | `""` | 能動発話の生成モデル。空なら `provider.model` |
 
-接続先と認証は `provider.base_url` / `provider.api_key` を再利用する。実行ファイルと GGUF は同梱しない。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
+接続先と認証は `provider.base_url` / `provider.api_key` を再利用する。GGUF は同梱せず、外部 `llama-server` も不要。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
 
 #### `provider.api_key` — API キー設定
 
@@ -114,7 +112,7 @@ pub struct EneConfig {
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `backend` | string | `"cloud"` | `"cloud"` はプロバイダの埋め込み API を使用、`"local"` はローカル GGUF モデルを使用 |
+| `backend` | string | `"cloud"` | `"cloud"` はプロバイダの埋め込み API を使用、`"local"` は llama-cpp-2 経由のローカル GGUF |
 | `query_prefix` | string or null | `null` | 検索クエリに付加するプレフィックス |
 | `cloud` | object | (下記参照) | クラウド埋め込みモデル設定 |
 | `local` | object | (下記参照) | ローカル GGUF 埋め込み設定 |

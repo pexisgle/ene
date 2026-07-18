@@ -17,14 +17,14 @@ Adopt proactive companion speech with the following fixed contracts.
 | Crate | Responsibility |
 |---|---|
 | `ene-mind` | Build `ProactiveContext`, run deterministic gates, format the decision prompt, parse/normalize `ProactiveDecision`. No OS APIs, scheduler, or UI. |
-| `ene-ai` | Decision model routing: `llama_cpp` (local `llama-server` subprocess on loopback), `cloud` (OpenAI-compatible model override), or `disabled`. Generation reuses the existing chat `LlmProvider`. Explicit async shutdown of child processes. |
+| `ene-ai` | Decision model routing: `llama_cpp` (in-process llama-cpp-2 GGUF), `cloud` (OpenAI-compatible model override), or `disabled`. Generation reuses the existing chat `LlmProvider`. Explicit async shutdown of local handles. |
 | `ene-runtime` | Interval scheduling, single-flight `TurnGate` integration with user turns, `TurnOrigin`, history/event emission, observation intake API, diagnostics. |
 | `ene-desktop` | Privacy-aware OS observation, settings UI, chat rendering for proactive turns. |
 
 ### Dependency rules
 
 - `ene-mind` does **not** depend on `ene-runtime`, `ene-tool-host`, or OS observation crates.
-- `ene-ai` does **not** implement GPU kernels or GGUF forward graphs for chat; it manages `llama-server` lifecycle and an OpenAI-compatible client.
+- `ene-ai` embeds llama-cpp-2 for local decision (and local embedding); it does not spawn `llama-server` or implement Candle graphs for chat/embedding.
 - Desktop observation stays in `ene-desktop` (or a desktop-local platform module). Raw screenshots never enter `ene-mind` / `ene-store`.
 
 ### Decision → utterance flow
@@ -91,17 +91,17 @@ Each source has an independent enable flag. When disabled, desktop must not capt
 | Decision | `provider.proactive.decision.backend`: `llama_cpp` \| `cloud` \| `disabled` |
 | Generation | `provider.proactive.generation_model` if set, else `provider.model` |
 
-`llama_cpp` runs `llama-server` on loopback only. `acceleration` is `auto` / `vulkan` / `cuda` / `cpu`. On local failure, follow configured `fallback` (`disabled` or `cloud`) — never silently upload observation context to the cloud when fallback is `disabled`.
+`llama_cpp` loads a GGUF in-process via llama-cpp-2. `acceleration` is `auto` / `vulkan` / `cuda` / `cpu`. On local failure, follow configured `fallback` (`disabled` or `cloud`) — never silently upload observation context to the cloud when fallback is `disabled`.
 
-Binary and GGUF weights are **not** bundled with the app; paths are configured by the user.
+GGUF weights are **not** bundled with the app; paths are configured by the user. No external `llama-server` binary is required.
 
 ### Fail-closed summary
 
 - Invalid config → safe defaults / clamps; feature stays off unless explicitly enabled.
-- Local server missing, health timeout, process crash → typed error → no speech (optional cloud fallback only if configured).
+- Local model missing, load failure, timeout → typed error → no speech (optional cloud fallback only if configured).
 - Malformed decision JSON → `should_speak = false`.
 - User `run()` during decision → discard decision; prefer the user turn.
-- Shutdown cancels timer, in-flight decision, generation, and `llama-server`.
+- Shutdown cancels timer, in-flight decision, generation, and releases local llama.cpp handles.
 
 ## Consequences
 
