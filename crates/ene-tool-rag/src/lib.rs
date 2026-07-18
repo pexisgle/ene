@@ -2,14 +2,14 @@
 //!
 //! Tool RAG (Retrieval-Augmented Generation) pipeline for the ene AI character platform.
 //!
-//! Provides multi-vector tool embedding with weighted field similarity scoring
-//! and embedding-based reranking.
+//! Provides multi-vector tool embedding with weighted field similarity scoring,
+//! optional `HyDE` (Hypothetical Document Embedding), and optional LLM-based reranking.
 //!
 //! ## Key Types
 //!
 //! - [`ToolRag`] — The RAG pipeline: embedding, similarity scoring, reranking, and tool selection
 //! - [`ToolRagOptions`] — Runtime options resolved from configuration
-//! - [`ToolRagConfig`] — Code-default pipeline configuration (not in public settings schema)
+//! - [`ToolRagConfig`] — User-facing configuration (serialized into `settings.json`)
 //! - [`FieldWeights`] — Per-field weight controls for multi-vector scoring
 //! - [`ToolRagStats`] — Observability snapshot returned by [`ToolRag::stats`]
 //!
@@ -42,7 +42,8 @@
 pub mod config;
 /// Tool RAG error types.
 pub mod error;
-/// Tool RAG pipeline — multi-vector tool embedding and weighted field similarity.
+/// Tool RAG pipeline — multi-vector tool embedding, weighted field similarity,
+/// optional HyDE and LLM rerank.
 pub mod rag;
 
 /// Tool RAG configuration types.
