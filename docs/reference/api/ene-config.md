@@ -471,8 +471,8 @@ pub struct MotionEntry {
 ## Prompt Templates: `PromptLibrary`
 
 `PromptLibrary` loads the LLM-facing prompt strings (system prompt
-framing, emotion rules, memory/summarizer/extractor/affect-classifier
-templates) used throughout `ene-runtime`, keeping user-facing prose out of
+framing, emotion rules, memory/summarizer/extractor/affect-classifier/
+proactive-speech templates) used throughout `ene-runtime`, keeping user-facing prose out of
 compiled code and giving each string a stable, localisable home.
 
 ```rust
@@ -499,6 +499,7 @@ pub struct PromptLibrary { /* opaque: PromptLibraryData + lang */ }
 | `split()` | `&SplitPrompts` | Session-split reason message templates (`reason_timeout`, `reason_topic`, `reason_context`, `reason_composite`, `reason_manual`). Has `render_reason_timeout(minutes)`, `render_reason_topic(similarity)`, `render_reason_composite(score)`. |
 | `extractor()` | `&ExtractorPrompts` | LLM memory-extractor system/user prompt templates. Has `render_user_prompt(conversation, pattern_hints)`. |
 | `affect_classifier()` | `&AffectClassifierPrompts` | LLM affect-classifier system/user prompt templates. Has `render_user_prompt(current_affect, conversation)`. |
+| `proactive()` | `&ProactivePrompts` | Proactive speech gate, generation-hint, and screen-summary templates. Has `render_generation_hint(topic_hint)`. |
 
 ### `substitute`
 

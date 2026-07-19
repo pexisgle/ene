@@ -32,6 +32,8 @@ pub struct PromptLibraryData {
     pub extractor: ExtractorPrompts,
     /// Affect classifier prompts configuration (#88).
     pub affect_classifier: AffectClassifierPrompts,
+    /// Proactive speech / screen-summary prompts.
+    pub proactive: ProactivePrompts,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +50,8 @@ struct RawPromptLibraryData {
     extractor: RawExtractorPrompts,
     #[serde(default)]
     affect_classifier: RawAffectClassifierPrompts,
+    #[serde(default)]
+    proactive: RawProactivePrompts,
 }
 
 /// Prompt templates for the system prompt.
@@ -312,6 +316,77 @@ impl AffectClassifierPrompts {
     }
 }
 
+/// Prompt templates for proactive speech (decision gate, generation hint, screen summary).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProactivePrompts {
+    /// System prompt for the proactive speak/don't-speak JSON gate.
+    pub decision_system: String,
+    /// Generation hint when the decision has no topic hint.
+    pub generation_hint_idle: String,
+    /// Generation hint template with `{topic}` when a topic hint is present.
+    pub generation_hint_with_topic: String,
+    /// System prompt for local screen-image summarization.
+    pub screen_summary_system: String,
+    /// User prompt for local screen-image summarization.
+    pub screen_summary_user: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "JSON keys mirror on-disk path fields (*_path) for PromptLibrary locale files"
+)]
+struct RawProactivePrompts {
+    #[serde(default = "default_proactive_decision_system_path")]
+    decision_system_path: String,
+    #[serde(default = "default_proactive_generation_hint_idle_path")]
+    generation_hint_idle_path: String,
+    #[serde(default = "default_proactive_generation_hint_with_topic_path")]
+    generation_hint_with_topic_path: String,
+    #[serde(default = "default_proactive_screen_summary_system_path")]
+    screen_summary_system_path: String,
+    #[serde(default = "default_proactive_screen_summary_user_path")]
+    screen_summary_user_path: String,
+}
+
+fn default_proactive_decision_system_path() -> String {
+    "en/proactive/decision_system.md".into()
+}
+
+fn default_proactive_generation_hint_idle_path() -> String {
+    "en/proactive/generation_hint_idle.md".into()
+}
+
+fn default_proactive_generation_hint_with_topic_path() -> String {
+    "en/proactive/generation_hint_with_topic.md".into()
+}
+
+fn default_proactive_screen_summary_system_path() -> String {
+    "en/proactive/screen_summary_system.md".into()
+}
+
+fn default_proactive_screen_summary_user_path() -> String {
+    "en/proactive/screen_summary_user.md".into()
+}
+
+impl ProactivePrompts {
+    /// Renders the generation hint, choosing idle vs topic template.
+    pub fn render_generation_hint(&self, topic_hint: &str) -> String {
+        let topic = topic_hint.trim();
+        if topic.is_empty() {
+            self.generation_hint_idle.trim().to_string()
+        } else {
+            substitute(&self.generation_hint_with_topic, &[("topic", topic)])
+                .trim()
+                .to_string()
+        }
+    }
+}
+
 impl SplitPrompts {
     /// Renders the split reason timeout message.
     pub fn render_reason_timeout(&self, minutes: &str) -> String {
@@ -444,6 +519,33 @@ impl PromptLibrary {
                 ))
                 .to_string(),
             },
+            proactive: ProactivePrompts {
+                decision_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/decision_system.md"
+                ))
+                .to_string(),
+                generation_hint_idle: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/generation_hint_idle.md"
+                ))
+                .to_string(),
+                generation_hint_with_topic: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/generation_hint_with_topic.md"
+                ))
+                .to_string(),
+                screen_summary_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/screen_summary_system.md"
+                ))
+                .to_string(),
+                screen_summary_user: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/screen_summary_user.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -548,6 +650,33 @@ impl PromptLibrary {
                 ))
                 .to_string(),
             },
+            proactive: ProactivePrompts {
+                decision_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/decision_system.md"
+                ))
+                .to_string(),
+                generation_hint_idle: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/generation_hint_idle.md"
+                ))
+                .to_string(),
+                generation_hint_with_topic: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/generation_hint_with_topic.md"
+                ))
+                .to_string(),
+                screen_summary_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/screen_summary_system.md"
+                ))
+                .to_string(),
+                screen_summary_user: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/screen_summary_user.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -595,6 +724,11 @@ impl PromptLibrary {
     pub const fn affect_classifier(&self) -> &AffectClassifierPrompts {
         &self.data.affect_classifier
     }
+
+    /// Returns reference to proactive speech prompts.
+    pub const fn proactive(&self) -> &ProactivePrompts {
+        &self.data.proactive
+    }
 }
 
 /// Substitutes `{variable_name}` placeholders in `template` with the provided
@@ -632,6 +766,8 @@ mod tests {
         assert!(!lib.system().mascot_context.is_empty());
         assert!(!lib.emotion().header.is_empty());
         assert!(!lib.summarizer().system.is_empty());
+        assert!(!lib.proactive().decision_system.is_empty());
+        assert!(!lib.proactive().screen_summary_system.is_empty());
     }
 
     #[test]
@@ -688,6 +824,12 @@ mod tests {
         assert!(
             sum_user.contains("{conversation}"),
             "[{source}] summarizer.user_prompt template must contain {{conversation}}"
+        );
+
+        let gen_topic = &lib.proactive().generation_hint_with_topic;
+        assert!(
+            gen_topic.contains("{topic}"),
+            "[{source}] proactive.generation_hint_with_topic must contain {{topic}}"
         );
     }
 }

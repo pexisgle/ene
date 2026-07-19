@@ -2,12 +2,15 @@
 
 use crate::proactive::ProactiveContext;
 use ene_ai::{LlmMessage, Role, UserMessagePart};
+use ene_config::PromptLibrary;
 
 /// Build chat messages that instruct the model to return decision JSON only.
 #[must_use]
 pub fn build_decision_messages(context: &ProactiveContext) -> Vec<LlmMessage> {
+    // Backend LLM instructions stay English (AGENTS.md); JA templates exist for locale parity.
+    let prompts = PromptLibrary::load("en");
     let system = LlmMessage::System {
-        content: DECISION_SYSTEM_PROMPT.to_string(),
+        content: prompts.proactive().decision_system.trim().to_string(),
     };
     let user = LlmMessage::User {
         parts: vec![UserMessagePart::Text {
@@ -16,15 +19,6 @@ pub fn build_decision_messages(context: &ProactiveContext) -> Vec<LlmMessage> {
     };
     vec![system, user]
 }
-
-const DECISION_SYSTEM_PROMPT: &str = r#"You are a companion speech gate. Decide whether the character should speak unprompted right now.
-Return ONLY a JSON object with fields:
-- should_speak (boolean)
-- confidence (number 0..1)
-- reason (short internal string; never spoken aloud)
-- topic_hint (short optional hint for a later generator; may be empty)
-- urgency ("low" | "normal" | "high")
-Do not write dialogue. Do not greet. Do not invent user messages. Prefer should_speak=false when unsure."#;
 
 fn format_context_block(context: &ProactiveContext) -> String {
     let mut lines = Vec::new();

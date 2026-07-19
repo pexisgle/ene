@@ -486,7 +486,7 @@ pub struct MotionEntry {
 
 `PromptLibrary` は、`ene-runtime` 全体で使用される LLM 向けのプロンプト
 文字列（システムプロンプトのフレーミング、感情ルール、
-メモリ/サマライザー/エクストラクター/感情分類器のテンプレート）を
+メモリ/サマライザー/エクストラクター/感情分類器/プロアクティブ発話のテンプレート）を
 読み込みます。ユーザー向けの文章をコンパイル済みコードから分離し、
 各文字列に安定したローカライズ可能な場所を与えます。
 
@@ -514,6 +514,7 @@ pub struct PromptLibrary { /* 非公開: PromptLibraryData + lang */ }
 | `split()` | `&SplitPrompts` | セッション分割理由のメッセージテンプレート（`reason_timeout`、`reason_topic`、`reason_context`、`reason_composite`、`reason_manual`）。`render_reason_timeout(minutes)`、`render_reason_topic(similarity)`、`render_reason_composite(score)` を持つ。 |
 | `extractor()` | `&ExtractorPrompts` | LLM メモリエクストラクターのシステム/ユーザープロンプトテンプレート。`render_user_prompt(conversation, pattern_hints)` を持つ。 |
 | `affect_classifier()` | `&AffectClassifierPrompts` | LLM 感情分類器のシステム/ユーザープロンプトテンプレート。`render_user_prompt(current_affect, conversation)` を持つ。 |
+| `proactive()` | `&ProactivePrompts` | プロアクティブ発話ゲート、生成ヒント、画面要約のテンプレート。`render_generation_hint(topic_hint)` を持つ。 |
 
 ### `substitute`
 
