@@ -483,12 +483,12 @@ impl VrmModel {
     ///    `head` / `leftEye` / `rightEye` humanoid bones
     ///    whose [`LookAtBoneOutput`] carries a non-identity
     ///    delta, multiply the delta onto the **current** local
-    ///    rotation (`current * look_at_delta`). The LookAt step
+    ///    rotation (`current * look_at_delta`). The `LookAt` step
     ///    runs **after** the VRMA step so cursor tracking is
     ///    additive on top of the motion pose — overwriting with
     ///    `rest * delta` would discard head compensation that
-    ///    body-bowing clips rely on (e.g. VRMA_02), leaving the
-    ///    character staring at the floor whenever LookAt is
+    ///    body-bowing clips rely on (e.g. `VRMA_02`), leaving the
+    ///    character staring at the floor whenever `LookAt` is
     ///    active. Bones missing from the humanoid registry are
     ///    silently dropped, so the call is a no-op on models
     ///    without humanoid metadata.
@@ -595,8 +595,7 @@ impl VrmModel {
                 if entry.node >= self.nodes.local_rotations.len() {
                     continue;
                 }
-                self.nodes.local_rotations[entry.node] =
-                    self.nodes.local_rotations[entry.node] * delta.delta;
+                self.nodes.local_rotations[entry.node] *= delta.delta;
             }
         }
 
