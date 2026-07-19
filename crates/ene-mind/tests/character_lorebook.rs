@@ -1,4 +1,4 @@
-//! Phase 5 character processing integration tests (#82–#84).
+//! Character lorebook and style integration tests.
 
 #![expect(
     clippy::unwrap_used,

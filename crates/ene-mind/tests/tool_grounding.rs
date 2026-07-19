@@ -1,4 +1,4 @@
-//! Phase 8 tool grounding integration tests (#92).
+//! Tool grounding integration tests (result summarization, memory writer persistence).
 
 #![expect(
     clippy::expect_used,

@@ -387,7 +387,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_check_error_mapping() {
+    fn check_error_maps_all_error_codes_to_typed_variants() {
         let err_codes = vec![
             (DbErrorCode::PermissionDenied, "Permission Denied message"),
             (DbErrorCode::UnknownTable, "Unknown Table message"),

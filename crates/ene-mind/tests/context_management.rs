@@ -1,4 +1,4 @@
-//! Phase 6 context management tests (#79, #81).
+//! Context management integration tests (compression, prompt packing, config validation).
 
 use ene_mind::character::IdentityKernel;
 use ene_mind::{

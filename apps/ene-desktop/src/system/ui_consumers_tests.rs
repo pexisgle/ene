@@ -311,9 +311,6 @@ fn platform_plugin_provides_cursor_state_and_pointer_moved_is_reserved() {
 }
 
 #[test]
-fn mark_gtk_tick_removed_in_phase_75() {}
-
-#[test]
 fn question_draft_default_is_blank() {
     let d = QuestionDraft::default();
     assert_eq!(d.text, "");

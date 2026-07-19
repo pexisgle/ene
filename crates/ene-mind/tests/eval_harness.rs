@@ -1,3 +1,5 @@
+//! End-to-end eval harness tests (recall, identity, affect, before-turn scenarios).
+
 #![expect(
     clippy::unwrap_used,
     clippy::indexing_slicing,

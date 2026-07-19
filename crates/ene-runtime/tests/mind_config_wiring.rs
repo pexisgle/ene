@@ -1,4 +1,4 @@
-//! Smoke tests for the mind runtime configuration wiring.
+//! Integration tests for the mind runtime configuration wiring.
 //!
 //! Public `MindConfig` only exposes `emotion` and `proactive`;
 //! `context` / `memory` / `character` are code defaults (serde-skipped).

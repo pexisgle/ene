@@ -197,7 +197,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_summary_json() {
+    fn parse_summary_json_valid_input() {
         let json =
             r#"{"summary": "Test summary.", "key_facts": [{"key": "job", "value": "fact1"}]}"#;
         let result = parse_summary_json(json).unwrap();
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_summary_json_with_code_block() {
+    fn parse_summary_json_strips_markdown_fences() {
         let json = "```json\n{\"summary\": \"test\", \"key_facts\": []}\n```";
         let result = parse_summary_json(json).unwrap();
         assert_eq!(result.summary, "test");
@@ -217,7 +217,7 @@ mod tests {
     /// Regression test: the parser must NOT silently fall back to the raw LLM
     /// prose as a "summary". A non-JSON response is a structured error.
     #[test]
-    fn test_parse_summary_json_non_json_returns_error() {
+    fn parse_summary_json_non_json_input_returns_error() {
         let raw = "This is not valid JSON at all";
         let result = parse_summary_json(raw);
         assert!(result.is_err(), "expected an error, got {result:?}");

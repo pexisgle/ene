@@ -1,4 +1,4 @@
-//! Integration smoke tests for cognitive runtime streaming (#100).
+//! Basic integration tests for cognitive runtime streaming.
 
 #![expect(
     clippy::unwrap_used,

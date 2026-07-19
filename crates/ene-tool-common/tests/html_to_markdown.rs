@@ -1,3 +1,5 @@
+//! Integration tests for HTML-to-Markdown conversion and extraction utilities.
+
 use ene_tool_common::html::{extract_html, extract_markdown, html_to_markdown};
 
 #[test]
@@ -167,7 +169,7 @@ fn extract_markdown_full_no_trim_preserves_script_in_md() {
 }
 
 #[test]
-fn html_to_markdown_basic() {
+fn html_to_markdown_converts_headings_and_paragraphs() {
     let html = "<h1>Hello</h1><p>World</p>";
     let md = html_to_markdown(html);
     assert!(

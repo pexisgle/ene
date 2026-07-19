@@ -1830,7 +1830,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_broadcast_channels_lag_and_overflow() {
+    async fn broadcast_channels_emit_lag_on_overflow() {
         let handle = EneHandle::open(test_config_memory_off(), test_card())
             .await
             .expect("open initializes handle");

@@ -2298,7 +2298,7 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip_bytes() {
+    fn embedding_bytes_roundtrip() {
         let original = vec![1.0_f32, 0.5, -0.25, 0.0];
         let bytes = embedding_to_bytes(&original);
         let restored = bytes_to_embedding(&bytes);
@@ -2308,7 +2308,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_embedding_field_upsert_and_list() {
+    async fn tool_embedding_field_upsert_overwrites_and_list_filters() {
         let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
 
@@ -2401,7 +2401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_tool_embeddings_cascades() {
+    async fn delete_tool_embeddings_cascades_to_fields() {
         let store = setup_store().await;
         let emb = vec![1.0_f32, 0.0, 0.0, 0.0];
 
@@ -2531,7 +2531,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_insert_conversation_turn() {
+    async fn insert_conversation_turn_stores_and_retrieves() {
         let store = setup_store().await;
         let session_id = "turn-test-session";
 

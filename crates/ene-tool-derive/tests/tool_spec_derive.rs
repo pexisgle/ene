@@ -1,4 +1,4 @@
-//! Trybuild-style smoke test for the `#[derive(ToolSpec)]` proc-macro.
+//! Integration tests for the `#[derive(ToolSpec)]` proc-macro.
 #![expect(
     clippy::expect_used,
     reason = "proc-macro smoke tests use expect for schema assertions"
@@ -35,7 +35,7 @@ pub struct ReadArgs {
 }
 
 #[test]
-fn consts() {
+fn tool_spec_derive_produces_expected_consts() {
     assert_eq!(ReadArgs::TOOL_NAME, "filesystem.read");
     assert_eq!(ReadArgs::DISPLAY_NAME, "Read");
     assert_eq!(ReadArgs::SUMMARY, "Read a file from disk");

@@ -139,22 +139,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_simple_no_truncation() {
+    fn simple_returns_input_under_limit() {
         assert_eq!(Truncate::simple("hello", 10), "hello");
     }
 
     #[test]
-    fn test_simple_truncation() {
+    fn simple_truncates_with_ellipsis_over_limit() {
         assert_eq!(Truncate::simple("hello world", 5), "hello...");
     }
 
     #[test]
-    fn test_detailed_no_truncation() {
+    fn detailed_returns_input_under_limit() {
         assert_eq!(Truncate::detailed("hello", 10), "hello");
     }
 
     #[test]
-    fn test_detailed_truncation() {
+    fn detailed_truncates_with_metadata_over_limit() {
         let truncated = Truncate::detailed("hello world", 5);
         assert!(truncated.starts_with("hello"));
         assert!(truncated.contains("truncated"));
@@ -162,19 +162,19 @@ mod tests {
     }
 
     #[test]
-    fn test_chars_no_truncation() {
+    fn chars_returns_input_under_limit() {
         assert_eq!(Truncate::chars("hello", 10), "hello");
     }
 
     #[test]
-    fn test_chars_truncation() {
+    fn chars_truncates_over_limit() {
         let truncated = Truncate::chars("hello world", 5);
         assert!(truncated.starts_with("hello"));
         assert!(truncated.contains("truncated"));
     }
 
     #[test]
-    fn test_output_no_truncation_needed() {
+    fn output_returns_full_text_when_within_bounds() {
         let text = "line1\nline2\nline3";
         let result = Truncate::output(text, 10, 1000);
         assert!(!result.truncated);
@@ -182,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_by_lines() {
+    fn output_truncates_by_line_count() {
         let text = "line1\nline2\nline3\nline4\nline5";
         let result = Truncate::output(text, 3, 1000);
         assert!(result.truncated);
@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_by_bytes() {
+    fn output_truncates_by_byte_size() {
         let text = "this is a very long line that exceeds the byte limit";
         let result = Truncate::output(text, 100, 20);
         assert!(result.truncated);
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tail_no_truncation_needed() {
+    fn tail_returns_full_text_when_within_bounds() {
         let text = "line1\nline2\nline3";
         let result = Truncate::tail(text, 10, 1000);
         assert!(!result.truncated);
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tail_by_lines() {
+    fn tail_keeps_last_n_lines() {
         let text = "line1\nline2\nline3\nline4\nline5";
         let result = Truncate::tail(text, 3, 1000);
         assert!(result.truncated);

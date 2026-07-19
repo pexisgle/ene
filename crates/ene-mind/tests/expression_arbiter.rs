@@ -1,4 +1,4 @@
-//! Phase 7 expression arbiter integration tests (#89).
+//! Expression arbiter integration tests (resolution, hysteresis, classifier hints).
 
 #![expect(
     clippy::default_trait_access,

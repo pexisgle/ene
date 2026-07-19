@@ -18,7 +18,7 @@ use std::time::Duration;
 /// Sets up a mock IPC server and verifies the full flow from `IpcToolRegistry`
 /// connection through Handshake, `ListTools`, and `CallTool`
 #[tokio::test]
-async fn test_ipc_list_tools_and_call_tool() {
+async fn ipc_e2e_handshake_list_tools_and_call_tool() {
     let socket_path: PathBuf = {
         #[cfg(unix)]
         {

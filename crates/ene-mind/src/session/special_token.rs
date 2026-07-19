@@ -300,7 +300,7 @@ mod tests {
     // ── extract_emotion_from_token ──
 
     #[test]
-    fn test_extract_emotion_simple() {
+    fn extract_emotion_normalizes_case() {
         assert_eq!(
             extract_emotion_from_token("<|emo:happy|>"),
             Some("happy".to_string())
@@ -316,14 +316,14 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_emotion_invalid() {
+    fn extract_emotion_returns_none_for_non_emotion_tokens() {
         assert_eq!(extract_emotion_from_token("<|ACT:happy|>"), None);
         assert_eq!(extract_emotion_from_token("<|emo:|>"), None);
         assert_eq!(extract_emotion_from_token("not a token"), None);
     }
 
     #[test]
-    fn test_extract_emotion_whitespace() {
+    fn extract_emotion_strips_whitespace() {
         assert_eq!(
             extract_emotion_from_token("<|EMO:  happy  |>"),
             Some("happy".to_string())
@@ -333,7 +333,7 @@ mod tests {
     // ── split_text_and_special_tokens ──
 
     #[test]
-    fn test_split_text_and_special_tokens_no_tokens() {
+    fn split_tokens_plain_text_passes_through() {
         let mut carry = String::new();
         let (text, tokens) = split_text_and_special_tokens(&mut carry, "Hello world");
         assert_eq!(text, vec!["Hello world"]);
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_text_and_special_tokens_with_emotion() {
+    fn split_tokens_separates_emotion_marker() {
         let mut carry = String::new();
         let (text, tokens) = split_text_and_special_tokens(&mut carry, "Hello <|emo:happy|> world");
         assert_eq!(text, vec!["Hello ", " world"]);
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_text_and_special_tokens_with_perf() {
+    fn split_tokens_separates_performance_marker() {
         let mut carry = String::new();
         let (text, tokens) =
             split_text_and_special_tokens(&mut carry, "Hi <|perf:expr=happy|> there");
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_text_and_special_tokens_multiple() {
+    fn split_tokens_handles_multiple_markers() {
         let mut carry = String::new();
         let (text, tokens) =
             split_text_and_special_tokens(&mut carry, "A <|emo:happy|> B <|emo:sad|> C");
@@ -371,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_text_and_special_tokens_incomplete_at_end() {
+    fn split_tokens_buffers_incomplete_marker_at_chunk_end() {
         let mut carry = String::new();
         let (text, tokens) = split_text_and_special_tokens(&mut carry, "Hello <|emo");
         assert_eq!(text, vec!["Hello "]);
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_text_and_special_tokens_carry_continuation() {
+    fn split_tokens_completes_marker_across_chunks() {
         let mut carry = String::new();
         let (text1, _tokens1) = split_text_and_special_tokens(&mut carry, "Hello <|emo");
         assert_eq!(text1, vec!["Hello "]);
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_text_and_special_tokens_trailing_angle_bracket() {
+    fn split_buffers_bare_angle_bracket_at_end() {
         let mut carry = String::new();
         let (text, tokens) = split_text_and_special_tokens(&mut carry, "Hello <");
         assert_eq!(text, vec!["Hello "]);
@@ -402,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_text_and_special_tokens_empty_chunk() {
+    fn split_tokens_empty_input_returns_empty() {
         let mut carry = String::new();
         let (text, tokens) = split_text_and_special_tokens(&mut carry, "");
         assert!(text.is_empty());
@@ -426,7 +426,7 @@ mod tests {
     // ── parse_performance_marker ──
 
     #[test]
-    fn parse_expr_simple() {
+    fn parse_expression_name_only_without_optional_params() {
         let cue = parse_performance_marker("<|perf:expr=happy|>").unwrap();
         assert_eq!(cue.kind, crate::output::PerfKind::Expression);
         assert_eq!(cue.name, "happy");
@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_motion_simple() {
+    fn parse_motion_name_only_without_optional_layer() {
         let cue = parse_performance_marker("<|perf:motion=wave|>").unwrap();
         assert_eq!(cue.kind, crate::output::PerfKind::Motion);
         assert_eq!(cue.name, "wave");

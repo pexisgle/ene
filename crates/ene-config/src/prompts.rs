@@ -642,7 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_variables_validation() {
+    fn prompt_libraries_contain_required_template_variables() {
         // Test compile-time embedded english prompts
         let lib_en = PromptLibrary::built_in_english();
         verify_library_variables(&lib_en, "built-in en");

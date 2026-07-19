@@ -1,4 +1,4 @@
-//! Phase 7 emotion engine integration tests (#86, #88).
+//! Emotion engine integration tests (valence, appraisal, decay, classifier).
 
 use std::time::Duration;
 
