@@ -114,6 +114,8 @@ Commands are entered with `/` prefix:
 
 Progress and tool logs are rendered by a custom `tracing` layer as an ASCII tree when spans are nested (parallel pre-turn / post-turn work). Flat `tracing` events without an open span print as single lines. LLM text streams on stdout.
 
+Each log line is colored by level (`INFO` green, `WARN` yellow, `ERROR` red) and shows a source label (`component` field when present, otherwise the short tracing target), for example `INFO MemoryWriter: …`. Span names in the tree are cyan.
+
 | Channel | Content |
 |---------|---------|
 | stderr (tree / flat) | Pipeline phases, tools, post-turn memory / affect |

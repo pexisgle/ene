@@ -114,6 +114,8 @@ pub trait CliCommand: Send + Sync {
 
 進捗・ツールログはカスタム `tracing` Layer が出力する。ネストした span（並列 pre-turn / post-turn）は ASCII ツリー、span 外のイベントは 1 行で表示する。LLM テキストは stdout にストリームする。
 
+各ログ行はレベル色（`INFO` 緑 / `WARN` 黄 / `ERROR` 赤）と出所ラベル（`component` があればそれ、なければ短い tracing target）付きで、例: `INFO MemoryWriter: …`。ツリー上の span 名はシアン。
+
 | チャネル | 内容 |
 |---------|------|
 | stderr（ツリー / フラット） | パイプライン段階、ツール、post-turn メモリ / affect |

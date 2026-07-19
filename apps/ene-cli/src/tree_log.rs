@@ -2,17 +2,31 @@
 //!
 //! Out-of-order child events (A1 → B1 → A2) still produce a correct parent/child
 //! tree because nodes are keyed by span id and re-rendered as a block.
+//!
+//! Lines keep level colors and a source label (`component` field, else target)
+//! so the tree stays readable after replacing the default `fmt` subscriber.
 
 use crate::terminal_ui::TerminalUi;
+use console::style;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Subscriber};
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
+
+#[derive(Debug, Clone)]
+struct LogEvent {
+    level: Level,
+    /// `component` field, else short tracing target.
+    source: String,
+    message: String,
+    /// Extra structured fields (tool, turn, …), already formatted.
+    extras: String,
+}
 
 #[derive(Debug)]
 struct TreeNode {
@@ -23,7 +37,7 @@ struct TreeNode {
 
 #[derive(Debug)]
 enum Child {
-    Event(String),
+    Event(LogEvent),
     Span(Id),
 }
 
@@ -65,6 +79,39 @@ impl Forest {
     }
 }
 
+fn dim_branch(s: &str) -> String {
+    style(s).dim().to_string()
+}
+
+fn style_span_name(name: &str) -> String {
+    style(name).cyan().bold().to_string()
+}
+
+fn style_level(level: Level) -> String {
+    match level {
+        Level::ERROR => style("ERROR").red().bold().to_string(),
+        Level::WARN => style("WARN").yellow().bold().to_string(),
+        Level::INFO => style("INFO").green().to_string(),
+        Level::DEBUG => style("DEBUG").dim().to_string(),
+        Level::TRACE => style("TRACE").dim().to_string(),
+    }
+}
+
+fn format_log_event(event: &LogEvent) -> String {
+    let level = style_level(event.level);
+    let source = style(event.source.as_str()).cyan().to_string();
+    if event.extras.is_empty() {
+        format!("{level} {source}: {}", event.message)
+    } else {
+        let extras = style(event.extras.as_str()).dim().to_string();
+        format!("{level} {source}: {} {extras}", event.message)
+    }
+}
+
+fn format_flat_line(event: &LogEvent) -> String {
+    format_log_event(event)
+}
+
 fn render_node(
     id: &Id,
     nodes: &HashMap<Id, TreeNode>,
@@ -75,27 +122,59 @@ fn render_node(
     let Some(node) = nodes.get(id) else {
         return;
     };
-    let branch = if is_last { "└ " } else { "|- " };
-    lines.push(format!("{prefix}{branch}{}", node.name));
+    let branch = if is_last {
+        dim_branch("└ ")
+    } else {
+        dim_branch("|- ")
+    };
+    lines.push(format!("{prefix}{branch}{}", style_span_name(&node.name)));
 
     let child_prefix = if is_last {
-        format!("{prefix}  ")
+        format!("{prefix}{}", dim_branch("  "))
     } else {
-        format!("{prefix}| ")
+        format!("{prefix}{}", dim_branch("| "))
     };
     let child_count = node.children.len();
     for (i, child) in node.children.iter().enumerate() {
         let last = i + 1 == child_count;
         match child {
-            Child::Event(msg) => {
-                let b = if last { "└ " } else { "|- " };
-                lines.push(format!("{child_prefix}{b}{msg}"));
+            Child::Event(event) => {
+                let b = if last {
+                    dim_branch("└ ")
+                } else {
+                    dim_branch("|- ")
+                };
+                lines.push(format!("{child_prefix}{b}{}", format_log_event(event)));
             }
             Child::Span(cid) => {
                 render_node(cid, nodes, &child_prefix, last, lines);
             }
         }
     }
+}
+
+fn short_target(target: &str) -> &str {
+    target.rsplit("::").next().unwrap_or(target)
+}
+
+fn build_log_event(event: &Event<'_>) -> Option<LogEvent> {
+    let mut visitor = FieldVisitor::default();
+    event.record(&mut visitor);
+    if visitor.message.is_empty() {
+        return None;
+    }
+    let meta = event.metadata();
+    let source = visitor
+        .component
+        .take()
+        .unwrap_or_else(|| short_target(meta.target()).to_string());
+    let extras = visitor.extras_string();
+    Some(LogEvent {
+        level: *meta.level(),
+        source,
+        message: visitor.message,
+        extras,
+    })
 }
 
 struct TreeLogState {
@@ -202,12 +281,9 @@ where
     fn on_record(&self, _span: &Id, _values: &Record<'_>, _ctx: Context<'_, S>) {}
 
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let mut visitor = MessageVisitor::default();
-        event.record(&mut visitor);
-        let message = visitor.message;
-        if message.is_empty() {
+        let Some(log) = build_log_event(event) else {
             return;
-        }
+        };
 
         let current = ctx.event_span(event).map(|s| s.id());
         let mut state = self.state.lock();
@@ -224,7 +300,7 @@ where
                 return;
             };
             if let Some(node) = state.forest.nodes.get_mut(&span_id) {
-                node.children.push(Child::Event(message));
+                node.children.push(Child::Event(log));
             }
             state.refresh();
             return;
@@ -234,7 +310,7 @@ where
         if !state.forest.is_empty() {
             state.finalize();
         }
-        state.ui.writeln(&message);
+        state.ui.writeln(&format_flat_line(&log));
     }
 
     fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
@@ -247,37 +323,102 @@ where
 }
 
 #[derive(Default)]
-struct MessageVisitor {
+struct FieldVisitor {
     message: String,
+    component: Option<String>,
+    extras: Vec<(String, String)>,
 }
 
-impl Visit for MessageVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
-        if field.name() == "message" {
-            self.message = format!("{value:?}");
+impl FieldVisitor {
+    fn extras_string(&self) -> String {
+        if self.extras.is_empty() {
+            return String::new();
         }
+        self.extras
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn push_extra(&mut self, name: &str, value: String) {
+        if name == "message" {
+            return;
+        }
+        if name == "component" {
+            self.component = Some(value);
+            return;
+        }
+        // Keep the line scannable; truncate very large payloads (tool args/results).
+        let value = if value.chars().count() > 120 {
+            let truncated: String = value.chars().take(117).collect();
+            format!("{truncated}…")
+        } else {
+            value
+        };
+        self.extras.push((name.to_string(), value));
+    }
+}
+
+impl Visit for FieldVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        let text = format!("{value:?}");
+        if field.name() == "message" {
+            // Debug of &str includes quotes; prefer record_str when possible.
+            self.message = text.trim_matches('"').to_string();
+            return;
+        }
+        self.push_extra(field.name(), text);
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
         if field.name() == "message" {
             self.message = value.to_string();
+            return;
         }
+        self.push_extra(field.name(), value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.push_extra(field.name(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.push_extra(field.name(), value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.push_extra(field.name(), value.to_string());
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Child, Forest, TreeNode};
+    use super::{Child, Forest, LogEvent, TreeNode, format_log_event};
     use std::collections::HashMap;
+    use tracing::Level;
     use tracing::span::Id;
 
     fn id(n: u64) -> Id {
         Id::from_u64(n)
     }
 
+    fn plain(s: &str) -> String {
+        console::strip_ansi_codes(s).into_owned()
+    }
+
     enum TestChild {
-        Event(String),
+        Event(LogEvent),
         Span(u64, String, Vec<TestChild>),
+    }
+
+    fn info_event(source: &str, message: &str) -> LogEvent {
+        LogEvent {
+            level: Level::INFO,
+            source: source.to_string(),
+            message: message.to_string(),
+            extras: String::new(),
+        }
     }
 
     fn insert_recursive(
@@ -289,7 +430,7 @@ mod tests {
         let mut node_children = Vec::new();
         for child in children {
             match child {
-                TestChild::Event(msg) => node_children.push(Child::Event(msg.clone())),
+                TestChild::Event(ev) => node_children.push(Child::Event(ev.clone())),
                 TestChild::Span(cid, cname, grandchildren) => {
                     let child_id = id(*cid);
                     node_children.push(Child::Span(child_id.clone()));
@@ -314,7 +455,7 @@ mod tests {
             forest.roots.push(span_id.clone());
             insert_recursive(&mut forest.nodes, span_id, name, children);
         }
-        forest.render()
+        forest.render().iter().map(|l| plain(l)).collect()
     }
 
     #[test]
@@ -324,31 +465,26 @@ mod tests {
                 1,
                 "LOG_A",
                 vec![
-                    TestChild::Event("LOG_A_1".into()),
-                    TestChild::Event("LOG_A_2".into()),
+                    TestChild::Event(info_event("embedding", "LOG_A_1")),
+                    TestChild::Event(info_event("embedding", "LOG_A_2")),
                 ],
             ),
             (
                 2,
                 "LOG_B",
                 vec![
-                    TestChild::Event("LOG_B_1".into()),
-                    TestChild::Event("LOG_B_2".into()),
+                    TestChild::Event(info_event("ccv3_sync", "LOG_B_1")),
+                    TestChild::Event(info_event("ccv3_sync", "LOG_B_2")),
                 ],
             ),
         ]);
 
-        assert_eq!(
-            lines,
-            vec![
-                "|- LOG_A".to_string(),
-                "| |- LOG_A_1".to_string(),
-                "| └ LOG_A_2".to_string(),
-                "└ LOG_B".to_string(),
-                "  |- LOG_B_1".to_string(),
-                "  └ LOG_B_2".to_string(),
-            ]
-        );
+        assert_eq!(lines[0], "|- LOG_A");
+        assert!(lines[1].contains("INFO embedding: LOG_A_1"));
+        assert!(lines[2].contains("INFO embedding: LOG_A_2"));
+        assert_eq!(lines[3], "└ LOG_B");
+        assert!(lines[4].contains("INFO ccv3_sync: LOG_B_1"));
+        assert!(lines[5].contains("INFO ccv3_sync: LOG_B_2"));
     }
 
     #[test]
@@ -360,12 +496,18 @@ mod tests {
                 TestChild::Span(
                     2,
                     "embedding".to_string(),
-                    vec![TestChild::Event("Generating embedding...".into())],
+                    vec![TestChild::Event(info_event(
+                        "streaming_cognitive",
+                        "Generating embedding...",
+                    ))],
                 ),
                 TestChild::Span(
                     3,
                     "ccv3_sync".to_string(),
-                    vec![TestChild::Event("Synchronizing...".into())],
+                    vec![TestChild::Event(info_event(
+                        "streaming_cognitive",
+                        "Synchronizing...",
+                    ))],
                 ),
             ],
         )]);
@@ -373,5 +515,24 @@ mod tests {
         assert_eq!(lines[0], "└ phase_a");
         assert!(lines.iter().any(|l| l.contains("embedding")));
         assert!(lines.iter().any(|l| l.contains("ccv3_sync")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("INFO streaming_cognitive: Generating embedding..."))
+        );
+    }
+
+    #[test]
+    fn format_includes_level_source_and_extras() {
+        let line = plain(&format_log_event(&LogEvent {
+            level: Level::WARN,
+            source: "MemoryWriter".into(),
+            message: "Post-turn memory extraction failed".into(),
+            extras: "character_id=Alicia".into(),
+        }));
+        assert_eq!(
+            line,
+            "WARN MemoryWriter: Post-turn memory extraction failed character_id=Alicia"
+        );
     }
 }
