@@ -1,4 +1,4 @@
-//! Settings UI — the 3-page tabbed window that mirrors the legacy
+//! Settings UI — the tabbed window that mirrors the legacy
 //! Bevy `apps/ene-desktop/src/settings_ui/`.
 //!
 //! The runtime owns a single [`SettingsUi`] per `UiWindow`. Each
@@ -8,6 +8,7 @@ pub mod input;
 pub mod page_ai;
 pub mod page_character;
 pub mod page_debug;
+pub mod page_features;
 pub mod page_graphics;
 pub mod page_memory;
 pub mod widgets;
@@ -29,6 +30,7 @@ pub enum PageKind {
     Character,
     Graphics,
     Ai,
+    Features,
     Memory,
     Debug,
 }
@@ -86,6 +88,7 @@ impl SettingsUi {
                 PageKind::Character,
                 PageKind::Graphics,
                 PageKind::Ai,
+                PageKind::Features,
                 PageKind::Memory,
                 PageKind::Debug,
             ] {
@@ -94,6 +97,7 @@ impl SettingsUi {
                     PageKind::Graphics => crate::i18n::graphics(),
                     PageKind::Debug => crate::i18n::debug(),
                     PageKind::Ai => crate::i18n::ai(),
+                    PageKind::Features => crate::i18n::features(),
                     PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
                 };
                 if ui
@@ -129,6 +133,7 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
+            PageKind::Features => page_features::render(ui, settings, ai),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
             PageKind::Debug => {
                 page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);

@@ -138,6 +138,24 @@ handled on the chat window. History is reconciled from
 `EneStateSnapshot.history` when the window opens and after each
 completed turn.
 
+### Settings window
+
+Opened with F1 or Tray → Settings. Tabs:
+
+| Tab | Contents |
+|-----|----------|
+| Character | VRM selection, motion, look-at, position, expression test |
+| Graphics | Language, quality preset |
+| AI | Chat/embedding providers, proactive speech timing |
+| Features | On/off for memory, emotion, proactive speech, tools, Tool RAG, and per-tool enable |
+| Memory | Memory journal (browse / recall debug) |
+| Debug | Session overlays (colliders, input region) |
+
+Feature toggles persist to `settings.json` (`store.enabled`,
+`mind.emotion.enabled`, `mind.proactive.enabled`, `tools.enabled`,
+`tools.rag.enabled`, `tools.list.<name>.enable`). Proactive timing
+knobs remain on the AI tab; the master switch is on Features.
+
 ### Message types
 
 The messages registered by `CorePlugin` include:

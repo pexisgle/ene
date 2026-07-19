@@ -21,7 +21,6 @@ pub struct SettingsInputState {
     pub ai_api_key_source: String,
     pub ai_api_key: String,
     pub ai_api_key_env: String,
-    pub ai_memory_enabled: bool,
     pub ai_embedding_provider: String,
     pub ai_embedding_model: String,
     pub ai_embedding_dimensions: String,
@@ -58,12 +57,6 @@ impl SettingsInputState {
             .ai
             .get_section::<ene_runtime::AiConfig>()
             .unwrap_or_default();
-        let mem = settings
-            .ai
-            .ai
-            .get_section::<ene_store::StoreConfig>()
-            .unwrap_or_default();
-        self.ai_memory_enabled = mem.enabled;
         self.ai_chat_model = ai_cfg.tasks.chat.model.clone().unwrap_or_default();
         if let Some(AiProviderDef::OpenaiCompatible { base_url, api_key }) =
             ai_cfg.providers.get(&ai_cfg.tasks.chat.provider)

@@ -1,6 +1,7 @@
-//! AI settings page — embedding, memory, and proactive speech configuration.
+//! AI settings page — embedding and proactive speech timing.
 //!
 //! Chat lives in the dedicated chat window (F2); see #109.
+//! Feature on/off toggles live on the Features tab.
 
 use super::input::SettingsInputState;
 use crate::ai_bridge::AiBridge;
@@ -71,11 +72,6 @@ pub fn render(
         .ai
         .ai
         .get_section::<ene_runtime::AiConfig>()
-        .unwrap_or_default();
-    let mut memory = settings
-        .ai
-        .ai
-        .get_section::<ene_store::StoreConfig>()
         .unwrap_or_default();
 
     ui.vertical(|ui| {
@@ -302,38 +298,14 @@ pub fn render(
         });
 
         ui.separator();
-        ui.label(crate::i18n::memory_settings());
-
-        ui.horizontal(|ui| {
-            let mut checked = input.ai_memory_enabled;
-            ui.checkbox(&mut checked, crate::i18n::enable_long_term_memory());
-            if checked != input.ai_memory_enabled {
-                input.ai_memory_enabled = checked;
-                memory.enabled = checked;
-                let _ = settings.ai.ai.set_section(&memory);
-                settings.mark_dirty();
-            }
-        });
-
-        ui.separator();
         ui.label(crate::i18n::proactive_speech());
+        ui.weak(crate::i18n::features_proactive_timing_hint());
 
         let mut mind = settings
             .ai
             .ai
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
-
-        ui.horizontal(|ui| {
-            let mut enabled = mind.proactive.enabled;
-            ui.checkbox(&mut enabled, crate::i18n::proactive_enabled());
-            if enabled != mind.proactive.enabled {
-                mind.proactive.enabled = enabled;
-                let _ = settings.ai.ai.set_section(&mind);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind);
-            }
-        });
 
         ui.horizontal(|ui| {
             ui.label(crate::i18n::proactive_interval());

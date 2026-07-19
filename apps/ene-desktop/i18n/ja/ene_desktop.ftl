@@ -149,6 +149,18 @@ proactive-fallback = ローカル失敗時のフォールバック
 proactive-model-path = ローカル判定モデルパス（GGUF）
 proactive-generation-model = 生成モデル override（任意）
 
+# Features
+features = 機能
+features-hint = 主要な機能の on/off を切り替えます。タイミングやプロバイダー設定は AI タブにあります。
+features-mind = Mind
+features-tools = ツール
+features-per-tool = ツール別
+features-proactive-timing-hint = マスタースイッチは機能タブにあります。
+enable-emotion = 感情処理を有効化
+enable-tools = ツール呼び出しを有効化
+enable-tool-rag = Tool RAG を有効化
+enable-tool = ツールを有効化
+
 # Permission
 permission-requested = 権限が要求されました
 action-label = アクション

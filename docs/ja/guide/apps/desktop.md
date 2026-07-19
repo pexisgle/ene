@@ -125,6 +125,24 @@ tokio EneActor (ene-runtime)
                 → UiStateComponent / CharacterSettings
 ```
 
+### 設定ウィンドウ
+
+F1 またはトレイ → Settings で開きます。タブ構成:
+
+| タブ | 内容 |
+|------|------|
+| Character | VRM 選択、モーション、視線、位置、表情テスト |
+| Graphics | 言語、画質プリセット |
+| AI | チャット / 埋め込みプロバイダー、能動発話のタイミング |
+| Features | メモリ・感情・能動発話・ツール・Tool RAG・ツール別 enable の on/off |
+| Memory | メモリジャーナル（閲覧 / recall デバッグ） |
+| Debug | セッション専用オーバーレイ（コライダー、入力領域） |
+
+機能トグルは `settings.json` に保存されます（`store.enabled`、
+`mind.emotion.enabled`、`mind.proactive.enabled`、`tools.enabled`、
+`tools.rag.enabled`、`tools.list.<name>.enable`）。能動発話の
+タイミング設定は AI タブ、マスタースイッチは機能タブです。
+
 ### メッセージ型
 
 `CorePlugin` が登録する 13 種類のメッセージ:

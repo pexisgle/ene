@@ -149,6 +149,18 @@ proactive-fallback = Local failure fallback
 proactive-model-path = Local decision model path (GGUF)
 proactive-generation-model = Generation model override (optional)
 
+# Features
+features = Features
+features-hint = Toggle major capabilities. Timing and provider settings stay on the AI tab.
+features-mind = Mind
+features-tools = Tools
+features-per-tool = Per-tool
+features-proactive-timing-hint = Master switch is on the Features tab.
+enable-emotion = Enable emotion processing
+enable-tools = Enable tool calling
+enable-tool-rag = Enable Tool RAG
+enable-tool = Enable tool
+
 # Permission
 permission-requested = Permission Requested
 action-label = Action

@@ -21,6 +21,8 @@ ene-ai = { workspace = true }
 ene-store = { workspace = true }
 ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }
+ene-tool-host = { workspace = true }
+ene-tool-rag = { workspace = true }
 ene-vrm = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
