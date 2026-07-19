@@ -385,6 +385,16 @@ impl ProactivePrompts {
                 .to_string()
         }
     }
+
+    /// Renders the vision user prompt with the privacy-safe OS app label.
+    pub fn render_screen_summary_user(&self, app_label: &str) -> String {
+        substitute(
+            &self.screen_summary_user,
+            &[("app_label", app_label.trim())],
+        )
+        .trim()
+        .to_string()
+    }
 }
 
 impl SplitPrompts {
@@ -768,6 +778,14 @@ mod tests {
         assert!(!lib.summarizer().system.is_empty());
         assert!(!lib.proactive().decision_system.is_empty());
         assert!(!lib.proactive().screen_summary_system.is_empty());
+    }
+
+    #[test]
+    fn render_screen_summary_user_injects_app_label() {
+        let lib = PromptLibrary::built_in_english();
+        let rendered = lib.proactive().render_screen_summary_user("org.kde.kate");
+        assert!(rendered.contains("org.kde.kate"));
+        assert!(!rendered.contains("{app_label}"));
     }
 
     #[test]

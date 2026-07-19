@@ -42,7 +42,8 @@
       "chat": {
         "max_tokens": 8192,
         "model": "openai/gpt-4o-mini",
-        "provider": "openrouter"
+        "provider": "openrouter",
+        "supports_vision": true
       },
       "classifier": {
         "model": "google/gemini-2.5-flash-lite",
@@ -70,14 +71,14 @@
       "classifier_language": "ja"
     },
     "proactive": {
-      "enabled": false,
+      "enabled": true,
       "interval_seconds": 10,
       "min_idle_seconds": 20,
       "cooldown_seconds": 60,
       "sources": {
         "conversation": true,
         "activity": true,
-        "screen_summary": false
+        "screen_summary": true
       }
     }
   },

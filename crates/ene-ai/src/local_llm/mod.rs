@@ -185,6 +185,7 @@ mod tests {
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
+            supports_vision: false,
         });
         let handles = build_proactive_llm_handles(&cfg).await.expect("build");
         assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
@@ -209,6 +210,7 @@ mod tests {
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
+            supports_vision: false,
         });
         let handles = build_proactive_llm_handles(&cfg)
             .await
@@ -233,6 +235,7 @@ mod tests {
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
+            supports_vision: false,
         });
         let handles = build_proactive_llm_handles(&cfg)
             .await

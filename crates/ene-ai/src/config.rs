@@ -131,6 +131,9 @@ pub struct TaskRef {
     pub dimensions: Option<usize>,
     /// Optional query prefix for embedding retrieval queries (e.g. `"Query: "`).
     pub query_prefix: Option<String>,
+    /// When true, proactive generation may attach the decision-time screen frame.
+    #[serde(default)]
+    pub supports_vision: bool,
 }
 
 impl Default for TaskRef {
@@ -141,6 +144,7 @@ impl Default for TaskRef {
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
+            supports_vision: false,
         }
     }
 }
@@ -169,6 +173,7 @@ impl Default for AiTasksConfig {
                 max_tokens: Some(8192),
                 dimensions: None,
                 query_prefix: None,
+                supports_vision: false,
             },
             embedding: TaskRef {
                 provider: "default".to_string(),
@@ -176,6 +181,7 @@ impl Default for AiTasksConfig {
                 max_tokens: None,
                 dimensions: Some(1536),
                 query_prefix: None,
+                supports_vision: false,
             },
             classifier: None,
             proactive: None,
@@ -324,6 +330,7 @@ mod tests {
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
+            supports_vision: false,
         };
         let embed = cfg.resolve_embedding().expect("resolve local embedding");
         match embed {

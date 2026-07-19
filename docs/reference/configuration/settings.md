@@ -125,6 +125,7 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 | `max_tokens` | int | Max completion tokens for chat workloads (`0` = omit from request). OpenRouter reserves credit collateral against this ceiling |
 | `dimensions` | int | Expected embedding dimensions (cloud embedding) |
 | `query_prefix` | string or null | Optional prefix prepended to embedding retrieval queries (e.g. `"Query: "`) |
+| `supports_vision` | bool | When `true`, proactive generation may attach the decision-time screen frame (JPEG data URI). Default `false`. Set on `tasks.chat` (or cloud `tasks.proactive`) for vision-capable models |
 
 #### `ai.local_models` — Local GGUF Registry
 

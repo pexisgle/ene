@@ -139,6 +139,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         origin: TurnOrigin::User,
         allow_tools: false,
         runtime_directive: None,
+        proactive_screen_image: None,
         generation_timeout: None,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx,

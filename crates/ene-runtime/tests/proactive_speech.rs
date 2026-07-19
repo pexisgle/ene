@@ -120,6 +120,7 @@ async fn proactive_stream_does_not_add_user_history() {
         origin: TurnOrigin::Proactive,
         allow_tools: false,
         runtime_directive: Some("Speak briefly.".into()),
+        proactive_screen_image: None,
         generation_timeout: Some(std::time::Duration::from_secs(30)),
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
@@ -146,6 +147,78 @@ async fn proactive_stream_does_not_add_user_history() {
         !has_synthetic_user,
         "proactive directive must not inject synthetic user messages"
     );
+    let has_image = messages.iter().any(|m| {
+        let LlmMessage::User { parts } = m else {
+            return false;
+        };
+        parts
+            .iter()
+            .any(|p| matches!(p, ene_ai::UserMessagePart::Image { .. }))
+    });
+    assert!(!has_image, "no screen image was provided for this turn");
+}
+
+#[tokio::test]
+async fn proactive_stream_attaches_screen_image_when_provided() {
+    let mut card = CharacterCardV3::default();
+    card.data.name = "Ene".into();
+    card.data.system_prompt = "Be helpful.".into();
+
+    let mut session = ene_mind::ConversationSession::new();
+    session.character_card = Some(card);
+
+    let mut config = EneConfig::default();
+    let mut mind = MindConfig::default();
+    mind.proactive.enabled = true;
+    config.set_section(&mind).expect("mind");
+
+    let provider = Arc::new(EchoProvider {
+        last_messages: Mutex::new(Vec::new()),
+        response: "I see your screen!".into(),
+    });
+    let provider_for_assert = Arc::clone(&provider);
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+    let (diag_tx, _diag_rx) = tokio::sync::broadcast::channel(8);
+
+    let ctx = StreamContext {
+        config,
+        session,
+        user_input: String::new(),
+        embedder: None,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_tool_host::ToolRegistry>,
+        tool_rag: None,
+        provider,
+        event_tx,
+        diag_tx,
+        cancel_token: CancellationToken::new(),
+        pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        terminal_emitted: Arc::new(AtomicBool::new(false)),
+        turn: TurnId::new(),
+        origin: TurnOrigin::Proactive,
+        allow_tools: false,
+        runtime_directive: Some("React to the screen.".into()),
+        proactive_screen_image: Some("data:image/jpeg;base64,AAAA".into()),
+        generation_timeout: Some(std::time::Duration::from_secs(30)),
+        classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+    };
+
+    let outcome = run_stream_cognitive(ctx).await;
+    assert_eq!(outcome.terminal, TerminalReason::Done);
+    let messages = provider_for_assert.last_messages.lock().expect("lock");
+    let image_uri = messages.iter().find_map(|m| {
+        let LlmMessage::User { parts } = m else {
+            return None;
+        };
+        parts.iter().find_map(|p| match p {
+            ene_ai::UserMessagePart::Image { base64_image_data } => {
+                Some(base64_image_data.as_str())
+            }
+            _ => None,
+        })
+    });
+    assert_eq!(image_uri, Some("data:image/jpeg;base64,AAAA"));
 }
 
 #[tokio::test]
@@ -187,6 +260,7 @@ async fn proactive_stream_without_memory_store() {
         origin: TurnOrigin::Proactive,
         allow_tools: false,
         runtime_directive: Some("Check in briefly.".into()),
+        proactive_screen_image: None,
         generation_timeout: Some(std::time::Duration::from_secs(30)),
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,

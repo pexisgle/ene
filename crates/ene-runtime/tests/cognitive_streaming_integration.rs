@@ -139,6 +139,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         origin: ene_runtime::TurnOrigin::User,
         allow_tools: true,
         runtime_directive: None,
+        proactive_screen_image: None,
         generation_timeout: None,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,

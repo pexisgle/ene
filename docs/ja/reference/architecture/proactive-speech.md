@@ -44,15 +44,16 @@ Timer / observation update
 
 | フィールド | 型 | 備考 |
 |---|---|---|
+| `screen_digest` | string | 発話判定の前に `screen_summary` を整理した内部スケッチ。画面文脈が無いときは空。そのまま発話しない。短い 1〜4 行 |
 | `should_speak` | bool | 必須。欠落時は `false` |
 | `confidence` | f64 | 有限かつ `[0.0, 1.0]` 内であること。範囲外は fail-closed（`should_speak = false`）。欠落は `0.0` |
-| `reason` | string | 内部診断用。そのまま発話しない。短い 1〜3 行 |
-| `topic_hint` | string | 生成用の任意ヒント。欠落時は空。0〜2 行。`reason` のコピペ禁止 |
+| `reason` | string | 内部診断用。そのまま発話しない。短い 1〜3 行。`screen_digest` が空でないときはそれに根拠を置く |
+| `topic_hint` | string | 生成用の任意ヒント。欠落時は空。0〜2 行。`reason` / `screen_digest` のコピペ禁止 |
 | `urgency` | string | `low` / `normal` / `high`。未知は `normal` |
 
-**推奨出力順**（プロンプト + ローカル JSON grammar）: `reason` → `should_speak` → `confidence` → `topic_hint` → `urgency`。Rust パーサはキー順を問わない。grammar 制約付きローカルモデルは schema のプロパティ順に従う。
+**推奨出力順**（プロンプト + ローカル JSON grammar）: `screen_digest` → `reason` → `should_speak` → `confidence` → `topic_hint` → `urgency`。Rust パーサはキー順を問わない。grammar 制約付きローカルモデルは schema のプロパティ順に従う。欠落した `screen_digest` は `""` に正規化。
 
-**生成ヒント**（`generation_hint_idle` / `generation_hint_with_topic`）は最大 2〜3 行。**画面要約**は平文 2〜3 行（最大 3 文）。
+**生成ヒント**（`generation_hint_idle` / `generation_hint_with_topic`）は最大 2〜3 行。**画面要約**は平文 4〜6 行（1 行 1 事実を推奨）。vision のユーザープロンプトには機微でない OS アプリ名ラベルを事前情報として含め、主張は見える UI に根拠を置く。
 
 未知フィールドは無視する。parse / timeout / provider 失敗は fail-closed: `should_speak = false` として扱い、生成を開始しない。
 
@@ -87,7 +88,7 @@ Timer / observation update
 |---|---|---|
 | `conversation` | 直近の `HistoryEntry`（文字数上限で truncate） | セッション履歴のみ |
 | `activity` | 任意の idle ヒント、**アプリ名のみ**（生ウィンドウタイトルなし）、直近フォーカス変化 | キーログなし。V1 ではタイトルは収集しない |
-| `screen_summary` | デスクトップ要約プロバイダによる短命 **テキスト** 要約 | デスクトップがアクティブウィンドウ（またはプライマリディスプレイ）をキャプチャし、ローカル proactive GGUF + `mmproj`（Gemma 4）で要約。**テキストのみ**を転送。raw screenshot は永続化・ログ・mind/store に出さない |
+| `screen_summary` | デスクトップ要約プロバイダによる短命 **テキスト** 要約 | デスクトップは観測ティックごとに **新規** キャプチャ（クロスティックのキャッシュなし）し、ローカル proactive GGUF + `mmproj`（Gemma 4）で要約。mind へは **テキストのみ**。同じフレームは runtime actor 内に **短命保持**（JPEG data URI、mind/store には出さない）。生成側タスクが `supports_vision: true` のクラウドモデルなら、そのフレームを能動発話の生成ターンに添付する。このソース有効時は vision 直後に判定 LLM を起動する |
 
 各ソースは個別に有効 / 無効。無効時は desktop が収集せず、mind も判定プロンプトに含めない。
 

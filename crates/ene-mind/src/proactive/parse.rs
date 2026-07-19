@@ -9,8 +9,9 @@ pub fn decision_schema_object() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["reason", "should_speak", "confidence", "topic_hint", "urgency"],
+        "required": ["screen_digest", "reason", "should_speak", "confidence", "topic_hint", "urgency"],
         "properties": {
+            "screen_digest": { "type": "string" },
             "reason": { "type": "string" },
             "should_speak": { "type": "boolean" },
             "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
@@ -59,6 +60,12 @@ pub fn parse_decision_json(raw: &str) -> ProactiveDecision {
         }
         None => 0.0,
     };
+    let screen_digest = obj
+        .get("screen_digest")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let reason = obj
         .get("reason")
         .and_then(Value::as_str)
@@ -71,8 +78,8 @@ pub fn parse_decision_json(raw: &str) -> ProactiveDecision {
         .unwrap_or("")
         .trim()
         .to_string();
-    // ADR: topic_hint must not copy reason verbatim.
-    if !topic_hint.is_empty() && topic_hint == reason {
+    // ADR: topic_hint must not copy reason or screen_digest verbatim.
+    if !topic_hint.is_empty() && (topic_hint == reason || topic_hint == screen_digest) {
         topic_hint.clear();
     }
     let urgency = ProactiveUrgency::parse(obj.get("urgency").and_then(Value::as_str));
@@ -80,6 +87,7 @@ pub fn parse_decision_json(raw: &str) -> ProactiveDecision {
     ProactiveDecision {
         should_speak,
         confidence,
+        screen_digest,
         reason,
         topic_hint,
         urgency,
@@ -134,13 +142,32 @@ mod tests {
     }
 
     #[test]
-    fn parses_reason_first_field_order() {
+    fn parses_screen_digest_before_reason_field_order() {
         let d = parse_decision_json(
-            r#"{"reason":"idle with open thread","should_speak":true,"confidence":0.7,"topic_hint":"check in","urgency":"normal"}"#,
+            r#"{"screen_digest":"Text editor.\nEditing source.","reason":"idle with open thread","should_speak":true,"confidence":0.7,"topic_hint":"check in","urgency":"normal"}"#,
         );
         assert!(d.should_speak);
+        assert_eq!(d.screen_digest, "Text editor.\nEditing source.");
         assert_eq!(d.reason, "idle with open thread");
         assert_eq!(d.topic_hint, "check in");
+    }
+
+    #[test]
+    fn missing_screen_digest_defaults_empty() {
+        let d = parse_decision_json(
+            r#"{"reason":"idle","should_speak":false,"confidence":0.5,"topic_hint":"","urgency":"low"}"#,
+        );
+        assert!(d.screen_digest.is_empty());
+        assert!(!d.should_speak);
+    }
+
+    #[test]
+    fn clears_topic_hint_that_copies_screen_digest_verbatim() {
+        let d = parse_decision_json(
+            r#"{"screen_digest":"same text","reason":"other","should_speak":true,"confidence":0.9,"topic_hint":"same text","urgency":"normal"}"#,
+        );
+        assert!(d.should_speak);
+        assert!(d.topic_hint.is_empty());
     }
 
     #[test]

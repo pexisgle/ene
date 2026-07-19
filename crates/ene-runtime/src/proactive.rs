@@ -14,6 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) struct ProactiveScheduler {
     /// Latest host observation.
     pub observation: ProactiveObservation,
+    /// Ephemeral screen frame from the last successful vision summarize (data URI).
+    /// Never persisted; used only for the next proactive generation when the
+    /// generation model declares `supports_vision`.
+    pub last_screen_image_data_uri: Option<String>,
     /// When the last user `Run` started.
     pub last_user_input_at: Instant,
     /// When the last proactive utterance completed.
@@ -28,6 +32,7 @@ impl Default for ProactiveScheduler {
     fn default() -> Self {
         Self {
             observation: ProactiveObservation::default(),
+            last_screen_image_data_uri: None,
             last_user_input_at: Instant::now(),
             last_proactive_at: None,
             proactive_turns: 0,
@@ -55,7 +60,13 @@ impl ProactiveScheduler {
         self.last_proactive_at = None;
         self.epoch = self.epoch.wrapping_add(1);
         self.observation = ProactiveObservation::default();
+        self.last_screen_image_data_uri = None;
         self.last_user_input_at = Instant::now();
+    }
+
+    /// Take the stashed screen image for a generation turn (clears the stash).
+    pub fn take_screen_image(&mut self) -> Option<String> {
+        self.last_screen_image_data_uri.take()
     }
 
     /// Build suppression state for mind gates.
@@ -72,6 +83,31 @@ impl ProactiveScheduler {
             user_turn_busy,
         }
     }
+}
+
+/// Encode an RGB8 buffer to a JPEG data URI for OpenAI-compatible vision parts.
+pub(crate) fn rgb_to_jpeg_data_uri(width: u32, height: u32, rgb: &[u8]) -> Result<String, String> {
+    use base64::Engine as _;
+    use image::ImageEncoder;
+
+    let expected = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(3);
+    if rgb.len() != expected {
+        return Err(format!(
+            "rgb length mismatch (got {}, expected {expected})",
+            rgb.len()
+        ));
+    }
+
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75)
+        .write_image(rgb, width, height, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("jpeg encode failed: {e}"))?;
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(jpeg)
+    ))
 }
 
 /// Result of an async decision task.
@@ -108,7 +144,12 @@ pub(crate) fn sanitize_observation(
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
-    let max_age_secs = config.interval_seconds.saturating_mul(3).max(1);
+    // Screen summaries must stay within one observe interval; activity may be slightly older.
+    let max_age_secs = if config.sources.screen_summary {
+        config.interval_seconds.max(1)
+    } else {
+        config.interval_seconds.saturating_mul(3).max(1)
+    };
     let age_secs = now_ms
         .saturating_sub(observation.captured_at_unix_ms)
         .saturating_div(1000);
@@ -211,5 +252,13 @@ mod tests {
         };
         let sanitized = sanitize_observation(&config, obs);
         assert!(sanitized.activity.is_none());
+    }
+
+    #[test]
+    fn rgb_to_jpeg_data_uri_has_prefix() {
+        let rgb = [255u8, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0];
+        let uri = rgb_to_jpeg_data_uri(2, 2, &rgb).expect("encode");
+        assert!(uri.starts_with("data:image/jpeg;base64,"));
+        assert!(uri.len() > "data:image/jpeg;base64,".len());
     }
 }

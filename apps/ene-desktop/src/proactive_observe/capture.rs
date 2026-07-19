@@ -5,7 +5,9 @@
 
 use image::{DynamicImage, imageops::FilterType};
 
-const DEFAULT_SCALE_PERCENT: u32 = 35;
+/// Capture scale for vision: 50% balances legibility vs token/cost budget.
+/// (35% was too aggressive — local vision misread text editors as media UIs.)
+const DEFAULT_SCALE_PERCENT: u32 = 50;
 
 /// Capture result with optional active-app label for cache keys.
 #[derive(Debug)]

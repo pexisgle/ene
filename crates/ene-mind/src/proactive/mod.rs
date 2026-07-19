@@ -121,6 +121,8 @@ pub struct ProactiveDecision {
     pub should_speak: bool,
     /// Model confidence in `[0.0, 1.0]`.
     pub confidence: f64,
+    /// Reorganized screen sketch (diagnostics only; never spoken verbatim).
+    pub screen_digest: String,
     /// Internal reason (diagnostics only; never spoken verbatim).
     pub reason: String,
     /// Optional topic hint for generation.
@@ -136,6 +138,7 @@ impl ProactiveDecision {
         Self {
             should_speak: false,
             confidence: 0.0,
+            screen_digest: String::new(),
             reason: reason.into(),
             topic_hint: String::new(),
             urgency: ProactiveUrgency::Normal,
@@ -314,7 +317,12 @@ pub async fn decide_proactive_speech(
         }
     };
 
-    let decision = parse_decision_json(&raw);
+    let mut decision = parse_decision_json(&raw);
+    // Models sometimes invent screen_digest from prompt examples when no screen
+    // context was provided — clear it fail-closed.
+    if context.screen_summary.is_none() {
+        decision.screen_digest.clear();
+    }
     if !decision.allows_generation(config.decision.min_confidence) {
         let skip = if decision.should_speak {
             Some(ProactiveSkipReason::BelowConfidence)

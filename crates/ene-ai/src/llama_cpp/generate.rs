@@ -12,8 +12,8 @@ use llama_cpp_2::mtmd::{MtmdBitmap, MtmdInputText, mtmd_default_marker};
 use llama_cpp_2::sampling::LlamaSampler;
 use std::time::{Duration, Instant};
 
-const MAX_DECISION_TOKENS: i32 = 256;
-const MAX_VISION_TOKENS: i32 = 128;
+const MAX_DECISION_TOKENS: i32 = 320;
+const MAX_VISION_TOKENS: i32 = 256;
 
 /// Generate a completion for `messages`, optionally constrained by JSON schema grammar.
 pub(crate) fn generate_chat(

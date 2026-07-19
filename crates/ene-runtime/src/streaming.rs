@@ -131,6 +131,8 @@ pub struct StreamContext {
     pub allow_tools: bool,
     /// Internal companion directive for proactive turns (never stored as user history).
     pub runtime_directive: Option<String>,
+    /// Optional decision-time screen frame (JPEG data URI) for vision-capable generation.
+    pub proactive_screen_image: Option<String>,
     /// Wall-clock cap for proactive generation (outer timeout wins over provider defaults).
     pub generation_timeout: Option<std::time::Duration>,
     /// Sender for classifier `JoinHandles` spawned after Terminal emission.

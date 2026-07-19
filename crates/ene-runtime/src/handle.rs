@@ -127,6 +127,8 @@ pub enum EneCommand {
         height: u32,
         /// Tight RGB8 buffer (`width * height * 3`).
         rgb: Vec<u8>,
+        /// Privacy-safe OS app label (may be empty).
+        app_label: String,
         /// Reply channel.
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -743,6 +745,7 @@ impl EneHandle {
         width: u32,
         height: u32,
         rgb: Vec<u8>,
+        app_label: String,
     ) -> Result<String, String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -750,6 +753,7 @@ impl EneHandle {
                 width,
                 height,
                 rgb,
+                app_label,
                 reply: tx,
             })
             .map_err(|_| "actor dead".to_string())?;
@@ -969,7 +973,12 @@ impl EneActor {
                             }
                         }
                         () = tokio::time::sleep(tick) => {
-                            self.maybe_spawn_proactive_decision().await;
+                            // When screen_summary is on, decisions are driven by
+                            // fresh observation pushes (capture → vision → decide).
+                            let screen_driven = mind.proactive.sources.screen_summary;
+                            if !screen_driven {
+                                self.maybe_spawn_proactive_decision().await;
+                            }
                         }
                     }
                 } else {
@@ -1050,6 +1059,7 @@ impl EneActor {
         width: u32,
         height: u32,
         rgb: Vec<u8>,
+        app_label: String,
         reply: oneshot::Sender<Result<String, String>>,
     ) {
         const MAX_PIXELS: u64 = 1920 * 1080;
@@ -1110,9 +1120,25 @@ impl EneActor {
             return;
         }
 
+        match crate::proactive::rgb_to_jpeg_data_uri(width, height, &rgb) {
+            Ok(uri) => {
+                self.proactive.last_screen_image_data_uri = Some(uri);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    component = "Proactive",
+                    error = %e,
+                    "Failed to stash screen frame for generation; continuing text-only"
+                );
+                self.proactive.last_screen_image_data_uri = None;
+            }
+        }
+
         let prompts = ene_config::PromptLibrary::load(&prompt_language);
         let system = prompts.proactive().screen_summary_system.trim().to_string();
-        let user = prompts.proactive().screen_summary_user.trim().to_string();
+        let user = prompts
+            .proactive()
+            .render_screen_summary_user(&app_label);
         self.vision_tasks.spawn(async move {
             let result = local
                 .summarize_rgb(width, height, rgb, &system, &user)
@@ -1256,6 +1282,16 @@ impl EneActor {
             &result.topic_hint,
             &mind.emotion.classifier_language,
         );
+        let screen_image = self
+            .config
+            .get_section::<ene_ai::AiConfig>()
+            .ok()
+            .filter(|ai| ai.proactive_generation_supports_vision())
+            .and_then(|_| self.proactive.take_screen_image());
+        if screen_image.is_none() {
+            // Drop any stashed frame when the generation model cannot use it.
+            let _ = self.proactive.take_screen_image();
+        }
         self.drain_pending().await;
         self.cancel_token = CancellationToken::new();
         self.terminal_emitted = Arc::new(AtomicBool::new(false));
@@ -1273,6 +1309,7 @@ impl EneActor {
             false,
             mind.proactive.allow_tools,
             Some(hint),
+            screen_image,
             Some(generation_timeout),
         );
     }
@@ -1306,6 +1343,7 @@ impl EneActor {
                     crate::types::TurnOrigin::User,
                     true,
                     true,
+                    None,
                     None,
                     None,
                 );
@@ -1393,6 +1431,15 @@ impl EneActor {
             }
             EneCommand::UpdateProactiveObservation { observation } => {
                 self.proactive.observation = observation;
+                // When screen_summary is enabled, each observe cycle (fresh
+                // capture → vision) drives the decision LLM immediately.
+                let screen_driven = self
+                    .config
+                    .get_section::<ene_mind::MindConfig>()
+                    .is_ok_and(|m| m.proactive.enabled && m.proactive.sources.screen_summary);
+                if screen_driven {
+                    self.maybe_spawn_proactive_decision().await;
+                }
                 true
             }
             EneCommand::UpdateProactiveSettings { mind } => {
@@ -1451,9 +1498,11 @@ impl EneActor {
                 width,
                 height,
                 rgb,
+                app_label,
                 reply,
             } => {
-                self.summarize_screen_rgb(width, height, rgb, reply).await;
+                self.summarize_screen_rgb(width, height, rgb, app_label, reply)
+                    .await;
                 true
             }
             EneCommand::PermissionDecision {
@@ -1554,6 +1603,7 @@ impl EneActor {
         record_user_message: bool,
         allow_tools: bool,
         runtime_directive: Option<String>,
+        proactive_screen_image: Option<String>,
         generation_timeout: Option<std::time::Duration>,
     ) {
         // Create the provider before mutating history so a failed open leaves
@@ -1643,6 +1693,7 @@ impl EneActor {
                 origin,
                 allow_tools,
                 runtime_directive,
+                proactive_screen_image,
                 generation_timeout,
                 classifier_tx,
                 memory_writer_tx,

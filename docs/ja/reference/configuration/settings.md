@@ -125,6 +125,7 @@ pub struct EneConfig {
 | `max_tokens` | int | チャット完了の最大トークン数（`0` = リクエストから省略）。OpenRouter はこの上限に対してクレジット担保を確保 |
 | `dimensions` | int | 埋め込みベクトルの次元数（クラウド埋め込み） |
 | `query_prefix` | string または null | 埋め込み検索クエリに前置する任意プレフィックス（例: `"Query: "`） |
+| `supports_vision` | bool | `true` のとき、能動発話の生成に判定時点の画面フレーム（JPEG data URI）を添付できる。既定 `false`。画像対応モデルでは `tasks.chat`（またはクラウドの `tasks.proactive`）に設定する |
 
 #### `ai.local_models` — ローカル GGUF レジストリ
 

@@ -2549,6 +2549,7 @@ name = "ene-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "cargo-husky",
  "chrono",
@@ -2560,6 +2561,7 @@ dependencies = [
  "ene-tool-host",
  "ene-tool-proto",
  "ene-tool-rag",
+ "image",
  "regex",
  "sea-orm",
  "serde",

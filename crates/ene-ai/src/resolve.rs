@@ -284,6 +284,20 @@ impl AiConfig {
         self.resolve_chat()
     }
 
+    /// True when proactive/chat generation may receive an image part.
+    ///
+    /// Uses `tasks.proactive.supports_vision` when that task is a cloud generation
+    /// override; otherwise `tasks.chat.supports_vision`.
+    #[must_use]
+    pub fn proactive_generation_supports_vision(&self) -> bool {
+        if let Some(proactive) = self.tasks.proactive.as_ref()
+            && !Self::is_local_provider(&proactive.provider)
+        {
+            return proactive.supports_vision;
+        }
+        self.tasks.chat.supports_vision
+    }
+
     /// Resolve embedding backend settings for [`AiConfig::tasks`] embedding task.
     pub fn resolve_embedding(&self) -> Result<ResolvedEmbedding, LlmProviderError> {
         if Self::is_local_provider(&self.tasks.embedding.provider) {

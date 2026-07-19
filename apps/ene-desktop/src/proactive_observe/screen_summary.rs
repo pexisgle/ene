@@ -4,6 +4,7 @@
 //! `mind.proactive.sources.screen_summary` opts in to a short local
 //! multimodal completion against the proactive GGUF + `mmproj`.
 //! Vision failures mark the source unavailable — no fabricated summaries.
+//! Every summarize call captures a fresh frame (no cross-tick cache).
 
 use std::time::{Duration, Instant};
 
@@ -13,20 +14,12 @@ use parking_lot::Mutex;
 use super::capture::{CapturedScreen, capture_for_summary};
 use super::{redact_paths, truncate};
 
-/// Minimum time between vision refreshes when the focused app is unchanged.
-const MIN_REFRESH: Duration = Duration::from_mins(1);
-
-#[derive(Debug, Clone)]
-struct CachedSummary {
-    text: String,
-    app_label: String,
-    captured_at: Instant,
-}
+/// Brief backoff after capture/vision failure (avoids hammering portals).
+const FAIL_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Host screen summarizer (local Gemma + mmproj via runtime actor).
 pub struct ScreenSummaryProvider {
     handle: EneHandle,
-    cache: Mutex<Option<CachedSummary>>,
     last_failure_at: Mutex<Option<Instant>>,
 }
 
@@ -36,24 +29,16 @@ impl ScreenSummaryProvider {
     pub fn new(handle: EneHandle) -> Self {
         Self {
             handle,
-            cache: Mutex::new(None),
             last_failure_at: Mutex::new(None),
         }
     }
 
-    /// Capture + summarize. Returns `None` when unavailable.
+    /// Capture + summarize. Always takes a fresh frame. Returns `None` when unavailable.
     pub async fn summarize(&self, max_chars: usize) -> Option<String> {
         let max_chars = max_chars.max(32);
-        let app_hint = active_app_hint();
-        if let Some(cached) = self.cache.lock().as_ref()
-            && cached.app_label == app_hint
-            && cached.captured_at.elapsed() < MIN_REFRESH
-        {
-            return Some(truncate(&cached.text, max_chars));
-        }
 
         if let Some(failed_at) = *self.last_failure_at.lock()
-            && failed_at.elapsed() < MIN_REFRESH
+            && failed_at.elapsed() < FAIL_BACKOFF
         {
             return None;
         }
@@ -100,15 +85,6 @@ impl ScreenSummaryProvider {
         );
 
         *self.last_failure_at.lock() = None;
-        *self.cache.lock() = Some(CachedSummary {
-            text: text.clone(),
-            app_label: if captured.app_label.is_empty() {
-                app_hint
-            } else {
-                captured.app_label.clone()
-            },
-            captured_at: Instant::now(),
-        });
         Some(text)
     }
 
@@ -116,14 +92,12 @@ impl ScreenSummaryProvider {
         let rgb = captured.image.to_rgb8();
         let (width, height) = rgb.dimensions();
         self.handle
-            .summarize_screen_image(width, height, rgb.into_raw())
+            .summarize_screen_image(
+                width,
+                height,
+                rgb.into_raw(),
+                captured.app_label.clone(),
+            )
             .await
-    }
-}
-
-fn active_app_hint() -> String {
-    match active_win_pos_rs::get_active_window() {
-        Ok(win) => redact_paths(win.app_name.trim()),
-        Err(()) => String::new(),
     }
 }

@@ -266,6 +266,7 @@ mod smoke {
             max_tokens: None,
             dimensions: None,
             query_prefix: None,
+            supports_vision: false,
         });
         let handles = build_proactive_llm_handles(&cfg)
             .await

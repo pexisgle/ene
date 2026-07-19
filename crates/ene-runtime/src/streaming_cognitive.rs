@@ -60,7 +60,11 @@ fn build_turn_context<'a>(
     }
 }
 
-fn apply_proactive_prompt(messages: &mut Vec<LlmMessage>, directive: Option<&str>) {
+fn apply_proactive_prompt(
+    messages: &mut Vec<LlmMessage>,
+    directive: Option<&str>,
+    screen_image_data_uri: Option<&str>,
+) {
     if let Some(ene_ai::LlmMessage::User { parts }) = messages.last() {
         let empty = parts.iter().all(|p| match p {
             UserMessagePart::Text { text } => text.trim().is_empty(),
@@ -75,6 +79,22 @@ fn apply_proactive_prompt(messages: &mut Vec<LlmMessage>, directive: Option<&str
             content: format!("[Companion directive]\n{dir}"),
         });
     }
+    // OpenAI-compatible chat APIs expect the last message to be user-role.
+    // Keep this cue ephemeral (not written to ConversationSession history).
+    let mut parts = vec![UserMessagePart::Text {
+        text: if screen_image_data_uri.is_some() {
+            "(Proactive turn — respond per the companion directive. A screenshot from the decision moment is attached.)"
+                .to_string()
+        } else {
+            "(Proactive turn — respond per the companion directive.)".to_string()
+        },
+    }];
+    if let Some(uri) = screen_image_data_uri.filter(|s| !s.trim().is_empty()) {
+        parts.push(UserMessagePart::Image {
+            base64_image_data: uri.to_string(),
+        });
+    }
+    messages.push(LlmMessage::User { parts });
 }
 
 /// Run the streaming loop using the cognitive runtime lifecycle.
@@ -97,6 +117,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         origin,
         allow_tools,
         runtime_directive,
+        proactive_screen_image,
         generation_timeout,
         classifier_tx,
         memory_writer_tx,
@@ -522,7 +543,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 
     let mut messages = composed.messages;
     if is_proactive {
-        apply_proactive_prompt(&mut messages, runtime_directive.as_deref());
+        apply_proactive_prompt(
+            &mut messages,
+            runtime_directive.as_deref(),
+            proactive_screen_image.as_deref(),
+        );
     }
     let max_rounds = tool_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();

@@ -25,6 +25,8 @@ ene-tool-db = { workspace = true }
 sea-orm = { workspace = true }
 blake3 = { workspace = true }
 uuid = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
+image = { workspace = true, features = ["jpeg"] }
 
 ene-tool-host = { workspace = true }
 ene-tool-rag = { workspace = true }
