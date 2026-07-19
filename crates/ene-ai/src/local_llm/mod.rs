@@ -254,9 +254,8 @@ mod tests {
             context_size: 2048,
             request_timeout_seconds: 20,
         };
-        let err = match LocalLlamaCppProvider::load(&params) {
-            Ok(_) => panic!("expected empty path to fail"),
-            Err(e) => e,
+        let Err(err) = LocalLlamaCppProvider::load(&params) else {
+            panic!("expected empty path to fail");
         };
         assert!(matches!(err, LlmProviderError::LocalLlm(_)));
     }

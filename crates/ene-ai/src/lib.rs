@@ -16,7 +16,8 @@
     expect(
         clippy::unwrap_used,
         clippy::expect_used,
-        reason = "unit/integration tests use unwrap/expect for assertions"
+        clippy::panic,
+        reason = "unit/integration tests use unwrap/expect/panic for assertions"
     )
 )]
 

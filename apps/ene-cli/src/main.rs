@@ -6,6 +6,13 @@
     clippy::indexing_slicing,
     reason = "CLI command parsers index into argv and message buffers"
 )]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::expect_used,
+        reason = "unit tests use expect for assertions"
+    )
+)]
 
 mod commands;
 mod config;

@@ -646,7 +646,11 @@ mod tests {
             .expect("url");
         assert_eq!(a, b);
         assert!(a.starts_with("v5-small-"));
-        assert!(a.ends_with(".gguf"));
+        assert!(
+            std::path::Path::new(&a)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("gguf"))
+        );
         assert!(!a.contains('?'));
     }
 

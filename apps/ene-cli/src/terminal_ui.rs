@@ -506,11 +506,6 @@ impl TerminalUi {
         inner.redraw_prompt();
         inner.backend.flush_all();
     }
-
-    #[cfg(test)]
-    pub fn mode_is_prompting(&self) -> bool {
-        matches!(self.inner.lock().mode, UiMode::Prompting { .. })
-    }
 }
 
 impl TerminalUiInner {

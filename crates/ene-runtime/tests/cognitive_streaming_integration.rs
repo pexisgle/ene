@@ -163,6 +163,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
 
     let sessions = store.list_session_ids_for_card("Ene").await.unwrap();
     assert!(!sessions.is_empty(), "conversation logs should be saved");
-    let logs = store.get_logs_by_session(&sessions[0]).await.unwrap();
+    let session_id = sessions.first().expect("non-empty sessions");
+    let logs = store.get_logs_by_session(session_id).await.unwrap();
     assert!(logs.len() >= 2, "user and assistant logs should be saved");
 }

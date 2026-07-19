@@ -438,6 +438,7 @@ mod tests {
     #[cfg(unix)]
     #[expect(
         clippy::expect_used,
+        clippy::panic,
         reason = "reconnect harness panics on protocol or IO failure"
     )]
     mod reconnect_auth {

@@ -215,7 +215,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
             ene_ai::UserMessagePart::Image { base64_image_data } => {
                 Some(base64_image_data.as_str())
             }
-            _ => None,
+            ene_ai::UserMessagePart::Text { .. } => None,
         })
     });
     assert_eq!(image_uri, Some("data:image/jpeg;base64,AAAA"));

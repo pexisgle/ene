@@ -63,19 +63,19 @@ mod tests {
         let active = Arc::new(AtomicUsize::new(0));
         let max_active = Arc::new(AtomicUsize::new(0));
 
-        let handles: Vec<_> = (0..4)
-            .map(|_| {
-                let active = Arc::clone(&active);
-                let max_active = Arc::clone(&max_active);
-                std::thread::spawn(move || {
-                    let _guard = INFERENCE.lock();
-                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    max_active.fetch_max(now, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(5));
-                    active.fetch_sub(1, Ordering::SeqCst);
-                })
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            std::thread::spawn(move || {
+                let _guard = INFERENCE.lock();
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_active.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(5));
+                active.fetch_sub(1, Ordering::SeqCst);
             })
-            .collect();
+        })
+        .take(4)
+        .collect();
 
         for handle in handles {
             handle.join().expect("thread join");

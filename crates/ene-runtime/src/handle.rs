@@ -1286,7 +1286,7 @@ impl EneActor {
             .config
             .get_section::<ene_ai::AiConfig>()
             .ok()
-            .filter(|ai| ai.proactive_generation_supports_vision())
+            .filter(ene_ai::AiConfig::proactive_generation_supports_vision)
             .and_then(|_| self.proactive.take_screen_image());
         if screen_image.is_none() {
             // Drop any stashed frame when the generation model cannot use it.

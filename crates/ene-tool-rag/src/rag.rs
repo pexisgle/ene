@@ -935,7 +935,6 @@ mod tests {
         let cfg = crate::config::ToolRagConfig {
             top_k: 3,
             final_n: 2,
-            use_hyde: true,
             use_rerank: true,
             min_similarity: 0.5,
             forced: vec![
@@ -945,6 +944,7 @@ mod tests {
             ],
             ..crate::config::ToolRagConfig::default()
         };
+        #[expect(clippy::expect_used, reason = "unit test asserts Err")]
         let err = ToolRagOptions::from_config(cfg).expect_err("invalid forced");
         assert!(
             err.to_string().contains("rag.forced"),
@@ -960,6 +960,7 @@ mod tests {
             forced: vec!["utility.question".into(), "utility.todo_add".into()],
             ..crate::config::ToolRagConfig::default()
         };
+        #[expect(clippy::expect_used, reason = "unit test asserts Ok")]
         let opts = ToolRagOptions::from_config(cfg).expect("valid");
         assert_eq!(opts.top_k, 3);
         assert_eq!(opts.final_n, 2);
@@ -971,7 +972,10 @@ mod tests {
     #[test]
     fn defaults_disable_hyde_and_rerank() {
         let cfg = crate::config::ToolRagConfig::default();
-        assert!(!cfg.use_hyde);
+        #[expect(deprecated, reason = "assert deprecated default")]
+        {
+            assert!(!cfg.use_hyde);
+        }
         assert!(!cfg.use_rerank);
         let opts = ToolRagOptions::default();
         #[expect(deprecated, reason = "assert deprecated default")]

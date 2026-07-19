@@ -48,7 +48,6 @@
     expect(
         clippy::unwrap_used,
         clippy::expect_used,
-        clippy::clone_on_copy,
         reason = "unit/integration tests use unwrap/expect for assertions",
     )
 )]
