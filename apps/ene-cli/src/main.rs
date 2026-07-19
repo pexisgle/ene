@@ -19,16 +19,26 @@ mod tree_log;
 
 #[tokio::main]
 async fn main() {
+    use std::io::{self, IsTerminal};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::{EnvFilter, Layer};
+    use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-    let ui = terminal_ui::TerminalUi::init_global();
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,sea_orm=warn"));
-    tracing_subscriber::registry()
-        .with(tree_log::TreeLogLayer::new(ui).with_filter(filter))
-        .init();
+
+    if io::stderr().is_terminal() {
+        let ui = terminal_ui::TerminalUi::init_global();
+        tracing_subscriber::registry()
+            .with(tree_log::TreeLogLayer::new(ui).with_filter(filter))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_writer(io::stderr).with_filter(filter))
+            .init();
+        // Still install TerminalUi so REPL helpers have a sink.
+        let _ = terminal_ui::TerminalUi::init_global();
+    }
 
     let handle = match config::init().await {
         Ok(h) => h,
@@ -37,10 +47,6 @@ async fn main() {
             std::process::exit(1);
         }
     };
-
-    let loader = i18n::loader();
-    tracing::info!("{}", i18n_embed_fl::fl!(loader, "welcome"));
-    tracing::info!("{}", i18n_embed_fl::fl!(loader, "help-hint"));
 
     let mut ctx = context::AppContext::new(handle);
     let code = repl::run(&mut ctx).await;

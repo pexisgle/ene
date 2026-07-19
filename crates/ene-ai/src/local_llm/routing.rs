@@ -96,9 +96,9 @@ impl ProactiveLlmHandles {
 
 /// Build decision + generation routing from [`AiConfig`].
 ///
-/// Local GGUF load failures fall back to a cloud decision provider when an
-/// OpenAI-compatible chat/proactive task is available; otherwise fail-closed
-/// to [`DisabledDecisionProvider`].
+/// When `tasks.proactive` requests `provider: "local"`, GGUF load failures
+/// fail-closed to [`DisabledDecisionProvider`] — never silently route
+/// observation context to a cloud decision provider.
 pub async fn build_proactive_llm_handles(
     config: &AiConfig,
 ) -> Result<ProactiveLlmHandles, LlmProviderError> {
@@ -116,15 +116,9 @@ pub async fn build_proactive_llm_handles(
                     component = "LocalLlamaCpp",
                     error = %e,
                     model = %local.name,
-                    "Local GGUF unavailable; falling back to cloud decision"
+                    "Local GGUF unavailable; falling back to disabled (fail-closed)"
                 );
-                let cloud = build_cloud_decision_provider(config)?;
-                return Ok(ProactiveLlmHandles {
-                    decision: cloud,
-                    decision_kind: DecisionProviderKind::Cloud,
-                    local: None,
-                    generation_model,
-                });
+                return Ok(disabled_handles(generation_model));
             }
         };
         let mmproj_path = match ensure_mmproj_available(&local).await {
@@ -158,31 +152,12 @@ pub async fn build_proactive_llm_handles(
                 })
             }
             Err(e) => {
-                if let Ok(cloud) = build_cloud_decision_provider(config) {
-                    tracing::warn!(
-                        component = "LocalLlamaCpp",
-                        error = %e,
-                        "Local decision backend failed; falling back to cloud"
-                    );
-                    Ok(ProactiveLlmHandles {
-                        decision: cloud,
-                        decision_kind: DecisionProviderKind::Cloud,
-                        local: None,
-                        generation_model,
-                    })
-                } else {
-                    tracing::warn!(
-                        component = "LocalLlamaCpp",
-                        error = %e,
-                        "Local decision backend failed; falling back to disabled"
-                    );
-                    Ok(ProactiveLlmHandles {
-                        decision: Arc::new(DisabledDecisionProvider),
-                        decision_kind: DecisionProviderKind::Disabled,
-                        local: None,
-                        generation_model,
-                    })
-                }
+                tracing::warn!(
+                    component = "LocalLlamaCpp",
+                    error = %e,
+                    "Local decision backend failed; falling back to disabled (fail-closed)"
+                );
+                Ok(disabled_handles(generation_model))
             }
         }
     } else {
@@ -193,6 +168,15 @@ pub async fn build_proactive_llm_handles(
             local: None,
             generation_model,
         })
+    }
+}
+
+fn disabled_handles(generation_model: String) -> ProactiveLlmHandles {
+    ProactiveLlmHandles {
+        decision: Arc::new(DisabledDecisionProvider),
+        decision_kind: DecisionProviderKind::Disabled,
+        local: None,
+        generation_model,
     }
 }
 

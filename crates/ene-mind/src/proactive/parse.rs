@@ -65,12 +65,16 @@ pub fn parse_decision_json(raw: &str) -> ProactiveDecision {
         .unwrap_or("")
         .trim()
         .to_string();
-    let topic_hint = obj
+    let mut topic_hint = obj
         .get("topic_hint")
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
         .to_string();
+    // ADR: topic_hint must not copy reason verbatim.
+    if !topic_hint.is_empty() && topic_hint == reason {
+        topic_hint.clear();
+    }
     let urgency = ProactiveUrgency::parse(obj.get("urgency").and_then(Value::as_str));
 
     ProactiveDecision {
@@ -146,5 +150,15 @@ mod tests {
         );
         assert!(!d.should_speak);
         assert!((d.confidence - 0.1).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn clears_topic_hint_that_copies_reason_verbatim() {
+        let d = parse_decision_json(
+            r#"{"reason":"same text","should_speak":true,"confidence":0.9,"topic_hint":"same text","urgency":"normal"}"#,
+        );
+        assert!(d.should_speak);
+        assert_eq!(d.reason, "same text");
+        assert!(d.topic_hint.is_empty());
     }
 }

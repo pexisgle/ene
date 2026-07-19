@@ -70,14 +70,14 @@
       "classifier_language": "ja"
     },
     "proactive": {
-      "enabled": true,
+      "enabled": false,
       "interval_seconds": 10,
-      "min_idle_seconds": 120,
-      "cooldown_seconds": 300,
+      "min_idle_seconds": 20,
+      "cooldown_seconds": 60,
       "sources": {
         "conversation": true,
         "activity": true,
-        "screen_summary": true
+        "screen_summary": false
       }
     }
   },

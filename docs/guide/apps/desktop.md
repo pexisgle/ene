@@ -153,8 +153,12 @@ Opened with F1 or Tray → Settings. Tabs:
 
 Feature toggles persist to `settings.json` (`store.enabled`,
 `mind.emotion.enabled`, `mind.proactive.*`, `tools.enabled`,
-`tools.rag.enabled`, `tools.list.<name>.enable`). Proactive speech
-policy (timing and sources) is edited on the Features tab.
+`tools.rag.enabled`, `tools.list.<name>.enable`) and are pushed into the
+running runtime actor immediately via `UpdateFeatureSettings` (no restart;
+per-tool enable rebuilds the tool registry in-process). Proactive speech
+policy (timing and sources) is edited on the Features tab. `screen_summary`
+requires a local proactive GGUF with `mmproj`; vision failures mark the
+source unavailable (no fabricated metadata summary).
 
 ### Message types
 

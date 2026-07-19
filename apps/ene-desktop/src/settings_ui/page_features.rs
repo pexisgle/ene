@@ -19,7 +19,7 @@ pub fn render(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBr
 
         render_mind(ui, settings, ai);
         ui.separator();
-        render_tools(ui, settings);
+        render_tools(ui, settings, ai);
     });
 }
 
@@ -45,6 +45,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         memory.enabled = memory_enabled;
         let _ = settings.ai.ai.set_section(&memory);
         settings.mark_dirty();
+        sync_features(settings, ai);
     }
 
     let mut emotion_enabled = mind.emotion.enabled;
@@ -53,8 +54,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         .changed()
     {
         mind.emotion.enabled = emotion_enabled;
-        let _ = settings.ai.ai.set_section(&mind);
-        settings.mark_dirty();
+        persist_mind(settings, ai, &mind);
     }
 
     ui.separator();
@@ -144,10 +144,34 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 fn persist_mind(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, mind: &ene_mind::MindConfig) {
     let _ = settings.ai.ai.set_section(mind);
     settings.mark_dirty();
-    ai.sync_proactive_runtime(mind);
+    sync_features(settings, ai);
 }
 
-fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
+fn sync_features(settings: &CharacterSettings, ai: &Arc<AiBridge>) {
+    let mind = settings
+        .ai
+        .ai
+        .get_section::<ene_mind::MindConfig>()
+        .unwrap_or_default();
+    let store = settings
+        .ai
+        .ai
+        .get_section::<ene_store::StoreConfig>()
+        .unwrap_or_default();
+    let tools = settings
+        .ai
+        .ai
+        .get_section::<ToolConfig>()
+        .unwrap_or_default();
+    let rag = settings
+        .ai
+        .ai
+        .get_section::<ToolRagConfig>()
+        .unwrap_or_default();
+    ai.sync_feature_runtime(&mind, &store, &tools, &rag);
+}
+
+fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
     ui.label(crate::i18n::features_tools());
 
     let mut tools = settings
@@ -167,7 +191,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
         .changed()
     {
         tools.enabled = tools_enabled;
-        persist_tools(settings, &tools);
+        persist_tools(settings, ai, &tools);
     }
 
     ui.add_enabled_ui(tools.enabled, |ui| {
@@ -179,6 +203,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
             rag.enabled = rag_enabled;
             let _ = settings.ai.ai.set_section(&rag);
             settings.mark_dirty();
+            sync_features(settings, ai);
         }
 
         ui.label(crate::i18n::features_per_tool());
@@ -204,13 +229,13 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
             }
         }
         if list_changed {
-            persist_tools(settings, &tools);
+            persist_tools(settings, ai, &tools);
         }
     });
 }
 
 /// `ToolConfig` serializes at `tools` and would wipe sibling `tools.rag`.
-fn persist_tools(settings: &mut CharacterSettings, tools: &ToolConfig) {
+fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &ToolConfig) {
     let rag = settings
         .ai
         .ai
@@ -219,6 +244,7 @@ fn persist_tools(settings: &mut CharacterSettings, tools: &ToolConfig) {
     let _ = settings.ai.ai.set_section(tools);
     let _ = settings.ai.ai.set_section(&rag);
     settings.mark_dirty();
+    sync_features(settings, ai);
 }
 
 fn tool_display_name(name: &str) -> &str {
@@ -248,7 +274,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_entry_defaults_enabled() {
-        assert!(ene_tool_host::ToolEntry::default().enable);
+    fn tool_display_name_covers_builtins() {
+        assert_eq!(tool_display_name("fs"), "Filesystem");
+        assert_eq!(tool_display_name("unknown"), "unknown");
     }
 }

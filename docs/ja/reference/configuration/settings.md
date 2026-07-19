@@ -188,7 +188,7 @@ pub struct EneConfig {
 - `tasks.embedding` は `provider: "local"` と `local_models` キー、またはクラウドプロバイダを使用可能。
 - `tasks.classifier: null` → 分類器は `tasks.chat` のプロバイダとモデルを再利用。
 - `tasks.proactive: null` → 能動発話の**生成**は `tasks.chat` を再利用。
-- 能動**判定**: `tasks.proactive` が `provider: "local"` の場合、指定した `local_models` エントリをプロセス内 GGUF で実行（ロード失敗時は OpenAI 互換の chat/proactive があればクラウドへフォールバック）。`tasks.proactive` が `openai_compatible` の場合はそのモデルでクラウド判定；それ以外は `tasks.chat`。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
+- 能動**判定**: `tasks.proactive` が `provider: "local"` の場合、指定した `local_models` エントリをプロセス内 GGUF で実行。ロード失敗時は判定バックエンドを disabled に fail-close（発話なし）— 観測コンテキストを黙ってクラウドへ送らない。`tasks.proactive` が `openai_compatible` プロバイダの場合はそのモデルでクラウド判定；それ以外は `tasks.chat`。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
 
 GGUF は **同梱されません**。`ai.local_models` の HTTPS `url`（または明示 `model_path`）を設定すると、初回起動時に `{assets_dir}/models/gguf/` へダウンロードされます（`[GgufDownload]` として進捗ログ出力）。非 HTTPS は拒否し、HTTPS→HTTPS リダイレクトは追跡します（Hugging Face CDN）。Content-Length / GGUF magic を検証し、ハッシュ付きキャッシュ名を使います。外部 `llama-server` バイナリは不要です。
 

@@ -137,17 +137,25 @@ impl AiBridge {
         self.active_turn.lock().is_ok_and(|g| g.is_some())
     }
 
-    /// Refresh proactive observation flags and push policy into the runtime actor.
-    pub fn sync_proactive_runtime(&self, mind: &ene_mind::MindConfig) {
+    /// Refresh Features-tab settings into the runtime actor (no GGUF reload).
+    pub fn sync_feature_runtime(
+        &self,
+        mind: &ene_mind::MindConfig,
+        store: &ene_store::StoreConfig,
+        tools: &ene_tool_host::ToolConfig,
+        rag: &ene_tool_rag::ToolRagConfig,
+    ) {
         self.proactive_observe.apply_mind(mind);
-        if let Err(e) = self
-            .handle
-            .update_proactive_settings(mind.proactive.clone())
-        {
+        if let Err(e) = self.handle.update_feature_settings(
+            mind.clone(),
+            store.clone(),
+            tools.clone(),
+            rag.clone(),
+        ) {
             tracing::warn!(
                 component = "AiBridge",
                 error = %e,
-                "Failed to push proactive settings to runtime actor"
+                "Failed to push feature settings to runtime actor"
             );
         }
     }

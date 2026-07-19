@@ -120,9 +120,9 @@ async fn try_reuse_unhashed_cache(
                 .await
                 .map_err(|e| LlmProviderError::Provider(format!("create GGUF cache dir: {e}")))?;
         }
-        let link_target = unhashed
-            .file_name()
-            .ok_or_else(|| LlmProviderError::Provider("unhashed GGUF has no file name".to_string()))?;
+        let link_target = unhashed.file_name().ok_or_else(|| {
+            LlmProviderError::Provider("unhashed GGUF has no file name".to_string())
+        })?;
         match link_cache_entry(link_target, hashed_path) {
             Ok(()) => {
                 tracing::info!(

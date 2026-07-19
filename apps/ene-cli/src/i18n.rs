@@ -7,8 +7,16 @@ use std::sync::OnceLock;
 
 #[derive(RustEmbed)]
 #[folder = "i18n/"]
+#[expect(
+    dead_code,
+    reason = "Fluent assets wired for forthcoming CLI i18n strings"
+)]
 struct Localizations;
 
+#[expect(
+    dead_code,
+    reason = "CLI Fluent loader reserved for forthcoming localized strings"
+)]
 pub fn loader() -> &'static FluentLanguageLoader {
     static LOADER: OnceLock<FluentLanguageLoader> = OnceLock::new();
     LOADER.get_or_init(|| {

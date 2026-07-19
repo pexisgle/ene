@@ -34,7 +34,7 @@
 }
 ```
 
-デスクトップ設定は再起動なしで実行中のアクターに反映されます。デスクトップオブザーバーとランタイムスケジューラは `UpdateProactiveSettings` 経由で更新を受け取ります。
+デスクトップ設定は再起動なしで実行中のアクターに反映されます。デスクトップオブザーバーとランタイムスケジューラは `UpdateFeatureSettings`（Features タブ）/ `UpdateProactiveSettings` 経由で更新を受け取ります。
 
 デスクトップのデフォルト `info` ログレベルでは次が出ます:
 
@@ -55,7 +55,8 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 ## プライバシー
 
 - デスクトップは生のスクリーンショットをディスク・ログ・SQLite に書き込みません。
-- `sources.screen_summary` 有効時、デスクトップはアクティブウィンドウ（またはプライマリディスプレイ）をキャプチャし、**ローカル** proactive GGUF + `mmproj`（Gemma 4 マルチモーダル）で 1–2 文に要約してから画像を破棄します。判定コンテキストに入るのは切り詰められたテキストのみ。vision 失敗時はメタデータフォールバック（`Active application: …`）を使います。
+- `sources.screen_summary` 有効時、デスクトップはアクティブウィンドウ（またはプライマリディスプレイ）をキャプチャし、**ローカル** proactive GGUF + `mmproj`（Gemma 4 マルチモーダル）で要約してから画像を破棄します。判定コンテキストに入るのは切り詰められたテキストのみ。vision 失敗時は画面ソースを Unavailable とし、捏造サマリは入れません。
+- `tasks.proactive` が `provider: "local"` のとき、GGUF 欠落・ロード失敗は判定バックエンドを disabled にします — 観測コンテキスト付きでクラウドへフォールバックしません。
 - アクティビティは **アプリ名のみ**（生のウィンドウタイトルなし、キーロギングなし）。
 
 ## デスクトップ統合

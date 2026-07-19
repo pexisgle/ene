@@ -188,7 +188,7 @@ Cloud chat, embedding, classifier, and cloud proactive decision via an OpenAI-co
 - `tasks.embedding` may use `provider: "local"` with a `local_models` key, or a cloud provider.
 - `tasks.classifier: null` → classifier reuses `tasks.chat` provider and model.
 - `tasks.proactive: null` → proactive **generation** reuses `tasks.chat`.
-- Proactive **decision**: when `tasks.proactive` uses `provider: "local"`, the named `local_models` entry runs in-process via llama-cpp-2 (load failure falls back to cloud when an OpenAI-compatible chat/proactive task exists). When `tasks.proactive` uses `openai_compatible`, that task's model is used for the cloud decision call; otherwise `tasks.chat` is used. See [Proactive Speech ADR](../architecture/proactive-speech.md).
+- Proactive **decision**: when `tasks.proactive` uses `provider: "local"`, the named `local_models` entry runs in-process via llama-cpp-2. Load failure fail-closes to a disabled decision backend (no speech) — observation context is never silently uploaded to the cloud. When `tasks.proactive` uses an `openai_compatible` provider, that task's model is used for the cloud decision call; otherwise `tasks.chat` is used. See [Proactive Speech ADR](../architecture/proactive-speech.md).
 
 GGUF weights are **not** bundled. Set an HTTPS `url` in `ai.local_models` (or explicit `model_path`) — files download into `{assets_dir}/models/gguf/` on first startup with progress logged as `[GgufDownload]`. Non-HTTPS URLs are refused; HTTPS→HTTPS redirects are followed (Hugging Face CDN). Downloads require Content-Length, verify GGUF magic, and use hash-suffixed cache names. No external `llama-server` binary is required.
 

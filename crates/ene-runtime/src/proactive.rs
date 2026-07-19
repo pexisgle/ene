@@ -132,6 +132,7 @@ pub(crate) async fn run_decision_task(
     epoch: u64,
     affect: Option<StoreAffectState>,
     commitments: Vec<ActiveCommitmentPrompt>,
+    prompt_language: String,
 ) -> ProactiveDecisionResult {
     let observation = sanitize_observation(&config, observation);
     let context = build_proactive_context(
@@ -142,7 +143,7 @@ pub(crate) async fn run_decision_task(
         &commitments,
         suppression,
     );
-    let outcome = decide_proactive_speech(&config, &context, provider).await;
+    let outcome = decide_proactive_speech(&config, &context, provider, &prompt_language).await;
     let should_generate = outcome.skip.is_none()
         && outcome
             .decision
@@ -173,8 +174,8 @@ pub(crate) async fn run_decision_task(
 
 /// Build the internal generation hint (never stored as a user message).
 #[must_use]
-pub(crate) fn proactive_generation_hint(topic_hint: &str) -> String {
-    ene_config::PromptLibrary::load("en")
+pub(crate) fn proactive_generation_hint(topic_hint: &str, prompt_language: &str) -> String {
+    ene_config::PromptLibrary::load(prompt_language)
         .proactive()
         .render_generation_hint(topic_hint)
 }

@@ -5,19 +5,52 @@
 //! `>: ` plus the in-progress buffer.
 
 use crossterm::{
-    cursor::{MoveToColumn, MoveUp},
+    cursor::{MoveToColumn, MoveUp, Show},
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     queue,
     style::Print,
     terminal::{self, Clear, ClearType},
 };
 use parking_lot::Mutex;
-use std::io::{self, Stderr, Stdout, Write};
+use std::io::{self, Stderr, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 const PROMPT_PREFIX: &str = ">: ";
 
 static GLOBAL: OnceLock<TerminalUi> = OnceLock::new();
+static READ_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Ask any in-flight raw-mode line editor to exit (used on Ctrl-C).
+pub fn request_read_cancel() {
+    READ_CANCEL.store(true, Ordering::SeqCst);
+}
+
+fn clear_read_cancel() {
+    READ_CANCEL.store(false, Ordering::SeqCst);
+}
+
+fn read_cancel_requested() -> bool {
+    READ_CANCEL.load(Ordering::SeqCst)
+}
+
+/// RAII guard that always restores cooked terminal mode.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> Option<Self> {
+        terminal::enable_raw_mode().ok()?;
+        Some(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = queue!(io::stderr(), Show);
+        let _ = io::stderr().flush();
+        let _ = terminal::disable_raw_mode();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UiMode {
@@ -39,7 +72,6 @@ struct TerminalUiInner {
 
 /// Testable output sink.
 pub trait TerminalBackend: Send {
-    fn write_stdout(&mut self, s: &str);
     fn write_stderr(&mut self, s: &str);
     fn flush_all(&mut self);
     fn clear_current_line(&mut self);
@@ -52,7 +84,6 @@ pub trait TerminalBackend: Send {
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub struct CaptureBackend {
-    pub stdout: String,
     pub stderr: String,
     pub ops: Vec<CaptureOp>,
 }
@@ -60,7 +91,6 @@ pub struct CaptureBackend {
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureOp {
-    Stdout(String),
     Stderr(String),
     ClearCurrentLine,
     MoveUp(usize),
@@ -69,11 +99,6 @@ pub enum CaptureOp {
 
 #[cfg(test)]
 impl TerminalBackend for CaptureBackend {
-    fn write_stdout(&mut self, s: &str) {
-        self.stdout.push_str(s);
-        self.ops.push(CaptureOp::Stdout(s.to_string()));
-    }
-
     fn write_stderr(&mut self, s: &str) {
         self.stderr.push_str(s);
         self.ops.push(CaptureOp::Stderr(s.to_string()));
@@ -101,30 +126,23 @@ impl TerminalBackend for CaptureBackend {
 }
 
 struct RealBackend {
-    stdout: Stdout,
     stderr: Stderr,
 }
 
 impl RealBackend {
     fn new() -> Self {
         Self {
-            stdout: io::stdout(),
             stderr: io::stderr(),
         }
     }
 }
 
 impl TerminalBackend for RealBackend {
-    fn write_stdout(&mut self, s: &str) {
-        let _ = self.stdout.write_all(s.as_bytes());
-    }
-
     fn write_stderr(&mut self, s: &str) {
         let _ = queue!(self.stderr, Print(s));
     }
 
     fn flush_all(&mut self) {
-        let _ = self.stdout.flush();
         let _ = self.stderr.flush();
     }
 
@@ -192,9 +210,13 @@ impl TerminalUi {
     /// Replace a previously drawn multi-line block (open tree) in place.
     ///
     /// `old_line_count` is how many lines are currently on screen for the block.
-    /// Returns the new line count.
+    /// Returns the new line count. While LLM tokens stream, live rewrites are
+    /// frozen so cursor math cannot fight the stream.
     pub fn replace_block(&self, old_line_count: usize, new_lines: &[String]) -> usize {
         let mut inner = self.inner.lock();
+        if matches!(inner.mode, UiMode::Streaming { .. }) {
+            return old_line_count;
+        }
         let prompting = matches!(inner.mode, UiMode::Prompting { .. });
         if prompting {
             inner.backend.clear_current_line();
@@ -229,7 +251,7 @@ impl TerminalUi {
         new_lines.len()
     }
 
-    /// Stream LLM text to stdout.
+    /// Stream LLM text on stderr (same stream as tree / prompt).
     pub fn write_stream(&self, delta: &str) {
         if delta.is_empty() {
             return;
@@ -250,7 +272,7 @@ impl TerminalUi {
                 };
             }
         }
-        inner.backend.write_stdout(delta);
+        inner.backend.write_stderr(delta);
         if let UiMode::Streaming { at_line_start } = &mut inner.mode {
             *at_line_start = delta.ends_with('\n');
         }
@@ -264,7 +286,7 @@ impl TerminalUi {
             at_line_start: false,
         } = inner.mode
         {
-            inner.backend.write_stdout("\n");
+            inner.backend.write_stderr("\n");
         }
         if matches!(inner.mode, UiMode::Streaming { .. }) {
             inner.mode = UiMode::Idle;
@@ -272,12 +294,41 @@ impl TerminalUi {
         }
     }
 
+    /// Freeze coordinated UI before `dialoguer` (or other raw TTY owners) run.
+    pub fn pause_for_external_prompt(&self) {
+        let mut inner = self.inner.lock();
+        if let UiMode::Streaming {
+            at_line_start: false,
+        } = inner.mode
+        {
+            inner.backend.write_stderr("\n");
+        }
+        if matches!(inner.mode, UiMode::Prompting { .. }) {
+            inner.backend.clear_current_line();
+            inner.backend.move_to_column0();
+        }
+        inner.mode = UiMode::Idle;
+        inner.backend.flush_all();
+    }
+
+    /// Resume after [`Self::pause_for_external_prompt`].
+    pub fn resume_after_external_prompt(&self) {
+        let mut inner = self.inner.lock();
+        inner.mode = UiMode::Idle;
+        inner.backend.flush_all();
+    }
+
     /// Async REPL line read (blocking editor on a worker thread).
     pub async fn read_line(&self) -> Option<String> {
+        clear_read_cancel();
         let ui = self.clone();
-        tokio::task::spawn_blocking(move || ui.read_line_blocking())
-            .await
-            .unwrap_or(None)
+        match tokio::task::spawn_blocking(move || ui.read_line_blocking()).await {
+            Ok(line) => line,
+            Err(e) => {
+                tracing::warn!(error = %e, "REPL read_line worker failed");
+                None
+            }
+        }
     }
 
     fn read_line_blocking(&self) -> Option<String> {
@@ -290,13 +341,12 @@ impl TerminalUi {
             return self.read_line_stdio();
         }
 
-        if terminal::enable_raw_mode().is_err() {
+        let Some(_raw) = RawModeGuard::enter() else {
             return self.read_line_stdio();
-        }
+        };
 
         self.begin_prompt();
         let result = self.edit_line_raw();
-        let _ = terminal::disable_raw_mode();
 
         if let Some(line) = result {
             self.finish_prompt_with_line(&line);
@@ -331,7 +381,7 @@ impl TerminalUi {
             at_line_start: false,
         } = inner.mode
         {
-            inner.backend.write_stdout("\n");
+            inner.backend.write_stderr("\n");
         }
         inner.mode = UiMode::Prompting {
             buffer: String::new(),
@@ -366,6 +416,14 @@ impl TerminalUi {
 
     fn edit_line_raw(&self) -> Option<String> {
         loop {
+            if read_cancel_requested() {
+                return None;
+            }
+            // Poll so Ctrl-C cancel can be observed without waiting forever on
+            // the next key event after the async signal handler fires.
+            if !event::poll(std::time::Duration::from_millis(200)).unwrap_or(false) {
+                continue;
+            }
             let Ok(ev) = event::read() else {
                 return None;
             };
@@ -474,10 +532,6 @@ struct SharedCaptureBackend {
 
 #[cfg(test)]
 impl TerminalBackend for SharedCaptureBackend {
-    fn write_stdout(&mut self, s: &str) {
-        self.inner.lock().write_stdout(s);
-    }
-
     fn write_stderr(&mut self, s: &str) {
         self.inner.lock().write_stderr(s);
     }
@@ -543,5 +597,19 @@ mod tests {
         assert_eq!(n, 3);
         let cap = capture.lock();
         assert!(cap.ops.iter().any(|op| matches!(op, CaptureOp::MoveUp(2))));
+    }
+
+    #[test]
+    fn replace_block_frozen_while_streaming() {
+        let (ui, capture) = TerminalUi::with_capture();
+        ui.write_stream("hello");
+        let n = ui.replace_block(0, &["|- A".into()]);
+        assert_eq!(n, 0);
+        let cap = capture.lock();
+        assert!(
+            !cap.ops.iter().any(|op| matches!(op, CaptureOp::MoveUp(_))),
+            "streaming must not move cursor for tree rewrites"
+        );
+        assert!(cap.stderr.contains("hello"));
     }
 }

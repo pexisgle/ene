@@ -569,12 +569,11 @@ async fn fetch_gguf_https(url: &str) -> Result<reqwest::Response, LlmProviderErr
 }
 
 fn resolve_https_redirect(base: &str, location: &str) -> Result<String, LlmProviderError> {
-    let base_url = reqwest::Url::parse(base.trim()).map_err(|e| {
-        LlmProviderError::Provider(format!("invalid GGUF redirect base URL: {e}"))
-    })?;
-    let joined = base_url.join(location.trim()).map_err(|e| {
-        LlmProviderError::Provider(format!("invalid GGUF redirect Location: {e}"))
-    })?;
+    let base_url = reqwest::Url::parse(base.trim())
+        .map_err(|e| LlmProviderError::Provider(format!("invalid GGUF redirect base URL: {e}")))?;
+    let joined = base_url
+        .join(location.trim())
+        .map_err(|e| LlmProviderError::Provider(format!("invalid GGUF redirect Location: {e}")))?;
     if joined.scheme() != "https" {
         return Err(LlmProviderError::Provider(format!(
             "GGUF download refused non-HTTPS redirect to {}",

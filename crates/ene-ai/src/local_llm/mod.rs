@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_missing_weights_fall_back_to_cloud() {
+    async fn local_missing_weights_fails_closed_to_disabled() {
         let mut cfg = test_config();
         cfg.local_models.insert(
             "missing".to_string(),
@@ -212,13 +212,13 @@ mod tests {
         });
         let handles = build_proactive_llm_handles(&cfg)
             .await
-            .expect("missing weights fall back to cloud");
-        assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
+            .expect("missing weights fail-closed to disabled");
+        assert_eq!(handles.decision_kind, DecisionProviderKind::Disabled);
         handles.shutdown().await;
     }
 
     #[tokio::test]
-    async fn missing_model_path_fails_closed_for_llama_cpp() {
+    async fn missing_model_path_fails_closed_to_disabled() {
         let mut cfg = test_config();
         cfg.local_models.insert(
             "empty".to_string(),
@@ -236,8 +236,8 @@ mod tests {
         });
         let handles = build_proactive_llm_handles(&cfg)
             .await
-            .expect("empty model_path falls back to cloud");
-        assert_eq!(handles.decision_kind, DecisionProviderKind::Cloud);
+            .expect("empty model_path fail-closed to disabled");
+        assert_eq!(handles.decision_kind, DecisionProviderKind::Disabled);
         handles.shutdown().await;
     }
 

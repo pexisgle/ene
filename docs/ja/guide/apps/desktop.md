@@ -138,10 +138,14 @@ F1 またはトレイ → Settings で開きます。タブ構成:
 | Memory | メモリジャーナル（閲覧 / recall デバッグ） |
 | Debug | セッション専用オーバーレイ（コライダー、入力領域） |
 
-機能トグルは `settings.json` に保存されます（`store.enabled`、
+機能トグルは `settings.json` に保存され（`store.enabled`、
 `mind.emotion.enabled`、`mind.proactive.*`、`tools.enabled`、
-`tools.rag.enabled`、`tools.list.<name>.enable`）。能動発話ポリシー
-（タイミングとソース）は機能タブで編集します。
+`tools.rag.enabled`、`tools.list.<name>.enable`）、`UpdateFeatureSettings`
+経由で実行中のランタイムアクターへ即時反映されます（再起動不要。ツール別
+enable 変更時はプロセス内でツールレジストリを再構築）。能動発話ポリシー
+（タイミングとソース）は機能タブで編集します。`screen_summary` には
+`mmproj` 付きローカル proactive GGUF が必要で、vision 失敗時はソースを
+Unavailable とし（捏造メタデータサマリは入れません）。
 
 ### メッセージ型
 

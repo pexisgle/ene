@@ -3,6 +3,7 @@
 //! Raw pixels stay in the desktop/runtime process. Enabling
 //! `mind.proactive.sources.screen_summary` opts in to a short local
 //! multimodal completion against the proactive GGUF + `mmproj`.
+//! Vision failures mark the source unavailable — no fabricated summaries.
 
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,7 @@ struct CachedSummary {
 pub struct ScreenSummaryProvider {
     handle: EneHandle,
     cache: Mutex<Option<CachedSummary>>,
+    last_failure_at: Mutex<Option<Instant>>,
 }
 
 impl ScreenSummaryProvider {
@@ -35,6 +37,7 @@ impl ScreenSummaryProvider {
         Self {
             handle,
             cache: Mutex::new(None),
+            last_failure_at: Mutex::new(None),
         }
     }
 
@@ -49,6 +52,12 @@ impl ScreenSummaryProvider {
             return Some(truncate(&cached.text, max_chars));
         }
 
+        if let Some(failed_at) = *self.last_failure_at.lock()
+            && failed_at.elapsed() < MIN_REFRESH
+        {
+            return None;
+        }
+
         let captured = match capture_for_summary().await {
             Ok(c) => c,
             Err(e) => {
@@ -57,6 +66,7 @@ impl ScreenSummaryProvider {
                     error = %e,
                     "Screen capture skipped"
                 );
+                *self.last_failure_at.lock() = Some(Instant::now());
                 return None;
             }
         };
@@ -69,14 +79,16 @@ impl ScreenSummaryProvider {
                     error = %e,
                     width = captured.image.width(),
                     height = captured.image.height(),
-                    "Local vision summary failed; using metadata fallback"
+                    "Local vision summary failed; screen source unavailable"
                 );
-                metadata_fallback(&captured)
+                *self.last_failure_at.lock() = Some(Instant::now());
+                return None;
             }
         };
 
         let text = truncate(&redact_paths(&text), max_chars);
         if text.trim().is_empty() {
+            *self.last_failure_at.lock() = Some(Instant::now());
             return None;
         }
 
@@ -87,6 +99,7 @@ impl ScreenSummaryProvider {
             "Screen summary refreshed"
         );
 
+        *self.last_failure_at.lock() = None;
         *self.cache.lock() = Some(CachedSummary {
             text: text.clone(),
             app_label: if captured.app_label.is_empty() {
@@ -108,39 +121,9 @@ impl ScreenSummaryProvider {
     }
 }
 
-fn metadata_fallback(captured: &CapturedScreen) -> String {
-    let w = captured.image.width();
-    let h = captured.image.height();
-    if captured.app_label.is_empty() {
-        format!("Screen capture available ({w}x{h}).")
-    } else {
-        format!(
-            "Active application: {}. Screen capture available ({w}x{h}).",
-            captured.app_label
-        )
-    }
-}
-
 fn active_app_hint() -> String {
     match active_win_pos_rs::get_active_window() {
         Ok(win) => redact_paths(win.app_name.trim()),
         Err(()) => String::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use image::DynamicImage;
-
-    #[test]
-    fn metadata_fallback_includes_app() {
-        let captured = CapturedScreen {
-            image: DynamicImage::new_rgba8(8, 4),
-            app_label: "firefox".into(),
-        };
-        let text = metadata_fallback(&captured);
-        assert!(text.contains("firefox"));
-        assert!(text.contains("8x4"));
     }
 }

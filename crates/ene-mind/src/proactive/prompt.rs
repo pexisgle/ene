@@ -6,9 +6,11 @@ use ene_config::PromptLibrary;
 
 /// Build chat messages that instruct the model to return decision JSON only.
 #[must_use]
-pub fn build_decision_messages(context: &ProactiveContext) -> Vec<LlmMessage> {
-    // Backend LLM instructions stay English (AGENTS.md); JA templates exist for locale parity.
-    let prompts = PromptLibrary::load("en");
+pub fn build_decision_messages(
+    context: &ProactiveContext,
+    prompt_language: &str,
+) -> Vec<LlmMessage> {
+    let prompts = PromptLibrary::load(prompt_language);
     let system = LlmMessage::System {
         content: prompts.proactive().decision_system.trim().to_string(),
     };

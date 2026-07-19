@@ -2,7 +2,7 @@ use crate::{
     commands::{self, CommandOutcome, SHUTDOWN_TIMEOUT},
     context::AppContext,
     stream,
-    terminal_ui::TerminalUi,
+    terminal_ui::{self, TerminalUi},
 };
 
 /// Read a single line of REPL input on a blocking thread. Returns
@@ -45,6 +45,7 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                 } else {
                     tracing::info!("[Runtime] Ctrl-C received, shutting down...");
                 }
+                terminal_ui::request_read_cancel();
                 return drain_and_exit(ctx, 130).await;
             }
 

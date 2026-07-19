@@ -34,7 +34,7 @@ Example (`assets/settings.json`):
 }
 ```
 
-Desktop settings apply to the running actor immediately (no restart). The desktop observer and runtime scheduler both receive updates via `UpdateProactiveSettings`.
+Desktop settings apply to the running actor immediately (no restart). The desktop observer and runtime scheduler both receive updates via `UpdateFeatureSettings` (Features tab) / `UpdateProactiveSettings`.
 
 At the default desktop `info` log level you should see:
 
@@ -55,7 +55,8 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 ## Privacy
 
 - Desktop never writes raw screenshots to disk, logs, or SQLite (portal temp files are deleted immediately).
-- When `sources.screen_summary` is enabled, desktop captures the active window (or primary display), summarizes it with the **local** proactive GGUF + `mmproj` (Gemma 4 multimodal), then discards the image. Only truncated text enters the decision context. If vision fails, a metadata fallback (`Active application: …`) is used.
+- When `sources.screen_summary` is enabled, desktop captures the active window (or primary display), summarizes it with the **local** proactive GGUF + `mmproj` (Gemma 4 multimodal), then discards the image. Only truncated text enters the decision context. If vision fails, the screen source is marked unavailable (no fabricated summary).
+- When `tasks.proactive` is `provider: "local"`, a missing or failed GGUF load disables the decision backend — it does **not** fall back to cloud with observation context.
 - Activity uses **application name only** (no raw window titles; no keylogging).
 
 ## Desktop integration

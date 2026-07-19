@@ -259,6 +259,7 @@ pub async fn decide_proactive_speech(
     config: &ProactiveConfig,
     context: &ProactiveContext,
     provider: Option<Arc<dyn LlmProvider>>,
+    prompt_language: &str,
 ) -> ProactiveDecisionOutcome {
     if !config.enabled {
         return ProactiveDecisionOutcome {
@@ -286,7 +287,7 @@ pub async fn decide_proactive_speech(
         };
     };
 
-    let messages = build_decision_messages(context);
+    let messages = build_decision_messages(context, prompt_language);
     // Inner object only — OpenAI/OpenRouter wrap this as response_format themselves.
     let schema = decision_schema_object();
     let timeout = Duration::from_secs(config.decision_timeout_seconds.max(1));
@@ -529,7 +530,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":1.0}"#.into(),
         });
-        let outcome = decide_proactive_speech(&config, &ctx, Some(provider)).await;
+        let outcome = decide_proactive_speech(&config, &ctx, Some(provider), "en").await;
         assert!(!outcome.llm_invoked);
         assert!(!outcome.decision.should_speak);
         assert!(matches!(
@@ -565,7 +566,7 @@ mod tests {
         let provider: Arc<dyn LlmProvider> = Arc::new(FixedProvider {
             body: r#"{"should_speak":true,"confidence":0.9,"reason":"idle","topic_hint":"check in","urgency":"low"}"#.into(),
         });
-        let outcome = decide_proactive_speech(&config, &ctx, Some(provider)).await;
+        let outcome = decide_proactive_speech(&config, &ctx, Some(provider), "en").await;
         assert!(outcome.llm_invoked);
         assert!(
             outcome
@@ -606,7 +607,7 @@ mod tests {
             captured: std::sync::Mutex::new(None),
         });
         let provider: Arc<dyn LlmProvider> = capture.clone();
-        let outcome = decide_proactive_speech(&config, &ctx, Some(provider)).await;
+        let outcome = decide_proactive_speech(&config, &ctx, Some(provider), "en").await;
         assert!(outcome.llm_invoked);
         let schema = capture
             .captured

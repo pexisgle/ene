@@ -113,6 +113,12 @@ pub enum EneCommand {
         /// Mind proactive policy.
         mind: ene_mind::ProactiveConfig,
     },
+    /// Hot-update Features-tab settings (mind / store / tools / RAG) without
+    /// tearing down the local proactive GGUF.
+    UpdateFeatureSettings {
+        /// Boxed payload to keep [`EneCommand`] small.
+        settings: Box<FeatureSettingsUpdate>,
+    },
     /// Summarize a screen RGB capture with the local vision (mmproj) model.
     SummarizeScreenImage {
         /// Image width in pixels.
@@ -124,6 +130,19 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<String, String>>,
     },
+}
+
+/// Payload for [`EneCommand::UpdateFeatureSettings`].
+#[derive(Debug, Clone)]
+pub struct FeatureSettingsUpdate {
+    /// Full mind section (emotion + proactive).
+    pub mind: ene_mind::MindConfig,
+    /// Long-term memory store section.
+    pub store: ene_store::StoreConfig,
+    /// Tool host section.
+    pub tools: ene_tool_host::ToolConfig,
+    /// Tool RAG section.
+    pub rag: ToolRagConfig,
 }
 
 /// Events emitted from the actor to all consumers via broadcast channel.
@@ -545,6 +564,7 @@ impl EneHandle {
             call_tool_tasks: tokio::task::JoinSet::new(),
             classifier_tasks: tokio::task::JoinSet::new(),
             memory_writer_tasks: tokio::task::JoinSet::new(),
+            vision_tasks: tokio::task::JoinSet::new(),
             classifier_rx,
             memory_writer_rx,
             terminal_emitted: Arc::new(AtomicBool::new(false)),
@@ -681,12 +701,39 @@ impl EneHandle {
     }
 
     /// Hot-update proactive policy in the running actor.
+    ///
+    /// Prefer [`Self::update_feature_settings`] when emotion / store / tools
+    /// also change — this path only patches `mind.proactive` and does not
+    /// reload the local decision model.
     pub fn update_proactive_settings(
         &self,
         mind: ene_mind::ProactiveConfig,
     ) -> Result<(), ActorDeadError> {
         self.cmd_tx
             .send(EneCommand::UpdateProactiveSettings { mind })
+            .map_err(|_| ActorDeadError)
+    }
+
+    /// Hot-update Features-tab sections (mind / store / tools / RAG).
+    ///
+    /// Does not tear down local GGUF handles. Tool process registry is rebuilt
+    /// when the tools section changes.
+    pub fn update_feature_settings(
+        &self,
+        mind: ene_mind::MindConfig,
+        store: ene_store::StoreConfig,
+        tools: ene_tool_host::ToolConfig,
+        rag: ToolRagConfig,
+    ) -> Result<(), ActorDeadError> {
+        self.cmd_tx
+            .send(EneCommand::UpdateFeatureSettings {
+                settings: Box::new(FeatureSettingsUpdate {
+                    mind,
+                    store,
+                    tools,
+                    rag,
+                }),
+            })
             .map_err(|_| ActorDeadError)
     }
 
@@ -739,6 +786,8 @@ struct EneActor {
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
     memory_writer_tasks: tokio::task::JoinSet<()>,
+    /// In-flight screen-summary vision jobs (must not block the command loop).
+    vision_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     /// Sender for classifier `JoinHandles` from the stream task.
@@ -797,6 +846,16 @@ impl EneActor {
                         component = "MemoryWriterReaper",
                         error = %e,
                         "Deferred memory-writer task panicked"
+                    );
+                }
+            }
+
+            while let Some(joined) = self.vision_tasks.try_join_next() {
+                if let Err(e) = joined {
+                    tracing::error!(
+                        component = "VisionReaper",
+                        error = %e,
+                        "Screen summary vision task panicked"
                     );
                 }
             }
@@ -938,6 +997,7 @@ impl EneActor {
         self.classifier_tasks.abort_all();
         self.memory_writer_tasks.abort_all();
         self.call_tool_tasks.abort_all();
+        self.vision_tasks.abort_all();
         self.drain_pending().await;
     }
 
@@ -990,28 +1050,76 @@ impl EneActor {
         width: u32,
         height: u32,
         rgb: Vec<u8>,
-    ) -> Result<String, String> {
-        let prompts = ene_config::PromptLibrary::load("en");
-        let system = prompts.proactive().screen_summary_system.trim();
-        let user = prompts.proactive().screen_summary_user.trim();
+        reply: oneshot::Sender<Result<String, String>>,
+    ) {
+        const MAX_PIXELS: u64 = 1920 * 1080;
+        let width_u = u64::from(width);
+        let height_u = u64::from(height);
+        let expected = width_u.saturating_mul(height_u).saturating_mul(3);
+        if width == 0 || height == 0 {
+            let _ = reply.send(Err("invalid screen image dimensions".to_string()));
+            return;
+        }
+        if width_u.saturating_mul(height_u) > MAX_PIXELS {
+            let _ = reply.send(Err(format!(
+                "screen image too large ({width}x{height}; max {MAX_PIXELS} pixels)"
+            )));
+            return;
+        }
+        let Ok(expected_len) = usize::try_from(expected) else {
+            let _ = reply.send(Err("screen image byte length overflows usize".to_string()));
+            return;
+        };
+        if rgb.len() != expected_len {
+            let _ = reply.send(Err(format!(
+                "rgb buffer length mismatch (got {}, expected {expected_len})",
+                rgb.len()
+            )));
+            return;
+        }
+        if self.stream_handle.is_some() || self.proactive_decision_rx.is_some() {
+            let _ = reply.send(Err("runtime busy".to_string()));
+            return;
+        }
 
-        self.ensure_proactive_llm().await?;
+        let prompt_language = self
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .map_or_else(
+                |_| "en".to_string(),
+                |m| m.emotion.classifier_language.clone(),
+            );
+
+        if let Err(e) = self.ensure_proactive_llm().await {
+            let _ = reply.send(Err(e));
+            return;
+        }
         let Some(handles) = self.proactive_llm.as_ref() else {
-            return Err("proactive LLM handles missing after ensure".to_string());
+            let _ = reply.send(Err("proactive LLM handles missing after ensure".to_string()));
+            return;
         };
         let Some(local) = handles.local().cloned() else {
-            return Err(format!(
+            let _ = reply.send(Err(format!(
                 "local proactive model is not available (decision_backend={:?})",
                 handles.decision_kind
-            ));
+            )));
+            return;
         };
         if !local.supports_vision() {
-            return Err("local model has no vision mmproj loaded".to_string());
+            let _ = reply.send(Err("local model has no vision mmproj loaded".to_string()));
+            return;
         }
-        local
-            .summarize_rgb(width, height, rgb, system, user)
-            .await
-            .map_err(|e| e.to_string())
+
+        let prompts = ene_config::PromptLibrary::load(&prompt_language);
+        let system = prompts.proactive().screen_summary_system.trim().to_string();
+        let user = prompts.proactive().screen_summary_user.trim().to_string();
+        self.vision_tasks.spawn(async move {
+            let result = local
+                .summarize_rgb(width, height, rgb, &system, &user)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = reply.send(result);
+        });
     }
 
     async fn maybe_spawn_proactive_decision(&mut self) {
@@ -1068,6 +1176,7 @@ impl EneActor {
         let (tx, rx) = oneshot::channel();
         self.proactive_decision_rx = Some(rx);
         let config = mind.proactive.clone();
+        let prompt_language = mind.emotion.classifier_language.clone();
         let handle = tokio::spawn(async move {
             let result = crate::proactive::run_decision_task(
                 config,
@@ -1078,6 +1187,7 @@ impl EneActor {
                 epoch,
                 affect,
                 commitments,
+                prompt_language,
             )
             .await;
             let _ = tx.send(result);
@@ -1142,7 +1252,10 @@ impl EneActor {
             .config
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
-        let hint = crate::proactive::proactive_generation_hint(&result.topic_hint);
+        let hint = crate::proactive::proactive_generation_hint(
+            &result.topic_hint,
+            &mind.emotion.classifier_language,
+        );
         self.drain_pending().await;
         self.cancel_token = CancellationToken::new();
         self.terminal_emitted = Arc::new(AtomicBool::new(false));
@@ -1263,6 +1376,7 @@ impl EneActor {
                 self.classifier_tasks.abort_all();
                 self.memory_writer_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
+                self.vision_tasks.abort_all();
                 self.abort_proactive_decision();
                 if let Some(handles) = self.proactive_llm.take() {
                     handles.shutdown().await;
@@ -1287,9 +1401,49 @@ impl EneActor {
                     let _ = self.config.set_section(&mind_cfg);
                 }
                 self.abort_proactive_decision();
-                // Drop handles so the next ensure rebuilds from current AiConfig.
-                if let Some(handles) = self.proactive_llm.take() {
-                    handles.shutdown().await;
+                true
+            }
+            EneCommand::UpdateFeatureSettings { settings } => {
+                let FeatureSettingsUpdate {
+                    mind,
+                    store,
+                    tools,
+                    rag,
+                } = *settings;
+                let prev_tools = self
+                    .config
+                    .get_section::<ene_tool_host::ToolConfig>()
+                    .unwrap_or_default();
+                let tools_changed = tool_enable_set_changed(&prev_tools, &tools);
+
+                let _ = self.config.set_section(&mind);
+                let _ = self.config.set_section(&store);
+                let _ = self.config.set_section(&tools);
+                let _ = self.config.set_section(&rag);
+                self.abort_proactive_decision();
+
+                if tools_changed {
+                    match build_tool_registry(
+                        &self.config,
+                        self.session.memory.memory_store.clone(),
+                    )
+                    .await
+                    {
+                        Ok(registry) => {
+                            self.registry = registry;
+                            tracing::info!(
+                                component = "EneActor",
+                                "Tool registry rebuilt after Features update"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                component = "EneActor",
+                                error = %e,
+                                "Failed to rebuild tool registry after Features update"
+                            );
+                        }
+                    }
                 }
                 true
             }
@@ -1299,8 +1453,7 @@ impl EneActor {
                 rgb,
                 reply,
             } => {
-                let result = self.summarize_screen_rgb(width, height, rgb).await;
-                let _ = reply.send(result);
+                self.summarize_screen_rgb(width, height, rgb, reply).await;
                 true
             }
             EneCommand::PermissionDecision {
@@ -1741,6 +1894,26 @@ async fn warmup_character_memories_ready(
             None
         }
     }
+}
+
+fn tool_enable_set_changed(
+    prev: &ene_tool_host::ToolConfig,
+    next: &ene_tool_host::ToolConfig,
+) -> bool {
+    if prev.enabled != next.enabled {
+        return true;
+    }
+    let mut keys: Vec<&String> = prev.list.keys().chain(next.list.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        let prev_enable = prev.list.get(key).is_none_or(|e| e.enable);
+        let next_enable = next.list.get(key).is_none_or(|e| e.enable);
+        if prev_enable != next_enable {
+            return true;
+        }
+    }
+    false
 }
 
 /// Builds the active composite tool registry based on workspace config.

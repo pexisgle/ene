@@ -133,12 +133,14 @@ pub async fn process_stream(
                     "このセッションで常に許可 (Allow Session)",
                     "拒否 (Deny)",
                 ];
+                ui.pause_for_external_prompt();
                 let selection = dialoguer::Select::new()
                     .with_prompt("操作の権限を選択してください")
                     .items(&choices)
                     .default(0)
                     .interact()
                     .unwrap_or(2);
+                ui.resume_after_external_prompt();
 
                 let decision = match selection {
                     0 => PermissionDecision::AllowOnce,
@@ -171,12 +173,14 @@ pub async fn process_stream(
                         let mut choices: Vec<String> = item.options.clone();
                         choices.push("(skip)".to_string());
                         choices.push("(cancel all)".to_string());
+                        ui.pause_for_external_prompt();
                         let selection = dialoguer::Select::new()
                             .with_prompt("回答を選択 (上下キーで選択, Enterで確定)")
                             .items(&choices)
                             .default(0)
                             .interact()
                             .unwrap_or_else(|_| choices.len().saturating_sub(1));
+                        ui.resume_after_external_prompt();
 
                         let chosen = &choices[selection];
                         if chosen == "(cancel all)" {
@@ -190,11 +194,13 @@ pub async fn process_stream(
                             }
                         }
                     } else if item.allow_free_text {
+                        ui.pause_for_external_prompt();
                         let text: String = dialoguer::Input::new()
                             .with_prompt("自由入力 (空でskip, 'cancel'で全キャンセル)")
                             .allow_empty(true)
                             .interact_text()
                             .unwrap_or_default();
+                        ui.resume_after_external_prompt();
                         if text.eq_ignore_ascii_case("cancel") {
                             cancelled = true;
                             break;
