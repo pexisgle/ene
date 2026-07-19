@@ -86,7 +86,7 @@ impl MemoryWriter {
             .into_iter()
             .partition(|c| c.source_quote.is_empty());
 
-        tracing::info!(
+        tracing::debug!(
             component = "MemoryWriter",
             character_id = %input.character_id,
             user_id = %input.user_id,
@@ -123,7 +123,7 @@ impl MemoryWriter {
             .await
             {
                 Ok(llm_candidates) => {
-                    tracing::info!(
+                    tracing::debug!(
                         component = "MemoryWriter",
                         character_id = %input.character_id,
                         user_id = %input.user_id,
@@ -134,7 +134,7 @@ impl MemoryWriter {
                     if llm_candidates.is_empty() {
                         // Leave `used_llm` false so remember/forget
                         // safety-net patterns still reach the arbiter.
-                        tracing::info!(
+                        tracing::debug!(
                             component = "MemoryWriter",
                             character_id = %input.character_id,
                             "LLM returned no candidates; will use remember/forget patterns if any"
@@ -173,7 +173,7 @@ impl MemoryWriter {
             .partition(|c| !c.should_persist);
 
         if !forget_candidates.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
                 candidate_count = forget_candidates.len(),
@@ -183,7 +183,7 @@ impl MemoryWriter {
         }
 
         if !used_llm && !other_patterns.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
                 candidate_count = other_patterns.len(),
@@ -200,7 +200,7 @@ impl MemoryWriter {
         }
 
         if !used_llm && !tool_candidates.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
                 candidate_count = tool_candidates.len(),
@@ -225,6 +225,7 @@ impl MemoryWriter {
             character_id: input.character_id,
             user_id: input.user_id,
         };
+        let mut outcome_summary = ArbiterOutcomeSummary::default();
 
         for (candidates, provenance) in batches {
             let semantic_matches = build_semantic_matches(
@@ -275,7 +276,7 @@ impl MemoryWriter {
                             &sync_ctx,
                         )
                         .await?;
-                    log_arbiter_outcomes(input, &applied);
+                    record_arbiter_outcomes(input, &applied, &mut outcome_summary);
                 } else {
                     regular.push(candidate);
                 }
@@ -286,9 +287,19 @@ impl MemoryWriter {
                     store, &regular, &base_ctx, &sync_ctx,
                 )
                 .await?;
-                log_arbiter_outcomes(input, &applied);
+                record_arbiter_outcomes(input, &applied, &mut outcome_summary);
             }
         }
+
+        tracing::info!(
+            component = "MemoryWriter",
+            character_id = %input.character_id,
+            user_id = %input.user_id,
+            persisted = outcome_summary.persisted,
+            skipped = outcome_summary.skipped,
+            other = outcome_summary.other,
+            "Post-turn memory arbitration complete"
+        );
 
         Ok(())
     }
@@ -435,15 +446,24 @@ const fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
     }
 }
 
-fn log_arbiter_outcomes(
+#[derive(Default)]
+struct ArbiterOutcomeSummary {
+    persisted: usize,
+    skipped: usize,
+    other: usize,
+}
+
+fn record_arbiter_outcomes(
     input: &PostTurnInput<'_>,
     applied: &[crate::memory_writer::AppliedDecision],
+    summary: &mut ArbiterOutcomeSummary,
 ) {
     for outcome in applied {
         match &outcome.decision.action {
             crate::memory_writer::ArbiterAction::Persist(_)
             | crate::memory_writer::ArbiterAction::Supersede { .. } => {
-                tracing::info!(
+                summary.persisted = summary.persisted.saturating_add(1);
+                tracing::debug!(
                     component = "MemoryWriter",
                     character_id = %input.character_id,
                     user_id = %input.user_id,
@@ -456,7 +476,8 @@ fn log_arbiter_outcomes(
             }
             crate::memory_writer::ArbiterAction::Ignore
             | crate::memory_writer::ArbiterAction::AskConfirmationLater => {
-                tracing::info!(
+                summary.skipped = summary.skipped.saturating_add(1);
+                tracing::debug!(
                     component = "MemoryWriter",
                     character_id = %input.character_id,
                     user_id = %input.user_id,
@@ -468,7 +489,8 @@ fn log_arbiter_outcomes(
                 );
             }
             other => {
-                tracing::info!(
+                summary.other = summary.other.saturating_add(1);
+                tracing::debug!(
                     component = "MemoryWriter",
                     character_id = %input.character_id,
                     user_id = %input.user_id,
