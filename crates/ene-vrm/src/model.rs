@@ -482,20 +482,16 @@ impl VrmModel {
     /// 2. **Apply `LookAt` bone deltas** (this struct): for the
     ///    `head` / `leftEye` / `rightEye` humanoid bones
     ///    whose [`LookAtBoneOutput`] carries a non-identity
-    ///    delta, overwrite the local rotation with
-    ///    `rest_local_rotations[node] * look_at_delta`. The
-    ///    spec defines the `LookAt` delta as a rotation
-    ///    applied to the bone's *rest* rotation, so a
-    ///    LookAt-active head/eye wins over the VRMA's
-    ///    contribution for the same bone (this matches the
-    ///    legacy `bevy_vrm1` "head tracking overrides the
-    ///    active motion" behaviour). Bones missing from
-    ///    the humanoid registry are silently dropped, so
-    ///    the call is a no-op on models without humanoid
-    ///    metadata. The `LookAt` step runs **after** the
-    ///    VRMA step so head/eye bones that the motion also
-    ///    animates end up looking at the cursor rather than
-    ///    blending the two sources.
+    ///    delta, multiply the delta onto the **current** local
+    ///    rotation (`current * look_at_delta`). The LookAt step
+    ///    runs **after** the VRMA step so cursor tracking is
+    ///    additive on top of the motion pose — overwriting with
+    ///    `rest * delta` would discard head compensation that
+    ///    body-bowing clips rely on (e.g. VRMA_02), leaving the
+    ///    character staring at the floor whenever LookAt is
+    ///    active. Bones missing from the humanoid registry are
+    ///    silently dropped, so the call is a no-op on models
+    ///    without humanoid metadata.
     /// 3. **Walk the hierarchy**: `nodes.compute_world_transforms()`
     ///    fills `world_rotations` / `world_positions`.
     /// 4. **Hips translation**: if the frame carries an
@@ -578,17 +574,12 @@ impl VrmModel {
         }
 
         // 2.5 apply the LookAt cursor-tracking deltas
-        //    on top of the VRMA pose. The spec defines the
-        //    delta as a rotation applied to the bone's *rest*
-        //    rotation (not a delta on top of the current
-        //    local rotation), so head/eye bones that the
-        //    motion also animates end up looking at the
-        //    cursor rather than blending the two sources.
-        //    Identity deltas are skipped (the rest pose
-        //    would rotate to itself; cheaper to leave the
-        //    VRMA result untouched). Unknown humanoid bone
-        //    names are silently dropped — `by_name` returns
-        //    `None` and the existing local rotation wins.
+        //    on top of the VRMA pose. Multiply onto the current
+        //    local rotation (already VRMA or rest) so body-bowing
+        //    motions keep their head compensation. Identity
+        //    deltas are skipped. Unknown humanoid bone names are
+        //    silently dropped — `by_name` returns `None` and the
+        //    existing local rotation wins.
         if let Some(look_at) = look_at {
             for (bone_name, delta) in [
                 ("head", look_at.head),
@@ -605,7 +596,7 @@ impl VrmModel {
                     continue;
                 }
                 self.nodes.local_rotations[entry.node] =
-                    self.nodes.rest_local_rotations[entry.node] * delta.delta;
+                    self.nodes.local_rotations[entry.node] * delta.delta;
             }
         }
 
@@ -1397,15 +1388,12 @@ mod tests {
         );
     }
 
-    /// The `LookAt` step runs **after** the VRMA step, so a
-    /// frame that animates `head` plus an active `LookAt`
-    /// delta on the same bone must end up with the `LookAt`
-    /// rotation, not the VRMA rotation. This is the
-    /// "head tracking overrides the active motion" rule
-    /// from the spec and is what the user expects when a
-    /// waving VRMA also has the head follow the cursor.
+    /// The `LookAt` step runs **after** the VRMA step and
+    /// multiplies the delta onto the current local rotation, so
+    /// a frame that animates `head` plus an active `LookAt`
+    /// delta ends up with `vrma * look_at` (additive tracking).
     #[test]
-    fn update_skin_palette_look_at_overrides_vrma_for_head() {
+    fn update_skin_palette_look_at_composes_onto_vrma_for_head() {
         let mut humanoid = HumanoidBoneRegistry::new();
         humanoid.insert(
             VrmBone("head".into()),
@@ -1419,31 +1407,27 @@ mod tests {
             single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
         let mut frame = VrmaFrame::default();
         // VRMA rotates the head 90° around X.
-        frame.bone_rotations.insert(
-            "head".into(),
-            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        );
+        let vrma = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        frame.bone_rotations.insert("head".into(), vrma);
         // LookAt rotates the head 90° around Y.
+        let look_delta = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         let look_at = LookAtBoneOutput {
-            head: LookAtBoneDelta {
-                delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-            },
+            head: LookAtBoneDelta { delta: look_delta },
             left_eye: LookAtBoneDelta::default(),
             right_eye: LookAtBoneDelta::default(),
         };
-        let palette = model.update_skin_palette(&frame, Some(&look_at));
-        // LookAt wins: +X rotates to -Z (Y rotation), not
-        // to +X (X rotation, identity case).
-        let transformed = palette[0].transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        let _palette = model.update_skin_palette(&frame, Some(&look_at));
+        let expected = vrma * look_delta;
         assert!(
-            (transformed - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5,
-            "LookAt must override VRMA on the head, got {transformed:?}"
+            model.nodes.local_rotations[0].dot(expected).abs() > 1.0 - 1e-5,
+            "head local must be vrma * look_at, got {:?} expected {expected:?}",
+            model.nodes.local_rotations[0]
         );
     }
 
     /// Identity `LookAt` deltas must be a no-op (the
     /// implementation skips them to avoid an unnecessary
-    /// `rest * identity` write). A model whose humanoid
+    /// write). A model whose humanoid
     /// registry has none of `head` / `leftEye` / `rightEye`
     /// must produce a palette identical to the
     /// `None`-`LookAt` case — the call must not panic on
