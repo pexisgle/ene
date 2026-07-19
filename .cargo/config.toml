@@ -1,2 +1,5 @@
 [future-incompat-report]
 frequency = "never"
+
+[build]
+rustc-wrapper = "sccache"

@@ -204,6 +204,9 @@ renamed_function_params = "allow"
 
 allow_attributes_without_reason = "deny"
 
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 3
 

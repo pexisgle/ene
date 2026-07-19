@@ -35,6 +35,8 @@
           with pkgs;
           mkShell {
             buildInputs = [
+              # sccache — compiler cache to reduce rebuild times and target/ size
+              sccache
               # Stable Rust compiler and standard library sources
               (rust-bin.stable.latest.default.override {
                 extensions = [ "rust-src" ];
@@ -113,6 +115,8 @@
 
             shellHook = ''
               export CARGO_TARGET_DIR="$PWD/target"
+              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+              export SCCACHE_DIR="$HOME/.cache/sccache"
             '';
           };
       }
