@@ -346,18 +346,13 @@ impl CharacterRenderer {
         // `None` for `"expression"`-type models, where the
         // LookAt signal routes into morph weights via
         // `apply_emotions` instead.
-        let palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
+        let mut palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
 
-        // Step the spring-bone simulator. The simulator reads
-        // the per-node world transforms the palette update
-        // just produced and writes the updated local
-        // rotations for the affected joints back into
-        // `model.nodes.local_rotations`. The next
-        // `update_skin_palette` call (next frame) picks them
-        // up, so the simulator's effect on the silhouette
-        // lags one frame — a single-frame delay is
-        // imperceptible at 60 Hz and is the standard pattern
-        // for VRMC_springBone in v1 / v0 reference impls.
+        // Step the spring-bone simulator against the posed world
+        // transforms, write updated local rotations, then rebuild
+        // the skin palette so the same-frame mesh reflects sway.
+        // (Writing locals without rebuilding left spring bones
+        // invisible — the next frame resets locals to rest.)
         if let (Some(sim), Some(props)) = (
             self.spring_bone_sim.as_mut(),
             self.spring_bone_props.as_ref(),
@@ -402,6 +397,7 @@ impl CharacterRenderer {
                     model.nodes.local_rotations[node] = rotation;
                 }
             }
+            palette = model.rebuild_skin_palette(frame.hips_translation);
         }
 
         if palette.is_empty() {

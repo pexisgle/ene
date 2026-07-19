@@ -436,8 +436,26 @@ impl SpringBoneSimulator {
                             (axis, len)
                         };
 
-                        // current_tail: child's world position at rest
-                        let current_tail = world_pos + world_rot * (bone_axis * bone_length);
+                        // current_tail: child's world position at rest,
+                        // converted to center space when the chain has a
+                        // center node (three-vrm / UniVRM).
+                        let current_tail_world =
+                            world_pos + world_rot * (bone_axis * bone_length);
+                        let current_tail = if let Some(center_node) = chain.center {
+                            let c_pos = node_world_positions
+                                .get(&center_node)
+                                .copied()
+                                .filter(|v| v.is_finite())
+                                .unwrap_or(Vec3::ZERO);
+                            let c_rot = node_world_rotations
+                                .get(&center_node)
+                                .copied()
+                                .filter(|q| q.is_finite())
+                                .unwrap_or(Quat::IDENTITY);
+                            c_rot.inverse() * (current_tail_world - c_pos)
+                        } else {
+                            current_tail_world
+                        };
 
                         SpringBoneJointState {
                             prev_tail: current_tail,
@@ -496,13 +514,23 @@ impl SpringBoneSimulator {
                     }
                 }
 
-                // Center space transform (if set)
-                let center_world_pos = chain
+                // Per-chain mutable transforms so ancestor joints that
+                // update earlier in this step are visible to descendants
+                // (VRMC_springBone: root → tip). Colliders stay on the
+                // caller-provided snapshot (body pose).
+                let mut positions = node_world_positions.clone();
+                let mut rotations = node_world_rotations.clone();
+                let mut parent_rots = node_parent_world_rotations.clone();
+
+                // Center space: tails stay in center space; stiffness /
+                // gravity / collision run in world space (three-vrm /
+                // UniVRM). Alicia has no centers; still handle correctly.
+                let center_pos = chain
                     .center
-                    .and_then(|c| node_world_positions.get(&c).copied());
-                let center_world_rot = chain
+                    .and_then(|c| positions.get(&c).copied());
+                let center_rot = chain
                     .center
-                    .and_then(|c| node_world_rotations.get(&c).copied());
+                    .and_then(|c| rotations.get(&c).copied());
 
                 for (joint_idx, joint) in chain.joints.iter().enumerate() {
                     // Skip the last joint (it's only a tail target)
@@ -512,53 +540,52 @@ impl SpringBoneSimulator {
 
                     let state = &mut chain_state.joints[joint_idx];
 
-                    let world_pos = node_world_positions
+                    let world_pos = positions
                         .get(&joint.node)
                         .copied()
                         .filter(|v| v.is_finite())
                         .unwrap_or(Vec3::ZERO);
-                    let parent_world_rot = node_parent_world_rotations
+                    let parent_world_rot = parent_rots
                         .get(&joint.node)
                         .copied()
                         .filter(|q| q.is_finite())
                         .unwrap_or(Quat::IDENTITY);
 
-                    // Transform to center space if needed
-                    let (world_pos, parent_world_rot) =
-                        if let (Some(c_pos), Some(c_rot)) = (center_world_pos, center_world_rot) {
-                            let local_pos = c_rot.inverse() * (world_pos - c_pos);
-                            let local_rot = c_rot.inverse() * parent_world_rot;
-                            (local_pos, local_rot)
-                        } else {
-                            (world_pos, parent_world_rot)
-                        };
-
-                    // Heal state if NaN is present
+                    // Heal state if NaN is present (world-space rest)
+                    let rest_tail_world =
+                        world_pos + parent_world_rot * state.initial_local_rotation * (state.bone_axis * state.bone_length);
                     if !state.current_tail.is_finite() {
-                        state.current_tail =
-                            world_pos + parent_world_rot * (state.bone_axis * state.bone_length);
+                        state.current_tail = match (center_pos, center_rot) {
+                            (Some(c_pos), Some(c_rot)) => c_rot.inverse() * (rest_tail_world - c_pos),
+                            _ => rest_tail_world,
+                        };
                     }
                     if !state.prev_tail.is_finite() {
                         state.prev_tail = state.current_tail;
                     }
 
-                    // Verlet integration
+                    // Verlet: inertia in center space (or world if no center)
                     let drag = joint.drag_force.clamp(0.0, 1.0);
                     let inertia = (state.current_tail - state.prev_tail) * (1.0 - drag);
+                    let mut next_tail_center = state.current_tail + inertia;
+
+                    // Stiffness + gravity in world space
+                    let mut next_tail = match (center_pos, center_rot) {
+                        (Some(c_pos), Some(c_rot)) => c_pos + c_rot * next_tail_center,
+                        _ => next_tail_center,
+                    };
 
                     let stiffness_dir =
                         parent_world_rot * state.initial_local_rotation * state.bone_axis;
                     let stiffness = stiffness_dir * joint.stiffness * dt;
-
                     let gravity = Vec3::from(joint.gravity_dir) * joint.gravity_power * dt;
+                    next_tail += stiffness + gravity;
 
-                    let mut next_tail = state.current_tail + inertia + stiffness + gravity;
                     if !next_tail.is_finite() {
-                        next_tail =
-                            world_pos + parent_world_rot * (state.bone_axis * state.bone_length);
+                        next_tail = rest_tail_world;
                     }
 
-                    // Constrain bone length
+                    // Constrain bone length (world)
                     let to_tail = next_tail - world_pos;
                     if to_tail.length_squared() > 1e-10 && to_tail.is_finite() {
                         next_tail = world_pos + to_tail.normalize() * state.bone_length;
@@ -573,7 +600,7 @@ impl SpringBoneSimulator {
                         next_tail = world_pos + fallback_dir * state.bone_length;
                     }
 
-                    // Collision resolution
+                    // Collision resolution (world)
                     let joint_radius = joint.hit_radius;
                     for &(collider_node, shape) in &chain_colliders {
                         let collider_pos = collider_world_positions
@@ -633,7 +660,6 @@ impl SpringBoneSimulator {
 
                         if distance.is_finite() && distance < 0.0 {
                             next_tail -= direction * distance;
-                            // Re-constrain bone length
                             let to_tail = next_tail - world_pos;
                             if to_tail.length_squared() > 1e-10 && to_tail.is_finite() {
                                 next_tail = world_pos + to_tail.normalize() * state.bone_length;
@@ -641,13 +667,18 @@ impl SpringBoneSimulator {
                         }
                     }
 
-                    // Update state
+                    // Store tails in center space (or world if no center)
+                    next_tail_center = match (center_pos, center_rot) {
+                        (Some(c_pos), Some(c_rot)) => c_rot.inverse() * (next_tail - c_pos),
+                        _ => next_tail,
+                    };
                     state.prev_tail = state.current_tail;
-                    state.current_tail = next_tail;
+                    state.current_tail = next_tail_center;
 
-                    // Compute rotation
-                    let parent_world_matrix = parent_world_rot;
-                    let local_diff = parent_world_matrix.inverse() * (next_tail - world_pos);
+                    // Rotation in rest-local space (VRMC_springBone):
+                    // to = normalize(inverse(parentWorld * initialLocal) * nextTailDir)
+                    let rest_world_rot = parent_world_rot * state.initial_local_rotation;
+                    let local_diff = rest_world_rot.inverse() * (next_tail - world_pos);
                     let to_local = if local_diff.length_squared() > 1e-10 && local_diff.is_finite()
                     {
                         local_diff.normalize()
@@ -663,6 +694,15 @@ impl SpringBoneSimulator {
                     };
 
                     updated_rotations.insert(joint.node, new_rotation);
+
+                    // Propagate world transforms to descendant joints
+                    // in this chain (sparse intermediates approximate
+                    // via next_tail on the next spring joint).
+                    let new_world_rot = parent_world_rot * new_rotation;
+                    rotations.insert(joint.node, new_world_rot);
+                    let child_node = chain.joints[joint_idx + 1].node;
+                    positions.insert(child_node, next_tail);
+                    parent_rots.insert(child_node, new_world_rot);
                 }
 
                 updated_rotations

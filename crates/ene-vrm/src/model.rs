@@ -609,16 +609,33 @@ impl VrmModel {
             }
         }
 
-        // 3. Walk the hierarchy with the new local
-        //    rotations in place.
+        // 3–5. World walk, optional hips cascade, palette.
+        self.rebuild_skin_palette(frame.hips_translation)
+    }
+
+    /// Recompute world transforms from the current `local_*`
+    /// buffers and rebuild the skin palette.
+    ///
+    /// Call after mutating [`NodeHierarchy::local_rotations`]
+    /// post-pose (e.g. spring bones) so the same-frame mesh
+    /// reflects those rotations. `hips_translation` is the
+    /// same rest-relative hips delta [`update_skin_palette`]
+    /// would have applied — pass it again after a local-only
+    /// recompute so locomotion is preserved.
+    pub fn rebuild_skin_palette(&mut self, hips_translation: Option<Vec3>) -> Vec<Mat4> {
+        let joint_count = self.skeleton.joint_count();
+        if joint_count == 0 || self.nodes.is_empty() {
+            return Vec::new();
+        }
+
         self.nodes.compute_world_transforms();
 
-        // 4. Hips translation (post-walk): add the delta
-        //    to the hips node's world position and cascade
-        //    through every descendant. We only re-walk
-        //    descendants of hips to avoid re-doing the
-        //    full tree — the cascade is O(subtree).
-        if let Some(hips_delta) = frame.hips_translation
+        // Hips translation (post-walk): add the delta to the
+        // hips node's world position and cascade through every
+        // descendant. We only re-walk descendants of hips to
+        // avoid re-doing the full tree — the cascade is
+        // O(subtree).
+        if let Some(hips_delta) = hips_translation
             && let Some(hips_entry) = self.humanoid.hips()
         {
             self.nodes.world_positions[hips_entry.node] += hips_delta;
@@ -638,15 +655,9 @@ impl VrmModel {
             }
         }
 
-        // 5. Build the palette. The standard glTF skinning
-        //    identity is `joint_world * inverse_bind[j]`,
-        //    which is identity at rest. We previously used
-        //    `joint_world * bind_matrices[j] =
-        //    joint_world * inverse_bind[j]⁻¹`; that was
-        //    wrong on two counts — the static rest pose
-        //    would render displaced by `inverse_bind[j]⁻¹`,
-        //    and the animated pose would double-apply the
-        //    bind transform.
+        // Build the palette. The standard glTF skinning
+        // identity is `joint_world * inverse_bind[j]`, which
+        // is identity at rest.
         let mut palette: Vec<Mat4> = Vec::with_capacity(joint_count);
         for j in 0..joint_count {
             let node_idx = self
