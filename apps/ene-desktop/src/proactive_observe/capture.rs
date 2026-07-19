@@ -1,4 +1,4 @@
-//! Active-window / primary-monitor capture for proactive screen summary.
+//! Active-window / primary-display capture for proactive screen summary.
 //!
 //! Images stay in desktop memory only. Callers must drop them after
 //! producing a text summary — never forward bytes into mind / store.
@@ -18,18 +18,17 @@ pub struct CapturedScreen {
     pub app_label: String,
 }
 
-/// Capture the active window when possible, otherwise the primary monitor.
+/// Capture the active window when possible, otherwise the primary display.
+/// When Ene is focused, capture the primary display so background context remains visible.
 pub async fn capture_for_summary() -> Result<CapturedScreen, String> {
     let app_label = active_app_label().unwrap_or_default();
-    if is_self_app(&app_label) {
-        return Err("skipping capture while Ene is focused".to_string());
-    }
+    let ene_focused = is_self_app(&app_label);
 
     let image = if detect_wayland() {
-        capture_wayland(DEFAULT_SCALE_PERCENT).await?
+        capture_wayland(DEFAULT_SCALE_PERCENT, ene_focused).await?
     } else {
         let scale = DEFAULT_SCALE_PERCENT;
-        tokio::task::spawn_blocking(move || capture_xcap(scale))
+        tokio::task::spawn_blocking(move || capture_xcap(scale, ene_focused))
             .await
             .map_err(|e| format!("capture task failed: {e}"))??
     };
@@ -37,10 +36,11 @@ pub async fn capture_for_summary() -> Result<CapturedScreen, String> {
     Ok(CapturedScreen { image, app_label })
 }
 
-fn capture_xcap(scale_percent: u32) -> Result<DynamicImage, String> {
+fn capture_xcap(scale_percent: u32, force_primary_display: bool) -> Result<DynamicImage, String> {
     let mut target_image = None;
 
-    if let Ok(active_win) = active_win_pos_rs::get_active_window()
+    if !force_primary_display
+        && let Ok(active_win) = active_win_pos_rs::get_active_window()
         && let Ok(windows) = xcap::Window::all()
     {
         for window in windows {
@@ -73,12 +73,46 @@ fn capture_xcap(scale_percent: u32) -> Result<DynamicImage, String> {
 }
 
 #[cfg(target_os = "linux")]
-async fn capture_wayland(scale_percent: u32) -> Result<DynamicImage, String> {
+async fn capture_wayland(
+    scale_percent: u32,
+    force_primary_display: bool,
+) -> Result<DynamicImage, String> {
+    use ashpd::desktop::screenshot::AvailableTargets;
+
+    let target = if force_primary_display {
+        AvailableTargets::Screen
+    } else {
+        AvailableTargets::ActiveWindow
+    };
+
+    match capture_wayland_portal(scale_percent, target).await {
+        Ok(image) => Ok(image),
+        Err(portal_err) if force_primary_display => {
+            tracing::debug!(
+                component = "ProactiveObserve",
+                error = %portal_err,
+                "Portal screen capture failed; falling back to monitor capture"
+            );
+            let scale = scale_percent;
+            tokio::task::spawn_blocking(move || capture_xcap(scale, true))
+                .await
+                .map_err(|e| format!("capture task failed: {e}"))?
+        }
+        Err(portal_err) => Err(portal_err),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn capture_wayland_portal(
+    scale_percent: u32,
+    target: ashpd::desktop::screenshot::AvailableTargets,
+) -> Result<DynamicImage, String> {
     use ashpd::desktop::screenshot::Screenshot;
 
     let response = Screenshot::request()
         .interactive(false)
         .modal(false)
+        .target(target)
         .send()
         .await
         .map_err(|e| format!("portal screenshot request failed: {e}"))?
@@ -93,9 +127,12 @@ async fn capture_wayland(scale_percent: u32) -> Result<DynamicImage, String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn capture_wayland(scale_percent: u32) -> Result<DynamicImage, String> {
+async fn capture_wayland(
+    scale_percent: u32,
+    force_primary_display: bool,
+) -> Result<DynamicImage, String> {
     let scale = scale_percent;
-    tokio::task::spawn_blocking(move || capture_xcap(scale))
+    tokio::task::spawn_blocking(move || capture_xcap(scale, force_primary_display))
         .await
         .map_err(|e| format!("capture task failed: {e}"))?
 }

@@ -88,7 +88,7 @@ Timer / observation update
 |---|---|---|
 | `conversation` | 直近の `HistoryEntry`（文字数上限で truncate） | セッション履歴のみ |
 | `activity` | 任意の idle ヒント、**アプリ名のみ**（生ウィンドウタイトルなし）、直近フォーカス変化 | キーログなし。V1 ではタイトルは収集しない |
-| `screen_summary` | デスクトップ要約プロバイダによる短命 **テキスト** 要約 | デスクトップは観測ティックごとに **新規** キャプチャ（クロスティックのキャッシュなし）し、ローカル proactive GGUF + `mmproj`（Gemma 4）で要約。mind へは **テキストのみ**。同じフレームは runtime actor 内に **短命保持**（JPEG data URI、mind/store には出さない）。生成側タスクが `supports_vision: true` のクラウドモデルなら、そのフレームを能動発話の生成ターンに添付する。このソース有効時は vision 直後に判定 LLM を起動する |
+| `screen_summary` | デスクトップ要約プロバイダによる短命 **テキスト** 要約 | デスクトップは観測ティックごとに **新規** キャプチャ（クロスティックのキャッシュなし）：他アプリがフォーカス中はアクティブウィンドウ、Ene がフォーカス中は **ディスプレイ全体**。Wayland では portal の `ActiveWindow` / `Screen`、X11 では xcap のアクティブウィンドウ / プライマリモニター。ローカル proactive GGUF + `mmproj`（Gemma 4）で要約。mind へは **テキストのみ**。同じフレームは runtime actor 内に **短命保持**（JPEG data URI、mind/store には出さない）。生成側タスクが `supports_vision: true` のクラウドモデルなら、そのフレームを能動発話の生成ターンに添付する。このソース有効時は vision 直後に判定 LLM を起動する |
 
 各ソースは個別に有効 / 無効。無効時は desktop が収集せず、mind も判定プロンプトに含めない。
 

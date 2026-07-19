@@ -55,7 +55,7 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 ## プライバシー
 
 - デスクトップは生のスクリーンショットをディスク・ログ・SQLite に書き込みません。
-- `sources.screen_summary` 有効時、デスクトップは観測ティックごとにアクティブウィンドウ（またはプライマリディスプレイ）を約 50% スケールで **新規** キャプチャ（クロスティックのキャッシュなし）し、OS アプリ名を事前情報として **ローカル** proactive GGUF + `mmproj`（Gemma 4 マルチモーダル）で要約してからデスクトップ側の画像を破棄します。runtime は同じフレームの JPEG を短命保持し、`ai.tasks.chat`（またはクラウドの `ai.tasks.proactive`）が `supports_vision: true` のとき生成ターンに添付します。その観測サイクルの直後に判定 LLM が走ります。判定モデルは `reason` の前に `screen_digest`（画面の整理）を書きます。vision 失敗時は画面ソースを Unavailable とし、捏造サマリは入れません。
+- `sources.screen_summary` 有効時、デスクトップは観測ティックごとに約 50% スケールで **新規** キャプチャ（クロスティックのキャッシュなし）します。他アプリがフォーカス中はアクティブウィンドウ、Ene がフォーカス中は **ディスプレイ全体**（companion ウィンドウの背後のコンテキストを含む）。Wayland では xdg-desktop-portal の `ActiveWindow` / `Screen` ターゲット、X11 ではアクティブウィンドウ / プライマリモニターを使い分けます。OS アプリ名を事前情報として **ローカル** proactive GGUF + `mmproj`（Gemma 4 マルチモーダル）で要約してからデスクトップ側の画像を破棄します。runtime は同じフレームの JPEG を短命保持し、`ai.tasks.chat`（またはクラウドの `ai.tasks.proactive`）が `supports_vision: true` のとき生成ターンに添付します。その観測サイクルの直後に判定 LLM が走ります。判定モデルは `reason` の前に `screen_digest`（画面の整理）を書きます。vision 失敗時は画面ソースを Unavailable とし、捏造サマリは入れません。
 - `tasks.proactive` が `provider: "local"` のとき、GGUF 欠落・ロード失敗は判定バックエンドを disabled にします — 観測コンテキスト付きでクラウドへフォールバックしません。
 - アクティビティは **アプリ名のみ**（生のウィンドウタイトルなし、キーロギングなし）。
 
