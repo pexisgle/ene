@@ -30,18 +30,17 @@ Performance システムは、表情、モーション、視線制御を単一�
 
 ### 1. ストリームマーカー解析
 
-LLM はストリーミングテキスト中に `<|perf:…|>` トークンをインラインで出力できます。`<|emo:NAME|>` は `<|perf:expr=NAME|>` の表情省略形です。
+LLM はストリーミングテキスト中に `<|perf:…|>` トークンをインラインで出力できます。
 
 | マーカー | 例 | 効果 |
 |--------|---------|--------|
-| Expression（省略形） | `<\|emo:happy\|>` | 表情ブレンドシェイプを設定 |
 | Expression | `<\|perf:expr=happy\|>` | 表情ブレンドシェイプを設定 |
 | Expression（重み付き） | `<\|perf:expr=happy,weight=0.8,hold=2.0\|>` | 重みと保持時間付き |
 | Motion | `<\|perf:motion=wave,layer=upper\|>` | 上半身モーションを再生 |
 | Look-at | `<\|perf:lookat=user\|>` | 対象への視線移動 |
 | Cancel | `<\|perf:cancel=expr\|>` / `<\|perf:cancel=motion\|>` / `<\|perf:cancel=all\|>` | スロットをクリア |
 
-`ene_mind::session::special_token::parse_performance_marker()` と `extract_emotion_from_token()` を参照。
+`ene_mind::session::special_token::parse_performance_marker()` を参照。
 
 ### 2. Performance Arbiter
 
@@ -118,7 +117,7 @@ Lower ──▶ Upper と共存（アイドルループ）
 
 ## Prompt 契約
 
-感情エンジンが**無効**の場合、LLM は post-history PHI ブロックで Performance 文法指示を受け取ります（旧来の `<|emo:NAME|>` 契約を置換）:
+感情エンジンが**無効**の場合、LLM は post-history PHI ブロックで Performance 文法指示を受け取ります:
 
 ```
 ## Performance Output Rule
@@ -126,8 +125,7 @@ RULE: You may use special tokens to control your avatar's expression, motion, an
 Place each token BEFORE the sentence it describes.
 
 Grammar:
-  Expression (required, shorthand): `<|emo:NAME|>`
-  Expression (full): `<|perf:expr=NAME[,weight=0.0-1.0][,hold=SECS]|>`
+  Expression: `<|perf:expr=NAME[,weight=0.0-1.0][,hold=SECS]|>`
   Motion: `<|perf:motion=NAME[,layer=upper|lower|full]|>`
   Look-at: `<|perf:lookat=TARGET|>`
   Cancel: `<|perf:cancel=expr|motion|all|>`

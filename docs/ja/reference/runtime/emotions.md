@@ -9,7 +9,7 @@ API v1 では、チャットコンシューマーは [`EneEvent::Performance`](s
 `mind.emotion.enabled` が true の場合:
 
 1. **プレターン:** `EmotionEngine` が DB から `AffectState` を読み込み、時間減衰と決定論的評価（感謝・称賛・侮辱・緊急・疲労）を適用。前ターン post-turn で保存された分類器提案があれば 1 回だけマージ。
-2. **プロンプト:** `build_natural_dialogue_contract()` がトークンリスト PHI を置換。LLM には自然な会話のみを要求（`<|emo:|>` 不要）。
+2. **プロンプト:** `build_natural_dialogue_contract()` がトークンリスト PHI を置換。LLM には自然な会話のみを要求（Performance マーカー不要）。
 3. **ストリーム後:** `OutputArbiter` が更新済み `AffectState`（+ 任意の LLM トークン）を提示 cue にマッピング。ヒステリシス適用。
 4. **イベント:** `EneEvent::Performance { turn, cues, source }` をコンシューマーへ送出。
 5. **ポストターン:** 更新済み `AffectState`（最終表情 / cue 状態を含む）を `Terminal` 前に永続化。
@@ -60,7 +60,7 @@ API v1 では、チャットコンシューマーは [`EneEvent::Performance`](s
 
 ## Performance マーカーパス
 
-感情エンジン無効時、LLM は `<|emo:name|>` 省略形または完全な `<|perf:…|>` マーカーを出力できます。ストリームタスクは `TextDelta` からマーカーを除去し、Performance パスがそれらを `Performance` cue として表面化します。
+感情エンジン無効時、LLM は `<|perf:…|>` マーカーを出力できます。ストリームタスクは `TextDelta` からマーカーを除去し、Performance パスがそれらを `Performance` cue として表面化します。
 
 ### マーカー解析
 
@@ -69,7 +69,6 @@ mind の special-token ヘルパー:
 | 関数 | 説明 |
 |----------|-------------|
 | `split_text_and_special_tokens(carry, chunk)` | チャンクをテキストと `<\|...\|>` に分割。境界跨ぎは `carry` |
-| `extract_emotion_from_token(token)` | `<\|emo:name\|>` から表情名を抽出 |
 | `parse_performance_marker(token)` | `<\|perf:…\|>` を `PerformanceCue` に解析 |
 
 ### データフロー
@@ -79,7 +78,7 @@ LLM ストリーム → 生テキスト
   ↓
 ene-runtime / mind ストリームパス
   ├── テキスト → EneEvent::TextDelta { turn, delta }
-  └── <|emo:name|> / <|perf:…|> → テキストから除去。Performance cue になる
+  └── <|perf:…|> → テキストから除去。Performance cue になる
        ↓
 コンシューマー:
   ├── CLI: TextDelta → 表示; Performance → cue 名ログ
@@ -88,7 +87,7 @@ ene-runtime / mind ストリームパス
 
 ### Performance Output Protocol（PHI）
 
-感情無効時、`build_expression_phi()` が `card.data.extensions["expressions"]` 由来の `<|emo:name|>` 省略形と `<|perf:…|>` 文法を列挙する指示ブロックを注入します。
+感情無効時、`build_expression_phi()` が `card.data.extensions["expressions"]` 由来の `<|perf:expr=NAME|>` マーカーと `<|perf:…|>` 文法を列挙する指示ブロックを注入します。
 
 ## アプリ別処理
 

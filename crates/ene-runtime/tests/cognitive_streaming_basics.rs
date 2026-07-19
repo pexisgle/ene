@@ -340,8 +340,8 @@ fn cognitive_output_contract_uses_natural_dialogue_when_emotion_enabled() {
         build_cognitive_output_contract(&card, &prompts, true, "Alice").expect("contract");
     assert!(contract.contains("natural dialogue") || contract.contains("Output Contract"));
     assert!(
-        contract.contains("<|emo:name|>"),
-        "natural dialogue contract must forbid emo tokens; got: {contract}"
+        contract.contains("<|perf:"),
+        "natural dialogue contract must forbid perf tokens; got: {contract}"
     );
 }
 
@@ -354,7 +354,6 @@ fn cognitive_output_contract_uses_phi_when_emotion_disabled() {
     if let Some(phi) = contract {
         assert!(
             phi.contains("<|perf:")
-                || phi.contains("<|emo:")
                 || phi.contains("Emotion")
                 || phi.contains("emotion")
         );

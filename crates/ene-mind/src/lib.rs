@@ -83,7 +83,7 @@ pub mod proactive;
 pub mod prompt_packet;
 /// Memory recall planning and hybrid search orchestration.
 pub mod recall;
-/// Conversation session state, splitting, and emotion-token parsing.
+/// Conversation session state, splitting, and performance-marker parsing.
 pub mod session;
 /// LLM-driven conversation summarization for session boundaries.
 pub mod summarizer;
@@ -172,8 +172,8 @@ pub use recall::{
 pub use session::{
     CardName, CharacterAsset, CharacterCardData, CharacterCardV3, ConversationSession,
     EneSessionError, ExpressionDefinition, ResolvedExpression, Role, SessionId, SplitReason,
-    SplitResult, Truncate, expand_cbs_macros, extract_emotion_from_token, generate_session_id,
-    parse_performance_marker, resolve_expressions, split_text_and_special_tokens, strip_markers,
+    SplitResult, Truncate, expand_cbs_macros, generate_session_id, parse_performance_marker,
+    resolve_expressions, split_text_and_special_tokens, strip_markers,
 };
 /// Conversation summary result and LLM summarization entry point.
 #[doc(no_inline)]

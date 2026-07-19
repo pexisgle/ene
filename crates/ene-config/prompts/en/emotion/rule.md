@@ -4,10 +4,7 @@ Use special tokens to control your expression, motion, and gaze.
 - Output exactly ONE expression token per reply.
 - Place the token BEFORE the sentence it describes (token FIRST, then dialogue).
 
-Expression (shorthand):
-  `<|emo:NAME|>`  — e.g. `<|emo:happy|>`
-
-Expression (full):
+Expression:
   `<|perf:expr=NAME[,weight=0.0-1.0][,hold=SECS]|>`
   e.g. `<|perf:expr=happy,weight=0.8,hold=3.0|>`
 

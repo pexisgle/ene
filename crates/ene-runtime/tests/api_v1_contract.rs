@@ -157,13 +157,12 @@ async fn marker_tokens_become_performance_not_text() {
     // Unit-level: special token splitter used by stream path.
     let mut carry = String::new();
     let (text, tokens) =
-        ene_mind::split_text_and_special_tokens(&mut carry, "Hi <|emo:happy|> there");
+        ene_mind::split_text_and_special_tokens(&mut carry, "Hi <|perf:expr=happy|> there");
     assert_eq!(text.join(""), "Hi  there");
     assert_eq!(tokens.len(), 1);
-    assert_eq!(
-        ene_mind::extract_emotion_from_token(&tokens[0]).as_deref(),
-        Some("happy")
-    );
+    let cue = ene_mind::parse_performance_marker(&tokens[0]).expect("perf marker");
+    assert_eq!(cue.name, "happy");
+    assert_eq!(cue.kind, ene_mind::PerfKind::Expression);
 }
 
 #[tokio::test(flavor = "current_thread")]

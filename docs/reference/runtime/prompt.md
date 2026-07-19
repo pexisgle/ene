@@ -58,7 +58,7 @@ Sections are only appended if they contain content. The entire prompt is process
 
 ## `build_expression_phi()`
 
-Generates an Emotion Expression Protocol block using `PromptLibrary` templates. Provides concrete examples of how to format the `<|emo:name|>` tokens at the beginning of sentences to improve lower-capability model compliance.
+Generates an Emotion Expression Protocol block using `PromptLibrary` templates. Provides concrete examples of how to format the `<|perf:expr=NAME|>` tokens at the beginning of sentences to improve lower-capability model compliance.
 
 - Uses `emotion.header` and `emotion.rule` from the prompt library
 - Lists available tokens from card extensions or defaults (neutral, happy, sad, angry, relaxed, surprised)

@@ -34,7 +34,7 @@ Design contracts, crate APIs, and implementation detail for AI agents and deep c
 | [Prompt](runtime/prompt.md) | `PromptPacket` assembly |
 | [Session](runtime/session.md) | Session and character card |
 | [Session split](runtime/session-split.md) | Split / compression lifecycle |
-| [Emotions](runtime/emotions.md) | Emotion tokens and Performance |
+| [Emotions](runtime/emotions.md) | Affect and Performance markers |
 
 ## Memory, configuration, tools
 

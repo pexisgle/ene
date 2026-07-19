@@ -296,7 +296,7 @@ pub fn build_messages(ctx: &MessageBuildContext<'_>) -> Result<Vec<LlmMessage>, 
 3. `System` — 過去の会話サマリー（メモリリコール）。
 4. `System` — ユーザーに関する既知のキーファクト。
 5. 履歴 — `User`/`Assistant`/`System` ターンの交互配置。
-6. `System` — 表情PHI（`<\|emo:name\|>` プロトコル＋post-history instructions）、`build_expression_phi` 経由。
+6. `System` — 表情PHI（`<\|perf:expr=NAME\|>` プロトコル＋post-history instructions）、`build_expression_phi` 経由。
 7. `User` — 現在のユーザー入力（任意の `[Runtime Context]` ブロックを追加）。
 
 ### モジュールスコープのプロンプトビルダー
@@ -304,8 +304,8 @@ pub fn build_messages(ctx: &MessageBuildContext<'_>) -> Result<Vec<LlmMessage>, 
 | 関数 | シグネチャ | 説明 |
 |---|---|---|
 | `build_system_prompt` | `fn build_system_prompt(card: &CharacterCardV3, runtime_rules: &str, user_name: &str, prompts: &PromptLibrary) -> String` | マスコットコンテキストフレーム＋振る舞いルール＋キャラクターアイデンティティ（システムプロンプト、性格、背景）＋シーンを組み立てる。`{{char}}`/`{{user}}` のCBSマクロを展開する。 |
-| `build_expression_phi` | `fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> Option<String>` | カードの解決済み表情から `<\|emo:NAME\|>` 感情トークンプロトコルブロックを組み立て、手動の `post_history_instructions` があれば結合する。両方が空の場合のみ `None` を返す。 |
-| `build_natural_dialogue_contract` | `fn build_natural_dialogue_contract(card: &CharacterCardV3, prompts: &PromptLibrary, user_name: &str) -> Option<String>` | エンジン管理表情（#91）向けの出力コントラクトを組み立てる: LLMにインラインの感情トークンを**含めない**プレーンな対話で応答するよう指示する。表情はターン後に認知ランタイムのOutput Arbiterが解決するため。 |
+| `build_expression_phi` | `fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> Option<String>` | カードの解決済み表情から `<\|perf:expr=NAME\|>` Performance マーカープロトコルブロックを組み立て、手動の `post_history_instructions` があれば結合する。両方が空の場合のみ `None` を返す。 |
+| `build_natural_dialogue_contract` | `fn build_natural_dialogue_contract(card: &CharacterCardV3, prompts: &PromptLibrary, user_name: &str) -> Option<String>` | エンジン管理表情（#91）向けの出力コントラクトを組み立てる: LLMにインラインの Performance マーカーを**含めない**プレーンな対話で応答するよう指示する。表情はターン後に認知ランタイムのOutput Arbiterが解決するため。 |
 | `build_cognitive_output_contract` | `fn build_cognitive_output_contract(card: &CharacterCardV3, prompts: &PromptLibrary, emotion_enabled: bool, user_name: &str) -> Option<String>` | 認知ストリーミングパス向けのpost-history出力ブロックを選択する: `emotion_enabled` の場合は `build_natural_dialogue_contract`、それ以外は `build_expression_phi`。 |
 
 ---

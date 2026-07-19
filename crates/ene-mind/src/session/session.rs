@@ -208,7 +208,7 @@ impl ConversationSession {
     }
 
     /// Processes a streaming text chunk, splitting it into text deltas and special tokens
-    /// (e.g., `<|emo:happy|>`). Appends text to the display buffer.
+    /// (e.g., `<|perf:expr=happy|>`). Appends text to the display buffer.
     ///
     /// Returns `(text_deltas, special_tokens)`.
     pub fn process_delta(&mut self, chunk: &str) -> (Vec<String>, Vec<String>) {

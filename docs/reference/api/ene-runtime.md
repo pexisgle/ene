@@ -300,7 +300,7 @@ Assembles the full message list in this order:
 3. `System` — recalled past-conversation summaries (memory recall).
 4. `System` — known key facts about the user.
 5. History — alternating `User`/`Assistant`/`System` turns.
-6. `System` — Expression PHI (`<\|emo:name\|>` protocol + post-history instructions), via `build_expression_phi`.
+6. `System` — Expression PHI (`<\|perf:expr=NAME\|>` protocol + post-history instructions), via `build_expression_phi`.
 7. `User` — the current user input, with an optional `[Runtime Context]` block appended.
 
 ### Module-scoped prompt builders
@@ -308,8 +308,8 @@ Assembles the full message list in this order:
 | Function | Signature | Description |
 |---|---|---|
 | `build_system_prompt` | `fn build_system_prompt(card: &CharacterCardV3, runtime_rules: &str, user_name: &str, prompts: &PromptLibrary) -> String` | Builds the mascot-context frame + behavior rules + character identity (system prompt, personality, background) + scene. Expands `{{char}}`/`{{user}}` CBS macros. |
-| `build_expression_phi` | `fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> Option<String>` | Builds the `<\|emo:NAME\|>` emotion-token protocol block from the card's resolved expressions, merged with any manual `post_history_instructions`. Returns `None` only when both are empty. |
-| `build_natural_dialogue_contract` | `fn build_natural_dialogue_contract(card: &CharacterCardV3, prompts: &PromptLibrary, user_name: &str) -> Option<String>` | Builds the engine-managed-expression output contract (#91): instructs the LLM to respond in plain dialogue with **no** inline emotion tokens, since expression is resolved after the turn by the cognitive runtime's Output Arbiter. |
+| `build_expression_phi` | `fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> Option<String>` | Builds the `<\|perf:expr=NAME\|>` performance-marker protocol block from the card's resolved expressions, merged with any manual `post_history_instructions`. Returns `None` only when both are empty. |
+| `build_natural_dialogue_contract` | `fn build_natural_dialogue_contract(card: &CharacterCardV3, prompts: &PromptLibrary, user_name: &str) -> Option<String>` | Builds the engine-managed-expression output contract (#91): instructs the LLM to respond in plain dialogue with **no** inline performance markers, since expression is resolved after the turn by the cognitive runtime's Output Arbiter. |
 | `build_cognitive_output_contract` | `fn build_cognitive_output_contract(card: &CharacterCardV3, prompts: &PromptLibrary, emotion_enabled: bool, user_name: &str) -> Option<String>` | Selects the post-history output block for the cognitive streaming path: `build_natural_dialogue_contract` when `emotion_enabled`, otherwise `build_expression_phi`. |
 
 ---

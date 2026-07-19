@@ -615,33 +615,22 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         for token in special_tokens {
                             accumulated_emotion_tokens.push(token.clone());
 
-                            if !suppress_stream_tokens {
-                                // Try `<|perf:…|>` first (#128).
-                                if let Some(cue) = ene_mind::parse_performance_marker(&token) {
-                                    let source = match cue.kind {
-                                        PerfKind::Expression
-                                        | PerfKind::Motion
-                                        | PerfKind::LookAt => {
-                                            if mind.emotion.llm_expression_is_advisory {
-                                                CueSource::LlmAdvisory
-                                            } else {
-                                                CueSource::LlmCommand
-                                            }
+                            if !suppress_stream_tokens
+                                && let Some(cue) = ene_mind::parse_performance_marker(&token)
+                            {
+                                let source = match cue.kind {
+                                    PerfKind::Expression
+                                    | PerfKind::Motion
+                                    | PerfKind::LookAt => {
+                                        if mind.emotion.llm_expression_is_advisory {
+                                            CueSource::LlmAdvisory
+                                        } else {
+                                            CueSource::LlmCommand
                                         }
-                                        PerfKind::Cancel => CueSource::LlmCommand,
-                                    };
-                                    perf_arbiter.accept(cue.clone(), source);
-                                } else if let Some(name) =
-                                    ene_mind::extract_emotion_from_token(&token)
-                                {
-                                    let source = if mind.emotion.llm_expression_is_advisory {
-                                        CueSource::LlmAdvisory
-                                    } else {
-                                        CueSource::LlmCommand
-                                    };
-                                    let cue = PerformanceCue::expression(name);
-                                    perf_arbiter.accept(cue.clone(), source);
-                                }
+                                    }
+                                    PerfKind::Cancel => CueSource::LlmCommand,
+                                };
+                                perf_arbiter.accept(cue.clone(), source);
                             }
                         }
                     }
@@ -686,7 +675,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             if mind.emotion.enabled {
                 let llm_proposal = accumulated_emotion_tokens
                     .iter()
-                    .find_map(|token| ene_mind::extract_emotion_from_token(token))
+                    .find_map(|token| {
+                        ene_mind::parse_performance_marker(token).and_then(|cue| {
+                            (cue.kind == PerfKind::Expression).then_some(cue.name)
+                        })
+                    })
                     .or_else(|| pre_turn.classifier_expression_hint.clone());
                 let (previous_expression, elapsed_since_change) =
                     session.expression_context(&turn_affect);

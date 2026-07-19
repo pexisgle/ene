@@ -30,18 +30,17 @@ Character config ────┼────────────────
 
 ### 1. Stream Marker Parsing
 
-The LLM may emit `<|perf:…|>` tokens inline in streaming text. `<|emo:NAME|>` is the shorthand expression form of `<|perf:expr=NAME|>`.
+The LLM may emit `<|perf:…|>` tokens inline in streaming text.
 
 | Marker | Example | Effect |
 |--------|---------|--------|
-| Expression (shorthand) | `<\|emo:happy\|>` | Set expression blend-shape |
 | Expression | `<\|perf:expr=happy\|>` | Set expression blend-shape |
 | Expression (weighted) | `<\|perf:expr=happy,weight=0.8,hold=2.0\|>` | With weight and hold duration |
 | Motion | `<\|perf:motion=wave,layer=upper\|>` | Play upper-body motion |
 | Look-at | `<\|perf:lookat=user\|>` | Glance at target |
 | Cancel | `<\|perf:cancel=expr\|>` / `<\|perf:cancel=motion\|>` / `<\|perf:cancel=all\|>` | Clear slot |
 
-See `ene_mind::session::special_token::parse_performance_marker()` and `extract_emotion_from_token()`.
+See `ene_mind::session::special_token::parse_performance_marker()`.
 
 ### 2. Performance Arbiter
 
@@ -118,7 +117,7 @@ See `ene_vrm::expression_compositor::ExpressionCompositor`.
 
 ## Prompt Contract
 
-When the emotion engine is **disabled**, the LLM receives performance grammar instructions in the post-history PHI block (replacing the old `<|emo:NAME|>` contract):
+When the emotion engine is **disabled**, the LLM receives performance grammar instructions in the post-history PHI block:
 
 ```
 ## Performance Output Rule
@@ -126,8 +125,7 @@ RULE: You may use special tokens to control your avatar's expression, motion, an
 Place each token BEFORE the sentence it describes.
 
 Grammar:
-  Expression (required, shorthand): `<|emo:NAME|>`
-  Expression (full): `<|perf:expr=NAME[,weight=0.0-1.0][,hold=SECS]|>`
+  Expression: `<|perf:expr=NAME[,weight=0.0-1.0][,hold=SECS]|>`
   Motion: `<|perf:motion=NAME[,layer=upper|lower|full]|>`
   Look-at: `<|perf:lookat=TARGET|>`
   Cancel: `<|perf:cancel=expr|motion|all|>`

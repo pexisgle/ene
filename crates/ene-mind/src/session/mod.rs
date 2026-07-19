@@ -1,17 +1,17 @@
 //! # ene-mind
 //!
-//! Conversation history management, character card loading, and emotion token parsing.
+//! Conversation history management, character card loading, and performance-marker parsing.
 //!
 //! ## Key Types
 //!
 //! - [`ConversationSession`] — Central session holder: history, display buffer, memory context, character card
 //! - [`SplitReason`] / [`SplitResult`] — Outcome types for manual compression and diagnostics
 //!
-//! ## Emotion Tokens
+//! ## Performance Markers
 //!
-//! The session layer parses `<|emo:name|>` tokens from LLM output streams:
+//! The session layer parses `<|perf:…|>` tokens from LLM output streams:
 //! - [`split_text_and_special_tokens`] — Splits streaming text into content and special tokens
-//! - [`extract_emotion_from_token`] — Extracts the emotion name from a token
+//! - [`parse_performance_marker`] — Parses a token into a [`crate::output::PerformanceCue`]
 //!
 //! Also re-exports character card types ([`CharacterCardV3`], [`expand_cbs_macros`], etc.) from `ene_config`.
 #![warn(missing_docs)]
@@ -26,7 +26,7 @@ pub mod error;
 pub mod session;
 /// Session ID generation and split/compression result types.
 pub mod session_split;
-/// Emotion-token (`<|emo:name|>`) parsing.
+/// Performance-marker (`<|perf:…|>`) parsing.
 pub mod special_token;
 /// Type-safe identifiers for sessions and cards.
 pub mod types;
@@ -48,10 +48,9 @@ pub use error::EneSessionError;
 pub use session::ConversationSession;
 /// Session ID and split/compression result types.
 pub use session_split::{SplitReason, SplitResult, generate_session_id};
-/// Emotion-token parsing utilities.
+/// Performance-marker parsing utilities.
 pub use special_token::{
-    extract_emotion_from_token, parse_performance_marker, split_text_and_special_tokens,
-    strip_markers,
+    parse_performance_marker, split_text_and_special_tokens, strip_markers,
 };
 /// Type-safe identifiers.
 pub use types::{CardName, SessionId};

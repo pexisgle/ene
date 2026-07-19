@@ -9,7 +9,7 @@ Under API v1, chat consumers receive [`EneEvent::Performance`](streaming-events.
 When `mind.emotion.enabled` is true:
 
 1. **Pre-turn:** `EmotionEngine` loads `AffectState` from the database, applies time-based decay and deterministic appraisal (gratitude, praise, insult, urgency, fatigue), then consumes any pending post-turn classifier proposal from the previous turn.
-2. **Prompt:** `build_natural_dialogue_contract()` replaces the token-list PHI. The LLM is asked for natural dialogue only — no `<|emo:|>` tokens required.
+2. **Prompt:** `build_natural_dialogue_contract()` replaces the token-list PHI. The LLM is asked for natural dialogue only — no performance markers required.
 3. **Post-stream:** `OutputArbiter` maps updated `AffectState` (+ optional LLM token hints) to resolved presentation cues with hysteresis.
 4. **Event:** `EneEvent::Performance { turn, cues, source }` is emitted to consumers.
 5. **Post-turn:** Updated `AffectState` (including last expression / cue state) is persisted before `Terminal`.
@@ -62,7 +62,7 @@ The classifier uses a **dedicated provider instance** (not the main stream clien
 
 ## Performance Marker Path
 
-When the emotion engine is disabled, the LLM may emit `<|emo:name|>` shorthand or full `<|perf:…|>` markers. The stream task strips markers from `TextDelta` and the Output / performance path surfaces them as `Performance` cues.
+When the emotion engine is disabled, the LLM may emit `<|perf:…|>` markers. The stream task strips markers from `TextDelta` and the Output / performance path surfaces them as `Performance` cues.
 
 ### Marker Parsing
 
@@ -71,7 +71,6 @@ Implemented in mind special-token helpers:
 | Function | Description |
 |----------|-------------|
 | `split_text_and_special_tokens(carry, chunk)` | Splits stream chunks into text fragments and `<\|...\|>` tokens. Tokens spanning chunk boundaries are held in `carry` |
-| `extract_emotion_from_token(token)` | Extracts expression name from `<\|emo:name\|>` (case-insensitive) |
 | `parse_performance_marker(token)` | Parses `<\|perf:…\|>` into a `PerformanceCue` |
 
 ### Marker Data Flow
@@ -81,7 +80,7 @@ LLM stream → raw text chunks
   ↓
 ene-runtime / mind stream path
   ├── Text → EneEvent::TextDelta { turn, delta }
-  └── <|emo:name|> / <|perf:…|> → stripped from text; become Performance cues
+  └── <|perf:…|> → stripped from text; become Performance cues
        ↓
 Consumer:
   ├── CLI: TextDelta → print; Performance → "[Performance: name]" (or similar)
@@ -90,7 +89,7 @@ Consumer:
 
 ### Performance Output Protocol (PHI)
 
-When emotion is disabled, `build_expression_phi()` injects an instruction block listing available `<|emo:name|>` shorthand and `<|perf:…|>` grammar derived from `card.data.extensions["expressions"]`.
+When emotion is disabled, `build_expression_phi()` injects an instruction block listing available `<|perf:expr=NAME|>` markers and `<|perf:…|>` grammar derived from `card.data.extensions["expressions"]`.
 
 Default expressions (can be disabled per-card):
 

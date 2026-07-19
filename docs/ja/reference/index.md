@@ -34,7 +34,7 @@ AI エージェントと深いコントリビューション向けの設計契�
 | [プロンプト](runtime/prompt.md) | `PromptPacket` 組み立て |
 | [セッション](runtime/session.md) | セッションとキャラクターカード |
 | [セッション分割](runtime/session-split.md) | 分割 / 圧縮ライフサイクル |
-| [感情](runtime/emotions.md) | 感情トークンと Performance |
+| [感情](runtime/emotions.md) | Affect と Performance マーカー |
 
 ## 記憶・設定・ツール
 

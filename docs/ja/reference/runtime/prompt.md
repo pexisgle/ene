@@ -58,7 +58,7 @@ MessageBuildContext {
 
 ## `build_expression_phi()`
 
-`PromptLibrary` のテンプレートを使用して、感情表現プロトコルブロックを生成します。性能の低いモデルでも `<|emo:name|>` トークンを正しく出力できるように、文頭に配置する具体的な例を提供します。
+`PromptLibrary` のテンプレートを使用して、感情表現プロトコルブロックを生成します。性能の低いモデルでも `<|perf:expr=NAME|>` トークンを正しく出力できるように、文頭に配置する具体的な例を提供します。
 
 - プロンプトライブラリから `emotion.header` と `emotion.rule` を使用
 - カード拡張 または デフォルト (neutral, happy, sad, angry, relaxed, surprised) から利用可能なトークン一覧を提示

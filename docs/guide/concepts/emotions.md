@@ -11,7 +11,7 @@ Mind owns cue arbitration. `ene-vrm` only renders; it does not import mind types
 
 ## Tokens in text
 
-Emotion markers such as `<|emo:name|>` may appear in model output; the runtime parses them as part of the performance path rather than as separate ad-hoc UI events.
+Performance markers such as `<|perf:expr=NAME|>` may appear in model output; the runtime parses them as part of the performance path rather than as separate ad-hoc UI events.
 
 ## Dig deeper
 

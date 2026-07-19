@@ -966,7 +966,7 @@ impl Runtime {
         }
 
         // Apply pending emotion commands (e.g. from the AI's
-        // `<|emo:happy|>` tokens) to the VRM model. The bevy
+        // `<|perf:expr=happy|>` tokens) to the VRM model. The bevy
         // `apply_emote_tokens_system` ran during `app.update()`;
         // here we drain the resulting queue and call
         // `expressions_mut().set_expression()` with the
