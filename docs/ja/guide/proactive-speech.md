@@ -17,7 +17,8 @@
   "ai": {
     "local_models": {
       "gemma-4-e2b": {
-        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
         "acceleration": "auto",
         "gpu_layers": "auto",
         "context_size": 2048
@@ -35,6 +36,12 @@
 
 デスクトップ設定は再起動なしで実行中のアクターに反映されます。デスクトップオブザーバーとランタイムスケジューラは `UpdateProactiveSettings` 経由で更新を受け取ります。
 
+デスクトップのデフォルト `info` ログレベルでは次が出ます:
+
+- `Proactive decision provider ready` — 判定バックエンドの初回初期化成功
+- `Proactive decision started` — ゲート / LLM を回す判定 tick
+- `Proactive will speak` / `Proactive will not speak` — 結果（`speak`、`detail`、必要に応じて `confidence` / `topic_hint`）
+
 重みは **同梱されません**。起動時に並列ダウンロードされ、`[GgufDownload]` で進捗がログ出力されます。ローカル推論は **プロセス内 llama-cpp-2**（`llama-server` サブプロセス不要）。[ADR](../reference/architecture/proactive-speech.md) を参照。
 
 ## スモークテスト（任意）
@@ -48,7 +55,7 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 ## プライバシー
 
 - デスクトップは生のスクリーンショットをディスク・ログ・SQLite に書き込みません。
-- 画面サマリーは任意。有効時、V1 デスクトップはサマライザー統合までソースを **利用不可** と報告します（空サマリーを黙って送りません）。
+- `sources.screen_summary` 有効時、デスクトップはアクティブウィンドウ（またはプライマリディスプレイ）をキャプチャし、**ローカル** proactive GGUF + `mmproj`（Gemma 4 マルチモーダル）で 1–2 文に要約してから画像を破棄します。判定コンテキストに入るのは切り詰められたテキストのみ。vision 失敗時はメタデータフォールバック（`Active application: …`）を使います。
 - アクティビティは **アプリ名のみ**（生のウィンドウタイトルなし、キーロギングなし）。
 
 ## デスクトップ統合

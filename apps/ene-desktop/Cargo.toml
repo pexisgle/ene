@@ -27,6 +27,8 @@ ene-vrm = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
 png = "0.18"
+image = { workspace = true, features = ["png"] }
+xcap = "0.9.6"
 tray-icon = { version = "0.24", default-features = false }
 ctor = { workspace = true }
 serde = { workspace = true }
@@ -50,6 +52,8 @@ wayland-protocols = { version = "0.32", default-features = false, features = ["s
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
 x11rb = { version = "0.13", default-features = false }
 bitflags = "2"
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot", "screencast"] }
+pipewire = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }

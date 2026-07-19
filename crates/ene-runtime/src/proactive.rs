@@ -81,6 +81,12 @@ pub(crate) struct ProactiveDecisionResult {
     pub epoch: u64,
     /// Whether generation should start.
     pub should_generate: bool,
+    /// Model `should_speak` flag (before confidence gate).
+    pub should_speak: bool,
+    /// Model confidence in `[0.0, 1.0]`.
+    pub confidence: f64,
+    /// Whether the lightweight decision LLM was invoked.
+    pub llm_invoked: bool,
     /// Topic hint for the generation prompt.
     pub topic_hint: String,
     /// Diagnostic reason / skip text.
@@ -142,13 +148,24 @@ pub(crate) async fn run_decision_task(
             .decision
             .allows_generation(config.decision.min_confidence);
     let detail = if let Some(skip) = &outcome.skip {
-        format!("{skip:?}")
+        skip.to_string()
+    } else if outcome.decision.should_speak {
+        if outcome.decision.reason.is_empty() {
+            "will speak".to_string()
+        } else {
+            outcome.decision.reason.clone()
+        }
+    } else if outcome.decision.reason.is_empty() {
+        "model declined".to_string()
     } else {
         outcome.decision.reason.clone()
     };
     ProactiveDecisionResult {
         epoch,
         should_generate,
+        should_speak: outcome.decision.should_speak,
+        confidence: outcome.decision.confidence,
+        llm_invoked: outcome.llm_invoked,
         topic_hint: outcome.decision.topic_hint,
         detail,
     }
@@ -157,14 +174,9 @@ pub(crate) async fn run_decision_task(
 /// Build the internal generation hint (never stored as a user message).
 #[must_use]
 pub(crate) fn proactive_generation_hint(topic_hint: &str) -> String {
-    let topic = topic_hint.trim();
-    if topic.is_empty() {
-        "The user has been idle. Speak briefly and naturally as the companion — one short check-in. Do not invent that the user said something.".to_string()
-    } else {
-        format!(
-            "The user has been idle. Speak briefly and naturally as the companion about: {topic}. Do not invent that the user said something. Do not quote internal decision reasons."
-        )
-    }
+    ene_config::PromptLibrary::load("en")
+        .proactive()
+        .render_generation_hint(topic_hint)
 }
 
 /// Interval duration from config (minimum 1s).

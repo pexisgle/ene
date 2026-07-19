@@ -52,9 +52,9 @@ pub use config::{
 pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
 pub use gguf::{
-    ensure_gguf_available, prefetch_configured_gguf, prefetch_decision_gguf,
-    prefetch_embedding_gguf, resolve_decision_gguf_path, resolve_embedding_gguf_path,
-    resolve_local_gguf_path,
+    ensure_gguf_available, ensure_mmproj_available, prefetch_configured_gguf,
+    prefetch_decision_gguf, prefetch_embedding_gguf, resolve_decision_gguf_path,
+    resolve_embedding_gguf_path, resolve_local_gguf_path,
 };
 pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
 pub use local_llm::{

@@ -66,7 +66,12 @@ pub struct EneConfig {
       "enabled": false,
       "interval_seconds": 60,
       "min_idle_seconds": 120,
-      "cooldown_seconds": 300
+      "cooldown_seconds": 300,
+      "sources": {
+        "conversation": true,
+        "activity": true,
+        "screen_summary": false
+      }
     }
   },
   "desktop": {
@@ -123,7 +128,7 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 
 #### `ai.local_models` — Local GGUF Registry
 
-Named local GGUF models referenced by tasks with `provider: "local"`. Weights are downloaded from an **HTTPS** `url` into `{assets_dir}/models/gguf/` on first use (prefetched in parallel during `EneHandle::open`). Cache filenames are `{safe_stem}-{blake3_12}.gguf` (query strings stripped; same basename from different URLs do not collide). Downloads refuse non-HTTPS URLs and HTTP redirects, require `Content-Length` (max 30 GiB), verify byte count and GGUF magic, and delete incomplete `.part` files on failure. In debug builds `assets_dir` is the source-tree `assets/` folder; in release it is the OS app data directory.
+Named local GGUF models referenced by tasks with `provider: "local"`. Weights are downloaded from an **HTTPS** `url` into `{assets_dir}/models/gguf/` on first use (prefetched in parallel during `EneHandle::open`). Cache filenames are `{safe_stem}-{blake3_12}.gguf` (query strings stripped; same basename from different URLs do not collide). Downloads refuse non-HTTPS URLs; **HTTPS→HTTPS redirects** are followed (capped, for Hugging Face CDN). Responses require `Content-Length` (max 30 GiB), verify byte count and GGUF magic, and delete incomplete `.part` files on failure. In debug builds `assets_dir` is the source-tree `assets/` folder; in release it is the OS app data directory.
 
 ```json
 {
@@ -139,9 +144,11 @@ Named local GGUF models referenced by tasks with `provider: "local"`. Weights ar
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `url` | string | `""` | HTTPS-only URL for GGUF weights (no redirects; Content-Length + GGUF magic verified) |
+| `url` | string | `""` | HTTPS-only URL for GGUF weights (HTTPS→HTTPS redirects allowed; Content-Length + GGUF magic verified) |
 | `quantization` | string | `"F16"` | Quantization label (embedding metadata) |
 | `model_path` | string | `""` | Explicit filesystem path override (skips download) |
+| `mmproj_url` | string | `""` | HTTPS URL for multimodal projector GGUF (Gemma 4 vision / screen summary) |
+| `mmproj_path` | string | `""` | Explicit mmproj path override (skips download) |
 | `acceleration` | string | `"auto"` | `"auto"`, `"vulkan"`, `"cuda"`, or `"cpu"` |
 | `gpu_layers` | string | `"auto"` | `"auto"` or an integer string for GPU layer offload |
 | `context_size` | int | `2048` | Context size for decision workloads |
@@ -183,7 +190,7 @@ Cloud chat, embedding, classifier, and cloud proactive decision via an OpenAI-co
 - `tasks.proactive: null` → proactive **generation** reuses `tasks.chat`.
 - Proactive **decision**: when `tasks.proactive` uses `provider: "local"`, the named `local_models` entry runs in-process via llama-cpp-2 (load failure falls back to cloud when an OpenAI-compatible chat/proactive task exists). When `tasks.proactive` uses `openai_compatible`, that task's model is used for the cloud decision call; otherwise `tasks.chat` is used. See [Proactive Speech ADR](../architecture/proactive-speech.md).
 
-GGUF weights are **not** bundled. Set an HTTPS `url` in `ai.local_models` (or explicit `model_path`) — files download into `{assets_dir}/models/gguf/` on first startup with progress logged as `[GgufDownload]`. Non-HTTPS URLs and redirects are refused; downloads require Content-Length, verify GGUF magic, and use hash-suffixed cache names. No external `llama-server` binary is required.
+GGUF weights are **not** bundled. Set an HTTPS `url` in `ai.local_models` (or explicit `model_path`) — files download into `{assets_dir}/models/gguf/` on first startup with progress logged as `[GgufDownload]`. Non-HTTPS URLs are refused; HTTPS→HTTPS redirects are followed (Hugging Face CDN). Downloads require Content-Length, verify GGUF magic, and use hash-suffixed cache names. No external `llama-server` binary is required.
 
 #### Multi-Provider Example
 
@@ -201,7 +208,8 @@ OpenRouter for chat + classifier, local embedding and proactive decision:
         "context_size": 2048
       },
       "gemma-4-e2b": {
-        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
         "acceleration": "auto",
         "gpu_layers": "auto",
         "context_size": 2048
@@ -404,7 +412,12 @@ Only policy toggles exposed to users. Context budgets, memory extraction, charac
       "enabled": false,
       "interval_seconds": 60,
       "min_idle_seconds": 120,
-      "cooldown_seconds": 300
+      "cooldown_seconds": 300,
+      "sources": {
+        "conversation": true,
+        "activity": true,
+        "screen_summary": false
+      }
     }
   }
 }
@@ -429,8 +442,11 @@ Policy for unsolicited companion utterances. Default is **off**. Model routing i
 | `interval_seconds` | int | `60` | Decision tick interval (minimum 1) |
 | `min_idle_seconds` | int | `120` | Suppress until this idle after last user input |
 | `cooldown_seconds` | int | `300` | Suppress after a successful proactive utterance (`TerminalReason::Done`) |
+| `sources.conversation` | bool | `true` | Include recent conversation history in the decision context |
+| `sources.activity` | bool | `true` | Include privacy-safe activity / active-window signals |
+| `sources.screen_summary` | bool | `false` | Include a short-lived screen text summary (never raw image bytes; desktop captures and summarizes with local Gemma + mmproj when enabled) |
 
-Extended proactive settings (source flags, confidence gate, timeouts, tool allowance) use code defaults.
+Extended proactive settings (confidence gate, timeouts, tool allowance) use code defaults.
 
 ### `desktop` — GUI Settings
 
@@ -463,7 +479,7 @@ The following are controlled by code defaults and are intentionally absent from 
 | `mind.context` | Token budgets, rolling compression thresholds |
 | `mind.memory` | Extraction, hybrid recall, MMR (memory HyDE/LLM rerank intentionally omitted) |
 | `mind.character` | CCv3 compilation, identity kernel budget |
-| `mind.emotion` / `mind.proactive` | Engine mode, classifier timeouts, source flags, confidence gates |
+| `mind.emotion` / `mind.proactive` | Engine mode, classifier timeouts, confidence gates, tool allowance |
 | `tools` | `max_rounds`, `timeout_ms` |
 | `store` | `db_path` |
 

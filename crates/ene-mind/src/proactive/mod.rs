@@ -11,6 +11,7 @@ pub use gate::{GateRejectReason, evaluate_deterministic_gates};
 pub use parse::{decision_schema, decision_schema_object, parse_decision_json};
 pub use prompt::build_decision_messages;
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -161,6 +162,17 @@ pub enum ProactiveSkipReason {
     BelowConfidence,
 }
 
+impl fmt::Display for ProactiveSkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Disabled => write!(f, "disabled"),
+            Self::Gate(reason) => write!(f, "gate: {reason}"),
+            Self::DecisionFailed(error) => write!(f, "decision failed: {error}"),
+            Self::BelowConfidence => write!(f, "below confidence"),
+        }
+    }
+}
+
 /// Outcome of [`decide_proactive_speech`].
 #[derive(Debug, Clone)]
 pub struct ProactiveDecisionOutcome {
@@ -275,7 +287,8 @@ pub async fn decide_proactive_speech(
     };
 
     let messages = build_decision_messages(context);
-    let schema = decision_schema();
+    // Inner object only — OpenAI/OpenRouter wrap this as response_format themselves.
+    let schema = decision_schema_object();
     let timeout = Duration::from_secs(config.decision_timeout_seconds.max(1));
 
     let raw = match tokio::time::timeout(timeout, provider.chat_completion(&messages, Some(schema)))
@@ -386,6 +399,11 @@ mod tests {
         body: String,
     }
 
+    struct SchemaCaptureProvider {
+        body: String,
+        captured: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+
     #[async_trait]
     impl LlmProvider for FixedProvider {
         fn name(&self) -> &'static str {
@@ -408,6 +426,35 @@ mod tests {
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
         ) -> Result<String, LlmProviderError> {
+            Ok(self.body.clone())
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SchemaCaptureProvider {
+        fn name(&self) -> &'static str {
+            "schema-capture"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[LlmMessage],
+            _tools: &[ene_tool_proto::ToolSpec],
+        ) -> Result<
+            Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
+            LlmProviderError,
+        > {
+            Err(LlmProviderError::Provider("stream unused".into()))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[LlmMessage],
+            json_schema: Option<serde_json::Value>,
+        ) -> Result<String, LlmProviderError> {
+            if let Ok(mut guard) = self.captured.lock() {
+                *guard = json_schema;
+            }
             Ok(self.body.clone())
         }
     }
@@ -528,5 +575,47 @@ mod tests {
         assert_eq!(outcome.decision.topic_hint, "check in");
         assert_eq!(outcome.decision.urgency, ProactiveUrgency::Low);
         assert!(outcome.skip.is_none());
+    }
+
+    #[tokio::test]
+    async fn decision_passes_inner_json_schema_object() {
+        let config = base_config();
+        let ctx = ProactiveContext {
+            history: vec![HistoryEntry {
+                role: Role::User,
+                content: "hey".into(),
+            }],
+            seconds_since_user_input: 200,
+            activity: Some(ActivitySnapshot {
+                idle_seconds: Some(200),
+                active_window_label: "Browser".into(),
+                recent_change: String::new(),
+            }),
+            screen_summary: None,
+            affect_summary: None,
+            commitments: vec![],
+            suppression: ProactiveSuppressionState {
+                seconds_since_user_input: 200,
+                seconds_since_proactive: 1000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+        };
+        let capture = Arc::new(SchemaCaptureProvider {
+            body: r#"{"should_speak":false,"confidence":0.1,"reason":"quiet","topic_hint":"","urgency":"low"}"#.into(),
+            captured: std::sync::Mutex::new(None),
+        });
+        let provider: Arc<dyn LlmProvider> = capture.clone();
+        let outcome = decide_proactive_speech(&config, &ctx, Some(provider)).await;
+        assert!(outcome.llm_invoked);
+        let schema = capture
+            .captured
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .expect("schema passed to decision provider");
+        assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
+        assert!(schema.get("properties").is_some());
+        assert!(schema.get("schema").is_none());
     }
 }

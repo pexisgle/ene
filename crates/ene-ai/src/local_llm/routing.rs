@@ -3,7 +3,7 @@
 use super::{LocalGgufLoadParams, LocalLlamaCppProvider};
 use crate::config::{AiConfig, AiProviderDef};
 use crate::error::LlmProviderError;
-use crate::gguf::ensure_gguf_available;
+use crate::gguf::{ensure_gguf_available, ensure_mmproj_available};
 use crate::message::{LlmMessage, LlmResponseChunk};
 use crate::openai::OpenAiProvider;
 use crate::resolve::ResolvedChat;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::Stream;
 
-const LOCAL_STARTUP_TIMEOUT_SECS: u64 = 60;
+const LOCAL_STARTUP_TIMEOUT_SECS: u64 = 300;
 const LOCAL_REQUEST_TIMEOUT_SECS: u64 = 20;
 const DECISION_MAX_TOKENS: u32 = 256;
 
@@ -80,6 +80,12 @@ pub struct ProactiveLlmHandles {
 }
 
 impl ProactiveLlmHandles {
+    /// Local llama.cpp provider when the decision backend is in-process.
+    #[must_use]
+    pub fn local(&self) -> Option<&Arc<LocalLlamaCppProvider>> {
+        self.local.as_ref()
+    }
+
     /// Shut down any local resources (model drop is sufficient; kept for API stability).
     pub async fn shutdown(&self) {
         if let Some(local) = &self.local {
@@ -103,17 +109,38 @@ pub async fn build_proactive_llm_handles(
         && AiConfig::is_local_provider(&proactive.provider)
     {
         let local = config.resolve_local_model_for_task(proactive)?;
-        let Ok(resolved_path) = ensure_gguf_available(&local).await else {
-            let cloud = build_cloud_decision_provider(config)?;
-            return Ok(ProactiveLlmHandles {
-                decision: cloud,
-                decision_kind: DecisionProviderKind::Cloud,
-                local: None,
-                generation_model,
-            });
+        let resolved_path = match ensure_gguf_available(&local).await {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(
+                    component = "LocalLlamaCpp",
+                    error = %e,
+                    model = %local.name,
+                    "Local GGUF unavailable; falling back to cloud decision"
+                );
+                let cloud = build_cloud_decision_provider(config)?;
+                return Ok(ProactiveLlmHandles {
+                    decision: cloud,
+                    decision_kind: DecisionProviderKind::Cloud,
+                    local: None,
+                    generation_model,
+                });
+            }
+        };
+        let mmproj_path = match ensure_mmproj_available(&local).await {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!(
+                    component = "LocalLlamaCpp",
+                    error = %e,
+                    "mmproj unavailable; continuing text-only"
+                );
+                None
+            }
         };
         let params = LocalGgufLoadParams {
             model_path: resolved_path.to_string_lossy().into_owned(),
+            mmproj_path: mmproj_path.map(|p| p.to_string_lossy().into_owned()),
             acceleration: local.acceleration,
             gpu_layers: local.gpu_layers.clone(),
             context_size: local.context_size,

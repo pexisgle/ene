@@ -470,8 +470,6 @@ pub struct ProactiveConfig {
     #[schemars(skip)]
     pub generation_timeout_seconds: u64,
     /// Per-source enable flags.
-    #[serde(skip_deserializing, default, skip_serializing)]
-    #[schemars(skip)]
     pub sources: ProactiveSourcesConfig,
     /// Decision confidence gate.
     #[serde(skip_deserializing, default, skip_serializing)]
@@ -647,6 +645,31 @@ mod tests {
         assert_eq!(cfg.proactive.interval_seconds, 60);
         assert!(cfg.proactive.sources.conversation);
         assert!(!cfg.proactive.sources.screen_summary);
+    }
+
+    #[test]
+    fn proactive_sources_round_trip_in_public_schema() {
+        let cfg: ProactiveConfig = serde_json::from_str(
+            r#"{
+                "enabled": true,
+                "interval_seconds": 30,
+                "sources": {
+                    "conversation": false,
+                    "activity": true,
+                    "screen_summary": true
+                }
+            }"#,
+        )
+        .expect("deserialize");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.interval_seconds, 30);
+        assert!(!cfg.sources.conversation);
+        assert!(cfg.sources.activity);
+        assert!(cfg.sources.screen_summary);
+
+        let json = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(json["sources"]["conversation"], false);
+        assert_eq!(json["sources"]["screen_summary"], true);
     }
 
     #[test]

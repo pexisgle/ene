@@ -2402,11 +2402,13 @@ version = "0.1.0"
 dependencies = [
  "async-openai",
  "async-trait",
+ "base64 0.22.1",
  "blake3",
  "ctor",
  "encoding_rs",
  "ene-config",
  "ene-tool-proto",
+ "image",
  "llama-cpp-2",
  "parking_lot",
  "reqwest 0.13.4",
@@ -2471,6 +2473,7 @@ name = "ene-desktop"
 version = "0.1.0"
 dependencies = [
  "active-win-pos-rs",
+ "ashpd",
  "bevy_app",
  "bevy_ecs",
  "bitflags 2.13.1",
@@ -2493,7 +2496,9 @@ dependencies = [
  "gtk",
  "i18n-embed",
  "i18n-embed-fl",
+ "image",
  "parking_lot",
+ "pipewire",
  "png",
  "pollster",
  "rapier3d",
@@ -2512,6 +2517,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "winit",
  "x11rb",
+ "xcap",
 ]
 
 [[package]]
@@ -4483,6 +4489,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

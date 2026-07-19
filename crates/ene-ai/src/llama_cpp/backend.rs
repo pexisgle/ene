@@ -9,6 +9,28 @@ use std::sync::OnceLock;
 static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
 static INFERENCE: Mutex<()> = Mutex::new(());
 
+// Quiet llama.cpp `common/log` (mtmd LOG_INF / LOG_DBG spam).
+// These bypass `llama_log_set` and go through `common_log_*` (C++ Itanium ABI on Unix).
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "_Z30common_log_set_verbosity_tholdi"]
+    fn common_log_set_verbosity_thold(verbosity: std::os::raw::c_int);
+}
+
+/// Suppress mtmd `add_text` / encode-timing noise (INFO=3, DEBUG=5).
+#[cfg(unix)]
+const COMMON_LOG_ERRORS_ONLY: std::os::raw::c_int = 1;
+
+fn quiet_llama_common_logs() {
+    #[cfg(unix)]
+    {
+        // SAFETY: sets a process-global llama.cpp log verbosity threshold; called once at init.
+        unsafe {
+            common_log_set_verbosity_thold(COMMON_LOG_ERRORS_ONLY);
+        }
+    }
+}
+
 /// Run `f` with the process-global backend (initialized once).
 ///
 /// Holds a process-wide inference lock so embedding and decision paths never
@@ -20,6 +42,7 @@ where
     let _guard = INFERENCE.lock();
     let backend = BACKEND.get_or_init(|| {
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
+        quiet_llama_common_logs();
         LlamaBackend::init().map_err(|e| format!("LlamaBackend::init failed: {e}"))
     });
     match backend {

@@ -113,6 +113,17 @@ pub enum EneCommand {
         /// Mind proactive policy.
         mind: ene_mind::ProactiveConfig,
     },
+    /// Summarize a screen RGB capture with the local vision (mmproj) model.
+    SummarizeScreenImage {
+        /// Image width in pixels.
+        width: u32,
+        /// Image height in pixels.
+        height: u32,
+        /// Tight RGB8 buffer (`width * height * 3`).
+        rgb: Vec<u8>,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<String, String>>,
+    },
 }
 
 /// Events emitted from the actor to all consumers via broadcast channel.
@@ -678,6 +689,25 @@ impl EneHandle {
             .send(EneCommand::UpdateProactiveSettings { mind })
             .map_err(|_| ActorDeadError)
     }
+
+    /// Summarize a screen RGB capture via the local vision model (Gemma + mmproj).
+    pub async fn summarize_screen_image(
+        &self,
+        width: u32,
+        height: u32,
+        rgb: Vec<u8>,
+    ) -> Result<String, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SummarizeScreenImage {
+                width,
+                height,
+                rgb,
+                reply: tx,
+            })
+            .map_err(|_| "actor dead".to_string())?;
+        rx.await.map_err(|_| "actor dropped reply".to_string())?
+    }
 }
 
 impl Drop for EneHandle {
@@ -932,6 +962,58 @@ impl EneActor {
         self.proactive_decision_rx = None;
     }
 
+    async fn ensure_proactive_llm(&mut self) -> Result<(), String> {
+        if self.proactive_llm.is_some() {
+            return Ok(());
+        }
+        let ai_cfg = self
+            .config
+            .get_section::<ene_ai::AiConfig>()
+            .map_err(|e| format!("AI config unavailable: {e}"))?;
+        match ene_ai::build_proactive_llm_handles(&ai_cfg).await {
+            Ok(handles) => {
+                tracing::info!(
+                    component = "Proactive",
+                    decision_backend = ?handles.decision_kind,
+                    vision = handles.local().is_some_and(|l| l.supports_vision()),
+                    "Proactive decision provider ready"
+                );
+                self.proactive_llm = Some(handles);
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to start proactive decision provider: {e}")),
+        }
+    }
+
+    async fn summarize_screen_rgb(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgb: Vec<u8>,
+    ) -> Result<String, String> {
+        let prompts = ene_config::PromptLibrary::load("en");
+        let system = prompts.proactive().screen_summary_system.trim();
+        let user = prompts.proactive().screen_summary_user.trim();
+
+        self.ensure_proactive_llm().await?;
+        let Some(handles) = self.proactive_llm.as_ref() else {
+            return Err("proactive LLM handles missing after ensure".to_string());
+        };
+        let Some(local) = handles.local().cloned() else {
+            return Err(format!(
+                "local proactive model is not available (decision_backend={:?})",
+                handles.decision_kind
+            ));
+        };
+        if !local.supports_vision() {
+            return Err("local model has no vision mmproj loaded".to_string());
+        }
+        local
+            .summarize_rgb(width, height, rgb, system, user)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn maybe_spawn_proactive_decision(&mut self) {
         if self.stream_handle.is_some() || self.proactive_decision_rx.is_some() {
             return;
@@ -949,30 +1031,17 @@ impl EneActor {
             return;
         }
 
-        if self.proactive_llm.is_none() {
-            let ai_cfg = match self.config.get_section::<ene_ai::AiConfig>() {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::debug!(
-                        component = "Proactive",
-                        error = %e,
-                        "AI config unavailable for proactive handles"
-                    );
-                    return;
-                }
-            };
-            match ene_ai::build_proactive_llm_handles(&ai_cfg).await {
-                Ok(handles) => self.proactive_llm = Some(handles),
-                Err(e) => {
-                    tracing::warn!(
-                        component = "Proactive",
-                        error = %e,
-                        "Failed to start proactive decision provider"
-                    );
-                    return;
-                }
-            }
+        if let Err(e) = self.ensure_proactive_llm().await {
+            tracing::warn!(component = "Proactive", error = %e, "Failed to start proactive decision provider");
+            return;
         }
+
+        tracing::info!(
+            component = "Proactive",
+            interval_seconds = mind.proactive.interval_seconds,
+            min_idle_seconds = mind.proactive.min_idle_seconds,
+            "Proactive decision started"
+        );
 
         let decision_provider = self.proactive_llm.as_ref().map(|h| Arc::clone(&h.decision));
         let epoch = self.proactive.epoch;
@@ -1021,28 +1090,54 @@ impl EneActor {
         result: crate::proactive::ProactiveDecisionResult,
     ) {
         if result.epoch != self.proactive.epoch {
-            tracing::debug!(
+            tracing::info!(
                 component = "Proactive",
-                "Discarding stale proactive decision after user turn"
+                speak = false,
+                detail = "stale after user turn",
+                "Proactive will not speak"
             );
             return;
         }
         if self.stream_handle.is_some() {
+            tracing::info!(
+                component = "Proactive",
+                speak = false,
+                detail = "user stream active",
+                "Proactive will not speak"
+            );
             return;
         }
         if !result.should_generate {
-            tracing::debug!(
+            tracing::info!(
                 component = "Proactive",
+                speak = false,
+                should_speak = result.should_speak,
+                confidence = result.confidence,
+                llm_invoked = result.llm_invoked,
                 detail = %result.detail,
-                "Proactive decision suppressed"
+                "Proactive will not speak"
             );
             return;
         }
 
         let turn = TurnId::new();
         if !self.turn_gate.try_begin(&turn) {
+            tracing::info!(
+                component = "Proactive",
+                speak = false,
+                detail = "turn gate busy",
+                "Proactive will not speak"
+            );
             return;
         }
+        tracing::info!(
+            component = "Proactive",
+            speak = true,
+            confidence = result.confidence,
+            topic_hint = %result.topic_hint,
+            detail = %result.detail,
+            "Proactive will speak"
+        );
         let mind = self
             .config
             .get_section::<ene_mind::MindConfig>()
@@ -1196,6 +1291,16 @@ impl EneActor {
                 if let Some(handles) = self.proactive_llm.take() {
                     handles.shutdown().await;
                 }
+                true
+            }
+            EneCommand::SummarizeScreenImage {
+                width,
+                height,
+                rgb,
+                reply,
+            } => {
+                let result = self.summarize_screen_rgb(width, height, rgb).await;
+                let _ = reply.send(result);
                 true
             }
             EneCommand::PermissionDecision {

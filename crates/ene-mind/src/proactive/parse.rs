@@ -96,6 +96,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn decision_schema_object_is_json_schema_root() {
+        let schema = decision_schema_object();
+        assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
+        assert!(schema.get("properties").is_some());
+        assert!(schema.get("required").is_some());
+        assert!(schema.get("schema").is_none());
+    }
+
+    #[test]
     fn parses_valid_decision() {
         let d = parse_decision_json(
             r#"{"should_speak":true,"confidence":0.8,"reason":"idle","topic_hint":"hi","urgency":"high","extra":1}"#,

@@ -142,8 +142,9 @@ proactive-cooldown = Cooldown after speech (seconds)
 proactive-min-idle = Min idle before speech (seconds)
 proactive-source-conversation = Use conversation history
 proactive-source-activity = Use activity / active window
-proactive-source-screen = Use screen summary (not available in this build)
-proactive-source-screen-hint = V1 desktop does not bundle a screen summarizer; enabling this source reports unavailable until one is integrated. See the proactive speech guide.
+proactive-source-screen = Use screen summary
+proactive-source-screen-hint = Captures the active window (or primary display) and summarizes it with the local Gemma model + mmproj. Raw screenshots stay in-process and are never saved. Falls back to app metadata if vision is unavailable.
+proactive-sources = Observation sources
 proactive-decision-backend = Decision backend
 proactive-fallback = Local failure fallback
 proactive-model-path = Local decision model path (GGUF)
@@ -151,11 +152,10 @@ proactive-generation-model = Generation model override (optional)
 
 # Features
 features = Features
-features-hint = Toggle major capabilities. Timing and provider settings stay on the AI tab.
+features-hint = Toggle major capabilities and proactive speech policy. Provider settings stay on the AI tab.
 features-mind = Mind
 features-tools = Tools
 features-per-tool = Per-tool
-features-proactive-timing-hint = Master switch is on the Features tab.
 enable-emotion = Enable emotion processing
 enable-tools = Enable tool calling
 enable-tool-rag = Enable Tool RAG

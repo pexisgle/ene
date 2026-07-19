@@ -133,15 +133,15 @@ F1 またはトレイ → Settings で開きます。タブ構成:
 |------|------|
 | Character | VRM 選択、モーション、視線、位置、表情テスト |
 | Graphics | 言語、画質プリセット |
-| AI | チャット / 埋め込みプロバイダー、能動発話のタイミング |
-| Features | メモリ・感情・能動発話・ツール・Tool RAG・ツール別 enable の on/off |
+| AI | チャット / 埋め込みプロバイダー |
+| Features | メモリ・感情・ツール・Tool RAG・ツール別 enable の on/off、能動発話の有効化 / 間隔 / クールダウン / 最低待機 / 観測ソース |
 | Memory | メモリジャーナル（閲覧 / recall デバッグ） |
 | Debug | セッション専用オーバーレイ（コライダー、入力領域） |
 
 機能トグルは `settings.json` に保存されます（`store.enabled`、
-`mind.emotion.enabled`、`mind.proactive.enabled`、`tools.enabled`、
-`tools.rag.enabled`、`tools.list.<name>.enable`）。能動発話の
-タイミング設定は AI タブ、マスタースイッチは機能タブです。
+`mind.emotion.enabled`、`mind.proactive.*`、`tools.enabled`、
+`tools.rag.enabled`、`tools.list.<name>.enable`）。能動発話ポリシー
+（タイミングとソース）は機能タブで編集します。
 
 ### メッセージ型
 

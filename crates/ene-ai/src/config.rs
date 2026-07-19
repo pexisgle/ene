@@ -72,6 +72,12 @@ pub struct LocalModelDef {
     /// Explicit filesystem path override (skips download when non-empty).
     #[serde(default = "default_string")]
     pub model_path: String,
+    /// Optional HTTPS URL for the multimodal projector (`mmproj`) GGUF.
+    #[serde(default = "default_string")]
+    pub mmproj_url: String,
+    /// Optional filesystem path for `mmproj` (skips download when non-empty).
+    #[serde(default = "default_string")]
+    pub mmproj_path: String,
     /// Preferred acceleration backend.
     #[serde(default)]
     pub acceleration: ProactiveAcceleration,
@@ -89,6 +95,8 @@ impl Default for LocalModelDef {
             url: default_string(),
             quantization: default_local_quantization(),
             model_path: default_string(),
+            mmproj_url: default_string(),
+            mmproj_path: default_string(),
             acceleration: ProactiveAcceleration::default(),
             gpu_layers: default_gpu_layers(),
             context_size: default_context_size(),

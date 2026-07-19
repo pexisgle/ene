@@ -46,6 +46,7 @@ impl GgufEmbeddingProvider {
         let path = LoadSpec::validate_model_path(gguf_path)?;
         let spec = LoadSpec {
             model_path: path,
+            mmproj_path: None,
             acceleration,
             gpu_layers: "auto".to_string(),
             context_size: 8192,

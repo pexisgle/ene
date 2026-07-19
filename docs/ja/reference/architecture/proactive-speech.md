@@ -83,7 +83,7 @@ Timer / observation update
 |---|---|---|
 | `conversation` | 直近の `HistoryEntry`（文字数上限で truncate） | セッション履歴のみ |
 | `activity` | 任意の idle ヒント、**アプリ名のみ**（生ウィンドウタイトルなし）、直近フォーカス変化 | キーログなし。V1 ではタイトルは収集しない |
-| `screen_summary` | デスクトップ要約プロバイダが利用可能なときの短命 **テキスト** 要約 | V1 デスクトップは有効でも要約器未同梱のため `unavailable`。raw screenshot は永続化・ログ・diagnostic に出さない |
+| `screen_summary` | デスクトップ要約プロバイダによる短命 **テキスト** 要約 | デスクトップがアクティブウィンドウ（またはプライマリディスプレイ）をキャプチャし、ローカル proactive GGUF + `mmproj`（Gemma 4）で要約。**テキストのみ**を転送。raw screenshot は永続化・ログ・mind/store に出さない |
 
 各ソースは個別に有効 / 無効。無効時は desktop が収集せず、mind も判定プロンプトに含めない。
 

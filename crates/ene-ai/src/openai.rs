@@ -399,6 +399,11 @@ impl LlmProvider for OpenAiProvider {
         req_builder.model(self.model.clone()).messages(oa_messages);
 
         if let Some(schema) = json_schema {
+            // Accept either a raw JSON Schema object or a `{ "schema": ... }` wrapper.
+            let schema = schema
+                .get("schema")
+                .cloned()
+                .unwrap_or(schema);
             req_builder.response_format(async_openai::types::chat::ResponseFormat::JsonSchema {
                 json_schema: async_openai::types::chat::ResponseFormatJsonSchema {
                     description: Some("Structured output".to_string()),

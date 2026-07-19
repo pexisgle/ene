@@ -21,6 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "jina-v5-small".to_string(),
         url: embedding_model_url,
         model_path: String::new(),
+        mmproj_url: String::new(),
+        mmproj_path: String::new(),
         quantization: "F16".to_string(),
         acceleration: ProactiveAcceleration::Cpu,
         gpu_layers: "auto".to_string(),

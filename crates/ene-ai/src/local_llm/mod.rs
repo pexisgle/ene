@@ -24,6 +24,8 @@ use tokio_stream::Stream;
 pub struct LocalGgufLoadParams {
     /// Absolute or relative path to GGUF weights.
     pub model_path: String,
+    /// Optional path to multimodal projector GGUF (vision).
+    pub mmproj_path: Option<String>,
     /// Preferred acceleration backend.
     pub acceleration: ProactiveAcceleration,
     /// GPU layer offload: `"auto"` or an integer string.
@@ -44,8 +46,14 @@ impl LocalLlamaCppProvider {
     /// Load GGUF weights from `params` and wrap as an [`LlmProvider`].
     pub fn load(params: &LocalGgufLoadParams) -> Result<Self, LlmProviderError> {
         let model_path = LoadSpec::validate_model_path(&params.model_path)?;
+        let mmproj_path = params
+            .mmproj_path
+            .as_ref()
+            .map(|p| LoadSpec::validate_model_path(p))
+            .transpose()?;
         let spec = LoadSpec {
             model_path,
+            mmproj_path,
             acceleration: params.acceleration,
             gpu_layers: params.gpu_layers.clone(),
             context_size: params.context_size.max(256),
@@ -55,6 +63,35 @@ impl LocalLlamaCppProvider {
             model: Arc::new(Mutex::new(loaded)),
             request_timeout: Duration::from_secs(params.request_timeout_seconds.max(1)),
         })
+    }
+
+    /// True when an mmproj was loaded and reports vision support.
+    #[must_use]
+    pub fn supports_vision(&self) -> bool {
+        self.model.lock().supports_vision()
+    }
+
+    /// Summarize an RGB8 screen capture with the local vision model.
+    pub async fn summarize_rgb(
+        &self,
+        width: u32,
+        height: u32,
+        rgb: Vec<u8>,
+        system: &str,
+        user: &str,
+    ) -> Result<String, LlmProviderError> {
+        let model = Arc::clone(&self.model);
+        let timeout = self.request_timeout;
+        let system = system.to_string();
+        let user = user.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = model.lock();
+            crate::llama_cpp::generate_with_rgb_image(
+                &guard, &system, &user, width, height, &rgb, timeout,
+            )
+        })
+        .await
+        .map_err(|e| LlmProviderError::LocalLlm(format!("vision task join error: {e}")))?
     }
 
     /// No-op for API compatibility with the former subprocess provider.
@@ -208,6 +245,7 @@ mod tests {
     async fn local_load_rejects_empty_model_path() {
         let params = LocalGgufLoadParams {
             model_path: String::new(),
+            mmproj_path: None,
             acceleration: ProactiveAcceleration::Cpu,
             gpu_layers: "auto".to_string(),
             context_size: 2048,

@@ -1,7 +1,7 @@
-//! AI settings page — embedding and proactive speech timing.
+//! AI settings page — chat provider and embedding configuration.
 //!
 //! Chat lives in the dedicated chat window (F2); see #109.
-//! Feature on/off toggles live on the Features tab.
+//! Feature toggles and proactive speech policy live on the Features tab.
 
 use super::input::SettingsInputState;
 use crate::ai_bridge::AiBridge;
@@ -63,7 +63,7 @@ pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     _animation: &mut AnimationControl,
-    ai: &Arc<AiBridge>,
+    _ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     _world: &mut World,
     _ui_entity: Entity,
@@ -294,58 +294,6 @@ pub fn render(
                     let _ = settings.ai.ai.set_section(&ai_cfg);
                     settings.mark_dirty();
                 }
-            }
-        });
-
-        ui.separator();
-        ui.label(crate::i18n::proactive_speech());
-        ui.weak(crate::i18n::features_proactive_timing_hint());
-
-        let mut mind = settings
-            .ai
-            .ai
-            .get_section::<ene_mind::MindConfig>()
-            .unwrap_or_default();
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_interval());
-            let mut value = mind.proactive.interval_seconds as i32;
-            if ui
-                .add(egui::DragValue::new(&mut value).range(1..=3600))
-                .changed()
-            {
-                mind.proactive.interval_seconds = value.max(1) as u64;
-                let _ = settings.ai.ai.set_section(&mind);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_cooldown());
-            let mut value = mind.proactive.cooldown_seconds as i32;
-            if ui
-                .add(egui::DragValue::new(&mut value).range(0..=86_400))
-                .changed()
-            {
-                mind.proactive.cooldown_seconds = value.max(0) as u64;
-                let _ = settings.ai.ai.set_section(&mind);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind);
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_min_idle());
-            let mut value = mind.proactive.min_idle_seconds as i32;
-            if ui
-                .add(egui::DragValue::new(&mut value).range(0..=86_400))
-                .changed()
-            {
-                mind.proactive.min_idle_seconds = value.max(0) as u64;
-                let _ = settings.ai.ai.set_section(&mind);
-                settings.mark_dirty();
-                ai.sync_proactive_runtime(&mind);
             }
         });
     });

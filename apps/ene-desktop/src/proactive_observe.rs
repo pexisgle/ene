@@ -2,9 +2,10 @@
 //!
 //! Collects host signals on a background tokio task and pushes
 //! [`ene_mind::ProactiveObservation`] into the runtime. Raw screenshots are
-//! never persisted; screen summary is omitted when no safe summarizer is
-//! available (source unavailable).
+//! never persisted; only a short text summary crosses the mind boundary.
+//! Screen pixels are summarized in-process by the local Gemma + mmproj model.
 
+mod capture;
 mod screen_summary;
 
 use std::sync::Arc;
@@ -29,6 +30,7 @@ struct ObserveConfig {
     activity: bool,
     screen_summary: bool,
     interval_seconds: u64,
+    max_screen_summary_chars: usize,
 }
 
 impl ProactiveObserveControl {
@@ -41,6 +43,7 @@ impl ProactiveObserveControl {
                 activity: mind.proactive.sources.activity,
                 screen_summary: mind.proactive.sources.screen_summary,
                 interval_seconds: mind.proactive.interval_seconds.max(1),
+                max_screen_summary_chars: mind.proactive.max_screen_summary_chars.max(32),
             })),
         }
     }
@@ -52,6 +55,7 @@ impl ProactiveObserveControl {
         guard.activity = mind.proactive.sources.activity;
         guard.screen_summary = mind.proactive.sources.screen_summary;
         guard.interval_seconds = mind.proactive.interval_seconds.max(1);
+        guard.max_screen_summary_chars = mind.proactive.max_screen_summary_chars.max(32);
     }
 
     fn snapshot(&self) -> ObserveConfig {
@@ -67,8 +71,9 @@ pub fn spawn_proactive_observer(
 ) -> ProactiveObserveControl {
     let control = ProactiveObserveControl::from_mind(mind);
     let control_task = control.clone();
+    let observe_handle = handle.clone();
     runtime.spawn(async move {
-        let screen_provider = ScreenSummaryProvider::v1_unavailable();
+        let screen_provider = ScreenSummaryProvider::new(observe_handle.clone());
         let mut last_app = String::new();
         loop {
             let cfg = control_task.snapshot();
@@ -78,7 +83,7 @@ pub fn spawn_proactive_observer(
                 continue;
             }
 
-            let observation = collect_observation(&cfg, screen_provider, &mut last_app);
+            let observation = collect_observation(&cfg, &screen_provider, &mut last_app).await;
             if let Err(e) = handle.update_proactive_observation(observation) {
                 tracing::debug!(
                     component = "ProactiveObserve",
@@ -93,9 +98,9 @@ pub fn spawn_proactive_observer(
     control
 }
 
-fn collect_observation(
+async fn collect_observation(
     cfg: &ObserveConfig,
-    screen_provider: ScreenSummaryProvider,
+    screen_provider: &ScreenSummaryProvider,
     last_app: &mut String,
 ) -> ProactiveObservation {
     let captured_at_unix_ms = SystemTime::now()
@@ -109,7 +114,10 @@ fn collect_observation(
     };
 
     let (screen_summary, screen_summary_status) = if cfg.screen_summary {
-        match screen_provider.summarize() {
+        match screen_provider
+            .summarize(cfg.max_screen_summary_chars)
+            .await
+        {
             Some(text) => (Some(text), ScreenSummaryStatus::Available),
             None => (None, ScreenSummaryStatus::Unavailable),
         }
@@ -166,7 +174,7 @@ fn active_app_label() -> Option<String> {
     }
 }
 
-fn redact_paths(input: &str) -> String {
+pub(crate) fn redact_paths(input: &str) -> String {
     input
         .split_whitespace()
         .filter(|t| !t.contains('/') && !t.contains('\\') && !t.contains('@'))
@@ -174,7 +182,7 @@ fn redact_paths(input: &str) -> String {
         .join(" ")
 }
 
-fn truncate(input: &str, max: usize) -> String {
+pub(crate) fn truncate(input: &str, max: usize) -> String {
     if input.chars().count() <= max {
         input.to_string()
     } else {
@@ -202,20 +210,6 @@ mod tests {
         assert!(!snap.enabled);
         assert!(snap.activity);
         assert!(!snap.screen_summary);
-    }
-
-    #[test]
-    fn screen_summary_unavailable_when_enabled_but_no_provider() {
-        let cfg = ObserveConfig {
-            enabled: true,
-            activity: false,
-            screen_summary: true,
-            interval_seconds: 30,
-        };
-        let provider = ScreenSummaryProvider::v1_unavailable();
-        let obs = collect_observation(&cfg, provider, &mut String::new());
-        assert_eq!(obs.screen_summary_status, ScreenSummaryStatus::Unavailable);
-        assert!(obs.screen_summary.is_none());
     }
 
     #[test]

@@ -142,8 +142,9 @@ proactive-cooldown = 発話後のクールダウン（秒）
 proactive-min-idle = 発話前の最低待機（秒）
 proactive-source-conversation = 会話履歴を使う
 proactive-source-activity = 活動 / アクティブウィンドウを使う
-proactive-source-screen = 画面要約を使う（このビルドでは未対応）
-proactive-source-screen-hint = V1 デスクトップには画面要約器が同梱されていません。有効にしても要約器が統合されるまで unavailable になります。能動発話ガイドを参照してください。
+proactive-source-screen = 画面要約を使う
+proactive-source-screen-hint = アクティブウィンドウ（またはプライマリディスプレイ）をキャプチャし、ローカルの Gemma + mmproj で要約します。生のスクリーンショットはプロセス内のみで扱い保存しません。vision が使えない場合はアプリ名などのメタデータにフォールバックします。
+proactive-sources = 観測ソース
 proactive-decision-backend = 判定バックエンド
 proactive-fallback = ローカル失敗時のフォールバック
 proactive-model-path = ローカル判定モデルパス（GGUF）
@@ -151,11 +152,10 @@ proactive-generation-model = 生成モデル override（任意）
 
 # Features
 features = 機能
-features-hint = 主要な機能の on/off を切り替えます。タイミングやプロバイダー設定は AI タブにあります。
+features-hint = 主要な機能と能動発話ポリシーを切り替えます。プロバイダー設定は AI タブにあります。
 features-mind = Mind
 features-tools = ツール
 features-per-tool = ツール別
-features-proactive-timing-hint = マスタースイッチは機能タブにあります。
 enable-emotion = 感情処理を有効化
 enable-tools = ツール呼び出しを有効化
 enable-tool-rag = Tool RAG を有効化

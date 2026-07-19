@@ -83,7 +83,7 @@ Unknown fields are ignored. Parse / timeout / provider failures are fail-closed:
 |---|---|---|
 | `conversation` | Recent `HistoryEntry` list, truncated by char budget | Session history only |
 | `activity` | Optional idle hint, **app name only** (no raw window title), recent focus change | No keylogging; titles never collected in V1 |
-| `screen_summary` | Short-lived **text** summary when a desktop summarizer is available | V1 desktop reports `unavailable` when enabled but no provider is bundled; raw screenshot bytes are never persisted, logged, or sent in diagnostics |
+| `screen_summary` | Short-lived **text** summary from the desktop summarizer | Desktop captures the active window (or primary display), summarizes via the **local** proactive GGUF + `mmproj` (Gemma 4), and forwards **text only**. Raw screenshot bytes never enter mind/store |
 
 Each source has an independent enable flag. When disabled, desktop must not capture that source, and mind must not include it in the decision prompt.
 

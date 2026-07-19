@@ -27,9 +27,11 @@ ene-config = { workspace = true }
 ene-tool-proto = { workspace = true }
 ctor = { workspace = true }
 thiserror = { workspace = true }
-llama-cpp-2 = { workspace = true, default-features = false, features = ["common"] }
+llama-cpp-2 = { workspace = true, default-features = false, features = ["common", "mtmd"] }
 encoding_rs = { workspace = true }
 blake3 = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
+image = { workspace = true, features = ["png", "jpeg"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-openai = { workspace = true, default-features = false, features = ["rustls", "byot"] }

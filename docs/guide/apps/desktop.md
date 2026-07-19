@@ -146,15 +146,15 @@ Opened with F1 or Tray → Settings. Tabs:
 |-----|----------|
 | Character | VRM selection, motion, look-at, position, expression test |
 | Graphics | Language, quality preset |
-| AI | Chat/embedding providers, proactive speech timing |
-| Features | On/off for memory, emotion, proactive speech, tools, Tool RAG, and per-tool enable |
+| AI | Chat/embedding providers |
+| Features | On/off for memory, emotion, tools, Tool RAG, and per-tool enable; proactive speech enable, timing (interval / cooldown / min idle), and observation sources |
 | Memory | Memory journal (browse / recall debug) |
 | Debug | Session overlays (colliders, input region) |
 
 Feature toggles persist to `settings.json` (`store.enabled`,
-`mind.emotion.enabled`, `mind.proactive.enabled`, `tools.enabled`,
-`tools.rag.enabled`, `tools.list.<name>.enable`). Proactive timing
-knobs remain on the AI tab; the master switch is on Features.
+`mind.emotion.enabled`, `mind.proactive.*`, `tools.enabled`,
+`tools.rag.enabled`, `tools.list.<name>.enable`). Proactive speech
+policy (timing and sources) is edited on the Features tab.
 
 ### Message types
 

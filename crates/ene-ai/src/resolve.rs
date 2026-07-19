@@ -27,6 +27,10 @@ pub struct ResolvedLocalModel {
     pub url: String,
     /// Optional filesystem path override.
     pub model_path: String,
+    /// Optional multimodal projector download URL.
+    pub mmproj_url: String,
+    /// Optional multimodal projector filesystem path.
+    pub mmproj_path: String,
     /// Quantization label.
     pub quantization: String,
     /// Preferred acceleration backend.
@@ -43,11 +47,19 @@ impl ResolvedLocalModel {
             name: name.to_string(),
             url: def.url.clone(),
             model_path: def.model_path.clone(),
+            mmproj_url: def.mmproj_url.clone(),
+            mmproj_path: def.mmproj_path.clone(),
             quantization: def.quantization.clone(),
             acceleration: def.acceleration,
             gpu_layers: def.gpu_layers.clone(),
             context_size: def.context_size,
         }
+    }
+
+    /// True when an mmproj URL or path is configured.
+    #[must_use]
+    pub fn has_mmproj(&self) -> bool {
+        !self.mmproj_path.trim().is_empty() || !self.mmproj_url.trim().is_empty()
     }
 }
 

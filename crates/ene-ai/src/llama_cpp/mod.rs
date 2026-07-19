@@ -8,7 +8,7 @@ mod generate;
 mod load;
 
 pub(crate) use embed::embed_text;
-pub(crate) use generate::generate_chat;
+pub(crate) use generate::{generate_chat, generate_with_rgb_image};
 pub(crate) use load::{LoadSpec, LoadedModel};
 
 use crate::error::LlmProviderError;

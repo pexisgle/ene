@@ -1,4 +1,4 @@
-//! Model load helpers (GPU offload + GGUF path validation).
+//! Model load helpers (GPU offload + GGUF path validation + optional mtmd).
 
 use super::backend::with_backend;
 use super::map_llama_err;
@@ -9,6 +9,8 @@ use llama_cpp_2::list_llama_ggml_backend_devices;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::mtmd::{MtmdContext, MtmdContextParams};
+use std::ffi::CString;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +26,7 @@ pub(crate) struct GpuOffload {
 #[derive(Debug, Clone)]
 pub(crate) struct LoadSpec {
     pub model_path: PathBuf,
+    pub mmproj_path: Option<PathBuf>,
     pub acceleration: ProactiveAcceleration,
     pub gpu_layers: String,
     pub context_size: u32,
@@ -142,24 +145,37 @@ fn parse_gpu_layers(raw: &str) -> u32 {
     }
 }
 
-/// Owned loaded model + context size preference.
+/// Owned loaded model + optional multimodal projector context.
 pub(crate) struct LoadedModel {
     pub model: LlamaModel,
     pub context_size: NonZeroU32,
+    pub mtmd: Option<MtmdContext>,
 }
 
 impl LoadedModel {
     pub(crate) fn load(spec: &LoadSpec) -> Result<Self, LlmProviderError> {
         let offload = resolve_gpu_offload(spec.acceleration, &spec.gpu_layers)?;
         with_backend(|backend| {
-            load_with_backend(backend, &spec.model_path, offload, spec.context_size)
+            load_with_backend(
+                backend,
+                &spec.model_path,
+                spec.mmproj_path.as_deref(),
+                offload,
+                spec.context_size,
+            )
         })
+    }
+
+    #[must_use]
+    pub(crate) fn supports_vision(&self) -> bool {
+        self.mtmd.as_ref().is_some_and(MtmdContext::support_vision)
     }
 }
 
 fn load_with_backend(
     backend: &LlamaBackend,
     path: &Path,
+    mmproj_path: Option<&Path>,
     offload: GpuOffload,
     context_size: u32,
 ) -> Result<LoadedModel, LlmProviderError> {
@@ -184,11 +200,55 @@ fn load_with_backend(
     let model = LlamaModel::load_from_file(backend, path, &params)
         .map_err(|e| map_llama_err("failed to load GGUF", e))?;
 
+    let mtmd = if let Some(mmproj) = mmproj_path {
+        let use_gpu = offload.n_gpu_layers > 0;
+        let mtmd_params = MtmdContextParams {
+            use_gpu,
+            print_timings: false,
+            n_threads: 4,
+            media_marker: CString::new(llama_cpp_2::mtmd::mtmd_default_marker())
+                .map_err(|e| LlmProviderError::LocalLlm(format!("invalid media marker: {e}")))?,
+            // Gemma 4 supported budgets: 70, 140, 280, 560, 1120 — keep modest for overlays.
+            image_min_tokens: 70,
+            image_max_tokens: 280,
+        };
+        tracing::info!(
+            component = "LlamaCpp",
+            path = %mmproj.display(),
+            use_gpu,
+            "Loading mmproj for vision"
+        );
+        match MtmdContext::init_from_file(mmproj.to_string_lossy().as_ref(), &model, &mtmd_params) {
+            Ok(ctx) => {
+                if ctx.support_vision() {
+                    Some(ctx)
+                } else {
+                    tracing::warn!(
+                        component = "LlamaCpp",
+                        "mmproj loaded but vision is not supported"
+                    );
+                    None
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    component = "LlamaCpp",
+                    error = %e,
+                    "failed to load mmproj; continuing text-only"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let ctx = NonZeroU32::new(context_size.max(256))
         .ok_or_else(|| LlmProviderError::LocalLlm("context_size must be non-zero".to_string()))?;
 
     Ok(LoadedModel {
         model,
         context_size: ctx,
+        mtmd,
     })
 }

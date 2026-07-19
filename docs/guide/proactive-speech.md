@@ -17,7 +17,8 @@ Example (`assets/settings.json`):
   "ai": {
     "local_models": {
       "gemma-4-e2b": {
-        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
         "acceleration": "auto",
         "gpu_layers": "auto",
         "context_size": 2048
@@ -35,6 +36,12 @@ Example (`assets/settings.json`):
 
 Desktop settings apply to the running actor immediately (no restart). The desktop observer and runtime scheduler both receive updates via `UpdateProactiveSettings`.
 
+At the default desktop `info` log level you should see:
+
+- `Proactive decision provider ready` — first successful decision-backend init
+- `Proactive decision started` — each decision tick that runs gates / LLM
+- `Proactive will speak` / `Proactive will not speak` — outcome (`speak`, `detail`, optional `confidence` / `topic_hint`)
+
 Weights are **not** bundled. Downloads run in parallel at startup with `[GgufDownload]` progress logs. Local inference is **in-process llama-cpp-2** (no `llama-server` subprocess). See the [ADR](../reference/architecture/proactive-speech.md).
 
 ## Smoke test (optional)
@@ -47,8 +54,8 @@ direnv exec . rtk cargo test -p ene-ai --lib local_llm::routing::smoke
 
 ## Privacy
 
-- Desktop never writes raw screenshots to disk, logs, or SQLite.
-- Screen summary is optional; when enabled, V1 desktop reports the source as **unavailable** until a summarizer is integrated (no silent empty summaries).
+- Desktop never writes raw screenshots to disk, logs, or SQLite (portal temp files are deleted immediately).
+- When `sources.screen_summary` is enabled, desktop captures the active window (or primary display), summarizes it with the **local** proactive GGUF + `mmproj` (Gemma 4 multimodal), then discards the image. Only truncated text enters the decision context. If vision fails, a metadata fallback (`Active application: …`) is used.
 - Activity uses **application name only** (no raw window titles; no keylogging).
 
 ## Desktop integration

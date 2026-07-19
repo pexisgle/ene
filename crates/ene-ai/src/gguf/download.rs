@@ -13,6 +13,8 @@ const PROGRESS_BAR_WIDTH: usize = 10;
 const UPDATE_INTERVAL: Duration = Duration::from_millis(500);
 /// Hard cap on a single GGUF download (30 GiB).
 const MAX_DOWNLOAD_BYTES: u64 = 30 * 1024 * 1024 * 1024;
+/// Hugging Face `resolve/` URLs 302 to CDN; follow HTTPS→HTTPS only.
+const MAX_HTTPS_REDIRECTS: usize = 5;
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const CACHE_HASH_HEX_LEN: usize = 12;
 
@@ -286,7 +288,7 @@ pub async fn file_has_gguf_magic(path: &Path) -> bool {
     file.read_exact(&mut magic).await.is_ok() && magic == *GGUF_MAGIC
 }
 
-fn strip_url_path(url: &str) -> &str {
+pub(crate) fn strip_url_path(url: &str) -> &str {
     let without_scheme = url
         .trim()
         .strip_prefix("https://")
@@ -299,7 +301,7 @@ fn strip_url_path(url: &str) -> &str {
     path.split_once('#').map_or(path, |(p, _)| p)
 }
 
-fn sanitize_basename(segment: &str) -> Result<String, LlmProviderError> {
+pub(crate) fn sanitize_basename(segment: &str) -> Result<String, LlmProviderError> {
     if segment.is_empty()
         || segment.contains("..")
         || segment.contains('/')
@@ -426,17 +428,7 @@ async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderEr
         .and_then(|n| n.to_str())
         .unwrap_or("model.gguf");
 
-    let response =
-        http_client()?.get(url.trim()).send().await.map_err(|e| {
-            LlmProviderError::Provider(format!("GGUF download request failed: {e}"))
-        })?;
-
-    if response.status().is_redirection() {
-        return Err(LlmProviderError::Provider(format!(
-            "GGUF download refused HTTP redirect ({}): redirects are disabled",
-            response.status()
-        )));
-    }
+    let response = fetch_gguf_https(url).await?;
 
     if !response.status().is_success() {
         return Err(LlmProviderError::Provider(format!(
@@ -528,6 +520,71 @@ async fn download_gguf_inner(url: &str, dest: &Path) -> Result<(), LlmProviderEr
     Ok(())
 }
 
+/// GET `url`, following a bounded number of HTTPS→HTTPS redirects (Hugging Face CDN).
+async fn fetch_gguf_https(url: &str) -> Result<reqwest::Response, LlmProviderError> {
+    let client = http_client()?;
+    let mut current = url.trim().to_string();
+
+    for hop in 0..=MAX_HTTPS_REDIRECTS {
+        validate_https_url(&current)?;
+        let response = client.get(&current).send().await.map_err(|e| {
+            LlmProviderError::Provider(format!("GGUF download request failed: {e}"))
+        })?;
+
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+
+        if hop == MAX_HTTPS_REDIRECTS {
+            return Err(LlmProviderError::Provider(format!(
+                "GGUF download exceeded {MAX_HTTPS_REDIRECTS} HTTPS redirects"
+            )));
+        }
+
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                LlmProviderError::Provider(format!(
+                    "GGUF download redirect ({}) missing Location header",
+                    response.status()
+                ))
+            })?;
+        let next = resolve_https_redirect(&current, location)?;
+        tracing::debug!(
+            component = "GgufDownload",
+            from = %current,
+            to = %next,
+            status = %response.status(),
+            hop,
+            "Following HTTPS GGUF redirect"
+        );
+        current = next;
+    }
+
+    Err(LlmProviderError::Provider(
+        "GGUF download redirect loop".to_string(),
+    ))
+}
+
+fn resolve_https_redirect(base: &str, location: &str) -> Result<String, LlmProviderError> {
+    let base_url = reqwest::Url::parse(base.trim()).map_err(|e| {
+        LlmProviderError::Provider(format!("invalid GGUF redirect base URL: {e}"))
+    })?;
+    let joined = base_url.join(location.trim()).map_err(|e| {
+        LlmProviderError::Provider(format!("invalid GGUF redirect Location: {e}"))
+    })?;
+    if joined.scheme() != "https" {
+        return Err(LlmProviderError::Provider(format!(
+            "GGUF download refused non-HTTPS redirect to {}",
+            joined.scheme()
+        )));
+    }
+    validate_https_url(joined.as_str())?;
+    Ok(joined.to_string())
+}
+
 /// Directory where downloaded GGUF weights are stored.
 pub fn gguf_cache_dir() -> PathBuf {
     ene_config::models_dir().join("gguf")
@@ -537,6 +594,31 @@ pub fn gguf_cache_dir() -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn resolve_https_redirect_allows_cdn_and_rejects_http() {
+        let next = resolve_https_redirect(
+            "https://huggingface.co/org/model/resolve/main/mmproj.gguf",
+            "https://cdn-lfs.huggingface.co/path/mmproj.gguf",
+        )
+        .expect("https redirect");
+        assert!(next.starts_with("https://cdn-lfs.huggingface.co/"));
+
+        let relative = resolve_https_redirect(
+            "https://huggingface.co/org/model/resolve/main/mmproj.gguf",
+            "/cdn/mmproj.gguf",
+        )
+        .expect("relative https");
+        assert_eq!(relative, "https://huggingface.co/cdn/mmproj.gguf");
+
+        assert!(
+            resolve_https_redirect(
+                "https://huggingface.co/org/model/resolve/main/mmproj.gguf",
+                "http://evil.example/mmproj.gguf",
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn validate_https_rejects_http_and_file() {

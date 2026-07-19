@@ -66,7 +66,12 @@ pub struct EneConfig {
       "enabled": false,
       "interval_seconds": 60,
       "min_idle_seconds": 120,
-      "cooldown_seconds": 300
+      "cooldown_seconds": 300,
+      "sources": {
+        "conversation": true,
+        "activity": true,
+        "screen_summary": false
+      }
     }
   },
   "desktop": {
@@ -123,7 +128,7 @@ pub struct EneConfig {
 
 #### `ai.local_models` — ローカル GGUF レジストリ
 
-`provider: "local"` のタスクが参照する名前付きローカル GGUF。**HTTPS** の `url` から初回利用時に `{assets_dir}/models/gguf/` へダウンロード（`EneHandle::open` で並列プリフェッチ）。キャッシュ名は `{safe_stem}-{blake3_12}.gguf`（クエリ除去・同名 basename の衝突回避）。非 HTTPS・リダイレクト拒否、`Content-Length` 必須（上限 30 GiB）、バイト数と GGUF magic を検証し、失敗時は `.part` を削除。デバッグビルドでは `assets_dir` はソースツリーの `assets/`、リリースでは OS のアプリデータディレクトリ。
+`provider: "local"` のタスクが参照する名前付きローカル GGUF。**HTTPS** の `url` から初回利用時に `{assets_dir}/models/gguf/` へダウンロード（`EneHandle::open` で並列プリフェッチ）。キャッシュ名は `{safe_stem}-{blake3_12}.gguf`（クエリ除去・同名 basename の衝突回避）。非 HTTPS は拒否。**HTTPS→HTTPS リダイレクト**は上限付きで追跡（Hugging Face CDN 用）。`Content-Length` 必須（上限 30 GiB）、バイト数と GGUF magic を検証し、失敗時は `.part` を削除。デバッグビルドでは `assets_dir` はソースツリーの `assets/`、リリースでは OS のアプリデータディレクトリ。
 
 ```json
 {
@@ -139,9 +144,11 @@ pub struct EneConfig {
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `url` | string | `""` | GGUF 重みの HTTPS 専用 URL（リダイレクト不可。Content-Length + GGUF magic を検証） |
+| `url` | string | `""` | GGUF 重みの HTTPS 専用 URL（HTTPS→HTTPS リダイレクト可。Content-Length + GGUF magic を検証） |
 | `quantization` | string | `"F16"` | 量子化ラベル（埋め込みメタデータ） |
 | `model_path` | string | `""` | 明示的なファイルシステムパス（ダウンロードをスキップ） |
+| `mmproj_url` | string | `""` | マルチモーダルプロジェクター GGUF の HTTPS URL（Gemma 4 vision / 画面要約） |
+| `mmproj_path` | string | `""` | mmproj の明示パス（ダウンロードをスキップ） |
 | `acceleration` | string | `"auto"` | `"auto"` / `"vulkan"` / `"cuda"` / `"cpu"` |
 | `gpu_layers` | string | `"auto"` | `"auto"` または GPU オフロード層数の整数文字列 |
 | `context_size` | int | `2048` | 判定ワークロードのコンテキストサイズ |
@@ -183,7 +190,7 @@ pub struct EneConfig {
 - `tasks.proactive: null` → 能動発話の**生成**は `tasks.chat` を再利用。
 - 能動**判定**: `tasks.proactive` が `provider: "local"` の場合、指定した `local_models` エントリをプロセス内 GGUF で実行（ロード失敗時は OpenAI 互換の chat/proactive があればクラウドへフォールバック）。`tasks.proactive` が `openai_compatible` の場合はそのモデルでクラウド判定；それ以外は `tasks.chat`。[能動発話 ADR](../architecture/proactive-speech.md) を参照。
 
-GGUF は **同梱されません**。`ai.local_models` の HTTPS `url`（または明示 `model_path`）を設定すると、初回起動時に `{assets_dir}/models/gguf/` へダウンロードされます（`[GgufDownload]` として進捗ログ出力）。非 HTTPS・リダイレクトは拒否し、Content-Length / GGUF magic を検証し、ハッシュ付きキャッシュ名を使います。外部 `llama-server` バイナリは不要です。
+GGUF は **同梱されません**。`ai.local_models` の HTTPS `url`（または明示 `model_path`）を設定すると、初回起動時に `{assets_dir}/models/gguf/` へダウンロードされます（`[GgufDownload]` として進捗ログ出力）。非 HTTPS は拒否し、HTTPS→HTTPS リダイレクトは追跡します（Hugging Face CDN）。Content-Length / GGUF magic を検証し、ハッシュ付きキャッシュ名を使います。外部 `llama-server` バイナリは不要です。
 
 #### マルチプロバイダの例
 
@@ -201,7 +208,8 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
         "context_size": 2048
       },
       "gemma-4-e2b": {
-        "url": "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/main/gemma-4-E2B_q4_0-it.gguf",
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
         "acceleration": "auto",
         "gpu_layers": "auto",
         "context_size": 2048
@@ -404,7 +412,12 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
       "enabled": false,
       "interval_seconds": 60,
       "min_idle_seconds": 120,
-      "cooldown_seconds": 300
+      "cooldown_seconds": 300,
+      "sources": {
+        "conversation": true,
+        "activity": true,
+        "screen_summary": false
+      }
     }
   }
 }
@@ -429,8 +442,11 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 | `interval_seconds` | int | `60` | 判定 tick 間隔（最小 1） |
 | `min_idle_seconds` | int | `120` | 最後のユーザー入力からの最低待機 |
 | `cooldown_seconds` | int | `300` | 成功した能動発話（`TerminalReason::Done`）後の抑制時間 |
+| `sources.conversation` | bool | `true` | 判定コンテキストに直近の会話履歴を含める |
+| `sources.activity` | bool | `true` | プライバシー配慮の活動 / アクティブウィンドウ信号を含める |
+| `sources.screen_summary` | bool | `false` | 短命な画面テキスト要約を含める（生画像バイトは含めない。有効時はデスクトップがキャプチャしローカル Gemma + mmproj で要約） |
 
-拡張能動設定（ソースフラグ、信頼度ゲート、タイムアウト、ツール許可）はコードデフォルト。
+拡張能動設定（信頼度ゲート、タイムアウト、ツール許可）はコードデフォルト。
 
 ### `desktop` — GUI 設定
 
@@ -463,7 +479,7 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 | `mind.context` | トークン予算、rolling compression しきい値 |
 | `mind.memory` | 抽出、ハイブリッド recall、MMR（memory HyDE/LLM rerank は意図的に非搭載） |
 | `mind.character` | CCv3 コンパイル、Identity Kernel 予算 |
-| `mind.emotion` / `mind.proactive` | エンジンモード、分類器タイムアウト、ソースフラグ、信頼度ゲート |
+| `mind.emotion` / `mind.proactive` | エンジンモード、分類器タイムアウト、信頼度ゲート、ツール許可 |
 | `tools` | `max_rounds`、`timeout_ms` |
 | `store` | `db_path` |
 
