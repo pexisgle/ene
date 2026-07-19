@@ -35,7 +35,7 @@
           with pkgs;
           mkShell {
             buildInputs = [
-              # sccache — compiler cache to reduce rebuild times and target/ size
+              # sccache — compiler cache to shorten rebuild times
               sccache
               # Stable Rust compiler and standard library sources
               (rust-bin.stable.latest.default.override {

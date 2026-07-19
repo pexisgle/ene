@@ -4,11 +4,12 @@
 #![warn(missing_docs)]
 #![expect(
     clippy::arithmetic_side_effects,
-    reason = "websearch result ranking uses intentional score arithmetic"
+    reason = "search result ranking uses intentional score arithmetic"
 )]
 
 mod action;
 mod provider;
+mod search;
 
 use ene_tool_proto::run_tool_server;
 

@@ -13,13 +13,16 @@ ene-tool-derive = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
-websearch = "0.1.1"
+scraper = { workspace = true }
+quick-xml = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-reqwest = { workspace = true, features = ["rustls", "json", "query"] }
+reqwest = { workspace = true, features = ["rustls", "json", "query", "form"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-reqwest = { workspace = true, features = ["native-tls", "json", "query"] }
+reqwest = { workspace = true, features = ["native-tls", "json", "query", "form"] }
 
 [[bin]]
 name = "ene-tool-web"

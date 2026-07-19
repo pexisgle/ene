@@ -10,8 +10,25 @@ Build and run ene locally, then point it at an LLM provider.
 
 ## Build
 
+Day-to-day development builds only `ene-cli` (the workspace `default-members` entry). Build other packages explicitly when you need them.
+
+```bash
+cargo build
+cargo check -p ene-cli
+cargo run -p ene-cli
+```
+
+Desktop:
+
+```bash
+cargo run -p ene-desktop
+```
+
+Full workspace (CI / pre-PR verification):
+
 ```bash
 cargo build --workspace
+cargo test --workspace
 ```
 
 Release:
@@ -19,6 +36,14 @@ Release:
 ```bash
 cargo build --workspace --release
 ```
+
+### Build performance
+
+The dev profile keeps workspace debug symbols minimal (`line-tables-only`), disables dependency debuginfo, and uses selective `opt-level = 2` for heavy runtime crates (`wgpu`, `egui`, `rapier3d`, etc.). `sccache` and `mold` (via the Nix shell) shorten rebuilds; sccache stores its cache under `~/.cache/sccache`, not in `target/`.
+
+After changing profile settings, run `cargo clean` once before comparing `target/` size. Optional cleanup: `cargo install cargo-sweep` then `cargo sweep -t 7`.
+
+Use `--profile debugging` when you need full debug symbols for stepping through code in a debugger.
 
 ## Run CLI
 

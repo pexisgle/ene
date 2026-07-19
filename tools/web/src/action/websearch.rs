@@ -3,10 +3,10 @@ use std::fmt::Write;
 use std::sync::{Arc, RwLock};
 
 use crate::provider::WebSearchConfig;
-use websearch::providers::{
-    ArxivProvider, BraveProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider,
+use crate::search::{
+    ArxivProvider, BraveProvider, DuckDuckGoProvider, ExaProvider, SearchOptions, TavilyProvider,
+    web_search,
 };
-use websearch::{SearchOptions, SearchProvider, web_search};
 
 fn default_config() -> Arc<RwLock<WebSearchConfig>> {
     Arc::new(RwLock::new(WebSearchConfig::default()))
@@ -62,7 +62,7 @@ impl WebSearchAction {
         // updating an API key required a process restart.
         let config = self.config.read().ok().map(|g| g.clone());
 
-        let provider: Box<dyn SearchProvider> = match backend_name {
+        let provider: Box<dyn crate::search::SearchProvider> = match backend_name {
             "arxiv" => Box::new(ArxivProvider::new()),
             "duckduckgo" => Box::new(DuckDuckGoProvider::new()),
             "tavily" => {
@@ -100,7 +100,6 @@ impl WebSearchAction {
             query: self.query.clone(),
             max_results: Some(limit),
             provider,
-            ..Default::default()
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed {

@@ -10,8 +10,25 @@ ene をローカルでビルドして実行し、LLM プロバイダを設定す
 
 ## ビルド
 
+日常の開発では `ene-cli` のみがビルドされます（ワークスペースの `default-members`）。他のパッケージは必要なときだけ明示的に指定してください。
+
+```bash
+cargo build
+cargo check -p ene-cli
+cargo run -p ene-cli
+```
+
+Desktop:
+
+```bash
+cargo run -p ene-desktop
+```
+
+ワークスペース全体（CI / PR 前の検証）:
+
 ```bash
 cargo build --workspace
+cargo test --workspace
 ```
 
 リリース:
@@ -19,6 +36,14 @@ cargo build --workspace
 ```bash
 cargo build --workspace --release
 ```
+
+### ビルド性能
+
+dev プロファイルでは、ワークスペース部材のデバッグ情報を最小限（`line-tables-only`）にし、依存クレートの debuginfo は無効化します。重いランタイム依存（`wgpu`、`egui`、`rapier3d` など）だけ `opt-level = 2` で最適化します。`sccache` と Nix シェル経由の `mold` で再ビルドを短縮できます。sccache のキャッシュは `target/` ではなく `~/.cache/sccache` に保存されます。
+
+プロファイル変更後に `target/` のサイズを比較する場合は、一度 `cargo clean` してから計測してください。任意の掃除: `cargo install cargo-sweep` のあと `cargo sweep -t 7`。
+
+デバッガでステップ実行するときは `--profile debugging` を使います。
 
 ## CLI を実行
 

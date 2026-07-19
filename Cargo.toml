@@ -1,5 +1,6 @@
 [workspace]
 members = [ "crates/*", "tools/*", "apps/*" ]
+default-members = [ "apps/ene-cli" ]
 resolver = "2"
 
 [workspace.package]
@@ -50,6 +51,8 @@ crossterm = "0.29"
 # ── Networking ──
 reqwest = { version = "0.13", default-features = false }
 scraper = "0.27"
+quick-xml = { version = "0.31", features = ["serialize"] }
+url = "2"
 
 # ── IPC / Tool System ──
 darling = "0.23"
@@ -208,10 +211,41 @@ allow_attributes_without_reason = "deny"
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
+debug = false
+
+[profile.dev.package.ash]
+opt-level = 2
+
+[profile.dev.package.egui]
+opt-level = 2
+
+[profile.dev.package.egui-wgpu]
+opt-level = 2
+
+[profile.dev.package.egui-winit]
+opt-level = 2
+
+[profile.dev.package.glam]
+opt-level = 2
+
+[profile.dev.package.image]
+opt-level = 2
+
+[profile.dev.package.naga]
+opt-level = 2
+
+[profile.dev.package.rapier3d]
+opt-level = 2
+
+[profile.dev.package.wgpu]
+opt-level = 2
+
+[profile.dev.build-override]
 opt-level = 3
 
-[profile.dev.package.ene-ai]
-opt-level = 3
+[profile.debugging]
+inherits = "dev"
+debug = true
 
 [profile.release]
 opt-level = 3
