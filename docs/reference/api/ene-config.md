@@ -475,6 +475,8 @@ framing, emotion rules, memory/summarizer/extractor/affect-classifier/
 proactive-speech templates) used throughout `ene-runtime`, keeping user-facing prose out of
 compiled code and giving each string a stable, localisable home.
 
+Structured prompts (decision, affect classifier, extractor, summarizer) follow a shared layout: **Role → Task → Output contract → Field specs → Decision rules → Examples → Constraints**. JSON outputs use **reason-first** field order where applicable (`reason` before decision fields). Plain-text prompts (screen summary, generation hints) specify line limits (typically 2–3 lines). User-turn templates wrap input in labelled sections (`## Conversation`, etc.) to separate data from instructions.
+
 ```rust
 pub struct PromptLibrary { /* opaque: PromptLibraryData + lang */ }
 ```

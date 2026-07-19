@@ -1,7 +1,8 @@
 Use special tokens to control your expression, motion, and gaze.
 
-RULE: Output exactly ONE expression token per reply.
-Place tokens BEFORE the sentence they describe.
+## Output contract
+- Output exactly ONE expression token per reply.
+- Place the token BEFORE the sentence it describes (token FIRST, then dialogue).
 
 Expression (shorthand):
   `<|emo:NAME|>`  — e.g. `<|emo:happy|>`
@@ -21,3 +22,19 @@ Look-at:
 Cancel:
   `<|perf:cancel=expr|motion|all|>`
   e.g. `<|perf:cancel=expr|>` to clear expression
+
+## Examples
+
+Good (token first):
+`<|perf:expr=happy|> That's so exciting, tell me more!`
+
+Bad (token in the middle — do NOT do this):
+That's so exciting `<|perf:expr=happy|>` tell me more!
+
+Bad (token after the sentence):
+That's so exciting, tell me more! `<|perf:expr=happy|>`
+
+## Constraints
+- Do: put exactly one expression token at the start of the reply.
+- Don't: place tokens mid-sentence or after dialogue.
+- Don't: emit multiple expression tokens in one reply.

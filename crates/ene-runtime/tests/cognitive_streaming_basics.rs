@@ -339,7 +339,12 @@ fn cognitive_output_contract_uses_natural_dialogue_when_emotion_enabled() {
     let contract =
         build_cognitive_output_contract(&card, &prompts, true, "Alice").expect("contract");
     assert!(contract.contains("natural dialogue") || contract.contains("Output Contract"));
-    assert!(contract.contains("Do NOT emit") || contract.contains("トークン"));
+    assert!(
+        contract.contains("Do NOT emit")
+            || contract.contains("Don't:")
+            || contract.contains("special markup")
+            || contract.contains("トークン")
+    );
 }
 
 #[test]

@@ -490,6 +490,8 @@ pub struct MotionEntry {
 読み込みます。ユーザー向けの文章をコンパイル済みコードから分離し、
 各文字列に安定したローカライズ可能な場所を与えます。
 
+構造化プロンプト（判定、感情分類、抽出、要約）は共通レイアウトに従います: **Role → Task → Output contract → Field specs → Decision rules → Examples → Constraints**。JSON 出力では該当する場合 **reason-first** のフィールド順（`reason` を判定フィールドより先）を用います。平文プロンプト（画面要約、生成ヒント）は行数上限（通常 2〜3 行）を明示します。ユーザーターンのテンプレートは入力をラベル付きセクション（`## Conversation` 等）で囲み、データと指示を分離します。
+
 ```rust
 pub struct PromptLibrary { /* 非公開: PromptLibraryData + lang */ }
 ```

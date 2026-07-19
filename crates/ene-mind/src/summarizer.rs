@@ -1,7 +1,7 @@
 //! LLM-driven conversation summarizer.
 //!
 //! Called during session splits to convert raw conversation history into structured summaries
-//! with natural-language descriptions, extracted topics, and user-relevant key facts.
+//! with natural-language descriptions and user-relevant key facts.
 //!
 //! Prompt templates are loaded from the `PromptLibrary` so all user-facing strings
 //! stay out of compiled code and can be localised without recompilation.
@@ -104,11 +104,6 @@ pub async fn summarize_conversation(
                 "type": "string",
                 "description": "2–4 sentence summary of the conversation's key events, decisions, and outcomes"
             },
-            "topics": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "1–5 specific keyword phrases representing the main topics discussed"
-            },
             "key_facts": {
                 "type": "array",
                 "items": {
@@ -129,7 +124,7 @@ pub async fn summarize_conversation(
                 "description": "Current and updated facts about the user"
             }
         },
-        "required": ["summary", "topics", "key_facts"],
+        "required": ["summary", "key_facts"],
         "additionalProperties": false
     });
 

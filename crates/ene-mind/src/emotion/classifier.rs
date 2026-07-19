@@ -119,6 +119,7 @@ fn proposal_json_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
+            "reason": { "type": "string" },
             "user_emotion": { "type": "string" },
             "user_intent": { "type": "string" },
             "valence": { "type": "number" },
@@ -126,10 +127,10 @@ fn proposal_json_schema() -> serde_json::Value {
             "irritation": { "type": "number" },
             "affinity": { "type": "number" },
             "recommended_expression": { "type": "string" },
-            "confidence": { "type": "number" },
-            "reason": { "type": "string" }
+            "confidence": { "type": "number" }
         },
         "required": [
+            "reason",
             "user_emotion",
             "user_intent",
             "valence",
@@ -137,8 +138,7 @@ fn proposal_json_schema() -> serde_json::Value {
             "irritation",
             "affinity",
             "recommended_expression",
-            "confidence",
-            "reason"
+            "confidence"
         ],
         "additionalProperties": false
     })

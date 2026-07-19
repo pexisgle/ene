@@ -171,6 +171,7 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
         let examples = [
             &prompts.emotion().example_happy,
             &prompts.emotion().example_sad,
+            &prompts.emotion().example_angry,
             &prompts.emotion().example_neutral,
         ]
         .iter()
@@ -371,8 +372,8 @@ mod tests {
             "phi should list happy token: {phi}"
         );
         assert!(
-            phi.contains("RULE:"),
-            "phi should contain RULE directive: {phi}"
+            phi.contains("Output contract"),
+            "phi should contain output contract directive: {phi}"
         );
     }
 }

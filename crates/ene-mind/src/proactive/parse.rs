@@ -9,11 +9,11 @@ pub fn decision_schema_object() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["should_speak", "confidence", "reason", "topic_hint", "urgency"],
+        "required": ["reason", "should_speak", "confidence", "topic_hint", "urgency"],
         "properties": {
+            "reason": { "type": "string" },
             "should_speak": { "type": "boolean" },
             "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-            "reason": { "type": "string" },
             "topic_hint": { "type": "string" },
             "urgency": { "type": "string", "enum": ["low", "normal", "high"] }
         }
@@ -127,6 +127,16 @@ mod tests {
         let d = parse_decision_json(r#"{"should_speak":true,"confidence":2.5}"#);
         assert!(!d.should_speak);
         assert!(d.reason.contains("confidence"));
+    }
+
+    #[test]
+    fn parses_reason_first_field_order() {
+        let d = parse_decision_json(
+            r#"{"reason":"idle with open thread","should_speak":true,"confidence":0.7,"topic_hint":"check in","urgency":"normal"}"#,
+        );
+        assert!(d.should_speak);
+        assert_eq!(d.reason, "idle with open thread");
+        assert_eq!(d.topic_hint, "check in");
     }
 
     #[test]

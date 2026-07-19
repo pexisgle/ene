@@ -46,9 +46,13 @@ Timer / observation update
 |---|---|---|
 | `should_speak` | bool | 必須。欠落時は `false` |
 | `confidence` | f64 | 有限かつ `[0.0, 1.0]` 内であること。範囲外は fail-closed（`should_speak = false`）。欠落は `0.0` |
-| `reason` | string | 内部診断用。そのまま発話しない |
-| `topic_hint` | string | 生成用の任意ヒント。欠落時は空 |
+| `reason` | string | 内部診断用。そのまま発話しない。短い 1〜3 行 |
+| `topic_hint` | string | 生成用の任意ヒント。欠落時は空。0〜2 行。`reason` のコピペ禁止 |
 | `urgency` | string | `low` / `normal` / `high`。未知は `normal` |
+
+**推奨出力順**（プロンプト + ローカル JSON grammar）: `reason` → `should_speak` → `confidence` → `topic_hint` → `urgency`。Rust パーサはキー順を問わない。grammar 制約付きローカルモデルは schema のプロパティ順に従う。
+
+**生成ヒント**（`generation_hint_idle` / `generation_hint_with_topic`）は最大 2〜3 行。**画面要約**は平文 2〜3 行（最大 3 文）。
 
 未知フィールドは無視する。parse / timeout / provider 失敗は fail-closed: `should_speak = false` として扱い、生成を開始しない。
 

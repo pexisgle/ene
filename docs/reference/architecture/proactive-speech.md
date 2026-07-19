@@ -46,9 +46,13 @@ The decision model must return JSON only (no utterance body). Normalized fields:
 |---|---|---|
 | `should_speak` | bool | Required; missing → `false` |
 | `confidence` | f64 | Must be finite and in `[0.0, 1.0]`; out-of-range → fail-closed (`should_speak = false`); missing → `0.0` |
-| `reason` | string | Internal diagnostic; never spoken verbatim |
-| `topic_hint` | string | Optional hint for generation; empty if missing |
+| `reason` | string | Internal diagnostic; never spoken verbatim; 1–3 short lines |
+| `topic_hint` | string | Optional hint for generation; empty if missing; 0–2 lines; must not copy `reason` verbatim |
 | `urgency` | string | One of `low` / `normal` / `high`; unknown → `normal` |
+
+**Recommended output order** (prompt + local JSON grammar): `reason` → `should_speak` → `confidence` → `topic_hint` → `urgency`. The Rust parser accepts any key order; grammar-constrained local models follow schema property order.
+
+**Generation hints** (`generation_hint_idle` / `generation_hint_with_topic`) allow up to 2–3 short lines. **Screen summaries** allow 2–3 short lines (max 3 sentences) of plain text.
 
 Unknown fields are ignored. Parse / timeout / provider failures are fail-closed: treat as `should_speak = false` and do not start generation.
 
