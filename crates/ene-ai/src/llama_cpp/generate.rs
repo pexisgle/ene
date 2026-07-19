@@ -248,8 +248,10 @@ fn sample_tokens(
             batch.n_tokens().saturating_sub(1)
         };
 
+        // `llama_sampler_sample` already calls `llama_sampler_accept` — do not accept twice.
+        // A second accept empties grammar stacks (e.g. after compound token `{"`) and the next
+        // sample hits GGML_ASSERT(!stacks.empty()).
         let token = sampler.sample(ctx, idx);
-        sampler.accept(token);
 
         if loaded.model.is_eog_token(token) {
             break;
