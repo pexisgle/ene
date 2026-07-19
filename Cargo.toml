@@ -44,6 +44,9 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
+# ── Terminal / CLI ──
+crossterm = "0.29"
+
 # ── Networking ──
 reqwest = { version = "0.13", default-features = false }
 scraper = "0.27"

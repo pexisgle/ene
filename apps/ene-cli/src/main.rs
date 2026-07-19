@@ -14,13 +14,22 @@ mod i18n;
 mod repl;
 mod stream;
 mod style;
+mod terminal_ui;
+mod tree_log;
 
 #[tokio::main]
 async fn main() {
-    use tracing_subscriber::{EnvFilter, fmt};
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer};
+
+    let ui = terminal_ui::TerminalUi::init_global();
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,sea_orm=warn"));
-    fmt().with_env_filter(filter).init();
+    tracing_subscriber::registry()
+        .with(tree_log::TreeLogLayer::new(ui).with_filter(filter))
+        .init();
+
     let handle = match config::init().await {
         Ok(h) => h,
         Err(e) => {

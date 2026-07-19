@@ -14,11 +14,12 @@ cargo run -p ene-cli
 main.rs → clap args
   → config::init() → ConfigStore::try_load, EneHandle::open(config, card)
   → AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
-  → repl::run() → dialoguer input loop
+  → repl::run() → TerminalUi line editor loop
       → stream::process_stream() → EneEvent dispatch (TurnId-scoped)
       → commands::execute() → / command dispatch via CliCommand trait
 ```
 
+Logs use a tree-aware `tracing` layer (`TreeLogLayer`) coordinated with `TerminalUi` so post-turn lines never overwrite the `>: ` prompt.
 The CLI creates an `EneHandle` (actor) on startup. User input is sent via `handle.run()`, and events are received via `handle.subscribe()`.
 
 ### CliCommand Trait
@@ -111,11 +112,27 @@ Commands are entered with `/` prefix:
 
 ## Stream Display
 
-| Event | Style |
-|-------|-------|
-| Plain text | Default stdout |
-| `[Emotion: happy]` | Magenta |
-| `[Tool Calling: name(args)]` | Cyan |
-| `[Tool Result: ...]` | Green |
-| `[Session split]` | Yellow |
-| Error | Red bold |
+Progress and tool logs are rendered by a custom `tracing` layer as an ASCII tree when spans are nested (parallel pre-turn / post-turn work). Flat `tracing` events without an open span print as single lines. LLM text streams on stdout.
+
+| Channel | Content |
+|---------|---------|
+| stderr (tree / flat) | Pipeline phases, tools, post-turn memory / affect |
+| stdout | `TextDelta` / `[Performance: …]` |
+
+Post-turn work continues after `Terminal`. The REPL shows `>: ` immediately; later log lines are inserted **above** the prompt while preserving any in-progress input.
+
+Example:
+
+```text
+>: hello
+|- pre_turn.phase_a
+| |- embedding
+| | └ Generating user query embedding...
+| └ ccv3_sync
+|   └ Character card memories already up-to-date
+assistant reply text
+|- post_turn.memory
+| └ Post-turn memory extraction and forgetting completed
+>: 
+```
+

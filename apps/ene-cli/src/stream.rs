@@ -2,7 +2,8 @@ use ene_runtime::{
     CueSource, EneEvent, EneEventReceiver, EneHandle, MultiAnswer, PerfKind, PermissionDecision,
     TurnId, UserInputResponse,
 };
-use std::io::{self, Write};
+
+use crate::terminal_ui::TerminalUi;
 
 /// Processes AI events from the actor in real-time, printing them to stdout.
 ///
@@ -15,6 +16,7 @@ pub async fn process_stream(
     handle: &EneHandle,
     active_turn: Option<&TurnId>,
 ) {
+    let ui = TerminalUi::global();
     let mut subscribed_turn = active_turn.cloned();
     loop {
         match rx.recv().await {
@@ -31,8 +33,7 @@ pub async fn process_stream(
                 if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
-                print!("{delta}");
-                let _ = io::stdout().flush();
+                ui.write_stream(&delta);
             }
             Ok(EneEvent::Performance {
                 turn,
@@ -57,9 +58,11 @@ pub async fn process_stream(
                         PerfKind::LookAt => "lookat",
                         PerfKind::Cancel => "cancel",
                     };
-                    print!("\n[Performance: {} ({kind_label}) ({label})]", cue.name);
+                    ui.write_stream(&format!(
+                        "\n[Performance: {} ({kind_label}) ({label})]",
+                        cue.name
+                    ));
                 }
-                let _ = io::stdout().flush();
             }
             Ok(EneEvent::ToolCallStart {
                 turn,
@@ -97,10 +100,11 @@ pub async fn process_stream(
                 if !turn_matches(subscribed_turn.as_ref(), &turn) {
                     continue;
                 }
+                ui.end_stream();
                 if let ene_runtime::TerminalReason::Failed { message } = &reason {
                     tracing::error!(%turn, error = %message, "Terminal failure");
                 } else {
-                    tracing::info!(%turn, ?reason, "Stream terminal");
+                    tracing::debug!(%turn, ?reason, "Stream terminal");
                 }
                 break;
             }

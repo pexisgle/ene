@@ -2,21 +2,14 @@ use crate::{
     commands::{self, CommandOutcome, SHUTDOWN_TIMEOUT},
     context::AppContext,
     stream,
+    terminal_ui::TerminalUi,
 };
 
 /// Read a single line of REPL input on a blocking thread. Returns
 /// `None` if stdin reaches EOF (Ctrl-D in a TTY, or the input stream
 /// was closed).
 async fn read_line() -> Option<String> {
-    tokio::task::spawn_blocking(|| {
-        dialoguer::Input::<String>::new()
-            .with_prompt(">")
-            .allow_empty(true)
-            .interact()
-            .ok()
-    })
-    .await
-    .unwrap_or(None)
+    TerminalUi::global().read_line().await
 }
 
 /// Drains the actor and returns the exit code. Used on both `/quit`
@@ -45,7 +38,7 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
             // Ctrl-C: clean shutdown path. tokio::signal::ctrl_c()
             // resolves on the first SIGINT, including the one a TTY
             // forwards when the user presses Ctrl-C while
-            // `dialoguer::Input::interact()` is blocked.
+            // line editing is blocked.
             ctrl_c_result = tokio::signal::ctrl_c() => {
                 if let Err(e) = ctrl_c_result {
                     tracing::error!(error = %e, "Failed to install Ctrl-C handler");
@@ -55,8 +48,8 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                 return drain_and_exit(ctx, 130).await;
             }
 
-            // Normal REPL line input. The blocking dialoguer call
-            // runs on a worker thread; we await its result here.
+            // Normal REPL line input. The blocking editor runs on a
+            // worker thread; we await its result here.
             maybe_input = read_line() => {
                 let Some(input) = maybe_input else {
                     // EOF (Ctrl-D) — treat like /quit so we still

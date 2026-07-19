@@ -24,6 +24,7 @@ use ene_ai::{LlmMessage, UserMessagePart};
 use ene_mind::{
     CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority, strip_markers,
 };
+use tracing::Instrument;
 
 #[expect(
     clippy::ref_option,
@@ -169,6 +170,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         && embedder.is_some()
         && session.memory.ccv3_memory_hash != Some(card_hash);
 
+    let span_pre_a = tracing::info_span!("pre_turn.phase_a");
+    let embed_span = tracing::info_span!(parent: &span_pre_a, "embedding");
+    let sync_span = tracing::info_span!(parent: &span_pre_a, "ccv3_sync");
+
     let embed_fut = async {
         if is_proactive {
             return Ok::<Option<Vec<f32>>, String>(None);
@@ -184,7 +189,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             }
             Err(e) => Err(format!("Embedding failed: {e}")),
         }
-    };
+    }
+    .instrument(embed_span);
 
     let sync_fut = async {
         if !sync_needed {
@@ -250,9 +256,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 None
             }
         }
-    };
+    }
+    .instrument(sync_span);
 
-    let (embed_result, sync_hash) = tokio::join!(embed_fut, sync_fut);
+    let (embed_result, sync_hash) = async { tokio::join!(embed_fut, sync_fut) }
+        .instrument(span_pre_a)
+        .await;
     let query_embedding = match embed_result {
         Ok(emb) => {
             if let Some(ref emb) = emb {
@@ -287,6 +296,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 
     tracing::info!(%turn, "Retrieving memory recall context and selecting relevant tools...");
     let (pre_turn_result, tools, style_examples, scene_summary) = if is_proactive {
+        let span_pre_b = tracing::info_span!("pre_turn.phase_b");
         let turn_ctx = build_turn_context(
             &mind,
             &card,
@@ -301,32 +311,44 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &provider,
             post_history_phi.as_deref(),
         );
-        let (pre, style, scene) = tokio::join!(
-            engine.before_proactive_turn(turn_ctx),
-            CharacterProcessor::select_style_examples(
-                &card,
-                &user_name,
-                compose_query,
-                &history,
-                mem_store.as_deref(),
-                embedder.as_ref(),
-                &mind.character,
-                2,
-            ),
-            async {
-                if let Some(store) = mem_store.as_deref() {
-                    load_active_scene_summary(store, session_id.as_str())
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|s| s.text)
-                } else {
-                    None
+        let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
+        let style_span = tracing::info_span!(parent: &span_pre_b, "style_examples");
+        let scene_span = tracing::info_span!(parent: &span_pre_b, "scene_summary");
+        let (pre, style, scene) = async {
+            tokio::join!(
+                engine
+                    .before_proactive_turn(turn_ctx)
+                    .instrument(recall_span),
+                CharacterProcessor::select_style_examples(
+                    &card,
+                    &user_name,
+                    compose_query,
+                    &history,
+                    mem_store.as_deref(),
+                    embedder.as_ref(),
+                    &mind.character,
+                    2,
+                )
+                .instrument(style_span),
+                async {
+                    if let Some(store) = mem_store.as_deref() {
+                        load_active_scene_summary(store, session_id.as_str())
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|s| s.text)
+                    } else {
+                        None
+                    }
                 }
-            },
-        );
+                .instrument(scene_span),
+            )
+        }
+        .instrument(span_pre_b)
+        .await;
         (pre, Vec::new(), style, scene)
     } else {
+        let span_pre_b = tracing::info_span!("pre_turn.phase_b");
         let turn_ctx = build_turn_context(
             &mind,
             &card,
@@ -341,37 +363,48 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &provider,
             post_history_phi.as_deref(),
         );
-        tokio::join!(
-            engine.before_turn(turn_ctx),
-            select_relevant_tools(
-                registry.as_ref(),
-                tool_rag.as_deref(),
-                recall_query,
-                query_embedding.as_deref(),
-                tool_calling_enabled,
-            ),
-            CharacterProcessor::select_style_examples(
-                &card,
-                &user_name,
-                recall_query,
-                &history,
-                mem_store.as_deref(),
-                embedder.as_ref(),
-                &mind.character,
-                2,
-            ),
-            async {
-                if let Some(store) = mem_store.as_deref() {
-                    load_active_scene_summary(store, session_id.as_str())
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|s| s.text)
-                } else {
-                    None
+        let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
+        let tools_span = tracing::info_span!(parent: &span_pre_b, "tools");
+        let style_span = tracing::info_span!(parent: &span_pre_b, "style_examples");
+        let scene_span = tracing::info_span!(parent: &span_pre_b, "scene_summary");
+        async {
+            tokio::join!(
+                engine.before_turn(turn_ctx).instrument(recall_span),
+                select_relevant_tools(
+                    registry.as_ref(),
+                    tool_rag.as_deref(),
+                    recall_query,
+                    query_embedding.as_deref(),
+                    tool_calling_enabled,
+                )
+                .instrument(tools_span),
+                CharacterProcessor::select_style_examples(
+                    &card,
+                    &user_name,
+                    recall_query,
+                    &history,
+                    mem_store.as_deref(),
+                    embedder.as_ref(),
+                    &mind.character,
+                    2,
+                )
+                .instrument(style_span),
+                async {
+                    if let Some(store) = mem_store.as_deref() {
+                        load_active_scene_summary(store, session_id.as_str())
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|s| s.text)
+                    } else {
+                        None
+                    }
                 }
-            },
-        )
+                .instrument(scene_span),
+            )
+        }
+        .instrument(span_pre_b)
+        .await
     };
 
     let pre_turn = match pre_turn_result {
@@ -437,18 +470,28 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     };
 
     tracing::info!(%turn, "Building prompt packet context...");
-    let (persist_result, composed_result) = tokio::join!(
-        async {
-            if mind.emotion.enabled
-                && let Some(store) = mem_store.as_deref()
-            {
-                CognitionEngine::persist_affect_snapshot(store, &turn_affect).await
-            } else {
-                Ok(())
+    let span_pre_c = tracing::info_span!("pre_turn.phase_c");
+    let persist_span = tracing::info_span!(parent: &span_pre_c, "persist_affect");
+    let compose_span = tracing::info_span!(parent: &span_pre_c, "compose_prompt");
+    let (persist_result, composed_result) = async {
+        tokio::join!(
+            async {
+                if mind.emotion.enabled
+                    && let Some(store) = mem_store.as_deref()
+                {
+                    CognitionEngine::persist_affect_snapshot(store, &turn_affect).await
+                } else {
+                    Ok(())
+                }
             }
-        },
-        engine.compose_prompt_packet(compose_ctx, &pre_turn, prefetch),
-    );
+            .instrument(persist_span),
+            engine
+                .compose_prompt_packet(compose_ctx, &pre_turn, prefetch)
+                .instrument(compose_span),
+        )
+    }
+    .instrument(span_pre_c)
+    .await;
 
     if let Err(error) = persist_result {
         tracing::warn!(
@@ -753,47 +796,50 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 let deferred_mind = mind.clone();
                 let deferred_provider = provider.clone();
                 let deferred_embedder = embedder.clone();
-                let memory_writer_handle = tokio::spawn(async move {
-                    let engine = CognitionEngine::new();
-                    tracing::info!(
-                        component = "MemoryWriter",
-                        character_id = %deferred_input.character_id,
-                        user_id = %deferred_input.user_id,
-                        "Post-turn memory extraction and forgetting starting"
-                    );
-                    match engine
-                        .write_memories_deferred(
-                            store.as_ref(),
-                            &deferred_mind,
-                            &deferred_input,
-                            ene_mind::MemoryWriteProviders {
-                                llm: Some(deferred_provider.as_ref()),
-                                embedder: deferred_embedder
-                                    .as_ref()
-                                    .map(std::convert::AsRef::as_ref),
-                            },
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            tracing::info!(
-                                component = "MemoryWriter",
-                                character_id = %deferred_input.character_id,
-                                user_id = %deferred_input.user_id,
-                                "Post-turn memory extraction and forgetting completed"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                component = "MemoryWriter",
-                                error = %error,
-                                character_id = %deferred_input.character_id,
-                                user_id = %deferred_input.user_id,
-                                "Post-turn memory extraction failed"
-                            );
+                let memory_writer_handle = tokio::spawn(
+                    async move {
+                        let engine = CognitionEngine::new();
+                        tracing::info!(
+                            component = "MemoryWriter",
+                            character_id = %deferred_input.character_id,
+                            user_id = %deferred_input.user_id,
+                            "Post-turn memory extraction and forgetting starting"
+                        );
+                        match engine
+                            .write_memories_deferred(
+                                store.as_ref(),
+                                &deferred_mind,
+                                &deferred_input,
+                                ene_mind::MemoryWriteProviders {
+                                    llm: Some(deferred_provider.as_ref()),
+                                    embedder: deferred_embedder
+                                        .as_ref()
+                                        .map(std::convert::AsRef::as_ref),
+                                },
+                            )
+                            .await
+                        {
+                            Ok(()) => {
+                                tracing::info!(
+                                    component = "MemoryWriter",
+                                    character_id = %deferred_input.character_id,
+                                    user_id = %deferred_input.user_id,
+                                    "Post-turn memory extraction and forgetting completed"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    component = "MemoryWriter",
+                                    error = %error,
+                                    character_id = %deferred_input.character_id,
+                                    user_id = %deferred_input.user_id,
+                                    "Post-turn memory extraction failed"
+                                );
+                            }
                         }
                     }
-                });
+                    .instrument(tracing::info_span!("post_turn.memory")),
+                );
                 let _ = memory_writer_tx.send(memory_writer_handle);
             }
 
@@ -818,80 +864,85 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 
                 // Fire-and-forget: must not delay Terminal (already emitted).
                 // The JoinHandle is sent to the actor for lifecycle management.
-                let classifier_handle = tokio::spawn(async move {
-                    tracing::info!(
-                        component = "EmotionEngine",
-                        turn_id = classifier_turn_id,
-                        "Starting post-turn affect classifier"
-                    );
-                    let started = std::time::Instant::now();
-                    match ene_mind::emotion::classifier::classify_for_config(
-                        &classifier_config,
-                        None,
-                        0,
-                        &classifier_context,
-                        classifier_timeout_secs,
-                        &classifier_lang,
-                    )
-                    .await
-                    {
-                        Ok(proposal) => {
-                            let pending = ene_store::PendingAffectProposal {
-                                character_id: classifier_character_id,
-                                user_id: classifier_user_id,
-                                source_turn_id: classifier_turn_id,
-                                user_emotion: proposal.user_emotion,
-                                user_intent: proposal.user_intent,
-                                valence: proposal.valence,
-                                arousal: proposal.arousal,
-                                irritation: proposal.irritation,
-                                affinity: proposal.affinity,
-                                recommended_expression: proposal.recommended_expression,
-                                confidence: proposal.confidence,
-                                reason: proposal.reason,
-                                created_at: chrono::Utc::now(),
-                            };
-                            if let Err(error) = classifier_store
-                                .upsert_pending_affect_proposal(&pending)
-                                .await
-                            {
+                let classifier_handle = tokio::spawn(
+                    async move {
+                        tracing::info!(
+                            component = "EmotionEngine",
+                            turn_id = classifier_turn_id,
+                            "Starting post-turn affect classifier"
+                        );
+                        let started = std::time::Instant::now();
+                        match ene_mind::emotion::classifier::classify_for_config(
+                            &classifier_config,
+                            None,
+                            0,
+                            &classifier_context,
+                            classifier_timeout_secs,
+                            &classifier_lang,
+                        )
+                        .await
+                        {
+                            Ok(proposal) => {
+                                let pending = ene_store::PendingAffectProposal {
+                                    character_id: classifier_character_id,
+                                    user_id: classifier_user_id,
+                                    source_turn_id: classifier_turn_id,
+                                    user_emotion: proposal.user_emotion,
+                                    user_intent: proposal.user_intent,
+                                    valence: proposal.valence,
+                                    arousal: proposal.arousal,
+                                    irritation: proposal.irritation,
+                                    affinity: proposal.affinity,
+                                    recommended_expression: proposal.recommended_expression,
+                                    confidence: proposal.confidence,
+                                    reason: proposal.reason,
+                                    created_at: chrono::Utc::now(),
+                                };
+                                if let Err(error) = classifier_store
+                                    .upsert_pending_affect_proposal(&pending)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        component = "EmotionEngine",
+                                        error = %error,
+                                        turn_id = classifier_turn_id,
+                                        "Failed to persist post-turn classifier proposal"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        component = "EmotionEngine",
+                                        turn_id = classifier_turn_id,
+                                        elapsed_ms = started.elapsed().as_millis(),
+                                        user_emotion = %pending.user_emotion,
+                                        user_intent = %pending.user_intent,
+                                        estimated_valence = pending.valence,
+                                        estimated_arousal = pending.arousal,
+                                        estimated_irritation = pending.irritation,
+                                        estimated_affinity = pending.affinity,
+                                        recommended_expression = %pending.recommended_expression,
+                                        confidence = pending.confidence,
+                                        reason = %pending.reason,
+                                        "Post-turn affect classifier estimate complete"
+                                    );
+                                }
+                            }
+                            Err(error) => {
                                 tracing::warn!(
                                     component = "EmotionEngine",
                                     error = %error,
-                                    turn_id = classifier_turn_id,
-                                    "Failed to persist post-turn classifier proposal"
-                                );
-                            } else {
-                                tracing::info!(
-                                    component = "EmotionEngine",
+                                    failure_reason =
+                                        ene_mind::emotion::classifier::classify_failure_reason(
+                                            &error
+                                        ),
                                     turn_id = classifier_turn_id,
                                     elapsed_ms = started.elapsed().as_millis(),
-                                    user_emotion = %pending.user_emotion,
-                                    user_intent = %pending.user_intent,
-                                    estimated_valence = pending.valence,
-                                    estimated_arousal = pending.arousal,
-                                    estimated_irritation = pending.irritation,
-                                    estimated_affinity = pending.affinity,
-                                    recommended_expression = %pending.recommended_expression,
-                                    confidence = pending.confidence,
-                                    reason = %pending.reason,
-                                    "Post-turn affect classifier estimate complete"
+                                    "Post-turn affect classifier failed"
                                 );
                             }
                         }
-                        Err(error) => {
-                            tracing::warn!(
-                                component = "EmotionEngine",
-                                error = %error,
-                                failure_reason =
-                                    ene_mind::emotion::classifier::classify_failure_reason(&error),
-                                turn_id = classifier_turn_id,
-                                elapsed_ms = started.elapsed().as_millis(),
-                                "Post-turn affect classifier failed"
-                            );
-                        }
                     }
-                });
+                    .instrument(tracing::info_span!("post_turn.affect")),
+                );
                 // Send handle to actor for lifecycle management.
                 // A send failure means the actor has shut down; the
                 // classifier task runs as a detached orphan until

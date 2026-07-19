@@ -14,11 +14,12 @@ cargo run -p ene-cli
 main.rs → clap 引数解析
   → config::init() → ConfigStore::try_load, EneHandle::open(config, card)
   → AppContext { handle: EneHandle, commands: Vec<Arc<dyn CliCommand>> }
-  → repl::run() → dialoguer 入力ループ
+  → repl::run() → TerminalUi 行エディタループ
       → stream::process_stream() → EneEvent バリアント処理（TurnId 範囲）
       → commands::execute() → CliCommand トレイト経由の / コマンドディスパッチ
 ```
 
+ログはツリー対応の `tracing` Layer（`TreeLogLayer`）と `TerminalUi` が連携し、post-turn 行が `>: ` プロンプトを上書きしないようにする。
 CLI は起動時に準備済み `EneHandle`（`open`）を作成。ユーザー入力は `handle.run()` → `TurnId` で送信し、イベントは `handle.subscribe()` で受信。
 
 ### CliCommand トレイト
@@ -111,11 +112,26 @@ pub trait CliCommand: Send + Sync {
 
 ## ストリーム表示
 
-| イベント | スタイル |
-|---------|---------|
-| 通常テキスト | デフォルト stdout |
-| `[Emotion: happy]` | マゼンタ |
-| `[Tool Calling: name(args)]` | シアン |
-| `[Tool Result: ...]` | 緑 |
-| `[Session split]` | 黄色 |
-| エラー | 赤太字 |
+進捗・ツールログはカスタム `tracing` Layer が出力する。ネストした span（並列 pre-turn / post-turn）は ASCII ツリー、span 外のイベントは 1 行で表示する。LLM テキストは stdout にストリームする。
+
+| チャネル | 内容 |
+|---------|------|
+| stderr（ツリー / フラット） | パイプライン段階、ツール、post-turn メモリ / affect |
+| stdout | `TextDelta` / `[Performance: …]` |
+
+post-turn は `Terminal` のあとも継続する。REPL はすぐに `>: ` を出し、後から届いたログ行は入力中バッファを保ったままプロンプトの**上**に差し込む。
+
+例:
+
+```text
+>: hello
+|- pre_turn.phase_a
+| |- embedding
+| | └ Generating user query embedding...
+| └ ccv3_sync
+|   └ Character card memories already up-to-date
+assistant reply text
+|- post_turn.memory
+| └ Post-turn memory extraction and forgetting completed
+>: 
+```
