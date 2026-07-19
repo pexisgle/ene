@@ -710,29 +710,31 @@ fn compute_node_rest_transforms(gltf: &gltf::Gltf) -> NodeRestTransforms {
     let mut world_positions = vec![Vec3::ZERO; node_count];
 
     for i in 0..node_count {
+        // Walk parent chain root → node. Stop only when parent < 0
+        // (do not special-case node index 0 — it may not be the root).
         let mut chain = Vec::new();
-        let mut cur = i;
-        while cur != 0 && parents[cur] >= 0 {
-            chain.push(cur);
-            cur = parents[cur] as usize;
+        let mut cur = i as i32;
+        loop {
+            chain.push(cur as usize);
+            let p = parents[cur as usize];
+            if p < 0 {
+                break;
+            }
+            cur = p;
         }
-        chain.push(cur);
         chain.reverse();
 
+        // Standard glTF hierarchy:
+        //   world_pos' = world_pos + world_rot * local_pos
+        //   world_rot' = world_rot * local_rot
         let mut wr = Quat::IDENTITY;
         let mut wp = Vec3::ZERO;
         for &n in &chain {
+            wp += wr * local_positions[n];
             wr *= local_rotations[n];
-            wp = wr * local_positions[n] + if n == chain[0] { Vec3::ZERO } else { wp };
         }
-        let mut accumulated_rot = Quat::IDENTITY;
-        let mut accumulated_pos = Vec3::ZERO;
-        for &n in &chain {
-            accumulated_rot *= local_rotations[n];
-            accumulated_pos = accumulated_rot * local_positions[n] + accumulated_pos;
-        }
-        world_rotations[i] = accumulated_rot;
-        world_positions[i] = accumulated_pos;
+        world_rotations[i] = wr;
+        world_positions[i] = wp;
     }
 
     (

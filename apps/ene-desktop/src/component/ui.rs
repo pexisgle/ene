@@ -51,7 +51,6 @@ pub struct UiInputDrafts(pub SettingsInputState);
 /// Animation play / pause toggle. Mirrors the legacy
 /// `SettingsUi::animation` field.
 #[derive(Component, Default)]
-#[expect(dead_code, reason = "Mirror of legacy SettingsUi.animation")]
 pub struct UiAnimation(pub AnimationControl);
 
 /// Pending emotion commands emitted by the AI bridge or the
@@ -110,6 +109,7 @@ mod tests {
         assert_eq!(bundle.input.0.ai_embedding_provider, "");
         assert!(!bundle.state.0.settings_window_visible);
         assert!(bundle.emotion_queue.0.commands.is_empty());
+        assert!(bundle.animation.0.playing);
     }
 
     #[test]

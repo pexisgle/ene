@@ -100,6 +100,11 @@ pub fn apply_action(
         }
         SettingsAction::TogglePlay => {
             animation.toggle_playing();
+            if let Some(mut ui_anim) =
+                world.get_mut::<crate::component::ui::UiAnimation>(ui_entity)
+            {
+                ui_anim.0.playing = animation.playing;
+            }
         }
         #[cfg(target_os = "linux")]
         SettingsAction::ToggleDebugOverlay => {

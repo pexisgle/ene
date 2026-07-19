@@ -908,6 +908,24 @@ impl Runtime {
             )
         };
         let last_raycast_hit = self.state.debug.last_raycast_hit;
+        let motion_playing = {
+            use crate::component::ui::UiAnimation;
+            self.state
+                .ui_bevy_entity()
+                .and_then(|entity| {
+                    self.state
+                        .app
+                        .world()
+                        .get::<UiAnimation>(entity)
+                        .map(|a| a.0.playing)
+                })
+                .or_else(|| {
+                    self.ui_window
+                        .as_ref()
+                        .map(|uw| uw.settings_ui.animation.playing)
+                })
+                .unwrap_or(true)
+        };
         let AppState {
             ref mut character,
             ref mut debug,
@@ -965,64 +983,25 @@ impl Runtime {
             character.play_motion(&motion_path);
         }
 
-        // Apply pending emotion commands (e.g. from the AI's
-        // `<|perf:expr=happy|>` tokens) to the VRM model. The bevy
-        // `apply_emote_tokens_system` ran during `app.update()`;
-        // here we drain the resulting queue and call
-        // `expressions_mut().set_expression()` with the
-        // computed (name, weight).
-        {
+        // Tick the emotion pipeline early; apply morph weights after
+        // look-at so gaze morphs are composed first and emotion
+        // overrides win on conflicting targets.
+        let applied_emotion = {
             let world = app.world_mut();
             let pipeline =
                 world.get_resource_mut::<crate::resource::emotion_pipeline::EmotionPipelineState>();
             if let Some(mut pipeline) = pipeline {
-                // The producers record `target_time` in their
-                // own clock (settings UI uses
-                // `started_at.elapsed()`). For the AI path the
-                // command's `target_time` is `0.0`, so any
-                // monotonically increasing `now_secs` works.
-                // We use the same clock as the producers: an
-                // f64 of "monotonic seconds since the bevy app
-                // started". `Instant::now()` against a per-app
-                // start time is the cheapest correct option.
                 let now_secs = self
                     .emotion_clock
                     .map_or(0.0, |t| t.elapsed().as_secs_f64());
-                let applied =
-                    crate::resource::emotion_pipeline::tick_emotions(&mut pipeline, now_secs);
-                if !applied.name.is_empty()
-                    && let Some(model) = character.model_mut()
-                {
-                    let expressions_meta = model.expressions_meta.clone();
-                    let layer = model.expressions_mut();
-                    tracing::debug!(
-                        expression = %applied.name,
-                        weight = applied.weight,
-                        "apply emotion"
-                    );
-                    let names = match applied.name.as_str() {
-                        "happy" => vec!["happy", "joy", "fun"],
-                        "sad" => vec!["sad", "sorrow"],
-                        "relaxed" => vec!["relaxed", "fun"],
-                        other => vec![other],
-                    };
-                    // First reset all expression weights so a previous
-                    // expression doesn't linger after a new one starts.
-                    for en in layer.expression_names() {
-                        layer.set_expression(&en, 0.0);
-                    }
-                    for name_str in names {
-                        let name = ene_vrm::ExpressionName::new(name_str.to_string());
-                        layer.set_expression(&name, applied.weight);
-                    }
-                    // Apply_overrides translates the named weights into the
-                    // per-(node, morph_target_index) map that the GPU
-                    // renderer reads via `morph_target_weights`.
-                    // Without this call, set_expression has no visible effect.
-                    layer.apply_overrides(&expressions_meta);
-                }
+                Some(crate::resource::emotion_pipeline::tick_emotions(
+                    &mut pipeline,
+                    now_secs,
+                ))
+            } else {
+                None
             }
-        }
+        };
         self.emotion_clock = self.emotion_clock.or_else(|| Some(Instant::now()));
 
         let cs = &settings.character_state;
@@ -1052,17 +1031,29 @@ impl Runtime {
                 if let Some(motion_name) = frame.active_motions.first() {
                     let should_switch =
                         character.active_motion_name() != Some(motion_name.as_str());
-                    if should_switch && let Err(e) = character.play_motion_by_name(motion_name) {
-                        tracing::warn!(
-                            component = "MotionLayer",
-                            motion = %motion_name,
-                            error = %e,
-                            "Failed to load motion clip"
-                        );
+                    if should_switch {
+                        let entry = settings.current_entry();
+                        let resolved = entry
+                            .motion_names
+                            .iter()
+                            .position(|n| n == motion_name.as_str())
+                            .map(|idx| settings.assets_dir.join(&entry.motion_paths[idx]));
+                        if let Some(path) = resolved {
+                            character.play_motion(&path);
+                        } else if let Err(e) = character.play_motion_by_name(motion_name) {
+                            tracing::warn!(
+                                component = "MotionLayer",
+                                motion = %motion_name,
+                                error = %e,
+                                "Failed to load motion clip"
+                            );
+                        }
                     }
                 }
             }
         }
+
+        character.set_motion_player_playing(motion_playing);
 
         if let Some(palette) = character.update_motion(dt_secs) {
             character.update_skin_palette_gpu(queue, &palette);
@@ -1093,6 +1084,44 @@ impl Runtime {
                 cs.look_at_strength,
                 dt_secs,
             );
+        }
+
+        if let Some(applied) = applied_emotion
+            && !applied.name.is_empty()
+            && let Some(model) = character.model_mut()
+        {
+            let expressions_meta = model.expressions_meta.clone();
+            let layer = model.expressions_mut();
+            tracing::debug!(
+                expression = %applied.name,
+                weight = applied.weight,
+                "apply emotion"
+            );
+            let names = match applied.name.as_str() {
+                "happy" => vec!["happy", "joy"],
+                "sad" => vec!["sad", "sorrow"],
+                "relaxed" => vec!["relaxed"],
+                other => vec![other],
+            };
+            for preset in [
+                "neutral",
+                "happy",
+                "sad",
+                "angry",
+                "relaxed",
+                "surprised",
+                "joy",
+                "sorrow",
+                "fun",
+            ] {
+                let name = ene_vrm::ExpressionName::new(preset.to_string());
+                layer.set_expression(&name, 0.0);
+            }
+            for name_str in names {
+                let name = ene_vrm::ExpressionName::new(name_str.to_string());
+                layer.set_expression(&name, applied.weight);
+            }
+            layer.apply_overrides(&expressions_meta);
         }
 
         let result = cw.with_surface_view(|view| {
