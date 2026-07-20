@@ -21,7 +21,7 @@ Represents responses to interactive user input requests:
 Configuration packet sent to spawn the streaming loop:
 ```rust
 pub struct StreamContext {
-    pub config: EneConfig,
+    pub config: Arc<EneConfig>,
     pub session: ConversationSession,
     pub user_input: String,
     pub embedder: Option<Arc<dyn EmbeddingProvider>>,
@@ -40,16 +40,19 @@ pub struct StreamContext {
     pub runtime_directive: Option<String>,
     pub proactive_screen_image: Option<String>,
     pub generation_timeout: Option<Duration>,
-    pub classifier_tx: mpsc::UnboundedSender<JoinHandle<()>>,
-    pub memory_writer_tx: mpsc::UnboundedSender<JoinHandle<()>>,
 }
 ```
+
+> [!NOTE]
+> Background task handles (`classifier_tx`, `memory_writer_tx`) have been removed from `StreamContext`. Background consolidation tasks spawned by `CognitionEngine::finalize_turn` are tracked in `EneActor`'s `JoinSet`, decoupling task lifecycle management from the stream context packet.
+
+
 
 ---
 
 ## 2. Standard Chat Loop Functions (`streaming.rs`)
 
-`run_stream` processes conversational streaming without long-term memory or emotion model appraisal.
+`run_stream` processes conversational streaming without long-term memory or emotion model appraisal. It is strictly limited to basic context and tool executions, keeping it decoupled from the complex cognitive pipelines managed in `streaming_cognitive.rs`.
 
 #### `run_stream`
 *   **Signature**: `pub async fn run_stream(ctx: StreamContext) -> StreamOutcome`

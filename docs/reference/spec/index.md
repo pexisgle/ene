@@ -65,7 +65,7 @@ flowchart TD
 | `ene-config` | `crates/ene-config` | Configuration structures, CBS macro definitions (`define_config!`), and Character Card V3 deserialization. |
 | `ene-tool` | `crates/ene-tool` | SDK facade crate for tool developers. |
 | `ene-tool-host` | `crates/ene-tool-host` | External tool process supervisor. Spawns sandbox environments, provisions IPC security tokens, and maps MCP servers. |
-| `ene-tool-rag` | `crates/ene-tool-rag` | Embedding-based tool RAG. Indexes tool specs and reranks candidate lists via LLMs. |
+| `ene-tool-rag` | `crates/ene-tool-rag` | Embedding-based tool RAG. Indexes tool specs and reranks candidate lists via LLMs (e.g. `HybridRerankProvider`). |
 | `ene-tool-proto` | `crates/ene-tool-proto` | IPC protocol serialization models (`IpcRequest` / `IpcResponse`) and `ToolSpec`. |
 | `ene-tool-common`| `crates/ene-tool-common`| Common tool utilities (e.g. `ToolAction` trait, HTML-to-markdown translation). |
 | `ene-tool-derive`| `crates/ene-tool-derive`| Procedural macros for automatic spec generation: `#[derive(ToolSpec)]` and `#[derive(ToolAction)]`. |

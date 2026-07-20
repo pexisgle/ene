@@ -33,13 +33,8 @@ The in-memory cache and file system manager for Ene configurations.
 *   **Signature**: `pub fn set_config(&self, config: EneConfig)`
 *   **Description**: Replaces configurations and flags the store as dirty.
 
-#### `get_section`
-*   **Signature**: `pub fn get_section<T>(&self) -> T where T: serde::de::DeserializeOwned + Default + crate::HasConfigKey`
-*   **Description**: Extracts sub-sections from configurations.
-
-#### `set_section`
-*   **Signature**: `pub fn set_section<T>(&self, section: &T) where T: serde::Serialize + crate::HasConfigKey`
-*   **Description**: Serializes and sets configuration sub-sections.
+#### `get_section` / `set_section`
+*   **Description**: Delegates directly to the underlying `EneConfig` to extract or serialize sub-sections safely.
 
 #### `character_config`
 *   **Signature**: `pub fn character_config(&self) -> CharacterConfig`
@@ -77,13 +72,13 @@ The in-memory cache and file system manager for Ene configurations.
 *   **Signature**: `pub fn update_global_config(config: EneConfig)` (same pattern for getters)
 *   **Description**: Reads/writes thread-safe global settings configurations.
 
-#### `__register_schema` / `__register_tool_schema`
-*   **Signature**: `pub fn __register_schema<T: JsonSchema + HasConfigKey>(target: ConfigTarget, parent_key: Option<&str>)`
+#### `register_config_schema` / `register_tool_schema`
+*   **Signature**: `pub fn register_config_schema<T: JsonSchema + HasConfigKey>(target: ConfigTarget, parent_key: Option<&str>)`
 *   **Description**: Links JSON validation structures for automated CLI schema exports.
 
 #### `EneConfig::get_section` / `set_section`
-*   **Signature**: `pub fn get_section<T>(&self) -> Result<T, EneConfigError> ...`
-*   **Description**: Accesses or modifies configuration categories.
+*   **Signature**: `pub(crate) fn get_section<T>(&self) -> Result<T, EneConfigError> ...`
+*   **Description**: Internal helpers for serializing/deserializing configuration sub-trees. Callers outside `ene-config` should use `ConfigStore::get_section` / `set_section` instead.
 
 #### `generate_schema_json` / `generate_character_schema_json`
 *   **Signature**: `pub fn generate_schema_json() -> Result<String, serde_json::Error>`
@@ -134,7 +129,13 @@ The in-memory cache and file system manager for Ene configurations.
 
 #### `app_data_dir`
 *   **Signature**: `pub fn app_data_dir() -> PathBuf`
-*   **Description**: Returns Ene's configuration path (`~/.gemini/antigravity/`).
+*   **Description**: Returns Ene's platform-appropriate application data directory using the `directories` crate (`ProjectDirs::from("ai", "Ene", "Ene")`):
+    *   **Linux**: `~/.local/share/ene/` (XDG Base Directory spec)
+    *   **macOS**: `~/Library/Application Support/ene/`
+    *   **Windows**: `%APPDATA%\ene\`
+
+> [!WARNING]
+> Earlier builds incorrectly returned `~/.gemini/antigravity/` due to a development-time placeholder. Existing installations require a one-time data migration. See [issue #234](https://github.com/pexisgle/ene/issues/234).
 
 #### `assets_dir`
 *   **Signature**: `pub fn assets_dir() -> PathBuf`

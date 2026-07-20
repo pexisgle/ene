@@ -60,8 +60,8 @@ pub struct CognitionEngine {
 *   **Description**: A lightweight pre-turn loop used when Ene initiates the turn proactively. Since there is no user input text, it bypasses embedding calculations and hybrid search, loading only the active emotional state and active promises.
 
 #### `persist_affect_snapshot`
-*   **Signature**: `pub async fn persist_affect_snapshot(store: &MemoryStore, affect: &ene_store::AffectState) -> Result<(), CognitionError>`
-*   **Description**: Directly persists changes to the emotional PAD state to SQLite, allowing affect updates to survive stream cancellations or stream pipeline crashes.
+*   **Signature**: `pub(crate) async fn persist_affect_snapshot(store: &MemoryStore, affect: &ene_store::AffectState) -> Result<(), CognitionError>`
+*   **Description**: Directly persists changes to the emotional PAD state to SQLite. Internal persistence detail.
 
 #### `compose_prompt_packet`
 *   **Signature**: `pub async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput, prefetch: ComposePrefetch) -> Result<ComposedPrompt, CognitionError>`
@@ -74,20 +74,17 @@ pub struct CognitionEngine {
     6.  Triggers token budget compression and session splits if budget counts exceed `ContextBudget` boundaries.
     7.  Converts results into `ComposedPrompt` carrying the text payload and budget metadata.
 
-#### `after_turn`
-*   **Signature**: `pub async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: crate::memory_writer::MemoryWriteProviders<'_>) -> Result<(), CognitionError>`
-*   **Description**: Dispatches deferred background consolidation pipelines (factual memory extraction, vector uploads, and forgets).
+#### `finalize_turn`
+*   **Signature**: `pub async fn finalize_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: crate::memory_writer::MemoryWriteProviders<'_>) -> Result<(), CognitionError>`
+*   **Description**: Handles all post-turn wrap-up safely. Synchronously saves basic dialog logs and emotion changes. It internally forks and spawns the deferred background tasks for complex operations such as factual memory extraction, vector embeddings, and memory decay/forgetting loops.
 
-#### `finalize_turn_post`
-*   **Signature**: `pub async fn finalize_turn_post(&self, store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>`
-*   **Description**: Executed synchronously immediately when LLM streaming completes. Saves plain dialog lines to text logs and updates affect coordinates in the store.
+#### `check_compression`
+*   **Signature**: `pub fn check_compression(&self, ctx: &TurnContext<'_>) -> Option<CompressionPlan>`
+*   **Description**: Evaluates current context boundaries (migrated from EneActor) and determines if a summary rollup or chunk split is required.
 
-#### `write_memories_deferred`
-*   **Signature**: `pub async fn write_memories_deferred(&self, store: &MemoryStore, config: &MindConfig, input: &crate::lifecycle::OwnedPostTurnInput, providers: crate::memory_writer::MemoryWriteProviders<'_>) -> Result<(), CognitionError>`
-*   **Process**:
-    1.  Extracts semantic and episodic memory candidates from turn data via `MemoryWriter::write_memories`.
-    2.  Evaluates candidates against database records to arbitrate duplicates and contradictions.
-    3.  Fades, archives, or decays older memory nodes via `MemoryWriter::apply_forgetting`.
+#### `apply_compression`
+*   **Signature**: `pub async fn apply_compression(&self, store: &MemoryStore, plan: CompressionPlan) -> Result<(), CognitionError>`
+*   **Description**: Executes the actual context compression summarization flow, interacting with the store to save scene snapshots.
 
 #### `resolve_expression_turn`
 *   **Signature**: `pub fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &ene_store::AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (crate::output::ExpressionDecision, ene_store::AffectState)`

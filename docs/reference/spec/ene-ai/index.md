@@ -20,7 +20,9 @@ The `ene-ai` crate defines Ene's core abstractions for LLM (Large Language Model
             &self,
             messages: &[LlmMessage],
             json_schema: Option<serde_json::Value>,
-        ) -> Result<String, LlmProviderError>;
+        ) -> Result<String, LlmProviderError> {
+            // Default implementation uses create_chat_stream and collects all chunks.
+        }
         fn name(&self) -> &str;
     }
     ```
@@ -38,10 +40,6 @@ The `ene-ai` crate defines Ene's core abstractions for LLM (Large Language Model
         fn model_name(&self) -> &str;
     }
     ```
-
-#### `collect_chat_completion`
-*   **Signature**: `pub async fn collect_chat_completion(provider: &dyn LlmProvider, messages: &[LlmMessage]) -> Result<String, LlmProviderError>`
-*   **Description**: Helper that collects all chunks from a chat stream into a single finalized string.
 
 #### `embed`
 *   **Signature**: `pub async fn embed<P: EmbeddingProvider + ?Sized>(provider: &P, text: &str, kind: EmbeddingKind) -> Result<Vec<f32>, EmbeddingError>`
@@ -92,8 +90,8 @@ The `ene-ai` crate defines Ene's core abstractions for LLM (Large Language Model
 *   **Description**: Requests embeddings in batches.
 
 #### `run_direct_sse_stream`
-*   **Signature**: `async fn run_direct_sse_stream(api_base: &str, api_key: &str, body: serde_json::Value, name_mapping: std::collections::HashMap<String, String>, tx: tokio::sync::mpsc::Sender<Result<LlmResponseChunk, LlmProviderError>>) -> Result<(), LlmProviderError>`
-*   **Description**: Direct Server-Sent Events (SSE) consumer for custom API backends.
+*   **Signature**: `pub(crate) async fn run_direct_sse_stream(...) -> Result<(), LlmProviderError>`
+*   **Description**: Internal Server-Sent Events (SSE) consumer for custom API backends.
 
 ---
 
@@ -169,24 +167,6 @@ The `ene-ai` crate defines Ene's core abstractions for LLM (Large Language Model
 
 ---
 
-## 5. RAG Retrieval Helpers (`hybrid.rs`)
+## 5. RAG Retrieval Helpers (Migrated)
 
-#### `HybridRerankProvider::new`
-*   **Signature**: `pub fn new(embedder: Arc<dyn EmbeddingProvider>) -> Self`
-*   **Description**: Constructs RAG search setups.
-
-#### `HybridRerankProvider::hyde`
-*   **Signature**: `pub async fn hyde(&self, query: &str) -> Result<String, EmbeddingError>`
-*   **Description**: Generates hypothetical answer documents using the HyDE model to improve semantic search vector alignments.
-
-#### `HybridRerankProvider::rerank`
-*   **Signature**: `pub async fn rerank(&self, query: &str, candidates: &[ene_tool_proto::ToolSpec]) -> Result<Vec<f32>, EmbeddingError>`
-*   **Description**: Ranks candidates using cross-encoder models.
-
-#### `hyde_document`
-*   **Signature**: `pub async fn hyde_document(llm: Option<&dyn LlmProvider>, query: &str) -> Result<String, EmbeddingError>`
-*   **Description**: Formats prompts for HyDE hypothetical documents.
-
-#### `rerank_tool_specs`
-*   **Signature**: `pub async fn rerank_tool_specs(embedder: &dyn EmbeddingProvider, rerank_llm: Option<&dyn LlmProvider>, query: &str, candidates: &[ene_tool_proto::ToolSpec]) -> Result<Vec<f32>, EmbeddingError>`
-*   **Description**: Computes cross-attention reranking matrix coefficients.
+*(Note: `HybridRerankProvider`, `hyde_document`, and `rerank_tool_specs` have been relocated to the `ene-tool-rag` crate to preserve strict boundaries. `ene-ai` remains solely responsible for LLM wrappers and fundamental vector generation.)*

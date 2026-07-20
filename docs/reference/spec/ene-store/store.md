@@ -156,17 +156,13 @@ pub struct MemoryStore {
 *   **Signature**: `pub async fn supersede_typed_memory(&self, new_item: &crate::NewMemoryItem, superseded_id: i64) -> Result<i64, MemoryError>`
 *   **Description**: Inserts a new memory and marks the overridden record as `Superseded` in a single transaction.
 
-#### `update_typed_memory_status`
-*   **Signature**: `pub async fn update_typed_memory_status(&self, id: i64, new_status: crate::MemoryStatus) -> Result<bool, MemoryError>`
-*   **Description**: Directly updates a memory record's status.
+#### `transition_typed_memory_status`
+*   **Signature**: `pub async fn transition_typed_memory_status(&self, id: i64, new_status: crate::MemoryStatus) -> Result<bool, MemoryError>`
+*   **Description**: Validates and directly updates a memory record's status.
 
 #### `bump_typed_memory_access`
 *   **Signature**: `pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, MemoryError>`
 *   **Description**: Increments the access counter and updates `last_accessed_at` timestamps.
-
-#### `transition_typed_memory_status`
-*   **Signature**: `pub async fn transition_typed_memory_status(&self, id: i64, new_status: crate::MemoryStatus) -> Result<bool, MemoryError>`
-*   **Description**: Validates and updates a memory record's status.
 
 #### `user_restore_typed_memory`
 *   **Signature**: `pub async fn user_restore_typed_memory(&self, id: i64) -> Result<bool, MemoryError>`
@@ -225,22 +221,15 @@ pub struct MemoryStore {
 *   **Signature**: `fn validate_embedding(embedding: &[f32], expected_dim: usize) -> Result<(), MemoryError>`
 *   **Description**: Verifies that vector sizes match and containing floats are finite.
 
-#### `decode_embedding_bytes`
-*   **Signature**: `pub fn decode_embedding_bytes(&self, bytes: &[u8]) -> Vec<f32>`
-*   **Description**: Translates database binary blobs back to float32 vectors.
-
-#### `embedding_to_bytes`
-*   **Signature**: `fn embedding_to_bytes(v: &[f32]) -> Vec<u8>`
-*   **Description**: Converts vector floats into binary blobs.
-
-#### `bytes_to_embedding`
-*   **Signature**: `fn bytes_to_embedding(b: &[u8]) -> Vec<f32>`
-*   **Description**: Converts binary blobs back to vector floats.
+#### `EmbeddingBytes` (Helper Struct)
+A centralized unit structure representing binary-to-float translations for sqlite-vec blobs.
+*   **`decode(&self, bytes: &[u8]) -> Vec<f32>`**: Translates database binary blobs back to float32 vectors.
+*   **`encode(v: &[f32]) -> Vec<u8>`**: Converts vector floats into binary blobs.
 
 #### `cosine_similarity_expr`
-*   **Signature**: `fn cosine_similarity_expr(embedding_col: &str, query_bytes: &[u8]) -> sea_orm::sea_query::Expr`
+*   **Signature**: `pub(crate) fn cosine_similarity_expr(embedding_col: &str, query_bytes: &[u8]) -> sea_orm::sea_query::Expr`
 *   **Description**: Compiles SQLite `vec_distance_cosine` functions into SeaORM query expressions.
 
 #### `cosine_similarity_filter`
-*   **Signature**: `fn cosine_similarity_filter(embedding_col: &str, query_bytes: &[u8], threshold: f64) -> sea_orm::sea_query::Expr`
+*   **Signature**: `pub(crate) fn cosine_similarity_filter(embedding_col: &str, query_bytes: &[u8], threshold: f64) -> sea_orm::sea_query::Expr`
 *   **Description**: Returns filtering expressions checking cosine thresholds.
