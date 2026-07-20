@@ -1,58 +1,178 @@
-# `ene-vrm` VRM1.0レンダラー仕様
+# `ene-vrm` VRM 1.0 キャラクターレンダラー仕様
 
-`ene-vrm` クレートは、VRM 1.0 形式のアバターモデルをディスクからロードし、表情（BlendShape）、目線（LookAt）、揺れもの物理シミュレーション（SpringBone）、VRMA形式のアニメーション再生、および `wgpu` を用いた MToon シェーディングによる描画を行うグラフィックスレンダラーモジュールです。
-
----
-
-## 1. 主要データ構造
-
-### `VrmModel` (公開 / 構造体)
-ロードされたアバターの全アセットとボーン情報を保持する最上位オブジェクト。
-*   `meshes: Vec<VrmMesh>`: 描画対象のポリゴンメッシュ群。
-*   `textures: Vec<VrmTexture>`: テクスチャ画像データ群。
-*   `skeleton: Skeleton`: Humanoid 規格ボーンの参照リストと初期トランスフォーム。
-*   `humanoid: HumanoidBoneRegistry`: Canonical 規格（55ボーン）から glTF ノードインデックスへのマッピング。
-*   `look_at: LookAtProperties`: 目線追従パラメータ。
-*   `spring_bones: SpringBoneProperties`: 揺れもの（髪・服等）のジョイント・コリダー定義。
+`ene-vrm` クレートは、VRM 1.0 キャラクターモデルのロード、表情ブレンドシェイプの補間評価、視線追跡（Look-At）、揺れもの物理シミュレーション（Spring Bone）、VRMA アニメーションの読み込みとリターゲット、および `wgpu` による MToon シェーディング描画を管理します。
 
 ---
 
-## 2. コアサブモジュール
+## 1. コアモデルデータ構造と操作メソッド (`model.rs`)
 
-### 1. ロード処理 (`loader::load_vrm`)
-*   **シグネチャ**: `pub fn load_vrm(data: &[u8]) -> Result<VrmModel, VrmError>`
-*   **解説**:
-    1.  `.vrm` バイナリ（gltf/glb 構造）をパース。
-    2.  `VRMC_vrm` 拡張スキーマから、Humanoid ボーン、表情ターゲット（Morph Targets）、LookAt（視線追従）パラメータをロード。
-    3.  `VRMC_springBone` 拡張から揺れもの構造、衝突体（Collider）を読み込み。
-    4.  MToon (トゥーンシェーダーマテリアル) のテクスチャバインドおよびパラメータ情報を解決。
+### `VrmModel` (パブリック / 構造体)
+キャラクターのメッシュ、テクスチャ、ボーン骨格、表情定義、および物理設定情報を集約して保持するルートコンポーネントです。
 
-### 2. 骨格構造 (`humanoid.rs`)
-*   **Humanoid 規格ボーンの正規化**:
-    UnityやVRM規格で定義されている55種類のボーン（Hips, Spine, Head, LeftHand 等）の定義 `VrmBone` と、glTF ノード ID の紐付けを管理。アニメーションリターゲットのベースとなります。
+#### `new`
+*   **定義**:
+    ```rust
+    pub const fn new(
+        meshes: Vec<VrmMesh>,
+        skeleton: Skeleton,
+        aabb_min: [f32; 3],
+        aabb_max: [f32; 3],
+        humanoid: HumanoidBoneRegistry,
+        look_at: Option<LookAtProperties>,
+        spring_bones: Option<SpringBoneProperties>,
+        expression_overrides: Option<Vec<ExpressionDefinition>>,
+    ) -> Self
+    ```
+*   **説明**: `VrmModel` キャラクターアセットモデルコンテナを作成します。
 
-### 3. 表情合成・ブレンドシェイプ (`expression.rs`)
-*   **表情ブレンドマトリクス**:
-    `VRM1` の表情グループ（Joy, Angry, Sorrow, Fun, Blink 等）に対し、どのメッシュのどの Morph Target（モーフターゲット）のウェイト値を何％適用するかを保持。
-*   **衝突回避（Expression Override）**:
-    目が瞬きしている間（Blink）は、喜び目（Joy）の表情モーフを一部打ち消すなど、ブレンドの排他・上書き制御を行います。
+#### `joint_count`
+*   **シグネチャ**: `pub const fn joint_count(&self) -> usize`
+*   **説明**: キャラクターのボーン骨格内に存在するボーン（ジョイント）の総数を返します。
 
-### 4. 視線追従 (`look_at.rs`)
-*   カメラやターゲットの座標に向かってアバターの目を向ける制御。
-*   **タイプ判定**:
-    -   `LookAtType::Bone`: 目（LeftEye/RightEye）のボーン回転により視線移動。
-    -   `LookAtType::Expression`: 目のテクスチャUVやモーフターゲット（表情値）のウェイトを増減させて擬似的に視線移動。
+#### `compute_world_transforms`
+*   **シグネチャ**: `pub fn compute_world_transforms(&mut self)`
+*   **説明**: 親子階層構造に沿って深さ優先探索（DFS）を行い、各ジョイントのローカル変化行列を、レンダリング時に使用する絶対ワールド変換行列（`glam::Mat4`）へと累積計算します。
 
-### 5. 揺れものシミュレーション (`spring_bone.rs`)
-*   髪やスカートなどの物理シミュレーター。
-*   **アルゴリズム**: Verlet 積分（Verlet Integration）を用いた位置解決。
-*   **コリジョン判定**: ボーンジョイント球と、腕や体幹に設定された球体・カプセル型コリダー（`SpringBoneCollider`）との間で、毎フレーム交差判定と押し戻し処理を実行します。
+#### `update_skin_palette`
+*   **シグネチャ**: `pub fn update_skin_palette(&mut self, frame: &VrmaFrame, look_at: Option<&LookAtBoneOutput>) -> Vec<Mat4>`
+*   **説明**: 現在の VRMA キーフレームポーズ、および視線追跡（Look-At）による関節回転量を合成してボーン座標を更新し、GPU のスキンメッシュシェーダーに入力するジョイント変換行列配列（パレット）を返します。
 
-### 6. アニメーション再生 (`animation.rs` - VRMA)
-*   `.vrma` (VRM Animation) 形式ファイルをロードし、`VrmaClip` として保持。
-*   **リターゲット機能**:
-    アニメーションファイルのボーン比率と、現在ロードされているアバターモデル（`VrmModel`）のボーン長比率の差分を吸収するための、Hips 位置スケール retargeting およびボーン回転補正を適用します。
+#### `rebuild_skin_palette`
+*   **シグネチャ**: `pub fn rebuild_skin_palette(&mut self, hips_translation: Option<Vec3>) -> Vec<Mat4>`
+*   **説明**: レストポーズ（初期姿勢）に基づき、必要に応じてヒップ位置の初期補正オフセットを適用してスキンパレット行列配列を再構築します。
 
-### 7. 描画処理 (`renderer.rs`)
-*   `wgpu` のレンダーパイプライン、深度バッファ、MToon（トゥーンレンダリング）用バインドグループを管理。
-*   **MToon特徴**: 陰影の境界のシャープさ（Shading Toony）、ハイライト、リムライト、輪郭線（Outline）の描画を GPU シェーダー（WGSL）にて描画します。
+---
+
+## 2. VRM モデルロード処理 (`loader.rs`)
+
+#### `load_vrm`
+*   **シグネチャ**: `pub fn load_vrm(path: impl AsRef<Path>, device: &wgpu::Device, queue: &wgpu::Queue) -> VrmResult<VrmModel>`
+*   **プロセス**:
+    1.  指定された `.vrm` バイナリ GLB ファイルデータを解析します。
+    2.  `VRMC_vrm` glTF 拡張ブロックから、表情定義、55種類の標準 Humanoid ジョイントノードマッピング、および視線追跡パラメータをロードします。
+    3.  `VRMC_springBone` 拡張ブロックから、揺れものボーンチェーンの定義とコライダーの配置設定を抽出します。
+    4.  MToon シェーダー用マテリアル定数とテクスチャリソースを解決して GPU にバインドします。
+    5.  すべてを結合した `VrmModel` モデルオブジェクトを構築します。
+
+#### `load_all_meshes`
+*   **シグネチャ**: `fn load_all_meshes(gltf: &gltf::Gltf, device: &wgpu::Device, queue: &wgpu::Queue, mtoon_materials: &[Option<mtoon::MToonMaterial>], primitive_joint_remap: &[Vec<Vec<u32>>]) -> VrmResult<LoadAllMeshesResult>`
+*   **説明**: メッシュジオメトリの頂点バッファおよびインデックスバッファを作成し、対応する MToon マテリアルパラメータを割り当てます。
+
+#### `load_primitive_morph_targets`
+*   **シグネチャ**: `fn load_primitive_morph_targets(primitive: &gltf::Primitive, gltf: &gltf::Gltf, expected_vertex_count: usize, mesh_idx: usize, prim_idx: usize, scale: f32) -> Option<Vec<crate::expression::MorphTarget>>`
+*   **説明**: 表情変更時に頂点位置を動的にブレンド補間するために、頂点モーフターゲットバッファの差分（座標、法線ベクトル）データをデコードします。
+
+#### `load_merged_skeleton_and_remaps`
+*   **シグネチャ**: `fn load_merged_skeleton_and_remaps(gltf: &gltf::Gltf) -> (Skeleton, Vec<Vec<Vec<u32>>>)`
+*   **説明**: ボーンの初期変形情報を読み込み、頂点ウェイトジョイントインデックスをグローバルなボーン ID にマッピング再配置します。
+
+---
+
+## 3. 表情ブレンドシェイプと競合排除 (`expression.rs` & `expression_override.rs`)
+
+#### `ExpressionLayer::set_expression`
+*   **シグネチャ**: `pub fn set_expression(&mut self, name: &ExpressionName, weight: f32) -> bool`
+*   **説明**: 表情名（`Joy`、`Blink` など）に対するブレンドシェイプの重み（Weight）を `[0.0, 1.0]` の範囲にクランプしてセットします。
+
+#### `ExpressionLayer::apply_weights`
+*   **シグネチャ**: `pub fn apply_weights(&mut self, incoming: &BTreeMap<ExpressionName, f32>)`
+*   **説明**: 複数の表情ブレンドシェイプパラメータを一括で更新適用します。
+
+#### `apply_overrides`
+*   **シグネチャ**: `pub fn apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[ExpressionDefinition])`
+*   **説明**: 表情競合ルールを処理します。たとえば `Blink`（まばたき）が 100% 適用されている間は、目の変形が破綻しないように `Joy` などによる他の目元モーフウェイトを一時的に減衰・ブロック（Block / Blend）します。
+
+---
+
+## 4. 視線追跡 Look-At 処理 (`look_at.rs`)
+
+#### `LookAtRangeMap::apply`
+*   **シグネチャ**: `pub fn apply(&self, input_degrees: f32) -> f32`
+*   **説明**: 入力された目標物に対する角度パラメータ（度）を、指定されたカーブ特性に沿って実際のボーン回転角度または表情モーフウェイトへとマッピング計算します。
+
+#### `LookAtModel::evaluate`
+*   **シグネチャ**: `pub fn evaluate(&self, head_world: Vec3, target_world: Vec3, head_rest_rotation: Quat) -> LookAtOutput`
+*   **説明**: 頭の現在位置および追跡目標物（Target）のワールド座標から、首および目のジョイントに適用すべき目標回転量を算出します。
+
+---
+
+## 5. 揺れもの Spring Bone 物理シミュレーション (`spring_bone.rs`)
+
+#### `SpringBoneSimulator::step`
+*   ```rust
+    pub fn step(
+        &mut self,
+        dt: f32,
+        props: &SpringBoneProperties,
+        node_world_positions: &HashMap<usize, Vec3>,
+        node_world_rotations: &HashMap<usize, Quat>,
+        node_parent_world_rotations: &HashMap<usize, Quat>,
+        collider_world_positions: &HashMap<usize, Vec3>,
+        collider_world_rotations: &HashMap<usize, Quat>,
+    ) -> HashMap<usize, Quat>
+    ```
+*   **プロセス**:
+    1.  髪の毛や服などのボーン関節の先端点に対して、重力、慣性力、風力などの外部フォースを算出します。
+    2.  Verlet（ベルレ）積分を実行して、新たなワールド座標を仮決定します。
+    3.  球体およびカプセルコライダー（`SpringBoneCollider`）との境界交差を検証し、めり込んでいる場合は衝突領域の外側へ点を押し出します。
+    4.  計算された関節先端のワールド位置から、ジョイントの親に対する相対的な局所回転量（`Quat`）に逆算出・マッピングして返します。
+
+---
+
+## 6. VRM アニメーション (VRMA) プレイヤー仕様 (`animation.rs`)
+
+#### `retarget_rotation`
+*   ```rust
+    pub fn retarget_rotation(
+        src_pose: Quat,
+        src_rest_local: Quat,
+        src_rest_global: Quat,
+        dst_rest_local: Quat,
+        dst_rest_global: Quat,
+    ) -> Quat
+    ```
+*   **説明**: 汎用の VRMA アニメーションファイル内の骨格構造と、現在ロードされている VRM mascot の関節レストポーズ形状の違いを相殺するように、回転角を数学的に retarget（適合変換）します。
+
+#### `retarget_hips_translation`
+*   ```rust
+    pub fn retarget_hips_translation(
+        src_pose: Vec3,
+        src_rest_local: Vec3,
+        src_rest_global_y: f32,
+        dst_rest_local: Vec3,
+        dst_rest_global_y: f32,
+    ) -> Vec3
+    ```
+*   **説明**: モデルのスケール身長比率（アニメーションファイルと対象モデルの頭頂高比など）を算出し、ルートボーン（Hips）の平行移動移動量をスケール補正して適用します。
+
+---
+
+## 7. WGPU レンダリングおよびポストプロセス処理 (`renderer.rs` & `post_process.rs`)
+
+#### `VrmRenderer::render`
+*   ```rust
+    pub fn render(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        model: &VrmModel,
+        camera: &OrthographicCamera,
+        model_uniform: &ModelUniform,
+        transparent: bool,
+    )
+    ```
+*   **説明**: キャラクターの各不透明・半透明プリミティブを、MToon シェーダーを使用して描画パイプラインに投入し、Outline や陰影境界を GPU レンダリングします。
+
+#### `PostProcessor::render`
+*   ```rust
+    pub fn render(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+    )
+    ```
+*   **説明**: 描画された中間テクスチャバッファに対し、アンチエイリアシング（SMAA）や色変換フィルタなどのポストプロセス加工を適用し、最終的なスワップチェーンビューへ転送・出力します。

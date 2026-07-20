@@ -1,20 +1,20 @@
-# `Commitment` / 約束・タスク台帳仕様
+# `Commitment` / アクティブコミットメント台帳仕様
 
-`Commitment` は、会話中に発生したマスコットの約束、予定、ユーザーへのタスク（未完了コミットメント）を追跡・永続化するモジュールです。回収処理（Recall）に組み込まれ、「約束の履行忘れ」を防止します。
+`Commitment`（約束）モジュールは、会話中にアクターがユーザーに対して行った約束、スケジュールされたタスク、およびフォローアップ事項を記録、永続化、および監視します。これらはプロンプトパッキング時に優先的にインジェクトされ、アクターが義務を失念するのを防止します。
 
 ---
 
 ## 1. データ構造
 
-### `CommitmentStatus` (公開 / 列挙型)
-約束の現在の状態を表します。
-*   `Active`: 未完了かつ有効。プロンプトや検索で常に参照されます。
-*   `Done`: 履行完了。
-*   `Cancelled`: キャンセルまたは撤回。
-*   `Stale`: 期限切れ、または別の約束に上書きされ不要になった状態。
+### `CommitmentStatus` (パブリック / 列挙型)
+約束のステータス情報：
+*   `Active`: 進行中の約束。プロンプトセクションおよび検索候補の対象となります。
+*   `Done`: 解決・履行された状態。
+*   `Cancelled`: 取り消しまたはキャンセルされた状態。
+*   `Stale`: 期限が切れたか、または古い状態。
 
-### `Commitment` (公開 / 構造体)
-データベース内の約束レコード。
+### `Commitment` (パブリック / 構造体)
+SQLite に保存される約束の永続レコード構造：
 ```rust
 pub struct Commitment {
     pub id: Option<i64>,
@@ -30,37 +30,75 @@ pub struct Commitment {
     pub completed_at: Option<DateTime<Utc>>,
 }
 ```
-*   `due_at`: システムが評価可能な期限日時。
-*   `due_label`: 抽出時にLLMが検出した生の文字列（例: 「明日」「来週の月曜」）。
 
 ---
 
-## 2. データベース操作
+## 2. 解析および型変換処理 (`commitment.rs`)
 
-`MemoryStore`（`store/mod.rs`）は、約束を管理するための以下の低レベルCRUDメソッドを提供します。
+#### `as_str`
+*   **シグネチャ**: `pub const fn as_str(self) -> &'static str`
+*   **説明**: 列挙型ステータスを SQLite 保存用の文字列データに変換します。
 
-### `insert_commitment`
+#### `from_db_str`
+*   **シグネチャ**: `pub(crate) fn from_db_str(s: &str) -> Self`
+*   **説明**: SQLite からロードしたステータス文字列を列挙型データにデシリアライズします。
+
+---
+
+## 3. データベース CRUD 操作
+
+`MemoryStore` 接続プールは、以下の約束に関するデータ操作を提供します：
+
+#### `insert_commitment`
 *   **シグネチャ**: `pub async fn insert_commitment(&self, row: &NewCommitment) -> Result<i64, MemoryError>`
-*   **解説**: 新しい約束をデータベースに追加し、生成された主キーIDを返却します。
+*   **説明**: データベースに新しい約束レコードを作成し、そのレコード ID を返します。
 
-### `list_active_commitments`
+#### `list_active_commitments`
 *   **シグネチャ**: `pub async fn list_active_commitments(&self, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<Commitment>, MemoryError>`
-*   **解説**: 特定のキャラクターとユーザーに紐づく、ステータスが `Active` な約束レコードを指定件数（`limit`）までロードします。
+*   **説明**: 指定されたキャラクターおよびユーザー ID スコープに合致するアクティブ（Active）な約束レコードを、最大 `limit` 件取得します。
 
-### `update_commitment_status`
+#### `update_commitment_status`
 *   **シグネチャ**: `pub async fn update_commitment_status(&self, id: i64, status: CommitmentStatus, fail_reason: Option<&str>) -> Result<bool, MemoryError>`
-*   **解説**: IDで指定された約束のステータスを更新します。ステータスが `Done` に変更された場合、同期的現在時刻を `completed_at` に記録します。
+*   **説明**: 特定の約束レコードのステータスを変更します。状態を `Done`（解決）に変更した場合は、自動的に `completed_at` カラムに現在の日時をスタンプします。
 
 ---
 
-## 3. プロンプトインジェクション用データ (`ActiveCommitmentPrompt`)
+## 4. 台帳ビジネスロジック (`CommitmentLedger` in `ene-mind`)
 
-ベクトル類似度検索（Vector Recall）の結果に左右されず、未完了タスクをプロンプトの固定セクションに確実に差し込むため、軽量のテキスト表現である `ActiveCommitmentPrompt` を使用します。
+`ene-mind/src/commitments/mod.rs` に存在する `CommitmentLedger` 構造体は、約束に関連する高レベルな統合ビジネスロジックを管理します。
 
-*   **構造**:
-    -   `id`: コミットメントID。
-    -   `title`: 短い見出し。
-    -   `description`: 約束の内容説明。
-    -   `due_label`: 期限表現。
-*   **変換処理**:
-    `CommitmentLedger::active_prompt_candidates(rows: &[Commitment]) -> Vec<ActiveCommitmentPrompt>` を経由し、データベース行オブジェクトからプロンプトに適した最小限の文字列表現へ変換します。
+#### `apply_commitment_candidates`
+*   **シグネチャ**: `pub async fn apply_commitment_candidates(store: &MemoryStore, ctx: &CommitmentSyncContext<'_>, candidates: &[MemoryCandidate]) -> Result<Vec<i64>, CognitionError>`
+*   **説明**: メモリ統合器から送られてきた約束候補レコードを精査し、条件を満たした新しい項目を SQLite に追加します。
+
+#### `arbitrate_apply_and_sync`
+*   **シグネチャ**: `pub async fn arbitrate_apply_and_sync(store: &MemoryStore, candidates: &[MemoryCandidate], arbiter_ctx: &ArbiterContext<'_>, sync_ctx: &CommitmentSyncContext<'_>) -> Result<(Vec<AppliedDecision>, Vec<i64>), CognitionError>`
+*   **説明**: 通常のメモリ判定の重複仲裁プロセスと、約束テーブルの書き込み同期プロセスを統合して一括処理します。
+
+#### `list_active`
+*   **シグネチャ**: `pub async fn list_active(store: &MemoryStore, character_id: &str, user_id: Option<&str>, limit: usize) -> Result<Vec<Commitment>, CognitionError>`
+*   **説明**: キャラクターに紐づくアクティブな約束レコードを取得します。
+
+#### `active_prompt_candidates`
+*   **シグネチャ**: `pub fn active_prompt_candidates(commitments: &[Commitment]) -> Vec<ActiveCommitmentPrompt>`
+*   **説明**: データベースの約束レコード配列を、トークン節約のため簡素化されたプロンプトインジェクト用の軽量モデル配列にマッピング変換します。
+
+#### `complete`
+*   **シグネチャ**: `pub async fn complete(store: &MemoryStore, id: i64) -> Result<bool, CognitionError>`
+*   **説明**: 約束を `Done`（解決完了）に変更します。
+
+#### `cancel`
+*   **シグネチャ**: `pub async fn cancel(store: &MemoryStore, id: i64) -> Result<bool, CognitionError>`
+*   **説明**: 約束を `Cancelled`（キャンセル）に変更します。
+
+#### `mark_stale_overdue`
+*   **シグネチャ**: `pub async fn mark_stale_overdue(store: &MemoryStore, now: chrono::DateTime<chrono::Utc>) -> Result<usize, CognitionError>`
+*   **説明**: 期限日時（`due_at`）が現在時刻（`now`）を過ぎて超過しているアクティブな約束を検索し、一括でステータスを `Stale` に更新します。
+
+#### `cancel_matching_by_title`
+*   **シグネチャ**: `pub async fn cancel_matching_by_title(store: &MemoryStore, ctx: &CommitmentSyncContext<'_>, title: &str) -> Result<(), CognitionError>`
+*   **説明**: 同じタイトル条件を持つ進行中の約束を検索し、強制的にキャンセル（Cancelled）状態に更新します。
+
+#### `normalize_title`
+*   **シグネチャ**: `fn normalize_title(title: &str) -> String`
+*   **説明**: 比較マッチングのために、タイトルの文字列を小文字に正規化します。

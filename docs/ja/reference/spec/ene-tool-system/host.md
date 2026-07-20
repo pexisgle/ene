@@ -1,53 +1,119 @@
-# ツールプロセスライフサイクル & MCP仕様 (`ene-tool-host`)
+# ツールプロセスマネージャーおよび MCP クライアント仕様 (`ene-tool-host`)
 
-`ene-tool-host` クレートは、独立したツールバイナリプロセスの自動起動・監視、Unixドメインソケット/Windows名前付きパイプによる接続、衝突検知、クラッシュレジリエンス、および外部の MCP (Model Context Protocol) サーバーとの接続管理を担当します。
-
----
-
-## 1. ツールプロセス管理者 (`ToolHostManager`)
-
-`ToolHostManager` は、設定ファイル `config.json` 内の `tools.list.<name>` の記述に基づき、ツール子プロセス（Subprocess）のライフサイクルを管理します。
-
-### 1. 安全なプロセスのスポーンと環境変数伝播
-ツールプロセスを起動する際、ホスト（親プロセス）はサンドボックス制限およびDBプロキシ用の接続情報をセキュリティ環境変数として子プロセスに伝播します。
-*   `ENE_DB_SOCKET`: ツール専用DBプロキシソケットのパス。
-*   `ENE_DB_AUTH_TOKEN`: 接続に必要な一時トークン（Blake3ハッシュ認証用）。
-*   `ENE_TOOL_CONFIG`: 該当ツールのカスタム設定JSON。
-
-### 2. 衝突防止ガード (Hard-Error on Startup)
-起動時、すべてのツールの設定名がユニークであることを検証します。名前空間の重複（例: 2つの異なるツールが `system` という名前を要求した場合）が検知された場合、`ToolHostError::DuplicateToolName` を投げてアクターの起動自体を強制クラッシュさせます（セキュリティ上のフェイルクローズ）。
+`ene-tool-host` クレートは、外部ツール子プロセスの起動・監視、IPC 通信用のチャネル確立、名前衝突のチェック、クラッシュ回復のための再接続ループ、および外部 MCP (Model Context Protocol) サーバーの接続統合を管理します。
 
 ---
 
-## 2. クラッシュレジリエンス (Crash Resilience)
+## 1. ツールホスト構成設定およびバージョン管理
 
-Ene では、ファイルI/Oツールやブラウザ操作ツールが不安定になりクラッシュした場合でも、チャットセッション全体が巻き込まれて終了しないよう、プロセスレイヤー（`ToolHostManager`）と通信レイヤー（`IpcToolRegistry`）の双方にレジリエンス（自己修復）機構を備えています。
+#### `deserialize_config`
+*   **シグネチャ**: `pub fn deserialize_config<T>(&self) -> Result<T, serde_json::Error> where T: DeserializeOwned`
+*   **説明**: ツール個別のカスタム JSON 設定ブロックを、構造化オブジェクトへとデシリアライズします。
 
-*   **接続喪失の検知**: ソケット読み書き時のタイムアウト、またはEOF到達により通信断絶を検知。
-*   **指数バックオフ再試行 (Exponential Backoff)**:
-    接続ロスまたはプロセス終了を検知した場合、以下のパラメータで自動復旧・再接続を試みます。
-    -   **最大試行回数**: 5回
-    -   **初期待機時間**: 500ms
-    -   **最大待機時間**: 30秒
-    -   **バックオフ倍率**: 2倍（500ms → 1s → 2s → 4s ... と待機時間を延長）。
-*   再試行が5回連続で失敗した場合のみ、ツールは「利用不可能（Offline）」と判断され、以降の呼び出しは即座にエラーとなります。
+#### `compute_tool_version_hash`
+*   **シグネチャ**: `pub fn compute_tool_version_hash(tool: &ene_tool_proto::ToolSpec) -> String`
+*   **説明**: ツールで定義されている引数の構成、キーワード、バージョン値から Blake3 ハッシュ値を算出し、定義変更が生じていないかを照合判定します。
 
 ---
 
-## 3. MCP連携 (`McpToolRegistry`)
+## 2. プロセス監視機能 (`ToolHostManager`)
 
-Ene は、Anthropic社が提唱する Model Context Protocol (MCP) をネイティブサポートしています。
-*   **トランスポート方式**:
-    -   `stdio`: サブプロセスを起動し、標準入出力を介して JSON-RPC 通信を実行。
-    -   `http`: Webソケット (SSE) 経由でリモートの MCP サーバーに接続。
-*   **スキーマ変換**:
-    MCP の提供する `tools/list` 応答をパースし、Ene の内部構造体 `ToolSpec` に動的に変換します。これにより、世の中の豊富な MCP ツール群を Ene のプラグインとしてそのまま利用可能です。
+`ToolHostManager` は、`config.json` の `tools.list.<name>` 定義に沿って外部ツールのライフサイクルを監視・管理します。
+
+#### `start`
+*   **シグネチャ**: `pub async fn start(config: &EneConfig, mut db_tokens: std::collections::HashMap<String, String>) -> Result<Self, ToolHostError>`
+*   **説明**: 構成設定情報を元に、登録されたツール群の初期化・起動を開始します。
+
+#### `start_full`
+*   **シグネチャ**: `pub async fn start_full(config: &EneConfig, db_tokens: std::collections::HashMap<String, String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>`
+*   **説明**: すべての定義された外部ツールをロード・起動し、一元管理するスレッド安全な `CompositeToolRegistry` 参照ハンドラを返します。
+
+#### `try_add_registry`
+*   **シグネチャ**: `pub fn try_add_registry(&mut self, registry: Arc<dyn ToolRegistry>) -> Result<(), ToolHostError>`
+*   **説明**: 管理リストに新たなツールレジストリを追加します。他のツール名と重複（競合）している場合は、`ToolHostError::DuplicateToolName` 例外を発行して起動を中断します。
+
+#### `into_registry`
+*   **シグネチャ**: `pub fn into_registry(self) -> Arc<dyn ToolRegistry>`
+*   **説明**: 構築された統合型の `CompositeToolRegistry` オブジェクトを返します。
+
+#### `start_tool`
+*   **シグネチャ**: `async fn start_tool(name: &str, sandbox: &ene_tool_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64, db_token: Option<String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>`
+*   **プロセス**:
+    1.  `find_tool_binary` を実行して、該当ツールのバイナリ実体ファイルの絶対パスを取得します。
+    2.  ツール固有のテンポラリ UDS チャネルソケットファイルを配置し、リスナーをバインドします。
+    3.  環境変数パラメータ（DB ハンドシェイク情報 `ENE_DB_AUTH_TOKEN` やソケットパスなど）を設定します。
+    4.  子プロセス（コマンド実行）を Spawn し起動します。
+    5.  ツールからの初期ハンドシェイク接続の到着を指定時間待ちます。
+    6.  UDS セッションが有効化された `IpcToolRegistry` を構築して返します。
+
+#### `find_tool_binary`
+*   **シグネチャ**: `fn find_tool_binary(name: &str) -> Option<PathBuf>`
+*   **説明**: 内蔵のプリセットツール実行ファイルディレクトリ、およびユーザー設定のツール配置フォルダ配下から、ツール名に対応する実行ファイルを探索します。
+
+#### `is_alive`
+*   **シグネチャ**: `fn is_alive(&mut self) -> bool`
+*   **説明**: 子プロセスのプロセスハンドルが現在正常にアクティブであるかを死活監視します。
+
+#### `restart`
+*   **シグネチャ**: `fn restart(&mut self) -> Result<(), ToolHostError>`
+*   **説明**: ゾンビプロセス化した既存の子プロセスを強制終了（Kill）し、再度新規に子プロセスを立ち上げて再接続処理を実行します。
+
+#### `delay_for_restart`
+*   **シグネチャ**: `fn delay_for_restart(restart_count: usize) -> Duration`
+*   **説明**: ツールのクラッシュに伴う自動再起動のバックオフ時間を算出します。指数バックオフを適用し、最大30秒のクールダウン間隔にクランプします。
 
 ---
 
-## 4. 複合レジストリ (`CompositeToolRegistry`)
+## 3. IPC 通信レジストリ処理 (`ipc_registry.rs`)
 
-内蔵ツール（Built-in）、IPC接続ツール、および MCP ツールを単一のインターフェースに統合する最上位クラス。
-*   `CompositeToolRegistry` は、アクターからの `call_tool` 要求を受けると、対象ツールが属する適切な子レジストリへシームレスに処理をルーティングします。
-*   **RAGによるツール選択フィルタリング**:
-    すべてのツール定義を LLM のプロンプトにインジェクションするとコンテキスト上限を超えるため、現在実行中の会話ターンに関連性の高いツールのみを `ene-tool-rag` を用いてフィルタリングし、プロンプトに差し込みます。
+外部プロセスとのメッセージングと接続確認を処理します。
+
+#### `new` (for IpcToolRegistry)
+*   **シグネチャ**: `pub async fn new(socket_path: PathBuf, sandbox: SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64) -> Result<Self, ToolHostError>`
+*   **説明**: 対象の UDS ソケットと接続し、非同期メッセージ通信セッションを確立します。
+
+#### `connect_with_retry`
+*   **シグネチャ**: `pub(crate) async fn connect_with_retry(socket_path: &Path, sandbox: &ene_tool_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, max_retries: u32, delay_ms: u64, timeout_ms: u64) -> Result<IpcToolRegistry, ToolError>` (および同名関数)
+*   **説明**: ネットワークエラー等に対して指数バックオフ待機をかけながら、指定ソケットへの接続試行を繰り返します。
+
+#### `do_request`
+*   **シグネチャ**: `async fn do_request(&self, req: IpcRequest) -> Result<IpcResponse, ToolHostError>`
+*   **説明**: `IpcRequest` をバイトシリアライズして UDS に送信し、結果フレームが返ってくるのを待ちます。
+
+#### `do_refresh_tools_with_stream`
+*   **シグネチャ**: `async fn do_refresh_tools_with_stream(&self, stream: &mut IpcStream) -> Result<(), ToolHostError>`
+*   **説明**: ストリームに対して `ListTools` コマンドを送信し、外部プロセス側が提供可能な全ツールスペック情報を取得します。
+
+#### `do_refresh_tools` / `refresh_tools`
+*   **シグネチャ**: `pub async fn refresh_tools(&self) -> Result<(), ToolHostError>`
+*   **説明**: キャッシュされているスキーマ情報を手動でリフレッシュして再ロードします。
+
+#### `ensure_connected`
+*   **シグネチャ**: `async fn ensure_connected(&self) -> Result<(), ToolHostError>`
+*   **説明**: ソケットが切断状態になっているかをチェックし、切断されている場合は自動で回復接続プロセスをトリガーします。
+
+---
+
+## 4. Model Context Protocol (`McpToolRegistry`)
+
+外部の標準 MCP サービスへのネイティブ接続を提供します。
+
+#### `connect_stdio`
+*   **シグネチャ**: `pub async fn connect_stdio(&self, name: &str, command: &str, args: &[&str]) -> Result<(), ToolHostError>`
+*   **説明**: 外部の MCP サーバーコマンドプロセスを起動し、JSON-RPC 仕様に基づいて stdin/stdout 経由で機能定義の読み込みおよびツール呼び出しの転送を実行します。
+
+---
+
+## 5. 統合レジストリ処理 (`CompositeToolRegistry`)
+
+#### `try_new` / `new`
+*   **シグネチャ**: `pub fn try_new(registries: Vec<Arc<dyn ToolRegistry>>) -> Result<Self, ToolHostError>`
+*   **説明**: 複数のレジストリソース（内蔵、IPC 子プロセス、MCP 接続）を一つのファサードに結合します。ツール名の重複衝突チェックを実行します。
+
+#### `try_add_registry`
+*   **シグネチャ**: `pub fn try_add_registry(&self, registry: Arc<dyn ToolRegistry>) -> Result<(), ToolHostError>`
+*   **説明**: アプリケーションの実行中に動的にレジストリを追加します。
+
+#### `call_tool`
+*   **シグネチャ**: `async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError>`
+*   **説明**: ツール名（例: `fs.read`）のプレフィックスから対象のツールを所有するレジストリセグメントを特定し、引数を転送して非同期実行します。

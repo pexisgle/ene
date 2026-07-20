@@ -1,79 +1,81 @@
-# `DbIpcServer` / ツールDBプロキシセキュリティ仕様
+# ツールデータベースプロキシ仕様 (`DbIpcServer`)
 
-`DbIpcServer` は、各外部ツールプロセスに対してSQLiteデータベースへの安全なアクセスを提供するIPCソケットサーバーです。ツールバイナリが生の `memory.db` ファイルへのハンドルを直接保持したり、任意のSQL文を実行したりすることを防ぎ、セキュリティ境界を確立します。
-
----
-
-## 1. サーバーデータ構造
-
-### `DbServerError` (公開 / エラー列挙型)
-DB IPCサーバーの実行およびリクエストのパース・検証時に発生しうるエラー。
-*   `Io(std::io::Error)`: ソケット接続や読み書きのエラー。
-*   `Json(serde_json::Error)`: JSON Lines メッセージのデシリアライズ失敗。
-*   `Db(sea_orm::DbErr)`: SeaORM 経由でSQLiteを実行した際のエラー。
-*   `PermissionDenied(String)`: 認証失敗、プレフィックス違反、またはシステムテーブルへのアクセス試行。
-*   `UnknownTable(String)`: `DeclareSchema` で宣言されていないテーブルへのアクセス。
-*   `UnknownColumn { table, column }`: 宣言されていないカラムへのアクセス。
-*   `Internal(String)`: その他の内部サーバーエラー。
-
-### `DbIpcServer` (公開 / サーバーインスタンス)
-ツールごとに1台生成されるサーバー実体。
-```rust
-pub struct DbIpcServer {
-    db: DatabaseConnection,
-    socket_path: PathBuf,
-    tool_name: String,
-    prefix: String,
-    auth_token: String,
-}
-```
-*   `new(db: DatabaseConnection, socket_path: PathBuf, tool_name: String, prefix: String, auth_token: String) -> Self`: コンストラクタ。
-*   `async fn run(self) -> Result<(), DbServerError>`:
-    1.  Unix環境では、前回の実行で残った古いソケットファイルを `remove_file` でクリーンアップ。
-    2.  `IpcListener::bind` により指定のソケットパス/パイプにバインド。
-    3.  Unix環境では、ソケットファイルのパーミッションを `0o600`（所有ユーザーのみ接続可能）へ `chmod` してローカル特権昇格を防ぐ。
-    4.  無限 accept ループを実行。一時的なリソース枯渇（EMFILE等）に対しては、ソケットタスクを終了せず、500msのバックオフを挟んでリトライ。
-    5.  接続ごとに `tokio::spawn` して `handle_connection` タスクを起動。
+`DbIpcServer` は、ホストのメインプロセスのランタイム内に存在し、サンドボックス化されたサードパーティ製ツールとホストの SQLite 接続プール (`MemoryStore`) 間の仲介役として機能します。
 
 ---
 
-## 2. 接続・認証・ライフサイクル制御
+## 1. サーバーのライフサイクルと接続
 
-### `handle_connection`
-```rust
-async fn handle_connection(
-    stream: IpcStream,
-    db: DatabaseConnection,
-    tool_name: String,
-    prefix: String,
-    auth_token: String,
-) -> Result<(), DbServerError>
-```
-1.  **接続ローカル状態管理**:
-    -   `last_rowid`: 直前の `Insert` で発行された `rowid` を一時保存する `Arc<Mutex<Option<i64>>>`。SeaORM のコネクションプールを使うため、接続間でSQLiteの `last_insert_rowid()` を直接呼び出すとスレッド競合が発生して異なるツールのrowidが返る恐れがあります。これを防ぐため、本ハンドラ単位（＝同一ソケット接続内）でメモリ上に保存します。
-    -   `declared_tables`/`declared_columns`: ツールが宣言したスキーマ構造。
-2.  **メッセージ長ヘッダーパース**:
-    -   すべてのメッセージは 4バイトの小端エンディアン整数でメッセージ長を前置します。
-    -   最大メッセージ長を `64MB` に制限し、悪意ある巨大データによるメモリ枯渇攻撃を防止します。
-3.  **ハンドシェイク & 認証**:
-    -   接続後、最初のメッセージは `DbRequest::Handshake { token }` である必要があります。
-    -   受け取った `token` が起動時に生成された `auth_token` と完全一致しない場合、即座に接続を切断します。
+#### `start`
+*   **シグネチャ**: `pub fn start(store: Arc<MemoryStore>, socket_path: &Path) -> Result<Self, DbServerError>`
+*   **プロセス**:
+    1.  指定された UDS (Unix Domain Socket) パス上の既存のファイルをクリーンアップします。
+    2.  `IpcListener` にバインドしてソケットをリッスンします。
+    3.  バックグラウンドで接続の受け入れループを実行します。
+    4.  UDS のファイルアクセス許可を設定し、同一マシンのユーザープロセスのみが接続できるようにセキュリティを保護します。
+
+#### `shutdown`
+*   **シグネチャ**: `pub async fn shutdown(&self)`
+*   **説明**: ソケットリスナーをクローズし、現在接続されているすべてのクエリセッションを切断し、UDS のソケットファイルを削除します。
 
 ---
 
-## 3. セキュリティ防御機構 (Security Model)
+## 2. セキュリティとクエリセッション処理
 
-### 1. 識別子の厳格検証 (`validate_identifier`)
-テーブル名、カラム名、インデックス名など、SQLに動的埋め込みが必要となるすべての識別子（これらはプレースホルダによるパラメータ化ができないため）に対し、以下のバリデーションを実行します。
-*   空文字、または64文字を超えるものは拒否。
-*   先頭文字が `[A-Za-z_]`、それ以降が `[A-Za-z0-9_]` 以外の文字を含む場合は `PermissionDenied`。SQLインジェクションを完全に防御します。
+接続が受け入れられると、サーバーはクライアントごとに独立したタスクを実行し、`DbSession` を確立します。
 
-### 2. プレフィックス制限 (Namespace Isolation)
-ツールがアクセスできるテーブル名は、起動時に指定された `prefix`（例: `fs_`、`web_`）から始まるものに限定されます。
-*   `DeclareSchema` でテーブルを作成する際、および `Select`/`Insert`/`Update` 等のクエリ発行時、テーブル名のプレフィックスが検証されます。
-*   `sqlite_*` などのメタテーブルや、他のツールのテーブル、スキーマ管理用内部テーブル `__tool_schemas` へのアクセスはすべて拒否されます。
+#### `run_session`
+*   **シグネチャ**: `async fn run_session(store: Arc<MemoryStore>, stream: IpcStream) -> Result<(), DbServerError>`
+*   **プロセス**:
+    1.  **ハンドシェイクフェーズ**:
+        クライアントから最初の `DbRequest::Handshake` フレームを読み取ります。提供された Blake3 `auth_token` と、ホストが該当するツールプロセスの起動時に生成したトークンを照合します。
+    2.  認証に成功すると、応答として `DbResponse::HandshakeAck` を送り返します。認証に失敗した場合は `DbErrorCode::Unauthorized` を返してソケット接続を即座に切断します。
+    3.  **メッセージループ**:
+        ハンドシェイクに成功したセッションでは、ループに入り、長さプレフィックス付きの `DbRequest` を受信・処理し、対応する `DbResponse` を返します。
 
-### 3. DDLの遮断
-ツールは生の `CREATE TABLE` などのSQLを送信できません。
-*   スキーマ定義は `DbRequest::DeclareSchema` APIに制限され、内部でバリデーションされた情報に基づき安全に `CREATE TABLE` 文が生成・発行されます。
-*   テーブルの `DROP` や `ALTER`、インデックスの削除などはAPIとして提供されておらず、ツール側からデータベース構造を破壊することはできません。
+---
+
+## 3. クエリ検証ルーチン
+
+#### `validate_schema`
+*   **シグネチャ**: `fn validate_schema(tool_name: &str, schema: &DbSchema) -> Result<(), DbServerError>`
+*   **プロセス**:
+    1.  スキーマで定義されているすべてのテーブル名を検査します。
+    2.  テーブル名がツールの名前空間プレフィックス（例: `fs_`）で始まっていることを確認します。
+    3.  プレフィックスが一致しない場合は `DbErrorCode::PermissionDenied` を返し、スキーマ定義の適用をブロックします。
+
+#### `validate_query_tables`
+*   **シグネチャ**: `fn validate_query_tables(tool_name: &str, table: &str) -> Result<(), DbServerError>`
+*   **説明**: SQL クエリインジェクション攻撃を防御するため、テーブル名およびカラム名が正規表現 `^[A-Za-z_][A-Za-z0-9_]*$` に準拠しているか検証します。また、スキーマで割り当てられた名前空間のプレフィックスで始まっているか再確認します。
+
+---
+
+## 4. DDL（データ定義言語）とスキーマ移行
+
+#### `apply_schema_migration`
+*   **シグネチャ**: `async fn apply_schema_migration(store: &MemoryStore, schema: &DbSchema) -> Result<(), DbServerError>`
+*   **プロセス**:
+    1.  `validate_schema` を呼び出して安全性を検証します。
+    2.  ツール用の独立したデータベーススキーマ情報を解析します。
+    3.  `CREATE TABLE IF NOT EXISTS` ステートメントを構築してテーブルを作成します。
+    4.  スキーマで定義されたすべてのインデックス（例: `CREATE INDEX IF NOT EXISTS ...`）を順次構築します。
+
+---
+
+## 5. DML（データ操作言語）ヘルパーメソッド
+
+#### `execute_insert`
+*   **シグネチャ**: `async fn execute_insert(store: &MemoryStore, tool_name: &str, table: &str, row: Row) -> Result<i64, DbServerError>`
+*   **説明**: `validate_query_tables` を実行したのち、SQLite パラメータバインディングプレースホルダーを構築し、ツールデータベースに行データを安全に挿入して、自動生成されたレコード ID を返します。
+
+#### `execute_select`
+*   **シグネチャ**: `async fn execute_select(store: &MemoryStore, tool_name: &str, table: &str, columns: &[String], filter: DbFilter, order_by: Vec<DbOrderBy>, limit: Option<u64>) -> Result<Vec<Row>, DbServerError>`
+*   **説明**: AST フィルタパラメータを検証して SQL 構文を生成し、データを検索してクエリ結果をツールに返します。
+
+#### `execute_update`
+*   **シグネチャ**: `async fn execute_update(store: &MemoryStore, tool_name: &str, table: &str, set: BTreeMap<String, DbValue>, filter: DbFilter) -> Result<u64, DbServerError>`
+*   **説明**: 行の値と更新用の設定情報を適用し、更新されたレコード数を返します。
+
+#### `execute_delete`
+*   **シグネチャ**: `async fn execute_delete(store: &MemoryStore, tool_name: &str, table: &str, filter: DbFilter) -> Result<u64, DbServerError>`
+*   **説明**: 指定された条件に一致するレコードをツール用のテーブルから安全に削除します。

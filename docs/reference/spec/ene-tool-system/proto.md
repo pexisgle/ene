@@ -4,45 +4,130 @@ The `ene-tool-proto` crate defines the serialized wire contract, network stream 
 
 ---
 
-## 1. Frame Protocol
+## 1. Frame Protocol & Transport (`transport.rs`)
 
-### 1. Length-Prefixed JSON
-All socket operations are framed with the following bytes:
-*   **Header**: A 4-byte big-endian unsigned 32-bit integer (`u32`) indicating the length of the payload in bytes.
-*   **Body**: A UTF-8 encoded JSON string.
-*   **Size Limit**: Message bodies are capped at **64MB** (`MAX_MESSAGE_SIZE`) to prevent memory exhaustion and buffer overflows. Socket connections are terminated if this limit is exceeded.
+All socket operations are framed using length-prefixed JSON Lines.
 
----
+#### `IpcStream::connect`
+*   **Signature**: `pub async fn connect(path: &Path) -> io::Result<Self>`
+*   **Description**: Connects to the local database socket (Unix Domain Sockets on Linux/macOS, Named Pipes on Windows).
 
-## 2. IPC Request & Response (`IpcRequest` / `IpcResponse`)
+#### `poll_read` / `poll_write` / `poll_flush` / `poll_shutdown`
+*   **Description**: Standard async I/O implementations for `IpcStream`.
 
-### 1. `IpcRequest` (Core → Tool)
-*   **`Handshake`**: Negotiates the protocol version and passes sandbox limits and tool settings.
-*   **`ListTools`**: Requests all available action schemas (`ToolSpec`).
-*   **`ListRagProfiles`**: Requests metadata profiles for RAG retrieval indexing.
-*   **`CallTool`**: Requests tool execution, carrying the target `name` and JSON string `arguments`.
-*   **`SetCallContext`**: Carries conversation and turn identifiers for caching and rollback snapshots.
-*   **`Shutdown`**: Requests a graceful process shutdown.
+#### `IpcListener::bind`
+*   **Signature**: `pub fn bind(path: &Path) -> io::Result<Self>`
+*   **Description**: Binds a socket listener.
 
-### 2. `IpcResponse` (Tool → Core)
-*   **`HandshakeAck`**: Returns the negotiated version.
-*   **`Tools`**: Returns a list of supported `ToolSpec` definitions.
-*   **`RagProfiles`**: Returns indexed RAG metadata profiles.
-*   **`CallResult`**: Returns execution output: `Ok(String)` or `Err(ToolError)`.
+#### `IpcListener::accept`
+*   **Signature**: `pub async fn accept(&mut self) -> io::Result<IpcStream>`
+*   **Description**: Awaits incoming tool client connections.
+
+#### `cleanup_path`
+*   **Signature**: `pub fn cleanup_path(path: &Path)`
+*   **Description**: Removes stale socket files.
 
 ---
 
-## 3. Sandbox Configuration (`SandboxConfigData`)
+## 2. IPC Request & Response Serialization (`ipc.rs`)
 
-Defines permission limits for tool processes, registered via `define_tool_config!`:
+#### `read_ipc_request`
+*   **Signature**: `pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Option<IpcRequest>, ToolError>`
+*   **Description**: Reads a 4-byte big-endian `u32` header, verifies it is under the 64MB limit (`MAX_MESSAGE_SIZE`), reads the JSON body, and deserializes it to `IpcRequest`.
 
-*   `enabled: bool`: Enables sandbox limits.
-*   `allowed_directories: Vec<String>`: Directory paths allowed for read access (defaults to `.`).
-*   `writable_directories: Vec<String>`: Directory paths allowed for write access.
-*   `blocked_commands: Vec<String>`: Regular expression blocklists for shell commands (e.g., `rm -rf /`, `sudo`).
-*   `max_read_bytes / max_write_bytes`: Size caps per read/write action (defaults to 50KB read / 1MB write).
-*   `shell_timeout_ms`: Command execution timeout limit (defaults to 120,000 ms).
-*   `db_socket / db_auth_token`: Connection credentials for the tool SQLite proxy server.
+#### `write_ipc_request`
+*   **Signature**: `pub async fn write_ipc_request<W: AsyncWriteExt + Unpin>(writer: &mut W, req: &IpcRequest) -> Result<(), ToolError>`
+*   **Description**: Serializes `IpcRequest` to JSON, prepends the length header, and writes the frame.
 
-### Sanitize Helper (`sanitize()`)
-*   To prevent tools from bypassing permissions by setting zero-values, the `sanitize()` method restores default blocklist regexes and overrides `0` limits with safe fallback values.
+#### `read_ipc_response`
+*   **Signature**: `pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Option<IpcResponse>, ToolError>`
+*   **Description**: Reads and deserializes `IpcResponse` payloads.
+
+#### `write_ipc_response`
+*   **Signature**: `pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(writer: &mut W, resp: &IpcResponse) -> Result<(), ToolError>`
+*   **Description**: Serializes and writes `IpcResponse` payloads.
+
+#### `IpcConfig::new`
+*   **Signature**: `pub fn new(initial_config: serde_json::Value) -> Self`
+*   **Description**: Creates a new config handle.
+
+#### `IpcConfig::get` / `set`
+*   **Signature**: `pub async fn get<T: serde::de::DeserializeOwned>(&self) -> Result<T, ToolError>` (same patterns for set)
+*   **Description**: Safely extracts and updates configurations.
+
+---
+
+## 3. Tool Server & Dispatch Logic (`server.rs`)
+
+#### `run_tool_server`
+*   **Signature**: `pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), ToolError>`
+*   **Process**:
+    1.  Resolves socket paths from environment variables.
+    2.  Establishes connections to the host database socket.
+    3.  Enters the loop: reads requests, dispatches them via `dispatch`, and writes back response frames.
+
+#### `dispatch`
+*   **Signature**: `async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse`
+*   **Description**: Handles incoming requests, calling providers to retrieve schemas or execute target tools.
+
+---
+
+## 4. Metadata Models & Profiles (`types.rs`)
+
+#### `ToolName::try_new`
+*   **Signature**: `pub fn try_new(name: impl Into<String>) -> Result<Self, String>`
+*   **Description**: Parses and validates names. Verifies they match the format `<namespace>.<action>` and contain no invalid characters.
+
+#### `ToolName::namespace` / `action`
+*   **Signature**: `pub fn namespace(&self) -> Option<&str>` (same pattern for actions)
+*   **Description**: Returns namespace or action name components.
+
+#### `ToolVersion::new`
+*   **Signature**: `pub const fn new(major: u32, minor: u32, patch: u32) -> Self`
+*   **Description**: Constructs a tool version.
+
+#### `KeywordSet::primary_only` / `with_secondary`
+*   **Signature**: `pub fn primary_only(primary: impl IntoIterator<Item = impl Into<String>>) -> Self` (same for secondary)
+*   **Description**: Configures keyword matching arrays for Tool RAG.
+
+#### `ToolRagProfile::from_tool_spec`
+*   **Signature**: `pub fn from_tool_spec(spec: &ToolSpec) -> Self`
+*   **Description**: Builds RAG retrieval profiles.
+
+#### `ToolRagProfile::embedding_text`
+*   **Signature**: `pub fn embedding_text(&self, field: EmbeddingField, parameters: Option<&serde_json::Value>, example_index: Option<usize>) -> String`
+*   **Description**: Formats tool schemas and descriptions into structured text for vector embeddings.
+
+---
+
+## 5. Tool Providers Host Registry (`host_registry.rs`)
+
+#### `HostRegistry::new`
+*   **Signature**: `pub fn new() -> Self`
+*   **Description**: Constructs an empty registry.
+
+#### `HostRegistry::try_add_provider`
+*   **Signature**: `pub fn try_add_provider(&mut self, provider: Box<dyn ToolProvider>) -> Result<(), ToolError>`
+*   **Description**: Registers a provider. Returns an error on name collisions.
+
+#### `HostRegistry::list_specs` / `list_rag_profiles`
+*   **Signature**: `pub fn list_specs(&self) -> Vec<ToolSpec>`
+*   **Description**: Lists all registered specifications.
+
+#### `HostRegistry::call_tool`
+*   **Signature**: `pub async fn call_tool(&self, name: &ToolName, arguments: &str) -> Result<String, ToolError>`
+*   **Description**: Routes calls to the provider matching the namespace.
+
+#### `HostRegistry::set_call_context` / `set_sandbox`
+*   **Signature**: `pub fn set_call_context(&self, ctx: &CallContext)`
+*   **Description**: Sets current context properties across all registered providers.
+
+---
+
+## 6. Sandbox Configuration (`SandboxConfigData`)
+
+Defines permission limits for tool processes:
+
+#### `SandboxConfigData::sanitize`
+*   **Signature**: `pub fn sanitize(&mut self)`
+*   **Description**: Restores default command blocklists and overrides zero limits with safe fallback values to prevent security bypasses.

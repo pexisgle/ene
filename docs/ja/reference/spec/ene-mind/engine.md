@@ -1,13 +1,13 @@
-# `CognitionEngine` & ターンライフサイクル仕様
+# `CognitionEngine` およびターンライフサイクル仕様
 
-`CognitionEngine` は、`ene-mind` クレートの主たるファサードであり、会話の各ターンで実行される一連の認知処理（事前分析、長期記憶回収、プロンプト生成、表情出力決定、感情・記憶の事後保存および抽出）のオーケストレーションを担います。
+`CognitionEngine` は、`ene-mind` の認知パイプラインの主要なオーケストレータファサードです。ターン前の分析、ハイブリッドメモリの想起、プロンプトのレイアウト構築、表情決定の解決、およびバックグラウンドでのメモリ統合を調整します。
 
 ---
 
-## 1. 構造体定義
+## 1. 構造体の定義
 
-### `CognitionEngine` (公開 / 構造体)
-認知機能ごとの各サブコンポーネントをメンバとして集約しています。
+### `CognitionEngine` (パブリック / 構造体)
+AI パートナーの頭脳を表す、個々のモジュール式サブコンポーネントを集約します：
 ```rust
 pub struct CognitionEngine {
     pub pre_turn: PreTurnAnalyzer,
@@ -21,113 +21,99 @@ pub struct CognitionEngine {
     pub commitments: CommitmentLedger,
 }
 ```
-*   `new() -> Self`: 各サブコンポーネントをデフォルト値でインスタンス化します。
 
 ---
 
-## 2. 構成の検証と同期 (Validation & Sync)
+## 2. CognitionEngine コアメソッド
 
-### `validate_config`
+#### `new`
+*   **シグネチャ**: `pub fn new() -> Self`
+*   **説明**: 新しい `CognitionEngine` インスタンスを作成し、各サブコンポーネントを初期状態に設定します。
+
+#### `validate_config`
 *   **シグネチャ**: `pub fn validate_config(config: &MindConfig) -> Result<(), CognitionError>`
-*   **解説**: 設定値の中のコンテキスト管理予算（システム、履歴、メモリ回想などの上限トークン値）の合計が安全な範囲に収まっているかを検証します。
+*   **説明**: `validate_context_config` に検証を委譲し、設定されたトークンサイズとセグメント境界が LLM 制限内に安全に収まるか検証します。
 
-### `sync_character_memories`
-*   **シグネチャ**:
-    ```rust
-    pub async fn sync_character_memories(
-        &self,
-        ctx: TurnContext<'_>,
-        previous_hash: Option<u64>,
-    ) -> Result<(CharacterMemorySyncReport, u64), CognitionError>
-    ```
-*   **解説**: キャラクターカードV3に定義された Lorebook（特定単語に反応する固有設定）やスタイル例文、セリフ設定を SQLite に同期保存し、再インデックスします。カードに変化がない（ハッシュが一致する）場合は処理をスキップします。
-*   **接続先**: `CharacterProcessor::sync_card_memories`, `MemoryStore`, `EmbeddingProvider`
+#### `sync_character_memories`
+*   **シグネチャ**: `pub async fn sync_character_memories(&self, ctx: TurnContext<'_>, previous_hash: Option<u64>) -> Result<(crate::character::CharacterMemorySyncReport, u64), CognitionError>`
+*   **プロセス**:
+    1.  バッキングデータベース (`ctx.store`) とベクトル埋め込みプロバイダ (`ctx.embedder`) の存在を確認します。
+    2.  `CharacterProcessor::sync_card_memories` を呼び出して、`CharacterCardV3` 内のキャラクター固有のルール、背景設定、および会話スタイルの指示情報を同期します。
+    3.  新しいキャラクターカードハッシュを計算し、DB レジストリを更新して同期レポートを返します。
 
----
-
-## 3. 前ターン処理 (before_turn / before_proactive_turn)
-
-### `before_turn`
+#### `before_turn`
 *   **シグネチャ**: `pub async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>`
-*   **制御フロー**:
-    1.  **感情のロードと更新**:
-        -   `MemoryStore` から現在の `AffectState`（PAD感情モデル状態）をロード。
-        -   前ターンでバックグラウンド実行された感情分類器の保留査定結果（`PendingAffectProposal`）があれば取得し、今回のターンにブレンド。
-        -   前回の発話からの経過時間（時間減衰）とユーザーの現在入力を考慮し、`EmotionEngine` で一次感情を更新。
-    2.  **長期記憶回収**:
-        -   ユーザー入力のベクトル（埋め込み）を用いて、`execute_hybrid_recall` を実行。直近の話題や感情状態に応じた関連エピソード・キーファクトを回想記憶として取得。
-    3.  **コミットメントロード**:
-        -   キャラクターが保持している未完了タスク（約束・約束履歴）を `CommitmentLedger::list_active` から最大16件抽出し、システム用候補として形式化。
-    4.  **出力**:
-        -   感情情報、回想記憶、コミットメント、感情分類器による推奨表情をまとめた `PreTurnOutput` を返却。
+*   **プロセス**:
+    1.  **感情の更新**:
+        -   `ctx.store` から感情状態データ (`AffectState` の PAD 座標値) をロードします。
+        -   以前のターンから保留されている分類器の提案情報 (`take_pending_affect_proposal`) があれば、ユーザーのターン順序と一致することを確認してポップ・適用します。
+        -   前回の更新からの経過時間に基づいて、時間の経過による感情の自然減衰を計算し、`EmotionEngine::update_turn` 経由で新たな感情アプレザル（評価）を実行します。
+    2.  **メモリ想起 (Recall)**:
+        -   埋め込みプロバイダを検証し、ユーザー入力テキストと対応するベクトルを用いて `execute_hybrid_recall` を実行します。
+        -   ベクトルのセマンティック類似度検索、時間的リセンシー、および感情フィルタを組み合わせて、最も関連性の高い過去の記憶コンテキストを選択します。
+    3.  **コミットメント (約束) のロード**:
+        -   SQLite から `CommitmentLedger::list_active` 経由でアクティブなタスクや約束を最大 16 件取得し、プロンプト事実情報として格納します。
+    4.  **アセンブリ**:
+        -   これらすべての結果をまとめて、`PreTurnOutput` 構造体を構築して返します。
 
-### `before_proactive_turn`
+#### `before_proactive_turn`
 *   **シグネチャ**: `pub async fn before_proactive_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError>`
-*   **解説**: 能動発話用の軽量版 `before_turn`。ユーザーからのクエリ入力が存在しないため、ベクトル生成や長期記憶回収処理をすべてスキップし、感情のロードとコミットメントのロードのみを高速に実行します。
+*   **説明**: キャラクターが自発的に発話する場合（プロアクティブ発話）の軽量なターン前処理。ユーザーの入力テキストが存在しないため、ベクトル計算やハイブリッド想起のプロセスをスキップし、現在の感情状態とアクティブな約束情報のみを読み込みます。
 
----
+#### `persist_affect_snapshot`
+*   **シグネチャ**: `pub async fn persist_affect_snapshot(store: &MemoryStore, affect: &ene_store::AffectState) -> Result<(), CognitionError>`
+*   **説明**: 感情の PAD 状態データを SQLite に直接保存し、ストリーム接続のキャンセルやランタイムエラーが発生した場合でも感情座標データを保護します。
 
-## 4. プロンプトパケット組み立て (compose_prompt_packet)
+#### `compose_prompt_packet`
+*   **シグネチャ**: `pub async fn compose_prompt_packet(&self, ctx: TurnContext<'_>, pre: &PreTurnOutput, prefetch: ComposePrefetch) -> Result<ComposedPrompt, CognitionError>`
+*   **プロセス**:
+    1.  `CharacterProcessor::compile_kernel` を使用して、キャラクターの基本的なパーソナリティテキストをコンパイルします。
+    2.  キャラクターカードから会話スタイルの指示情報を読み込んで解決します。
+    3.  アクティブな感情パラメータ状態（PAD 座標、気分ラベルなど）をシリアライズします。
+    4.  `prefetch` にシーン要約が存在しない場合は、DB から直近の `ActiveSceneSummary` をロードします。
+    5.  残りの履歴トークン量を推定し、`pack_prompt` に引き渡します。
+    6.  プロンプト全体の推定トークン量が `ContextBudget` の閾値を超えた場合、古い歴史履歴の削除やメモリプロンプトのドロップ処理をトリガーします。
+    7.  生成されたプロンプトテキストと予算メタデータを含む `ComposedPrompt` を作成して返します。
 
-### `compose_prompt_packet`
-*   **シグネチャ**:
-    ```rust
-    pub async fn compose_prompt_packet(
-        &self,
-        ctx: TurnContext<'_>,
-        pre: &PreTurnOutput,
-        prefetch: ComposePrefetch,
-    ) -> Result<ComposedPrompt, CognitionError>
-    ```
-*   **組み立て手順**:
-    1.  `CharacterProcessor::compile_kernel` を呼び出し、キャラクターの自己認識コア（Identity Kernel）をコンパイル。
-    2.  ユーザー入力に関連する対話スタイル例文（Style Examples）を取得。
-    3.  感情状態（PAD値と現在のムードラベル）をフォーマット。
-    4.  `load_active_scene_summary` により、現在のシーン状況テキストをロード。
-    5.  履歴の切り出し（`recent_turns` 設定値に基づく件数制限）。
-    6.  これらのデータを `PackInput` 構造体にまとめ、設定された `ContextBudget`（トークン予算）に従って `pack_prompt` を実行。予算が逼迫したセクションは自動的にトリミングまたは圧縮されます。
-    7.  生成された LLM メッセージリストとメタ情報を `ComposedPrompt` として返却。
+#### `after_turn`
+*   **シグネチャ**: `pub async fn after_turn(&self, store: &MemoryStore, config: &MindConfig, input: PostTurnInput<'_>, providers: crate::memory_writer::MemoryWriteProviders<'_>) -> Result<(), CognitionError>`
+*   **説明**: ターンの終了後に、非同期バックグラウンドで実行するメモリ統合タスク（対話からの新しい事実の抽出、ベクトル化、自然忘却処理など）をディスパッチします。
 
----
-
-## 5. 後ターン処理 (finalize_turn_post / write_memories_deferred)
-
-### `finalize_turn_post` (同期最終処理)
+#### `finalize_turn_post`
 *   **シグネチャ**: `pub async fn finalize_turn_post(&self, store: &MemoryStore, config: &MindConfig, input: &PostTurnInput<'_>) -> Result<(), CognitionError>`
-*   **解説**: LLMの出力が完了した直後に**同期的**に実行されます。更新された最新の `AffectState`（PAD感情）のみをデータベースにupsertし、ユーザーへのレスポンス速度を最優先します。
+*   **説明**: LLM の出力ストリームが完了した直後に同期的に実行されるメソッドです。会話メッセージテキストをログテーブルに保存し、感情座標の更新を SQLite にコミットします。
 
-### `write_memories_deferred` (遅延書き込み処理)
-*   **シグネチャ**:
-    ```rust
-    pub async fn write_memories_deferred(
-        &self,
-        store: &MemoryStore,
-        config: &MindConfig,
-        input: &OwnedPostTurnInput,
-        providers: MemoryWriteProviders<'_>,
-    ) -> Result<(), CognitionError>
-    ```
-*   **解説**: ターン応答のブロードキャスト後にバックグラウンドで実行されます。
-    1.  `MemoryWriter::write_memories`: 今回の会話履歴から `MemoryArbiter`（LLMによる重要エピソードおよびファクト抽出器）を起動し、長期ベクター記憶を抽出して永続化。
-    2.  `MemoryWriter::apply_forgetting`: 保存された長期ベクター記憶に対して、自然忘却（時間の経過による想起スコアの減衰、および一定以下になった記憶のステータス遷移）を適用。
+#### `write_memories_deferred`
+*   **シグネチャ**: `pub async fn write_memories_deferred(&self, store: &MemoryStore, config: &MindConfig, input: &crate::lifecycle::OwnedPostTurnInput, providers: crate::memory_writer::MemoryWriteProviders<'_>) -> Result<(), CognitionError>`
+*   **プロセス**:
+    1.  `MemoryWriter::write_memories` を呼び出し、今回のターンで新たに生じたセマンティックメモリおよびエピソードメモリの候補データを抽出します。
+    2.  抽出された候補と既存のデータベース内のメモリを比較し、重複や矛盾がないか仲裁します。
+    3.  `MemoryWriter::apply_forgetting` を呼び出し、一定期間アクセスされていない古いアクティブメモリを減衰（Faded）またはアーカイブ（Archived）状態に移行します。
+
+#### `resolve_expression_turn`
+*   **シグネチャ**: `pub fn resolve_expression_turn(&self, config: &MindConfig, card: &CharacterCardV3, affect: &ene_store::AffectState, response_text: &str, llm_proposal: Option<&str>, previous_expression: &str, elapsed_since_change: Option<Duration>) -> (crate::output::ExpressionDecision, ene_store::AffectState)`
+*   **説明**: キャラクターの表情ブレンドシェイプキーを解決します。現在の感情座標、テキストの句読点、LLM からの表情変更提案、およびヒステリシス保護時間の制約を考慮し、最終的な表情と感情の更新結果を決定して返します。
 
 ---
 
-## 6. 表情出力決定 (resolve_expression_turn)
+## 3. モジュールレベルのヘルパー関数
 
-### `resolve_expression_turn`
-*   **シグネチャ**:
-    ```rust
-    pub fn resolve_expression_turn(
-        &self,
-        config: &MindConfig,
-        card: &CharacterCardV3,
-        affect: &ene_store::AffectState,
-        response_text: &str,
-        llm_proposal: Option<&str>,
-        previous_expression: &str,
-        elapsed_since_change: Option<Duration>,
-    ) -> (ExpressionDecision, ene_store::AffectState)
-    ```
-*   **解説**: 今回のターンのアシスタント発話に対する、マスコットの最終的な 3D 表情出力を決定します。
-*   **制御ロジック**: `OutputArbiter::resolve` を呼び出し、現在のPAD感情値、会話テキスト（感嘆符や疑問符の有無）、直前の表情からの経過時間（チャタリング/激しい表情変化を防ぐためのヒステリシス制御）を総合的に考慮して、最適な表情を判定します。判定された表情名を反映した `AffectState` と意思決定情報 `ExpressionDecision` を返却します。
+#### `build_behavior_contract`
+*   **シグネチャ**: `fn build_behavior_contract(card: &CharacterCardV3, user_name: &str) -> Option<String>`
+*   **説明**: キャラクターカードから原作者ノートや指示記述を抽出し、`expand_cbs_macros` 経由でプレースホルダーを展開します。
+
+#### `pending_to_affect_proposal`
+*   **シグネチャ**: `fn pending_to_affect_proposal(pending: ene_store::PendingAffectProposal) -> crate::emotion::AffectProposal`
+*   **説明**: データベースに保存されていた保留中の感情提案データを、アクター処理用の型に変換マッピングします。
+
+#### `count_user_turns`
+*   **シグネチャ**: `pub fn count_user_turns(history: &[crate::lifecycle::HistoryEntry]) -> i64`
+*   **説明**: 直近の履歴ウィンドウにおけるユーザー発言数を取得します。
+
+#### `completed_user_turn_at_post_turn`
+*   **シグネチャ**: `pub fn completed_user_turn_at_post_turn(history: &[crate::lifecycle::HistoryEntry]) -> i64`
+*   **説明**: ポストターンにおける感情判定処理用にユーザー発言のインデックスを計算します。
+
+#### `build_classifier_context`
+*   **シグネチャ**: `pub fn build_classifier_context(history: &[crate::lifecycle::HistoryEntry], current_assistant: &str, affect: &ene_store::AffectState, max_turns: usize) -> ClassifierContext`
+*   **説明**: 会話履歴と最終出力をまとめ、バックグラウンドでの感情分析 LLM プロバイダへ渡すための `ClassifierContext` を生成します。

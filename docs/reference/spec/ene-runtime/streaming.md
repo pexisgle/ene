@@ -47,11 +47,9 @@ pub struct StreamContext {
 
 ---
 
-## 2. Standard Chat Loop (`streaming.rs`)
+## 2. Standard Chat Loop Functions (`streaming.rs`)
 
 `run_stream` processes conversational streaming without long-term memory or emotion model appraisal.
-
-### Core Functions
 
 #### `run_stream`
 *   **Signature**: `pub async fn run_stream(ctx: StreamContext) -> StreamOutcome`
@@ -63,13 +61,34 @@ pub struct StreamContext {
     5.  Collects tool chunks (`accumulate_tool_calls`), pauses the stream, and runs them via `perform_tool_executions`.
     6.  Closes the loop and broadcasts `Terminal(Done)` via `stream_finish`.
 
+#### `stream_finish`
+*   **Signature**: `pub(crate) fn stream_finish(session: ene_mind::ConversationSession, event_tx: &broadcast::Sender<EneEvent>, guard: &AtomicBool, turn: &TurnId, origin: TurnOrigin, reason: TerminalReason) -> StreamOutcome`
+*   **Description**: Finalizes stream resources, registers session statistics, and emits the final turn terminal state if it hasn't been broadcast yet.
+
+#### `emit_terminal`
+*   **Signature**: `pub(crate) fn emit_terminal(event_tx: &broadcast::Sender<EneEvent>, guard: &AtomicBool, turn: &TurnId, origin: TurnOrigin, reason: TerminalReason)`
+*   **Description**: Thread-safe helper that sets the status to idle, clears turn flags, and broadcasts exactly one `EneEvent::Terminal` payload.
+
+#### `select_relevant_tools`
+*   **Signature**: `pub(crate) async fn select_relevant_tools(registry: &dyn ene_tool_host::ToolRegistry, tool_rag: Option<&ToolRag>, user_input: &str, query_embedding: Option<&[f32]>, tool_calling_enabled: bool) -> Vec<ene_tool_proto::ToolSpec>`
+*   **Description**: Filters tools to fit model contexts. Uses RAG vector similarity rankings on embedding models if enabled, otherwise returns the default toolset.
+
 #### `perform_tool_executions`
 *   **Signature**:
     ```rust
     pub(crate) async fn perform_tool_executions(
-        calls: Vec<LlmToolCall>,
-        // ... (truncated parameters)
-    ) -> Result<ToolExecutionOutput, ToolError>
+        registry: &dyn ene_tool_host::ToolRegistry,
+        session_id: &str,
+        tool_calls: Vec<LlmToolCall>,
+        assistant_content: &str,
+        event_tx: &broadcast::Sender<EneEvent>,
+        turn: &crate::types::TurnId,
+        origin: TurnOrigin,
+        pending_permissions: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+        pending_user_inputs: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+        timeout_ms: u64,
+        max_summary_chars: usize,
+    ) -> Result<ToolExecutionOutput, crate::error::EneRuntimeError>
     ```
 *   **Process**:
     -   Validates tool specifications from the registry.
@@ -77,37 +96,62 @@ pub struct StreamContext {
     -   **Interactive Inputs**: If a tool prompts for user questions, it fires `UserInputRequired` and yields until a response is received.
     -   Executes the target binary and broadcasts `ToolCallResult`. Feeds the result back to the LLM context.
 
+#### `accumulate_tool_calls`
+*   **Signature**: `pub(crate) fn accumulate_tool_calls(current_tool_calls: &mut Vec<LlmToolCallChunk>, tool_calls_delta: &[LlmToolCallChunk])`
+*   **Description**: Merges incoming streaming delta chunks (index offsets and string slices) into candidate tool arguments.
+
+#### `finalize_tool_calls`
+*   **Signature**: `pub(crate) fn finalize_tool_calls(current_tool_calls: Vec<LlmToolCallChunk>) -> Vec<LlmToolCall>`
+*   **Description**: Packages gathered delta chunks into validated, query-ready `LlmToolCall` models.
+
+#### `extract_screenshot`
+*   **Signature**: `fn extract_screenshot(result: &str) -> (String, Option<String>)`
+*   **Description**: Scans tool outcome bodies for encoded screenshot marker payloads.
+
+#### `inject_user_answers`
+*   **Signature**: `fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String`
+*   **Description**: Merges custom user-resolved answers back into JSON parameter trees of interactive tools.
+
 ---
 
-## 3. Cognitive Chat Loop (`streaming_cognitive.rs`)
+## 3. Cognitive Chat Loop Functions (`streaming_cognitive.rs`)
 
 `run_stream_cognitive` integrates hybrid memory recall, emotional appraisal, output presentation, and background consolidation.
 
-### Turn Lifecycle (5-Phase Pipeline)
+#### `build_turn_context`
+*   **Signature**:
+    ```rust
+    fn build_turn_context<'a>(
+        mind: &'a MindConfig,
+        card: &'a ene_config::CharacterCardV3,
+        card_name: &'a str,
+        user_name: &'a str,
+        session_id: &'a str,
+        user_input: &'a str,
+        history: &'a [HistoryEntry],
+        mem_store: &'a Option<std::sync::Arc<ene_store::MemoryStore>>,
+        query_embedding: Option<&'a [f32]>,
+        embedder: Option<&'a std::sync::Arc<dyn ene_ai::EmbeddingProvider>>,
+        provider: &std::sync::Arc<dyn ene_ai::LlmProvider>,
+        post_history_block: Option<&'a str>,
+    ) -> TurnContext<'a>
+    ```
+*   **Description**: Compiles prompt configurations, vector settings, and user input references into a unified context token payload.
 
-#### 1. Phase A: Embedding & Sync
-*   Computes user query embeddings via `embed_query`.
-*   If the character card memory hash (`ccv3_memory_hash`) mismatches the struct value, the engine synchronizes lorebook entries and style declarations (`engine.sync_character_memories`) synchronously.
+#### `apply_proactive_prompt`
+*   **Signature**: `fn apply_proactive_prompt(messages: &mut Vec<LlmMessage>, directive: Option<&str>, screen_image_data_uri: Option<&str>)`
+*   **Description**: Modifies conversation history prompts for proactive turns by injecting system guidelines and user screen screenshots.
 
-#### 2. Phase B: Pre-Turn (before_turn)
-*   Invokes `engine.before_turn` to run in parallel:
-    -   Reloading emotion state and computing appraisal parameters.
-    -   Retrieving episodic, semantic, and lorebook memories from SQLite.
-    -   Running Tool RAG retrieval.
-*   Aggregates results into `PreTurnOutput`.
-
-#### 3. Phase C: Prompt Composition (compose_prompt_packet)
-*   Invokes `engine.compose_prompt_packet` to pack sections within `ContextBudget` tokens.
-*   Triggers session splits (`session_split`) and summarization if the budget is exceeded.
-*   Orders system prompt sections, memories, emotion cues, conversation history, and user input.
-
-#### 4. Phase D: LLM Stream & Tool Execution
-*   Launches LLM chat completion.
-*   Parses inline tags like `<|perf:expr=NAME|>` and routes them as `Performance` events while stripping them from conversation logs and user output.
-*   Executes tool calls via `perform_tool_executions` and feeds outputs back into the LLM context.
-
-#### 5. Phase E: Finalization & Consolidation (finalize_turn)
-*   Runs `engine.finalize_turn` to commit conversation logs, update commitments, and save emotion states.
-*   **Background Tasks**: To keep latency low, the following pipelines are spawned asynchronously *after* emitting the `Terminal` event:
-    -   **Affect Classifier (`spawn_affect_classifier`)**: Categorizes emotional responses and appends proposals for the next turn.
-    -   **Memory Consolidation (`spawn_memory_writer`)**: Parses the history using `MemoryArbiter` to extract long-term semantic facts and runs memory decay calculations.
+#### `run_stream_cognitive`
+*   **Signature**: `pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome`
+*   **Process (5-Phase Pipeline)**:
+    1.  **Phase A: Embedding & Sync**:
+        Computes user query embeddings via `embed_query`. Synchronizes character memories.
+    2.  **Phase B: Pre-Turn (before_turn)**:
+        Invokes `engine.before_turn` (appraisal, hybrid recalls, commitments) to construct `PreTurnOutput`.
+    3.  **Phase C: Prompt Composition (compose_prompt_packet)**:
+        Composes and packs prompt sections. Compresses session data if token limits are exceeded.
+    4.  **Phase D: LLM Stream & Tool Execution**:
+        Streams LLM completions, resolves expression tags, and dispatches tool execution frames.
+    5.  **Phase E: Finalization & Consolidation (finalize_turn)**:
+        Saves chat logs and emotions. Spawns the background affect classifier and memory consolidator task loops.

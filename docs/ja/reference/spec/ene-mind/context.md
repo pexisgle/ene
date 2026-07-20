@@ -1,60 +1,159 @@
-# `ContextManager` / セッション圧縮分割・トークン予算仕様
+# `ContextManager` / セッション圧縮およびトークン予算仕様
 
-本ドキュメントでは、LLMの有限なコンテキストウィンドウ（トークン上限）を効率的かつ安全に管理するためのトークン予算（Context Budget）計算、優先順位に基づくセクション詰め込み（Prompt Packing）、および古い会話を自動で要約して履歴を切り詰めるローリング圧縮（Session Split & Compression）の仕様を定義します。
-
----
-
-## 1. トークン推定アルゴリズム (`tokens.rs`)
-
-Ene では、ターン実行時に毎回重いトークナイザーを起動するオーバーヘッドを避けるため、文字数ベースの決定論的推定を使用します。
-*   **推定比率**:
-    -   英語文字: 約 4文字＝1トークン
-    -   CJK文字（日中韓等）: 1文字＝約 1〜2トークン（マルチバイト文字境界を考慮した文字種判定ルール）。
-*   **主要関数**:
-    -   `estimate_tokens(text: &str) -> usize`: 文字種特徴量からトークン数を概算。
-    -   `truncate_to_tokens(text: &str, max_tokens: usize) -> &str`: トークン推定上限に収まるように文字列の末尾（または先頭）をスライス。
+このドキュメントでは、Ene のコンテキストトークン制限の予算管理（Context Budget）、優先度ベースのプロンプト構成（Prompt Packing）、およびスライド窓式履歴圧縮プロセスについて詳細に定義します。
 
 ---
 
-## 2. 優先度付きプロンプト詰め込み (`budget.rs`)
+## 1. 決定論的トークン見積もり (`tokens.rs`)
 
-`pack_prompt` は、`ContextBudget`（設定された上限値）の範囲内に各プロンプトセクションを安全に配置します。
+リアルタイムチャットストリーミング中のオーバーヘッドを避けるため、Ene は外部トークナイザを使用せず、文字ベースの見積もりルールを採用しています。
 
-### セクションの優先順位とトリミング方針
-コンテキストウィンドウが逼迫した場合、以下の優先度に基づき、下位のセクションから切り詰め（またはドロップ）を行います。
+#### `estimate_tokens`
+*   **シグネチャ**: `pub fn estimate_tokens(text: &str) -> usize`
+*   **説明**: 文字コードパターンを読み取り、CJK文字（日本語、中国語、韓国語）は1文字あたり1.5～2トークン、英数字 ASCII はおよそ4文字あたり1トークンとして高速に見積もり計算を実行します。
 
-| 優先度 | セクション名 | トリミング/ドロップ挙動 |
-|---|---|---|
-| 1 (最高) | **ユーザー入力** / **プラットフォーム制約** | 絶対に保護（ドロップ不可）。収まらない場合はエラー。 |
-| 2 | **自己認識コア (Identity Kernel)** | キャラクター性崩壊を防ぐため、保護。 |
-| 3 | **表情・出力契約 (Output Contract)** | 表情タグ出力ルールを守らせるため、保護。 |
-| 4 | **行動制約ルール (Behavior Contract)** | キャラクターの設定メモ。 |
-| 5 | **会話履歴 (Recent History)** | 直近数ターンは保護。古い履歴から切り詰め。 |
-| 6 | **感情・シーン状況サマリー** | 状況理解データ。 |
-| 7 | **コミットメント (未完了約束)** | アクティブな約束リスト。 |
-| 8 | **回想長期記憶 (Recalled Memory)** | トークン制限を超えた場合、真っ先に古い/スコアが低い順にドロップ。 |
-| 9 (最低) | **スタイル例文 (Style Examples)** | 話調維持用のサンプル。容量不足時は全ドロップ。 |
+#### `tokens_to_chars`
+*   **シグネチャ**: `pub const fn tokens_to_chars(tokens: usize) -> usize`
+*   **説明**: 指定されたトークン制限量を、文字列操作用の最大許容文字数にマッピング逆算します。
 
-*   `pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt`:
-    各セクションのトークン数を算出し、バジェットを切り崩しながらパッキングを実行。切り詰められたセクション情報を `BudgetMeta` に記録します。
+#### `truncate_to_tokens`
+*   **シグネチャ**: `pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> String`
+*   **説明**: 文字列を指定トークン量に収まるようにトリミングスライスします。UTF-8 マルチバイト文字の境界が破損しないように保護しながら処理します。
 
 ---
 
-## 3. ローリング会話圧縮 (`compression.rs`)
+## 2. 優先度に基づくプロンプトパッキング (`budget.rs`)
 
-会話履歴が長くなり、システムが処理可能なトークンしきい値を超えた場合、古い会話を同期的に切り詰めると記憶喪失が発生します。これを防ぐため、古いスパンを要約して「シーンサマリー」へ昇華し、不要になった個別メッセージを履歴から消去します。
+`pack_prompt` は、システムプロンプトの各ブロックを設定された `ContextBudget` トークン量の境界内に整理・格納します。
 
-### 1. トリガー評価 (`evaluate_compression_trigger`)
-*   会話の総ターン数、または総推定トークン数が `ContextConfig::trigger_token_limit` を超えた場合、`CompressionReason`（`TokenLimitExceeded` や `TurnLimitExceeded`）を検出し、圧縮を要求します。
+#### `from_config`
+*   **シグネチャ**: `pub const fn from_config(config: &ContextConfig) -> Self`
+*   **説明**: 設定パラメータから基準トークン枠を組み立てます。
 
-### 2. 非同期圧縮タスクのスポーン
-1.  **アクターからの要求**:
-    アクターはストリーム終了後、`spawn_compression_task` を呼び出します。
-2.  **LLMによる要約生成 (`summarize_conversation`)**:
-    -   切り詰め対象となる古いメッセージ履歴（例: 直近20ターンより前の部分）を抽出し、LLM要約プロバイダーに投入。
-    -   「何が起き、何が決定したか」を凝縮した `ActiveSceneSummary` を生成。
-3.  **データベースへの保存**:
-    -   要約結果を `memory_spans` および `entities::conversation_logs` のメタデータに書き込み。
-    -   アクティブなセッションオブジェクト（`ConversationSession`）のメッセージリストから、要約された古いメッセージ範囲を削除してメモリウィンドウをクリア。
-4.  **反映**:
-    次ターンからは、消去された履歴の代わりに `ActiveSceneSummary` がプロンプトにインジェクションされます。
+#### `from_config_and_hints`
+*   **シグネチャ**: `pub const fn from_config_and_hints(config: &ContextConfig, hints: &RecallBudgetHints) -> Self`
+*   **説明**: RAG 想起の要求バッファやメタデータ指示値を反映して、現在の発話ターンで利用可能な詳細トークン閾値を構成します。
+
+#### `budget_for`
+*   **シグネチャ**: `const fn budget_for(&self, kind: PromptSectionKind) -> usize`
+*   **説明**: プロンプトセクションごとの最大許容トークン制限枠を返します。
+
+#### `validate_context_config`
+*   **シグネチャ**: `pub fn validate_context_config(config: &ContextConfig) -> Result<(), CognitionError>`
+*   **説明**: 設定ファイルのトークン設定値が論理的破綻（セクション合計が最大制限を大幅に超過しているなど）していないか検査します。
+
+#### `sort_memories_for_drop`
+*   **シグネチャ**: `fn sort_memories_for_drop(memories: &mut [RecalledMemory])`
+*   **説明**: トークン圧迫時に破棄するメモリの順序をソートします。信頼度が低く、ピン留めされていない想起項目が優先して破棄されます。
+
+#### `memory_section_body`
+*   **Signature**: `fn memory_section_body(memories: &[RecalledMemory]) -> String`
+*   **Description**: 想起された複数のメモリ行を、マークダウンリストの結合テキストにフォーマットします。
+
+#### `set_section_body`
+*   **Signature**: `fn set_section_body(sections: &mut [PromptSection], kind: PromptSectionKind, body: String)`
+*   **Description**: 特定セクションの文字列をバインド更新します。
+
+#### `estimate_history_tokens`
+*   **Signature**: `fn estimate_history_tokens(history: &[HistoryEntry]) -> usize`
+*   **Description**: 会話履歴スレッド全体の合計トークン量を算出します。
+
+#### `trim_history_to_budget`
+*   **Signature**: `fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) -> usize`
+*   **Description**: 履歴が指定制限トークン内に収まるまで、最も古いメッセージレコードから順にトリミングして削減します。
+
+#### `build_sections`
+*   **Signature**: `fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSection>`
+*   **Description**: プロンプトを構築するための基礎的なマークダウンセクションの配列を組み立てます。
+
+#### `apply_section_budget`
+*   **Signature**: `fn apply_section_budget(section: &mut PromptSection)`
+*   **Description**: 個別のセクションに割り当てられたトークン閾値チェックを適用し、オーバー分をトリミングします。
+
+#### `section_token_total`
+*   **Signature**: `fn section_token_total(sections: &[PromptSection]) -> usize`
+*   **Description**: 全セクションの推定トークン量の合計値を集計します。
+
+#### `pack_prompt`
+*   **シグネチャ**: `pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt`
+*   **プロセス**:
+    1.  全セクションの合計トークン見積もり値を集計します。
+    2.  トークン予算を超過している場合は、以下の逆優先順位に従ってセクションを段階的にトリミングまたは完全に削除（ドロップ）します：
+        -   `StyleExamples` (最初期に完全に破棄)
+        -   `RecalledMemories` (信頼度の低い順に段階的に削減・ドロップ)
+        -   `ActiveCommitments` (約束)
+        -   `SceneSummary` / `EmotionSummary`
+        -   `History` (古い会話レコードから順にトリミング)
+        -   `BehaviorContract` (指示ノート)
+    3.  最も重要なアイデンティティプロンプトや直近のユーザー入力テキストが安全に収まるか検証します。
+    4.  最終的なプロンプトの構成結果と、トリミングの履歴を示すメタデータを `PackedPrompt` として返します。
+
+#### `classify_recalled_memories_owned`
+*   **Signature**: `fn classify_recalled_memories_owned(recalled: &[RecalledMemory]) -> (Vec<RecalledMemory>, Vec<RecalledMemory>, Vec<RecalledMemory>)`
+*   **Description**: 想起されたメモリ候補を、約束、セマンティックメモリ、およびエピソードメモリに分類整理します。
+
+---
+
+## 3. スライド窓式セッション圧縮処理 (`compression.rs`)
+
+会話が長くなりコンテキストサイズの上限を超えそうになった場合、古い対話履歴を LLM で要約し、メモリ消費を最適化します。
+
+#### `as_i32` / `from_i32`
+*   **Signature**: `pub const fn as_i32(self) -> i32` (および `from_i32` 変換)
+*   **Description**: 圧縮の深さレベル（CompressionLevel）をシリアライズするための整数値マッピングです。
+
+#### `compression_has_usable_summary`
+*   **Signature**: `pub fn compression_has_usable_summary(result: &CompressionResult) -> bool`
+*   **Description**: 要約生成タスクの結果が空でなく、正しく利用可能なものか検証します。
+
+#### `execute_compression`
+*   **Signature**: `pub async fn execute_compression(store: Arc<MemoryStore>, provider: Arc<dyn LlmProvider>, input: CompressionTaskInput) -> Result<CompressionResult, CognitionError>`
+*   **Description**: 会話履歴を要約し、データベースに保存してメモリを再配置するタスクの完了を待機するコア実行関数です。
+
+#### `spawn_compression_task`
+*   **Signature**: `pub fn spawn_compression_task(pending: &mut Option<PendingCompressionTask>, store: Arc<MemoryStore>, provider: Arc<dyn LlmProvider>, input: CompressionTaskInput)`
+*   **Description**: 実行スレッドをブロックしないように、会話履歴の圧縮要約タスクをバックグラウンドのスレッドプールに非同期で投入（Spawn）します。
+
+#### `poll_compression_result`
+*   **Signature**: `pub fn poll_compression_result(pending: &mut Option<PendingCompressionTask>) -> Option<Result<CompressionResult, CognitionError>>`
+*   **Description**: バックグラウンドで実行されている圧縮タスクが完了しているかノンブロッキングでポーリング（Poll）確認します。
+
+#### `evaluate_compression_trigger`
+*   **Signature**: `pub fn evaluate_compression_trigger(config: &ContextConfig, turn_count: usize, history_len: usize) -> Option<CompressionReason>`
+*   **Description**: 会話ターン数またはコンテキストトークンサイズが設定値の圧縮トリガー限界に達しているかを判定します。
+
+#### `load_active_scene_summary`
+*   **Signature**: `pub async fn load_active_scene_summary(store: &MemoryStore, session_id: &str) -> Result<Option<ActiveSceneSummary>, CognitionError>`
+*   **Description**: データベースから、該当する対話セッションの最新の圧縮シーン要約テキストをロードします。
+
+#### `run_compression`
+*   **Signature**: `async fn run_compression(store: Arc<MemoryStore>, provider: Arc<dyn LlmProvider>, input: CompressionTaskInput) -> Result<CompressionResult, CognitionError>`
+*   **Description**: バックグラウンド圧縮タスクの実装処理です。古い対話履歴データをシリアライズして LLM プロバイダで要約を生成し、SQLite の `memory_spans` に保存した上で、会話メモリセッションの履歴リストから該当する過去のレコード行を切り捨てて削除します。
+
+#### `render_turn_excerpt`
+*   **Signature**: `fn render_turn_excerpt(turns: &[HistoryEntry]) -> String`
+*   **Description**: 要約作成 LLM に渡すために、古い履歴レコードをダイアログ形式のトランスクリプトテキストに変換します。
+
+#### `summarize_span`
+*   **Signature**: `async fn summarize_span(provider: &dyn LlmProvider, character_name: &str, user_name: &str, excerpt: &str, level: CompressionLevel, timeout_secs: u64) -> Option<String>`
+*   **Description**: LLM プロバイダを呼び出し、対話抜粋テキストを指定の圧縮レベル（概要のみ、または詳細）で要約します。
+
+#### `maybe_roll_up_chapter`
+*   **Signature**: `pub async fn maybe_roll_up_chapter(store: &MemoryStore, provider: Arc<dyn LlmProvider>, session_id: &str, character_name: &str, user_name: &str, config: &ContextConfig) -> Result<Option<CompressionResult>, CognitionError>`
+*   **Description**: 複数のシーン要約が増えて上限を超えた場合に、それらをさらに統合して大まかな「章（Chapter）サマリー」へとロールアップして長期圧縮を実行します。
+
+---
+
+## 4. ファサードおよびモジュールメソッド (`mod.rs`)
+
+#### `validate_config`
+*   **シグネチャ**: `pub fn validate_config(config: &ContextConfig) -> Result<(), CognitionError>`
+*   **説明**: コンテキスト構成パラメータの健全性を外部からチェックします。
+
+#### `evaluate_compression_trigger` (ファサード)
+*   **シグネチャ**: `pub fn evaluate_compression_trigger(config: &ContextConfig, turn_count: usize, history_len: usize) -> Option<CompressionReason>`
+*   **説明**: 履歴要約をトリガーすべきか判定する外部インターフェースです。
+
+#### `load_scene_summary`
+*   **シグネチャ**: `pub async fn load_scene_summary(ctx: TurnContext<'_>) -> Result<Option<ActiveSceneSummary>, CognitionError>`
+*   **説明**: 現在のアクター実行セッションに対応する有効なシーン要約を読み込みます。
