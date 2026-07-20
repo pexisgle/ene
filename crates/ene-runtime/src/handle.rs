@@ -1560,7 +1560,8 @@ impl EneActor {
                 true
             }
             EneCommand::ListTools { reply } => {
-                let tools = self.registry.list_tools();
+                let mut tools = self.registry.list_tools();
+                tools.push(crate::streaming::search_tools_spec());
                 let _ = reply.send(tools);
                 true
             }
@@ -1597,6 +1598,7 @@ impl EneActor {
                 reply,
             } => {
                 let registry = self.registry.clone();
+                let tool_rag = self.tool_rag.clone();
                 let session_id = self.session.memory.session_id.to_string();
                 self.call_tool_tasks.spawn(async move {
                     if let Some(ref turn) = turn {
@@ -1606,10 +1608,24 @@ impl EneActor {
                         };
                         registry.set_call_context(&call_ctx).await;
                     }
-                    let result = registry
-                        .call_tool(&name, &arguments)
+                    let result = if name == "system.search_tools" {
+                        let query = serde_json::from_str::<serde_json::Value>(&arguments)
+                            .ok()
+                            .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
+                            .unwrap_or_default();
+                        crate::streaming::execute_system_search_tool(
+                            registry.as_ref(),
+                            tool_rag.as_deref(),
+                            &query,
+                        )
                         .await
-                        .map_err(EneRuntimeError::from);
+                        .map_err(EneRuntimeError::from)
+                    } else {
+                        registry
+                            .call_tool(&name, &arguments)
+                            .await
+                            .map_err(EneRuntimeError::from)
+                    };
                     let _ = reply.send(result);
                 });
                 true

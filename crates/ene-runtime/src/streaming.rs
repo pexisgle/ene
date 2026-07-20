@@ -241,50 +241,7 @@ pub(crate) async fn perform_tool_executions(
                 .ok()
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
                 .unwrap_or_default();
-
-            if query.is_empty() {
-                Ok("Please provide a search query.".to_string())
-            } else {
-                let matching_tools = if let Some(rag) = tool_rag {
-                    let all_tools = registry.list_tools();
-                    let profiles = registry.list_rag_profiles();
-                    if let Err(e) = rag.ensure_index(&all_tools, &profiles).await {
-                        tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
-                    }
-                    rag.select(&query).await
-                } else {
-                    let query_lower = query.to_lowercase();
-                    registry
-                        .list_tools()
-                        .into_iter()
-                        .filter(|t| {
-                            t.name.as_str().to_lowercase().contains(&query_lower)
-                                || t.description.to_lowercase().contains(&query_lower)
-                        })
-                        .collect()
-                };
-
-                if matching_tools.is_empty() {
-                    Ok("No matching tools found.".to_string())
-                } else {
-                    use std::fmt::Write as _;
-                    let mut output = String::new();
-                    let _ = writeln!(output, "Found the following tools matching your query:\n");
-                    for tool in matching_tools {
-                        if tool.name.as_str() == "system.search_tools" {
-                            continue;
-                        }
-                        let _ = writeln!(output, "- **{}**", tool.name.as_str());
-                        let _ = writeln!(output, "  *Description:* {}", tool.description);
-                        let _ = writeln!(
-                            output,
-                            "  *Parameters Schema:* {}\n",
-                            serde_json::to_string(&tool.parameters).unwrap_or_default()
-                        );
-                    }
-                    Ok(output)
-                }
-            }
+            execute_system_search_tool(registry, tool_rag, &query).await
         } else {
             let tool_timeout = std::time::Duration::from_millis(timeout_ms);
             match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
@@ -551,6 +508,56 @@ pub(crate) fn search_tools_spec() -> ene_tool_proto::ToolSpec {
             },
             "required": ["query"]
         }),
+    }
+}
+
+pub(crate) async fn execute_system_search_tool(
+    registry: &dyn ene_tool_host::ToolRegistry,
+    tool_rag: Option<&ToolRag>,
+    query: &str,
+) -> Result<String, ToolHostError> {
+    if query.is_empty() {
+        return Ok("Please provide a search query.".to_string());
+    }
+
+    let matching_tools = if let Some(rag) = tool_rag {
+        let all_tools = registry.list_tools();
+        let profiles = registry.list_rag_profiles();
+        if let Err(e) = rag.ensure_index(&all_tools, &profiles).await {
+            tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
+        }
+        rag.select(query).await
+    } else {
+        let query_lower = query.to_lowercase();
+        registry
+            .list_tools()
+            .into_iter()
+            .filter(|t| {
+                t.name.as_str().to_lowercase().contains(&query_lower)
+                    || t.description.to_lowercase().contains(&query_lower)
+            })
+            .collect()
+    };
+
+    if matching_tools.is_empty() {
+        Ok("No matching tools found.".to_string())
+    } else {
+        use std::fmt::Write as _;
+        let mut output = String::new();
+        let _ = writeln!(output, "Found the following tools matching your query:\n");
+        for tool in matching_tools {
+            if tool.name.as_str() == "system.search_tools" {
+                continue;
+            }
+            let _ = writeln!(output, "- **{}**", tool.name.as_str());
+            let _ = writeln!(output, "  *Description:* {}", tool.description);
+            let _ = writeln!(
+                output,
+                "  *Parameters Schema:* {}\n",
+                serde_json::to_string(&tool.parameters).unwrap_or_default()
+            );
+        }
+        Ok(output)
     }
 }
 

@@ -280,3 +280,43 @@ async fn diagnostics_search_tools_returns_empty_when_no_tools() {
     assert!(result.is_empty(), "expected empty list, got {result:?}");
     let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }
+
+#[tokio::test]
+async fn diagnostics_list_tools_includes_system_search_tool() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+    let result = handle
+        .diagnostics()
+        .list_tools()
+        .await
+        .expect("list tools succeeds");
+    assert!(
+        result
+            .iter()
+            .any(|t| t.name.as_str() == "system.search_tools"),
+        "expected system.search_tools in diagnostics tool list"
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn diagnostics_call_tool_intercepts_system_search_tool() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+    let result = handle
+        .diagnostics()
+        .call_tool(
+            "system.search_tools".to_string(),
+            serde_json::json!({ "query": "filesystem" }).to_string(),
+        )
+        .await
+        .expect("call system.search_tools succeeds");
+    assert!(
+        result.contains("No matching tools found."),
+        "expected search tool response, got: {}",
+        result
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
