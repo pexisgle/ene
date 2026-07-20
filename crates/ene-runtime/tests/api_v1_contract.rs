@@ -266,3 +266,17 @@ async fn cancel_frees_gate_for_next_run() {
     );
     let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }
+
+#[tokio::test]
+async fn diagnostics_search_tools_returns_empty_when_no_tools() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+    let result = handle
+        .diagnostics()
+        .search_tools("nonexistent".to_string())
+        .await
+        .expect("search tools succeeds");
+    assert!(result.is_empty(), "expected empty list, got {result:?}");
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}

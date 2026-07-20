@@ -16,7 +16,7 @@ impl CliCommand for ToolCommand {
     }
 
     fn usage(&self) -> &'static str {
-        "/tool <list|help|call>"
+        "/tool <list|search|help|call>"
     }
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
@@ -44,6 +44,43 @@ impl CliCommand for ToolCommand {
                     "Failed to list tools: {e}"
                 ))),
             },
+            Some("search") => {
+                let query = arg.strip_prefix("search").unwrap_or(arg).trim();
+                if query.is_empty() {
+                    Err(CliError::UsageError {
+                        usage: "Usage: /tool search <query>".to_string(),
+                    })
+                } else {
+                    match ctx
+                        .handle
+                        .diagnostics()
+                        .search_tools(query.to_string())
+                        .await
+                    {
+                        Ok(tools) => {
+                            if tools.is_empty() {
+                                println!("No matching tools found.");
+                            } else {
+                                println!("{}", style::success("Matching tools:"));
+                                for tool in tools {
+                                    let desc = if tool.description.chars().count() > 60 {
+                                        let truncated: String =
+                                            tool.description.chars().take(57).collect();
+                                        format!("{truncated}...")
+                                    } else {
+                                        tool.description.clone()
+                                    };
+                                    println!("  - {}: {}", style::header(tool.name.as_str()), desc);
+                                }
+                            }
+                            Ok(())
+                        }
+                        Err(e) => Err(CliError::ExecutionFailed(format!(
+                            "Failed to search tools: {e}"
+                        ))),
+                    }
+                }
+            }
             Some("help") => {
                 if subparts.len() >= 2 {
                     let name = subparts[1];

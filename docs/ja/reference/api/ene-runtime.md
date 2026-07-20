@@ -100,7 +100,7 @@ impl Clone for EneHandle { /* ... */ }
 |---|---|
 | `memory()` | [`MemoryQueryHandle`](#memoryqueryhandle) |
 | `subscribe()` | 診断ストリーム（`PipelinePhase` / `PipelineMetrics`） |
-| `get_snapshot` / `list_tools` / `call_tool` / `manual_split` | 検査・ツール |
+| `get_snapshot` / `list_tools` / `search_tools` / `call_tool` / `manual_split` | 検査・ツール |
 | `set_character` | カード差し替え（CLI `/card`） |
 
 ---

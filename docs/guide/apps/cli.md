@@ -63,6 +63,7 @@ Commands are entered with `/` prefix:
 |---------|--------|
 | `/config` | Show current settings (provider, model, embedding, memory) |
 | `/tool list` | List all registered tools |
+| `/tool search <query>` | Search registered tools using RAG or name/description filter |
 | `/tool help <name>` | Show detailed help for a tool |
 | `/tool call <name> <json>` | Call a tool directly with JSON arguments |
 | `/undo` | Placeholder (not yet supported with actor-based runtime) |

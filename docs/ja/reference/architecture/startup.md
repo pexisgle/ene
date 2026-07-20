@@ -249,6 +249,7 @@ stream::process_stream(&mut rx, &ctx.handle, turn).await;  // イベントを処
 | `/card <path>` | キャラクターカード変更 (非同期) |
 | `/config` | 設定表示 |
 | `/tool list` | 登録済みツール一覧 |
+| `/tool search <query>` | RAGまたは名前/説明フィルタを使用して登録済みツールを検索 |
 | `/tool help <name>` | ツールの詳細ヘルプ表示 |
 | `/tool call <name> <json>` | ツールの直接呼び出し |
 | `/history` | 会話履歴表示 |

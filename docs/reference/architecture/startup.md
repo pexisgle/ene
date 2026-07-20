@@ -239,6 +239,7 @@ This ensures no events are lost between the `run()` call and the first `recv()`.
 | `/card <path>` | Switch character card (async load) |
 | `/config` | Show current settings |
 | `/tool list` | List all registered tools |
+| `/tool search <query>` | Search registered tools using RAG or name/description filter |
 | `/tool help <name>` | Show detailed help for a tool |
 | `/tool call <name> <json>` | Call a tool directly |
 | `/history` | Show conversation history |

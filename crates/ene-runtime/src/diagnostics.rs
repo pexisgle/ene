@@ -341,6 +341,15 @@ impl EneDiagnostics {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)
     }
 
+    /// Search tools in the registry using RAG if available.
+    pub async fn search_tools(&self, query: String) -> Result<Vec<ToolSpec>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SearchTools { query, reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)
+    }
+
     /// Call a tool directly by name with arguments.
     pub async fn call_tool(
         &self,

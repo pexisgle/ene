@@ -103,7 +103,7 @@ Concrete facade returned by `handle.diagnostics()`:
 |---|---|
 | `memory()` | [`MemoryQueryHandle`](#memoryqueryhandle) |
 | `subscribe()` | Diagnostic stream (`PipelinePhase` / `PipelineMetrics`) |
-| `get_snapshot` / `list_tools` / `call_tool` / `manual_split` | Inspection & tools |
+| `get_snapshot` / `list_tools` / `search_tools` / `call_tool` / `manual_split` | Inspection & tools |
 | `set_character` | Hot-swap card (CLI `/card`) |
 | `invalidate_tool_index` | Drop Tool RAG cache |
 

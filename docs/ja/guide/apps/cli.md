@@ -63,6 +63,7 @@ pub trait CliCommand: Send + Sync {
 |---------|------|
 | `/config` | 現在の設定を表示 (provider, model, embedding, memory) |
 | `/tool list` | 登録済みの全ツールを一覧 |
+| `/tool search <query>` | RAGまたは名前/説明フィルタを使用して登録済みツールを検索 |
 | `/tool help <name>` | ツールの詳細ヘルプを表示 |
 | `/tool call <name> <json>` | JSON 引数でツールを直接呼び出し |
 | `/undo` | プレースホルダー (アクターベースランタイムでは未対応) |

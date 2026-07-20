@@ -75,6 +75,13 @@ pub enum EneCommand {
         /// Reply channel for the tools.
         reply: oneshot::Sender<Vec<ToolSpec>>,
     },
+    /// Search tools in the active tool registry using RAG if available.
+    SearchTools {
+        /// The query to search for.
+        query: String,
+        /// Reply channel for the matching tools.
+        reply: oneshot::Sender<Vec<ToolSpec>>,
+    },
     /// Call a tool by name with JSON-encoded arguments.
     CallTool {
         /// The tool name.
@@ -1136,9 +1143,7 @@ impl EneActor {
 
         let prompts = ene_config::PromptLibrary::load(&prompt_language);
         let system = prompts.proactive().screen_summary_system.trim().to_string();
-        let user = prompts
-            .proactive()
-            .render_screen_summary_user(&app_label);
+        let user = prompts.proactive().render_screen_summary_user(&app_label);
         self.vision_tasks.spawn(async move {
             let result = local
                 .summarize_rgb(width, height, rgb, &system, &user)
@@ -1557,6 +1562,32 @@ impl EneActor {
             EneCommand::ListTools { reply } => {
                 let tools = self.registry.list_tools();
                 let _ = reply.send(tools);
+                true
+            }
+            EneCommand::SearchTools { query, reply } => {
+                let registry = self.registry.clone();
+                let tool_rag = self.tool_rag.clone();
+                tokio::spawn(async move {
+                    let result = if let Some(rag) = tool_rag {
+                        let all_tools = registry.list_tools();
+                        let profiles = registry.list_rag_profiles();
+                        if let Err(e) = rag.ensure_index(&all_tools, &profiles).await {
+                            tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
+                        }
+                        rag.select(&query).await
+                    } else {
+                        let query_lower = query.to_lowercase();
+                        registry
+                            .list_tools()
+                            .into_iter()
+                            .filter(|t| {
+                                t.name.as_str().to_lowercase().contains(&query_lower)
+                                    || t.description.to_lowercase().contains(&query_lower)
+                            })
+                            .collect()
+                    };
+                    let _ = reply.send(result);
+                });
                 true
             }
             EneCommand::CallTool {

@@ -16,8 +16,11 @@ pub enum EneCommand {
     PermissionDecision { request_id: RequestId, decision: PermissionDecision },
     UserInputResponse { request_id: RequestId, response: UserInputResponse },
     GetSnapshot { reply: oneshot::Sender<EneStateSnapshot> },
-    ManualSplit { reply: oneshot::Sender<Result<SplitResult, EneRuntimeError>> },
+    /// Unified context compression command. `mode: Split` creates a full session boundary;
+    /// `mode: Compress` only compresses history into a scene summary.
+    ManualCompression { mode: CompressionMode, reply: oneshot::Sender<Result<SplitResult, EneRuntimeError>> },
     ListTools { reply: oneshot::Sender<Vec<ToolSpec>> },
+    SearchTools { query: String, reply: oneshot::Sender<Vec<ToolSpec>> },
     CallTool { name: String, arguments: String, turn: Option<TurnId>, reply: oneshot::Sender<Result<String, EneRuntimeError>> },
     InvalidateToolIndex,
     SetCcv3MemoryHash { hash: u64, reply: oneshot::Sender<()> },
@@ -26,6 +29,22 @@ pub enum EneCommand {
     UpdateProactiveSettings { mind: ene_mind::ProactiveConfig },
     UpdateFeatureSettings { settings: Box<FeatureSettingsUpdate> },
     SummarizeScreenImage { width: u32, height: u32, rgb: Vec<u8>, app_label: String, reply: oneshot::Sender<Result<String, String>> },
+}
+```
+
+### `CompressionMode` (Public / Enum)
+Controls the behavior of `EneCommand::ManualCompression`:
+*   `Split`: Creates a full session boundary — summarizes history, saves the summary, and starts a new session window.
+*   `Compress`: Compresses history into a scene summary only, without creating a new session boundary.
+
+### `FeatureSettingsUpdate` (Public / Struct)
+An opaque settings bundle. Each field is `Option<_>`; `None` fields are left unchanged.
+```rust
+pub struct FeatureSettingsUpdate {
+    pub mind: Option<ene_mind::MindConfig>,
+    pub store: Option<ene_store::StoreConfig>,
+    pub tools: Option<ene_tool_host::ToolConfig>,
+    pub rag: Option<ToolRagConfig>,
 }
 ```
 
@@ -108,6 +127,9 @@ The main entry point for host applications, cheap to clone, and thread-safe.
     10. Warms up the character card memories (`warmup_character_memories_ready`) and records the hash.
     11. Spawns the `EneActor` task loop onto the Tokio runtime.
 
+> [!NOTE]
+> History-to-cognitive-model conversion (`mind_history_entries`) has been moved to `ConversationSession::to_mind_history_entries()` in `ene-mind`. `EneActor` calls `session.to_mind_history_entries()` directly.
+
 #### `subscribe`
 *   **Signature**: `pub fn subscribe(&self) -> EneEventReceiver`
 *   **Description**: Creates a new receiver to listen to public runtime events.
@@ -150,8 +172,8 @@ The main entry point for host applications, cheap to clone, and thread-safe.
 *   **Description**: Modifies the cognitive triggers for proactive loops.
 
 #### `update_feature_settings`
-*   **Signature**: `pub fn update_feature_settings(&self, mind: ene_mind::MindConfig, store: ene_store::StoreConfig, tools: ene_tool_host::ToolConfig, rag: ToolRagConfig) -> Result<(), ActorDeadError>`
-*   **Description**: Live updates settings for AI models, databases, and tools.
+*   **Signature**: `pub fn update_feature_settings(&self, settings: FeatureSettingsUpdate) -> Result<(), ActorDeadError>`
+*   **Description**: Live updates settings for AI models, databases, and tools without restarting the actor. Uses the `FeatureSettingsUpdate` bundle to avoid exposing internal crate types in the public API.
 
 #### `summarize_screen_image`
 *   **Signature**: `pub async fn summarize_screen_image(&self, width: u32, height: u32, rgb: Vec<u8>, app_label: String) -> Result<String, String>`
@@ -222,37 +244,11 @@ The main entry point for host applications, cheap to clone, and thread-safe.
 *   **Signature**: `fn create_proactive_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError>`
 *   **Description**: Builds the LLM provider instance for background proactive decisions.
 
-#### `handle_manual_split`
-*   **Signature**: `async fn handle_manual_split(&mut self) -> Result<SplitResult, EneRuntimeError>`
-*   **Description**: Directly triggers context boundary summarization and compression, saving the new summary and resetting history.
-
 #### `handle_manual_compression`
-*   **Signature**: `async fn handle_manual_compression(&mut self) -> Result<SplitResult, EneRuntimeError>`
-*   **Description**: Triggers manual context compression without creating a full boundary split.
+*   **Signature**: `async fn handle_manual_compression(&mut self, mode: CompressionMode) -> Result<SplitResult, EneRuntimeError>`
+*   **Description**: Delegates context compression or boundary splits to `ene-mind`'s `ContextManager`.
 
-#### `check_and_perform_split`
-*   **Signature**: `fn check_and_perform_split(&mut self, _user_input: &str)`
-*   **Description**: Evaluates if the current token budget exceeds split thresholds and queues background splits.
-
-#### `check_and_trigger_compression`
-*   **Signature**: `fn check_and_trigger_compression(&mut self)`
-*   **Description**: Evaluates if context limits are exceeded and schedules prompt package compression.
-
-#### `apply_pending_compression`
-*   **Signature**: `fn apply_pending_compression(&mut self)`
-*   **Description**: Applies background split results back to the active session state.
-
-#### `trim_history_after_compression`
-*   **Signature**: `fn trim_history_after_compression(&mut self)`
-*   **Description**: Slices session history arrays to clean references after context summaries are successfully saved.
-
-#### `spawn_chapter_rollup_if_needed`
-*   **Signature**: `fn spawn_chapter_rollup_if_needed(&self)`
-*   **Description**: Consolidates multiple scene summaries into chapter-level summaries.
-
-#### `mind_history_entries`
-*   **Signature**: `fn mind_history_entries(&self) -> Vec<MindHistoryEntry>`
-*   **Description**: Transforms active session history elements into cognitive models.
+*(Note: Context splitting, token budget checks, and memory array trimming have been fully migrated to `ene-mind` to preserve architectural boundaries. `EneActor` no longer handles raw history transformations or summarization loops internally.)*
 
 #### `warmup_character_memories_ready`
 *   **Signature**: `async fn warmup_character_memories_ready(config: &EneConfig, session: &ConversationSession) -> Option<u64>`
