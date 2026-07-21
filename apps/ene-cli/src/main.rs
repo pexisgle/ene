@@ -8,10 +8,7 @@
 )]
 #![cfg_attr(
     test,
-    expect(
-        clippy::expect_used,
-        reason = "unit tests use expect for assertions"
-    )
+    expect(clippy::expect_used, reason = "unit tests use expect for assertions")
 )]
 
 mod commands;

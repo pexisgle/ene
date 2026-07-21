@@ -5,6 +5,7 @@ edition = "2024"
 description = "Interactive CLI REPL for chatting with AI characters, testing tools, and managing memory/sessions"
 
 [dependencies]
+ene-ai = { workspace = true }
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
 ene-config = { workspace = true }
@@ -12,6 +13,7 @@ ene-store = { workspace = true }
 ene-tool-host = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }
 tokio-stream = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 dialoguer = "0.12"
