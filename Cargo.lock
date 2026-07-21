@@ -2432,6 +2432,7 @@ dependencies = [
  "egui-winit",
  "ene-ai",
  "ene-config",
+ "ene-i18n-macros",
  "ene-mind",
  "ene-runtime",
  "ene-store",
@@ -2439,6 +2440,7 @@ dependencies = [
  "ene-tool-proto",
  "ene-tool-rag",
  "ene-vrm",
+ "fluent-bundle",
  "glam 0.33.2",
  "gtk",
  "i18n-embed",
@@ -2465,6 +2467,16 @@ dependencies = [
  "winit",
  "x11rb",
  "xcap",
+]
+
+[[package]]
+name = "ene-i18n-macros"
+version = "0.1.0"
+dependencies = [
+ "fluent-syntax",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
