@@ -11,7 +11,7 @@ ene-mind = { workspace = true }
 ene-config = { workspace = true }
 ene-store = { workspace = true }
 ene-tool-host = { workspace = true }
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "fs"] }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

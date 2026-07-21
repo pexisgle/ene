@@ -20,6 +20,63 @@ cargo run -p ene-cli
 
 User-facing CLI output is localized through Fluent catalogs under `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`. The active language is negotiated from the system locale unless overridden with `--lang`.
 
+## Non-interactive mode (#186)
+
+With no subcommand, `ene` starts the interactive REPL. With a subcommand, it
+runs a single operation against the runtime and exits — suitable for CI
+pipelines and shell scripts. The global flags (`--config`, `--character`,
+`--lang`) apply to both modes.
+
+```bash
+cargo run -p ene-cli -- run "hello"            # one prompt, stream text, exit
+cargo run -p ene-cli -- run --jsonl "hello"    # one JSON event per line
+cargo run -p ene-cli -- run --json "hello"     # single JSON summary object
+cargo run -p ene-cli -- tool list --json
+cargo run -p ene-cli -- session list --json
+cargo run -p ene-cli -- memory search "tea" --json
+cargo run -p ene-cli -- doctor --json
+```
+
+### Subcommands
+
+| Subcommand | Action |
+|------------|--------|
+| `run [PROMPT…]` | Run a single prompt and stream the response, then exit. With no `PROMPT`, the prompt is read from stdin |
+| `run --jsonl` | Emit one JSON object per line (streaming events) on stdout |
+| `run --json` | Emit a single JSON summary object on stdout (conflicts with `--jsonl`) |
+| `run --timeout <SECONDS>` | Abort if the turn does not complete within the given seconds |
+| `run --yes` | Automatically approve side-effecting tool operations; without it a permission gate fails the run instead of prompting |
+| `tool list\|search\|help\|call [--json]` | Manage and call tools (mirrors the REPL `/tool` commands) |
+| `session list\|export\|import\|search\|archive\|unarchive [--json]` | Manage conversation sessions (mirrors `/session`) |
+| `memory list\|inspect\|search [--json]` | Inspect cognitive memories (mirrors `/memory`) |
+| `doctor [--json]` | Run environment health checks (mirrors `/doctor`) |
+
+### Output contract
+
+- Structured results (`--json` / `--jsonl`) print to **stdout**; logs and
+  progress stay on **stderr**.
+- `run --jsonl` emits a stable event stream mirroring the chat event bus:
+  `turn_started`, `text_delta`, `performance`, `tool_call_start`,
+  `tool_call_result`, `permission_denied`, and exactly one terminal `terminal`
+  event (`reason` is `done`, `failed`, `cancelled`, or `timeout`).
+- On failure, a JSON error envelope is printed to stdout:
+  `{"error": {"code": "<class>", "message": "…"}}`. Error classes are
+  `usage`, `runtime`, `timeout`, `tool_failed`, `busy`, and
+  `confirmation_required`.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Generic runtime or execution failure |
+| `2` | Invalid arguments or usage (matches clap) |
+| `3` | The operation exceeded `--timeout` |
+| `4` | A tool call failed |
+| `5` | The runtime was busy or the actor was unavailable |
+| `6` | A side-effecting operation required `--yes` confirmation |
+| `130` | Interrupted by Ctrl-C |
+
 ## Architecture
 
 ```

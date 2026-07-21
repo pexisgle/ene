@@ -16,6 +16,8 @@ mod commands;
 mod config;
 mod context;
 mod i18n;
+mod noninteractive;
+mod output;
 mod repl;
 mod stream;
 mod style;
@@ -69,6 +71,12 @@ async fn main() {
     };
 
     let mut ctx = context::AppContext::new(handle);
-    let code = repl::run(&mut ctx).await;
+
+    // Dispatch: with a subcommand, run a single non-interactive operation and
+    // exit; without one, start the interactive REPL (#186).
+    let code = match &args.command {
+        Some(cmd) => noninteractive::execute(cmd, &mut ctx).await,
+        None => repl::run(&mut ctx).await,
+    };
     std::process::exit(code);
 }

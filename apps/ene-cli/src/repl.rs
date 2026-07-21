@@ -1,6 +1,7 @@
 use crate::{
     commands::{self, CommandOutcome, SHUTDOWN_TIMEOUT},
     context::AppContext,
+    output::EXIT_INTERRUPTED,
     stream,
     terminal_ui::{self, TerminalUi},
 };
@@ -46,7 +47,7 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                     tracing::info!("[Runtime] Ctrl-C received, shutting down...");
                 }
                 terminal_ui::request_read_cancel();
-                return drain_and_exit(ctx, 130).await;
+                return drain_and_exit(ctx, EXIT_INTERRUPTED).await;
             }
 
             // Normal REPL line input. The blocking editor runs on a

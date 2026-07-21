@@ -20,6 +20,61 @@ cargo run -p ene-cli
 
 ユーザー向けの CLI 出力は `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl` 配下の Fluent カタログでローカライズされます。有効な言語は `--lang` で上書きしない限りシステムロケールから交渉されます。
 
+## 非対話モード (#186)
+
+サブコマンドなしで `ene` を起動すると対話型 REPL が始まります。サブコマンドを
+指定すると、ランタイムに対して単一の操作を実行して終了します。CI パイプラインや
+シェルスクリプトでの利用に適しています。グローバルフラグ（`--config`、
+`--character`、`--lang`）はどちらのモードでも有効です。
+
+```bash
+cargo run -p ene-cli -- run "hello"            # 1 プロンプトを実行しテキストをストリームして終了
+cargo run -p ene-cli -- run --jsonl "hello"    # 1 行 1 JSON イベント
+cargo run -p ene-cli -- run --json "hello"     # 単一の JSON サマリオブジェクト
+cargo run -p ene-cli -- tool list --json
+cargo run -p ene-cli -- session list --json
+cargo run -p ene-cli -- memory search "tea" --json
+cargo run -p ene-cli -- doctor --json
+```
+
+### サブコマンド
+
+| サブコマンド | 動作 |
+|------------|------|
+| `run [PROMPT…]` | 単一プロンプトを実行し応答をストリームして終了。`PROMPT` がない場合は stdin から読み込む |
+| `run --jsonl` | 1 行 1 JSON オブジェクト（ストリーミングイベント）を stdout に出力 |
+| `run --json` | 単一の JSON サマリオブジェクトを stdout に出力（`--jsonl` と排他） |
+| `run --timeout <SECONDS>` | 指定秒数以内にターンが完了しなければ中断 |
+| `run --yes` | 副作用を伴うツール操作を自動承認。指定しない場合、権限ゲートはプロンプトを出さず実行を失敗させる |
+| `tool list\|search\|help\|call [--json]` | ツールの管理と呼び出し（REPL の `/tool` コマンドに対応） |
+| `session list\|export\|import\|search\|archive\|unarchive [--json]` | 会話セッションの管理（`/session` に対応） |
+| `memory list\|inspect\|search [--json]` | 認知メモリの検査（`/memory` に対応） |
+| `doctor [--json]` | 環境ヘルスチェックの実行（`/doctor` に対応） |
+
+### 出力契約
+
+- 構造化結果（`--json` / `--jsonl`）は **stdout** に出力。ログと進捗は **stderr** に留まる。
+- `run --jsonl` はチャットイベントバスを映す安定したイベントストリームを出力する:
+  `turn_started`、`text_delta`、`performance`、`tool_call_start`、
+  `tool_call_result`、`permission_denied`、そして終端の `terminal` イベントが
+  ちょうど 1 回（`reason` は `done`、`failed`、`cancelled`、`timeout` のいずれか）。
+- 失敗時は JSON エラーエンベロープが stdout に出力される:
+  `{"error": {"code": "<class>", "message": "…"}}`。エラークラスは
+  `usage`、`runtime`、`timeout`、`tool_failed`、`busy`、`confirmation_required`。
+
+### 終了コード
+
+| コード | 意味 |
+|------|------|
+| `0` | 成功 |
+| `1` | 汎用のランタイムまたは実行失敗 |
+| `2` | 無効な引数または使用方法（clap と一致） |
+| `3` | 操作が `--timeout` を超過 |
+| `4` | ツール呼び出しが失敗 |
+| `5` | ランタイムがビジー、またはアクターが利用不可 |
+| `6` | 副作用を伴う操作に `--yes` 確認が必要だった |
+| `130` | Ctrl-C による中断 |
+
 ## アーキテクチャ
 
 ```
