@@ -284,6 +284,20 @@ pub enum DiagnosticEvent {
         /// Best-effort panic message.
         message: String,
     },
+    /// A tool health/lifecycle event from the tool host supervisor (#238).
+    ///
+    /// Emitted when a tool is detected unhealthy (hung or dead), restarted,
+    /// recovered, paused by the circuit breaker, or disabled. `status` is a
+    /// stable English contract mirroring [`ene_tool_host::ToolHealthEvent`].
+    ToolHealth {
+        /// Tool name.
+        tool: String,
+        /// Stable status code: `unhealthy`, `restarting`, `restarted`,
+        /// `recovered`, `circuit_open`, `circuit_closed`, or `disabled`.
+        status: String,
+        /// Optional human-readable detail (e.g. unhealthy reason).
+        detail: Option<String>,
+    },
 }
 
 /// Extracts a human-readable message from a caught panic payload.

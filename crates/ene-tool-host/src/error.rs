@@ -18,6 +18,17 @@ pub enum EneToolHostError {
         /// A descriptive message about the failure.
         message: String,
     },
+    /// The circuit breaker is open after consecutive failures; the call was
+    /// rejected without reaching the tool (#238).
+    #[error(
+        "Circuit breaker open for tool '{tool}' after {consecutive_failures} consecutive failures; call paused"
+    )]
+    CircuitOpen {
+        /// The tool whose breaker is open.
+        tool: String,
+        /// Consecutive failure count that tripped the breaker.
+        consecutive_failures: u32,
+    },
     /// A tool name collision in [`CompositeToolRegistry`].
     ///
     /// Per API v1 / #135, name collision is a hard error at every

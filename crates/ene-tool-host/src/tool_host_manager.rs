@@ -1,4 +1,6 @@
+use crate::circuit_breaker::CircuitBreaker;
 use crate::error::ToolHostError;
+use crate::health::ToolHealthEvent;
 use crate::ipc_registry::IpcToolRegistry;
 use crate::tools::CompositeToolRegistry;
 use crate::tools::registry::ToolRegistry;
@@ -9,7 +11,7 @@ use ene_tool_proto::ToolSpec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 
 const MAX_RESTARTS: usize = 5;
 const BASE_DELAY_MS: u64 = 500;
@@ -96,70 +98,29 @@ struct SupervisedIpcRegistry {
     /// Per-call timeout, forwarded to `IpcToolRegistry::new` on
     /// every (re)connect.
     timeout_ms: u64,
+    /// Per-tool circuit breaker guarding consecutive call failures (#238).
+    breaker: Mutex<CircuitBreaker>,
+    /// Sink for health events surfaced to the diagnostics layer (#238).
+    health_tx: Option<mpsc::UnboundedSender<ToolHealthEvent>>,
 }
 
-#[async_trait::async_trait]
-impl ToolRegistry for SupervisedIpcRegistry {
-    fn list_tools(&self) -> Vec<ToolSpec> {
-        let reg = self
-            .registry
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        reg.list_tools()
-    }
-
-    fn list_rag_profiles(&self) -> Vec<ene_tool_proto::ToolRagProfile> {
-        let reg = self
-            .registry
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        reg.list_rag_profiles()
-    }
-
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
-        // Fast path: a successful call also clears the
-        // per-process restart counter so a tool that crashes
-        // occasionally but is otherwise healthy does not
-        // accumulate lifetime crashes against the MAX_RESTARTS
-        // budget.
-        let reg = self
-            .registry
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let first_result = reg.call_tool(name, arguments).await;
-        if first_result.is_ok() {
-            let mut guard = self.process.lock().await;
-            if guard.restart_count != 0 {
-                tracing::info!(
-                    "[SupervisedIpcRegistry] Tool '{}' call succeeded; resetting restart counter (was {})",
-                    guard.name,
-                    guard.restart_count
-                );
-                guard.restart_count = 0;
-            }
-            drop(guard);
-            return first_result;
+impl SupervisedIpcRegistry {
+    fn emit_health(&self, event: ToolHealthEvent) {
+        if let Some(tx) = &self.health_tx {
+            let _ = tx.send(event);
         }
+    }
 
-        // Supervision path: the call failed. Hold the process
-        // lock through the alive-check and restart so a second
-        // concurrent caller cannot trigger a duplicate restart.
-        // Release before `connect_with_retry` (which may sleep
-        // for seconds) so other callers are not blocked; then
-        // install the new registry and retry on the fresh handle.
+    /// Restarts the tool process, reconnects, and installs the fresh
+    /// registry. Assumes the caller has already verified a restart is
+    /// warranted. Emits `Restarting`/`Restarted`/`Disabled` health events.
+    async fn restart_and_reconnect(&self) -> Result<Arc<IpcToolRegistry>, ToolHostError> {
         let mut guard = self.process.lock().await;
 
-        if guard.is_alive() {
-            // Process is alive; the failure was the tool's
-            // own response (e.g. a permission denial).
-            // Surface the original error to the caller.
-            return first_result;
-        }
-
         if guard.restart_count >= MAX_RESTARTS {
+            self.emit_health(ToolHealthEvent::Disabled {
+                tool: guard.name.clone(),
+            });
             return Err(ToolHostError::ExecutionFailed {
                 message: format!(
                     "Tool '{}' has exceeded max restarts ({}) and is disabled",
@@ -168,10 +129,11 @@ impl ToolRegistry for SupervisedIpcRegistry {
             });
         }
 
-        tracing::warn!(
-            "[SupervisedIpcRegistry] Tool '{}' process is dead, attempting restart",
-            guard.name
-        );
+        let attempt = guard.restart_count.saturating_add(1);
+        self.emit_health(ToolHealthEvent::Restarting {
+            tool: guard.name.clone(),
+            attempt,
+        });
 
         let delay = guard.delay_for_restart();
         tokio::time::sleep(delay).await;
@@ -185,6 +147,7 @@ impl ToolRegistry for SupervisedIpcRegistry {
         let socket_path = guard.socket_path.clone();
         let sandbox = guard.sandbox.clone();
         let tool_config = guard.tool_config.clone();
+        let name = guard.name.clone();
         drop(guard);
 
         let new_registry = match ToolHostManager::connect_with_retry(
@@ -216,6 +179,194 @@ impl ToolRegistry for SupervisedIpcRegistry {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *reg_guard = Arc::clone(&new_reg_arc);
         }
+        self.emit_health(ToolHealthEvent::Restarted { tool: name });
+
+        Ok(new_reg_arc)
+    }
+
+    /// Periodic liveness probe (#238). Pings the tool and, when it is dead
+    /// or unresponsive, restarts it. Returns `true` when the tool is healthy
+    /// (or was successfully healed).
+    async fn probe_and_heal(&self) -> bool {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let ping_ok = reg.ping().await.is_ok();
+        let alive = self.process.lock().await.is_alive();
+
+        if alive && ping_ok {
+            return true;
+        }
+
+        let reason = if alive { "unresponsive" } else { "dead" };
+        let tool = self.process.lock().await.name.clone();
+        self.emit_health(ToolHealthEvent::Unhealthy {
+            tool: tool.clone(),
+            reason: reason.to_string(),
+        });
+        tracing::warn!(
+            "[SupervisedIpcRegistry] Health probe: tool '{}' is {} (alive={alive}, ping={ping_ok}); restarting",
+            tool,
+            reason
+        );
+
+        match self.restart_and_reconnect().await {
+            Ok(_) => {
+                self.emit_health(ToolHealthEvent::Recovered { tool });
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[SupervisedIpcRegistry] Health probe: failed to heal tool '{}': {e}",
+                    tool
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Background loop that periodically pings every supervised tool and
+/// restarts any that are dead or unresponsive (#238).
+#[expect(
+    clippy::infinite_loop,
+    reason = "background liveness probe runs for the lifetime of the tool host"
+)]
+async fn health_probe_loop(interval: Duration, registries: Vec<Arc<SupervisedIpcRegistry>>) {
+    let mut ticker = tokio::time::interval(interval);
+    // Skip the immediate first tick so we don't probe right after startup.
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        for registry in &registries {
+            let _ = registry.probe_and_heal().await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolRegistry for SupervisedIpcRegistry {
+    fn list_tools(&self) -> Vec<ToolSpec> {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.list_tools()
+    }
+
+    fn list_rag_profiles(&self) -> Vec<ene_tool_proto::ToolRagProfile> {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.list_rag_profiles()
+    }
+
+    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
+        // Circuit breaker: reject fast while the tool is paused after
+        // repeated consecutive failures (#238).
+        {
+            let mut breaker = self.breaker.lock().await;
+            if breaker.is_open() {
+                return Err(ToolHostError::CircuitOpen {
+                    tool: name.to_string(),
+                    consecutive_failures: breaker.consecutive_failures(),
+                });
+            }
+        }
+
+        // Fast path: a successful call also clears the
+        // per-process restart counter so a tool that crashes
+        // occasionally but is otherwise healthy does not
+        // accumulate lifetime crashes against the MAX_RESTARTS
+        // budget.
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let first_result = reg.call_tool(name, arguments).await;
+        if first_result.is_ok() {
+            {
+                let mut breaker = self.breaker.lock().await;
+                if breaker.consecutive_failures() != 0 {
+                    self.emit_health(ToolHealthEvent::CircuitClosed {
+                        tool: name.to_string(),
+                    });
+                }
+                breaker.record_success();
+            }
+            let mut guard = self.process.lock().await;
+            if guard.restart_count != 0 {
+                tracing::info!(
+                    "[SupervisedIpcRegistry] Tool '{}' call succeeded; resetting restart counter (was {})",
+                    guard.name,
+                    guard.restart_count
+                );
+                guard.restart_count = 0;
+            }
+            drop(guard);
+            return first_result;
+        }
+
+        // Record the failure against the circuit breaker; if it trips,
+        // surface the original error and pause subsequent calls (#238).
+        {
+            let mut breaker = self.breaker.lock().await;
+            if breaker.record_failure() {
+                let failures = breaker.consecutive_failures();
+                self.emit_health(ToolHealthEvent::CircuitOpened {
+                    tool: name.to_string(),
+                    consecutive_failures: failures,
+                });
+                tracing::warn!(
+                    "[SupervisedIpcRegistry] Circuit breaker opened for tool '{}' after {} consecutive failures",
+                    name,
+                    failures
+                );
+            }
+        }
+
+        // Supervision path: the call failed. Distinguish a tool-owned
+        // error (process alive and responsive) from a dead or hung
+        // process. A hung process is alive at the OS level but fails a
+        // short IPC `Ping` probe; both dead and hung tools are restarted
+        // (#238).
+        let probe = reg.ping().await;
+        let mut guard = self.process.lock().await;
+
+        if guard.is_alive() && probe.is_ok() {
+            // Process is alive and responsive; the failure was the
+            // tool's own response (e.g. a permission denial).
+            // Surface the original error to the caller.
+            return first_result;
+        }
+
+        let reason = if guard.is_alive() {
+            "unresponsive"
+        } else {
+            "dead"
+        };
+        let alive = guard.is_alive();
+        let tool_name = guard.name.clone();
+        self.emit_health(ToolHealthEvent::Unhealthy {
+            tool: tool_name.clone(),
+            reason: reason.to_string(),
+        });
+        tracing::warn!(
+            "[SupervisedIpcRegistry] Tool '{}' is {} (alive={}, ping={:?}), attempting restart",
+            tool_name,
+            reason,
+            alive,
+            probe.is_ok()
+        );
+        drop(guard);
+
+        let new_reg_arc = self.restart_and_reconnect().await?;
 
         // Retry on the freshly installed registry. The process
         // lock is not held across connect/retry; concurrent
@@ -281,6 +432,11 @@ impl ToolRegistry for SupervisedIpcRegistry {
 /// Tool RAG indexing and selection is handled by [`ToolRag`](crate::ToolRag).
 pub struct ToolHostManager {
     composite: Arc<CompositeToolRegistry>,
+    /// Receiver for health events emitted by the supervisor and the
+    /// periodic probe; bridged into runtime diagnostics (#238).
+    health_rx: Option<mpsc::UnboundedReceiver<ToolHealthEvent>>,
+    /// Handle to the periodic health-probe task so it is aborted on drop.
+    _health_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[async_trait::async_trait]
@@ -333,7 +489,7 @@ impl ToolHostManager {
             .get_section::<crate::config::ToolConfig>()
             .unwrap_or_default();
 
-        let mut supervised_registries = Vec::new();
+        let mut supervised: Vec<Arc<SupervisedIpcRegistry>> = Vec::new();
 
         std::fs::create_dir_all(paths::tool_socket_dir()).map_err(|e| {
             ToolHostError::ExecutionFailed {
@@ -341,7 +497,13 @@ impl ToolHostManager {
             }
         })?;
 
+        let (health_tx, health_rx) = mpsc::unbounded_channel::<ToolHealthEvent>();
+
         let timeout_ms = tool_config.timeout_ms;
+        let breaker = CircuitBreaker::new(
+            tool_config.circuit_failure_threshold,
+            Duration::from_millis(tool_config.circuit_cooldown_ms),
+        );
         for (name, entry) in &tool_config.list {
             if !entry.enable {
                 continue;
@@ -355,13 +517,23 @@ impl ToolHostManager {
                     .unwrap_or_default();
             sandbox.sanitize();
             let db_token = db_tokens.remove(name);
-            match Self::start_tool(name, &sandbox, tool_config, timeout_ms, db_token).await {
+            match Self::start_tool(
+                name,
+                &sandbox,
+                tool_config,
+                timeout_ms,
+                db_token,
+                breaker.clone(),
+                health_tx.clone(),
+            )
+            .await
+            {
                 Ok(supervised_entry) => {
                     if let Some(schema) = supervised_entry.config_schema().await {
                         let schema_key = format!("{name}_config");
                         register_runtime_schema(&schema_key, schema);
                     }
-                    supervised_registries.push(supervised_entry);
+                    supervised.push(supervised_entry);
                 }
                 Err(e) => {
                     tracing::error!(component = "ToolHostManager", tool = %name, error = %e, "Failed to start tool");
@@ -369,9 +541,39 @@ impl ToolHostManager {
             }
         }
 
-        let composite = Arc::new(CompositeToolRegistry::try_new(supervised_registries)?);
+        let composite_registries: Vec<Arc<dyn ToolRegistry>> = supervised
+            .iter()
+            .map(|r| Arc::clone(r) as Arc<dyn ToolRegistry>)
+            .collect();
+        let composite = Arc::new(CompositeToolRegistry::try_new(composite_registries)?);
 
-        Ok(Self { composite })
+        // Spawn the periodic liveness probe (#238). It pings each tool on a
+        // fixed interval and restarts any that are dead or unresponsive.
+        let health_task = if tool_config.health_interval_ms > 0 && !supervised.is_empty() {
+            let interval = Duration::from_millis(tool_config.health_interval_ms);
+            let probes: Vec<Arc<SupervisedIpcRegistry>> =
+                supervised.iter().map(Arc::clone).collect();
+            Some(tokio::spawn(async move {
+                health_probe_loop(interval, probes).await;
+            }))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            composite,
+            health_rx: Some(health_rx),
+            _health_task: health_task,
+        })
+    }
+
+    /// Takes ownership of the health-event receiver (#238).
+    ///
+    /// The runtime calls this once after startup to bridge tool health
+    /// events into its diagnostics channel. Returns `None` on subsequent
+    /// calls.
+    pub fn take_health_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<ToolHealthEvent>> {
+        self.health_rx.take()
     }
 
     /// Starts all tool binaries and MCP servers and returns the unified registry.
@@ -379,9 +581,13 @@ impl ToolHostManager {
     /// Combines [`start`](Self::start) (IPC tool spawn), MCP server connection,
     /// and registry aggregation into a single call. Includes automatic fallback
     /// to an empty tool set if the primary startup fails.
+    ///
+    /// When `health_tx` is provided, tool health events (#238) are forwarded
+    /// to it for the lifetime of the returned registry.
     pub async fn start_full(
         config: &EneConfig,
         db_tokens: std::collections::HashMap<String, String>,
+        health_tx: Option<mpsc::UnboundedSender<ToolHealthEvent>>,
     ) -> Result<Arc<dyn ToolRegistry>, ToolHostError> {
         let mut manager = match Self::start(config, db_tokens).await {
             Ok(m) => m,
@@ -439,6 +645,17 @@ impl ToolHostManager {
             manager.try_add_registry(Arc::new(mcp))?;
         }
 
+        // Bridge tool health events to the runtime diagnostics layer (#238).
+        if let (Some(sink), Some(mut rx)) = (health_tx, manager.take_health_receiver()) {
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    if sink.send(event).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
         Ok(manager.into_registry())
     }
 
@@ -465,7 +682,9 @@ impl ToolHostManager {
         tool_config: Option<serde_json::Value>,
         timeout_ms: u64,
         db_token: Option<String>,
-    ) -> Result<Arc<dyn ToolRegistry>, ToolHostError> {
+        breaker: CircuitBreaker,
+        health_tx: mpsc::UnboundedSender<ToolHealthEvent>,
+    ) -> Result<Arc<SupervisedIpcRegistry>, ToolHostError> {
         let binary_path =
             Self::find_tool_binary(name).ok_or_else(|| ToolHostError::ExecutionFailed {
                 message: format!("Tool binary not found for {name}"),
@@ -546,6 +765,8 @@ impl ToolHostManager {
             process,
             registry: std::sync::RwLock::new(Arc::new(registry)),
             timeout_ms,
+            breaker: Mutex::new(breaker),
+            health_tx: Some(health_tx),
         }))
     }
 

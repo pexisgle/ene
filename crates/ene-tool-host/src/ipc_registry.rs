@@ -16,6 +16,9 @@ const RECONNECT_BASE_DELAY_MS: u64 = 200;
 const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
 /// Timeout for permission/pattern approval IPC calls (30s).
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Timeout for a `Ping` liveness probe (#238). Kept short so a hung
+/// tool is detected quickly without waiting for the full call timeout.
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A `ToolRegistry` implementation that communicates with tool binaries via IPC
 ///
@@ -131,6 +134,18 @@ impl IpcToolRegistry {
     /// restart path in `SupervisedIpcRegistry` instead of blocking
     /// forever behind the still-locked stream mutex.
     async fn do_request(&self, req: IpcRequest) -> Result<IpcResponse, ToolHostError> {
+        self.do_request_with_timeout(req, Duration::from_millis(self.timeout_ms))
+            .await
+    }
+
+    /// Like [`do_request`](Self::do_request) but with an explicit read
+    /// timeout. Used by the liveness probe, which needs a short bound
+    /// independent of the (potentially long) per-call timeout (#238).
+    async fn do_request_with_timeout(
+        &self,
+        req: IpcRequest,
+        timeout: Duration,
+    ) -> Result<IpcResponse, ToolHostError> {
         let result = {
             let mut guard = self.stream.lock().await;
             let Some(stream) = guard.as_mut() else {
@@ -143,13 +158,13 @@ impl IpcToolRegistry {
             }
 
             let read_fut = read_ipc_response(stream);
-            match tokio::time::timeout(Duration::from_millis(self.timeout_ms), read_fut).await {
+            match tokio::time::timeout(timeout, read_fut).await {
                 Ok(Ok(Some(resp))) => Ok(resp),
                 Ok(Ok(None)) => Err(ToolHostError::ipc("Connection closed by tool host")),
                 Ok(Err(e)) => Err(ToolHostError::ipc(format!("Failed to read response: {e}"))),
                 Err(_elapsed) => Err(ToolHostError::ipc(format!(
                     "Tool call timed out after {} ms",
-                    self.timeout_ms
+                    timeout.as_millis()
                 ))),
             }
         };
@@ -160,6 +175,27 @@ impl IpcToolRegistry {
         }
 
         result
+    }
+
+    /// Sends a `Ping` liveness probe and waits for a `Pong` (#238).
+    ///
+    /// Returns `Ok(())` when the tool answers within the probe bound (the
+    /// smaller of [`PING_TIMEOUT`] and the configured per-call timeout).
+    /// A timeout or transport error means the tool is alive at the OS
+    /// level but unresponsive (hung), which the supervisor treats as
+    /// unhealthy and restarts.
+    pub async fn ping(&self) -> Result<(), ToolHostError> {
+        let probe_timeout = Duration::from_millis(self.timeout_ms).min(PING_TIMEOUT);
+        match self
+            .do_request_with_timeout(IpcRequest::Ping, probe_timeout)
+            .await?
+        {
+            IpcResponse::Pong => Ok(()),
+            IpcResponse::Error { message } => Err(ToolHostError::ipc(message)),
+            other => Err(ToolHostError::ipc(format!(
+                "Unexpected response to Ping: {other:?}"
+            ))),
+        }
     }
 
     async fn do_refresh_tools_with_stream(

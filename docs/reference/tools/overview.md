@@ -49,6 +49,7 @@ pub enum IpcRequest {
     AllowPattern { action: String, target_pattern: String },
     RevokePattern { action: String, target_pattern: String },
     Shutdown,
+    Ping,
 }
 
 pub enum IpcResponse {
@@ -59,10 +60,11 @@ pub enum IpcResponse {
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
     Error { message: String },
+    Pong,
 }
 ```
 
-Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 1` (see `crates/ene-tool-proto/src/ipc.rs`).
+Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see `crates/ene-tool-proto/src/ipc.rs`). v2 adds the `Ping`/`Pong` liveness probe used by host health checks (#238).
 
 ## ToolHostManager
 
@@ -89,8 +91,26 @@ Wire format: 4-byte little-endian length prefix + JSON payload. Max message size
 | Layer | Behavior |
 |-------|----------|
 | `SupervisedIpcRegistry` (process) | Process death detection → exponential backoff restart (max 5: 500ms → 8s) |
+| `SupervisedIpcRegistry` (hang) | A failed call followed by a failed `Ping` probe marks the tool unhealthy (alive but unresponsive) and restarts it (#238) |
 | `IpcToolRegistry` (connection) | Connection loss → exponential backoff reconnect (base 200ms doubling, cap 10s, 5 retries), re-sends Handshake |
 | `ToolHostManager::connect_with_retry` (initial) | Constant 50ms delay, 50 retries (`CONNECT_RETRIES = 50`, `CONNECT_DELAY_MS = 50`) |
+
+### Health Checks and Circuit Breaker (#238)
+
+A periodic liveness probe pings every tool on a fixed interval
+(`tools.health_interval_ms`, default 30s). A tool that is dead or fails to
+answer `Ping` within the probe bound is restarted and its recovery surfaced
+as a health event.
+
+A per-tool circuit breaker pauses calls after consecutive failures
+(`tools.circuit_failure_threshold`, default 5) for a cooldown window
+(`tools.circuit_cooldown_ms`, default 30s), then allows a probe call. A
+successful call closes the breaker.
+
+Health events are bridged into the runtime diagnostics channel as
+`DiagnosticEvent::ToolHealth` with a stable English `status` contract:
+`unhealthy`, `restarting`, `restarted`, `recovered`, `circuit_open`,
+`circuit_closed`, `disabled`.
 
 ## ToolAction Trait
 

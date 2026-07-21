@@ -1,6 +1,6 @@
 #[cfg(any(unix, windows))]
 use crate::db_server::DbIpcServer;
-use crate::diagnostics::{DiagnosticEvent, MemoryQueryHandle};
+use crate::diagnostics::{DiagnosticEvent, MemoryQueryHandle, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
@@ -570,7 +570,7 @@ impl EneHandle {
             None
         };
 
-        let registry = build_tool_registry(&config, memory_store.clone()).await?;
+        let registry = build_tool_registry(&config, memory_store.clone(), diag_tx.clone()).await?;
         let tool_rag = match embedder.as_ref() {
             Some(emb) => init_tool_rag(&config, emb, &session)?,
             None => None,
@@ -1727,6 +1727,7 @@ impl EneActor {
                     match build_tool_registry(
                         &self.config,
                         self.session.memory.memory_store.clone(),
+                        self.diag_tx.clone(),
                     )
                     .await
                     {
@@ -2366,9 +2367,13 @@ fn tool_enable_set_changed(
 
 /// Builds the active composite tool registry based on workspace config.
 /// Spawns per-tool DB IPC servers before starting tool processes.
+///
+/// Tool health events (#238) are bridged into `diag_tx` as
+/// [`DiagnosticEvent::ToolHealth`].
 async fn build_tool_registry(
     config: &EneConfig,
     memory_store: Option<Arc<ene_store::MemoryStore>>,
+    diag_tx: broadcast::Sender<DiagnosticEvent>,
 ) -> Result<Arc<dyn ToolRegistry>, EneRuntimeError> {
     let mut db_tokens = std::collections::HashMap::new();
     if let Some(store) = &memory_store {
@@ -2449,9 +2454,58 @@ async fn build_tool_registry(
         }
     }
 
-    ToolHostManager::start_full(config, db_tokens)
+    let (health_tx, mut health_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ene_tool_host::ToolHealthEvent>();
+
+    let registry = ToolHostManager::start_full(config, db_tokens, Some(health_tx))
         .await
-        .map_err(EneRuntimeError::Tool)
+        .map_err(EneRuntimeError::Tool)?;
+
+    // Bridge tool health events into the diagnostics channel (#238).
+    tokio::spawn(async move {
+        while let Some(event) = health_rx.recv().await {
+            emit_diag(&diag_tx, tool_health_event_to_diag(event));
+        }
+    });
+
+    Ok(registry)
+}
+
+/// Maps a [`ene_tool_host::ToolHealthEvent`] to a [`DiagnosticEvent::ToolHealth`]
+/// with a stable English status contract (#238).
+fn tool_health_event_to_diag(event: ene_tool_host::ToolHealthEvent) -> DiagnosticEvent {
+    use ene_tool_host::ToolHealthEvent;
+    let (tool, status, detail) = match event {
+        ToolHealthEvent::Unhealthy { tool, reason } => {
+            (tool, "unhealthy", Some(format!("tool is {reason}")))
+        }
+        ToolHealthEvent::Restarting { tool, attempt } => (
+            tool,
+            "restarting",
+            Some(format!("restart attempt {attempt}")),
+        ),
+        ToolHealthEvent::Restarted { tool } => (tool, "restarted", None),
+        ToolHealthEvent::Recovered { tool } => (tool, "recovered", None),
+        ToolHealthEvent::CircuitOpened {
+            tool,
+            consecutive_failures,
+        } => (
+            tool,
+            "circuit_open",
+            Some(format!("{consecutive_failures} consecutive failures")),
+        ),
+        ToolHealthEvent::CircuitClosed { tool } => (tool, "circuit_closed", None),
+        ToolHealthEvent::Disabled { tool } => (
+            tool,
+            "disabled",
+            Some("restart budget exhausted".to_string()),
+        ),
+    };
+    DiagnosticEvent::ToolHealth {
+        tool,
+        status: status.to_string(),
+        detail,
+    }
 }
 
 fn init_embedding(

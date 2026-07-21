@@ -49,6 +49,7 @@ pub enum IpcRequest {
     AllowPattern { action: String, target_pattern: String },
     RevokePattern { action: String, target_pattern: String },
     Shutdown,
+    Ping,
 }
 
 pub enum IpcResponse {
@@ -59,10 +60,11 @@ pub enum IpcResponse {
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
     Error { message: String },
+    Pong,
 }
 ```
 
-ワイヤ形式: 4 バイト little-endian 長プレフィックス + JSON。最大メッセージサイズ 64 MB。プロトコルバージョン: `IPC_PROTOCOL_VERSION = 1`（`crates/ene-tool-proto/src/ipc.rs`）。
+ワイヤ形式: 4 バイト little-endian 長プレフィックス + JSON。最大メッセージサイズ 64 MB。プロトコルバージョン: `IPC_PROTOCOL_VERSION = 2`（`crates/ene-tool-proto/src/ipc.rs`）。v2 でホストのヘルスチェックに使う `Ping`/`Pong` liveness probe を追加（#238）。
 
 ## ToolHostManager
 
@@ -89,8 +91,24 @@ pub enum IpcResponse {
 | 層 | 挙動 |
 |----|------|
 | `SupervisedIpcRegistry`（プロセス） | 死亡検知 → 指数バックオフ再起動（最大 5: 500ms → 8s） |
+| `SupervisedIpcRegistry`（ハング） | 呼び出し失敗後に `Ping` probe も失敗したツールを unhealthy（生存だが無応答）と判定し再起動（#238） |
 | `IpcToolRegistry`（接続） | 切断 → 指数バックオフ再接続（200ms 倍増、上限 10s、5 回）、Handshake 再送 |
 | `ToolHostManager::connect_with_retry`（初期） | 定数 50ms、50 回リトライ |
+
+### ヘルスチェックとサーキットブレーカー (#238)
+
+定期的な liveness probe が固定間隔（`tools.health_interval_ms`、既定 30 秒）で
+全ツールに ping します。死亡している、または probe 制限時間内に `Ping` へ応答
+できないツールは再起動され、その回復はヘルスイベントとして通知されます。
+
+ツールごとのサーキットブレーカーは、連続失敗（`tools.circuit_failure_threshold`、
+既定 5 回）の後にクールダウン窓（`tools.circuit_cooldown_ms`、既定 30 秒）の間
+呼び出しを一時停止し、その後 probe 呼び出しを許可します。呼び出しが成功すると
+ブレーカーは閉じます。
+
+ヘルスイベントは runtime の診断チャネルへ `DiagnosticEvent::ToolHealth` として
+ブリッジされ、安定した英語の `status` 契約を持ちます: `unhealthy`、`restarting`、
+`restarted`、`recovered`、`circuit_open`、`circuit_closed`、`disabled`。
 
 ## ToolAction / ToolProvider / ToolRegistry
 

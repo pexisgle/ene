@@ -187,5 +187,6 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             IpcResponse::Ack
         }
         IpcRequest::Shutdown => IpcResponse::Ack,
+        IpcRequest::Ping => IpcResponse::Pong,
     }
 }

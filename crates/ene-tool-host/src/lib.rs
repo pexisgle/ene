@@ -24,10 +24,14 @@
 //! multi-vector embedding pipeline, `HyDE`, and LLM rerank details.
 #![warn(missing_docs)]
 
+/// Per-tool circuit breaker for consecutive-failure fail-fast (#238).
+pub mod circuit_breaker;
 /// Tool and MCP configuration types.
 pub mod config;
 /// Tool host error types
 pub mod error;
+/// Tool health events surfaced to diagnostics (#238).
+pub mod health;
 /// IPC client with auto-reconnect for tool binaries.
 pub mod ipc_registry;
 /// MCP server configuration types.
@@ -39,6 +43,8 @@ pub mod tool_host_manager;
 /// Tool registry types (Composite, `ToolRegistry` trait, etc.).
 pub mod tools;
 
+/// Per-tool circuit breaker (#238).
+pub use circuit_breaker::{BreakerState, CircuitBreaker};
 /// Tool configuration types.
 pub use config::{ToolConfig, ToolEntry};
 /// `ToolSpec` type (re-exported from `ene-tool-proto`).
@@ -46,6 +52,8 @@ pub use config::{ToolConfig, ToolEntry};
 pub use ene_tool_proto::ToolSpec;
 /// Tool host error types
 pub use error::{EneToolHostError, ToolHostError};
+/// Tool health events (#238).
+pub use health::ToolHealthEvent;
 /// IPC client with auto-reconnect.
 pub use ipc_registry::IpcToolRegistry;
 /// MCP server configuration types.

@@ -9,6 +9,18 @@ const fn default_timeout_ms() -> u64 {
     60_000
 }
 
+const fn default_health_interval_ms() -> u64 {
+    30_000
+}
+
+const fn default_health_failure_threshold() -> u32 {
+    5
+}
+
+const fn default_health_cooldown_ms() -> u64 {
+    30_000
+}
+
 fn default_tools() -> HashMap<String, ToolEntry> {
     ["fs", "web", "browser", "utility", "app"]
         .into_iter()
@@ -51,6 +63,18 @@ ene_config::define_config!(
         #[serde(skip_deserializing, default = "default_timeout_ms", skip_serializing)]
         #[schemars(skip)]
         pub timeout_ms: u64 = default_timeout_ms(),
+        /// Interval between periodic liveness probes in milliseconds (#238).
+        #[serde(skip_deserializing, default = "default_health_interval_ms", skip_serializing)]
+        #[schemars(skip)]
+        pub health_interval_ms: u64 = default_health_interval_ms(),
+        /// Consecutive call failures before the circuit breaker opens (#238).
+        #[serde(skip_deserializing, default = "default_health_failure_threshold", skip_serializing)]
+        #[schemars(skip)]
+        pub circuit_failure_threshold: u32 = default_health_failure_threshold(),
+        /// Circuit breaker cooldown in milliseconds while calls are paused (#238).
+        #[serde(skip_deserializing, default = "default_health_cooldown_ms", skip_serializing)]
+        #[schemars(skip)]
+        pub circuit_cooldown_ms: u64 = default_health_cooldown_ms(),
         /// Per-tool enable/disable map with optional extra config.
         pub list: HashMap<String, ToolEntry> = default_tools(),
         /// MCP servers.

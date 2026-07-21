@@ -8,7 +8,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
 /// Current IPC protocol version.
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+///
+/// v2 adds the `Ping`/`Pong` liveness probe used by the host's periodic
+/// health check and hang detection (#238).
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,6 +71,10 @@ pub enum IpcRequest {
     },
     /// Graceful shutdown.
     Shutdown,
+    /// Liveness probe. The server must reply with [`IpcResponse::Pong`]
+    /// promptly; a hung tool that fails to answer within the probe timeout
+    /// is considered unhealthy and restarted by the host (#238).
+    Ping,
 }
 
 /// IPC response — host → core
@@ -105,6 +112,8 @@ pub enum IpcResponse {
         /// Error description.
         message: String,
     },
+    /// Reply to a [`IpcRequest::Ping`] liveness probe (#238).
+    Pong,
 }
 
 /// Call context identifying the conversation and turn for which
@@ -316,6 +325,20 @@ mod tests {
         let req = IpcRequest::Shutdown;
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn ipc_request_ping_roundtrip() {
+        let req = IpcRequest::Ping;
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn ipc_response_pong_roundtrip() {
+        let resp = IpcResponse::Pong;
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
     }
 
     #[tokio::test]
