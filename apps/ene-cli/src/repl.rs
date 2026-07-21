@@ -80,11 +80,15 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                 }
                     Err(ene_runtime::RunError::Busy) => {
                         println!("{}", crate::style::warning(
-                            "[Busy] A turn is already in progress. Wait for it to finish.",
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "busy-warning"),
                         ));
                     }
                     Err(e) => {
-                        println!("{}", crate::style::error(format!("[Run] Failed: {e}")));
+                        println!("{}", crate::style::error(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "run-failed",
+                            error = e.to_string()
+                        )));
                     }
                 }
             }

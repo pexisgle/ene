@@ -8,6 +8,18 @@ Interactive REPL for chatting with AI characters, testing tools, and managing me
 cargo run -p ene-cli
 ```
 
+## Command-line flags
+
+| Flag | Action |
+|------|--------|
+| `-h`, `--help` | Print usage and exit |
+| `-V`, `--version` | Print the version and exit |
+| `--config <PATH>` | Load `settings.json` from an explicit path instead of the default location |
+| `--character <NAME>` | Use a character card name or path instead of the configured default |
+| `--lang <LANG>` | Override the UI language (`en` or `ja`); defaults to the system locale |
+
+User-facing CLI output is localized through Fluent catalogs under `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`. The active language is negotiated from the system locale unless overridden with `--lang`.
+
 ## Architecture
 
 ```

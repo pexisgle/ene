@@ -129,13 +129,16 @@ pub async fn process_stream(
                 );
 
                 let choices = vec![
-                    "1回のみ許可 (Allow Once)",
-                    "このセッションで常に許可 (Allow Session)",
-                    "拒否 (Deny)",
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-allow-once"),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-allow-session"),
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "permission-deny"),
                 ];
                 ui.pause_for_external_prompt();
                 let selection = dialoguer::Select::new()
-                    .with_prompt("操作の権限を選択してください")
+                    .with_prompt(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "permission-prompt"
+                    ))
                     .items(&choices)
                     .default(0)
                     .interact()
@@ -171,11 +174,17 @@ pub async fn process_stream(
 
                     let answer = if !item.options.is_empty() {
                         let mut choices: Vec<String> = item.options.clone();
-                        choices.push("(skip)".to_string());
-                        choices.push("(cancel all)".to_string());
+                        choices.push(i18n_embed_fl::fl!(crate::i18n::loader(), "user-input-skip"));
+                        choices.push(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "user-input-cancel"
+                        ));
                         ui.pause_for_external_prompt();
                         let selection = dialoguer::Select::new()
-                            .with_prompt("回答を選択 (上下キーで選択, Enterで確定)")
+                            .with_prompt(i18n_embed_fl::fl!(
+                                crate::i18n::loader(),
+                                "user-input-select"
+                            ))
                             .items(&choices)
                             .default(0)
                             .interact()
@@ -183,10 +192,13 @@ pub async fn process_stream(
                         ui.resume_after_external_prompt();
 
                         let chosen = &choices[selection];
-                        if chosen == "(cancel all)" {
+                        if chosen == &i18n_embed_fl::fl!(crate::i18n::loader(), "user-input-cancel")
+                        {
                             cancelled = true;
                             break;
-                        } else if chosen == "(skip)" {
+                        } else if chosen
+                            == &i18n_embed_fl::fl!(crate::i18n::loader(), "user-input-skip")
+                        {
                             MultiAnswer::Skip
                         } else {
                             MultiAnswer::Selected {
@@ -196,7 +208,10 @@ pub async fn process_stream(
                     } else if item.allow_free_text {
                         ui.pause_for_external_prompt();
                         let text: String = dialoguer::Input::new()
-                            .with_prompt("自由入力 (空でskip, 'cancel'で全キャンセル)")
+                            .with_prompt(i18n_embed_fl::fl!(
+                                crate::i18n::loader(),
+                                "user-input-freetext"
+                            ))
                             .allow_empty(true)
                             .interact_text()
                             .unwrap_or_default();

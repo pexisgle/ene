@@ -113,7 +113,14 @@ pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
             eprintln!("{}", crate::style::error(err.to_string()));
         }
     } else {
-        eprintln!("{}", crate::style::error(format!("Unknown command: {cmd}")));
+        eprintln!(
+            "{}",
+            crate::style::error(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "unknown-command",
+                command = cmd.to_string()
+            ))
+        );
     }
     CommandOutcome::Continue
 }

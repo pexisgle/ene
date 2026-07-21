@@ -11,6 +11,7 @@
     expect(clippy::expect_used, reason = "unit tests use expect for assertions")
 )]
 
+mod cli;
 mod commands;
 mod config;
 mod context;
@@ -21,12 +22,23 @@ mod style;
 mod terminal_ui;
 mod tree_log;
 
+use clap::Parser;
+
 #[tokio::main]
 async fn main() {
     use std::io::{self, IsTerminal};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{EnvFilter, Layer, fmt};
+
+    // Parse CLI args first so `--help`/`--version` work without touching
+    // config, the runtime, or the terminal UI.
+    let args = cli::Cli::parse();
+
+    // Apply the language override before any localized output is produced.
+    if let Some(lang) = &args.lang {
+        i18n::select_language(lang);
+    }
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,sea_orm=warn"));
@@ -44,7 +56,11 @@ async fn main() {
         let _ = terminal_ui::TerminalUi::init_global();
     }
 
-    let handle = match config::init().await {
+    let opts = config::InitOptions {
+        config_path: args.config,
+        character: args.character,
+    };
+    let handle = match config::init(&opts).await {
         Ok(h) => h,
         Err(e) => {
             tracing::error!(error = %e, "Fatal: Failed to initialize runtime");

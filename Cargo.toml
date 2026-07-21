@@ -47,6 +47,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 # ── Terminal / CLI ──
+clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
 
 # ── Networking ──

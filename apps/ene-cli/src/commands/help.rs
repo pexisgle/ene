@@ -19,8 +19,15 @@ impl CliCommand for HelpCommand {
     }
 
     async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<(), CliError> {
-        println!("Commands:");
-        println!("  {:<24} - Exit the CLI", "/quit");
+        println!(
+            "{}",
+            i18n_embed_fl::fl!(crate::i18n::loader(), "help-commands-title")
+        );
+        println!(
+            "  {:<24} - {}",
+            "/quit",
+            i18n_embed_fl::fl!(crate::i18n::loader(), "help-quit")
+        );
         for cmd in crate::commands::COMMANDS {
             println!("  {:<24} - {}", cmd.usage(), cmd.description());
         }
