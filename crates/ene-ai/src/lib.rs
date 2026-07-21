@@ -39,6 +39,8 @@ pub mod message;
 pub mod openai;
 /// Resolved settings from [`config::AiConfig`] task routing.
 pub mod resolve;
+/// Retry policy with exponential backoff for transient provider failures.
+pub mod retry;
 /// Provider traits and registry.
 pub mod traits;
 
@@ -46,7 +48,7 @@ pub mod role;
 
 pub use config::{
     AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, LOCAL_PROVIDER, LocalModelDef,
-    ProactiveAcceleration, TaskRef,
+    ProactiveAcceleration, RetryConfig, TaskRef,
 };
 pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
@@ -66,7 +68,9 @@ pub use openai::{
 };
 pub use resolve::{
     ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedTaskRef, resolve_base_url,
+    validate_api_key,
 };
+pub use retry::RetryPolicy;
 pub use role::Role;
 pub use traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,

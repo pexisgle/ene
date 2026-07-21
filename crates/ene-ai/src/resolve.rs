@@ -181,6 +181,54 @@ impl ApiKeyConfig {
     }
 }
 
+/// Lightweight API-key validation for an OpenAI-compatible provider (#237).
+///
+/// Performs a `GET {base_url}/models` request with a short timeout so an
+/// invalid key is reported before the first turn instead of surfacing as an
+/// HTTP 401 mid-conversation. Sends no user data. An empty key fails fast
+/// with [`crate::AiError::MissingApiKey`].
+pub async fn validate_api_key(base_url: &str, api_key: &str) -> Result<(), crate::error::AiError> {
+    if api_key.trim().is_empty() {
+        return Err(crate::error::AiError::MissingApiKey(
+            "resolved API key is empty; set the provider api_key or the configured env var"
+                .to_string(),
+        ));
+    }
+
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| {
+            crate::error::AiError::Llm(LlmProviderError::Provider(format!(
+                "validation HTTP client init failed: {e}"
+            )))
+        })?;
+
+    let response = client
+        .get(url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .map_err(|e| {
+            crate::error::AiError::Llm(LlmProviderError::Network(format!(
+                "API key validation request failed: {e}"
+            )))
+        })?;
+
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let raw = response.text().await.unwrap_or_default();
+    let snippet: String = raw.chars().take(200).collect();
+    Err(crate::error::AiError::Llm(match status.as_u16() {
+        401 | 403 => LlmProviderError::Auth(format!("API key rejected: {snippet}")),
+        429 => LlmProviderError::RateLimit(snippet),
+        _ => LlmProviderError::Provider(format!("API key validation HTTP {status}: {snippet}")),
+    }))
+}
+
 impl AiConfig {
     /// Whether `name` is the reserved local provider.
     #[must_use]

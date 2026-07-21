@@ -76,6 +76,31 @@ pub enum LlmProviderError {
     LocalLlm(String),
 }
 
+impl LlmProviderError {
+    /// Whether this error is transient and may succeed on retry.
+    ///
+    /// `RateLimit` (429) and `Network` errors are retryable; `Auth`,
+    /// `ContentFilter`, `Truncated`, and `Provider` errors are not.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::RateLimit(_) | Self::Network(_))
+    }
+
+    /// Extracts a `Retry-After` hint (seconds) embedded in a `RateLimit`
+    /// message by the transport layer, if present.
+    #[must_use]
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        const MARKER: &str = "[retry-after: ";
+        if let Self::RateLimit(msg) = self
+            && let Some((_prefix, rest)) = msg.split_once(MARKER)
+            && let Some(value) = rest.strip_suffix("s]")
+        {
+            return value.trim().parse::<u64>().ok();
+        }
+        None
+    }
+}
+
 /// Single public error type for the `ene-ai` crate boundary (API v1 / #118).
 ///
 /// Domain-specific [`LlmProviderError`] and [`EmbeddingError`] remain available
@@ -88,6 +113,9 @@ pub enum AiError {
     /// Embedding provider failure.
     #[error(transparent)]
     Embedding(#[from] crate::traits::EmbeddingError),
+    /// API key is missing or empty (#237).
+    #[error("API key not configured: {0}")]
+    MissingApiKey(String),
 }
 
 #[cfg(test)]

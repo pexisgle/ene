@@ -201,6 +201,44 @@ fn default_providers() -> BTreeMap<String, AiProviderDef> {
     providers
 }
 
+/// Retry / backoff policy for transient provider failures (#237).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct RetryConfig {
+    /// Maximum number of attempts (including the initial call).
+    pub max_attempts: u32,
+    /// Base delay before the first retry, in milliseconds.
+    pub base_delay_ms: u64,
+    /// Maximum delay cap for exponential growth, in milliseconds.
+    pub max_delay_ms: u64,
+    /// Per-request timeout, in milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay_ms: 500,
+            max_delay_ms: 30_000,
+            timeout_ms: 120_000,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Convert to the runtime [`crate::retry::RetryPolicy`].
+    #[must_use]
+    pub fn to_policy(&self) -> crate::retry::RetryPolicy {
+        crate::retry::RetryPolicy {
+            max_attempts: self.max_attempts.max(1),
+            base_delay: std::time::Duration::from_millis(self.base_delay_ms),
+            max_delay: std::time::Duration::from_millis(self.max_delay_ms),
+        }
+    }
+}
+
 ene_config::define_config!(
     settings,
     "ai",
@@ -212,6 +250,8 @@ ene_config::define_config!(
         pub providers: BTreeMap<String, AiProviderDef> = default_providers(),
         /// Task → provider/model routing.
         pub tasks: AiTasksConfig,
+        /// Retry / backoff policy for transient provider failures.
+        pub retry: RetryConfig,
     }
 );
 

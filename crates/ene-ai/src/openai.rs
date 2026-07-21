@@ -8,6 +8,7 @@ use crate::config::AiConfig;
 use crate::error::{LlmProviderError, map_openai_error};
 use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
 use crate::resolve::ResolvedChat;
+use crate::retry::RetryPolicy;
 use crate::traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
 };
@@ -169,6 +170,8 @@ pub struct OpenAiProvider {
     chat_max_tokens: Option<u32>,
     /// Disable `MiMo` / reasoning-model thinking so JSON lands in `content`.
     thinking_disabled: bool,
+    /// Retry policy for transient failures (#237).
+    retry_policy: RetryPolicy,
 }
 
 impl OpenAiProvider {
@@ -181,6 +184,7 @@ impl OpenAiProvider {
             model: model.to_string(),
             chat_max_tokens: None,
             thinking_disabled: false,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -195,6 +199,13 @@ impl OpenAiProvider {
     #[must_use]
     pub const fn with_thinking_disabled(mut self, disabled: bool) -> Self {
         self.thinking_disabled = disabled;
+        self
+    }
+
+    /// Override the retry policy for transient failures.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
         self
     }
 }
@@ -284,10 +295,34 @@ fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
         .map_err(|e| LlmProviderError::Provider(format!("HTTP client init failed: {e}")))
 }
 
+/// Maps a non-success HTTP status and response body to a typed
+/// [`LlmProviderError`], so retry logic can distinguish transient
+/// failures (429 / network) from permanent ones (401 / 400).
+fn http_status_error(status: reqwest::StatusCode, body: &str) -> LlmProviderError {
+    let snippet: String = body.chars().take(280).collect();
+    match status.as_u16() {
+        401 | 403 => LlmProviderError::Auth(snippet),
+        429 => LlmProviderError::RateLimit(snippet),
+        _ => LlmProviderError::Provider(format!("HTTP {status}: {snippet}")),
+    }
+}
+
+/// Parses a `Retry-After` response header (seconds) if present and valid.
+fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
 /// Non-stream BYOT chat completion via direct HTTP.
 ///
 /// `async-openai`'s `create_byot` can hang on `OpenRouter` `MiMo` with `thinking: disabled`;
 /// a plain POST matches the reliable direct-HTTP path used in classifier benchmarks.
+///
+/// Returns the parsed JSON body plus an optional `Retry-After` hint (seconds)
+/// captured from a 429 response, so callers can honor it in backoff (#237).
 async fn post_chat_byot_via_http(
     api_base: &str,
     api_key: &str,
@@ -301,19 +336,24 @@ async fn post_chat_byot_via_http(
         .json(&body)
         .send()
         .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat completion HTTP failed: {e}")))?;
+        .map_err(|e| LlmProviderError::Network(format!("chat completion HTTP failed: {e}")))?;
 
     let status = response.status();
+    let retry_after = retry_after_secs(&response);
     let raw = response
         .text()
         .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat completion read failed: {e}")))?;
+        .map_err(|e| LlmProviderError::Network(format!("chat completion read failed: {e}")))?;
 
     if !status.is_success() {
-        return Err(LlmProviderError::Provider(format!(
-            "chat completion HTTP {status}: {}",
-            raw.chars().take(200).collect::<String>()
-        )));
+        let mut err = http_status_error(status, &raw);
+        if let (LlmProviderError::RateLimit(_), Some(secs)) = (&err, retry_after) {
+            err = LlmProviderError::RateLimit(format!(
+                "{raw} [retry-after: {secs}s]",
+                raw = raw.chars().take(200).collect::<String>()
+            ));
+        }
+        return Err(err);
     }
 
     serde_json::from_str(&raw)
@@ -366,11 +406,19 @@ impl LlmProvider for OpenAiProvider {
         let body = merge_request_body(request, true, self.thinking_disabled)?;
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
+        let retry_policy = self.retry_policy.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
         tokio::spawn(async move {
-            if let Err(e) =
-                run_direct_sse_stream(&api_base, &api_key, body, name_mapping, tx.clone()).await
+            if let Err(e) = run_direct_sse_stream(
+                &api_base,
+                &api_key,
+                body,
+                name_mapping,
+                tx.clone(),
+                &retry_policy,
+            )
+            .await
             {
                 let _ = tx.send(Err(e)).await;
             }
@@ -420,7 +468,16 @@ impl LlmProvider for OpenAiProvider {
 
         if self.thinking_disabled {
             let body = merge_request_body(request, false, true)?;
-            let response = post_chat_byot_via_http(&self.api_base, &self.api_key, body).await?;
+            let api_base = self.api_base.clone();
+            let api_key = self.api_key.clone();
+            let response = self
+                .retry_policy
+                .run_with_retry_after(
+                    LlmProviderError::is_retryable,
+                    LlmProviderError::retry_after_secs,
+                    || post_chat_byot_via_http(&api_base, &api_key, body.clone()),
+                )
+                .await?;
 
             let message = response
                 .get("choices")
@@ -435,11 +492,22 @@ impl LlmProvider for OpenAiProvider {
         }
 
         let response = self
-            .client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| map_openai_error(&e))?;
+            .retry_policy
+            .run_with_retry_after(
+                LlmProviderError::is_retryable,
+                LlmProviderError::retry_after_secs,
+                || {
+                    let request = request.clone();
+                    async move {
+                        self.client
+                            .chat()
+                            .create(request)
+                            .await
+                            .map_err(|e| map_openai_error(&e))
+                    }
+                },
+            )
+            .await?;
 
         let choice = response.choices.first().ok_or_else(|| {
             tracing::warn!(component = "OpenAI", "Chat completion returned no choices");
@@ -523,7 +591,9 @@ pub fn create_task_chat_provider(
         AiTaskKind::Classifier => ai_config.resolve_classifier()?,
         AiTaskKind::Proactive => ai_config.resolve_proactive_generation()?,
     };
-    Ok(Box::new(create_chat_provider_from_resolved(&resolved)))
+    let provider = create_chat_provider_from_resolved(&resolved)
+        .with_retry_policy(ai_config.retry.to_policy());
+    Ok(Box::new(provider))
 }
 
 /// Cloud embedding provider.
@@ -533,6 +603,8 @@ pub struct CloudEmbeddingProvider {
     embedding_dimensions: usize,
     query_prefix: Option<String>,
     hyde_model: Option<String>,
+    /// Retry policy for transient failures (#237).
+    retry_policy: RetryPolicy,
 }
 
 impl CloudEmbeddingProvider {
@@ -550,6 +622,7 @@ impl CloudEmbeddingProvider {
             embedding_dimensions,
             query_prefix,
             hyde_model: None,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -558,6 +631,13 @@ impl CloudEmbeddingProvider {
     #[must_use]
     pub fn with_hyde_model(mut self, model: String) -> Self {
         self.hyde_model = Some(model);
+        self
+    }
+
+    /// Override the retry policy for transient failures.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
         self
     }
 
@@ -644,11 +724,18 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
             .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
 
         let response = self
-            .client
-            .embeddings()
-            .create(request)
-            .await
-            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
+            .retry_policy
+            .run(EmbeddingError::is_retryable, || {
+                let request = request.clone();
+                async move {
+                    self.client
+                        .embeddings()
+                        .create(request)
+                        .await
+                        .map_err(|e| EmbeddingError::Provider(e.to_string()))
+                }
+            })
+            .await?;
 
         // OpenAI returns embeddings in input order. Fail loudly if the count
         // is wrong rather than silently truncating (which used to mask
@@ -682,39 +769,71 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
     }
 }
 
+/// Establish the SSE connection, retrying transient failures (429 / network)
+/// before the stream body starts. Once bytes begin flowing, disconnects are
+/// not retried (the caller treats a mid-stream failure as terminal).
+async fn establish_sse_connection(
+    api_base: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    retry_policy: &RetryPolicy,
+) -> Result<reqwest::Response, LlmProviderError> {
+    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
+
+    retry_policy
+        .run_with_retry_after(
+            LlmProviderError::is_retryable,
+            LlmProviderError::retry_after_secs,
+            || async {
+                let response = byot_http_client()?
+                    .post(url.clone())
+                    .bearer_auth(api_key)
+                    .header("Content-Type", "application/json")
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        LlmProviderError::Network(format!("chat stream HTTP failed: {e}"))
+                    })?;
+
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(response);
+                }
+
+                let retry_after = retry_after_secs(&response);
+                let raw = response.text().await.unwrap_or_default();
+                if status.as_u16() == 402 {
+                    return Err(LlmProviderError::Provider(format!(
+                        "chat stream HTTP 402 Payment Required (often OpenRouter credit collateral for max_tokens): {}",
+                        raw.chars().take(280).collect::<String>()
+                    )));
+                }
+                let mut err = http_status_error(status, &raw);
+                if let (LlmProviderError::RateLimit(_), Some(secs)) = (&err, retry_after) {
+                    err = LlmProviderError::RateLimit(format!(
+                        "{} [retry-after: {secs}s]",
+                        raw.chars().take(200).collect::<String>()
+                    ));
+                }
+                Err(err)
+            },
+        )
+        .await
+}
+
 async fn run_direct_sse_stream(
     api_base: &str,
     api_key: &str,
     body: serde_json::Value,
     name_mapping: std::collections::HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<Result<LlmResponseChunk, LlmProviderError>>,
+    retry_policy: &RetryPolicy,
 ) -> Result<(), LlmProviderError> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio_util::io::StreamReader;
 
-    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    let response = byot_http_client()?
-        .post(url)
-        .bearer_auth(api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat stream HTTP failed: {e}")))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let raw = response.text().await.unwrap_or_default();
-        if status.as_u16() == 402 {
-            return Err(LlmProviderError::Provider(format!(
-                "chat stream HTTP 402 Payment Required (often OpenRouter credit collateral for max_tokens): {}",
-                raw.chars().take(280).collect::<String>()
-            )));
-        }
-        return Err(LlmProviderError::Provider(format!(
-            "chat stream HTTP {status}: {raw}"
-        )));
-    }
+    let response = establish_sse_connection(api_base, api_key, &body, retry_policy).await?;
 
     let bytes_stream = response
         .bytes_stream()

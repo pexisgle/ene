@@ -100,6 +100,17 @@ pub enum EmbeddingError {
     DimensionMismatch(String),
 }
 
+impl EmbeddingError {
+    /// Whether this error is transient and may succeed on retry.
+    ///
+    /// Transport / API failures (`Provider`) are retryable; init, empty-input,
+    /// and dimension-mismatch errors are deterministic and not retried.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Provider(_))
+    }
+}
+
 /// Trait for generating vector embeddings from text (used by memory search and Tool RAG).
 ///
 /// The only embedding operation on this trait is [`embed_batch`]. Single-text and
