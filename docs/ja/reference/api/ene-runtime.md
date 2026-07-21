@@ -80,6 +80,8 @@ impl Clone for EneHandle { /* ... */ }
 | `run` | `fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError>` | ターン開始。進行中なら `RunError::Busy` — 進行中ターンを黙って中断しない。 |
 | `cancel` | `fn cancel(&self, turn: &TurnId) -> Result<(), CancelError>` | 一致するターンのみキャンセル（不一致は `TurnMismatch`）。 |
 | `decide_permission` / `submit_user_input` | … | ゲート解決。 |
+| `list_permissions` / `revoke_permission` / `reset_all_permissions` | `async fn ... -> Result<..., ActorDeadError>` | セッション全体の権限付与の一覧・取り消し (#177)。 |
+| `undo` | `async fn undo(&self) -> Result<UndoReport, ActorDeadError>` | 直近の可逆なツール操作を取り消す (#178)。 |
 | `diagnostics` | `fn diagnostics(&self) -> &EneDiagnostics` | 具象 diagnostics ファサード。 |
 
 ### ライフサイクル — async
@@ -380,7 +382,8 @@ Mind 設定型は `ene-mind` が所有するため、そこから直接インポ
 | `handle` | `ActorDeadError`、`EneCommand`（*モジュールローカルで、再エクスポートされない*）、`EneEvent`、`EneEventReceiver`、`EneHandle`、`EneStateSnapshot`、`EneStatus`、`ShutdownTimeout`、`TerminalReason` |
 | `diagnostics` | `DiagnosticEvent`、`DiagnosticEventReceiver`、`EneDiagnostics`、`MemoryQueryHandle` |
 | `error` | `EneRuntimeError` |
-| `streaming` | `MultiAnswer`（*`ene_tool_proto` から再エクスポート、`#[doc(no_inline)]`*）、`PermissionDecision`、`UserInputResponse` |
+| `streaming` | `MultiAnswer`（*`ene_tool_proto` から再エクスポート、`#[doc(no_inline)]`*）、`PermissionDecision`、`GrantType`、`PermissionScope`、`UserInputResponse` |
+| `undo` | `UndoReport`、`UndoStack`、`UndoEntry` |
 | `message_builder` | `MessageBuildContext`、`build_messages` |
 | `types` | `RequestId`、`TurnId`、`RunError`、`CancelError` |
 

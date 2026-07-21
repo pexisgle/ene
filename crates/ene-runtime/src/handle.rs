@@ -51,6 +51,73 @@ pub enum EneCommand {
         /// The user's decision.
         decision: PermissionDecision,
     },
+    /// List all session-wide permission grants (#177).
+    ListPermissions {
+        /// Reply channel for the granted scopes.
+        reply: oneshot::Sender<Vec<crate::streaming::PermissionScope>>,
+    },
+    /// Revoke a single session-wide permission grant by id (#177).
+    RevokePermission {
+        /// The `PermissionScope::id` to revoke.
+        id: u64,
+        /// Reply channel reporting whether a scope was removed.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Revoke all session-wide permission grants (#177).
+    ResetAllPermissions {
+        /// Reply channel carrying the number of revoked scopes.
+        reply: oneshot::Sender<usize>,
+    },
+    /// Undo the most recent reversible tool operation (#178).
+    Undo {
+        /// Reply channel carrying the undo report.
+        reply: oneshot::Sender<crate::undo::UndoReport>,
+    },
+    /// List stored sessions, newest first (#176).
+    ListSessions {
+        /// Whether to include archived sessions.
+        include_archived: bool,
+        /// Maximum number of sessions to return.
+        limit: usize,
+        /// Reply channel carrying the session list.
+        reply: oneshot::Sender<Result<Vec<ene_store::SessionMeta>, ene_store::EneMemoryError>>,
+    },
+    /// Export a session to a versioned, redacted JSON bundle (#176).
+    ExportSession {
+        /// Logical session id to export.
+        session_id: String,
+        /// Reply channel carrying the JSON export string.
+        reply: oneshot::Sender<Result<String, ene_store::EneMemoryError>>,
+    },
+    /// Import a session from a JSON export bundle (#176).
+    ImportSession {
+        /// JSON export bundle to import.
+        json: String,
+        /// Reply channel carrying the imported session row id.
+        reply: oneshot::Sender<Result<i64, ene_store::EneMemoryError>>,
+    },
+    /// Full-text search over stored conversation messages (#176).
+    SearchSessions {
+        /// Case-insensitive search query.
+        query: String,
+        /// Maximum number of matches to return.
+        limit: usize,
+        /// Number of matches to skip (pagination).
+        offset: usize,
+        /// Reply channel carrying `(session_id, message)` matches.
+        reply: oneshot::Sender<
+            Result<Vec<(String, ene_store::ExportedMessage)>, ene_store::EneMemoryError>,
+        >,
+    },
+    /// Archive or unarchive a session (#176).
+    ArchiveSession {
+        /// Logical session id to update.
+        session_id: String,
+        /// Whether the session should be archived.
+        archived: bool,
+        /// Reply channel carrying whether a session row was updated.
+        reply: oneshot::Sender<Result<bool, ene_store::EneMemoryError>>,
+    },
     /// Submit a user-input response for a pending interactive tool.
     UserInputResponse {
         /// The `request_id` from a prior `UserInputRequired` event.
@@ -567,11 +634,14 @@ impl EneHandle {
             active_turn: None,
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
+            permission_scopes: Arc::new(Mutex::new(Vec::new())),
+            undo_stack: Arc::new(Mutex::new(crate::undo::UndoStack::new(64))),
             context: ene_mind::ContextManager::default(),
             call_tool_tasks: tokio::task::JoinSet::new(),
             classifier_tasks: tokio::task::JoinSet::new(),
             memory_writer_tasks: tokio::task::JoinSet::new(),
             vision_tasks: tokio::task::JoinSet::new(),
+            search_tasks: tokio::task::JoinSet::new(),
             classifier_rx,
             memory_writer_rx,
             terminal_emitted: Arc::new(AtomicBool::new(false)),
@@ -683,6 +753,131 @@ impl EneHandle {
             .map_err(|_| ActorDeadError)
     }
 
+    /// List all session-wide permission grants (#177).
+    pub async fn list_permissions(
+        &self,
+    ) -> Result<Vec<crate::streaming::PermissionScope>, ActorDeadError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ListPermissions { reply })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// Revoke a single session-wide permission grant by id (#177).
+    pub async fn revoke_permission(&self, id: u64) -> Result<bool, ActorDeadError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::RevokePermission { id, reply })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// Revoke all session-wide permission grants (#177).
+    pub async fn reset_all_permissions(&self) -> Result<usize, ActorDeadError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ResetAllPermissions { reply })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// Undo the most recent reversible tool operation (#178).
+    pub async fn undo(&self) -> Result<crate::undo::UndoReport, ActorDeadError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::Undo { reply })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// List stored sessions, newest first (#176).
+    pub async fn list_sessions(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Result<Vec<ene_store::SessionMeta>, ene_store::EneMemoryError>, ActorDeadError>
+    {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ListSessions {
+                include_archived,
+                limit,
+                reply,
+            })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// Export a session to a versioned, redacted JSON bundle (#176).
+    pub async fn export_session(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<Result<String, ene_store::EneMemoryError>, ActorDeadError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ExportSession {
+                session_id: session_id.into(),
+                reply,
+            })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// Import a session from a JSON export bundle (#176).
+    pub async fn import_session(
+        &self,
+        json: impl Into<String>,
+    ) -> Result<Result<i64, ene_store::EneMemoryError>, ActorDeadError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ImportSession {
+                json: json.into(),
+                reply,
+            })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// Full-text search over stored conversation messages (#176).
+    pub async fn search_sessions(
+        &self,
+        query: impl Into<String>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<
+        Result<Vec<(String, ene_store::ExportedMessage)>, ene_store::EneMemoryError>,
+        ActorDeadError,
+    > {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SearchSessions {
+                query: query.into(),
+                limit,
+                offset,
+                reply,
+            })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
+    /// Archive or unarchive a session (#176).
+    pub async fn archive_session(
+        &self,
+        session_id: impl Into<String>,
+        archived: bool,
+    ) -> Result<Result<bool, ene_store::EneMemoryError>, ActorDeadError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ArchiveSession {
+                session_id: session_id.into(),
+                archived,
+                reply,
+            })
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)
+    }
+
     /// Send a user-input response for a pending interactive tool.
     pub fn submit_user_input(
         &self,
@@ -783,12 +978,18 @@ struct EneActor {
     active_turn: Option<TurnId>,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+    /// Session-wide permission grants tracked for the permission center (#177).
+    permission_scopes: Arc<Mutex<Vec<crate::streaming::PermissionScope>>>,
+    /// Actor-native undo stack of mutating tool calls (#178).
+    undo_stack: Arc<Mutex<crate::undo::UndoStack>>,
     context: ene_mind::ContextManager,
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
     memory_writer_tasks: tokio::task::JoinSet<()>,
     /// In-flight screen-summary vision jobs (must not block the command loop).
     vision_tasks: tokio::task::JoinSet<()>,
+    /// In-flight tool-search jobs; reaped so panics are not lost (#236).
+    search_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     /// Sender for classifier `JoinHandles` from the stream task.
@@ -812,19 +1013,76 @@ struct EneActor {
     active_origin: crate::types::TurnOrigin,
 }
 
+/// Runs a future to completion, catching any panic and surfacing it as a
+/// [`DiagnosticEvent::ActorPanic`] instead of unwinding the caller (#236).
+///
+/// Returns `Ok(output)` on normal completion, or `Err(message)` when the
+/// future panicked. This keeps the actor command loop (and any other
+/// supervisor site) alive across a panicking unit of work.
+async fn isolate_panic<F, T>(
+    diag_tx: &broadcast::Sender<DiagnosticEvent>,
+    component: &str,
+    fut: F,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = T>,
+{
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(output) => Ok(output),
+        Err(payload) => {
+            let message = crate::diagnostics::panic_message(&payload);
+            tracing::error!(
+                component = "ActorSupervisor",
+                component_name = %component,
+                error = %message,
+                "task panicked; contained by supervisor"
+            );
+            let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
+                component: component.to_string(),
+                message: message.clone(),
+            });
+            Err(message)
+        }
+    }
+}
+
 /// Drains finished tasks from a `JoinSet`, logging any that panicked.
 ///
 /// Keeps the actor's background task sets from growing without bound while
-/// surfacing panics through structured diagnostics.
-fn reap_join_set(set: &mut tokio::task::JoinSet<()>, component: &str, message: &str) {
+/// surfacing panics through structured diagnostics (#236).
+fn reap_join_set(
+    set: &mut tokio::task::JoinSet<()>,
+    component: &str,
+    message: &str,
+    diag_tx: &broadcast::Sender<DiagnosticEvent>,
+) {
     while let Some(joined) = set.try_join_next() {
         if let Err(e) = joined {
             tracing::error!(component = %component, error = %e, "{message}");
+            if e.is_panic() {
+                let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
+                    component: component.to_string(),
+                    message: e.to_string(),
+                });
+            }
         }
     }
 }
 
 impl EneActor {
+    /// Runs a single command, isolating any panic so the actor loop survives (#236).
+    ///
+    /// A panicking command is logged and surfaced as a [`DiagnosticEvent::ActorPanic`]
+    /// instead of unwinding the whole actor task (which would take down the process).
+    /// The command is treated as non-terminal so subsequent commands keep flowing.
+    async fn run_command_isolated(&mut self, cmd: EneCommand) -> bool {
+        let diag_tx = self.diag_tx.clone();
+        isolate_panic(&diag_tx, "command", self.handle_command(cmd))
+            .await
+            .unwrap_or(true)
+    }
+
     async fn run(mut self) {
         loop {
             // Reap completed background tasks so the JoinSets
@@ -834,21 +1092,31 @@ impl EneActor {
                 &mut self.call_tool_tasks,
                 "CallToolReaper",
                 "CallTool task panicked",
+                &self.diag_tx,
             );
             reap_join_set(
                 &mut self.classifier_tasks,
                 "ClassifierReaper",
                 "Classifier task panicked",
+                &self.diag_tx,
             );
             reap_join_set(
                 &mut self.memory_writer_tasks,
                 "MemoryWriterReaper",
                 "Deferred memory-writer task panicked",
+                &self.diag_tx,
             );
             reap_join_set(
                 &mut self.vision_tasks,
                 "VisionReaper",
                 "Screen summary vision task panicked",
+                &self.diag_tx,
+            );
+            reap_join_set(
+                &mut self.search_tasks,
+                "SearchToolsReaper",
+                "SearchTools task panicked",
+                &self.diag_tx,
             );
 
             // Drain classifier JoinHandles sent from the stream.
@@ -891,7 +1159,7 @@ impl EneActor {
                     cmd = self.cmd_rx.recv() => {
                         match cmd {
                             Some(cmd) => {
-                                if !self.handle_command(cmd).await {
+                                if !self.run_command_isolated(cmd).await {
                                     break;
                                 }
                             }
@@ -932,7 +1200,7 @@ impl EneActor {
                         cmd = self.cmd_rx.recv() => {
                             match cmd {
                                 Some(cmd) => {
-                                    if !self.handle_command(cmd).await {
+                                    if !self.run_command_isolated(cmd).await {
                                         break;
                                     }
                                 }
@@ -952,7 +1220,7 @@ impl EneActor {
                         cmd = self.cmd_rx.recv() => {
                             match cmd {
                                 Some(cmd) => {
-                                    if !self.handle_command(cmd).await {
+                                    if !self.run_command_isolated(cmd).await {
                                         break;
                                     }
                                 }
@@ -971,7 +1239,7 @@ impl EneActor {
                 } else {
                     match self.cmd_rx.recv().await {
                         Some(cmd) => {
-                            if !self.handle_command(cmd).await {
+                            if !self.run_command_isolated(cmd).await {
                                 break;
                             }
                         }
@@ -994,6 +1262,7 @@ impl EneActor {
         self.memory_writer_tasks.abort_all();
         self.call_tool_tasks.abort_all();
         self.vision_tasks.abort_all();
+        self.search_tasks.abort_all();
         self.drain_pending().await;
     }
 
@@ -1501,6 +1770,116 @@ impl EneActor {
                 drop(guard);
                 true
             }
+            EneCommand::ListPermissions { reply } => {
+                let scopes = self.permission_scopes.lock().await.clone();
+                let _ = reply.send(scopes);
+                true
+            }
+            EneCommand::RevokePermission { id, reply } => {
+                let removed = {
+                    let mut guard = self.permission_scopes.lock().await;
+                    guard
+                        .iter()
+                        .position(|s| s.id == id)
+                        .map(|pos| guard.remove(pos))
+                };
+                let found = removed.is_some();
+                if let Some(scope) = removed {
+                    self.registry
+                        .revoke_pattern(&scope.action, &scope.target_pattern)
+                        .await;
+                }
+                let _ = reply.send(found);
+                true
+            }
+            EneCommand::ResetAllPermissions { reply } => {
+                let scopes = {
+                    let mut guard = self.permission_scopes.lock().await;
+                    std::mem::take(&mut *guard)
+                };
+                let count = scopes.len();
+                for scope in &scopes {
+                    self.registry
+                        .revoke_pattern(&scope.action, &scope.target_pattern)
+                        .await;
+                }
+                let _ = reply.send(count);
+                true
+            }
+            EneCommand::Undo { reply } => {
+                let report = self.handle_undo().await;
+                let _ = reply.send(report);
+                true
+            }
+            EneCommand::ListSessions {
+                include_archived,
+                limit,
+                reply,
+            } => {
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => store.list_sessions(include_archived, limit).await,
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
+                };
+                let _ = reply.send(result);
+                true
+            }
+            EneCommand::ExportSession { session_id, reply } => {
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => match store.build_export(&session_id).await {
+                        Ok(export) => export.to_json(),
+                        Err(e) => Err(e),
+                    },
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
+                };
+                let _ = reply.send(result);
+                true
+            }
+            EneCommand::ImportSession { json, reply } => {
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => match ene_store::SessionExport::from_json(&json) {
+                        Ok(export) => store.import_export(&export).await,
+                        Err(e) => Err(e),
+                    },
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
+                };
+                let _ = reply.send(result);
+                true
+            }
+            EneCommand::SearchSessions {
+                query,
+                limit,
+                offset,
+                reply,
+            } => {
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => store.search_messages(&query, limit, offset).await,
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
+                };
+                let _ = reply.send(result);
+                true
+            }
+            EneCommand::ArchiveSession {
+                session_id,
+                archived,
+                reply,
+            } => {
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => store.set_session_archived(&session_id, archived).await,
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
+                };
+                let _ = reply.send(result);
+                true
+            }
             EneCommand::UserInputResponse {
                 request_id,
                 response,
@@ -1548,7 +1927,7 @@ impl EneActor {
             EneCommand::SearchTools { query, reply } => {
                 let registry = self.registry.clone();
                 let tool_rag = self.tool_rag.clone();
-                tokio::spawn(async move {
+                self.search_tasks.spawn(async move {
                     let result = if let Some(rag) = tool_rag {
                         let all_tools = registry.list_tools();
                         let profiles = registry.list_rag_profiles();
@@ -1687,6 +2066,8 @@ impl EneActor {
         let cancel_token = self.cancel_token.clone();
         let pending_permissions = self.pending_permissions.clone();
         let pending_user_inputs = self.pending_user_inputs.clone();
+        let permission_scopes = self.permission_scopes.clone();
+        let undo_stack = self.undo_stack.clone();
         let terminal_emitted = self.terminal_emitted.clone();
         let turn_for_stream = turn.clone();
         let classifier_tx = self.classifier_tx.clone();
@@ -1715,6 +2096,8 @@ impl EneActor {
                 cancel_token,
                 pending_permissions,
                 pending_user_inputs,
+                permission_scopes,
+                undo_stack,
                 terminal_emitted,
                 turn: turn_for_stream,
                 origin,
@@ -1741,6 +2124,34 @@ impl EneActor {
         create_task_chat_provider(&self.config, AiTaskKind::Proactive)
             .map(Arc::from)
             .map_err(EneRuntimeError::from)
+    }
+
+    // ── Undo management (#178) ──
+
+    /// Undo the most recent reversible tool operation.
+    ///
+    /// Only reversible filesystem mutations are recorded on the stack
+    /// (irreversible actions are warned about at execution time but never
+    /// pushed), so popping the newest entry and invoking the owning fs
+    /// tool's `utility.undo` action rolls it back.
+    async fn handle_undo(&mut self) -> crate::undo::UndoReport {
+        use crate::undo::UndoReport;
+
+        let popped = { self.undo_stack.lock().await.pop_reversible() };
+        let Some(entry) = popped else {
+            return UndoReport::NothingToUndo;
+        };
+
+        match self.registry.call_tool("utility.undo", "{}").await {
+            Ok(output) => UndoReport::Reverted {
+                metadata: entry.metadata,
+                output,
+            },
+            Err(e) => UndoReport::Failed {
+                metadata: entry.metadata,
+                error: e.to_string(),
+            },
+        }
     }
 
     // ── Split management ──
@@ -2065,13 +2476,16 @@ fn init_embedding(
             model,
             dimensions,
             query_prefix,
-        } => Ok(Arc::new(ene_ai::CloudEmbeddingProvider::new(
-            &base_url,
-            &api_key,
-            &model,
-            dimensions,
-            query_prefix,
-        ))),
+        } => Ok(Arc::new(
+            ene_ai::CloudEmbeddingProvider::new(
+                &base_url,
+                &api_key,
+                &model,
+                dimensions,
+                query_prefix,
+            )
+            .with_retry_policy(ai_config.retry.to_policy()),
+        )),
     }
 }
 
@@ -2196,5 +2610,33 @@ mod tests {
         );
 
         let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn isolate_panic_returns_output_on_success() {
+        let (diag_tx, _diag_rx) = broadcast::channel(16);
+        let result = isolate_panic(&diag_tx, "test", async { 42u32 }).await;
+        assert_eq!(result.expect("no panic"), 42);
+    }
+
+    #[tokio::test]
+    async fn isolate_panic_contains_panic_and_emits_diagnostic() {
+        let (diag_tx, mut diag_rx) = broadcast::channel(16);
+        let result: Result<u32, String> = isolate_panic(&diag_tx, "test-component", async {
+            panic!("boom");
+        })
+        .await;
+        let message = result.expect_err("panic must be contained, not propagated");
+        assert!(message.contains("boom"), "unexpected message: {message}");
+
+        // The supervisor must surface the panic as a diagnostic event.
+        let mut saw_panic = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            if let crate::diagnostics::DiagnosticEvent::ActorPanic { component, .. } = ev {
+                assert_eq!(component, "test-component");
+                saw_panic = true;
+            }
+        }
+        assert!(saw_panic, "expected ActorPanic diagnostic event");
     }
 }

@@ -59,6 +59,13 @@ pub enum IpcRequest {
         /// Target glob pattern.
         target_pattern: String,
     },
+    /// Revoke a previously granted session-wide permission allow pattern (#177).
+    RevokePattern {
+        /// Action pattern to revoke.
+        action: String,
+        /// Target glob pattern to revoke.
+        target_pattern: String,
+    },
     /// Graceful shutdown.
     Shutdown,
 }

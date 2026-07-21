@@ -260,6 +260,15 @@ impl ToolRegistry for SupervisedIpcRegistry {
             .clone();
         reg.allow_pattern(action, target_pattern).await;
     }
+
+    async fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.revoke_pattern(action, target_pattern).await;
+    }
 }
 
 /// Orchestrates the lifecycle of all tool processes.
@@ -302,6 +311,10 @@ impl ToolRegistry for ToolHostManager {
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.composite.allow_pattern(action, target_pattern).await;
+    }
+
+    async fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        self.composite.revoke_pattern(action, target_pattern).await;
     }
 }
 

@@ -3,9 +3,11 @@ mod card;
 mod clear;
 mod commitments;
 mod config;
+mod doctor;
 mod help;
 mod history;
 mod memory;
+mod permissions;
 mod prompt;
 mod session;
 mod tool;
@@ -73,6 +75,8 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &memory::MemoryCommand as &dyn CliCommand,
     &commitments::CommitmentsCommand as &dyn CliCommand,
     &session::SessionCommand as &dyn CliCommand,
+    &permissions::PermissionsCommand as &dyn CliCommand,
+    &doctor::DoctorCommand as &dyn CliCommand,
 ];
 
 /// Maximum time the REPL will wait for the actor to drain on shutdown.

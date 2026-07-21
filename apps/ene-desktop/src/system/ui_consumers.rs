@@ -107,6 +107,41 @@ pub fn apply_ai_permission_system(
     chat.0.chat_window_visible = true;
 }
 
+/// Accumulates pending tool-permission approvals into the settings
+/// `UiState` so the Permission Center page can list and answer them
+/// (#177). Runs alongside [`apply_ai_permission_system`], which keeps
+/// the chat-window dialog; the two are independent surfaces over the
+/// same `decide_permission` call. Duplicate `request_id`s are ignored
+/// so a re-broadcast never double-lists a request.
+pub fn collect_permission_requests_system(
+    mut events: MessageReader<AiPermissionRequested>,
+    mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,
+) {
+    let Some(mut ui) = ui_query.iter_mut().next() else {
+        return;
+    };
+    for event in events.read() {
+        let already_present =
+            ui.0.permission_requests
+                .iter()
+                .any(|p| p.request_id == event.request_id);
+        if already_present {
+            continue;
+        }
+        ui.0.permission_requests
+            .push(crate::settings::PendingPermission {
+                request_id: event.request_id.clone(),
+                action: event.action.clone(),
+                target: event.target.clone(),
+                description: if event.description.is_empty() {
+                    None
+                } else {
+                    Some(event.description.clone())
+                },
+            });
+    }
+}
+
 pub fn apply_ai_user_input_system(
     mut events: MessageReader<AiUserInputRequested>,
     mut chat_query: Query<&mut ChatStateComponent, With<ChatWindow>>,

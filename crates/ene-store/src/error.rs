@@ -28,6 +28,14 @@ pub enum EneMemoryError {
         to: crate::MemoryStatus,
     },
 
+    /// Session export uses an unsupported `format_version`.
+    #[error("Unsupported session export format version: {0}")]
+    UnsupportedFormatVersion(u32),
+
+    /// Failed to (de)serialize a session export payload.
+    #[error("Session export serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+
     /// Catch-all error variant.
     #[error("Other error: {0}")]
     Other(String),

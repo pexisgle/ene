@@ -311,6 +311,45 @@ pub struct UiState {
     pub memory_journal_recall_query: String,
     /// Cached recall-debug rows.
     pub memory_journal_recall_rows: Vec<MemoryJournalRecallRow>,
+    /// Pending tool-permission approvals awaiting a user decision
+    /// (#177). Accumulated by the permission-center consumer system
+    /// from `AiPermissionRequested` messages; a request is removed
+    /// once the user answers it from the Permission Center page.
+    pub permission_requests: Vec<PendingPermission>,
+    /// Standing session-wide permission grants listed from the actor
+    /// (#177). Refreshed after every decision / revocation.
+    pub permission_grants: Vec<ene_runtime::PermissionScope>,
+    /// Last permission-center operation status/error message.
+    pub permission_message: Option<String>,
+    /// Cached session metadata rows for the sessions page (#176).
+    /// Lazy-loaded the first time the page is shown and refreshed
+    /// after every archive / import action.
+    pub session_rows: Vec<ene_store::SessionMeta>,
+    /// Whether `session_rows` has been populated at least once, so an
+    /// empty store is not mistaken for "not yet loaded".
+    pub sessions_loaded: bool,
+    /// Search query text for the sessions page (#176).
+    pub session_search_query: String,
+    /// Cached search-result rows for the sessions page (#176).
+    pub session_search_rows: Vec<SessionSearchRow>,
+    /// File path typed for a session import (#176).
+    pub session_import_path: String,
+    /// Whether archived sessions are included in the list (#176).
+    /// Defaults to `false`, matching the initial lazy load.
+    pub session_show_archived: bool,
+    /// Last sessions-page operation status/error message.
+    pub session_message: Option<String>,
+}
+
+/// A single session message search hit shown on the sessions page (#176).
+#[derive(Clone, Debug)]
+pub struct SessionSearchRow {
+    /// Logical session key the message belongs to.
+    pub session_id: String,
+    /// Role that produced the message (e.g. `user`, `assistant`).
+    pub role: String,
+    /// Message content, truncated for display.
+    pub content: String,
 }
 
 #[derive(Clone, Debug)]

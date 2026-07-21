@@ -37,6 +37,9 @@ pub trait ToolRegistry: Send + Sync {
     /// Adds a session-wide permission allow pattern (action + target glob).
     async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
+    /// Revokes a previously granted session-wide permission allow pattern (#177).
+    async fn revoke_pattern(&self, _action: &str, _target_pattern: &str) {}
+
     async fn config_schema(&self) -> Option<serde_json::Value> {
         None
     }

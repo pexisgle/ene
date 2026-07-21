@@ -112,6 +112,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         cancel_token,
         pending_permissions,
         pending_user_inputs,
+        permission_scopes,
+        undo_stack,
         terminal_emitted,
         turn,
         origin,
@@ -949,6 +951,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &pending_user_inputs,
             tool_config.timeout_ms,
             mind.memory.tool_grounding.max_summary_chars,
+            mem_store.as_ref(),
+            &permission_scopes,
+            &undo_stack,
         )
         .await;
 

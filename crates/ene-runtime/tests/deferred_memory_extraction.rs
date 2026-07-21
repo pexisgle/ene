@@ -134,6 +134,10 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
         terminal_emitted,
         turn: turn.clone(),
         origin: TurnOrigin::User,

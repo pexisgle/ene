@@ -115,6 +115,10 @@ async fn proactive_stream_does_not_add_user_history() {
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
         terminal_emitted: Arc::new(AtomicBool::new(false)),
         turn: TurnId::new(),
         origin: TurnOrigin::Proactive,
@@ -193,6 +197,10 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
         terminal_emitted: Arc::new(AtomicBool::new(false)),
         turn: TurnId::new(),
         origin: TurnOrigin::Proactive,
@@ -255,6 +263,10 @@ async fn proactive_stream_without_memory_store() {
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
         terminal_emitted: Arc::new(AtomicBool::new(false)),
         turn: TurnId::new(),
         origin: TurnOrigin::Proactive,

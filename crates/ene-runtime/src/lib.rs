@@ -53,6 +53,8 @@ pub mod streaming;
 mod streaming_cognitive;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
+/// Actor-native undo stack and metadata (#178).
+pub mod undo;
 
 // ── Bootstrap helpers ──
 /// Host helpers for `ConfigStore` → card → [`EneHandle::open`].
@@ -133,6 +135,10 @@ pub use streaming::MultiAnswer;
 /// Permission decision type.
 pub use streaming::PermissionDecision;
 pub use streaming::UserInputResponse;
+/// Permission grant scope and lifetime (#177).
+pub use streaming::{GrantType, PermissionScope};
+/// Undo report returned by [`EneHandle::undo`] (#178).
+pub use undo::UndoReport;
 
 // ── Prompt builder ──
 /// Message build context struct.

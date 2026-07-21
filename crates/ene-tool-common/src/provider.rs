@@ -31,6 +31,7 @@ pub struct ActionSetProvider {
     on_sandbox: Option<SandboxHook>,
     on_approve_permission: Option<PermissionHook>,
     on_allow_pattern: Option<AllowPatternHook>,
+    on_revoke_pattern: Option<AllowPatternHook>,
     on_set_config: Option<SetConfigHook>,
     config_schema: Option<ConfigSchemaHook>,
 }
@@ -45,6 +46,7 @@ impl ActionSetProvider {
             on_sandbox: None,
             on_approve_permission: None,
             on_allow_pattern: None,
+            on_revoke_pattern: None,
             on_set_config: None,
             config_schema: None,
         }
@@ -87,6 +89,16 @@ impl ActionSetProvider {
         hook: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Self {
         self.on_allow_pattern = Some(Box::new(hook));
+        self
+    }
+
+    /// Registers a callback invoked on `ToolProvider::revoke_pattern`.
+    #[must_use]
+    pub fn with_revoke_pattern_hook(
+        mut self,
+        hook: impl Fn(&str, &str) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_revoke_pattern = Some(Box::new(hook));
         self
     }
 
@@ -156,6 +168,12 @@ impl ToolProvider for ActionSetProvider {
         }
     }
 
+    fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        if let Some(hook) = &self.on_revoke_pattern {
+            hook(action, target_pattern);
+        }
+    }
+
     fn set_config(&self, config: &serde_json::Value) {
         if let Some(hook) = &self.on_set_config {
             hook(config);
@@ -178,6 +196,7 @@ pub struct SingleActionProvider {
     on_sandbox: Option<SandboxHook>,
     on_approve_permission: Option<PermissionHook>,
     on_allow_pattern: Option<AllowPatternHook>,
+    on_revoke_pattern: Option<AllowPatternHook>,
     on_set_config: Option<SetConfigHook>,
     config_schema: Option<ConfigSchemaHook>,
 }
@@ -192,6 +211,7 @@ impl SingleActionProvider {
             on_sandbox: None,
             on_approve_permission: None,
             on_allow_pattern: None,
+            on_revoke_pattern: None,
             on_set_config: None,
             config_schema: None,
         }
@@ -234,6 +254,16 @@ impl SingleActionProvider {
         hook: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Self {
         self.on_allow_pattern = Some(Box::new(hook));
+        self
+    }
+
+    /// Registers a callback invoked on `ToolProvider::revoke_pattern`.
+    #[must_use]
+    pub fn with_revoke_pattern_hook(
+        mut self,
+        hook: impl Fn(&str, &str) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_revoke_pattern = Some(Box::new(hook));
         self
     }
 
@@ -298,6 +328,12 @@ impl ToolProvider for SingleActionProvider {
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) {
         if let Some(hook) = &self.on_allow_pattern {
+            hook(action, target_pattern);
+        }
+    }
+
+    fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        if let Some(hook) = &self.on_revoke_pattern {
             hook(action, target_pattern);
         }
     }

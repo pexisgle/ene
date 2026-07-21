@@ -179,6 +179,13 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             provider.allow_pattern(action, target_pattern);
             IpcResponse::Ack
         }
+        IpcRequest::RevokePattern {
+            action,
+            target_pattern,
+        } => {
+            provider.revoke_pattern(action, target_pattern);
+            IpcResponse::Ack
+        }
         IpcRequest::Shutdown => IpcResponse::Ack,
     }
 }

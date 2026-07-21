@@ -83,6 +83,10 @@ Helpers: `open_from_disk()`, `open_with_config(config)`, `open_ready(config, car
 | `cancel` | `fn cancel(&self, turn: &TurnId) -> Result<(), CancelError>` | Cancels only the matching turn (`TurnMismatch` otherwise). |
 | `decide_permission` | `fn decide_permission(...) -> Result<(), ActorDeadError>` | Resolves `PermissionRequired`. |
 | `submit_user_input` | `fn submit_user_input(...) -> Result<(), ActorDeadError>` | Resolves `UserInputRequired`. |
+| `list_permissions` | `async fn list_permissions(&self) -> Result<Vec<PermissionScope>, ActorDeadError>` | Lists session-wide permission grants (#177). |
+| `revoke_permission` | `async fn revoke_permission(&self, id: u64) -> Result<bool, ActorDeadError>` | Revokes one grant by id (#177). |
+| `reset_all_permissions` | `async fn reset_all_permissions(&self) -> Result<usize, ActorDeadError>` | Revokes all session grants (#177). |
+| `undo` | `async fn undo(&self) -> Result<UndoReport, ActorDeadError>` | Undoes the most recent reversible tool operation (#178). |
 | `diagnostics` | `fn diagnostics(&self) -> &EneDiagnostics` | Concrete diagnostics facade (not a UI-implemented trait). |
 
 ### Lifecycle — async
@@ -384,7 +388,8 @@ These are the crate's own types, re-exported at the root from their defining mod
 | `handle` | `ActorDeadError`, `EneCommand` *(module-local, not re-exported)*, `EneEvent`, `EneEventReceiver`, `EneHandle`, `EneStateSnapshot`, `EneStatus`, `ShutdownTimeout`, `TerminalReason` |
 | `diagnostics` | `DiagnosticEvent`, `DiagnosticEventReceiver`, `EneDiagnostics`, `MemoryQueryHandle` |
 | `error` | `EneRuntimeError` |
-| `streaming` | `MultiAnswer` *(re-exported from `ene_tool_proto`, `#[doc(no_inline)]`)*, `PermissionDecision`, `UserInputResponse` |
+| `streaming` | `MultiAnswer` *(re-exported from `ene_tool_proto`, `#[doc(no_inline)]`)*, `PermissionDecision`, `GrantType`, `PermissionScope`, `UserInputResponse` |
+| `undo` | `UndoReport`, `UndoStack`, `UndoEntry` |
 | `message_builder` | `MessageBuildContext`, `build_messages` |
 | `types` | `RequestId`, `TurnId`, `RunError`, `CancelError` |
 

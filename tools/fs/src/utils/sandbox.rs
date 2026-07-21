@@ -364,6 +364,13 @@ impl Sandbox {
         }
     }
 
+    /// Revokes a previously granted session-wide allow pattern (#177).
+    pub fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        if let Ok(mut guard) = self.allowed_patterns.write() {
+            guard.remove(&(action.to_string(), target_pattern.to_string()));
+        }
+    }
+
     /// Permission check for destructive operations
     pub fn check_permission(
         &self,

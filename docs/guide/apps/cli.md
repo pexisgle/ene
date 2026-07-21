@@ -66,7 +66,10 @@ Commands are entered with `/` prefix:
 | `/tool search <query>` | Search registered tools using RAG or name/description filter |
 | `/tool help <name>` | Show detailed help for a tool |
 | `/tool call <name> <json>` | Call a tool directly with JSON arguments |
-| `/undo` | Placeholder (not yet supported with actor-based runtime) |
+| `/undo` | Undo the most recent reversible tool operation (filesystem write/edit/patch/delete). Irreversible operations (e.g. shell execution) are warned about and cannot be undone |
+| `/permissions list` | List session-wide tool permission grants |
+| `/permissions revoke <id>` | Revoke a single permission grant by id |
+| `/permissions reset` | Revoke all session-wide permission grants |
 
 ### Memory Commands
 
@@ -104,6 +107,37 @@ Commands are entered with `/` prefix:
 | `/session split` | Manually split session (via actor ManualSplit command) |
 | `/session info` | Session diagnostics |
 | `/session summaries` | Past session summaries |
+| `/session list` | List stored sessions (newest first) |
+| `/session export <id>` | Export a session to a versioned, redacted JSON bundle |
+| `/session import <path>` | Import a session from a JSON export file |
+| `/session search <query>` | Full-text search over stored conversation messages |
+| `/session archive <id>` | Archive a session |
+| `/session unarchive <id>` | Unarchive a session |
+
+### Diagnostics
+
+| Command | Action |
+|---------|--------|
+| `/doctor` | Run environment health checks and print a colored summary |
+| `/doctor --json` | Run the same checks and print machine-readable JSON |
+
+`/doctor` inspects the following categories and reports each check with a
+status (`OK` / `WARN` / `ERROR` / `SKIP`) plus a remediation hint when a
+problem is found:
+
+| Category | Checks |
+|----------|--------|
+| Runtime | Actor responsiveness (snapshot round-trip, session, turn count) |
+| Config | Character card loaded |
+| AI Provider | Chat provider resolution and connectivity (lightweight models-list call with a ~5s timeout; no user data is sent) |
+| Embedding | Embedding backend resolution (cloud or local) |
+| Store | Memory store enablement and runtime availability |
+| Tool Registry | Tool registration |
+| Assets | Assets directory presence |
+
+Secrets are never printed in full: API keys are shown as a short masked
+prefix (e.g. `sk-…abcd` or `[redacted]`), and absolute private paths are
+collapsed to `~/…` or a trailing component.
 
 ### Help
 

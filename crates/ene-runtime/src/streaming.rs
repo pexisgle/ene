@@ -32,6 +32,38 @@ pub enum PermissionDecision {
     Deny,
 }
 
+/// How long a granted permission scope remains in effect (#177).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantType {
+    /// Granted for a single call only (not tracked as a standing scope).
+    Once,
+    /// Granted for the remainder of the session.
+    Session,
+    /// Granted persistently across sessions.
+    Permanent,
+}
+
+/// A standing permission grant tracked by the host (#177).
+///
+/// Session grants are recorded when the user approves an action with
+/// [`PermissionDecision::AllowSession`] so the permission center can
+/// list and revoke them. The `target_pattern` is a path/glob prefix
+/// interpreted by the owning tool.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PermissionScope {
+    /// Monotonic host-side identifier for revocation.
+    pub id: u64,
+    /// Action label (e.g. `FileOverwrite`).
+    pub action: String,
+    /// Target glob/path prefix the grant applies to.
+    pub target_pattern: String,
+    /// How long the grant lasts.
+    pub grant_type: GrantType,
+    /// When the grant was created.
+    pub granted_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Re-exported from `ene-tool-proto` so consumers of `ene-runtime` only need to
 /// import one crate.
 #[doc(no_inline)]
@@ -121,6 +153,10 @@ pub struct StreamContext {
     pub cancel_token: CancellationToken,
     pub pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pub pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+    /// Session-wide permission grants tracked for the permission center (#177).
+    pub permission_scopes: Arc<Mutex<Vec<PermissionScope>>>,
+    /// Actor-native undo stack of mutating tool calls (#178).
+    pub undo_stack: Arc<Mutex<crate::undo::UndoStack>>,
     /// Shared with the actor; first side to flip emits Terminal.
     pub terminal_emitted: Arc<std::sync::atomic::AtomicBool>,
     /// Active turn id for all turn-scoped events.
@@ -205,6 +241,9 @@ pub(crate) async fn perform_tool_executions(
     pending_user_inputs: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     timeout_ms: u64,
     max_summary_chars: usize,
+    audit_store: Option<&Arc<ene_store::MemoryStore>>,
+    permission_scopes: &Arc<Mutex<Vec<PermissionScope>>>,
+    undo_stack: &Arc<Mutex<crate::undo::UndoStack>>,
 ) -> Result<ToolExecutionOutput, crate::error::EneRuntimeError> {
     let mut round_messages = Vec::new();
     let mut summaries = Vec::new();
@@ -236,6 +275,17 @@ pub(crate) async fn perform_tool_executions(
             arguments: args.clone(),
         });
 
+        // Warn before executing an irreversible operation (#178). Such
+        // actions are never placed on the undo stack, so the user is told
+        // up front that they cannot be rolled back.
+        if crate::undo::is_irreversible(&name) {
+            tracing::warn!(
+                component = "undo",
+                tool = %name,
+                "executing irreversible operation; it cannot be undone"
+            );
+        }
+
         let mut result = if name == "system.search_tools" {
             let query = serde_json::from_str::<serde_json::Value>(&args)
                 .ok()
@@ -263,6 +313,9 @@ pub(crate) async fn perform_tool_executions(
         // so a buggy tool that ping-pongs between the two
         // does not lock up the stream.
         const MAX_PENDING_ROUNDS: usize = 8;
+        let mut audit_decision = ene_store::AuditDecision::NotRequired;
+        let mut audit_action = String::new();
+        let mut audit_target = String::new();
         for _ in 0..MAX_PENDING_ROUNDS {
             match &result {
                 Err(ToolHostError::Protocol(ToolError::PermissionRequired {
@@ -272,6 +325,8 @@ pub(crate) async fn perform_tool_executions(
                     description,
                 })) => {
                     let req_id = RequestId::from(request_id.clone());
+                    audit_action = action.clone();
+                    audit_target = target.clone();
 
                     // Register the oneshot::Sender BEFORE
                     // emitting EneEvent::PermissionRequired. A
@@ -300,15 +355,44 @@ pub(crate) async fn perform_tool_executions(
 
                     match decide_rx.await {
                         Ok(PermissionDecision::AllowOnce) => {
+                            audit_decision = ene_store::AuditDecision::AllowOnce;
                             registry.approve_permission(req_id.as_str()).await;
                             result = registry.call_tool(&name, &args).await;
                         }
                         Ok(PermissionDecision::AllowSession) => {
+                            audit_decision = ene_store::AuditDecision::AllowSession;
                             registry.allow_pattern(action, target).await;
                             registry.approve_permission(req_id.as_str()).await;
+                            {
+                                let mut guard = permission_scopes.lock().await;
+                                let next_id = guard
+                                    .iter()
+                                    .map(|s| s.id)
+                                    .max()
+                                    .unwrap_or(0)
+                                    .saturating_add(1);
+                                // De-duplicate: a repeated grant for the same
+                                // action+target refreshes the existing scope
+                                // rather than stacking duplicates.
+                                if let Some(existing) = guard
+                                    .iter_mut()
+                                    .find(|s| s.action == *action && s.target_pattern == *target)
+                                {
+                                    existing.granted_at = chrono::Utc::now();
+                                } else {
+                                    guard.push(PermissionScope {
+                                        id: next_id,
+                                        action: action.clone(),
+                                        target_pattern: target.clone(),
+                                        grant_type: GrantType::Session,
+                                        granted_at: chrono::Utc::now(),
+                                    });
+                                }
+                            }
                             result = registry.call_tool(&name, &args).await;
                         }
                         _ => {
+                            audit_decision = ene_store::AuditDecision::Denied;
                             result = Err(ToolHostError::Protocol(ToolError::PermissionDenied {
                                 message: "Permission denied by user".to_string(),
                             }));
@@ -365,6 +449,34 @@ pub(crate) async fn perform_tool_executions(
             Err(e) => (format!("Error executing tool: {e}"), false),
         };
 
+        // Record the tool call in the permission audit log (#177).
+        // Arguments are redacted by the store before persistence so
+        // secrets and raw prompt text never land in the audit trail.
+        if let Some(store) = audit_store {
+            ene_store::MemoryStore::spawn_insert_audit_entry(
+                store,
+                ene_store::NewAuditEntry {
+                    turn_id: turn.to_string(),
+                    tool_name: name.clone(),
+                    action: std::mem::take(&mut audit_action),
+                    target: std::mem::take(&mut audit_target),
+                    decision: audit_decision,
+                    success,
+                    arguments: args.clone(),
+                },
+            );
+        }
+
+        // Record a successful mutating tool call on the undo stack (#178).
+        // Only reversible/irreversible mutations are relevant; read-only and
+        // meta tools are ignored by `UndoStack::record`.
+        if success {
+            let targets = crate::undo::extract_targets(&args);
+            undo_stack
+                .lock()
+                .await
+                .record(&name, &turn.to_string(), targets);
+        }
         let _ = event_tx.send(EneEvent::ToolCallResult {
             turn: turn.clone(),
             origin,
@@ -643,6 +755,9 @@ mod tests {
             &pending_user_inputs,
             1000,
             100,
+            None,
+            &Arc::new(Mutex::new(Vec::new())),
+            &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
         )
         .await
         .unwrap();
@@ -761,6 +876,9 @@ mod tests {
             &pending_user_inputs,
             5_000,
             10,
+            None,
+            &Arc::new(Mutex::new(Vec::new())),
+            &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
         )
         .await
         .expect("tool executions");
@@ -859,6 +977,8 @@ mod tests {
         });
 
         let turn = crate::types::TurnId::new();
+        let scopes = Arc::new(Mutex::new(Vec::new()));
+        let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
         let exec = perform_tool_executions(
             &registry,
             None,
@@ -872,6 +992,9 @@ mod tests {
             &pending_user_inputs,
             5_000,
             500,
+            None,
+            &scopes,
+            &undo_stack,
         );
 
         // Bound the test: if the fix regresses, the executor would
@@ -999,6 +1122,8 @@ mod tests {
         });
 
         let turn = crate::types::TurnId::new();
+        let scopes = Arc::new(Mutex::new(Vec::new()));
+        let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
         let exec = perform_tool_executions(
             &registry,
             None,
@@ -1012,6 +1137,9 @@ mod tests {
             &pending_user_inputs,
             5_000,
             500,
+            None,
+            &scopes,
+            &undo_stack,
         );
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;

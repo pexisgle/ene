@@ -394,4 +394,13 @@ impl ToolRegistry for IpcToolRegistry {
         let send = self.send_with_reconnect(req);
         let _ = tokio::time::timeout(PERMISSION_TIMEOUT, send).await;
     }
+
+    async fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        let req = IpcRequest::RevokePattern {
+            action: action.to_string(),
+            target_pattern: target_pattern.to_string(),
+        };
+        let send = self.send_with_reconnect(req);
+        let _ = tokio::time::timeout(PERMISSION_TIMEOUT, send).await;
+    }
 }

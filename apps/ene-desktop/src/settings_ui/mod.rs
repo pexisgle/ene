@@ -11,6 +11,8 @@ pub mod page_debug;
 pub mod page_features;
 pub mod page_graphics;
 pub mod page_memory;
+pub mod page_permissions;
+pub mod page_sessions;
 pub mod widgets;
 
 pub use input::SettingsInputState;
@@ -32,6 +34,8 @@ pub enum PageKind {
     Ai,
     Features,
     Memory,
+    Permissions,
+    Sessions,
     Debug,
 }
 
@@ -90,6 +94,8 @@ impl SettingsUi {
                 PageKind::Ai,
                 PageKind::Features,
                 PageKind::Memory,
+                PageKind::Permissions,
+                PageKind::Sessions,
                 PageKind::Debug,
             ] {
                 let label = match page {
@@ -99,6 +105,10 @@ impl SettingsUi {
                     PageKind::Ai => crate::i18n::ai(),
                     PageKind::Features => crate::i18n::features(),
                     PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
+                    PageKind::Permissions => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "permissions")
+                    }
+                    PageKind::Sessions => i18n_embed_fl::fl!(crate::i18n::loader(), "sessions"),
                 };
                 if ui
                     .selectable_label(self.current_page == page, label)
@@ -135,6 +145,8 @@ impl SettingsUi {
             ),
             PageKind::Features => page_features::render(ui, settings, ai),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
+            PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
+            PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),
             PageKind::Debug => {
                 page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
             }

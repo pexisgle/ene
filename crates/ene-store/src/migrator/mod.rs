@@ -650,6 +650,151 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // audit_log
+        manager
+            .create_table(
+                Table::create()
+                    .table(AuditLog::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(AuditLog::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::TurnId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(AuditLog::ToolName).string().not_null())
+                    .col(
+                        ColumnDef::new(AuditLog::Action)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::Target)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::Decision)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::Success)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::RedactedArgs)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(AuditLog::CreatedAt).string().not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_audit_log_created")
+                    .table(AuditLog::Table)
+                    .col((AuditLog::CreatedAt, IndexOrder::Desc))
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_audit_log_tool")
+                    .table(AuditLog::Table)
+                    .col(AuditLog::ToolName)
+                    .to_owned(),
+            )
+            .await?;
+
+        // sessions
+        manager
+            .create_table(
+                Table::create()
+                    .table(Sessions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Sessions::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Sessions::SessionId).string().not_null())
+                    .col(
+                        ColumnDef::new(Sessions::CardName)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(Sessions::Title)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(Sessions::CreatedAt).string().not_null())
+                    .col(ColumnDef::new(Sessions::UpdatedAt).string().not_null())
+                    .col(
+                        ColumnDef::new(Sessions::Archived)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Sessions::TurnCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .unique()
+                    .name("uniq_sessions_session_id")
+                    .table(Sessions::Table)
+                    .col(Sessions::SessionId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_sessions_archived_updated")
+                    .table(Sessions::Table)
+                    .col(Sessions::Archived)
+                    .col((Sessions::UpdatedAt, IndexOrder::Desc))
+                    .to_owned(),
+            )
+            .await?;
+
         // pending_affect_proposals
         manager
             .create_table(
@@ -695,6 +840,12 @@ impl MigrationTrait for Migration {
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(Sessions::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AuditLog::Table).to_owned())
+            .await?;
         manager
             .drop_table(
                 Table::drop()
@@ -880,4 +1031,33 @@ enum PendingAffectProposals {
     SourceTurnId,
     ProposalJson,
     CreatedAt,
+}
+
+#[derive(Iden)]
+enum AuditLog {
+    #[iden = "audit_log"]
+    Table,
+    Id,
+    TurnId,
+    ToolName,
+    Action,
+    Target,
+    Decision,
+    Success,
+    RedactedArgs,
+    CreatedAt,
+}
+
+#[derive(Iden)]
+enum Sessions {
+    #[iden = "sessions"]
+    Table,
+    Id,
+    SessionId,
+    CardName,
+    Title,
+    CreatedAt,
+    UpdatedAt,
+    Archived,
+    TurnCount,
 }

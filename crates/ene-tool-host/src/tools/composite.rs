@@ -188,6 +188,13 @@ impl ToolRegistry for CompositeToolRegistry {
             registry.allow_pattern(action, target_pattern).await;
         }
     }
+
+    async fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
+        for registry in &registries {
+            registry.revoke_pattern(action, target_pattern).await;
+        }
+    }
 }
 
 #[cfg(test)]

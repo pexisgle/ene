@@ -66,7 +66,10 @@ pub trait CliCommand: Send + Sync {
 | `/tool search <query>` | RAGまたは名前/説明フィルタを使用して登録済みツールを検索 |
 | `/tool help <name>` | ツールの詳細ヘルプを表示 |
 | `/tool call <name> <json>` | JSON 引数でツールを直接呼び出し |
-| `/undo` | プレースホルダー (アクターベースランタイムでは未対応) |
+| `/undo` | 直近の可逆なツール操作（filesystem の write/edit/patch/delete）を取り消す。不可逆な操作（shell 実行など）は警告のみで取り消し不可 |
+| `/permissions list` | セッション全体のツール権限付与を一覧表示 |
+| `/permissions revoke <id>` | id を指定して権限付与を1件取り消す |
+| `/permissions reset` | セッション全体の権限付与をすべて取り消す |
 
 ### メモリコマンド
 
@@ -104,6 +107,36 @@ pub trait CliCommand: Send + Sync {
 | `/session split` | 手動でセッション分割を実行 (アクターの ManualSplit コマンド経由) |
 | `/session info` | セッション診断情報を表示 |
 | `/session summaries` | 過去のセッション要約を一覧 |
+| `/session list` | 保存済みセッションを一覧 (新しい順) |
+| `/session export <id>` | セッションをバージョン管理・秘匿化済みの JSON バンドルにエクスポート |
+| `/session import <path>` | JSON エクスポートファイルからセッションをインポート |
+| `/session search <query>` | 保存済み会話メッセージの全文検索 |
+| `/session archive <id>` | セッションをアーカイブ |
+| `/session unarchive <id>` | セッションのアーカイブを解除 |
+
+### 診断
+
+| コマンド | 動作 |
+|---------|------|
+| `/doctor` | 環境ヘルスチェックを実行し、カラー表示のサマリーを出力 |
+| `/doctor --json` | 同一チェックを実行し、機械可読な JSON を出力 |
+
+`/doctor` は以下のカテゴリを検査し、各チェックをステータス（`OK` / `WARN` /
+`ERROR` / `SKIP`）と、問題が見つかった場合の修復ヒント付きで報告します:
+
+| カテゴリ | チェック内容 |
+|----------|------------|
+| Runtime | アクターの応答性（スナップショット往復、セッション、ターン数） |
+| Config | キャラクターカードの読み込み状態 |
+| AI Provider | チャットプロバイダーの解決と接続性（軽量な models-list 呼び出し、タイムアウト約5秒、ユーザーデータ送信なし） |
+| Embedding | 埋め込みバックエンドの解決（クラウドまたはローカル） |
+| Store | メモリストアの有効化とランタイムでの利用可能性 |
+| Tool Registry | ツール登録状況 |
+| Assets | assets ディレクトリの存在 |
+
+シークレットは全文出力されません: API キーは短いマスク付きプレフィックス
+（例: `sk-…abcd` または `[redacted]`）で表示され、絶対プライベートパスは
+`~/…` または末尾コンポーネントに短縮されます。
 
 ### ヘルプ
 

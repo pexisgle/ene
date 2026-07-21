@@ -47,6 +47,7 @@ pub enum IpcRequest {
     SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
+    RevokePattern { action: String, target_pattern: String },
     Shutdown,
 }
 

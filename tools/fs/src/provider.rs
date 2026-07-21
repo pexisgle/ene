@@ -36,7 +36,8 @@ impl FsToolProvider {
         let session_sandbox = sandbox.clone();
         let set_sandbox = sandbox.clone();
         let approve_sandbox = sandbox.clone();
-        let allow_sandbox = sandbox;
+        let allow_sandbox = sandbox.clone();
+        let revoke_sandbox = sandbox;
 
         let inner = ActionSetProvider::new(actions)
             .with_set_call_context_hook(move |conv_id| {
@@ -68,6 +69,14 @@ impl FsToolProvider {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some(s) = guard.as_ref() {
                     s.allow_pattern(action, target_pattern);
+                }
+            })
+            .with_revoke_pattern_hook(move |action, target_pattern| {
+                let guard = revoke_sandbox
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(s) = guard.as_ref() {
+                    s.revoke_pattern(action, target_pattern);
                 }
             });
 
@@ -105,5 +114,9 @@ impl ToolProvider for FsToolProvider {
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) {
         self.inner.allow_pattern(action, target_pattern);
+    }
+
+    fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        self.inner.revoke_pattern(action, target_pattern);
     }
 }

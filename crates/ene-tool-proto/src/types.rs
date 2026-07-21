@@ -477,6 +477,34 @@ fn format_keywords(keywords: &KeywordSet) -> String {
     parts.join("; ")
 }
 
+/// Whether a tool operation can be rolled back (#178).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Reversibility {
+    /// The operation can be reverted (e.g. file write/edit/delete/patch).
+    Reversible,
+    /// The operation cannot be reverted (e.g. shell execution, external sends).
+    Irreversible,
+}
+
+/// Runtime-level undo metadata recorded per tool execution (#178).
+///
+/// The runtime records one entry per mutating tool call so `/undo` can
+/// surface what a rollback affects and, for reversible operations, drive
+/// the owning tool's undo action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UndoMetadata {
+    /// Turn that performed the operation.
+    pub turn_id: String,
+    /// Namespaced tool name (e.g. `filesystem.write`).
+    pub tool_name: String,
+    /// Target resources affected (e.g. file paths), best-effort.
+    #[serde(default)]
+    pub target_resources: Vec<String>,
+    /// Whether the operation can be rolled back.
+    pub reversibility: Reversibility,
+}
+
 /// The structured, LLM-facing tool specification.
 ///
 /// Per API v1 / #135 this is limited to the fields the model sees:

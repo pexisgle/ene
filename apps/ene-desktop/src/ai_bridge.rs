@@ -175,6 +175,104 @@ impl AiBridge {
             .map_err(|e| e.to_string())
     }
 
+    /// List the standing session-wide permission grants (#177).
+    ///
+    /// Blocks the calling thread on the tokio runtime while the actor
+    /// answers, mirroring [`AiBridge::get_snapshot_blocking`]. Intended
+    /// for the permission-center settings page.
+    pub fn list_permissions_blocking(&self) -> Result<Vec<ene_runtime::PermissionScope>, String> {
+        self.runtime
+            .block_on(self.handle.list_permissions())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Revoke a single standing permission grant by id (#177).
+    ///
+    /// Returns whether a grant was actually removed.
+    pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, String> {
+        self.runtime
+            .block_on(self.handle.revoke_permission(id))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Revoke every standing permission grant, returning the number
+    /// removed (#177).
+    pub fn reset_all_permissions_blocking(&self) -> Result<usize, String> {
+        self.runtime
+            .block_on(self.handle.reset_all_permissions())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Undo the most recent reversible tool operation (#178).
+    ///
+    /// Blocks the calling thread on the tokio runtime while the actor
+    /// answers, mirroring [`AiBridge::reset_all_permissions_blocking`].
+    pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, String> {
+        self.runtime
+            .block_on(self.handle.undo())
+            .map_err(|e| e.to_string())
+    }
+
+    /// List stored session metadata (#176).
+    ///
+    /// Blocks the calling thread on the tokio runtime while the actor
+    /// answers, mirroring [`AiBridge::list_permissions_blocking`].
+    /// Intended for the sessions settings page.
+    pub fn list_sessions_blocking(
+        &self,
+        include_archived: bool,
+        limit: usize,
+    ) -> Result<Vec<ene_store::SessionMeta>, String> {
+        self.runtime
+            .block_on(self.handle.list_sessions(include_archived, limit))
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
+    /// Export a session as a pretty-printed JSON string (#176).
+    pub fn export_session_blocking(&self, session_id: impl Into<String>) -> Result<String, String> {
+        self.runtime
+            .block_on(self.handle.export_session(session_id))
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
+    /// Import a session from a JSON string, returning the imported
+    /// session's row id (#176).
+    pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, String> {
+        self.runtime
+            .block_on(self.handle.import_session(json))
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
+    /// Search session messages, returning matching
+    /// `(session_id, message)` pairs (#176).
+    pub fn search_sessions_blocking(
+        &self,
+        query: impl Into<String>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<(String, ene_store::ExportedMessage)>, String> {
+        self.runtime
+            .block_on(self.handle.search_sessions(query, limit, offset))
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
+    /// Archive or unarchive a session, returning whether the archived
+    /// flag actually changed (#176).
+    pub fn archive_session_blocking(
+        &self,
+        session_id: impl Into<String>,
+        archived: bool,
+    ) -> Result<bool, String> {
+        self.runtime
+            .block_on(self.handle.archive_session(session_id, archived))
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
     /// Forward a `UserInputResponse` for the request
     /// currently sitting in `ChatState::pending_user_input`.
     pub fn answer_user_input(

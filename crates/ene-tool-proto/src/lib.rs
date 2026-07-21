@@ -111,8 +111,8 @@ pub use sandbox::SandboxConfigData;
 pub use server::run_tool_server;
 /// Shared tool types.
 pub use types::{
-    KeywordSet, SideEffects, ToolCategory, ToolExample, ToolName, ToolRagProfile, ToolSpec,
-    ToolVersion,
+    KeywordSet, Reversibility, SideEffects, ToolCategory, ToolExample, ToolName, ToolRagProfile,
+    ToolSpec, ToolVersion, UndoMetadata,
 };
 
 use async_trait::async_trait;
@@ -155,6 +155,9 @@ pub trait ToolProvider: Send + Sync {
 
     /// Adds a session-wide permission allow pattern (action + target glob).
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+
+    /// Revokes a previously granted session-wide permission allow pattern (#177).
+    fn revoke_pattern(&self, _action: &str, _target_pattern: &str) {}
 
     /// Receives tool-specific configuration (called once during Handshake).
     fn set_config(&self, _config: &serde_json::Value) {}

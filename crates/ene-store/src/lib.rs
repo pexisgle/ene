@@ -54,6 +54,8 @@
 
 /// Affect state domain model.
 pub mod affect;
+/// Tool-permission audit log domain model (#177).
+pub mod audit;
 /// Companion commitment ledger domain model.
 pub mod commitment;
 /// Store configuration types.
@@ -62,12 +64,16 @@ pub mod config;
 pub mod entities;
 /// Memory-related error types.
 pub mod error;
+/// Versioned session export format (#176).
+pub mod export;
 /// Memory forgetting lifecycle (decay score and status transitions).
 pub(crate) mod forgetting;
 /// `SeaORM` schema migrations.
 pub mod migrator;
 /// Hybrid memory search scoring.
 pub mod search;
+/// Session metadata domain model (#176).
+pub mod session;
 /// Core memory store (`SQLite` + sqlite-vec).
 pub mod store;
 /// Typed memory domain model.
@@ -75,6 +81,8 @@ pub mod typed_memory;
 
 /// Affect state types.
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
+/// Audit log types (#177).
+pub use audit::{AuditDecision, AuditEntry, NewAuditEntry, redact_arguments};
 /// Commitment ledger types.
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Store feature toggle configuration.
@@ -82,10 +90,16 @@ pub use config::StoreConfig;
 /// Memory error type.
 pub use error::EneMemoryError;
 pub use error::MemoryError;
+/// Session export format types (#176).
+pub use export::{
+    ExportedMessage, ExportedToolLog, SESSION_EXPORT_FORMAT_VERSION, SessionExport, redact_secrets,
+};
 /// Forgetting lifecycle helpers.
 pub use forgetting::InvalidTransition;
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
+/// Session metadata types (#176).
+pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{ActiveSceneSummaryRow, KeyFact, MemoryStore, NaturalDecayReport, NewMemorySpan};
 /// Typed memory domain types.

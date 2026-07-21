@@ -47,6 +47,7 @@ pub enum IpcRequest {
     SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
+    RevokePattern { action: String, target_pattern: String },
     Shutdown,
 }
 
@@ -120,6 +121,7 @@ pub trait ToolProvider: Send + Sync {
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
     fn approve_permission(&self, _request_id: &str) {}
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+    fn revoke_pattern(&self, _action: &str, _target_pattern: &str) {}
     fn set_config(&self, _config: &serde_json::Value) {}
     fn config_schema(&self) -> Option<serde_json::Value> { None }
 }
@@ -137,6 +139,7 @@ pub trait ToolRegistry: Send + Sync {
     async fn set_session_id(&self, _session_id: &str) {}
     async fn approve_permission(&self, _request_id: &str) {}
     async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
+    async fn revoke_pattern(&self, _action: &str, _target_pattern: &str) {}
     async fn config_schema(&self) -> Option<serde_json::Value> { None }
 }
 ```
@@ -148,7 +151,7 @@ Tool RAG is handled separately by the `ToolRag` struct (owned by `EneActor`), no
 Aggregates multiple `ToolRegistry` instances:
 
 - **First-wins** — duplicate tool names resolve to the first registration
-- Dispatches `call_tool`, `set_session_id`, `approve_permission`, `allow_pattern` to the correct sub-registry
+- Dispatches `call_tool`, `set_session_id`, `approve_permission`, `allow_pattern`, `revoke_pattern` to the correct sub-registry
 
 ## MCP Support
 
