@@ -43,13 +43,15 @@ pub enum IpcRequest {
     ListTools,
     ListRagProfiles,
     GetConfigSchema,
-    CallTool { name: String, arguments: String },
+    CallTool { name: String, arguments: String, deferred: bool },
     SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
     RevokePattern { action: String, target_pattern: String },
     Shutdown,
     Ping,
+    PollDeferred { task_id: String },
+    CancelDeferred { task_id: String },
 }
 
 pub enum IpcResponse {
@@ -59,12 +61,14 @@ pub enum IpcResponse {
     RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
+    DeferredAccepted { task_id: String },
+    DeferredStatus { task_id: String, status: DeferredStatus },
     Error { message: String },
     Pong,
 }
 ```
 
-ワイヤ形式: 4 バイト little-endian 長プレフィックス + JSON。最大メッセージサイズ 64 MB。プロトコルバージョン: `IPC_PROTOCOL_VERSION = 2`（`crates/ene-tool-proto/src/ipc.rs`）。v2 でホストのヘルスチェックに使う `Ping`/`Pong` liveness probe を追加（#238）。
+ワイヤ形式: 4 バイト little-endian 長プレフィックス + JSON。最大メッセージサイズ 64 MB。プロトコルバージョン: `IPC_PROTOCOL_VERSION = 2`（`crates/ene-tool-proto/src/ipc.rs`）。v2 でホストのヘルスチェックに使う `Ping`/`Pong` liveness probe（#238）と、バックグラウンドツール実行を実現する deferred-call メッセージ（`CallTool.deferred`、`DeferredAccepted`、`PollDeferred`、`CancelDeferred`、`DeferredStatus`）を追加（#196）。
 
 ## ToolHostManager
 

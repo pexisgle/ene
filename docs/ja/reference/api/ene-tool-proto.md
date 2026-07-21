@@ -22,10 +22,10 @@
 ## プロトコルバージョン
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 ```
 
-双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../../../AGENTS.md) を参照）。現在のワイヤー形式は 9 リクエスト / 7 レスポンスバリアントを持ち、[`ToolRagProfile`](#toolragprofile)（#137）向けに `ListRagProfiles` / `RagProfiles` を含みます。`ToolSpec` は LLM 向けのみ（`name` / `description` / `parameters`）のままです。
+双方が `Handshake` / `HandshakeAck` メッセージで自分のバージョンを送信します。サーバー（`run_tool_server`）はバージョンの不一致を**厳密に拒否**します — ダウングレードや交渉は行わず、`IpcResponse::Error` で接続を終了します。この定数は、ワイヤーフォーマットが後方互換性のない形で変更された場合にのみバンプしてください（[AGENTS.md §6 R3](../../../../AGENTS.md) を参照）。v2 ではホストのヘルスチェックに使う `Ping`/`Pong` liveness probe（#238）と、バックグラウンドツール実行を実現する deferred-call メッセージ（`CallTool.deferred`、`DeferredAccepted`、`PollDeferred`、`CancelDeferred`、`DeferredStatus`）を追加しました（#196）。`ToolSpec` は LLM 向け（`name` / `description` / `parameters` / `background_capable`）のままです。
 
 ---
 
@@ -139,19 +139,21 @@ impl ToolProvider for HostRegistry { /* ... */ }
 
 ### `ToolSpec`
 
-単一の呼び出し可能なツールに関する、LLM 向けの構造化された記述（`name`、`description`、`parameters` のみ — #135）。
+単一の呼び出し可能なツールに関する、LLM 向けの構造化された記述（`name`、`description`、`parameters`、`background_capable` — #135）。
 
 ```rust
 pub struct ToolSpec {
     pub name: ToolName,
     pub description: String,
     pub parameters: serde_json::Value,  // schemars によって自動導出される JSON Schema
+    pub background_capable: bool,       // 遅延実行に対応するか (#196)、デフォルト false
 }
 ```
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
 | `new` | `fn new(name, description, parameters) -> Self` | LLM 向けのツール spec を構築する。 |
+| `background_capable` | `const fn background_capable(self, capable: bool) -> Self` | この spec を遅延（バックグラウンド）実行対応としてマークする（#196）。 |
 
 ### `ToolRagProfile`
 
@@ -479,11 +481,14 @@ pub enum IpcRequest {
     ListTools,
     ListRagProfiles,
     GetConfigSchema,
-    CallTool { name: String, arguments: String },
+    CallTool { name: String, arguments: String, deferred: bool },
     SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
     Shutdown,
+    Ping,
+    PollDeferred { task_id: String },
+    CancelDeferred { task_id: String },
 }
 ```
 
@@ -493,11 +498,14 @@ pub enum IpcRequest {
 | `ListTools` | ツールの LLM 向け `ToolSpec` リストをリクエストする。 |
 | `ListRagProfiles` | ホスト/RAG 向け `ToolRagProfile` リストをリクエストする（#137）。 |
 | `GetConfigSchema` | ツールの設定 JSON スキーマをリクエストする（#150 例外）。 |
-| `CallTool { name, arguments }` | 名前と JSON 引数でツールを起動する。 |
+| `CallTool { name, arguments, deferred }` | 名前と JSON 引数でツールを起動する。`deferred` が `true` の場合、バックグラウンド対応ツールはブロックせずに `DeferredAccepted` で応答できる（#196）。 |
 | `SetCallContext { conversation_id, turn_id }` | 会話 + ターン識別子を伝播する。 |
 | `ApprovePermission { request_id }` | 保留中のパーミッションリクエストを承認する。 |
 | `AllowPattern { action, target_pattern }` | サンドボックスの許可リストにパターンを追加する。 |
 | `Shutdown` | グレースフルシャットダウン。 |
+| `Ping` | 生存確認プローブ。サーバーは速やかに `Pong` で応答する必要がある（#238）。 |
+| `PollDeferred { task_id }` | 遅延バックグラウンドタスクのステータスをポーリングする。`DeferredStatus` で応答される（#196）。 |
+| `CancelDeferred { task_id }` | 遅延バックグラウンドタスクをキャンセルする。`Ack` で応答される（#196）。 |
 
 ---
 
@@ -513,19 +521,25 @@ pub enum IpcResponse {
     RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<serde_json::Value> },
     CallResult { result: Result<String, ToolError> },
+    DeferredAccepted { task_id: String },
+    DeferredStatus { task_id: String, status: DeferredStatus },
     Error { message: String },
+    Pong,
 }
 ```
 
 | バリアント | 用途 |
 |---|---|
 | `HandshakeAck { version }` | Handshake を受理し、交渉後のバージョンを返す。 |
-| `Ack` | 汎用の確認応答（`SetCallContext`、パーミッションなど）。 |
+| `Ack` | 汎用の確認応答（`SetCallContext`、パーミッション、`CancelDeferred` など）。 |
 | `Tools { tools }` | `ListTools` への応答。 |
 | `RagProfiles { profiles }` | `ListRagProfiles` への応答（#137）。 |
 | `ConfigSchema { schema }` | `GetConfigSchema` への応答。 |
-| `CallResult { result }` | `CallTool` への応答。 |
+| `CallResult { result }` | `CallTool` への応答（同期実行）。 |
+| `DeferredAccepted { task_id }` | `deferred: true` の `CallTool` への応答。ツールがタスクをバックグラウンド実行用に受け入れ、`task_id` を割り当てたことを示す（#196）。 |
+| `DeferredStatus { task_id, status }` | `PollDeferred` への応答。バックグラウンドタスクの現在のステータスを報告する（#196）。 |
 | `Error { message }` | 特定の呼び出し外で発生したツール側の回復不能エラー（例：ハンドシェイクのバージョン不一致）。 |
+| `Pong` | `Ping` 生存確認プローブへの応答（#238）。 |
 
 ### メッセージシーケンス図
 

@@ -128,6 +128,7 @@ async fn proactive_stream_does_not_add_user_history() {
         generation_timeout: Some(std::time::Duration::from_secs(30)),
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
     let outcome = run_stream_cognitive(ctx).await;
@@ -210,6 +211,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         generation_timeout: Some(std::time::Duration::from_secs(30)),
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
     let outcome = run_stream_cognitive(ctx).await;
@@ -276,6 +278,7 @@ async fn proactive_stream_without_memory_store() {
         generation_timeout: Some(std::time::Duration::from_secs(30)),
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
     let outcome = run_stream_cognitive(ctx).await;

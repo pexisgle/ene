@@ -63,4 +63,7 @@ pub use mcp_registry::McpToolRegistry;
 /// Tool process lifecycle manager.
 pub use tool_host_manager::ToolHostManager;
 /// Registry types and the `ToolRegistry` trait.
-pub use tools::{CompositeToolRegistry, ToolCategory, ToolRegistry, compute_tool_version_hash};
+pub use tools::{
+    CompositeToolRegistry, DeferredCallResult, ToolCategory, ToolRegistry,
+    compute_tool_version_hash,
+};

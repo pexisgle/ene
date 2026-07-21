@@ -116,7 +116,11 @@ async fn ipc_e2e_handshake_list_tools_and_call_tool() {
             .unwrap()
             .expect("server sends a CallTool request");
         match &req {
-            IpcRequest::CallTool { name, arguments } => {
+            IpcRequest::CallTool {
+                name,
+                arguments,
+                deferred: _,
+            } => {
                 assert_eq!(name, "utility.get_current_time");
                 assert_eq!(arguments, "{}");
             }

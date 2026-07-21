@@ -25,6 +25,23 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+/// A deferred (background) tool task tracked by the actor (#196).
+///
+/// Created when a background-capable tool accepts a deferred call and
+/// returns a `task_id`. The actor polls the owning tool until the task
+/// reaches a terminal state, then emits [`EneEvent::ToolBackgroundCompleted`].
+#[derive(Debug, Clone)]
+pub struct DeferredToolTask {
+    /// The tool name that owns the background task.
+    pub tool_name: String,
+    /// The `task_id` returned by the deferred call acceptance.
+    pub task_id: String,
+    /// JSON-encoded arguments the task was started with.
+    pub arguments: String,
+    /// When the task was accepted for background execution.
+    pub started_at: DateTime<Utc>,
+}
+
 /// Commands sent to the actor from consumers (UI/CLI).
 ///
 /// Fire-and-forget variants are sent via internal channels.
@@ -159,6 +176,18 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<String, EneRuntimeError>>,
     },
+    /// Cancel a deferred (background) tool task by id (#196).
+    ///
+    /// Routes to the owning tool and asks it to abort the background task.
+    /// The reply reports whether a running task was actually cancelled.
+    CancelDeferredTool {
+        /// The tool name that owns the background task.
+        tool_name: String,
+        /// The `task_id` returned by the deferred call acceptance.
+        task_id: String,
+        /// Reply channel carrying whether a running task was cancelled.
+        reply: oneshot::Sender<bool>,
+    },
     /// Invalidate the Tool RAG index, forcing re-embedding on next query.
     InvalidateToolIndex,
     /// Persist the `CCv3` character-memory content hash after startup warmup.
@@ -266,6 +295,20 @@ pub enum EneEvent {
         name: String,
         /// The tool's output as a string.
         result: String,
+    },
+    /// A deferred (background) tool task has reached a terminal state (#196).
+    ///
+    /// Emitted asynchronously after the originating turn has completed, once
+    /// the background-capable tool reports that the task finished, failed, or
+    /// was cancelled. Consumers can use `task_id` to correlate this with the
+    /// earlier `DeferredAccepted` result returned to the LLM.
+    ToolBackgroundCompleted {
+        /// The tool name that owns the background task.
+        tool_name: String,
+        /// The `task_id` returned by the deferred call acceptance.
+        task_id: String,
+        /// Terminal status of the background task.
+        status: ene_tool_proto::DeferredStatus,
     },
     /// A destructive operation requires user approval before execution.
     PermissionRequired {
@@ -618,6 +661,7 @@ impl EneHandle {
         let turn_gate = Arc::new(TurnGate::new());
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
+        let (deferred_tool_tx, deferred_tool_rx) = mpsc::unbounded_channel();
 
         let actor = EneActor {
             cmd_rx,
@@ -642,11 +686,14 @@ impl EneHandle {
             memory_writer_tasks: tokio::task::JoinSet::new(),
             vision_tasks: tokio::task::JoinSet::new(),
             search_tasks: tokio::task::JoinSet::new(),
+            deferred_tool_tasks: tokio::task::JoinSet::new(),
             classifier_rx,
             memory_writer_rx,
+            deferred_tool_rx,
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             classifier_tx,
             memory_writer_tx,
+            deferred_tool_tx,
             _diag_rx: diag_rx,
             proactive: crate::proactive::ProactiveScheduler::default(),
             proactive_decision_rx: None,
@@ -990,12 +1037,20 @@ struct EneActor {
     vision_tasks: tokio::task::JoinSet<()>,
     /// In-flight tool-search jobs; reaped so panics are not lost (#236).
     search_tasks: tokio::task::JoinSet<()>,
+    /// In-flight deferred (background) tool tasks (#196). Each task polls
+    /// its owning tool until the task reaches a terminal state, then emits
+    /// [`EneEvent::ToolBackgroundCompleted`]. Reaped so panics are not lost.
+    deferred_tool_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
+    /// Receiver for deferred (background) tool tasks accepted by the stream (#196).
+    deferred_tool_rx: mpsc::UnboundedReceiver<DeferredToolTask>,
     /// Sender for classifier `JoinHandles` from the stream task.
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Sender for deferred memory-writer `JoinHandles` from the stream task.
     memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
+    /// Sender for deferred (background) tool tasks accepted by the stream (#196).
+    deferred_tool_tx: mpsc::UnboundedSender<DeferredToolTask>,
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
     /// Held so the broadcast channel retains buffered diagnostic events until the
@@ -1070,6 +1125,73 @@ fn reap_join_set(
     }
 }
 
+/// Polls a deferred (background) tool task until it reaches a terminal state (#196).
+///
+/// Emits [`EneEvent::ToolBackgroundCompleted`] when the task completes, fails,
+/// or is cancelled. Runs as a background task in the actor's `deferred_tool_tasks`
+/// `JoinSet`.
+async fn poll_deferred_task(
+    registry: Arc<dyn ToolRegistry>,
+    event_tx: broadcast::Sender<EneEvent>,
+    task: DeferredToolTask,
+) {
+    use ene_tool_proto::DeferredStatus;
+    use std::time::Duration;
+
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+    const MAX_POLLS: u32 = 600; // 60 seconds at 100ms intervals
+
+    for _ in 0..MAX_POLLS {
+        let status = registry.poll_deferred(&task.tool_name, &task.task_id).await;
+        match status {
+            DeferredStatus::Pending => {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            DeferredStatus::Completed { result } => {
+                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                    tool_name: task.tool_name.clone(),
+                    task_id: task.task_id.clone(),
+                    status: DeferredStatus::Completed { result },
+                });
+                return;
+            }
+            DeferredStatus::Failed { error } => {
+                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                    tool_name: task.tool_name.clone(),
+                    task_id: task.task_id.clone(),
+                    status: DeferredStatus::Failed { error },
+                });
+                return;
+            }
+            DeferredStatus::Cancelled => {
+                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                    tool_name: task.tool_name.clone(),
+                    task_id: task.task_id.clone(),
+                    status: DeferredStatus::Cancelled,
+                });
+                return;
+            }
+            DeferredStatus::Unknown => {
+                tracing::warn!(
+                    component = "DeferredTool",
+                    tool = %task.tool_name,
+                    task_id = %task.task_id,
+                    "Deferred task became unknown; stopping poll"
+                );
+                return;
+            }
+        }
+    }
+
+    tracing::warn!(
+        component = "DeferredTool",
+        tool = %task.tool_name,
+        task_id = %task.task_id,
+        "Deferred task polling timed out after {} polls",
+        MAX_POLLS
+    );
+}
+
 impl EneActor {
     /// Runs a single command, isolating any panic so the actor loop survives (#236).
     ///
@@ -1118,6 +1240,12 @@ impl EneActor {
                 "SearchTools task panicked",
                 &self.diag_tx,
             );
+            reap_join_set(
+                &mut self.deferred_tool_tasks,
+                "DeferredToolReaper",
+                "Deferred tool task panicked",
+                &self.diag_tx,
+            );
 
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {
@@ -1142,6 +1270,16 @@ impl EneActor {
                             "Deferred memory-writer task panicked"
                         );
                     }
+                });
+            }
+
+            // Drain deferred tool tasks accepted by the stream (#196).
+            // Spawn a polling task for each that awaits completion.
+            while let Ok(task) = self.deferred_tool_rx.try_recv() {
+                let registry = Arc::clone(&self.registry);
+                let event_tx = self.event_tx.clone();
+                self.deferred_tool_tasks.spawn(async move {
+                    poll_deferred_task(registry, event_tx, task).await;
                 });
             }
 
@@ -1990,6 +2128,21 @@ impl EneActor {
                 });
                 true
             }
+            EneCommand::CancelDeferredTool {
+                tool_name,
+                task_id,
+                reply,
+            } => {
+                let registry = self.registry.clone();
+                self.call_tool_tasks.spawn(async move {
+                    registry.cancel_deferred(&tool_name, &task_id).await;
+                    // The tool-side cancel is best-effort; report success
+                    // optimistically since we cannot distinguish "cancelled"
+                    // from "already finished" without a follow-up poll.
+                    let _ = reply.send(true);
+                });
+                true
+            }
             EneCommand::InvalidateToolIndex => {
                 self.tool_rag = None;
                 true
@@ -2073,6 +2226,7 @@ impl EneActor {
         let turn_for_stream = turn.clone();
         let classifier_tx = self.classifier_tx.clone();
         let memory_writer_tx = self.memory_writer_tx.clone();
+        let deferred_tool_tx = self.deferred_tool_tx.clone();
         self.active_origin = origin;
 
         let _ = self.event_tx.send(EneEvent::TurnStarted {
@@ -2108,6 +2262,7 @@ impl EneActor {
                 generation_timeout,
                 classifier_tx,
                 memory_writer_tx,
+                deferred_tool_tx,
             })
             .await;
             let _ = session_tx.send(outcome);

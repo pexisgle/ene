@@ -176,6 +176,8 @@ pub struct StreamContext {
     pub classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Sender for deferred memory-writer `JoinHandles` spawned after Terminal emission.
     pub memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
+    /// Sender for deferred tool tasks accepted during tool execution (#196).
+    pub deferred_tool_tx: mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, optional memory
@@ -244,9 +246,19 @@ pub(crate) async fn perform_tool_executions(
     audit_store: Option<&Arc<ene_store::MemoryStore>>,
     permission_scopes: &Arc<Mutex<Vec<PermissionScope>>>,
     undo_stack: &Arc<Mutex<crate::undo::UndoStack>>,
+    deferred_tool_tx: &mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
 ) -> Result<ToolExecutionOutput, crate::error::EneRuntimeError> {
     let mut round_messages = Vec::new();
     let mut summaries = Vec::new();
+
+    // Build a lookup of background-capable tool names so deferred calls
+    // are only attempted for tools that advertise support (#196).
+    let background_capable: std::collections::HashSet<String> = registry
+        .list_tools()
+        .into_iter()
+        .filter(|spec| spec.background_capable)
+        .map(|spec| spec.name.as_str().to_string())
+        .collect();
 
     round_messages.push(LlmMessage::Assistant {
         content: if assistant_content.is_empty() {
@@ -292,6 +304,34 @@ pub(crate) async fn perform_tool_executions(
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
                 .unwrap_or_default();
             execute_system_search_tool(registry, tool_rag, &query).await
+        } else if background_capable.contains(&name) {
+            // Try deferred execution for background-capable tools (#196).
+            let tool_timeout = std::time::Duration::from_millis(timeout_ms);
+            match tokio::time::timeout(tool_timeout, registry.call_tool_deferred(&name, &args))
+                .await
+            {
+                Ok(Ok(ene_tool_host::DeferredCallResult::Deferred { task_id })) => {
+                    // Task accepted for background execution.
+                    let _ = deferred_tool_tx.send(crate::handle::DeferredToolTask {
+                        tool_name: name.clone(),
+                        task_id: task_id.clone(),
+                        arguments: args.clone(),
+                        started_at: chrono::Utc::now(),
+                    });
+                    Ok(format!(
+                        "Task queued for background execution with task_id: {task_id}"
+                    ))
+                }
+                Ok(Ok(ene_tool_host::DeferredCallResult::Sync(res))) => Ok(res),
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(ToolHostError::ExecutionFailed {
+                    message: format!(
+                        "Tool '{}' timed out after {:.2} seconds",
+                        name,
+                        tool_timeout.as_secs_f64()
+                    ),
+                }),
+            }
         } else {
             let tool_timeout = std::time::Duration::from_millis(timeout_ms);
             match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
@@ -620,6 +660,7 @@ pub(crate) fn search_tools_spec() -> ene_tool_proto::ToolSpec {
             },
             "required": ["query"]
         }),
+        background_capable: false,
     }
 }
 
@@ -719,6 +760,7 @@ mod tests {
                     name: ene_tool_proto::ToolName::new("filesystem.read"),
                     description: "Read files".to_string(),
                     parameters: serde_json::json!({}),
+                    background_capable: false,
                 }]
             }
             async fn call_tool(
@@ -731,6 +773,7 @@ mod tests {
         }
         let registry = DummyRegistry;
         let (event_tx, _event_rx) = broadcast::channel(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
         let pending_permissions = Arc::new(Mutex::new(HashMap::new()));
         let pending_user_inputs = Arc::new(Mutex::new(HashMap::new()));
         let turn = crate::types::TurnId::new();
@@ -758,6 +801,7 @@ mod tests {
             None,
             &Arc::new(Mutex::new(Vec::new())),
             &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
+            &deferred_tool_tx,
         )
         .await
         .unwrap();
@@ -850,6 +894,7 @@ mod tests {
             output: "x".repeat(64),
         };
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
         let pending_permissions: Arc<
             Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
         > = Arc::new(Mutex::new(HashMap::new()));
@@ -879,6 +924,7 @@ mod tests {
             None,
             &Arc::new(Mutex::new(Vec::new())),
             &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
+            &deferred_tool_tx,
         )
         .await
         .expect("tool executions");
@@ -943,6 +989,7 @@ mod tests {
         };
 
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
         let pending_permissions: Arc<
             Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
         > = Arc::new(Mutex::new(HashMap::new()));
@@ -995,6 +1042,7 @@ mod tests {
             None,
             &scopes,
             &undo_stack,
+            &deferred_tool_tx,
         );
 
         // Bound the test: if the fix regresses, the executor would
@@ -1074,6 +1122,7 @@ mod tests {
         };
 
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
         let pending_permissions: Arc<
             Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
         > = Arc::new(Mutex::new(HashMap::new()));
@@ -1140,6 +1189,7 @@ mod tests {
             None,
             &scopes,
             &undo_stack,
+            &deferred_tool_tx,
         );
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;

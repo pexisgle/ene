@@ -334,6 +334,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                     name: ToolName::new(#tool_name_str),
                     description,
                     parameters: schema,
+                    background_capable: false,
                 }
             }
 

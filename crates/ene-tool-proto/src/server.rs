@@ -153,8 +153,24 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
         IpcRequest::ListRagProfiles => IpcResponse::RagProfiles {
             profiles: provider.list_rag_profiles(),
         },
-        IpcRequest::CallTool { name, arguments } => match provider.call_tool(name, arguments).await
-        {
+        IpcRequest::CallTool {
+            name,
+            arguments,
+            deferred: true,
+        } => match provider.call_tool_deferred(name, arguments).await {
+            Ok(crate::DeferredOutcome::Sync(result)) => {
+                IpcResponse::CallResult { result: Ok(result) }
+            }
+            Ok(crate::DeferredOutcome::Deferred { task_id }) => {
+                IpcResponse::DeferredAccepted { task_id }
+            }
+            Err(e) => IpcResponse::CallResult { result: Err(e) },
+        },
+        IpcRequest::CallTool {
+            name,
+            arguments,
+            deferred: false,
+        } => match provider.call_tool(name, arguments).await {
             Ok(result) => IpcResponse::CallResult { result: Ok(result) },
             Err(e) => IpcResponse::CallResult { result: Err(e) },
         },
@@ -188,5 +204,13 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
         }
         IpcRequest::Shutdown => IpcResponse::Ack,
         IpcRequest::Ping => IpcResponse::Pong,
+        IpcRequest::PollDeferred { task_id } => IpcResponse::DeferredStatus {
+            task_id: task_id.clone(),
+            status: provider.poll_deferred(task_id),
+        },
+        IpcRequest::CancelDeferred { task_id } => {
+            provider.cancel_deferred(task_id);
+            IpcResponse::Ack
+        }
     }
 }

@@ -123,6 +123,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         generation_timeout,
         classifier_tx,
         memory_writer_tx,
+        deferred_tool_tx,
     } = ctx;
 
     let is_proactive = origin == TurnOrigin::Proactive;
@@ -954,6 +955,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             mem_store.as_ref(),
             &permission_scopes,
             &undo_stack,
+            &deferred_tool_tx,
         )
         .await;
 

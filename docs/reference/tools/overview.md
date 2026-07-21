@@ -43,13 +43,15 @@ pub enum IpcRequest {
     ListTools,
     ListRagProfiles,
     GetConfigSchema,
-    CallTool { name: String, arguments: String },
+    CallTool { name: String, arguments: String, deferred: bool },
     SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
     RevokePattern { action: String, target_pattern: String },
     Shutdown,
     Ping,
+    PollDeferred { task_id: String },
+    CancelDeferred { task_id: String },
 }
 
 pub enum IpcResponse {
@@ -59,12 +61,14 @@ pub enum IpcResponse {
     RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<Value> },
     CallResult { result: Result<String, ToolError> },
+    DeferredAccepted { task_id: String },
+    DeferredStatus { task_id: String, status: DeferredStatus },
     Error { message: String },
     Pong,
 }
 ```
 
-Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see `crates/ene-tool-proto/src/ipc.rs`). v2 adds the `Ping`/`Pong` liveness probe used by host health checks (#238).
+Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see `crates/ene-tool-proto/src/ipc.rs`). v2 adds the `Ping`/`Pong` liveness probe used by host health checks (#238) and the deferred-call messages (`CallTool.deferred`, `DeferredAccepted`, `PollDeferred`, `CancelDeferred`, `DeferredStatus`) that power background tool execution (#196).
 
 ## ToolHostManager
 

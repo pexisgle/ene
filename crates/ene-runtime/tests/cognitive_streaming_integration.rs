@@ -147,6 +147,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         generation_timeout: None,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
     };
 
     let _session = run_stream_cognitive(ctx).await;

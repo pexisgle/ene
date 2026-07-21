@@ -391,6 +391,7 @@ impl ToolRegistry for IpcToolRegistry {
         self.send_with_reconnect(IpcRequest::CallTool {
             name: name.to_string(),
             arguments: arguments.to_string(),
+            deferred: false,
         })
         .await
         .and_then(|resp| match resp {
@@ -400,6 +401,52 @@ impl ToolRegistry for IpcToolRegistry {
                 message: "Unexpected response for CallTool".to_string(),
             }),
         })
+    }
+
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<crate::DeferredCallResult, ToolHostError> {
+        self.send_with_reconnect(IpcRequest::CallTool {
+            name: name.to_string(),
+            arguments: arguments.to_string(),
+            deferred: true,
+        })
+        .await
+        .and_then(|resp| match resp {
+            IpcResponse::CallResult { result } => Ok(crate::DeferredCallResult::Sync(
+                result.map_err(Into::<ToolHostError>::into)?,
+            )),
+            IpcResponse::DeferredAccepted { task_id } => {
+                Ok(crate::DeferredCallResult::Deferred { task_id })
+            }
+            IpcResponse::Error { message } => Err(ToolHostError::ExecutionFailed { message }),
+            _ => Err(ToolHostError::ExecutionFailed {
+                message: "Unexpected response for deferred CallTool".to_string(),
+            }),
+        })
+    }
+
+    async fn poll_deferred(
+        &self,
+        _tool_name: &str,
+        task_id: &str,
+    ) -> ene_tool_proto::DeferredStatus {
+        let req = IpcRequest::PollDeferred {
+            task_id: task_id.to_string(),
+        };
+        match self.send_with_reconnect(req).await {
+            Ok(IpcResponse::DeferredStatus { status, .. }) => status,
+            _ => ene_tool_proto::DeferredStatus::Unknown,
+        }
+    }
+
+    async fn cancel_deferred(&self, _tool_name: &str, task_id: &str) {
+        let req = IpcRequest::CancelDeferred {
+            task_id: task_id.to_string(),
+        };
+        let _ = self.send_with_reconnect(req).await;
     }
 
     async fn config_schema(&self) -> Option<serde_json::Value> {

@@ -10,7 +10,9 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// Current IPC protocol version.
 ///
 /// v2 adds the `Ping`/`Pong` liveness probe used by the host's periodic
-/// health check and hang detection (#238).
+/// health check and hang detection (#238), and the deferred-call
+/// messages (`CallTool.deferred` / `DeferredAccepted`) that power
+/// background tool execution (#196).
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
@@ -39,6 +41,15 @@ pub enum IpcRequest {
         name: String,
         /// JSON-encoded arguments.
         arguments: String,
+        /// When `true`, request deferred (background) execution (#196).
+        ///
+        /// A background-capable tool should start the work asynchronously
+        /// and reply with [`IpcResponse::DeferredAccepted`] carrying a
+        /// `task_id` instead of blocking on the result. Tools that do not
+        /// support deferral ignore this flag and return a normal
+        /// [`IpcResponse::CallResult`].
+        #[serde(default)]
+        deferred: bool,
     },
     /// Set the call context (conversation + turn identifiers).
     ///
@@ -75,6 +86,20 @@ pub enum IpcRequest {
     /// promptly; a hung tool that fails to answer within the probe timeout
     /// is considered unhealthy and restarted by the host (#238).
     Ping,
+    /// Poll the status of a deferred (background) task by id (#196).
+    ///
+    /// The server replies with [`IpcResponse::DeferredStatus`].
+    PollDeferred {
+        /// The `task_id` returned by a prior [`IpcResponse::DeferredAccepted`].
+        task_id: String,
+    },
+    /// Cancel a deferred (background) task by id (#196).
+    ///
+    /// The server replies with [`IpcResponse::Ack`].
+    CancelDeferred {
+        /// The `task_id` of the background task to cancel.
+        task_id: String,
+    },
 }
 
 /// IPC response — host → core
@@ -107,6 +132,16 @@ pub enum IpcResponse {
         /// The result, or an error.
         result: Result<String, ToolError>,
     },
+    /// Acknowledgment of a deferred (background) tool call (#196).
+    ///
+    /// Returned instead of [`IpcResponse::CallResult`] when a
+    /// background-capable tool accepts a deferred request. The actual
+    /// result is delivered later out-of-band; the host tracks the task
+    /// by `task_id`.
+    DeferredAccepted {
+        /// Unique identifier for the queued background task.
+        task_id: String,
+    },
     /// Error response.
     Error {
         /// Error description.
@@ -114,6 +149,44 @@ pub enum IpcResponse {
     },
     /// Reply to a [`IpcRequest::Ping`] liveness probe (#238).
     Pong,
+    /// Status of a deferred (background) task (#196).
+    ///
+    /// Returned in response to [`IpcRequest::PollDeferred`].
+    DeferredStatus {
+        /// The polled task id.
+        task_id: String,
+        /// Current status of the task.
+        status: DeferredStatus,
+    },
+}
+
+/// Status of a deferred (background) tool task (#196).
+///
+/// Reported by [`IpcResponse::DeferredStatus`] in response to a
+/// [`IpcRequest::PollDeferred`] probe. The host/runtime polls a
+/// background-capable tool until the task reaches a terminal state
+/// ([`DeferredStatus::Completed`], [`DeferredStatus::Failed`], or
+/// [`DeferredStatus::Cancelled`]) and then surfaces the result as a
+/// background-completed event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeferredStatus {
+    /// The task is still running.
+    Pending,
+    /// The task finished successfully with `result`.
+    Completed {
+        /// The tool's output string.
+        result: String,
+    },
+    /// The task failed with `error`.
+    Failed {
+        /// Human-readable failure description.
+        error: String,
+    },
+    /// The task was cancelled before completing.
+    Cancelled,
+    /// No task with the polled id is known to the tool.
+    Unknown,
 }
 
 /// Call context identifying the conversation and turn for which
@@ -315,9 +388,77 @@ mod tests {
         let req = IpcRequest::CallTool {
             name: "read".into(),
             arguments: r#"{"path":"/tmp/test.txt"}"#.into(),
+            deferred: false,
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn ipc_request_call_tool_deferred_roundtrip() {
+        let req = IpcRequest::CallTool {
+            name: "timer.set".into(),
+            arguments: r#"{"seconds":5}"#.into(),
+            deferred: true,
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn ipc_request_call_tool_defaults_to_sync() {
+        // A v1-shaped payload without the `deferred` field must
+        // deserialize to a synchronous call for backward compatibility.
+        let json = r#"{"CallTool":{"name":"read","arguments":"{}"}}"#;
+        let req: IpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req,
+            IpcRequest::CallTool {
+                name: "read".into(),
+                arguments: "{}".into(),
+                deferred: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn ipc_response_deferred_accepted_roundtrip() {
+        let resp = IpcResponse::DeferredAccepted {
+            task_id: "task-123".into(),
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn ipc_request_poll_deferred_roundtrip() {
+        let req = IpcRequest::PollDeferred {
+            task_id: "task-456".into(),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn ipc_request_cancel_deferred_roundtrip() {
+        let req = IpcRequest::CancelDeferred {
+            task_id: "task-789".into(),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn ipc_response_deferred_status_roundtrip() {
+        use crate::DeferredStatus;
+        let resp = IpcResponse::DeferredStatus {
+            task_id: "task-abc".into(),
+            status: DeferredStatus::Completed {
+                result: "done".into(),
+            },
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
     }
 
     #[tokio::test]

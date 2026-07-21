@@ -26,10 +26,13 @@ pub mod html;
 
 /// Unified tool action interface.
 pub mod action;
+/// In-process store for deferred (background) tool tasks (#196).
+pub mod deferred;
 /// `ToolProvider` adapters over `Vec<Box<dyn ToolAction>>` (or a single action).
 pub mod provider;
 
 pub use action::{ToolAction, ToolSpecArgs};
+pub use deferred::DeferredTaskStore;
 pub use provider::ActionSetProvider;
 pub use provider::SingleActionProvider;
 

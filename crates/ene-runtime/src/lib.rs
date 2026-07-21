@@ -63,8 +63,8 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 // ── Actor types ──
 /// Actor handle, events, status, and state snapshot.
 pub use handle::{
-    ActorDeadError, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot, EneStatus,
-    FeatureSettingsUpdate, ShutdownTimeout, TerminalReason,
+    ActorDeadError, DeferredToolTask, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot,
+    EneStatus, FeatureSettingsUpdate, ShutdownTimeout, TerminalReason,
 };
 
 // ── Diagnostics ──

@@ -115,7 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("\n[Status: Error]");
                 }
             }
-            EneEvent::TurnStarted { .. } => {}
+            EneEvent::TurnStarted { .. } | EneEvent::ToolBackgroundCompleted { .. } => {}
             EneEvent::Terminal {
                 turn: t,
                 origin: _,

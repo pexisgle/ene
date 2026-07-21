@@ -22,10 +22,10 @@ See also: [`ene-tool-host`](./ene-tool-host.md) for the host-side connection man
 ## Protocol Version
 
 ```rust
-pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const IPC_PROTOCOL_VERSION: u32 = 2;
 ```
 
-Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../../AGENTS.md)). The current wire format carries 9 request variants and 7 response variants, including `ListRagProfiles` / `RagProfiles` for [`ToolRagProfile`](#toolragprofile) (#137). `ToolSpec` remains LLM-facing only (`name` / `description` / `parameters`).
+Both parties send their version in the `Handshake` / `HandshakeAck` messages. The server (`run_tool_server`) **strictly rejects** a mismatched version — it does not downgrade or negotiate — closing the connection with an `IpcResponse::Error`. Bump this constant only when the wire format changes in a backward-incompatible way (see [AGENTS.md §6 R3](../../../AGENTS.md)). v2 adds the `Ping`/`Pong` liveness probe used by host health checks (#238) and the deferred-call messages (`CallTool.deferred`, `DeferredAccepted`, `PollDeferred`, `CancelDeferred`, `DeferredStatus`) that power background tool execution (#196). `ToolSpec` remains LLM-facing (`name` / `description` / `parameters` / `background_capable`).
 
 ---
 
@@ -139,19 +139,21 @@ A composite registry that aggregates multiple `ToolProvider`s and dispatches cal
 
 ### `ToolSpec`
 
-The structured, LLM-facing description of a single callable tool (`name`, `description`, `parameters` only — #135).
+The structured, LLM-facing description of a single callable tool (`name`, `description`, `parameters`, `background_capable` — #135).
 
 ```rust
 pub struct ToolSpec {
     pub name: ToolName,
     pub description: String,
     pub parameters: serde_json::Value,  // JSON Schema, auto-derived by schemars
+    pub background_capable: bool,       // supports deferred execution (#196), default false
 }
 ```
 
 | Method | Signature | Description |
 |---|---|---|
 | `new` | `fn new(name, description, parameters) -> Self` | Construct an LLM-facing tool spec. |
+| `background_capable` | `const fn background_capable(self, capable: bool) -> Self` | Mark this spec as capable of deferred (background) execution (#196). |
 
 ### `ToolRagProfile`
 
@@ -479,11 +481,14 @@ pub enum IpcRequest {
     ListTools,
     ListRagProfiles,
     GetConfigSchema,
-    CallTool { name: String, arguments: String },
+    CallTool { name: String, arguments: String, deferred: bool },
     SetCallContext { conversation_id: String, turn_id: String },
     ApprovePermission { request_id: String },
     AllowPattern { action: String, target_pattern: String },
     Shutdown,
+    Ping,
+    PollDeferred { task_id: String },
+    CancelDeferred { task_id: String },
 }
 ```
 
@@ -493,11 +498,14 @@ pub enum IpcRequest {
 | `ListTools` | Request the tool's LLM-facing `ToolSpec` list. |
 | `ListRagProfiles` | Request host/RAG `ToolRagProfile` list (#137). |
 | `GetConfigSchema` | Request the tool's configuration JSON Schema (#150 exception). |
-| `CallTool { name, arguments }` | Invoke a tool by name with JSON arguments. |
+| `CallTool { name, arguments, deferred }` | Invoke a tool by name with JSON arguments. When `deferred` is `true`, a background-capable tool may reply with `DeferredAccepted` instead of blocking (#196). |
 | `SetCallContext { conversation_id, turn_id }` | Propagate conversation + turn identifiers. |
 | `ApprovePermission { request_id }` | Grant a pending permission request. |
 | `AllowPattern { action, target_pattern }` | Add a pattern to the sandbox allow-list. |
 | `Shutdown` | Graceful shutdown. |
+| `Ping` | Liveness probe; the server must reply with `Pong` promptly (#238). |
+| `PollDeferred { task_id }` | Poll the status of a deferred background task; answered with `DeferredStatus` (#196). |
+| `CancelDeferred { task_id }` | Cancel a deferred background task; answered with `Ack` (#196). |
 
 ---
 
@@ -513,19 +521,25 @@ pub enum IpcResponse {
     RagProfiles { profiles: Vec<ToolRagProfile> },
     ConfigSchema { schema: Option<serde_json::Value> },
     CallResult { result: Result<String, ToolError> },
+    DeferredAccepted { task_id: String },
+    DeferredStatus { task_id: String, status: DeferredStatus },
     Error { message: String },
+    Pong,
 }
 ```
 
 | Variant | Purpose |
 |---|---|
 | `HandshakeAck { version }` | Acknowledge the Handshake with the negotiated version. |
-| `Ack` | Generic acknowledgment (for `SetCallContext`, permissions, etc.). |
+| `Ack` | Generic acknowledgment (for `SetCallContext`, permissions, `CancelDeferred`, etc.). |
 | `Tools { tools }` | Response to `ListTools`. |
 | `RagProfiles { profiles }` | Response to `ListRagProfiles` (#137). |
 | `ConfigSchema { schema }` | Response to `GetConfigSchema`. |
-| `CallResult { result }` | Response to `CallTool`. |
+| `CallResult { result }` | Response to `CallTool` (synchronous execution). |
+| `DeferredAccepted { task_id }` | Response to `CallTool` with `deferred: true`; the tool accepted the task for background execution and assigned it `task_id` (#196). |
+| `DeferredStatus { task_id, status }` | Response to `PollDeferred`; reports the current status of a background task (#196). |
 | `Error { message }` | Unrecoverable tool-side error (outside a specific call), e.g. a handshake version mismatch. |
+| `Pong` | Response to `Ping` liveness probe (#238). |
 
 ### Message sequence diagram
 

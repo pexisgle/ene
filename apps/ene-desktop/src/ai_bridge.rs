@@ -587,7 +587,7 @@ async fn pump_events(
                 }));
             }
             Ok(EneEvent::ContextCompressed { .. }) => {}
-            Ok(EneEvent::StatusChanged { .. }) => {}
+            Ok(EneEvent::StatusChanged { .. } | EneEvent::ToolBackgroundCompleted { .. }) => {}
             Ok(EneEvent::TurnStarted { turn, origin: _ }) => {
                 if let Ok(mut guard) = active_turn.lock() {
                     *guard = Some(turn);

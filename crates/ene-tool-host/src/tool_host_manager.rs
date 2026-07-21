@@ -376,6 +376,55 @@ impl ToolRegistry for SupervisedIpcRegistry {
         new_reg_arc.call_tool(name, arguments).await
     }
 
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<crate::DeferredCallResult, ToolHostError> {
+        // Deferred acceptance is a fast, non-blocking round-trip: the
+        // tool either returns a `task_id` immediately or falls back to a
+        // synchronous result. It does not run the long-lived work inline,
+        // so the supervised restart path used by `call_tool` is not needed
+        // here (#196).
+        {
+            let mut breaker = self.breaker.lock().await;
+            if breaker.is_open() {
+                return Err(ToolHostError::CircuitOpen {
+                    tool: name.to_string(),
+                    consecutive_failures: breaker.consecutive_failures(),
+                });
+            }
+        }
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.call_tool_deferred(name, arguments).await
+    }
+
+    async fn poll_deferred(
+        &self,
+        tool_name: &str,
+        task_id: &str,
+    ) -> ene_tool_proto::DeferredStatus {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.poll_deferred(tool_name, task_id).await
+    }
+
+    async fn cancel_deferred(&self, tool_name: &str, task_id: &str) {
+        let reg = self
+            .registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        reg.cancel_deferred(tool_name, task_id).await;
+    }
+
     async fn config_schema(&self) -> Option<serde_json::Value> {
         let reg = self
             .registry
@@ -451,6 +500,26 @@ impl ToolRegistry for ToolHostManager {
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
         self.composite.call_tool(name, arguments).await
+    }
+
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<crate::DeferredCallResult, ToolHostError> {
+        self.composite.call_tool_deferred(name, arguments).await
+    }
+
+    async fn poll_deferred(
+        &self,
+        tool_name: &str,
+        task_id: &str,
+    ) -> ene_tool_proto::DeferredStatus {
+        self.composite.poll_deferred(tool_name, task_id).await
+    }
+
+    async fn cancel_deferred(&self, tool_name: &str, task_id: &str) {
+        self.composite.cancel_deferred(tool_name, task_id).await;
     }
 
     async fn config_schema(&self) -> Option<serde_json::Value> {

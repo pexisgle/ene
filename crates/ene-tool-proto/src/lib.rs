@@ -102,7 +102,7 @@ pub use error::{MultiAnswer, QuestionItem, UserInputPrompt};
 pub use host_registry::HostRegistry;
 /// IPC message types and serialisation helpers.
 pub use ipc::{
-    CallContext, IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolConfigAccessor,
+    CallContext, DeferredStatus, IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, ToolConfigAccessor,
     read_ipc_request, read_ipc_response, write_ipc_request, write_ipc_response,
 };
 /// Sandbox configuration data sent from the host.
@@ -116,6 +116,23 @@ pub use types::{
 };
 
 use async_trait::async_trait;
+
+/// Outcome of a deferred (background) tool call (#196).
+///
+/// Returned by [`ToolProvider::call_tool_deferred`]. A background-capable
+/// tool returns [`DeferredOutcome::Deferred`] with a unique `task_id` and
+/// delivers the result later out-of-band; any other tool falls back to
+/// [`DeferredOutcome::Sync`], carrying the ordinary synchronous result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeferredOutcome {
+    /// The call ran synchronously and produced its final result now.
+    Sync(String),
+    /// The call was accepted for background execution under `task_id`.
+    Deferred {
+        /// Unique identifier for the queued background task.
+        task_id: String,
+    },
+}
 
 /// Tool provider trait — implemented by each tool crate.
 ///
@@ -139,6 +156,38 @@ pub trait ToolProvider: Send + Sync {
 
     /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
+
+    /// Executes a tool in deferred (background) mode (#196).
+    ///
+    /// A background-capable tool should start the work asynchronously and
+    /// return [`DeferredOutcome::Deferred`] with a unique `task_id`; the
+    /// completion is delivered later out-of-band. Tools that do not support
+    /// deferral keep the default implementation, which runs the call
+    /// synchronously and returns [`DeferredOutcome::Sync`] — the host then
+    /// surfaces the result exactly like an ordinary call.
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<DeferredOutcome, ToolError> {
+        Ok(DeferredOutcome::Sync(
+            self.call_tool(name, arguments).await?,
+        ))
+    }
+
+    /// Polls the status of a deferred (background) task by id (#196).
+    ///
+    /// The default returns [`DeferredStatus::Unknown`] for tools that do
+    /// not support deferral; background-capable tools should track their
+    /// tasks and report the real status.
+    fn poll_deferred(&self, _task_id: &str) -> crate::DeferredStatus {
+        crate::DeferredStatus::Unknown
+    }
+
+    /// Cancels a deferred (background) task by id (#196).
+    ///
+    /// The default is a no-op for tools that do not support deferral.
+    fn cancel_deferred(&self, _task_id: &str) {}
 
     /// Sets the call context (conversation + turn identifiers).
     ///

@@ -519,6 +519,14 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema (auto-derived by `schemars` from the args struct).
     pub parameters: serde_json::Value,
+    /// Whether this tool supports deferred (background) execution (#196).
+    ///
+    /// When `true`, the host may issue a deferred call that returns a
+    /// `task_id` immediately instead of blocking on the result; the
+    /// completion is delivered later as a background-completed event.
+    /// Defaults to `false` for ordinary synchronous tools.
+    #[serde(default)]
+    pub background_capable: bool,
 }
 
 impl ToolSpec {
@@ -533,7 +541,15 @@ impl ToolSpec {
             name: name.into(),
             description: description.into(),
             parameters,
+            background_capable: false,
         }
+    }
+
+    /// Mark this spec as capable of deferred (background) execution (#196).
+    #[must_use]
+    pub const fn background_capable(mut self, capable: bool) -> Self {
+        self.background_capable = capable;
+        self
     }
 }
 

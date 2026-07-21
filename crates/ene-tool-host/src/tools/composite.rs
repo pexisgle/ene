@@ -83,6 +83,30 @@ impl CompositeToolRegistry {
         f(&mut guard)
     }
 
+    /// Resolves the owning sub-registry for a tool name.
+    fn registry_for(&self, name: &str) -> Result<Arc<dyn ToolRegistry>, ToolHostError> {
+        let guard = self
+            .state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(&idx) = guard.tool_index.get(name) else {
+            return Err(ToolHostError::Protocol(
+                ene_tool_proto::ToolError::NotFound {
+                    tool_name: name.to_string(),
+                },
+            ));
+        };
+        let Some(registry) = guard.registries.get(idx).map(Arc::clone) else {
+            return Err(ToolHostError::Protocol(
+                ene_tool_proto::ToolError::NotFound {
+                    tool_name: name.to_string(),
+                },
+            ));
+        };
+        drop(guard);
+        Ok(registry)
+    }
+
     /// Adds a sub-registry to the composite.
     ///
     /// # Errors
@@ -133,29 +157,34 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolHostError> {
-        let registry = {
-            let guard = self
-                .state
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let Some(&idx) = guard.tool_index.get(name) else {
-                return Err(ToolHostError::Protocol(
-                    ene_tool_proto::ToolError::NotFound {
-                        tool_name: name.to_string(),
-                    },
-                ));
-            };
-            let Some(registry) = guard.registries.get(idx).map(Arc::clone) else {
-                return Err(ToolHostError::Protocol(
-                    ene_tool_proto::ToolError::NotFound {
-                        tool_name: name.to_string(),
-                    },
-                ));
-            };
-            drop(guard);
-            registry
-        };
+        let registry = self.registry_for(name)?;
         registry.call_tool(name, arguments).await
+    }
+
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<crate::DeferredCallResult, ToolHostError> {
+        let registry = self.registry_for(name)?;
+        registry.call_tool_deferred(name, arguments).await
+    }
+
+    async fn poll_deferred(
+        &self,
+        tool_name: &str,
+        task_id: &str,
+    ) -> ene_tool_proto::DeferredStatus {
+        match self.registry_for(tool_name) {
+            Ok(registry) => registry.poll_deferred(tool_name, task_id).await,
+            Err(_) => ene_tool_proto::DeferredStatus::Unknown,
+        }
+    }
+
+    async fn cancel_deferred(&self, tool_name: &str, task_id: &str) {
+        if let Ok(registry) = self.registry_for(tool_name) {
+            registry.cancel_deferred(tool_name, task_id).await;
+        }
     }
 
     async fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
