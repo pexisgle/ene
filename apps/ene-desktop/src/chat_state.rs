@@ -23,6 +23,8 @@ pub struct ChatState {
     pub pending_permission: Option<PendingPermission>,
     pub pending_user_input: Option<PendingUserInput>,
     pub user_input_drafts: Vec<QuestionDraft>,
+    /// Transient status message from the most recent undo action (#178).
+    pub undo_status: Option<String>,
 }
 
 impl ChatState {
@@ -129,6 +131,7 @@ impl Default for ChatState {
             pending_permission: None,
             pending_user_input: None,
             user_input_drafts: Vec::new(),
+            undo_status: None,
         }
     }
 }

@@ -80,6 +80,9 @@ impl ChatUi {
                 let cancel_clicked = ui
                     .add_enabled(can_cancel, egui::Button::new(crate::i18n::cancel()))
                     .clicked();
+                let undo_clicked = ui
+                    .add_enabled(!processing, egui::Button::new(crate::i18n::chat_undo()))
+                    .clicked();
 
                 // Multiline TextEdit inserts a newline on Enter; detect send
                 // while focused instead of waiting for lost_focus.
@@ -90,6 +93,36 @@ impl ChatUi {
 
                 if cancel_clicked || escape_cancel {
                     ai.cancel();
+                }
+
+                if undo_clicked {
+                    let status = match ai.undo_blocking() {
+                        Ok(ene_runtime::UndoReport::NothingToUndo) => {
+                            crate::i18n::chat_undo_nothing()
+                        }
+                        Ok(ene_runtime::UndoReport::Irreversible { metadata }) => format!(
+                            "{} ({})",
+                            crate::i18n::chat_undo_irreversible(),
+                            metadata.tool_name
+                        ),
+                        Ok(ene_runtime::UndoReport::Reverted { metadata, .. }) => format!(
+                            "{} ({})",
+                            crate::i18n::chat_undo_reverted(),
+                            metadata.tool_name
+                        ),
+                        Ok(ene_runtime::UndoReport::Failed { metadata, error }) => format!(
+                            "{} ({}: {})",
+                            crate::i18n::chat_undo_failed(),
+                            metadata.tool_name,
+                            error
+                        ),
+                        Err(e) => {
+                            format!("{} ({e})", crate::i18n::chat_undo_failed())
+                        }
+                    };
+                    if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
+                        chat.0.undo_status = Some(status);
+                    }
                 }
 
                 if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
@@ -103,6 +136,12 @@ impl ChatUi {
                 }
             });
         });
+
+        if let Some(chat) = world.get::<ChatStateComponent>(chat_entity)
+            && let Some(status) = chat.0.undo_status.as_deref()
+        {
+            ui.weak(status);
+        }
 
         render_permission_dialog(ui, world, chat_entity, ai);
         render_user_input_dialog(ui, world, chat_entity, ai);
