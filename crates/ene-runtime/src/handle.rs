@@ -535,6 +535,7 @@ impl Clone for EneHandle {
                 cmd_tx: Arc::clone(&self.cmd_tx),
                 diag_tx: self.diag_tx.clone(),
                 memory: self.diagnostics.memory.clone(),
+                health_monitor: self.diagnostics.health_monitor.clone(),
             },
             turn_gate: Arc::clone(&self.turn_gate),
             actor_handle: Arc::clone(&self.actor_handle),
@@ -652,10 +653,21 @@ impl EneHandle {
             mind_memory,
         );
 
+        // Provider health monitor for failover diagnostics (#175).
+        let fallback_cfg = config
+            .get_section::<ene_ai::AiConfig>()
+            .map(|c| c.fallback)
+            .unwrap_or_default();
+        let health_monitor = ene_ai::ProviderHealthMonitor::new(
+            std::time::Duration::from_millis(fallback_cfg.cache_ttl_ms),
+            fallback_cfg.max_history,
+        );
+
         let diagnostics = crate::diagnostics::EneDiagnostics {
             cmd_tx: Arc::clone(&cmd_tx),
             diag_tx: diag_tx.clone(),
             memory,
+            health_monitor: health_monitor.clone(),
         };
 
         let turn_gate = Arc::new(TurnGate::new());
@@ -700,6 +712,7 @@ impl EneHandle {
             proactive_decision_handle: None,
             proactive_llm: None,
             active_origin: crate::types::TurnOrigin::User,
+            health_monitor,
         };
         let join = tokio::spawn(actor.run());
 
@@ -1066,6 +1079,8 @@ struct EneActor {
     proactive_llm: Option<ene_ai::ProactiveLlmHandles>,
     /// Origin of the active stream turn (for cancel Terminal).
     active_origin: crate::types::TurnOrigin,
+    /// Provider health monitor for failover routing (#175).
+    health_monitor: ene_ai::ProviderHealthMonitor,
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a
@@ -1703,7 +1718,8 @@ impl EneActor {
             Some(hint),
             screen_image,
             Some(generation_timeout),
-        );
+        )
+        .await;
     }
 
     async fn handle_command(&mut self, cmd: EneCommand) -> bool {
@@ -1738,7 +1754,8 @@ impl EneActor {
                     None,
                     None,
                     None,
-                );
+                )
+                .await;
                 true
             }
             EneCommand::Cancel { turn } => {
@@ -2155,7 +2172,7 @@ impl EneActor {
         }
     }
 
-    fn start_stream(
+    async fn start_stream(
         &mut self,
         user_input: String,
         turn: TurnId,
@@ -2171,7 +2188,7 @@ impl EneActor {
         let provider = match if origin == crate::types::TurnOrigin::Proactive {
             self.create_proactive_provider()
         } else {
-            self.create_provider()
+            self.create_provider().await
         } {
             Ok(p) => p,
             Err(e) => {
@@ -2202,12 +2219,12 @@ impl EneActor {
             }
         };
 
-        self.apply_pending_compression();
+        self.apply_pending_compression().await;
 
         if record_user_message {
             self.session.record_user_input();
             self.session.add_user_message(&user_input);
-            self.check_and_perform_split(&user_input);
+            self.check_and_perform_split(&user_input).await;
         }
 
         let config = self.config.clone();
@@ -2270,10 +2287,68 @@ impl EneActor {
         self.stream_handle = Some(handle);
     }
 
-    fn create_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
-        create_task_chat_provider(&self.config, AiTaskKind::Chat)
-            .map(Arc::from)
-            .map_err(EneRuntimeError::from)
+    async fn create_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
+        let ai_config = self
+            .config
+            .get_section::<ene_ai::AiConfig>()
+            .unwrap_or_default();
+
+        // Fast path: failover disabled → use the configured chat task directly.
+        if !ai_config.fallback.enabled {
+            return create_task_chat_provider(&self.config, AiTaskKind::Chat)
+                .map(Arc::from)
+                .map_err(EneRuntimeError::from);
+        }
+
+        // Failover path: probe candidates in priority order and pick the first
+        // healthy one (#175). Probes send no user data.
+        let candidates = ai_config.resolve_chat_candidates();
+        if candidates.is_empty() {
+            return create_task_chat_provider(&self.config, AiTaskKind::Chat)
+                .map(Arc::from)
+                .map_err(EneRuntimeError::from);
+        }
+
+        let timeout = std::time::Duration::from_millis(ai_config.fallback.health_check_timeout_ms);
+        let selection = ene_ai::select_healthy_chat(&candidates, &self.health_monitor, timeout)
+            .await
+            .ok_or_else(|| {
+                EneRuntimeError::from(ene_ai::LlmProviderError::Provider(
+                    "no chat provider candidates available".to_string(),
+                ))
+            })?;
+
+        // Emit a health diagnostic for every probed candidate so the UI can
+        // show per-provider status without polling.
+        for report in self.health_monitor.all_reports() {
+            let _ = self.diag_tx.send(DiagnosticEvent::ProviderHealth {
+                provider: report.provider.clone(),
+                status: report.status.status_code().to_string(),
+                latency_ms: report.latency_ms,
+                detail: report.error.clone(),
+            });
+        }
+
+        if selection.fell_back {
+            let reason = selection
+                .skipped
+                .iter()
+                .map(|(p, r)| format!("{p}: {r}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let _ = self.diag_tx.send(DiagnosticEvent::ProviderFallback {
+                from: candidates
+                    .first()
+                    .map_or_else(String::new, |c| c.provider.clone()),
+                to: selection.candidate.provider.clone(),
+                reason,
+            });
+        }
+
+        let resolved = selection.candidate.to_resolved();
+        let provider = ene_ai::create_chat_provider_from_resolved(&resolved)
+            .with_retry_policy(ai_config.retry.to_policy());
+        Ok(Arc::new(provider))
     }
 
     fn create_proactive_provider(&self) -> Result<Arc<dyn ene_ai::LlmProvider>, EneRuntimeError> {
@@ -2323,7 +2398,7 @@ impl EneActor {
         let Some(store) = self.session.memory.memory_store.clone() else {
             return Err(EneRuntimeError::from(EneSessionError::SplitNotNeeded));
         };
-        let provider = self.create_provider()?;
+        let provider = self.create_provider().await?;
         let mind = self
             .config
             .get_section::<ene_mind::MindConfig>()
@@ -2354,7 +2429,7 @@ impl EneActor {
         })
     }
 
-    fn check_and_perform_split(&mut self, _user_input: &str) {
+    async fn check_and_perform_split(&mut self, _user_input: &str) {
         let Ok(mem_config) = self.config.get_section::<ene_store::StoreConfig>() else {
             return;
         };
@@ -2367,7 +2442,7 @@ impl EneActor {
         let Some(store) = self.session.memory.memory_store.clone() else {
             return;
         };
-        let Ok(provider) = self.create_provider() else {
+        let Ok(provider) = self.create_provider().await else {
             return;
         };
         let turn_count = self.session.current_turn_count();
@@ -2384,7 +2459,7 @@ impl EneActor {
         );
     }
 
-    fn apply_pending_compression(&mut self) {
+    async fn apply_pending_compression(&mut self) {
         if let Some(result) = self.context.poll_pending() {
             match result {
                 Ok(compression) if compression_has_usable_summary(&compression) => {
@@ -2396,7 +2471,7 @@ impl EneActor {
                         "Rolling compression completed"
                     );
                     self.trim_history_after_compression();
-                    self.spawn_chapter_rollup_if_needed();
+                    self.spawn_chapter_rollup_if_needed().await;
                 }
                 Ok(compression) => {
                     tracing::warn!(
@@ -2428,14 +2503,14 @@ impl EneActor {
         }
     }
 
-    fn spawn_chapter_rollup_if_needed(&self) {
+    async fn spawn_chapter_rollup_if_needed(&self) {
         let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>() else {
             return;
         };
         let Some(store) = self.session.memory.memory_store.clone() else {
             return;
         };
-        let Ok(provider) = self.create_provider() else {
+        let Ok(provider) = self.create_provider().await else {
             return;
         };
         ene_mind::ContextManager::spawn_chapter_rollup(

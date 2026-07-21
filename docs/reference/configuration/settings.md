@@ -115,6 +115,8 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 | `tasks.embedding` | object | Embedding model (required) |
 | `tasks.classifier` | object or `null` | Affect classifier; `null` → falls back to `tasks.chat` |
 | `tasks.proactive` | object or `null` | Proactive generation routing; `null` → falls back to `tasks.chat` |
+| `retry` | object | Retry / backoff policy for transient provider failures |
+| `fallback` | object | Provider health-check and failover policy (#175) |
 
 #### `ai.tasks` — Task Reference (`TaskRef`)
 
@@ -239,6 +241,32 @@ OpenRouter for chat + classifier, local embedding and proactive decision:
   }
 }
 ```
+
+#### `ai.fallback` — Provider Health Check and Failover (#175)
+
+When `enabled`, the runtime probes each configured cloud chat provider's `/models` endpoint (with a timeout, sending **no** user data) before each turn and selects the first healthy provider in priority order — the configured `tasks.chat` provider first, then every other cloud provider in `ai.providers` order. If the primary is unhealthy (auth failure, rate limit, unreachable, or server error), the runtime falls back to the next available provider and records the event for diagnostics.
+
+```json
+{
+  "ai": {
+    "fallback": {
+      "enabled": false,
+      "health_check_timeout_ms": 5000,
+      "cache_ttl_ms": 60000,
+      "max_history": 32
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable provider health checks and automatic failover |
+| `health_check_timeout_ms` | int | `5000` | Per-probe timeout in milliseconds |
+| `cache_ttl_ms` | int | `60000` | How long a cached health result is considered fresh |
+| `max_history` | int | `32` | Maximum fallback events retained for diagnostics |
+
+Health probes never send user data — only an authenticated `GET {base_url}/models`. Results are cached for `cache_ttl_ms` so repeated turns do not re-probe. Per-provider status, latency, and recent fallback history are visible in the CLI `/doctor` output and the Desktop AI settings page.
 
 ### `store` — Persistent SQLite-vec Store
 

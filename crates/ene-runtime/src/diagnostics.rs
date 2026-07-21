@@ -298,6 +298,34 @@ pub enum DiagnosticEvent {
         /// Optional human-readable detail (e.g. unhealthy reason).
         detail: Option<String>,
     },
+    /// A provider health-check result (#175).
+    ///
+    /// Emitted after each provider probe so the UI can display the active
+    /// provider's connectivity, latency, and last error without polling.
+    ProviderHealth {
+        /// Provider name (key in `ai.providers`).
+        provider: String,
+        /// Stable status code: `healthy`, `degraded`, `auth_failed`,
+        /// `rate_limited`, `unreachable`, `server_error`, or `unknown`.
+        status: String,
+        /// Measured round-trip latency in milliseconds (0 if unreachable).
+        latency_ms: u64,
+        /// Optional human-readable error detail.
+        detail: Option<String>,
+    },
+    /// A provider failover event (#175).
+    ///
+    /// Emitted when the runtime switches from an unhealthy primary provider
+    /// to a fallback so the user is notified that the conversation is
+    /// continuing on a different backend.
+    ProviderFallback {
+        /// Provider that failed.
+        from: String,
+        /// Provider selected instead.
+        to: String,
+        /// Reason for the fallback.
+        reason: String,
+    },
 }
 
 /// Extracts a human-readable message from a caught panic payload.
@@ -337,6 +365,8 @@ pub struct EneDiagnostics {
     pub(crate) cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     pub(crate) diag_tx: broadcast::Sender<DiagnosticEvent>,
     pub(crate) memory: MemoryQueryHandle,
+    /// Provider health monitor for failover diagnostics (#175).
+    pub(crate) health_monitor: ene_ai::ProviderHealthMonitor,
 }
 
 impl std::fmt::Debug for EneDiagnostics {
@@ -351,6 +381,21 @@ impl EneDiagnostics {
     /// Memory / journal query surface.
     pub const fn memory(&self) -> &MemoryQueryHandle {
         &self.memory
+    }
+
+    /// Provider health monitor for failover diagnostics (#175).
+    pub const fn health_monitor(&self) -> &ene_ai::ProviderHealthMonitor {
+        &self.health_monitor
+    }
+
+    /// Snapshot of all cached provider health reports (#175).
+    pub fn provider_health_reports(&self) -> Vec<ene_ai::ProviderHealthReport> {
+        self.health_monitor.all_reports()
+    }
+
+    /// Snapshot of recent provider fallback events (#175).
+    pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
+        self.health_monitor.fallback_history()
     }
 
     /// Subscribe to diagnostic events (pipeline phases/metrics).

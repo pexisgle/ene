@@ -292,6 +292,16 @@ impl AiBridge {
             .map_err(|e| e.to_string())
     }
 
+    /// Snapshot of cached provider health reports for the AI settings page (#175).
+    pub fn provider_health_reports(&self) -> Vec<ene_ai::ProviderHealthReport> {
+        self.handle.diagnostics().provider_health_reports()
+    }
+
+    /// Snapshot of recent provider fallback events for the AI settings page (#175).
+    pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
+        self.handle.diagnostics().provider_fallback_history()
+    }
+
     /// Refresh memory journal payload (typed memories + affect + commitments).
     pub fn refresh_memory_journal(
         &self,

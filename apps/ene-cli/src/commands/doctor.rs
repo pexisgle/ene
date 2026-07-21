@@ -370,6 +370,88 @@ async fn check_ai_provider(results: &mut Vec<CheckResult>, snapshot: &EneStateSn
             ));
         }
     }
+
+    check_provider_fallback(results, &ai_config).await;
+}
+
+/// Per-provider health checks and failover policy display (#175).
+async fn check_provider_fallback(results: &mut Vec<CheckResult>, ai_config: &AiConfig) {
+    let fallback = &ai_config.fallback;
+    if !fallback.enabled {
+        results.push(CheckResult::skipped(
+            CheckCategory::AiProvider,
+            "fallback",
+            "Provider failover disabled (ai.fallback.enabled = false)",
+        ));
+        return;
+    }
+
+    let candidates = ai_config.resolve_chat_candidates();
+    if candidates.len() < 2 {
+        results.push(CheckResult::warning(
+            CheckCategory::AiProvider,
+            "fallback",
+            format!(
+                "Failover enabled but only {} chat candidate(s) configured",
+                candidates.len()
+            ),
+            "Add more cloud providers under ai.providers to enable real failover",
+        ));
+        return;
+    }
+
+    let timeout = std::time::Duration::from_millis(fallback.health_check_timeout_ms);
+    let mut healthy_count = 0;
+    for candidate in &candidates {
+        let report = ene_ai::check_provider_health(
+            &candidate.provider,
+            &candidate.base_url,
+            &candidate.api_key,
+            timeout,
+        )
+        .await;
+        let status = report.status.status_code();
+        if report.status.is_available() {
+            healthy_count += 1;
+            results.push(CheckResult::ok(
+                CheckCategory::AiProvider,
+                &format!("health:{}", candidate.provider),
+                format!(
+                    "Provider '{}' {} (latency: {}ms, key: {})",
+                    candidate.provider,
+                    status,
+                    report.latency_ms,
+                    mask_api_key(&candidate.api_key)
+                ),
+            ));
+        } else {
+            let detail = report.error.unwrap_or_else(|| status.to_string());
+            results.push(CheckResult::error(
+                CheckCategory::AiProvider,
+                &format!("health:{}", candidate.provider),
+                format!("Provider '{}' unhealthy: {detail}", candidate.provider),
+                Some("Verify this provider's API key and base URL"),
+            ));
+        }
+    }
+
+    if healthy_count == 0 {
+        results.push(CheckResult::error(
+            CheckCategory::AiProvider,
+            "fallback",
+            "All configured chat providers are unhealthy",
+            Some("Check network connectivity and API keys for all providers"),
+        ));
+    } else {
+        results.push(CheckResult::ok(
+            CheckCategory::AiProvider,
+            "fallback",
+            format!(
+                "Failover active: {healthy_count}/{} provider(s) healthy",
+                candidates.len()
+            ),
+        ));
+    }
 }
 
 fn check_embedding(results: &mut Vec<CheckResult>, snapshot: &EneStateSnapshot) {

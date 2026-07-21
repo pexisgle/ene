@@ -141,7 +141,7 @@ problem is found:
 |----------|--------|
 | Runtime | Actor responsiveness (snapshot round-trip, session, turn count) |
 | Config | Character card loaded |
-| AI Provider | Chat provider resolution and connectivity (lightweight models-list call with a ~5s timeout; no user data is sent) |
+| AI Provider | Chat provider resolution and connectivity (lightweight models-list call with a ~5s timeout; no user data is sent). When `ai.fallback.enabled`, also probes every configured cloud provider's health (status, latency, last error) and reports the failover policy (#175) |
 | Embedding | Embedding backend resolution (cloud or local) |
 | Store | Memory store enablement and runtime availability |
 | Tool Registry | Tool registration |

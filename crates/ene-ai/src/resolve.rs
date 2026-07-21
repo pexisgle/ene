@@ -147,6 +147,39 @@ pub struct ResolvedTaskRef<'a> {
     pub dimensions: Option<usize>,
 }
 
+/// A fully resolved cloud chat candidate for failover routing (#175).
+///
+/// Produced by [`AiConfig::resolve_chat_candidates`], which enumerates the
+/// configured chat provider first (highest priority) followed by every other
+/// cloud provider in [`AiConfig::providers`] order. The runtime probes each
+/// candidate's health and selects the first available one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatCandidate {
+    /// Provider name (key in [`AiConfig::providers`]).
+    pub provider: String,
+    /// Effective API base URL.
+    pub base_url: String,
+    /// Resolved API key.
+    pub api_key: String,
+    /// Model name.
+    pub model: String,
+    /// Optional completion token cap (`None` = omit on requests).
+    pub max_tokens: Option<u32>,
+}
+
+impl ChatCandidate {
+    /// Convert to the resolved chat settings used to build a provider.
+    #[must_use]
+    pub fn to_resolved(&self) -> ResolvedChat {
+        ResolvedChat {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            max_tokens: self.max_tokens,
+        }
+    }
+}
+
 /// Resolves an explicit or env-provided base URL for OpenAI-compatible APIs.
 pub fn resolve_base_url(base_url: &str) -> Result<String, ene_config::ConfigError> {
     if !base_url.trim().is_empty() {
@@ -307,6 +340,63 @@ impl AiConfig {
     /// Resolve main conversation chat settings.
     pub fn resolve_chat(&self) -> Result<ResolvedChat, LlmProviderError> {
         self.resolve_chat_task(None)
+    }
+
+    /// Resolve an ordered list of cloud chat candidates for failover (#175).
+    ///
+    /// The configured chat provider is first (highest priority), followed by
+    /// every other cloud provider in [`AiConfig::providers`] insertion order.
+    /// Local providers are excluded (chat requires an OpenAI-compatible API).
+    /// Candidates that fail to resolve (missing base URL / model) are skipped.
+    #[must_use]
+    pub fn resolve_chat_candidates(&self) -> Vec<ChatCandidate> {
+        let mut candidates = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Primary: the configured chat task provider.
+        if let Ok(resolved) = self.resolve_chat()
+            && seen.insert(self.tasks.chat.provider.clone())
+        {
+            candidates.push(ChatCandidate {
+                provider: self.tasks.chat.provider.clone(),
+                base_url: resolved.base_url,
+                api_key: resolved.api_key,
+                model: resolved.model,
+                max_tokens: resolved.max_tokens,
+            });
+        }
+
+        // Fallbacks: every other cloud provider, in config order.
+        for (name, def) in &self.providers {
+            if seen.contains(name) {
+                continue;
+            }
+            seen.insert(name.clone());
+            let AiProviderDef::OpenaiCompatible { base_url, api_key } = def;
+            let Ok(resolved_url) = resolve_base_url(base_url) else {
+                continue;
+            };
+            // Use the chat task's model for fallback providers since they
+            // share the same task routing; skip if no model is configured.
+            let Some(model) = self
+                .tasks
+                .chat
+                .model
+                .as_deref()
+                .filter(|m| !m.trim().is_empty())
+            else {
+                continue;
+            };
+            candidates.push(ChatCandidate {
+                provider: name.clone(),
+                base_url: resolved_url,
+                api_key: api_key.resolve_api_key(),
+                model: model.to_string(),
+                max_tokens: self.tasks.chat.max_tokens,
+            });
+        }
+
+        candidates
     }
 
     /// Resolve classifier chat settings (falls back to chat task).

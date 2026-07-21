@@ -239,6 +239,38 @@ impl RetryConfig {
     }
 }
 
+/// Provider health-check and failover policy (#175).
+///
+/// When `enabled`, the runtime probes each configured cloud provider's
+/// `/models` endpoint (with a timeout, sending no user data) and selects the
+/// first healthy provider in priority order for chat workloads. If the
+/// primary provider is unhealthy, the runtime falls back to the next
+/// available provider and records the event for diagnostics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct FallbackConfig {
+    /// Enable provider health checks and automatic failover.
+    pub enabled: bool,
+    /// Per-probe timeout, in milliseconds.
+    pub health_check_timeout_ms: u64,
+    /// How long a cached health result is considered fresh, in milliseconds.
+    pub cache_ttl_ms: u64,
+    /// Maximum number of fallback events retained for diagnostics.
+    pub max_history: usize,
+}
+
+impl Default for FallbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            health_check_timeout_ms: 5_000,
+            cache_ttl_ms: 60_000,
+            max_history: 32,
+        }
+    }
+}
+
 ene_config::define_config!(
     settings,
     "ai",
@@ -252,6 +284,8 @@ ene_config::define_config!(
         pub tasks: AiTasksConfig,
         /// Retry / backoff policy for transient provider failures.
         pub retry: RetryConfig,
+        /// Provider health-check and failover policy (#175).
+        pub fallback: FallbackConfig,
     }
 );
 

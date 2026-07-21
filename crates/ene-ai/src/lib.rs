@@ -29,6 +29,8 @@ pub mod embedding;
 pub mod error;
 /// GGUF download and path resolution (#171).
 pub mod gguf;
+/// Provider health checks and failover monitoring (#175).
+pub mod health;
 /// Shared llama-cpp-2 adapter (decision + embedding).
 pub(crate) mod llama_cpp;
 /// In-process llama.cpp decision provider (#165 / #171).
@@ -47,8 +49,8 @@ pub mod traits;
 pub mod role;
 
 pub use config::{
-    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, LOCAL_PROVIDER, LocalModelDef,
-    ProactiveAcceleration, RetryConfig, TaskRef,
+    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, FallbackConfig, LOCAL_PROVIDER,
+    LocalModelDef, ProactiveAcceleration, RetryConfig, TaskRef,
 };
 pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
@@ -56,6 +58,10 @@ pub use gguf::{
     ensure_gguf_available, ensure_mmproj_available, prefetch_configured_gguf,
     prefetch_decision_gguf, prefetch_embedding_gguf, resolve_decision_gguf_path,
     resolve_embedding_gguf_path, resolve_local_gguf_path,
+};
+pub use health::{
+    FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
+    ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
 pub use local_llm::{
     DecisionProviderKind, DisabledDecisionProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
@@ -67,8 +73,8 @@ pub use openai::{
     create_chat_provider_from_resolved, create_task_chat_provider,
 };
 pub use resolve::{
-    ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedTaskRef, resolve_base_url,
-    validate_api_key,
+    ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedTaskRef,
+    resolve_base_url, validate_api_key,
 };
 pub use retry::RetryPolicy;
 pub use role::Role;

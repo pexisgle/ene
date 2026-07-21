@@ -63,7 +63,7 @@ pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     _animation: &mut AnimationControl,
-    _ai: &Arc<AiBridge>,
+    ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     _world: &mut World,
     _ui_entity: Entity,
@@ -296,5 +296,61 @@ pub fn render(
                 }
             }
         });
+
+        ui.separator();
+        render_provider_health(ui, ai, &ai_cfg);
     });
+}
+
+/// Provider health and failover status display (#175).
+fn render_provider_health(ui: &mut egui::Ui, ai: &Arc<AiBridge>, ai_cfg: &AiConfig) {
+    ui.label(crate::i18n::provider_health());
+
+    if !ai_cfg.fallback.enabled {
+        ui.weak(crate::i18n::provider_health_failover_disabled());
+        return;
+    }
+
+    let reports = ai.provider_health_reports();
+    if reports.is_empty() {
+        ui.weak(crate::i18n::provider_health_no_reports());
+        return;
+    }
+
+    egui::Grid::new("provider_health_grid")
+        .striped(true)
+        .show(ui, |ui| {
+            ui.strong(crate::i18n::provider());
+            ui.strong(crate::i18n::provider_health_status());
+            ui.strong(crate::i18n::provider_health_latency());
+            ui.strong(crate::i18n::provider_health_detail());
+            ui.end_row();
+            for report in &reports {
+                ui.label(&report.provider);
+                let status = report.status.status_code();
+                let color = if report.status.is_available() {
+                    egui::Color32::from_rgb(120, 200, 120)
+                } else {
+                    egui::Color32::from_rgb(220, 110, 110)
+                };
+                ui.colored_label(color, status);
+                ui.label(format!("{}ms", report.latency_ms));
+                ui.label(report.error.clone().unwrap_or_default());
+                ui.end_row();
+            }
+        });
+
+    let history = ai.provider_fallback_history();
+    ui.add_space(8.0);
+    ui.label(crate::i18n::provider_health_fallback_history());
+    if history.is_empty() {
+        ui.weak(crate::i18n::provider_health_no_fallbacks());
+    } else {
+        for record in history.iter().rev().take(5) {
+            ui.weak(format!(
+                "{} → {} ({})",
+                record.from, record.to, record.reason
+            ));
+        }
+    }
 }
