@@ -10,6 +10,7 @@ edition = "2024"
 [workspace.dependencies]
 # ── Async / Runtime ──
 async-trait = "0.1"
+futures = "0.3"
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"

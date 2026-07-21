@@ -10,6 +10,7 @@ crate-type = ["lib"]
 [dependencies]
 ene-mind = { workspace = true }
 ene-ai = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }

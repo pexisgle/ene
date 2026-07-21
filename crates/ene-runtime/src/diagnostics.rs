@@ -274,6 +274,27 @@ pub enum DiagnosticEvent {
         /// Map of phase names to elapsed time in milliseconds.
         timings: HashMap<String, u64>,
     },
+    /// A panic was caught and contained by the actor supervisor (#236).
+    ///
+    /// The actor loop survives per-command panics; this event surfaces them
+    /// for diagnostics instead of crashing the process or losing the panic.
+    ActorPanic {
+        /// Component that panicked (e.g. `"command"`, `"SearchTools"`).
+        component: String,
+        /// Best-effort panic message.
+        message: String,
+    },
+}
+
+/// Extracts a human-readable message from a caught panic payload.
+pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 /// Event receiver for [`DiagnosticEvent`].
