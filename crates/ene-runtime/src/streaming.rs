@@ -647,7 +647,7 @@ mod tests {
         .await
         .unwrap();
 
-                assert_eq!(output.summaries.len(), 1);
+        assert_eq!(output.summaries.len(), 1);
         let summary = &output.summaries[0];
         assert_eq!(summary.tool_name.as_str(), "system.search_tools");
         // Check that it returned description of filesystem.read

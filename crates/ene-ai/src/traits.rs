@@ -30,25 +30,25 @@ pub trait LlmProvider: Send + Sync {
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
     ) -> Result<String, LlmProviderError>;
-}
 
-/// Collect a full assistant reply from a streaming chat completion.
-///
-/// `OpenRouter` and some OpenAI-compatible models respond reliably to streaming
-/// requests but may hang or exceed budgets on non-streaming `chat().create()`.
-pub async fn collect_chat_completion(
-    provider: &dyn LlmProvider,
-    messages: &[LlmMessage],
-) -> Result<String, LlmProviderError> {
-    let mut stream = provider.create_chat_stream(messages, &[]).await?;
-    let mut content = String::new();
-    while let Some(chunk_res) = stream.next().await {
-        let chunk = chunk_res?;
-        if let Some(delta) = chunk.text_delta {
-            content.push_str(&delta);
+    /// Collect a full assistant reply from a streaming chat completion.
+    ///
+    /// `OpenRouter` and some OpenAI-compatible models respond reliably to streaming
+    /// requests but may hang or exceed budgets on non-streaming `chat().create()`.
+    async fn collect_stream_completion(
+        &self,
+        messages: &[LlmMessage],
+    ) -> Result<String, LlmProviderError> {
+        let mut stream = self.create_chat_stream(messages, &[]).await?;
+        let mut content = String::new();
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res?;
+            if let Some(delta) = chunk.text_delta {
+                content.push_str(&delta);
+            }
         }
+        Ok(content)
     }
-    Ok(content)
 }
 
 /// Distinguishes embedding use cases. Providers may apply different prefixes
@@ -104,8 +104,8 @@ pub enum EmbeddingError {
 ///
 /// The only embedding operation on this trait is [`embed_batch`]. Single-text and
 /// query helpers are free functions ([`embed`], [`embed_query`]) that call
-/// batch. `HyDE` and rerank live in pipeline helpers (`ene_ai::hybrid`,
-/// tool-host RAG), not on this trait.
+/// batch. `HyDE` and rerank live in pipeline helpers (`ene_tool_rag::hybrid`),
+/// not on this trait.
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Batch embed. Implementations should saturate hardware (thread pool for

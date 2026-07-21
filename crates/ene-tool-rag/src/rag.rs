@@ -686,8 +686,13 @@ impl ToolRag {
 
         if self.opts.use_rerank && candidates.len() > 1 {
             let rerank_specs: Vec<ToolSpec> = candidates.iter().map(|(s, _)| s.clone()).collect();
-            match ene_ai::rerank_tool_specs(self.embedder.as_ref(), None, query, &rerank_specs)
-                .await
+            match crate::hybrid::rerank_tool_specs(
+                self.embedder.as_ref(),
+                None,
+                query,
+                &rerank_specs,
+            )
+            .await
             {
                 Ok(rerank_scores) => {
                     for (i, score) in rerank_scores.iter().enumerate() {

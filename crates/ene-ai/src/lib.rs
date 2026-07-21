@@ -29,8 +29,6 @@ pub mod embedding;
 pub mod error;
 /// GGUF download and path resolution (#171).
 pub mod gguf;
-/// Hybrid HyDE / rerank helpers (primary embedder + optional LLM).
-pub mod hybrid;
 /// Shared llama-cpp-2 adapter (decision + embedding).
 pub(crate) mod llama_cpp;
 /// In-process llama.cpp decision provider (#165 / #171).
@@ -57,7 +55,6 @@ pub use gguf::{
     prefetch_decision_gguf, prefetch_embedding_gguf, resolve_decision_gguf_path,
     resolve_embedding_gguf_path, resolve_local_gguf_path,
 };
-pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
 pub use local_llm::{
     DecisionProviderKind, DisabledDecisionProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
     ProactiveLlmHandles, build_proactive_llm_handles,
@@ -73,5 +70,5 @@ pub use resolve::{
 pub use role::Role;
 pub use traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
-    LlmProviderRegistry, collect_chat_completion, cosine_similarity, embed, embed_query,
+    LlmProviderRegistry, cosine_similarity, embed, embed_query,
 };

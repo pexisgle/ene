@@ -1101,9 +1101,9 @@ impl MemoryStore {
                 if keep_refs.contains(&source_ref) {
                     continue;
                 }
-                self.transition_typed_memory_status(model.id, crate::MemoryStatus::Faded)
+                self.set_memory_status(model.id, crate::MemoryStatus::Faded)
                     .await?;
-                self.transition_typed_memory_status(model.id, crate::MemoryStatus::Archived)
+                self.set_memory_status(model.id, crate::MemoryStatus::Archived)
                     .await?;
                 archived = archived.saturating_add(1);
             }
@@ -1631,15 +1631,6 @@ impl MemoryStore {
         Ok(new_id)
     }
 
-    /// Transition a typed memory to a new lifecycle status.
-    pub async fn update_typed_memory_status(
-        &self,
-        id: i64,
-        new_status: crate::MemoryStatus,
-    ) -> Result<bool, MemoryError> {
-        self.transition_typed_memory_status(id, new_status).await
-    }
-
     /// Bump the access count and last-accessed timestamp for a typed memory.
     pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, MemoryError> {
         use sea_orm::ExprTrait;
@@ -1661,7 +1652,7 @@ impl MemoryStore {
     }
 
     /// Transition a typed memory with lifecycle edge validation (#76).
-    pub async fn transition_typed_memory_status(
+    pub async fn set_memory_status(
         &self,
         id: i64,
         new_status: crate::MemoryStatus,
@@ -1727,7 +1718,7 @@ impl MemoryStore {
 
     /// User-driven forget (`Active` → `UserDeleted`).
     pub async fn user_forget_typed_memory(&self, id: i64) -> Result<bool, MemoryError> {
-        self.transition_typed_memory_status(id, crate::MemoryStatus::UserDeleted)
+        self.set_memory_status(id, crate::MemoryStatus::UserDeleted)
             .await
     }
 
@@ -1860,7 +1851,7 @@ impl MemoryStore {
             else {
                 continue;
             };
-            self.transition_typed_memory_status(id, target).await?;
+            self.set_memory_status(id, target).await?;
             match target {
                 crate::MemoryStatus::Faded => {
                     report.faded_count = report.faded_count.saturating_add(1);
@@ -2623,7 +2614,7 @@ mod tests {
         assert!(count > 0);
 
         let status_ok = store
-            .update_typed_memory_status(id, crate::MemoryStatus::Faded)
+            .set_memory_status(id, crate::MemoryStatus::Faded)
             .await
             .unwrap();
         assert!(status_ok);
@@ -2638,7 +2629,7 @@ mod tests {
         assert!(store.get_typed_memory(999_999).await.unwrap().is_none());
         assert!(
             !store
-                .update_typed_memory_status(999_999, crate::MemoryStatus::Active)
+                .set_memory_status(999_999, crate::MemoryStatus::Active)
                 .await
                 .unwrap()
         );
@@ -2761,7 +2752,7 @@ mod tests {
         };
         let old_id = store.insert_typed_memory(&item).await.unwrap();
         store
-            .update_typed_memory_status(old_id, crate::MemoryStatus::UserDeleted)
+            .set_memory_status(old_id, crate::MemoryStatus::UserDeleted)
             .await
             .unwrap();
 
@@ -3413,7 +3404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transition_typed_memory_status_rejects_invalid_edge() {
+    async fn set_memory_status_rejects_invalid_edge() {
         let store = setup_store().await;
         let id = store
             .insert_typed_memory(&crate::NewMemoryItem {
@@ -3441,7 +3432,7 @@ mod tests {
             .unwrap();
 
         let err = store
-            .transition_typed_memory_status(id, crate::MemoryStatus::Active)
+            .set_memory_status(id, crate::MemoryStatus::Active)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -3602,7 +3593,7 @@ mod tests {
         let before = store.get_typed_memory(id).await.unwrap().unwrap();
         assert!(
             store
-                .transition_typed_memory_status(id, crate::MemoryStatus::Faded)
+                .set_memory_status(id, crate::MemoryStatus::Faded)
                 .await
                 .unwrap()
         );

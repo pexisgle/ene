@@ -2698,6 +2698,7 @@ dependencies = [
 name = "ene-tool-rag"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "ctor",
  "ene-ai",

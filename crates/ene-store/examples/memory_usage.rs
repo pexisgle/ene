@@ -76,9 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Mark the memory as faded (lifecycle transition).
-    store
-        .update_typed_memory_status(id, MemoryStatus::Faded)
-        .await?;
+    store.set_memory_status(id, MemoryStatus::Faded).await?;
     println!("\nMemory {id} marked as faded.");
 
     Ok(())

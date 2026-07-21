@@ -146,12 +146,15 @@ impl AiBridge {
         rag: &ene_tool_rag::ToolRagConfig,
     ) {
         self.proactive_observe.apply_mind(mind);
-        if let Err(e) = self.handle.update_feature_settings(
-            mind.clone(),
-            store.clone(),
-            tools.clone(),
-            rag.clone(),
-        ) {
+        if let Err(e) = self
+            .handle
+            .update_feature_settings(ene_runtime::FeatureSettingsUpdate {
+                mind: mind.clone(),
+                store: store.clone(),
+                tools: tools.clone(),
+                rag: rag.clone(),
+            })
+        {
             tracing::warn!(
                 component = "AiBridge",
                 error = %e,
@@ -293,7 +296,7 @@ impl AiBridge {
                     .await
                     .map_err(|e| e.to_string()),
                 MemoryJournalAction::Archive => memory
-                    .transition_typed_memory_status(id, ene_store::MemoryStatus::Archived)
+                    .set_memory_status(id, ene_store::MemoryStatus::Archived)
                     .await
                     .map_err(|e| e.to_string()),
                 MemoryJournalAction::Forget => memory
@@ -301,7 +304,7 @@ impl AiBridge {
                     .await
                     .map_err(|e| e.to_string()),
                 MemoryJournalAction::Dispute => memory
-                    .transition_typed_memory_status(id, ene_store::MemoryStatus::Disputed)
+                    .set_memory_status(id, ene_store::MemoryStatus::Disputed)
                     .await
                     .map_err(|e| e.to_string()),
                 MemoryJournalAction::Restore => memory
@@ -321,7 +324,7 @@ impl AiBridge {
     ) -> Result<bool, String> {
         let memory = self.handle.diagnostics().memory().clone();
         self.runtime
-            .block_on(memory.transition_typed_memory_status(id, status))
+            .block_on(memory.set_memory_status(id, status))
             .map_err(|e| e.to_string())
     }
 

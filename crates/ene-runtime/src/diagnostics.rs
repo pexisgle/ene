@@ -173,14 +173,14 @@ impl MemoryQueryHandle {
     }
 
     /// Transition typed memory lifecycle status.
-    pub async fn transition_typed_memory_status(
+    pub async fn set_memory_status(
         &self,
         id: i64,
         status: ene_store::MemoryStatus,
     ) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         store
-            .transition_typed_memory_status(id, status)
+            .set_memory_status(id, status)
             .await
             .map_err(EneRuntimeError::Memory)
     }

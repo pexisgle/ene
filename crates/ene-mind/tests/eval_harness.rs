@@ -316,7 +316,7 @@ async fn scenario_explicit_forget_respected_by_recall() {
         .await
         .unwrap();
     store
-        .transition_typed_memory_status(id, MemoryStatus::UserDeleted)
+        .set_memory_status(id, MemoryStatus::UserDeleted)
         .await
         .unwrap();
 

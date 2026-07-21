@@ -3,6 +3,7 @@ use std::time::Duration;
 use chrono::Utc;
 use ene_config::{CharacterCardV3, PromptLibrary};
 use ene_store::MemoryStore;
+use tracing::Instrument;
 
 use crate::character::CharacterProcessor;
 use crate::commitments::CommitmentLedger;
@@ -53,7 +54,7 @@ impl CognitionEngine {
     pub fn new() -> Self {
         Self {
             pre_turn: crate::pre_turn::PreTurnAnalyzer,
-            context: ContextManager,
+            context: ContextManager::default(),
             memory_writer: MemoryWriter,
             recall: crate::recall::RecallPlanner,
             emotion: crate::emotion::EmotionEngine,
@@ -450,8 +451,8 @@ impl CognitionEngine {
 
     /// Synchronous post-turn finalize: persist affect state only.
     ///
-    /// Forgetting runs on the deferred path via [`Self::write_memories_deferred`].
-    pub async fn finalize_turn_post(
+    /// Forgetting runs on the deferred path via [`Self::spawn_deferred_memory_work`].
+    pub async fn finalize_turn(
         &self,
         store: &MemoryStore,
         config: &MindConfig,
@@ -460,17 +461,53 @@ impl CognitionEngine {
         MemoryWriter::finalize_turn(store, config, input).await
     }
 
-    /// Deferred post-turn memory extraction (LLM + arbiter) then forgetting lifecycle.
-    pub async fn write_memories_deferred(
-        &self,
-        store: &MemoryStore,
-        config: &MindConfig,
-        input: &crate::lifecycle::OwnedPostTurnInput,
-        providers: crate::memory_writer::MemoryWriteProviders<'_>,
-    ) -> Result<(), CognitionError> {
-        let borrowed = input.as_borrowed();
-        MemoryWriter::write_memories(store, config, &borrowed, providers).await?;
-        MemoryWriter::apply_forgetting(store, config, &borrowed).await
+    /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
+    ///
+    /// Returns the task handle so callers can track or abort it.
+    pub fn spawn_deferred_memory_work(
+        store: std::sync::Arc<MemoryStore>,
+        config: MindConfig,
+        input: crate::lifecycle::OwnedPostTurnInput,
+        llm: std::sync::Arc<dyn ene_ai::LlmProvider>,
+        embedder: Option<std::sync::Arc<dyn ene_ai::EmbeddingProvider>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(
+            async move {
+                tracing::info!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    user_id = %input.user_id,
+                    "Post-turn memory extraction and forgetting starting"
+                );
+                let borrowed = input.as_borrowed();
+                let providers = crate::memory_writer::MemoryWriteProviders {
+                    llm: Some(llm.as_ref()),
+                    embedder: embedder.as_ref().map(std::convert::AsRef::as_ref),
+                };
+                let result = async {
+                    MemoryWriter::write_memories(store.as_ref(), &config, &borrowed, providers)
+                        .await?;
+                    MemoryWriter::apply_forgetting(store.as_ref(), &config, &borrowed).await
+                }
+                .await;
+                match result {
+                    Ok(()) => {
+                        tracing::info!(
+                            component = "MemoryWriter",
+                            "Post-turn memory extraction and forgetting completed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            component = "MemoryWriter",
+                            error = %error,
+                            "Post-turn memory extraction failed"
+                        );
+                    }
+                }
+            }
+            .instrument(tracing::info_span!("post_turn.memory")),
+        )
     }
 
     /// Resolve the final character expression after an assistant turn (#89).

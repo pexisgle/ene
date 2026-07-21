@@ -644,9 +644,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                 && let Some(cue) = ene_mind::parse_performance_marker(&token)
                             {
                                 let source = match cue.kind {
-                                    PerfKind::Expression
-                                    | PerfKind::Motion
-                                    | PerfKind::LookAt => {
+                                    PerfKind::Expression | PerfKind::Motion | PerfKind::LookAt => {
                                         if mind.emotion.llm_expression_is_advisory {
                                             CueSource::LlmAdvisory
                                         } else {
@@ -701,9 +699,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 let llm_proposal = accumulated_emotion_tokens
                     .iter()
                     .find_map(|token| {
-                        ene_mind::parse_performance_marker(token).and_then(|cue| {
-                            (cue.kind == PerfKind::Expression).then_some(cue.name)
-                        })
+                        ene_mind::parse_performance_marker(token)
+                            .and_then(|cue| (cue.kind == PerfKind::Expression).then_some(cue.name))
                     })
                     .or_else(|| pre_turn.classifier_expression_hint.clone());
                 let (previous_expression, elapsed_since_change) =
@@ -770,7 +767,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             };
 
             if let Some(store) = mem_store.as_deref()
-                && let Err(error) = engine.finalize_turn_post(store, &mind, &post).await
+                && let Err(error) = engine.finalize_turn(store, &mind, &post).await
             {
                 tracing::warn!(
                     component = "CognitionEngine",
@@ -811,52 +808,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     character_id: card_name.clone(),
                     user_id: user_name.clone(),
                 };
-                let deferred_mind = mind.clone();
-                let deferred_provider = provider.clone();
-                let deferred_embedder = embedder.clone();
-                let memory_writer_handle = tokio::spawn(
-                    async move {
-                        let engine = CognitionEngine::new();
-                        tracing::info!(
-                            component = "MemoryWriter",
-                            character_id = %deferred_input.character_id,
-                            user_id = %deferred_input.user_id,
-                            "Post-turn memory extraction and forgetting starting"
-                        );
-                        match engine
-                            .write_memories_deferred(
-                                store.as_ref(),
-                                &deferred_mind,
-                                &deferred_input,
-                                ene_mind::MemoryWriteProviders {
-                                    llm: Some(deferred_provider.as_ref()),
-                                    embedder: deferred_embedder
-                                        .as_ref()
-                                        .map(std::convert::AsRef::as_ref),
-                                },
-                            )
-                            .await
-                        {
-                            Ok(()) => {
-                                tracing::info!(
-                                    component = "MemoryWriter",
-                                    character_id = %deferred_input.character_id,
-                                    user_id = %deferred_input.user_id,
-                                    "Post-turn memory extraction and forgetting completed"
-                                );
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    component = "MemoryWriter",
-                                    error = %error,
-                                    character_id = %deferred_input.character_id,
-                                    user_id = %deferred_input.user_id,
-                                    "Post-turn memory extraction failed"
-                                );
-                            }
-                        }
-                    }
-                    .instrument(tracing::info_span!("post_turn.memory")),
+                let memory_writer_handle = CognitionEngine::spawn_deferred_memory_work(
+                    store,
+                    mind.clone(),
+                    deferred_input,
+                    provider.clone(),
+                    embedder.clone(),
                 );
                 let _ = memory_writer_tx.send(memory_writer_handle);
             }

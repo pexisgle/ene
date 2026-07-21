@@ -132,6 +132,6 @@ impl HasConfigKey for ToolRagConfig {
 const _: () = {
     #[ctor::ctor(unsafe)]
     fn register() {
-        ene_config::__register_schema::<ToolRagConfig>(ConfigTarget::Settings, Some("tools"));
+        ene_config::register_config_schema::<ToolRagConfig>(ConfigTarget::Settings, Some("tools"));
     }
 };

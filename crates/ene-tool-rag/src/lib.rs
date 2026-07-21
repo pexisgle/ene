@@ -43,6 +43,8 @@
 pub mod config;
 /// Tool RAG error types.
 pub mod error;
+/// Hybrid HyDE / rerank helpers wrapping a primary embedder with optional LLMs.
+pub mod hybrid;
 /// Tool RAG pipeline — multi-vector tool embedding, weighted field similarity,
 /// and optional cosine reranking. LLM HyDE is deprecated (no-op).
 pub mod rag;
@@ -51,5 +53,7 @@ pub mod rag;
 pub use config::{FieldWeightsConfig, ToolRagConfig};
 /// Tool RAG error types.
 pub use error::ToolRagError;
+/// Hybrid rerank provider and helpers.
+pub use hybrid::{HybridRerankProvider, hybrid_embed, hyde_document, rerank_tool_specs};
 /// Tool RAG pipeline types.
 pub use rag::{FieldWeights, ToolRag, ToolRagOptions, ToolRagStats};

@@ -77,7 +77,7 @@ static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Sch
 
 /// Registers schemas collected from tools or compile-time config structs
 #[doc(hidden)]
-pub fn __register_schema<T: JsonSchema + HasConfigKey>(
+pub fn register_config_schema<T: JsonSchema + HasConfigKey>(
     target: ConfigTarget,
     parent_key: Option<&str>,
 ) {
@@ -98,7 +98,7 @@ pub fn __register_schema<T: JsonSchema + HasConfigKey>(
 
 /// Tool schema registration helper
 #[doc(hidden)]
-pub fn __register_tool_schema<T: JsonSchema>(tool_name: &str) {
+pub fn register_tool_schema<T: JsonSchema>(tool_name: &str) {
     let schema_gen = schemars::SchemaGenerator::default();
     let schema = schema_gen.into_root_schema_for::<T>();
     let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));

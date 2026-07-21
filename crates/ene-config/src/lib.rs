@@ -46,10 +46,10 @@ pub use character_card::{
 
 pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};
 pub use config::{
-    __register_schema, __register_tool_schema, ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig,
-    HasConfigKey, generate_character_schema_json, generate_schema_json, get_global_config,
-    get_global_section, load_character_card, load_config, load_config_from, load_full_config,
-    load_full_config_from, register_runtime_schema, resolve_character_path, save_full_config,
+    ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_character_schema_json,
+    generate_schema_json, get_global_config, get_global_section, load_character_card, load_config,
+    load_config_from, load_full_config, load_full_config_from, register_config_schema,
+    register_runtime_schema, register_tool_schema, resolve_character_path, save_full_config,
     update_global_config, update_section, write_schemas,
 };
 pub use error::ConfigError;
@@ -128,7 +128,7 @@ macro_rules! define_config {
         const _: () = {
             #[ctor::ctor(unsafe)]
             fn register() {
-                $crate::__register_schema::<$name>($crate::ConfigTarget::Settings, None);
+                $crate::register_config_schema::<$name>($crate::ConfigTarget::Settings, None);
             }
         };
     };
@@ -176,7 +176,7 @@ macro_rules! define_config {
         const _: () = {
             #[ctor::ctor(unsafe)]
             fn register() {
-                $crate::__register_schema::<$name>($crate::ConfigTarget::Character, None);
+                $crate::register_config_schema::<$name>($crate::ConfigTarget::Character, None);
             }
         };
     };
@@ -230,7 +230,7 @@ macro_rules! define_config {
         const _: () = {
             #[ctor::ctor(unsafe)]
             fn register() {
-                $crate::__register_schema::<$name>(
+                $crate::register_config_schema::<$name>(
                     <$parent as $crate::HasConfigKey>::TARGET,
                     Some(<$parent as $crate::HasConfigKey>::KEY),
                 );
@@ -276,7 +276,7 @@ macro_rules! define_tool_config {
         const _: () = {
             #[ctor::ctor(unsafe)]
             fn register() {
-                $crate::__register_tool_schema::<$name>($tool_name);
+                $crate::register_tool_schema::<$name>($tool_name);
             }
         };
     };

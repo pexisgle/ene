@@ -290,11 +290,7 @@ async fn handle_transition(
             usage: format!("/memory {label} <id>"),
         });
     };
-    match snapshot
-        .memory
-        .transition_typed_memory_status(id, status)
-        .await
-    {
+    match snapshot.memory.set_memory_status(id, status).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] {label} id={id}")));
             Ok(())

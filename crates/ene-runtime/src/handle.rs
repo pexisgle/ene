@@ -12,9 +12,7 @@ use ene_mind::commitments::CommitmentLedger;
 use ene_mind::{CardName, SessionId};
 use ene_mind::{
     CompressionLevel, CompressionTaskInput, HistoryEntry as MindHistoryEntry,
-    MIN_MESSAGES_TO_COMPRESS, PendingCompressionTask, compression_has_usable_summary,
-    evaluate_compression_trigger, execute_compression, maybe_roll_up_chapter,
-    poll_compression_result, spawn_compression_task,
+    compression_has_usable_summary,
 };
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
 use ene_tool_host::{ToolHostManager, ToolRegistry};
@@ -569,7 +567,7 @@ impl EneHandle {
             active_turn: None,
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
-            pending_compression: None,
+            context: ene_mind::ContextManager::default(),
             call_tool_tasks: tokio::task::JoinSet::new(),
             classifier_tasks: tokio::task::JoinSet::new(),
             memory_writer_tasks: tokio::task::JoinSet::new(),
@@ -729,19 +727,11 @@ impl EneHandle {
     /// when the tools section changes.
     pub fn update_feature_settings(
         &self,
-        mind: ene_mind::MindConfig,
-        store: ene_store::StoreConfig,
-        tools: ene_tool_host::ToolConfig,
-        rag: ToolRagConfig,
+        settings: FeatureSettingsUpdate,
     ) -> Result<(), ActorDeadError> {
         self.cmd_tx
             .send(EneCommand::UpdateFeatureSettings {
-                settings: Box::new(FeatureSettingsUpdate {
-                    mind,
-                    store,
-                    tools,
-                    rag,
-                }),
+                settings: Box::new(settings),
             })
             .map_err(|_| ActorDeadError)
     }
@@ -793,7 +783,7 @@ struct EneActor {
     active_turn: Option<TurnId>,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
-    pending_compression: Option<PendingCompressionTask>,
+    context: ene_mind::ContextManager,
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
     memory_writer_tasks: tokio::task::JoinSet<()>,
@@ -1784,7 +1774,7 @@ impl EneActor {
             level: CompressionLevel::Scene,
             config: mind.context.clone(),
         };
-        let result = execute_compression(store, provider, input).await?;
+        let result = ene_mind::ContextManager::execute_manual(store, provider, input).await?;
         if compression_has_usable_summary(&result) {
             self.trim_history_after_compression();
         }
@@ -1798,10 +1788,6 @@ impl EneActor {
     }
 
     fn check_and_perform_split(&mut self, _user_input: &str) {
-        self.check_and_trigger_compression();
-    }
-
-    fn check_and_trigger_compression(&mut self) {
         let Ok(mem_config) = self.config.get_section::<ene_store::StoreConfig>() else {
             return;
         };
@@ -1811,51 +1797,28 @@ impl EneActor {
         let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>() else {
             return;
         };
-        if self.pending_compression.is_some() {
-            return;
-        }
-
-        let turn_count = self.session.current_turn_count();
-        let history_len = self.session.history().len();
-        if evaluate_compression_trigger(&mind.context, turn_count, history_len).is_none() {
-            return;
-        }
-
         let Some(store) = self.session.memory.memory_store.clone() else {
             return;
         };
         let Ok(provider) = self.create_provider() else {
             return;
         };
-
-        let recent_cap = mind.context.recent_turns.saturating_mul(2).max(2);
-        let history = self.session.history();
-        if history.len() <= recent_cap {
-            return;
-        }
-        let compress_count = history.len().saturating_sub(recent_cap);
-        if compress_count < MIN_MESSAGES_TO_COMPRESS {
-            return;
-        }
-        let turns: Vec<MindHistoryEntry> = history[..compress_count].to_vec();
-        let turn_end = turn_count as i32;
-        let turn_start = (turn_end - (compress_count as i32 / 2).max(1)).max(0);
-
-        let input = CompressionTaskInput {
-            session_id: self.session.memory.session_id.to_string(),
-            character_name: self.session.card_name().to_string(),
-            user_name: self.config.user_name.clone(),
-            turns,
-            turn_start,
-            turn_end,
-            level: CompressionLevel::Scene,
-            config: mind.context,
-        };
-        spawn_compression_task(&mut self.pending_compression, store, provider, input);
+        let turn_count = self.session.current_turn_count();
+        let history = self.session.history().to_vec();
+        self.context.check_and_trigger(
+            &mind.context,
+            turn_count,
+            &history,
+            self.session.memory.session_id.as_str(),
+            self.session.card_name(),
+            &self.config.user_name,
+            store,
+            provider,
+        );
     }
 
     fn apply_pending_compression(&mut self) {
-        if let Some(result) = poll_compression_result(&mut self.pending_compression) {
+        if let Some(result) = self.context.poll_pending() {
             match result {
                 Ok(compression) if compression_has_usable_summary(&compression) => {
                     tracing::info!(
@@ -1908,28 +1871,14 @@ impl EneActor {
         let Ok(provider) = self.create_provider() else {
             return;
         };
-        let session_id = self.session.memory.session_id.to_string();
-        let character_name = self.session.card_name().to_string();
-        let user_name = self.config.user_name.clone();
-        let context = mind.context;
-        tokio::spawn(async move {
-            if let Err(error) = maybe_roll_up_chapter(
-                store.as_ref(),
-                provider,
-                &session_id,
-                &character_name,
-                &user_name,
-                &context,
-            )
-            .await
-            {
-                tracing::warn!(
-                    component = "ContextCompression",
-                    error = %error,
-                    "Chapter rollup failed"
-                );
-            }
-        });
+        ene_mind::ContextManager::spawn_chapter_rollup(
+            store,
+            provider,
+            self.session.memory.session_id.to_string(),
+            self.session.card_name().to_string(),
+            self.config.user_name.clone(),
+            mind.context,
+        );
     }
 
     fn mind_history_entries(&self) -> Vec<MindHistoryEntry> {

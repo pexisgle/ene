@@ -4,10 +4,9 @@
 
 use std::sync::Arc;
 
-use crate::message::{LlmMessage, UserMessagePart};
-use crate::traits::{
-    EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, cosine_similarity, embed,
-    embed_query,
+use ene_ai::{
+    EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, UserMessagePart,
+    cosine_similarity, embed, embed_query,
 };
 
 /// Wraps a primary embedder with optional LLM-backed `HyDE` and rerank.

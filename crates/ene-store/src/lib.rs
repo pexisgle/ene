@@ -63,7 +63,7 @@ pub mod entities;
 /// Memory-related error types.
 pub mod error;
 /// Memory forgetting lifecycle (decay score and status transitions).
-pub mod forgetting;
+pub(crate) mod forgetting;
 /// `SeaORM` schema migrations.
 pub mod migrator;
 /// Hybrid memory search scoring.
@@ -83,11 +83,7 @@ pub use config::StoreConfig;
 pub use error::EneMemoryError;
 pub use error::MemoryError;
 /// Forgetting lifecycle helpers.
-pub use forgetting::{
-    ARCHIVE_THRESHOLD, FADE_THRESHOLD, InvalidTransition, active_decay_anchor, decay_score,
-    emotional_impact, faded_decay_anchor, target_status_after_decay, user_restorable_statuses,
-    validate_transition, validate_user_restore,
-};
+pub use forgetting::InvalidTransition;
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
 /// Core memory types.

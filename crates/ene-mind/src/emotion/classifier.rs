@@ -247,7 +247,8 @@ async fn call_provider(
             .chat_completion(messages, Some(json_schema.clone()))
             .await
             .map_err(ClassifierError::Provider),
-        ClassifierTransport::Streaming => ene_ai::collect_chat_completion(provider, messages)
+        ClassifierTransport::Streaming => provider
+            .collect_stream_completion(messages)
             .await
             .map_err(ClassifierError::Provider),
     }

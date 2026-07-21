@@ -8,6 +8,7 @@ description = "Tool RAG pipeline — multi-vector tool embedding, weighted field
 crate-type = ["lib"]
 
 [dependencies]
+async-trait = { workspace = true }
 ene-ai = { workspace = true }
 ene-store = { workspace = true }
 ene-tool-proto = { workspace = true }

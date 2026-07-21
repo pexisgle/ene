@@ -564,7 +564,7 @@ impl MemoryArbiter {
             }
             ArbiterAction::MarkUserDeleted { memory_id } => {
                 let updated = store
-                    .transition_typed_memory_status(*memory_id, MemoryStatus::UserDeleted)
+                    .set_memory_status(*memory_id, MemoryStatus::UserDeleted)
                     .await
                     .map_err(CognitionError::Memory)?;
                 Ok(AppliedDecision {
@@ -575,7 +575,7 @@ impl MemoryArbiter {
             }
             ArbiterAction::MarkDisputed { memory_id } => {
                 let updated = store
-                    .transition_typed_memory_status(*memory_id, MemoryStatus::Disputed)
+                    .set_memory_status(*memory_id, MemoryStatus::Disputed)
                     .await
                     .map_err(CognitionError::Memory)?;
                 Ok(AppliedDecision {
