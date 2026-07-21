@@ -57,6 +57,7 @@ mod runtime;
 mod schedule;
 mod settings;
 mod settings_ui;
+mod skeleton_debug;
 mod startup;
 mod state;
 mod system;

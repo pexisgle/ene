@@ -315,8 +315,7 @@ async fn diagnostics_call_tool_intercepts_system_search_tool() {
         .expect("call system.search_tools succeeds");
     assert!(
         result.contains("No matching tools found."),
-        "expected search tool response, got: {}",
-        result
+        "expected search tool response, got: {result}"
     );
     let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }

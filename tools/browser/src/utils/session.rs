@@ -167,6 +167,25 @@ impl BrowserSessionStore {
         Ok(session_arc)
     }
 
+    /// Acquires the default session's page, launching Chrome on first use.
+    ///
+    /// Resolves the Chrome executable, opens (or reuses) the `"default"`
+    /// session, and returns a clone of its [`chromiumoxide::page::Page`].
+    /// Shared by every browser action so the launch-and-grab boilerplate
+    /// lives in one place.
+    pub async fn acquire_page(&self) -> Result<chromiumoxide::page::Page, ToolError> {
+        let chrome_path =
+            crate::utils::chrome::find_chrome_executable().ok_or_else(|| {
+                ToolError::ExecutionFailed {
+                    message: "No Chrome/Chromium browser found. Please install Google Chrome or Chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.".to_string(),
+                }
+            })?;
+
+        let session = self.get_or_create("default", chrome_path).await?;
+        let session_guard = session.lock().await;
+        Ok(session_guard.page.clone())
+    }
+
     pub fn close(&self, session_id: &str) {
         if let Some((_, session_arc)) = self.sessions.remove(session_id) {
             tokio::spawn(async move {

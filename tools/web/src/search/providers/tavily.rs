@@ -5,6 +5,8 @@ use std::time::Duration;
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
+use super::extract_domain;
+
 #[derive(Debug, Deserialize, Serialize)]
 struct TavilySearchResult {
     title: String,
@@ -123,10 +125,4 @@ impl SearchProvider for TavilyProvider {
             })
             .collect())
     }
-}
-
-fn extract_domain(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_string))
 }

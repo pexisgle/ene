@@ -822,54 +822,44 @@ struct EneActor {
     active_origin: crate::types::TurnOrigin,
 }
 
+/// Drains finished tasks from a `JoinSet`, logging any that panicked.
+///
+/// Keeps the actor's background task sets from growing without bound while
+/// surfacing panics through structured diagnostics.
+fn reap_join_set(set: &mut tokio::task::JoinSet<()>, component: &str, message: &str) {
+    while let Some(joined) = set.try_join_next() {
+        if let Err(e) = joined {
+            tracing::error!(component = %component, error = %e, "{message}");
+        }
+    }
+}
+
 impl EneActor {
     async fn run(mut self) {
         loop {
-            // Reap completed CallTool tasks so the JoinSet
-            // does not grow without bound. Bounded by the
-            // call rate from `EneCommand::CallTool`, which
-            // is interactive.
-            while let Some(joined) = self.call_tool_tasks.try_join_next() {
-                if let Err(e) = joined {
-                    tracing::error!(
-                        component = "CallToolReaper",
-                        error = %e,
-                        "CallTool task panicked"
-                    );
-                }
-            }
-
-            // Reap completed classifier tasks.
-            while let Some(joined) = self.classifier_tasks.try_join_next() {
-                if let Err(e) = joined {
-                    tracing::error!(
-                        component = "ClassifierReaper",
-                        error = %e,
-                        "Classifier task panicked"
-                    );
-                }
-            }
-
-            // Reap completed deferred memory-writer tasks.
-            while let Some(joined) = self.memory_writer_tasks.try_join_next() {
-                if let Err(e) = joined {
-                    tracing::error!(
-                        component = "MemoryWriterReaper",
-                        error = %e,
-                        "Deferred memory-writer task panicked"
-                    );
-                }
-            }
-
-            while let Some(joined) = self.vision_tasks.try_join_next() {
-                if let Err(e) = joined {
-                    tracing::error!(
-                        component = "VisionReaper",
-                        error = %e,
-                        "Screen summary vision task panicked"
-                    );
-                }
-            }
+            // Reap completed background tasks so the JoinSets
+            // do not grow without bound. Call-tool volume is
+            // bounded by interactive `EneCommand::CallTool` rate.
+            reap_join_set(
+                &mut self.call_tool_tasks,
+                "CallToolReaper",
+                "CallTool task panicked",
+            );
+            reap_join_set(
+                &mut self.classifier_tasks,
+                "ClassifierReaper",
+                "Classifier task panicked",
+            );
+            reap_join_set(
+                &mut self.memory_writer_tasks,
+                "MemoryWriterReaper",
+                "Deferred memory-writer task panicked",
+            );
+            reap_join_set(
+                &mut self.vision_tasks,
+                "VisionReaper",
+                "Screen summary vision task panicked",
+            );
 
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {

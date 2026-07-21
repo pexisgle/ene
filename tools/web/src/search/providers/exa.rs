@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
+use super::extract_domain;
+
 #[derive(Debug, Deserialize)]
 struct ExaSearchResult {
     title: String,
@@ -94,9 +96,7 @@ impl SearchProvider for ExaProvider {
             .results
             .into_iter()
             .map(|result| {
-                let domain = url::Url::parse(&result.url)
-                    .ok()
-                    .and_then(|parsed| parsed.host_str().map(str::to_string));
+                let domain = extract_domain(&result.url);
                 let mut raw_data = HashMap::new();
                 if let Some(score) = result.score {
                     raw_data.insert(

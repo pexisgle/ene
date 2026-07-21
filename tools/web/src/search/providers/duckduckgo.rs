@@ -5,8 +5,9 @@ use std::time::Duration;
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+use super::extract_domain;
 
+const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 /// `DuckDuckGo` HTML search provider.
 #[derive(Debug, Default)]
 pub struct DuckDuckGoProvider;
@@ -123,10 +124,4 @@ fn normalize_text(html: &str) -> String {
         .join("")
         .trim()
         .to_string()
-}
-
-fn extract_domain(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_string))
 }

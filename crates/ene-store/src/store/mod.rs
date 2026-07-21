@@ -149,6 +149,27 @@ fn validate_embedding(embedding: &[f32], expected_dim: usize) -> Result<(), Memo
     Ok(())
 }
 
+/// Memory statuses eligible for hybrid recall: `active`, `faded`, and `disputed`.
+///
+/// Archived / superseded / user-deleted memories are excluded from recall
+/// unless a caller explicitly opts in (see `list_typed_memories`).
+const RECALLABLE_STATUSES: [&str; 3] = [
+    crate::MemoryStatus::Active.as_str(),
+    crate::MemoryStatus::Faded.as_str(),
+    crate::MemoryStatus::Disputed.as_str(),
+];
+
+/// Builds the user-visibility filter for typed-memory queries.
+///
+/// A memory is visible to `user_id` when it is owned by that user **or**
+/// has no owner (empty `user_id`), so shared / character-level memories
+/// remain recallable across users.
+fn user_visibility_condition(user_id: &str) -> sea_orm::Condition {
+    sea_orm::Condition::any()
+        .add(entities::typed_memories::Column::UserId.eq(user_id))
+        .add(entities::typed_memories::Column::UserId.eq(""))
+}
+
 /// A key-value fact about the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyFact {
@@ -1110,11 +1131,6 @@ impl MemoryStore {
         }
 
         let pool = query.candidate_pool_size.max(query.limit);
-        let recallable_statuses = [
-            crate::MemoryStatus::Active.as_str(),
-            crate::MemoryStatus::Faded.as_str(),
-            crate::MemoryStatus::Disputed.as_str(),
-        ];
         let mut gathered: HashMap<i64, crate::search::GatheredCandidate> = HashMap::new();
 
         // Vector candidates across recallable statuses (skipped when no embedding).
@@ -1125,7 +1141,7 @@ impl MemoryStore {
                     query.character_id,
                     query.model_name,
                     query.user_id,
-                    &recallable_statuses,
+                    &RECALLABLE_STATUSES,
                     pool,
                     query.similarity_threshold,
                 )
@@ -1404,12 +1420,7 @@ impl MemoryStore {
             .limit(limit_val);
 
         if let Some(uid) = user_id {
-            use sea_orm::Condition;
-            select = select.filter(
-                Condition::any()
-                    .add(entities::typed_memories::Column::UserId.eq(uid))
-                    .add(entities::typed_memories::Column::UserId.eq("")),
-            );
+            select = select.filter(user_visibility_condition(uid));
         }
 
         let rows = select.into_model::<SearchMemoryRow>().all(&self.db).await?;
@@ -1461,23 +1472,12 @@ impl MemoryStore {
     ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
-        let statuses = [
-            crate::MemoryStatus::Active.as_str(),
-            crate::MemoryStatus::Faded.as_str(),
-            crate::MemoryStatus::Disputed.as_str(),
-        ];
-
         let mut query = entities::typed_memories::Entity::find()
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
-            .filter(entities::typed_memories::Column::Status.is_in(statuses));
+            .filter(entities::typed_memories::Column::Status.is_in(RECALLABLE_STATUSES));
 
         if let Some(uid) = user_id {
-            use sea_orm::Condition;
-            query = query.filter(
-                Condition::any()
-                    .add(entities::typed_memories::Column::UserId.eq(uid))
-                    .add(entities::typed_memories::Column::UserId.eq("")),
-            );
+            query = query.filter(user_visibility_condition(uid));
         }
 
         let models = query
@@ -1530,12 +1530,6 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
 
-        let statuses = [
-            crate::MemoryStatus::Active.as_str(),
-            crate::MemoryStatus::Faded.as_str(),
-            crate::MemoryStatus::Disputed.as_str(),
-        ];
-
         let mut lexical_match = Condition::any();
         for token in tokens {
             let pattern = format!("%{token}%");
@@ -1546,15 +1540,11 @@ impl MemoryStore {
 
         let mut query = entities::typed_memories::Entity::find()
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
-            .filter(entities::typed_memories::Column::Status.is_in(statuses))
+            .filter(entities::typed_memories::Column::Status.is_in(RECALLABLE_STATUSES))
             .filter(lexical_match);
 
         if let Some(uid) = user_id {
-            query = query.filter(
-                Condition::any()
-                    .add(entities::typed_memories::Column::UserId.eq(uid))
-                    .add(entities::typed_memories::Column::UserId.eq("")),
-            );
+            query = query.filter(user_visibility_condition(uid));
         }
 
         let models = query
@@ -1746,13 +1736,9 @@ impl MemoryStore {
         &self,
         options: &crate::MemoryJournalListOptions<'_>,
     ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
-        use sea_orm::{Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
-        let mut allowed_statuses = vec![
-            crate::MemoryStatus::Active.as_str(),
-            crate::MemoryStatus::Faded.as_str(),
-            crate::MemoryStatus::Disputed.as_str(),
-        ];
+        let mut allowed_statuses = RECALLABLE_STATUSES.to_vec();
         if options.include_archived {
             allowed_statuses.push(crate::MemoryStatus::Archived.as_str());
         }
@@ -1768,11 +1754,7 @@ impl MemoryStore {
             .filter(entities::typed_memories::Column::Status.is_in(allowed_statuses));
 
         if let Some(uid) = options.user_id {
-            query = query.filter(
-                Condition::any()
-                    .add(entities::typed_memories::Column::UserId.eq(uid))
-                    .add(entities::typed_memories::Column::UserId.eq("")),
-            );
+            query = query.filter(user_visibility_condition(uid));
         }
 
         if let Some(kind) = options.kind {
@@ -1832,12 +1814,7 @@ impl MemoryStore {
             .filter(entities::typed_memories::Column::Status.is_in(status_strs));
 
         if let Some(uid) = user_id {
-            use sea_orm::Condition;
-            query = query.filter(
-                Condition::any()
-                    .add(entities::typed_memories::Column::UserId.eq(uid))
-                    .add(entities::typed_memories::Column::UserId.eq("")),
-            );
+            query = query.filter(user_visibility_condition(uid));
         }
 
         let models = query

@@ -38,6 +38,11 @@ use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::state::AppState;
 use device_query::DeviceQuery;
 
+/// Framing margin passed to `Character::auto_fit_scale` when fitting the
+/// avatar to the camera. A value of `0.9` leaves a 10% margin around the
+/// model's normalized bounds so it is not flush against the viewport edges.
+const CHARACTER_AUTO_FIT_MARGIN: f32 = 0.9;
+
 /// Top-level runtime. One per process.
 pub struct Runtime {
     state: AppState,
@@ -330,7 +335,10 @@ impl ApplicationHandler for Runtime {
 
                 #[cfg(target_os = "windows")]
                 {
-                    let actual_scale = self.state.character.auto_fit_scale(0.9)
+                    let actual_scale = self
+                        .state
+                        .character
+                        .auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN)
                         * self.state.settings.character_state.model_scale;
                     let specs = self
                         .state
@@ -965,8 +973,8 @@ impl Runtime {
                 #[cfg(target_os = "windows")]
                 {
                     *character_physics_registration = None;
-                    let actual_scale =
-                        character.auto_fit_scale(0.9) * settings.character_state.model_scale;
+                    let actual_scale = character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN)
+                        * settings.character_state.model_scale;
                     let specs = character.build_character_bone_specs(actual_scale);
                     if !specs.is_empty() {
                         let mut physics_res =
@@ -1005,7 +1013,7 @@ impl Runtime {
         self.emotion_clock = self.emotion_clock.or_else(|| Some(Instant::now()));
 
         let cs = &settings.character_state;
-        let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
+        let actual_scale = character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN) * cs.model_scale;
         character.update_camera_target(actual_scale);
         let model_uniform = ene_vrm::ModelUniform::from_mat4(
             character.model_matrix(cs.character_position, actual_scale),
@@ -1176,72 +1184,14 @@ impl Runtime {
                         );
                     }
                     if let Some(model) = character.model() {
-                        let center = glam::Vec3::from(model.center());
-                        let normalize_scale = model.normalize_scale();
-                        let auto_scale = character.auto_fit_scale(0.9);
-                        let actual_scale = auto_scale * cs.model_scale;
-
-                        for (bone_name, entry) in model.humanoid.iter() {
-                            let parent_pos_raw = model.nodes.world_positions[entry.node];
-                            let parent_world = cs.character_position
-                                + (parent_pos_raw - center) * normalize_scale * actual_scale;
-
-                            if let Some(child_node) =
-                                crate::character::collider::get_humanoid_child_node(
-                                    bone_name.as_str(),
-                                    &model.humanoid,
-                                )
-                            {
-                                let child_pos_raw = model.nodes.world_positions[child_node];
-                                let child_world = cs.character_position
-                                    + (child_pos_raw - center) * normalize_scale * actual_scale;
-
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world,
-                                    b: child_world,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                            } else {
-                                let ext = 0.01 * actual_scale;
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world - glam::Vec3::X * ext,
-                                    b: parent_world + glam::Vec3::X * ext,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world - glam::Vec3::Y * ext,
-                                    b: parent_world + glam::Vec3::Y * ext,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world - glam::Vec3::Z * ext,
-                                    b: parent_world + glam::Vec3::Z * ext,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                            }
-                        }
-
-                        if let Some(spring_bones) = &model.spring_bones {
-                            for chain in &spring_bones.springs {
-                                for i in 0..chain.joints.len() - 1 {
-                                    let parent_node = chain.joints[i].node;
-                                    let child_node = chain.joints[i + 1].node;
-                                    let parent_pos_raw = model.nodes.world_positions[parent_node];
-                                    let child_pos_raw = model.nodes.world_positions[child_node];
-                                    let parent_world = cs.character_position
-                                        + (parent_pos_raw - center)
-                                            * normalize_scale
-                                            * actual_scale;
-                                    let child_world = cs.character_position
-                                        + (child_pos_raw - center) * normalize_scale * actual_scale;
-                                    lines.push(ene_vrm::DebugLine {
-                                        a: parent_world,
-                                        b: child_world,
-                                        color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                    });
-                                }
-                            }
-                        }
+                        let actual_scale =
+                            character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN) * cs.model_scale;
+                        crate::skeleton_debug::build_skeleton_lines(
+                            &mut lines,
+                            model,
+                            cs.character_position,
+                            actual_scale,
+                        );
                     }
                 }
                 if show_mask_gizmo {
