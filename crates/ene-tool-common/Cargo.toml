@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 schemars = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 ene-tool-proto = { workspace = true }
 ene-tool-derive = { workspace = true }
 ene-config = { workspace = true }

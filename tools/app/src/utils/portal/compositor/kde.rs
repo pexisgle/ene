@@ -1,11 +1,82 @@
+use std::process::Command;
+
 use ene_tool_proto::ToolError;
 
-use super::{WlCompositor, gvariant_string, parse_gdbus_tuple_string};
+use super::{WlCompositor, gvariant_string, js_string_literal, parse_gdbus_tuple_string};
 
 // ==================== Version detection ====================
 
 fn is_kde6() -> bool {
     std::env::var("KDE_SESSION_VERSION").is_ok_and(|v| v == "6")
+}
+
+// ==================== D-Bus transport abstraction ====================
+
+/// D-Bus CLI transport used to talk to `KWin`'s scripting interface.
+///
+/// `qdbus` is the Qt front-end (preferred on Plasma); `gdbus` is the `GLib`
+/// front-end used as a fallback. Both expose the same methods but differ in
+/// invocation syntax and output formatting, which this enum encapsulates.
+#[derive(Clone, Copy)]
+enum DbusTransport {
+    Qdbus,
+    Gdbus,
+}
+
+impl DbusTransport {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Qdbus => "qdbus",
+            Self::Gdbus => "gdbus",
+        }
+    }
+
+    /// Builds a `Command` that invokes `method` on `object_path` with the given
+    /// string `args`, using the correct syntax for this transport.
+    fn call(self, object_path: &str, method: &str, args: &[&str]) -> Command {
+        match self {
+            Self::Qdbus => {
+                let mut cmd = Command::new("qdbus");
+                cmd.arg("org.kde.KWin").arg(object_path).arg(method);
+                cmd.args(args);
+                cmd
+            }
+            Self::Gdbus => {
+                let mut cmd = Command::new("gdbus");
+                cmd.arg("call")
+                    .arg("--session")
+                    .arg("--dest")
+                    .arg("org.kde.KWin")
+                    .arg("--object-path")
+                    .arg(object_path)
+                    .arg("--method")
+                    .arg(method);
+                for arg in args {
+                    cmd.arg(gvariant_string(arg));
+                }
+                cmd
+            }
+        }
+    }
+
+    /// Extracts the integer script ID from `loadScript` stdout.
+    ///
+    /// `qdbus` prints the bare integer; `gdbus` wraps it in a `GVariant` tuple
+    /// like `(42,)`.
+    fn parse_script_id(self, stdout: &str) -> Option<i32> {
+        match self {
+            Self::Qdbus => stdout.trim().parse().ok(),
+            Self::Gdbus => stdout
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .split(',')
+                .next()?
+                .trim()
+                .parse()
+                .ok(),
+        }
+    }
 }
 
 // ==================== Plasma 6: loadScript + print/journal ====================
@@ -43,7 +114,8 @@ fn capture_kwin_print_output(since_epoch_secs: u64) -> Result<String, ToolError>
     Ok(lines.join("\n"))
 }
 
-fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
+fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolError> {
+    let label = transport.label();
     let script_name = format!("ene-{}", std::process::id());
     let tmp_dir = std::env::temp_dir();
     let script_path = tmp_dir.join(format!("{script_name}.js"));
@@ -57,38 +129,34 @@ fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
         .unwrap_or_default()
         .as_secs();
 
-    let output = std::process::Command::new("qdbus")
-        .args([
-            "org.kde.KWin",
+    let output = transport
+        .call(
             "/Scripting",
             "org.kde.kwin.Scripting.loadScript",
-            &path_str,
-            &script_name,
-        ])
+            &[&path_str, &script_name],
+        )
         .output()
         .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run qdbus loadScript: {e}"),
+            message: format!("Failed to run {label} loadScript: {e}"),
         })?;
 
     if !output.status.success() {
         let _ = std::fs::remove_file(&script_path);
         return Err(ToolError::ExecutionFailed {
             message: format!(
-                "qdbus loadScript failed: {}",
+                "{label} loadScript failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             ),
         });
     }
 
-    let script_id: i32 = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .map_err(|_| ToolError::ExecutionFailed {
-            message: format!(
-                "Failed to parse script ID from: {}",
-                String::from_utf8_lossy(&output.stdout)
-            ),
-        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let script_id =
+        transport
+            .parse_script_id(&stdout)
+            .ok_or_else(|| ToolError::ExecutionFailed {
+                message: format!("Failed to parse script ID from: {stdout}"),
+            })?;
 
     if script_id < 0 {
         let _ = std::fs::remove_file(&script_path);
@@ -98,157 +166,39 @@ fn kwin_load_and_run_qdbus(js: &str) -> Result<String, ToolError> {
     }
 
     let script_obj = format!("/Scripting/Script{script_id}");
-    let run_output = std::process::Command::new("qdbus")
-        .args(["org.kde.KWin", &script_obj, "org.kde.kwin.Script.run"])
+    let run_output = transport
+        .call(&script_obj, "org.kde.kwin.Script.run", &[])
         .output()
         .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run qdbus run: {e}"),
+            message: format!("Failed to run {label} run: {e}"),
         })?;
 
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    let _ = std::process::Command::new("qdbus")
-        .args(["org.kde.KWin", &script_obj, "org.kde.kwin.Script.stop"])
-        .output();
+    if let Err(e) = transport
+        .call(&script_obj, "org.kde.kwin.Script.stop", &[])
+        .output()
+    {
+        tracing::warn!("Failed to stop KWin script ({label}): {e}");
+    }
 
-    let _ = std::process::Command::new("qdbus")
-        .args([
-            "org.kde.KWin",
+    if let Err(e) = transport
+        .call(
             "/Scripting",
             "org.kde.kwin.Scripting.unloadScript",
-            &script_name,
-        ])
-        .output();
+            &[&script_name],
+        )
+        .output()
+    {
+        tracing::warn!("Failed to unload KWin script ({label}): {e}");
+    }
 
     let _ = std::fs::remove_file(&script_path);
 
     if !run_output.status.success() {
         return Err(ToolError::ExecutionFailed {
             message: format!(
-                "qdbus run failed: {}",
-                String::from_utf8_lossy(&run_output.stderr)
-            ),
-        });
-    }
-
-    capture_kwin_print_output(since_ts)
-}
-
-fn kwin_load_and_run_gdbus(js: &str) -> Result<String, ToolError> {
-    let script_name = format!("ene-{}", std::process::id());
-    let tmp_dir = std::env::temp_dir();
-    let script_path = tmp_dir.join(format!("{script_name}.js"));
-    std::fs::write(&script_path, js).map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to write KWin script: {e}"),
-    })?;
-
-    let path_str = script_path.to_string_lossy().to_string();
-    let since_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let load_output = std::process::Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            "/Scripting",
-            "--method",
-            "org.kde.kwin.Scripting.loadScript",
-            &gvariant_string(&path_str),
-            &gvariant_string(&script_name),
-        ])
-        .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run gdbus loadScript: {e}"),
-        })?;
-
-    if !load_output.status.success() {
-        let _ = std::fs::remove_file(&script_path);
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "gdbus loadScript failed: {}",
-                String::from_utf8_lossy(&load_output.stderr)
-            ),
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&load_output.stdout).to_string();
-    let script_id: i32 = stdout
-        .trim()
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .parse()
-        .map_err(|_| ToolError::ExecutionFailed {
-            message: format!("Failed to parse script ID from: {stdout}"),
-        })?;
-
-    if script_id < 0 {
-        let _ = std::fs::remove_file(&script_path);
-        return Err(ToolError::ExecutionFailed {
-            message: "KWin loadScript returned negative ID".to_string(),
-        });
-    }
-
-    let script_obj = format!("/Scripting/Script{script_id}");
-    let run_output = std::process::Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            &script_obj,
-            "--method",
-            "org.kde.kwin.Script.run",
-        ])
-        .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run gdbus run: {e}"),
-        })?;
-
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    let _ = std::process::Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            &script_obj,
-            "--method",
-            "org.kde.kwin.Script.stop",
-        ])
-        .output();
-
-    let _ = std::process::Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            "/Scripting",
-            "--method",
-            "org.kde.kwin.Scripting.unloadScript",
-            &gvariant_string(&script_name),
-        ])
-        .output();
-
-    let _ = std::fs::remove_file(&script_path);
-
-    if !run_output.status.success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "gdbus run failed: {}",
+                "{label} run failed: {}",
                 String::from_utf8_lossy(&run_output.stderr)
             ),
         });
@@ -259,52 +209,51 @@ fn kwin_load_and_run_gdbus(js: &str) -> Result<String, ToolError> {
 
 // ==================== Plasma 5: evaluateScript (legacy) ====================
 
-fn kwin_eval_qdbus(js: &str) -> Result<String, ToolError> {
-    let output = std::process::Command::new("qdbus")
-        .args(["org.kde.KWin", "/Scripting", "evaluateScript", js])
+fn kwin_eval(transport: DbusTransport, js: &str) -> Result<String, ToolError> {
+    let label = transport.label();
+    let output = transport
+        .call("/Scripting", "org.kde.KWin.Scripting.evaluateScript", &[js])
         .output()
         .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run qdbus: {e}"),
+            message: format!("Failed to run {label}: {e}"),
         })?;
 
     if !output.status.success() {
         return Err(ToolError::ExecutionFailed {
-            message: format!("qdbus failed: {}", String::from_utf8_lossy(&output.stderr)),
+            message: format!(
+                "{label} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
         });
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match transport {
+        DbusTransport::Qdbus => Ok(stdout.trim().to_string()),
+        DbusTransport::Gdbus => {
+            parse_gdbus_tuple_string(&stdout).ok_or_else(|| ToolError::ExecutionFailed {
+                message: "Failed to parse gdbus output".to_string(),
+            })
+        }
+    }
 }
 
-fn kwin_eval_gdbus(js: &str) -> Result<String, ToolError> {
-    let output = std::process::Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            "/Scripting",
-            "--method",
-            "org.kde.KWin.Scripting.evaluateScript",
-            &gvariant_string(js),
-        ])
-        .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run gdbus: {e}"),
-        })?;
+// ==================== Transport fallback helpers ====================
 
-    if !output.status.success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("gdbus failed: {}", String::from_utf8_lossy(&output.stderr)),
-        });
-    }
-
-    parse_gdbus_tuple_string(&String::from_utf8_lossy(&output.stdout)).ok_or_else(|| {
-        ToolError::ExecutionFailed {
-            message: "Failed to parse gdbus output".to_string(),
+/// Runs `f` with `qdbus`, falling back to `gdbus` when qdbus fails or yields
+/// an empty result. The qdbus error is logged so the fallback is observable.
+fn with_dbus_fallback<F>(mut f: F) -> Result<String, ToolError>
+where
+    F: FnMut(DbusTransport) -> Result<String, ToolError>,
+{
+    match f(DbusTransport::Qdbus) {
+        Ok(result) if !result.is_empty() => return Ok(result),
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!("kwin qdbus failed, falling back to gdbus: {e}");
         }
-    })
+    }
+    f(DbusTransport::Gdbus)
 }
 
 // ==================== WlCompositor impl ====================
@@ -315,44 +264,28 @@ impl WlCompositor for Kde {
     fn list_windows(&self) -> Result<String, ToolError> {
         if is_kde6() {
             let js = "workspace.windowList().forEach(function(w){if(w.caption)print('ENE_KWIN_OUT:' + w.caption + ' | ' + (w.resourceClass || ''))})";
-            if let Ok(result) = kwin_load_and_run_qdbus(js)
-                && !result.is_empty()
-            {
-                return Ok(result);
-            }
-            return kwin_load_and_run_gdbus(js);
+            return with_dbus_fallback(|t| kwin_load_and_run(t, js));
         }
 
         let js = "workspace.clientList().map(function(c){return c.caption + ' | ' + (c.resourceClass || '')}).join('\\n')";
-        if let Ok(result) = kwin_eval_qdbus(js)
-            && !result.is_empty()
-        {
-            return Ok(result);
-        }
-        kwin_eval_gdbus(js)
+        with_dbus_fallback(|t| kwin_eval(t, js))
     }
 
     fn focus_window(&self, title: &str) -> Result<String, ToolError> {
-        let escaped = title.replace('\\', "\\\\").replace('\'', "\\'");
+        let title_literal = js_string_literal(title);
 
         if is_kde6() {
             let js = format!(
-                "var ws=workspace.windowList();for(var i=0;i<ws.length;i++){{if(ws[i].caption.indexOf('{escaped}')!=-1||(ws[i].resourceClass||'').indexOf('{escaped}')!=-1){{workspace.activeWindow=ws[i];break}}}}"
+                "var ws=workspace.windowList();for(var i=0;i<ws.length;i++){{if(ws[i].caption.indexOf({title_literal})!=-1||(ws[i].resourceClass||'').indexOf({title_literal})!=-1){{workspace.activeWindow=ws[i];break}}}}"
             );
-            if let Ok(_result) = kwin_load_and_run_qdbus(&js) {
-                return Ok(format!("Focused window matching: {title}"));
-            }
-            let _ = kwin_load_and_run_gdbus(&js)?;
+            with_dbus_fallback(|t| kwin_load_and_run(t, &js))?;
             return Ok(format!("Focused window matching: {title}"));
         }
 
         let js = format!(
-            "var cs=workspace.clientList();for(var i=0;i<cs.length;i++){{if(cs[i].caption.indexOf('{escaped}')!=-1||(cs[i].resourceClass||'').indexOf('{escaped}')!=-1){{workspace.activeWindow=cs[i];break}}}}"
+            "var cs=workspace.clientList();for(var i=0;i<cs.length;i++){{if(cs[i].caption.indexOf({title_literal})!=-1||(cs[i].resourceClass||'').indexOf({title_literal})!=-1){{workspace.activeWindow=cs[i];break}}}}"
         );
-        if let Ok(_result) = kwin_eval_qdbus(&js) {
-            return Ok(format!("Focused window matching: {title}"));
-        }
-        let _ = kwin_eval_gdbus(&js)?;
+        with_dbus_fallback(|t| kwin_eval(t, &js))?;
         Ok(format!("Focused window matching: {title}"))
     }
 }

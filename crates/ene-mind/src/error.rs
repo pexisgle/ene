@@ -51,6 +51,10 @@ pub enum EneCognitionError {
     #[error("Invalid state transition: {0}")]
     InvalidState(String),
 
+    /// Required provider or resource is missing.
+    #[error("Missing required provider: {0}")]
+    MissingProvider(String),
+
     /// Catch-all for other errors.
     #[error("Other error: {0}")]
     Other(String),
@@ -61,6 +65,9 @@ pub enum EneCognitionError {
 }
 
 /// Type alias for internal module usage.
+///
+/// [`EneCognitionError`] is the canonical public name for the crate boundary;
+/// `CognitionError` is a shorter alias used pervasively within the crate internals.
 pub type CognitionError = EneCognitionError;
 
 /// Single public error type for the `ene-mind` crate boundary (API v1 / #118).

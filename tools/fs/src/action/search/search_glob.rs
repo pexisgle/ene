@@ -1,8 +1,8 @@
 use super::MAX_RESULTS;
 use crate::utils::sandbox::SandboxConfig;
+use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_tool_common::prelude::*;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 pub fn glob_search(
     pattern: &str,
@@ -29,7 +29,7 @@ pub fn glob_search(
         Ok(entries) => {
             for entry in entries.flatten() {
                 files.push(entry.to_string_lossy().to_string());
-                if files.len() > MAX_RESULTS {
+                if files.len() >= MAX_RESULTS {
                     break;
                 }
             }
@@ -41,12 +41,12 @@ pub fn glob_search(
         }
     }
 
+    files.sort();
+
     let truncated = files.len() > MAX_RESULTS;
     if truncated {
         files.truncate(MAX_RESULTS);
     }
-
-    files.sort();
 
     let mut output = Vec::new();
     if files.is_empty() {
@@ -62,12 +62,6 @@ pub fn glob_search(
     }
 
     Ok(output.join("\n"))
-}
-
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
 }
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
@@ -101,15 +95,7 @@ impl FsGlobAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
-            })
-        };
+        let sandbox = resolve_sandbox(&self.sandbox);
 
         glob_search(&self.pattern, self.path.as_deref(), sandbox.config())
     }

@@ -1,12 +1,8 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 
 pub struct CommitmentsCommand;
-
-fn parse_parts(arg: &str) -> Vec<&str> {
-    arg.split_whitespace().collect()
-}
 
 #[async_trait]
 impl CliCommand for CommitmentsCommand {
@@ -22,8 +18,8 @@ impl CliCommand for CommitmentsCommand {
         "/commitments <list|done <id>>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
-        let parts = parse_parts(arg);
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
+        let parts: Vec<&str> = arg.split_whitespace().collect();
         let sub = parts.first().copied().unwrap_or("");
         let snapshot = ctx
             .handle
@@ -53,7 +49,7 @@ impl CliCommand for CommitmentsCommand {
                             );
                         }
                     }
-                    Ok(())
+                    Ok(CommandOutcome::Continue)
                 }
                 Err(e) => Err(CliError::ExecutionFailed(format!("List error: {e}"))),
             },
@@ -67,7 +63,7 @@ impl CliCommand for CommitmentsCommand {
                 match snapshot.memory.complete_commitment(id).await {
                     Ok(true) => {
                         println!("{}", style::success(format!("[Commitments] done id={id}")));
-                        Ok(())
+                        Ok(CommandOutcome::Continue)
                     }
                     Ok(false) => Err(CliError::ExecutionFailed(format!(
                         "id={id} not found or not active"
@@ -84,11 +80,12 @@ impl CliCommand for CommitmentsCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_parts;
-
     #[test]
     fn parse_parts_for_list_and_done_subcommands() {
-        assert_eq!(parse_parts("list"), vec!["list"]);
-        assert_eq!(parse_parts("done 42"), vec!["done", "42"]);
+        assert_eq!("list".split_whitespace().collect::<Vec<_>>(), vec!["list"]);
+        assert_eq!(
+            "done 42".split_whitespace().collect::<Vec<_>>(),
+            vec!["done", "42"]
+        );
     }
 }

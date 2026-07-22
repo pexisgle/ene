@@ -1,5 +1,6 @@
 use ene_tool_common::prelude::*;
-use std::sync::{Arc, RwLock};
+
+use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 
 pub async fn undo(sandbox: &crate::utils::sandbox::Sandbox) -> Result<String, ToolError> {
     let logs = sandbox
@@ -9,14 +10,6 @@ pub async fn undo(sandbox: &crate::utils::sandbox::Sandbox) -> Result<String, To
             message: format!("Undo failed: {e}"),
         })?;
     Ok(format!("Undo successful:\n{logs}"))
-}
-
-use crate::utils::sandbox::SandboxConfig;
-
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
 }
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
@@ -41,15 +34,7 @@ impl UndoAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
-            })
-        };
+        let sandbox = resolve_sandbox(&self.sandbox);
         undo(&sandbox).await
     }
 }

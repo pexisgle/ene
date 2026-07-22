@@ -19,6 +19,9 @@ use ene_tool_host::{ToolHostManager, ToolRegistry};
 use ene_tool_proto::ToolSpec;
 use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 use std::collections::HashMap;
+/// Global monotonic counter used to generate unique DB IPC auth tokens.
+/// Intentionally process-global: each `EneHandle::open` call increments
+/// the counter so concurrent handles never share a token.
 static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -589,20 +592,17 @@ impl EneHandle {
 
         LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
 
-        let mind = config
-            .get_section::<ene_mind::MindConfig>()
-            .unwrap_or_default();
+        let mind = config.get_section::<ene_mind::MindConfig>()?;
         ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
 
         let mem_config = config.get_section::<ene_store::StoreConfig>()?;
-        let tool_config = config
-            .get_section::<ene_tool_host::ToolConfig>()
-            .unwrap_or_default();
-        let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
+        let tool_config = config.get_section::<ene_tool_host::ToolConfig>()?;
+        let rag_config = config.get_section::<ToolRagConfig>()?;
         let needs_embedder = mem_config.enabled || (tool_config.enabled && rag_config.enabled);
 
         // Prefetch configured GGUF weights in parallel before backends load them.
-        if let Ok(ai_config) = config.get_section::<ene_ai::AiConfig>() {
+        {
+            let ai_config = config.get_section::<ene_ai::AiConfig>()?;
             let needs_decision = mind.proactive.enabled;
             if (needs_embedder || needs_decision)
                 && let Err(e) =
@@ -637,7 +637,9 @@ impl EneHandle {
             let store = init_memory_store(&config, emb.as_ref())
                 .await
                 .map_err(|e| {
-                    EneRuntimeError::Memory(ene_store::MemoryError::MemoryStoreConnectionError(e))
+                    EneRuntimeError::Memory(ene_store::EneMemoryError::MemoryStoreConnectionError(
+                        e,
+                    ))
                 })?;
             session.memory.memory_store = Some(store.clone());
             Some(store)
@@ -674,10 +676,7 @@ impl EneHandle {
             session.memory.ccv3_memory_hash = Some(hash);
         }
 
-        let mind_memory = config
-            .get_section::<ene_mind::MindConfig>()
-            .unwrap_or_default()
-            .memory;
+        let mind_memory = mind.memory.clone();
         let memory = MemoryQueryHandle::new(
             session.memory.memory_store.clone(),
             session.memory.embedding_provider.clone(),
@@ -685,10 +684,7 @@ impl EneHandle {
         );
 
         // Provider health monitor for failover diagnostics (#175).
-        let fallback_cfg = config
-            .get_section::<ene_ai::AiConfig>()
-            .map(|c| c.fallback)
-            .unwrap_or_default();
+        let fallback_cfg = config.get_section::<ene_ai::AiConfig>()?.fallback;
         let health_monitor = ene_ai::ProviderHealthMonitor::new(
             std::time::Duration::from_millis(fallback_cfg.cache_ttl_ms),
             fallback_cfg.max_history,
@@ -744,6 +740,10 @@ impl EneHandle {
             proactive_llm: None,
             active_origin: crate::types::TurnOrigin::User,
             health_monitor,
+            deferred_max_polls: std::env::var("ENE_TOOLS__DEFERRED_MAX_POLLS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
         };
         let join = tokio::spawn(actor.run());
 
@@ -772,6 +772,7 @@ impl EneHandle {
 
     /// Start a turn. Returns [`RunError::Busy`] if a turn is already in flight
     /// — never silently aborts the active turn.
+    #[must_use = "the returned TurnId is needed for cancellation"]
     pub fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError> {
         let turn = TurnId::new();
         if !self.turn_gate.try_begin(&turn) {
@@ -792,6 +793,7 @@ impl EneHandle {
     }
 
     /// Cancel only the given turn. Wrong ids return [`CancelError::TurnMismatch`].
+    #[must_use = "caller should check whether cancellation succeeded"]
     pub fn cancel(&self, turn: &TurnId) -> Result<(), CancelError> {
         if !self.turn_gate.matches(turn) {
             return Err(CancelError::TurnMismatch);
@@ -1048,6 +1050,13 @@ impl EneHandle {
 }
 
 impl Drop for EneHandle {
+    /// Sends a graceful `Shutdown` command when the last handle clone is dropped.
+    ///
+    /// Because `Drop` is synchronous, the actor may still be running after this
+    /// returns. Background tasks spawned by the actor (classifiers, memory
+    /// writers, deferred tool tasks) become detached tokio tasks. Callers that
+    /// need a clean shutdown guarantee should use [`EneHandle::shutdown`] with
+    /// an explicit timeout before dropping the handle.
     fn drop(&mut self) {
         if Arc::strong_count(&self.cmd_tx) == 1 {
             let _ = self.cmd_tx.send(EneCommand::Shutdown);
@@ -1116,6 +1125,9 @@ struct EneActor {
     active_origin: crate::types::TurnOrigin,
     /// Provider health monitor for failover routing (#175).
     health_monitor: ene_ai::ProviderHealthMonitor,
+    /// Maximum poll iterations for deferred (background) tool tasks (#196).
+    /// Configurable via `ENE_TOOLS__DEFERRED_MAX_POLLS` env var (default: 600 = 60s).
+    deferred_max_polls: u32,
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a
@@ -1180,18 +1192,22 @@ fn reap_join_set(
 /// Emits [`EneEvent::ToolBackgroundCompleted`] when the task completes, fails,
 /// or is cancelled. Runs as a background task in the actor's `deferred_tool_tasks`
 /// `JoinSet`.
+///
+/// `max_polls` controls how many poll iterations (at 100ms each) before the task
+/// is considered timed out. Override via the `ENE_TOOLS__DEFERRED_MAX_POLLS` env var
+/// (default: 600 = 60s).
 async fn poll_deferred_task(
     registry: Arc<dyn ToolRegistry>,
     event_tx: broadcast::Sender<EneEvent>,
     task: DeferredToolTask,
+    max_polls: u32,
 ) {
     use ene_tool_proto::DeferredStatus;
     use std::time::Duration;
 
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
-    const MAX_POLLS: u32 = 600; // 60 seconds at 100ms intervals
 
-    for _ in 0..MAX_POLLS {
+    for _ in 0..max_polls {
         let status = registry.poll_deferred(&task.tool_name, &task.task_id).await;
         match status {
             DeferredStatus::Pending => {
@@ -1238,7 +1254,7 @@ async fn poll_deferred_task(
         tool = %task.tool_name,
         task_id = %task.task_id,
         "Deferred task polling timed out after {} polls",
-        MAX_POLLS
+        max_polls
     );
 }
 
@@ -1374,8 +1390,9 @@ impl EneActor {
             while let Ok(task) = self.deferred_tool_rx.try_recv() {
                 let registry = Arc::clone(&self.registry);
                 let event_tx = self.event_tx.clone();
+                let max_polls = self.deferred_max_polls;
                 self.deferred_tool_tasks.spawn(async move {
-                    poll_deferred_task(registry, event_tx, task).await;
+                    poll_deferred_task(registry, event_tx, task, max_polls).await;
                 });
             }
 
@@ -2888,7 +2905,7 @@ fn init_tool_rag(
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
     session: &ConversationSession,
 ) -> Result<Option<Arc<ToolRag>>, EneRuntimeError> {
-    let rag_config = config.get_section::<ToolRagConfig>().unwrap_or_default();
+    let rag_config = config.get_section::<ToolRagConfig>()?;
 
     if !rag_config.enabled {
         return Ok(None);

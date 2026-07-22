@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use async_trait::async_trait;
 
@@ -18,8 +18,8 @@ impl CliCommand for ClearCommand {
         "/clear"
     }
 
-    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         println!("Conversation history will be refreshed on next run.");
-        Ok(())
+        Ok(CommandOutcome::Continue)
     }
 }

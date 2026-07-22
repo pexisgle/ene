@@ -39,9 +39,6 @@ pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
         );
     }
 
-    // Keep ConfigStore load path documented for hosts that need dirty tracking.
-    let _ = ConfigStore::from_config(config);
-
     Ok(handle)
 }
 

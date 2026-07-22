@@ -5,18 +5,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
-/// Configuration for web search providers (Tavily, Brave, Exa).
+/// Configuration for web search providers (Tavily, Exa).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default, rename_all = "snake_case")]
-#[expect(
-    clippy::struct_field_names,
-    reason = "HTTP provider fields mirror upstream API naming"
-)]
 pub struct WebSearchConfig {
     /// Tavily Search API Key
     pub tavily_api_key: String,
-    /// Brave Search API Key
-    pub brave_api_key: String,
     /// Exa Search API Key
     pub exa_api_key: String,
 }
@@ -44,6 +38,10 @@ pub struct WebToolProvider {
 
 impl WebToolProvider {
     /// Creates a new `WebToolProvider` and registers web actions.
+    #[expect(
+        clippy::expect_used,
+        reason = "a default reqwest client silently loses the SSRF redirect policy, timeout, and user agent — failing fast is safer"
+    )]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -60,12 +58,13 @@ impl WebToolProvider {
                 );
                 headers
             })
-            // Limit the redirect chain so an SSRF-by-redirect (target
-            // is a public host that 30x's to a private one) cannot
-            // smuggle a fetch past the per-host SSRF check.
-            .redirect(reqwest::redirect::Policy::limited(5))
+            // Disable automatic redirects entirely. The fetch action
+            // follows redirects manually so it can re-run the SSRF
+            // host check on every hop — a limited redirect policy
+            // only caps hop count, not destination validation.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_default();
+            .expect("reqwest client builder should not fail");
 
         // RwLock so the API key can be hot-reloaded by a
         // reconfigure without restarting the tool
@@ -84,10 +83,16 @@ impl WebToolProvider {
         let config_for_set = config;
         let inner = ActionSetProvider::new(actions)
             .with_set_config_hook(move |value| {
-                if let Ok(cfg) = serde_json::from_value::<WebSearchConfig>(value.clone())
-                    && let Ok(mut guard) = config_for_set.write()
-                {
-                    *guard = cfg;
+                match serde_json::from_value::<WebSearchConfig>(value.clone()) {
+                    Ok(cfg) => match config_for_set.write() {
+                        Ok(mut guard) => *guard = cfg,
+                        Err(e) => {
+                            tracing::warn!("WebSearchConfig write lock poisoned: {e}");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Ignoring malformed web search config: {e}");
+                    }
                 }
             })
             .with_config_schema_hook(|| Some(generate_web_search_schema()));

@@ -24,6 +24,7 @@ mod stream;
 mod style;
 mod terminal_ui;
 mod tree_log;
+mod util;
 
 use clap::Parser;
 

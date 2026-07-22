@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing;
 
 /// The kind of a typed memory item.
 ///
@@ -8,6 +7,7 @@ use tracing;
 /// and lifecycle behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MemoryKind {
     /// Specific events or conversations (what happened when).
     Episodic,
@@ -58,7 +58,7 @@ impl MemoryKind {
             "procedure" => Self::Procedure,
             "reflection" => Self::Reflection,
             other => {
-                tracing::warn!(
+                tracing::error!(
                     other,
                     "unrecognized MemoryKind in DB, falling back to Semantic"
                 );
@@ -71,6 +71,7 @@ impl MemoryKind {
 /// The lifecycle status of a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MemoryStatus {
     /// Currently relevant and retrievable.
     Active,
@@ -109,7 +110,7 @@ impl MemoryStatus {
             "superseded" => Self::Superseded,
             "user_deleted" => Self::UserDeleted,
             other => {
-                tracing::warn!(
+                tracing::error!(
                     other,
                     "unrecognized MemoryStatus in DB, falling back to Active"
                 );
@@ -122,6 +123,7 @@ impl MemoryStatus {
 /// The scope or ownership of a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MemoryScope {
     /// Memory associated with the character/companion.
     Character,
@@ -148,7 +150,7 @@ impl MemoryScope {
             "user" => Self::User,
             "shared" => Self::Shared,
             other => {
-                tracing::warn!(
+                tracing::error!(
                     other,
                     "unrecognized MemoryScope in DB, falling back to Character"
                 );
@@ -161,6 +163,7 @@ impl MemoryScope {
 /// The provenance of a memory (how it was created).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MemorySource {
     /// Extracted directly from conversation turns.
     Conversation,
@@ -199,7 +202,7 @@ impl MemorySource {
             "imported" => Self::Imported,
             "ccv3" => Self::Ccv3,
             other => {
-                tracing::warn!(
+                tracing::error!(
                     other,
                     "unrecognized MemorySource in DB, falling back to Conversation"
                 );
@@ -407,6 +410,7 @@ pub struct NewMemoryItem {
 /// Recall source that surfaced a memory candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum MemoryCandidateSource {
     /// Vector embedding similarity search.
     Vector,

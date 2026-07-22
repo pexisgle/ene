@@ -15,7 +15,7 @@ pub fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<RecallInt
     let mut intents = vec![RecallIntent::Semantic];
     let lower = topic.to_lowercase();
 
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "remember",
@@ -33,7 +33,7 @@ pub fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<RecallInt
         intents.push(RecallIntent::Episodic);
     }
 
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "i like",
@@ -51,7 +51,7 @@ pub fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<RecallInt
         intents.push(RecallIntent::Preference);
     }
 
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "between us",
@@ -69,7 +69,7 @@ pub fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<RecallInt
         intents.push(RecallIntent::Relationship);
     }
 
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "feel",
@@ -88,7 +88,7 @@ pub fn infer_intents(topic: &str, affect: Option<&AffectState>) -> Vec<RecallInt
         intents.push(RecallIntent::Affective);
     }
 
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "how do i",
@@ -134,10 +134,6 @@ pub fn kinds_for_intents(intents: &[RecallIntent], has_commitments: bool) -> Vec
     }
 
     kinds
-}
-
-pub fn contains_any(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| text.contains(needle))
 }
 
 fn dedupe_intents(intents: &mut Vec<RecallIntent>) {

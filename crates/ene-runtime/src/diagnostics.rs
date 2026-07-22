@@ -250,7 +250,7 @@ impl MemoryQueryHandle {
 
     fn require_store(&self) -> Result<&std::sync::Arc<ene_store::MemoryStore>, EneRuntimeError> {
         self.store.as_ref().ok_or_else(|| {
-            EneRuntimeError::Memory(ene_store::MemoryError::MemoryStoreConnectionError(
+            EneRuntimeError::Memory(ene_store::EneMemoryError::MemoryStoreConnectionError(
                 "Memory store not available".into(),
             ))
         })

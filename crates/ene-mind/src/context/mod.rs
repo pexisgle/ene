@@ -51,7 +51,7 @@ impl ContextManager {
         ctx: TurnContext<'_>,
     ) -> Result<Option<ActiveSceneSummary>, CognitionError> {
         let store = ctx.store.ok_or_else(|| {
-            CognitionError::Other("Memory store required for scene summary".into())
+            CognitionError::MissingProvider("Memory store required for scene summary".into())
         })?;
         load_active_scene_summary(store, ctx.session_id).await
     }
@@ -91,8 +91,9 @@ impl ContextManager {
             return;
         }
         let turns: Vec<HistoryEntry> = history[..compress_count].to_vec();
-        let turn_end = turn_count as i32;
-        let turn_start = (turn_end - (compress_count as i32 / 2).max(1)).max(0);
+        let turn_end = i32::try_from(turn_count).unwrap_or(i32::MAX);
+        let compress_msg_count = i32::try_from(compress_count / 2).unwrap_or(i32::MAX).max(1);
+        let turn_start = (turn_end - compress_msg_count).max(0);
 
         let input = CompressionTaskInput {
             session_id: session_id.to_string(),

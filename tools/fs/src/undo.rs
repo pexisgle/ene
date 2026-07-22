@@ -11,6 +11,18 @@ use uuid::Uuid;
 
 use crate::schema::fs_db_schema;
 
+#[derive(Debug, thiserror::Error)]
+pub enum UndoError {
+    #[error("database error: {0}")]
+    Db(#[from] ene_tool_db::DbError),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("value overflow: {0}")]
+    Overflow(String),
+}
+
 #[derive(Debug, Clone)]
 pub enum UndoOperation {
     RestoreFile {
@@ -67,7 +79,7 @@ impl UndoManager {
         socket_path: &Path,
         session_id: String,
         db_auth_token: Option<&str>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, UndoError> {
         let mut client = match db_auth_token {
             Some(t) => DbClient::connect_with_token(socket_path, t).await?,
             None => DbClient::connect(socket_path).await?,
@@ -84,7 +96,7 @@ impl UndoManager {
         self.session_id = session_id;
     }
 
-    pub async fn push(&self, mut entry: UndoEntry) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn push(&self, mut entry: UndoEntry) -> Result<(), UndoError> {
         let mut client = self.client.lock().await;
         entry.session_id = self.session_id.clone();
 
@@ -133,7 +145,12 @@ impl UndoManager {
                     None => DbValue::Null,
                 },
             );
-            op_row.insert("sort_order".to_string(), DbValue::Int(sort_order as i64));
+            op_row.insert(
+                "sort_order".to_string(),
+                DbValue::Int(
+                    i64::try_from(sort_order).map_err(|e| UndoError::Overflow(e.to_string()))?,
+                ),
+            );
 
             client.insert("fs_undo_operations", op_row).await?;
         }
@@ -154,7 +171,7 @@ impl UndoManager {
         );
 
         if let Err(e) = self.push(entry).await {
-            eprintln!("[UndoManager] Failed to push restore_file: {e}");
+            tracing::warn!("[UndoManager] Failed to push restore_file: {e}");
         }
     }
 
@@ -162,7 +179,7 @@ impl UndoManager {
         let entry = UndoEntry::new(tool_name, vec![UndoEntry::delete_created_file(path)]);
 
         if let Err(e) = self.push(entry).await {
-            eprintln!("[UndoManager] Failed to push delete_created_file: {e}");
+            tracing::warn!("[UndoManager] Failed to push delete_created_file: {e}");
         }
     }
 
@@ -180,7 +197,7 @@ impl UndoManager {
     /// add `id` as a secondary `DESC` order so the
     /// "most recent" entry is always the same one for
     /// a given `(timestamp, id)` pair.
-    pub async fn peek(&self) -> Result<Option<UndoEntry>, Box<dyn std::error::Error>> {
+    pub async fn peek(&self) -> Result<Option<UndoEntry>, UndoError> {
         let mut client = self.client.lock().await;
 
         let filter = DbFilter::eq("session_id", self.session_id.clone());
@@ -190,7 +207,7 @@ impl UndoManager {
                 "fs_undo_entries",
                 &["id", "tool_name", "timestamp"],
                 filter,
-                vec![DbOrderBy::desc("timestamp"), DbOrderBy::desc("id")],
+                &[DbOrderBy::desc("timestamp"), DbOrderBy::desc("id")],
                 Some(1),
             )
             .await?;
@@ -212,7 +229,7 @@ impl UndoManager {
                 "fs_undo_operations",
                 &["op_type", "path", "original_content"],
                 op_filter,
-                vec![DbOrderBy::desc("sort_order")],
+                &[DbOrderBy::desc("sort_order")],
                 None,
             )
             .await?;
@@ -273,7 +290,7 @@ impl UndoManager {
     /// discarded (e.g. by a duplicate call after a
     /// retry), the operation is a no-op and returns
     /// `Ok(())`.
-    pub async fn discard(&self, entry_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn discard(&self, entry_id: &str) -> Result<(), UndoError> {
         let mut client = self.client.lock().await;
 
         client
@@ -291,8 +308,25 @@ impl UndoManager {
         Ok(())
     }
 
-    pub async fn clear(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn clear(&self) -> Result<(), UndoError> {
         let mut client = self.client.lock().await;
+
+        let session_filter = DbFilter::eq("session_id", self.session_id.clone());
+
+        let entry_rows = client
+            .select("fs_undo_entries", &["id"], session_filter, &[], None)
+            .await?;
+
+        for row in &entry_rows {
+            if let Some(DbValue::Text(entry_id)) = row.get("id") {
+                client
+                    .delete(
+                        "fs_undo_operations",
+                        DbFilter::eq("entry_id", entry_id.clone()),
+                    )
+                    .await?;
+            }
+        }
 
         client
             .delete(

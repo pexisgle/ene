@@ -55,6 +55,13 @@ impl WlCompositor for Hyprland {
             });
         }
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("Invalid") || stdout.contains("error") {
+            return Err(ToolError::ExecutionFailed {
+                message: format!("hyprctl focus failed for '{title}': {stdout}"),
+            });
+        }
+
         Ok(format!("Focused window matching: {title}"))
     }
 }

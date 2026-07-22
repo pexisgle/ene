@@ -1,6 +1,5 @@
 //! `CCv3` lorebook → semantic memory compilation (#83).
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use ene_config::{CharacterCardV3, LorebookEntry, expand_cbs_macros};
@@ -15,6 +14,28 @@ pub const LOREBOOK_SOURCE_PREFIX: &str = "ccv3:lorebook:";
 /// Compiles lorebook entries into typed memory payloads.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LorebookIndexer;
+
+/// Produce a stable `u64` hash from arbitrary bytes using `blake3`.
+fn stable_hash_u64(data: &[u8]) -> u64 {
+    let hash = blake3::hash(data);
+    let bytes = hash.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
+/// A `Hasher` that appends written bytes to a buffer for blake3 hashing.
+struct StableHasher<'a>(&'a mut Vec<u8>);
+
+impl Hasher for StableHasher<'_> {
+    fn finish(&self) -> u64 {
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+}
 
 impl LorebookIndexer {
     /// Compile enabled lorebook entries into new memory items (no DB writes).
@@ -36,17 +57,17 @@ impl LorebookIndexer {
 
     /// Canonical hash of enabled lorebook entries for change detection.
     pub fn content_hash(card: &CharacterCardV3) -> u64 {
-        let mut hasher = DefaultHasher::new();
         let Some(book) = card.data.character_book.as_ref() else {
             return 0;
         };
-        for entry in book.entries.iter().filter(|e| e.enabled) {
-            stable_entry_id(entry, 0).hash(&mut hasher);
-            entry.keys.hash(&mut hasher);
-            entry.content.hash(&mut hasher);
-            entry.constant.hash(&mut hasher);
+        let mut buf = Vec::new();
+        for (index, entry) in book.entries.iter().enumerate().filter(|(_, e)| e.enabled) {
+            stable_entry_id(entry, index).hash(&mut StableHasher(&mut buf));
+            entry.keys.hash(&mut StableHasher(&mut buf));
+            entry.content.hash(&mut StableHasher(&mut buf));
+            entry.constant.hash(&mut StableHasher(&mut buf));
         }
-        hasher.finish()
+        stable_hash_u64(&buf)
     }
 }
 
@@ -101,7 +122,7 @@ fn compile_entry(
 }
 
 /// Stable identifier for a lorebook entry across reindexes.
-pub fn stable_entry_id(entry: &LorebookEntry, _index: usize) -> String {
+pub fn stable_entry_id(entry: &LorebookEntry, index: usize) -> String {
     if let Some(id) = &entry.id {
         let raw = id.to_string();
         let trimmed = raw.trim_matches('"');
@@ -109,11 +130,12 @@ pub fn stable_entry_id(entry: &LorebookEntry, _index: usize) -> String {
             return trimmed.to_string();
         }
     }
-    let mut hasher = DefaultHasher::new();
-    entry.insertion_order.hash(&mut hasher);
-    entry.keys.hash(&mut hasher);
-    entry.content.hash(&mut hasher);
-    format!("{}:{:x}", entry.insertion_order, hasher.finish())
+    let mut buf = Vec::new();
+    index.hash(&mut StableHasher(&mut buf));
+    entry.insertion_order.hash(&mut StableHasher(&mut buf));
+    entry.keys.hash(&mut StableHasher(&mut buf));
+    entry.content.hash(&mut StableHasher(&mut buf));
+    format!("{}:{:x}", entry.insertion_order, stable_hash_u64(&buf))
 }
 
 /// Match lorebook trigger keys against scan text (case-insensitive by default).

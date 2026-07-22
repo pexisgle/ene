@@ -36,14 +36,30 @@ impl ToolName {
         c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b':'
     }
 
-    /// Returns `true` if the name is non-empty and contains only valid characters.
+    /// Returns `true` if the name is non-empty, contains only valid
+    /// characters, and does not start/end with or contain consecutive
+    /// `.`/`:` separators.
     pub fn is_valid(name: &str) -> bool {
-        !name.is_empty()
-            && name.bytes().all(Self::valid_char)
-            && !name.starts_with('.')
-            && !name.ends_with('.')
-            && !name.starts_with(':')
-            && !name.ends_with(':')
+        if name.is_empty() {
+            return false;
+        }
+        let bytes = name.as_bytes();
+        if !bytes.iter().all(|&b| Self::valid_char(b)) {
+            return false;
+        }
+        let Some(&first) = bytes.first() else {
+            return false;
+        };
+        let Some(&last) = bytes.last() else {
+            return false;
+        };
+        if matches!(first, b'.' | b':') || matches!(last, b'.' | b':') {
+            return false;
+        }
+        // Reject consecutive separator characters (e.g. "a..b", "a::b", "a.:b").
+        !bytes
+            .windows(2)
+            .any(|w| matches!(w, [b'.' | b':', b'.' | b':']))
     }
 
     /// Construct a new `ToolName` from a string.
@@ -60,7 +76,8 @@ impl ToolName {
         let s = name.into();
         assert!(
             Self::is_valid(&s),
-            "Invalid ToolName: '{s}' — must be non-empty, contain only alphanumeric/_/./:, and not start/end with '.' or ':'"
+            "Invalid ToolName: '{s}' — must be non-empty, contain only alphanumeric/_/./:, \
+             not start/end with '.' or ':', and not contain consecutive '.'/':' separators"
         );
         Self(s)
     }
@@ -80,7 +97,8 @@ impl ToolName {
             Ok(Self(s))
         } else {
             Err(format!(
-                "Invalid ToolName: '{s}' — must be non-empty, contain only alphanumeric/_/./:, and not start/end with '.' or ':'"
+                "Invalid ToolName: '{s}' — must be non-empty, contain only alphanumeric/_/./:, \
+                 not start/end with '.' or ':', and not contain consecutive '.'/':' separators"
             ))
         }
     }
@@ -609,6 +627,19 @@ impl EmbeddingField {
             Self::Negative => "negative",
         }
     }
+
+    /// Parse from the index field name. Returns `None` for
+    /// unrecognized strings (e.g. legacy `"hyde"` rows).
+    pub fn from_field_name(s: &str) -> Option<Self> {
+        match s {
+            "summary" => Some(Self::Summary),
+            "description" => Some(Self::Description),
+            "capability" => Some(Self::Capability),
+            "example" => Some(Self::Example),
+            "negative" => Some(Self::Negative),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -790,6 +821,18 @@ mod tests {
         assert!(!ToolName::is_valid("has space"));
         assert!(!ToolName::is_valid("has-dash"));
         assert!(!ToolName::is_valid("has/slash"));
+    }
+
+    #[test]
+    fn tool_name_validation_rejects_consecutive_separators() {
+        assert!(!ToolName::is_valid("a..b"));
+        assert!(!ToolName::is_valid("a::b"));
+        assert!(!ToolName::is_valid("a.:b"));
+        assert!(!ToolName::is_valid("a:.b"));
+        assert!(!ToolName::is_valid("a...b"));
+        assert!(!ToolName::is_valid("a:::b"));
+        assert!(ToolName::try_new("a..b").is_err());
+        assert!(ToolName::try_new("a::b").is_err());
     }
 
     #[test]

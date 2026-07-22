@@ -21,6 +21,9 @@ pub enum EneRuntimeError {
     /// Tool host error.
     #[error(transparent)]
     Tool(#[from] ene_tool_host::EneToolHostError),
+    /// Tool RAG pipeline error.
+    #[error(transparent)]
+    ToolRag(#[from] ene_tool_rag::ToolRagError),
     /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,
@@ -30,12 +33,6 @@ pub enum EneRuntimeError {
     /// Bootstrap misconfiguration or internal failure.
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),
-}
-
-impl From<ene_tool_rag::ToolRagError> for EneRuntimeError {
-    fn from(value: ene_tool_rag::ToolRagError) -> Self {
-        Self::Bootstrap(value.to_string())
-    }
 }
 
 impl From<ene_ai::LlmProviderError> for EneRuntimeError {

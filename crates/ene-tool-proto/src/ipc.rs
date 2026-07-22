@@ -203,6 +203,11 @@ pub struct CallContext {
 }
 
 /// Accessor for tool configuration.
+///
+/// Cheap to clone (shares the underlying `Arc<RwLock<…>>`), so it can be
+/// handed to multiple tasks that need concurrent read/write access to the
+/// same config value.
+#[derive(Clone)]
 pub struct ToolConfigAccessor {
     config: std::sync::Arc<tokio::sync::RwLock<serde_json::Value>>,
 }
@@ -569,5 +574,107 @@ mod tests {
             return;
         };
         assert_eq!(result.unwrap(), big_content);
+    }
+
+    // ── ToolConfigAccessor tests ────────────────────────────────────
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct SampleConfig {
+        threshold: u32,
+        label: String,
+    }
+
+    #[tokio::test]
+    async fn config_accessor_get_success() {
+        let accessor = ToolConfigAccessor::new(serde_json::json!({
+            "threshold": 42,
+            "label": "hello"
+        }));
+        let cfg: SampleConfig = accessor.get().await.unwrap();
+        assert_eq!(cfg.threshold, 42);
+        assert_eq!(cfg.label, "hello");
+    }
+
+    #[tokio::test]
+    async fn config_accessor_get_type_mismatch() {
+        let accessor = ToolConfigAccessor::new(serde_json::json!({
+            "threshold": "not_a_number",
+            "label": 123
+        }));
+        let result: Result<SampleConfig, _> = accessor.get().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("does not match expected type"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn config_accessor_set_success() {
+        let accessor = ToolConfigAccessor::new(serde_json::json!({}));
+        let new_cfg = SampleConfig {
+            threshold: 99,
+            label: "updated".into(),
+        };
+        accessor.set(&new_cfg).await.unwrap();
+        let got: SampleConfig = accessor.get().await.unwrap();
+        assert_eq!(got, new_cfg);
+    }
+
+    #[tokio::test]
+    async fn config_accessor_set_overwrites_previous_value() {
+        let accessor = ToolConfigAccessor::new(serde_json::json!({"threshold": 1, "label": "a"}));
+        accessor
+            .set(&SampleConfig {
+                threshold: 2,
+                label: "b".into(),
+            })
+            .await
+            .unwrap();
+        accessor
+            .set(&SampleConfig {
+                threshold: 3,
+                label: "c".into(),
+            })
+            .await
+            .unwrap();
+        let got: SampleConfig = accessor.get().await.unwrap();
+        assert_eq!(got.threshold, 3);
+        assert_eq!(got.label, "c");
+    }
+
+    #[tokio::test]
+    async fn config_accessor_concurrent_read_write() {
+        let accessor =
+            ToolConfigAccessor::new(serde_json::json!({"threshold": 0, "label": "init"}));
+        let writer = accessor.clone();
+        let writer_handle = tokio::spawn(async move {
+            for i in 0..50u32 {
+                let cfg = SampleConfig {
+                    threshold: i,
+                    label: format!("iter-{i}"),
+                };
+                writer.set(&cfg).await.unwrap();
+            }
+        });
+
+        let reader = accessor.clone();
+        let reader_handle = tokio::spawn(async move {
+            for _ in 0..50 {
+                // Reads must always produce a valid SampleConfig (never a
+                // torn or partially-written value).
+                let cfg: SampleConfig = reader.get().await.unwrap();
+                assert!(cfg.label.starts_with("iter-") || cfg.label == "init");
+            }
+        });
+
+        writer_handle.await.unwrap();
+        reader_handle.await.unwrap();
+
+        // Final value must be the last written.
+        let final_cfg: SampleConfig = accessor.get().await.unwrap();
+        assert_eq!(final_cfg.threshold, 49);
+        assert_eq!(final_cfg.label, "iter-49");
     }
 }

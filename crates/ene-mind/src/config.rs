@@ -75,6 +75,8 @@ pub struct ContextConfig {
     pub arc_span_threshold: usize,
     /// Timeout in seconds for a single compression summarization call.
     pub compression_timeout_secs: u64,
+    /// Prompt library language for compression summarizer (`en` or `ja`).
+    pub compression_language: String,
 }
 
 impl Default for ContextConfig {
@@ -90,6 +92,7 @@ impl Default for ContextConfig {
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
+            compression_language: "en".into(),
         }
     }
 }
@@ -430,6 +433,14 @@ impl Default for ProactiveDecisionConfig {
 ///
 /// Default is disabled so existing chat behaviour is unchanged until the user
 /// explicitly opts in.
+///
+/// **Note:** Several fields use `skip_deserializing` / `skip_serializing` and are
+/// invisible in the JSON schema and settings file. These fields always use struct
+/// defaults and are part of a staged rollout — they will be exposed in a future
+/// release once the proactive system is fully validated. Affected fields include:
+/// `max_turns_per_session`, `decision_timeout_seconds`, `generation_timeout_seconds`,
+/// `decision`, `allow_tools`, `max_conversation_chars`, `max_activity_chars`,
+/// `max_screen_summary_chars`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -440,10 +451,8 @@ pub struct ProactiveConfig {
     #[serde(deserialize_with = "deserialize_positive_u64")]
     pub interval_seconds: u64,
     /// Suppress decisions until this many seconds after the last user input.
-    #[serde(deserialize_with = "deserialize_non_negative_u64")]
     pub min_idle_seconds: u64,
     /// Suppress further proactive speech after a proactive utterance.
-    #[serde(deserialize_with = "deserialize_non_negative_u64")]
     pub cooldown_seconds: u64,
     /// Maximum proactive utterances per conversation session.
     #[serde(
@@ -532,14 +541,6 @@ where
     use ::ene_config::serde::Deserialize;
     let value = u64::deserialize(deserializer)?;
     Ok(value.max(1))
-}
-
-fn deserialize_non_negative_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: ::ene_config::serde::Deserializer<'de>,
-{
-    use ::ene_config::serde::Deserialize;
-    u64::deserialize(deserializer)
 }
 
 const fn default_max_turns_per_session() -> usize {
@@ -680,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn proactive_decision_confidence_uses_default() {
+    fn proactive_decision_out_of_range_confidence_is_clamped() {
         let cfg: ProactiveConfig =
             serde_json::from_str(r#"{"decision":{"min_confidence": 1.5}}"#).expect("deserialize");
         assert!((cfg.decision.min_confidence - 0.55).abs() < f64::EPSILON);

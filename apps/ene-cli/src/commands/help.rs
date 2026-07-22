@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use async_trait::async_trait;
 
@@ -18,7 +18,7 @@ impl CliCommand for HelpCommand {
         "/help"
     }
 
-    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, _arg: &str, _ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         println!(
             "{}",
             i18n_embed_fl::fl!(crate::i18n::loader(), "help-commands-title")
@@ -31,6 +31,6 @@ impl CliCommand for HelpCommand {
         for cmd in crate::commands::COMMANDS {
             println!("  {:<24} - {}", cmd.usage(), cmd.description());
         }
-        Ok(())
+        Ok(CommandOutcome::Continue)
     }
 }

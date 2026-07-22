@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use async_trait::async_trait;
 use ene_config::load_character_card;
@@ -19,7 +19,7 @@ impl CliCommand for CardCommand {
         "/card <name>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         if arg.is_empty() {
             return Err(CliError::UsageError {
                 usage: self.usage().to_string(),
@@ -28,13 +28,13 @@ impl CliCommand for CardCommand {
 
         let name = arg.to_string();
         let card = load_character_card(&name)
-            .map_err(|e| CliError::DatabaseError(format!("Failed to load card: {e}")))?;
+            .map_err(|e| CliError::ExecutionFailed(format!("Failed to load card: {e}")))?;
         ctx.handle
             .diagnostics()
             .set_character(card)
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to load character card: {e}")))?;
         println!("Character card loaded: {name}");
-        Ok(())
+        Ok(CommandOutcome::Continue)
     }
 }

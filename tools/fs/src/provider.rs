@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use ene_tool_common::{ActionSetProvider, ToolAction};
 use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
+use crate::utils::SandboxRef;
 use crate::utils::sandbox::Sandbox;
 
 /// Built-in filesystem tool provider.
@@ -16,7 +17,7 @@ pub struct FsToolProvider {
 impl FsToolProvider {
     /// Creates a new filesystem tool provider with all FS actions registered.
     pub fn new() -> Self {
-        let sandbox = Arc::new(RwLock::new(None));
+        let sandbox: SandboxRef = Arc::new(std::sync::RwLock::new(None));
         let actions: Vec<Box<dyn ToolAction>> = vec![
             Box::new(crate::action::read::FsReadAction::new(sandbox.clone())),
             Box::new(crate::action::write::FsWriteAction::new(sandbox.clone())),
@@ -40,7 +41,7 @@ impl FsToolProvider {
         let revoke_sandbox = sandbox;
 
         let inner = ActionSetProvider::new(actions)
-            .with_set_call_context_hook(move |conv_id| {
+            .with_set_call_context_hook(move |conv_id, _turn_id| {
                 let guard = session_sandbox
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);

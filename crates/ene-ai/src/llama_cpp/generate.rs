@@ -76,7 +76,7 @@ fn generate_chat_text(
             .new_context(backend, ctx_params)
             .map_err(|e| map_llama_err("failed to create llama context", e))?;
 
-        let prompt = apply_messages_template(&loaded.model, messages, false)?;
+        let prompt = apply_messages_template(loaded, messages, false)?;
         let tokens = loaded
             .model
             .str_to_token(&prompt, AddBos::Always)
@@ -175,7 +175,7 @@ fn generate_chat_vision_with_bitmaps(
             .new_context(backend, ctx_params)
             .map_err(|e| map_llama_err("failed to create llama context", e))?;
 
-        let prompt = apply_messages_template(&loaded.model, messages, true)?;
+        let prompt = apply_messages_template(loaded, messages, true)?;
         let bitmaps: Vec<MtmdBitmap> = images
             .iter()
             .map(|(w, h, rgb)| {
@@ -291,16 +291,16 @@ fn build_sampler(
             .map_err(|e| map_llama_err("grammar sampler", e))?;
         chain.push(grammar_sampler);
     }
-    chain.push(LlamaSampler::temp(0.0));
     chain.push(LlamaSampler::greedy());
     Ok(LlamaSampler::chain_simple(chain))
 }
 
 fn apply_messages_template(
-    model: &LlamaModel,
+    loaded: &LoadedModel,
     messages: &[LlmMessage],
     with_media_markers: bool,
 ) -> Result<String, LlmProviderError> {
+    let model = &loaded.model;
     let chat: Vec<LlamaChatMessage> = messages
         .iter()
         .map(|m| llm_message_to_chat(m, with_media_markers))
@@ -310,16 +310,43 @@ fn apply_messages_template(
         Ok(tmpl) => match model.apply_chat_template(&tmpl, &chat, true) {
             Ok(prompt) => Ok(prompt),
             Err(e) => {
-                // Gemma 4 Jinja is too complex for llama_chat_apply_template (FFI -1).
-                tracing::debug!(
+                let model_lower = loaded.model_name.to_ascii_lowercase();
+                let is_gemma = model_lower.contains("gemma");
+                if is_gemma {
+                    tracing::debug!(
+                        component = "LlamaCpp",
+                        error = %e,
+                        "apply_chat_template failed; using Gemma 4 turn fallback"
+                    );
+                    Ok(format_gemma4_prompt(messages, with_media_markers))
+                } else {
+                    tracing::warn!(
+                        component = "LlamaCpp",
+                        error = %e,
+                        model = %loaded.model_name,
+                        "apply_chat_template failed for non-Gemma model; using Gemma 4 fallback \
+                         which may produce incorrect output"
+                    );
+                    Ok(format_gemma4_prompt(messages, with_media_markers))
+                }
+            }
+        },
+        Err(e) => {
+            let model_lower = loaded.model_name.to_ascii_lowercase();
+            let is_gemma = model_lower.contains("gemma");
+            if is_gemma {
+                Ok(format_gemma4_prompt(messages, with_media_markers))
+            } else {
+                tracing::warn!(
                     component = "LlamaCpp",
                     error = %e,
-                    "apply_chat_template failed; using Gemma 4 turn fallback"
+                    model = %loaded.model_name,
+                    "no chat template available for non-Gemma model; using Gemma 4 fallback \
+                     which may produce incorrect output"
                 );
                 Ok(format_gemma4_prompt(messages, with_media_markers))
             }
-        },
-        Err(_) => Ok(format_gemma4_prompt(messages, with_media_markers)),
+        }
     }
 }
 

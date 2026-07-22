@@ -5,6 +5,7 @@ use crate::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Starts a tool provider as an IPC server
 ///
@@ -56,6 +57,8 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
 
     let provider: Arc<dyn ToolProvider> = provider.into();
     let shutdown = Arc::new(tokio::sync::Notify::new());
+    let tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
     #[cfg(unix)]
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -71,7 +74,8 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
                 let mut stream = result?;
                 let provider = Arc::clone(&provider);
                 let shutdown = Arc::clone(&shutdown);
-                tokio::spawn(async move {
+                let tasks = Arc::clone(&tasks);
+                let handle = tokio::spawn(async move {
                     loop {
                         match read_ipc_request(&mut stream).await {
                             Ok(None) => break,
@@ -99,6 +103,7 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
                         }
                     }
                 });
+                tasks.lock().await.push(handle);
             }
             () = shutdown.notified() => {
                 break;
@@ -111,6 +116,18 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
                 tracing::info!(component = "ToolServer", "Received SIGTERM, shutting down");
                 break;
             }
+        }
+    }
+
+    // Join all spawned connection tasks before cleanup. This prevents
+    // orphaned tasks from writing to a closed socket or holding
+    // references to the provider Arc after the server has exited.
+    {
+        let mut guard = tasks.lock().await;
+        let handles: Vec<_> = guard.drain(..).collect();
+        drop(guard);
+        for handle in handles {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
         }
     }
 

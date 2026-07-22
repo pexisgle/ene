@@ -203,7 +203,13 @@ pub struct ToolRag {
     /// In-memory cache of tool embedding vectors.
     /// Populated by `ensure_index`, used by select. Avoids
     /// deserializing all f32 vecs from `SQLite` every turn.
-    cached_field_rows: RwLock<Vec<CachedFieldRow>>,
+    /// Wrapped in `Arc` so `select` can clone the handle instead
+    /// of copying every cached embedding vector per query.
+    #[expect(
+        clippy::rc_buffer,
+        reason = "Arc<Vec> is intentional: select clones the handle, not the embeddings"
+    )]
+    cached_field_rows: RwLock<Arc<Vec<CachedFieldRow>>>,
 }
 
 impl ToolRag {
@@ -220,7 +226,7 @@ impl ToolRag {
             specs: RwLock::new(HashMap::new()),
             profiles: RwLock::new(HashMap::new()),
             last_specs_hash: AtomicU64::new(0),
-            cached_field_rows: RwLock::new(Vec::new()),
+            cached_field_rows: RwLock::new(Arc::new(Vec::new())),
         }
     }
 
@@ -416,21 +422,19 @@ impl ToolRag {
             Ok(rows) => {
                 let mapped: Vec<CachedFieldRow> = rows
                     .into_iter()
-                    .map(
-                        |(tool_name, field, _field_key, _hash, _model, embedding, _src)| {
-                            CachedFieldRow {
-                                tool_name,
-                                field,
-                                embedding,
-                            }
-                        },
-                    )
+                    .filter_map(|row| {
+                        Some(CachedFieldRow {
+                            tool_name: row.tool_name,
+                            field: EmbeddingField::from_field_name(&row.field)?,
+                            embedding: row.embedding,
+                        })
+                    })
                     .collect();
                 let mut cache_write = self
                     .cached_field_rows
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *cache_write = mapped;
+                *cache_write = Arc::new(mapped);
             }
             Err(e) => {
                 tracing::warn!(
@@ -518,21 +522,13 @@ impl ToolRag {
     /// Select the most relevant tools using a pre-computed query embedding.
     #[expect(
         deprecated,
-        reason = "read deprecated use_hyde / hyde weight for warn and scoring match arms"
+        reason = "read deprecated use_hyde for the no-op deprecation warning"
     )]
     pub async fn select_with_embedding(
         &self,
         query: &str,
         query_embedding: &[f32],
     ) -> Vec<ToolSpec> {
-        let is_zero_norm = |emb: &[f32]| {
-            if emb.is_empty() {
-                return true;
-            }
-            let norm_sq: f32 = emb.iter().map(|&x| x * x).sum();
-            norm_sq == 0.0 || norm_sq.is_nan()
-        };
-
         if is_zero_norm(query_embedding) {
             return self.forced_only_specs();
         }
@@ -546,17 +542,16 @@ impl ToolRag {
             return self.forced_only_specs();
         };
 
-        let query_vec = query_embedding.to_vec();
-
         if self.opts.use_hyde {
             tracing::warn!(
                 component = "ToolRag",
                 "use_hyde is deprecated and ignored (LLM HyDE disabled; scheduled for removal)"
             );
         }
-        let t_hyde = t_start.elapsed();
 
-        let cached_rows = {
+        // Clone the `Arc` handle (not the embeddings) so the read
+        // lock is released before any `.await` below.
+        let cached_rows: Option<Arc<Vec<CachedFieldRow>>> = {
             let cache = self
                 .cached_field_rows
                 .read()
@@ -564,124 +559,82 @@ impl ToolRag {
             if cache.is_empty() {
                 None
             } else {
-                Some(cache.clone())
+                Some(Arc::clone(&cache))
             }
         };
 
-        let field_rows: Vec<CachedFieldRow> = match cached_rows {
+        let field_rows: Arc<Vec<CachedFieldRow>> = match cached_rows {
             Some(rows) => rows,
             None => match store.list_tool_embedding_fields().await {
                 Ok(rows) => {
                     let mapped: Vec<CachedFieldRow> = rows
                         .into_iter()
-                        .map(
-                            |(tool_name, field, _field_key, _hash, _model, embedding, _src)| {
-                                CachedFieldRow {
-                                    tool_name,
-                                    field,
-                                    embedding,
-                                }
-                            },
-                        )
+                        .filter_map(|row| {
+                            Some(CachedFieldRow {
+                                tool_name: row.tool_name,
+                                field: EmbeddingField::from_field_name(&row.field)?,
+                                embedding: row.embedding,
+                            })
+                        })
                         .collect();
+                    let shared = Arc::new(mapped);
                     let mut cache_write = self
                         .cached_field_rows
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    cache_write.clone_from(&mapped);
-                    mapped
+                    *cache_write = Arc::clone(&shared);
+                    shared
                 }
                 Err(e) => {
                     tracing::warn!(component = "ToolRag", error = %e, "Could not load embeddings");
-                    Vec::new()
+                    Arc::new(Vec::new())
                 }
             },
         };
         let t_load = t_start.elapsed();
 
-        let w = &self.opts.weights;
-        let mut per_tool: HashMap<String, f32> = HashMap::new();
-
-        for row in &field_rows {
-            if is_zero_norm(&row.embedding) {
-                continue;
-            }
-            let sim = cosine_similarity(&query_vec, &row.embedding);
-
-            let weight = match row.field.as_str() {
-                "summary" => w.summary,
-                "description" => w.description,
-                "capability" => w.capability,
-                "example" => w.example,
-                "negative" => w.negative,
-                "hyde" => w.hyde,
-                _ => 1.0,
-            };
-
-            *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += sim * weight;
-        }
-
-        let mut scored: Vec<(String, f32)> = per_tool
-            .into_iter()
-            .filter(|(_, s)| *s >= self.opts.min_similarity)
-            .collect();
-
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Apply per-category limits (drop lowest-scoring extras).
-        if !self.opts.per_category_limits.is_empty() {
-            let profiles = self
+        let scored = score_tools(
+            &field_rows,
+            query_embedding,
+            &self.opts.weights,
+            self.opts.min_similarity,
+            &self.opts.per_category_limits,
+            &self
                 .profiles
                 .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut category_counts: HashMap<String, usize> = HashMap::new();
-            scored.retain(|(name, _)| {
-                let Ok(tn) = ToolName::try_new(name.clone()) else {
-                    return false;
-                };
-                let Some(profile) = profiles.get(&tn) else {
-                    return true;
-                };
-                let key = profile.category.config_key().to_string();
-                let Some(&limit) = self.opts.per_category_limits.get(&key) else {
-                    return true;
-                };
-                let count = category_counts.entry(key).or_insert(0);
-                if *count >= limit {
-                    return false;
-                }
-                *count += 1;
-                true
-            });
-        }
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
 
         // Cap to top_k before rerank.
+        let mut scored = scored;
         if scored.len() > self.opts.top_k {
             scored.truncate(self.opts.top_k);
         }
 
-        let all_specs = {
-            let map = self
+        // Clone only the specs we actually return, instead of cloning
+        // the entire specs map up front. The guard is scoped so it
+        // is dropped before the rerank `.await` below.
+        let mut candidates: Vec<(ToolSpec, f32)> = {
+            let all_specs = self
                 .specs
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            map.clone()
-        };
-
-        let take_n = self.opts.rerank_candidates.min(scored.len());
-        let mut candidates: Vec<(ToolSpec, f32)> = Vec::with_capacity(take_n);
-        for (name, score) in scored.iter().take(take_n) {
-            match ToolName::try_new(name.clone()) {
-                Ok(tn) => {
-                    if let Some(spec) = all_specs.get(&tn) {
-                        candidates.push((spec.clone(), *score));
+            let take_n = self.opts.rerank_candidates.min(scored.len());
+            let mut out: Vec<(ToolSpec, f32)> = Vec::with_capacity(take_n);
+            for (name, score) in scored.iter().take(take_n) {
+                match ToolName::try_new(name.clone()) {
+                    Ok(tn) => {
+                        if let Some(spec) = all_specs.get(&tn) {
+                            out.push((spec.clone(), *score));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(component = "ToolRag", error = %e, "Skipping invalid tool name in RAG index");
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(component = "ToolRag", error = %e, "Skipping invalid tool name in RAG index");
-                }
             }
-        }
+            out
+        };
         let t_score = t_start.elapsed();
 
         if self.opts.use_rerank && candidates.len() > 1 {
@@ -721,14 +674,17 @@ impl ToolRag {
         let t_rerank = t_start.elapsed();
         tracing::debug!(
             component = "ToolRag",
-            "Timings: hyde={:?}, load={:?}, score={:?}, rerank={:?}",
-            t_hyde,
-            t_load.checked_sub(t_hyde).unwrap_or_default(),
-            t_score.checked_sub(t_load).unwrap_or_default(),
-            t_rerank.checked_sub(t_score).unwrap_or_default()
+            load = ?t_load,
+            score = ?t_score.checked_sub(t_load).unwrap_or_default(),
+            rerank = ?t_rerank.checked_sub(t_score).unwrap_or_default(),
+            "RAG selection timings"
         );
 
         {
+            let all_specs = self
+                .specs
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let result_names: Vec<ToolName> = result.iter().map(|s| s.name.clone()).collect();
             for forced_name in self.opts.forced.iter().rev() {
                 if !result_names.contains(forced_name)
@@ -800,8 +756,80 @@ impl ToolRag {
 #[derive(Debug, Clone)]
 struct CachedFieldRow {
     tool_name: String,
-    field: String,
+    field: EmbeddingField,
     embedding: Vec<f32>,
+}
+
+/// `true` when the embedding is empty, all-zero, or contains NaN.
+fn is_zero_norm(emb: &[f32]) -> bool {
+    if emb.is_empty() {
+        return true;
+    }
+    let norm_sq: f32 = emb.iter().map(|&x| x * x).sum();
+    norm_sq == 0.0 || norm_sq.is_nan()
+}
+
+/// Core scoring + filtering pipeline, extracted for testability.
+///
+/// Returns `(tool_name, score)` pairs sorted descending by score,
+/// filtered by `min_similarity` and per-category limits.
+fn score_tools(
+    field_rows: &[CachedFieldRow],
+    query_embedding: &[f32],
+    weights: &FieldWeights,
+    min_similarity: f32,
+    per_category_limits: &HashMap<String, usize>,
+    profiles: &HashMap<ToolName, ToolRagProfile>,
+) -> Vec<(String, f32)> {
+    let mut per_tool: HashMap<String, f32> = HashMap::new();
+
+    for row in field_rows {
+        if is_zero_norm(&row.embedding) {
+            continue;
+        }
+        let sim = cosine_similarity(query_embedding, &row.embedding);
+
+        let weight = match row.field {
+            EmbeddingField::Summary => weights.summary,
+            EmbeddingField::Description => weights.description,
+            EmbeddingField::Capability => weights.capability,
+            EmbeddingField::Example => weights.example,
+            EmbeddingField::Negative => weights.negative,
+        };
+
+        *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += sim * weight;
+    }
+
+    let mut scored: Vec<(String, f32)> = per_tool
+        .into_iter()
+        .filter(|(_, s)| *s >= min_similarity)
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    if !per_category_limits.is_empty() {
+        let mut category_counts: HashMap<String, usize> = HashMap::new();
+        scored.retain(|(name, _)| {
+            let Ok(tn) = ToolName::try_new(name.clone()) else {
+                return false;
+            };
+            let Some(profile) = profiles.get(&tn) else {
+                return true;
+            };
+            let key = profile.category.config_key().to_string();
+            let Some(&limit) = per_category_limits.get(&key) else {
+                return true;
+            };
+            let count = category_counts.entry(key).or_insert(0);
+            if *count >= limit {
+                return false;
+            }
+            *count += 1;
+            true
+        });
+    }
+
+    scored
 }
 
 /// Compute a content-based version hash for a single field.
@@ -988,5 +1016,135 @@ mod tests {
             assert!(!opts.use_hyde);
         }
         assert!(!opts.use_rerank);
+    }
+
+    // ── score_tools / selection pipeline tests ─────────────────────────────
+
+    fn row(tool: &str, field: EmbeddingField, embedding: Vec<f32>) -> CachedFieldRow {
+        CachedFieldRow {
+            tool_name: tool.into(),
+            field,
+            embedding,
+        }
+    }
+
+    #[test]
+    fn is_zero_norm_detects_empty_zero_and_nan() {
+        assert!(is_zero_norm(&[]));
+        assert!(is_zero_norm(&[0.0, 0.0, 0.0]));
+        assert!(is_zero_norm(&[f32::NAN, 1.0]));
+        assert!(!is_zero_norm(&[1.0, 0.0]));
+    }
+
+    #[test]
+    fn score_tools_ranks_by_weighted_similarity() {
+        // query points along the x-axis.
+        let query = vec![1.0, 0.0];
+        let rows = vec![
+            row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
+            row("b", EmbeddingField::Summary, vec![0.0, 1.0]),
+        ];
+        let weights = FieldWeights::default();
+        let scored = score_tools(
+            &rows,
+            &query,
+            &weights,
+            0.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(scored.len(), 2);
+        // "a" is perfectly aligned; "b" is orthogonal (score 0).
+        assert_eq!(scored[0].0, "a");
+        assert!(scored[0].1 > scored[1].1);
+    }
+
+    #[test]
+    fn score_tools_filters_below_min_similarity() {
+        let query = vec![1.0, 0.0];
+        let rows = vec![
+            row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
+            row("b", EmbeddingField::Summary, vec![0.0, 1.0]),
+        ];
+        let weights = FieldWeights::default();
+        // min_similarity = 0.5 filters out the orthogonal "b".
+        let scored = score_tools(
+            &rows,
+            &query,
+            &weights,
+            0.5,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(scored.len(), 1);
+        assert_eq!(scored[0].0, "a");
+    }
+
+    #[test]
+    fn score_tools_skips_zero_norm_rows() {
+        let query = vec![1.0, 0.0];
+        let rows = vec![
+            row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
+            row("b", EmbeddingField::Summary, vec![0.0, 0.0]),
+        ];
+        let weights = FieldWeights::default();
+        let scored = score_tools(
+            &rows,
+            &query,
+            &weights,
+            0.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(scored.len(), 1);
+        assert_eq!(scored[0].0, "a");
+    }
+
+    #[test]
+    fn score_tools_applies_per_category_limits() {
+        let query = vec![1.0, 0.0];
+        // Two tools in the same category; limit to 1.
+        let rows = vec![
+            row("utility.a", EmbeddingField::Summary, vec![1.0, 0.0]),
+            row("utility.b", EmbeddingField::Summary, vec![0.9, 0.1]),
+        ];
+        let weights = FieldWeights::default();
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            ToolName::new("utility.a"),
+            profile("utility.a", ToolCategory::Utility),
+        );
+        profiles.insert(
+            ToolName::new("utility.b"),
+            profile("utility.b", ToolCategory::Utility),
+        );
+        let mut limits = HashMap::new();
+        limits.insert("Utility".to_string(), 1);
+
+        let scored = score_tools(&rows, &query, &weights, 0.0, &limits, &profiles);
+        assert_eq!(scored.len(), 1);
+        assert_eq!(scored[0].0, "utility.a");
+    }
+
+    #[test]
+    fn score_tools_negative_weight_penalizes() {
+        let query = vec![1.0, 0.0];
+        // "a" has a strong negative-field match; its score should be reduced.
+        let rows = vec![
+            row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
+            row("a", EmbeddingField::Negative, vec![1.0, 0.0]),
+            row("b", EmbeddingField::Summary, vec![0.8, 0.0]),
+        ];
+        let weights = FieldWeights::default();
+        let scored = score_tools(
+            &rows,
+            &query,
+            &weights,
+            -10.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        // "a" score = 1.0*1.0 + 1.0*(-0.5) = 0.5; "b" score = 0.8*1.0 = 0.8.
+        assert_eq!(scored[0].0, "b");
     }
 }

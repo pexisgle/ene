@@ -4,7 +4,7 @@
 //! and **never** send user data. Results are cached in a [`ProviderHealthMonitor`]
 //! with a configurable TTL so repeated turns do not re-probe on every call.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,9 @@ pub enum ProviderHealthStatus {
 
 impl ProviderHealthStatus {
     /// Whether the provider is usable for a chat request right now.
+    ///
+    /// `Unknown` returns `true` so unprobed providers can be used during
+    /// bootstrap without requiring an upfront health check.
     #[must_use]
     pub const fn is_available(&self) -> bool {
         matches!(self, Self::Healthy | Self::Degraded { .. } | Self::Unknown)
@@ -190,7 +193,7 @@ struct MonitorInner {
     /// How long a cached report is considered fresh.
     ttl: Duration,
     /// Recent fallback events (bounded ring buffer).
-    fallback_history: Vec<FallbackRecord>,
+    fallback_history: VecDeque<FallbackRecord>,
     /// Maximum fallback records to retain.
     max_history: usize,
 }
@@ -213,7 +216,7 @@ impl ProviderHealthMonitor {
             inner: Arc::new(Mutex::new(MonitorInner {
                 reports: HashMap::new(),
                 ttl,
-                fallback_history: Vec::new(),
+                fallback_history: VecDeque::new(),
                 max_history,
             })),
         }
@@ -249,9 +252,9 @@ impl ProviderHealthMonitor {
     pub fn record_fallback(&self, from: &str, to: &str, reason: &str) {
         let mut inner = self.inner.lock();
         if inner.fallback_history.len() >= inner.max_history {
-            inner.fallback_history.remove(0);
+            inner.fallback_history.pop_front();
         }
-        inner.fallback_history.push(FallbackRecord {
+        inner.fallback_history.push_back(FallbackRecord {
             from: from.to_string(),
             to: to.to_string(),
             reason: reason.to_string(),
@@ -262,7 +265,7 @@ impl ProviderHealthMonitor {
     /// Snapshot of recent fallback events (newest last).
     pub fn fallback_history(&self) -> Vec<FallbackRecord> {
         let inner = self.inner.lock();
-        inner.fallback_history.clone()
+        inner.fallback_history.iter().cloned().collect()
     }
 
     /// Snapshot of all cached health reports.

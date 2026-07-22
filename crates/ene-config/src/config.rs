@@ -1,29 +1,28 @@
 use crate::error::EneConfigError;
 use schemars::JsonSchema;
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Global singleton holding the active [`EneConfig`].
-pub static GLOBAL_CONFIG: std::sync::OnceLock<std::sync::RwLock<EneConfig>> =
+///
+/// Uses `parking_lot::RwLock` which does not poison on panic, matching the
+/// `ConfigStore` lock strategy.
+pub static GLOBAL_CONFIG: std::sync::OnceLock<parking_lot::RwLock<EneConfig>> =
     std::sync::OnceLock::new();
 
 /// Updates the global `EneConfig`
 pub fn update_global_config(config: EneConfig) {
     if let Some(lock) = GLOBAL_CONFIG.get() {
-        if let Ok(mut guard) = lock.write() {
-            *guard = config;
-        }
+        *lock.write() = config;
     } else {
-        let _ = GLOBAL_CONFIG.set(std::sync::RwLock::new(config));
+        let _ = GLOBAL_CONFIG.set(parking_lot::RwLock::new(config));
     }
 }
 
 /// Gets a clone of the entire global config
 pub fn get_global_config() -> EneConfig {
-    if let Some(lock) = GLOBAL_CONFIG.get()
-        && let Ok(guard) = lock.read()
-    {
-        return guard.clone();
+    if let Some(lock) = GLOBAL_CONFIG.get() {
+        return lock.read().clone();
     }
     EneConfig::default()
 }
@@ -45,16 +44,14 @@ pub fn get_global_section<T>() -> T
 where
     T: serde::de::DeserializeOwned + Default + HasConfigKey,
 {
-    if let Some(lock) = GLOBAL_CONFIG.get()
-        && let Ok(guard) = lock.read()
-    {
-        return guard.get_section::<T>().unwrap_or_default();
+    if let Some(lock) = GLOBAL_CONFIG.get() {
+        return lock.read().get_section::<T>().unwrap_or_default();
     }
     T::default()
 }
 
 /// The target of the configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigTarget {
     /// Config belongs to settings.json
     Settings,
@@ -72,7 +69,7 @@ pub struct SchemaEntry {
     pub parent_key: Option<String>,
 }
 
-static SCHEMA_REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, SchemaEntry>>> =
+static SCHEMA_REGISTRY: std::sync::OnceLock<parking_lot::Mutex<HashMap<String, SchemaEntry>>> =
     std::sync::OnceLock::new();
 
 /// Registers schemas collected from tools or compile-time config structs
@@ -83,17 +80,16 @@ pub fn register_config_schema<T: JsonSchema + HasConfigKey>(
 ) {
     let schema_gen = schemars::SchemaGenerator::default();
     let schema = schema_gen.into_root_schema_for::<T>();
-    let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    if let Ok(mut reg) = registry.lock() {
-        reg.insert(
-            T::KEY.to_string(),
-            SchemaEntry {
-                schema,
-                target,
-                parent_key: parent_key.map(String::from),
-            },
-        );
-    }
+    let registry = SCHEMA_REGISTRY.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+    let mut reg = registry.lock();
+    reg.insert(
+        T::KEY.to_string(),
+        SchemaEntry {
+            schema,
+            target,
+            parent_key: parent_key.map(String::from),
+        },
+    );
 }
 
 /// Tool schema registration helper
@@ -101,36 +97,38 @@ pub fn register_config_schema<T: JsonSchema + HasConfigKey>(
 pub fn register_tool_schema<T: JsonSchema>(tool_name: &str) {
     let schema_gen = schemars::SchemaGenerator::default();
     let schema = schema_gen.into_root_schema_for::<T>();
-    let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    if let Ok(mut reg) = registry.lock() {
-        reg.insert(
-            tool_name.to_string(),
-            SchemaEntry {
-                schema,
-                target: ConfigTarget::Settings,
-                parent_key: Some("tools_map".to_string()),
-            },
-        );
-    }
+    let registry = SCHEMA_REGISTRY.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+    let mut reg = registry.lock();
+    reg.insert(
+        tool_name.to_string(),
+        SchemaEntry {
+            schema,
+            target: ConfigTarget::Settings,
+            parent_key: Some("tools_map".to_string()),
+        },
+    );
 }
 
-/// Registers schemas collected at runtime
-pub fn register_runtime_schema(key: &str, schema: serde_json::Value) {
-    let root_schema: schemars::Schema = serde_json::from_value(schema).unwrap_or_else(|e| {
-        tracing::error!("Failed to parse runtime schema for '{}': {}", key, e);
-        schemars::Schema::default()
-    });
-    let registry = SCHEMA_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
-    if let Ok(mut reg) = registry.lock() {
-        reg.insert(
-            key.to_string(),
-            SchemaEntry {
-                schema: root_schema,
-                target: ConfigTarget::Settings,
-                parent_key: None,
-            },
-        );
-    }
+/// Registers schemas collected at runtime.
+///
+/// Returns `Err` if the JSON value cannot be parsed as a valid JSON Schema.
+pub fn register_runtime_schema(key: &str, schema: serde_json::Value) -> Result<(), EneConfigError> {
+    let root_schema: schemars::Schema = serde_json::from_value(schema).map_err(|e| {
+        EneConfigError::GenericConfigError(format!(
+            "Failed to parse runtime schema for '{key}': {e}"
+        ))
+    })?;
+    let registry = SCHEMA_REGISTRY.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+    let mut reg = registry.lock();
+    reg.insert(
+        key.to_string(),
+        SchemaEntry {
+            schema: root_schema,
+            target: ConfigTarget::Settings,
+            parent_key: None,
+        },
+    );
+    Ok(())
 }
 
 /// Default overlay-oriented behavioural rules when none are configured.
@@ -245,7 +243,24 @@ impl EneConfig {
         let val = serde_json::to_value(section).map_err(|e| {
             EneConfigError::GenericConfigError(format!("Failed to serialize section: {e}"))
         })?;
-        set_nested(&mut self.extra, T::path(), val)?;
+        // Skip the write if the serialised value is already identical
+        // to what sits at this path. This avoids redundant BTreeMap
+        // mutations and prevents unnecessary dirty-flag flips.
+        let path = T::path();
+        let mut current: Option<&serde_json::Value> = None;
+        for (i, key) in path.iter().enumerate() {
+            if i == 0 {
+                current = self.extra.get(*key);
+            } else {
+                current = current
+                    .and_then(|v| v.as_object())
+                    .and_then(|o| o.get(*key));
+            }
+        }
+        if current.is_some_and(|existing| *existing == val) {
+            return Ok(());
+        }
+        set_nested(&mut self.extra, path, val)?;
         Ok(())
     }
 
@@ -272,16 +287,27 @@ impl EneConfig {
     }
 
     /// Read a value at a dotted JSON path under `extra` (#241).
+    ///
+    /// Walks the `BTreeMap` directly instead of serialising the entire `extra`
+    /// map into a JSON `Value` tree.
     pub fn get_path(&self, dotted_path: &str) -> Option<serde_json::Value> {
-        let mut cur = serde_json::to_value(&self.extra).ok()?;
-        for key in dotted_path.split('.').filter(|s| !s.is_empty()) {
-            cur = cur.get(key)?.clone();
+        let keys: Vec<&str> = dotted_path.split('.').filter(|s| !s.is_empty()).collect();
+        if keys.is_empty() {
+            return None;
         }
-        Some(cur)
+        let mut current: Option<&serde_json::Value> = None;
+        for (i, key) in keys.iter().enumerate() {
+            if i == 0 {
+                current = Some(self.extra.get(*key)?);
+                continue;
+            }
+            current = Some(current?.as_object()?.get(*key)?);
+        }
+        current.cloned()
     }
 }
 
-fn set_nested(
+pub(crate) fn set_nested(
     extra: &mut BTreeMap<String, serde_json::Value>,
     path: &[&str],
     value: serde_json::Value,
@@ -373,9 +399,9 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let mut root_val = serde_json::to_value(&root_schema)?;
 
     if let Some(registry) = SCHEMA_REGISTRY.get()
-        && let Ok(reg) = registry.lock()
         && let Some(root_obj) = root_val.as_object_mut()
     {
+        let reg = registry.lock();
         // 1. Copy definitions
         for entry in reg.values() {
             if entry.target != ConfigTarget::Settings {
@@ -495,15 +521,19 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
 }
 
 /// Generates the JSON representation of the JSON Schema for `character_settings.json`
+// TODO(M8): `generate_schema_json` and `generate_character_schema_json` share ~80%
+// identical code (root schema generation, definition copying, property injection).
+// Extract the shared logic into a single parameterised function that accepts a
+// `ConfigTarget` filter and a closure for the special `tools_map`/`tools` handling.
 pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
     let root_schema = schema_gen.into_root_schema_for::<crate::character_config::CharacterConfig>();
     let mut root_val = serde_json::to_value(&root_schema)?;
 
     if let Some(registry) = SCHEMA_REGISTRY.get()
-        && let Ok(reg) = registry.lock()
         && let Some(root_obj) = root_val.as_object_mut()
     {
+        let reg = registry.lock();
         // 1. Copy definitions
         for entry in reg.values() {
             if entry.target != ConfigTarget::Character {
@@ -559,18 +589,20 @@ pub fn generate_character_card_schema_json() -> Result<String, serde_json::Error
 
 /// Resolves a character name to a full card path.
 #[must_use]
-pub fn resolve_character_path(name: &str) -> String {
+pub fn resolve_character_path(name: &str) -> PathBuf {
     let assets_dir = crate::paths::assets_dir();
     if name.trim().is_empty() {
-        format!("{}/characters/Alicia/character.json", assets_dir.display())
+        assets_dir
+            .join("characters")
+            .join("Alicia")
+            .join("character.json")
     } else if !name.contains('/') && !name.contains('\\') {
-        format!(
-            "{}/characters/{}/character.json",
-            assets_dir.display(),
-            name
-        )
+        assets_dir
+            .join("characters")
+            .join(name)
+            .join("character.json")
     } else {
-        name.to_string()
+        PathBuf::from(name)
     }
 }
 
@@ -597,7 +629,7 @@ pub fn load_character_card(
 pub fn load_config() -> Result<EneConfig, EneConfigError> {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
-    load_config_from(&assets_dir, &config_path)
+    load_config_from(assets_dir, &config_path)
 }
 
 /// Loads config from the specified asset directory and config file path.
@@ -616,7 +648,7 @@ pub fn load_config_from(
 pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
     let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
-    load_full_config_from(&assets_dir, &config_path)
+    load_full_config_from(assets_dir, &config_path)
 }
 
 /// Fully loads `EneConfig` from the specified asset directory and config file path.
@@ -657,7 +689,9 @@ pub fn load_full_config_from(
 
     // Ensure schema directory exists
     let schema_dir = assets_dir.join("schema");
-    let _ = std::fs::create_dir_all(&schema_dir);
+    if let Err(e) = std::fs::create_dir_all(&schema_dir) {
+        tracing::error!(component = "Config", path = %schema_dir.display(), error = %e, "Failed to create schema directory");
+    }
 
     write_schemas(assets_dir);
 
@@ -667,37 +701,42 @@ pub fn load_full_config_from(
 
 /// Auto-generates and writes out settings and character schemas under the assets schema directory.
 pub fn write_schemas(assets_dir: &Path) {
-    let _ = std::fs::create_dir_all(assets_dir.join("schema"));
+    if let Err(e) = std::fs::create_dir_all(assets_dir.join("schema")) {
+        tracing::error!(component = "Config", error = %e, "Failed to create schema directory");
+        return;
+    }
 
-    // Auto-generate schema write-out
     let schema_path = crate::paths::schema_file_path();
-    if let Ok(schema_json) = generate_schema_json() {
-        let _ = std::fs::write(&schema_path, schema_json);
+    if let Ok(schema_json) = generate_schema_json()
+        && let Err(e) = std::fs::write(&schema_path, schema_json)
+    {
+        tracing::error!(component = "Config", path = %schema_path.display(), error = %e, "Failed to write settings schema");
     }
 
-    // Auto-generate schema write-out for character-specific settings
     let char_schema_path = crate::paths::character_schema_file_path();
-    if let Ok(char_schema_json) = generate_character_schema_json() {
-        let _ = std::fs::write(&char_schema_path, char_schema_json);
+    if let Ok(char_schema_json) = generate_character_schema_json()
+        && let Err(e) = std::fs::write(&char_schema_path, char_schema_json)
+    {
+        tracing::error!(component = "Config", path = %char_schema_path.display(), error = %e, "Failed to write character schema");
     }
 
-    // Auto-generate schema write-out for character card (character.json)
     let char_card_schema_path = crate::paths::character_card_schema_file_path();
-    if let Ok(char_card_schema_json) = generate_character_card_schema_json() {
-        let _ = std::fs::write(&char_card_schema_path, char_card_schema_json);
+    if let Ok(char_card_schema_json) = generate_character_card_schema_json()
+        && let Err(e) = std::fs::write(&char_card_schema_path, char_card_schema_json)
+    {
+        tracing::error!(component = "Config", path = %char_card_schema_path.display(), error = %e, "Failed to write character card schema");
     }
 }
 
 /// Saves the config file in a type-safe manner
-pub fn save_full_config(config: &EneConfig) -> Result<(), std::io::Error> {
+pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
     if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
     }
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(config_path, json)?;
+    let json = serde_json::to_string_pretty(config)?;
+    std::fs::write(config_path, json).map_err(EneConfigError::IoError)?;
     Ok(())
 }
 
@@ -708,7 +747,7 @@ where
 {
     let mut config = load_config()?;
     config.set_section(value)?;
-    save_full_config(&config).map_err(|e| EneConfigError::GenericConfigError(e.to_string()))
+    save_full_config(&config)
 }
 
 #[cfg(test)]

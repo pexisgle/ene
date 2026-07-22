@@ -76,6 +76,17 @@ impl CircuitBreaker {
 
     /// Records a failed call, opening the breaker when the threshold is hit.
     /// Returns `true` when this failure caused the breaker to open.
+    ///
+    /// After the cooldown elapses and [`state`](Self::state) transitions
+    /// the breaker back to `Closed`, `consecutive_failures` is **not**
+    /// reset. This means the first call after a cooldown acts as a
+    /// **half-open probe**: if it fails, `consecutive_failures` (already
+    /// at `failure_threshold`) immediately re-opens the breaker for
+    /// another full cooldown. A successful call (via
+    /// [`record_success`](Self::record_success)) clears the counter and
+    /// fully closes the breaker. This is intentional: a single probe
+    /// failure after cooldown re-trips the breaker, preventing a
+    /// cascade of calls to a still-broken tool.
     pub fn record_failure(&mut self) -> bool {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         if self.opened_at.is_none() && self.consecutive_failures >= self.failure_threshold {

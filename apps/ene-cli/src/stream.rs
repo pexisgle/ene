@@ -258,5 +258,7 @@ pub async fn process_stream(
 }
 
 fn turn_matches(active: Option<&TurnId>, event_turn: &TurnId) -> bool {
-    active.is_some_and(|t| t == event_turn)
+    // When no turn is subscribed yet, accept all events so the loop can
+    // observe a Terminal event and exit instead of hanging forever.
+    active.is_none_or(|t| t == event_turn)
 }

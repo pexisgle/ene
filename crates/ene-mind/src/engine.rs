@@ -21,25 +21,29 @@ use crate::memory_writer::MemoryWriter;
 use crate::recall::{ExecuteRecallInput, execute_hybrid_recall};
 
 /// Central cognitive engine facade.
+#[expect(
+    dead_code,
+    reason = "facade fields are constructed and held for sub-component lifecycle; access is through engine methods"
+)]
 pub struct CognitionEngine {
     /// Pre-turn input analysis.
-    pub pre_turn: crate::pre_turn::PreTurnAnalyzer,
+    pub(crate) pre_turn: crate::pre_turn::PreTurnAnalyzer,
     /// Context budget and compression management.
-    pub context: ContextManager,
+    pub(crate) context: ContextManager,
     /// Memory extraction and arbitration.
-    pub memory_writer: MemoryWriter,
+    pub(crate) memory_writer: MemoryWriter,
     /// Memory recall planning.
-    pub recall: crate::recall::RecallPlanner,
+    pub(crate) recall: crate::recall::RecallPlanner,
     /// Deterministic and LLM emotion computation.
-    pub emotion: crate::emotion::EmotionEngine,
+    pub(crate) emotion: crate::emotion::EmotionEngine,
     /// Character identity and lorebook processing.
-    pub character: CharacterProcessor,
+    pub(crate) character: CharacterProcessor,
     /// Sectioned prompt composition.
-    pub prompt_packet: crate::prompt_packet::PromptPacket,
+    pub(crate) prompt_packet: crate::prompt_packet::PromptPacket,
     /// Expression arbitration and output validation.
-    pub output: crate::output::OutputArbiter,
+    pub(crate) output: crate::output::OutputArbiter,
     /// Companion promise and task tracking.
-    pub commitments: CommitmentLedger,
+    pub(crate) commitments: CommitmentLedger,
 }
 
 impl Default for CognitionEngine {
@@ -95,10 +99,14 @@ impl CognitionEngine {
         previous_hash: Option<u64>,
     ) -> Result<(crate::character::CharacterMemorySyncReport, u64), CognitionError> {
         let store = ctx.store.ok_or_else(|| {
-            CognitionError::Other("Memory store required for character memory sync".into())
+            CognitionError::MissingProvider(
+                "Memory store required for character memory sync".into(),
+            )
         })?;
         let embedder = ctx.embedder.ok_or_else(|| {
-            CognitionError::Other("Embedding provider required for character memory sync".into())
+            CognitionError::MissingProvider(
+                "Embedding provider required for character memory sync".into(),
+            )
         })?;
 
         CharacterProcessor::sync_card_memories(
@@ -116,7 +124,7 @@ impl CognitionEngine {
     /// Pre-turn: load affect, plan recall, execute hybrid search.
     pub async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError> {
         let store = ctx.store.ok_or_else(|| {
-            CognitionError::Other("Memory store required for cognitive path".into())
+            CognitionError::MissingProvider("Memory store required for cognitive path".into())
         })?;
 
         let mut affect = store
@@ -219,10 +227,12 @@ impl CognitionEngine {
 
         let recent_turns = ctx.recent_recall_turns();
         let embedding = ctx.query_embedding.ok_or_else(|| {
-            CognitionError::Other("Query embedding required for cognitive recall".into())
+            CognitionError::MissingProvider("Query embedding required for cognitive recall".into())
         })?;
         let embedder = ctx.embedder.ok_or_else(|| {
-            CognitionError::Other("Embedding provider required for cognitive recall".into())
+            CognitionError::MissingProvider(
+                "Embedding provider required for cognitive recall".into(),
+            )
         })?;
 
         let recall_input = ExecuteRecallInput {
@@ -365,10 +375,20 @@ impl CognitionEngine {
     pub async fn compose_prompt_packet(
         &self,
         ctx: TurnContext<'_>,
-        pre: &PreTurnOutput,
+        pre: PreTurnOutput,
         prefetch: ComposePrefetch,
     ) -> Result<ComposedPrompt, CognitionError> {
         Self::validate_config(ctx.config)?;
+
+        // Destructure to move the recalled/commitment vectors into the pack
+        // input without cloning (#review M2).
+        let PreTurnOutput {
+            recall_plan,
+            affect,
+            recalled,
+            commitments,
+            classifier_expression_hint: _,
+        } = pre;
 
         let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
         let kernel = CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens);
@@ -391,7 +411,7 @@ impl CognitionEngine {
 
         let affect_summary = Some(format!(
             "mood={}; valence={:.2}; arousal={:.2}",
-            pre.affect.mood_label, pre.affect.valence, pre.affect.arousal
+            affect.mood_label, affect.valence, affect.arousal
         ));
 
         let scene_summary = if let Some(prefetched) = prefetch.scene_summary {
@@ -425,8 +445,8 @@ impl CognitionEngine {
             identity_kernel: kernel,
             behavior_contract,
             style_examples,
-            recalled: pre.recalled.clone(),
-            commitments: pre.commitments.clone(),
+            recalled,
+            commitments,
             affect_summary,
             scene_summary,
             history,
@@ -434,8 +454,7 @@ impl CognitionEngine {
             user_input: ctx.user_input.to_string(),
         };
 
-        let budget =
-            ContextBudget::from_config_and_hints(&ctx.config.context, &pre.recall_plan.budget);
+        let budget = ContextBudget::from_config_and_hints(&ctx.config.context, &recall_plan.budget);
         let packed = pack_prompt(pack_input, &budget);
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections.clone_from(&packed.meta.dropped);
@@ -710,10 +729,11 @@ fn pending_to_affect_proposal(
 
 /// Count user messages in a history snapshot (current turn user is already included).
 pub fn count_user_turns(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
-    history
+    let count = history
         .iter()
         .filter(|entry| entry.role == ene_ai::Role::User)
-        .count() as i64
+        .count();
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 /// Completed user-turn index for a post-turn classifier proposal.
@@ -911,7 +931,7 @@ mod turn_id_tests {
             post_history_block: None,
         };
         let composed = engine
-            .compose_prompt_packet(ctx, &pre, prefetch)
+            .compose_prompt_packet(ctx, pre, prefetch)
             .await
             .expect("compose");
         let blob = format!("{composed:?}");

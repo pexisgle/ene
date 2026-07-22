@@ -34,9 +34,12 @@ impl ListWindowsAction {
             let title = window.title().unwrap_or_default();
             let app = window.app_name().unwrap_or_default();
             if !title.is_empty() || !app.is_empty() {
-                result.push(format!("{title} ({app})"));
+                result.push(serde_json::json!({
+                    "title": title,
+                    "app_name": app,
+                }));
             }
         }
-        Ok(result.join("\n"))
+        Ok(serde_json::json!({ "windows": result }).to_string())
     }
 }

@@ -81,6 +81,13 @@ impl Default for UiStartedAt {
 /// scratch). Mirrors `SettingsUi::UiState` field but lifted from
 /// lifted from the legacy `AppState` field into the bevy world. The runtime reads
 /// / writes this via `Mut<UiStateComponent>`.
+///
+/// TODO(#dual-source-of-truth): `runtime_startup_error`,
+/// `runtime_disconnected`, and `reconnect_attempted` are duplicated
+/// between this component and `AppState` (in `state.rs`). The
+/// `AppState::sync_runtime_health_to_ui` / `pull_runtime_health_from_ui`
+/// methods manually copy these fields every frame. A future refactor
+/// should pick a single source of truth and remove the duplication.
 #[derive(Component, Default)]
 pub struct UiStateComponent(pub UiState);
 

@@ -1,10 +1,6 @@
 use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
-    Arc::new(crate::utils::session::BrowserSessionStore::new())
-}
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "browser",
@@ -12,11 +8,11 @@ fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
     summary = "Closes the browser session.",
     category = "Browser",
     keywords_primary = "close, session",
-    side_effects = "Browser { mutates_dom: true }"
+    side_effects = "Browser { mutates_dom: false }"
 )]
 pub struct CloseAction {
     #[tool(skip)]
-    #[serde(skip, default = "default_store")]
+    #[serde(skip, default = "crate::utils::default_store")]
     store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
@@ -25,12 +21,12 @@ impl CloseAction {
         Self { store }
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "tool IPC handlers are async for uniform provider dispatch"
-    )]
     async fn run(&self) -> Result<String, ToolError> {
-        self.store.close("default");
-        Ok("Browser session closed.".to_string())
+        let existed = self.store.close("default").await;
+        if existed {
+            Ok("Browser session closed.".to_string())
+        } else {
+            Ok("No active browser session to close.".to_string())
+        }
     }
 }

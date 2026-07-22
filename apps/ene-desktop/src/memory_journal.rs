@@ -76,6 +76,7 @@ impl MemoryJournalPresenter {
             | MemoryStatus::Disputed => {
                 actions.push(MemoryJournalAction::Restore);
             }
+            _ => {}
         }
 
         actions

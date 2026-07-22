@@ -153,6 +153,10 @@ impl IpcToolRegistry {
             };
 
             if let Err(e) = write_ipc_request(stream, &req).await {
+                // The write failed (broken pipe / connection reset). Clear
+                // the stream so `ensure_connected` performs a fresh
+                // reconnect instead of seeing a stale `Some(stream)`.
+                *guard = None;
                 drop(guard);
                 return Err(ToolHostError::ipc(format!("Failed to send request: {e}")));
             }

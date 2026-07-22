@@ -2,10 +2,10 @@ mod read_binary;
 
 use self::read_binary::is_binary_file;
 use crate::utils::sandbox::SandboxConfig;
+use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_tool_common::prelude::*;
 use std::fmt::Write;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 const MAX_LINE_LENGTH: usize = 2000;
 const DEFAULT_LINE_LIMIT: usize = 2000;
@@ -75,6 +75,7 @@ pub async fn read(
     }
 
     let text = String::from_utf8_lossy(&sample);
+    let text = text.trim_start_matches('\u{FEFF}');
 
     if sample.len() > sandbox.max_read_bytes {
         let lines: Vec<&str> = text.lines().collect();
@@ -215,12 +216,6 @@ async fn read_directory(
     Ok(output)
 }
 
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
-}
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -257,18 +252,10 @@ impl FsReadAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
-            })
-        };
+        let sandbox = resolve_sandbox(&self.sandbox);
 
-        let offset = self.offset.map(|v| v as usize);
-        let limit = self.limit.map(|v| v as usize);
+        let offset = self.offset.and_then(|v| usize::try_from(v).ok());
+        let limit = self.limit.and_then(|v| usize::try_from(v).ok());
         read(Path::new(&self.file_path), offset, limit, sandbox.config()).await
     }
 }

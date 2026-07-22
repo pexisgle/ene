@@ -34,6 +34,8 @@ pub struct PromptLibraryData {
     pub affect_classifier: AffectClassifierPrompts,
     /// Proactive speech / screen-summary prompts.
     pub proactive: ProactivePrompts,
+    /// Compression summarizer prompts.
+    pub compression: CompressionPrompts,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +54,8 @@ struct RawPromptLibraryData {
     affect_classifier: RawAffectClassifierPrompts,
     #[serde(default)]
     proactive: RawProactivePrompts,
+    #[serde(default)]
+    compression: RawCompressionPrompts,
 }
 
 /// Prompt templates for the system prompt.
@@ -353,6 +357,16 @@ struct RawProactivePrompts {
     screen_summary_user_path: String,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
+struct RawCompressionPrompts {
+    #[serde(default = "default_compression_system_path")]
+    system_path: String,
+}
+
 fn default_proactive_decision_system_path() -> String {
     "en/proactive/decision_system.md".into()
 }
@@ -371,6 +385,10 @@ fn default_proactive_screen_summary_system_path() -> String {
 
 fn default_proactive_screen_summary_user_path() -> String {
     "en/proactive/screen_summary_user.md".into()
+}
+
+fn default_compression_system_path() -> String {
+    "en/compression/system.md".into()
 }
 
 impl ProactivePrompts {
@@ -411,6 +429,26 @@ impl SplitPrompts {
     /// Renders the split reason composite score message.
     pub fn render_reason_composite(&self, score: &str) -> String {
         substitute(&self.reason_composite, &[("score", score)])
+    }
+}
+
+/// Prompt templates for context compression summarization.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompressionPrompts {
+    /// System prompt for the compression summarizer.
+    pub system: String,
+}
+
+impl CompressionPrompts {
+    /// Renders the compression system prompt replacing `{character_name}` and `{level_label}`.
+    pub fn render_system(&self, character_name: &str, level_label: &str) -> String {
+        substitute(
+            &self.system,
+            &[
+                ("character_name", character_name),
+                ("level_label", level_label),
+            ],
+        )
     }
 }
 
@@ -556,6 +594,13 @@ impl PromptLibrary {
                 ))
                 .to_string(),
             },
+            compression: CompressionPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/compression/system.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -568,6 +613,10 @@ impl PromptLibrary {
     ///
     /// These are the same strings shipped in `assets/prompts/ja.json` but
     /// embedded at compile time as a fallback.
+    // TODO(M7): `built_in_english` and `built_in_japanese` share ~125 lines of
+    // identical structure, differing only in the language code and `include_str!`
+    // paths. Parameterise by language code (e.g. a `built_in_lang(lang: &str)`
+    // helper or a macro) to eliminate this duplication.
     pub fn built_in_japanese() -> Self {
         // The bundled JSON is checked into the repository and is part of the
         // build artifact. A parse failure here is a release-blocker bug, not
@@ -687,6 +736,13 @@ impl PromptLibrary {
                 ))
                 .to_string(),
             },
+            compression: CompressionPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/compression/system.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -738,6 +794,11 @@ impl PromptLibrary {
     /// Returns reference to proactive speech prompts.
     pub const fn proactive(&self) -> &ProactivePrompts {
         &self.data.proactive
+    }
+
+    /// Returns reference to compression summarizer prompts.
+    pub const fn compression(&self) -> &CompressionPrompts {
+        &self.data.compression
     }
 }
 

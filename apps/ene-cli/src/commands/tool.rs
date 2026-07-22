@@ -1,9 +1,18 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::style;
 use async_trait::async_trait;
 
 pub struct ToolCommand;
+
+fn truncate_desc(desc: &str, max_chars: usize) -> String {
+    if desc.chars().count() > max_chars {
+        let truncated: String = desc.chars().take(max_chars - 3).collect();
+        format!("{truncated}...")
+    } else {
+        desc.to_string()
+    }
+}
 
 #[async_trait]
 impl CliCommand for ToolCommand {
@@ -19,7 +28,7 @@ impl CliCommand for ToolCommand {
         "/tool <list|search|help|call>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let subparts: Vec<&str> = arg.splitn(3, ' ').collect();
         match subparts.first().copied() {
             Some("list") => match ctx.handle.diagnostics().list_tools().await {
@@ -29,16 +38,11 @@ impl CliCommand for ToolCommand {
                     } else {
                         println!("{}", style::success("Available tools:"));
                         for tool in tools {
-                            let desc = if tool.description.chars().count() > 60 {
-                                let truncated: String = tool.description.chars().take(57).collect();
-                                format!("{truncated}...")
-                            } else {
-                                tool.description.clone()
-                            };
+                            let desc = truncate_desc(&tool.description, 60);
                             println!("  - {}: {}", style::header(tool.name.as_str()), desc);
                         }
                     }
-                    Ok(())
+                    Ok(CommandOutcome::Continue)
                 }
                 Err(e) => Err(CliError::ExecutionFailed(format!(
                     "Failed to list tools: {e}"
@@ -63,17 +67,11 @@ impl CliCommand for ToolCommand {
                             } else {
                                 println!("{}", style::success("Matching tools:"));
                                 for tool in tools {
-                                    let desc = if tool.description.chars().count() > 60 {
-                                        let truncated: String =
-                                            tool.description.chars().take(57).collect();
-                                        format!("{truncated}...")
-                                    } else {
-                                        tool.description.clone()
-                                    };
+                                    let desc = truncate_desc(&tool.description, 60);
                                     println!("  - {}: {}", style::header(tool.name.as_str()), desc);
                                 }
                             }
-                            Ok(())
+                            Ok(CommandOutcome::Continue)
                         }
                         Err(e) => Err(CliError::ExecutionFailed(format!(
                             "Failed to search tools: {e}"
@@ -98,7 +96,7 @@ impl CliCommand for ToolCommand {
                                     serde_json::to_string_pretty(&tool.parameters)
                                         .unwrap_or_default()
                                 );
-                                Ok(())
+                                Ok(CommandOutcome::Continue)
                             } else {
                                 Err(CliError::ExecutionFailed(format!("Tool not found: {name}")))
                             }
@@ -127,7 +125,7 @@ impl CliCommand for ToolCommand {
                         Ok(res) => {
                             println!("{}", style::success("Tool execution result:"));
                             println!("{res}");
-                            Ok(())
+                            Ok(CommandOutcome::Continue)
                         }
                         Err(e) => Err(CliError::ExecutionFailed(format!(
                             "Tool execution failed: {e}"
@@ -145,7 +143,7 @@ impl CliCommand for ToolCommand {
                         Ok(res) => {
                             println!("{}", style::success("Tool execution result:"));
                             println!("{res}");
-                            Ok(())
+                            Ok(CommandOutcome::Continue)
                         }
                         Err(e) => Err(CliError::ExecutionFailed(format!(
                             "Tool execution failed: {e}"

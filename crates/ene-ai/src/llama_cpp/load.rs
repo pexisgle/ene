@@ -150,6 +150,8 @@ pub(crate) struct LoadedModel {
     pub model: LlamaModel,
     pub context_size: NonZeroU32,
     pub mtmd: Option<MtmdContext>,
+    /// File stem of the model path, used for model family detection.
+    pub model_name: String,
 }
 
 impl LoadedModel {
@@ -246,9 +248,16 @@ fn load_with_backend(
     let ctx = NonZeroU32::new(context_size.max(256))
         .ok_or_else(|| LlmProviderError::LocalLlm("context_size must be non-zero".to_string()))?;
 
+    let model_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     Ok(LoadedModel {
         model,
         context_size: ctx,
         mtmd,
+        model_name,
     })
 }

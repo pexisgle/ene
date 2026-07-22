@@ -23,6 +23,8 @@ ene_config::define_config!(
     }
 );
 
+// Manual PartialEq: all fields compared; kept explicit to ensure future fields
+// (e.g. secrets) are consciously included rather than auto-derived.
 impl PartialEq for ApiKeyConfig {
     fn eq(&self, other: &Self) -> bool {
         self.source == other.source && self.inline == other.inline && self.env == other.env
@@ -82,6 +84,8 @@ pub struct LocalModelDef {
     #[serde(default)]
     pub acceleration: ProactiveAcceleration,
     /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
+    // TODO: Replace `String` with an `AutoOrU32` enum to catch misconfiguration
+    // at the config boundary instead of silently falling back at load time.
     #[serde(default = "default_gpu_layers")]
     pub gpu_layers: String,
     /// Context size for decision workloads.
@@ -112,6 +116,8 @@ fn default_gpu_layers() -> String {
     "auto".to_string()
 }
 
+/// Default context size for local decision workloads.
+/// This is a minimum; larger contexts may be needed for long prompts.
 const fn default_context_size() -> u32 {
     2048
 }
@@ -235,6 +241,7 @@ impl RetryConfig {
             max_attempts: self.max_attempts.max(1),
             base_delay: std::time::Duration::from_millis(self.base_delay_ms),
             max_delay: std::time::Duration::from_millis(self.max_delay_ms),
+            timeout: std::time::Duration::from_millis(self.timeout_ms),
         }
     }
 }

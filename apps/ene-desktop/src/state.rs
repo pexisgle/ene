@@ -8,6 +8,15 @@
 //! Senders (clones of [`AppEventSender`](crate::events::AppEventSender))
 //! are passed to producers at construction time so they can push
 //! without holding a reference to the state.
+//!
+//! TODO(#dual-source-of-truth): `runtime_startup_error`,
+//! `runtime_disconnected`, and `reconnect_attempted` are duplicated
+//! between `AppState` and `UiStateComponent` (in `component/ui.rs`).
+//! `AppState::sync_runtime_health_to_ui` / `pull_runtime_health_from_ui`
+//! manually copy these fields back and forth every frame. This is
+//! fragile and error-prone. A future refactor should pick a single
+//! source of truth (likely the bevy `UiStateComponent`) and have
+//! `AppState` read/write through it exclusively.
 use std::sync::Arc;
 
 use bevy_app::App;
@@ -17,7 +26,7 @@ use crate::ai_bridge::AiBridge;
 use crate::app::build_app;
 use crate::character::CharacterRenderer;
 use crate::events::{AppEvent, AppEventSender};
-use crate::gpu::GpuContext;
+use crate::gpu::{GpuContext, GpuError};
 use crate::settings::CharacterSettings;
 use crate::tray::TrayHandle;
 
@@ -40,10 +49,13 @@ pub struct AppState {
     pub settings: CharacterSettings,
     pub ai: Option<Arc<AiBridge>>,
     /// Localized startup failure when [`AiBridge::try_new`] fails (#242).
+    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.runtime_startup_error`
     pub runtime_startup_error: Option<String>,
     /// Actor broadcast channel closed; chat is disabled until reconnect.
+    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.runtime_disconnected`
     pub runtime_disconnected: bool,
     /// Whether the single automatic reconnect has already been attempted.
+    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.reconnect_attempted`
     pub reconnect_attempted: bool,
     pub tray: Option<TrayHandle>,
     /// Character renderer (depth texture + default VRM).
@@ -438,11 +450,9 @@ impl AppState {
 #[derive(Debug, thiserror::Error)]
 pub enum AppStateError {
     #[error("GPU context failed to initialise: {0}")]
-    Gpu(#[from] Box<dyn std::error::Error>),
+    Gpu(#[from] GpuError),
     #[error("Failed to resolve assets directory: {0}")]
     AssetsDir(String),
-    #[error("Tokio runtime error: {0}")]
-    Tokio(#[from] tokio::io::Error),
 }
 
 #[cfg(test)]

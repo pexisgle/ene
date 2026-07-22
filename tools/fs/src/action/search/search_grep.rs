@@ -1,8 +1,8 @@
 use super::MAX_RESULTS;
 use crate::utils::sandbox::SandboxConfig;
+use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_tool_common::prelude::*;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 pub async fn grep_search(
     pattern: &str,
@@ -56,14 +56,14 @@ pub async fn grep_search(
             }
         }
 
-        let Ok(metadata) = tokio::fs::metadata(file_path).await else {
+        let Ok(metadata) = std::fs::metadata(file_path) else {
             continue;
         };
         if metadata.len() > 1024 * 1024 {
             continue;
         }
 
-        let Ok(content) = tokio::fs::read_to_string(file_path).await else {
+        let Ok(content) = std::fs::read_to_string(file_path) else {
             continue;
         };
 
@@ -134,12 +134,6 @@ pub async fn grep_search(
     Ok(output.join("\n"))
 }
 
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
-}
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "filesystem",
@@ -175,15 +169,7 @@ impl FsGrepAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
-            })
-        };
+        let sandbox = resolve_sandbox(&self.sandbox);
 
         grep_search(
             &self.pattern,

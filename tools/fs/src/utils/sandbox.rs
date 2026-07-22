@@ -4,6 +4,13 @@ use ene_tool_proto::ToolError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Pre-compiled blocklist regexes paired with their source pattern.
+///
+/// Stored as a `Result` so that regex compilation failures are
+/// preserved and surfaced as errors on first use rather than
+/// silently dropping patterns (which would cause index mismatch).
+type CompiledBlocklist = Result<Vec<(regex::Regex, String)>, String>;
+
 /// Sandbox settings — allowed directories and restrictions
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
@@ -23,7 +30,7 @@ pub struct SandboxConfig {
     /// cached regexes shared across clones. Not part of the
     /// `SandboxConfigData` wire format; populated by `Default` and
     /// the `From<SandboxConfigData>` impl.
-    pub compiled_blocklist: std::sync::Arc<std::sync::OnceLock<Vec<regex::Regex>>>,
+    pub compiled_blocklist: std::sync::Arc<std::sync::OnceLock<CompiledBlocklist>>,
     /// Thread-safe dynamic allowlist patterns shared with Sandbox.
     pub allowed_patterns:
         std::sync::Arc<std::sync::RwLock<std::collections::HashSet<(String, String)>>>,
@@ -70,13 +77,11 @@ impl SandboxConfig {
         path: &Path,
         require_writable: bool,
     ) -> Result<PathBuf, ToolError> {
-        // For non-existent files, check the parent directory
         let check_path = if path.exists() {
             std::fs::canonicalize(path).map_err(|e| ToolError::SandboxViolation {
                 message: format!("Cannot resolve path: {e}"),
             })?
         } else {
-            // Verify the parent directory exists
             let abs = if path.is_absolute() {
                 path.to_path_buf()
             } else {
@@ -169,17 +174,22 @@ impl SandboxConfig {
         let compiled = self.compiled_blocklist.get_or_init(|| {
             self.blocked_commands
                 .iter()
-                .filter_map(|p| regex::Regex::new(p).ok())
+                .map(|p| {
+                    regex::Regex::new(p)
+                        .map(|re| (re, p.clone()))
+                        .map_err(|e| format!("Failed to compile blocklist pattern '{p}': {e}"))
+                })
                 .collect()
         });
 
-        for (idx, re) in compiled.iter().enumerate() {
+        let compiled = compiled
+            .as_ref()
+            .map_err(|e| ToolError::Internal { message: e.clone() })?;
+
+        for (re, pattern) in compiled {
             if re.is_match(command) {
                 return Err(ToolError::SandboxViolation {
-                    message: format!(
-                        "Command matches blocked pattern: {}",
-                        self.blocked_commands[idx]
-                    ),
+                    message: format!("Command matches blocked pattern: {pattern}"),
                 });
             }
         }
@@ -340,9 +350,6 @@ impl Sandbox {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = id.to_string();
 
-        // Reset undo manager so it reconnects with new session_id.
-        // Use standard sync Mutex lock so we can block safely from
-        // both sync and async contexts without panicking the Tokio runtime.
         let mut guard = self
             .undo_manager
             .lock()
@@ -380,10 +387,6 @@ impl Sandbox {
     ) -> Result<(), ToolError> {
         let action_str = format!("{action:?}");
 
-        // 1. Session-level allow pattern check. The target is
-        //    matched against the allowed pattern as a *path prefix*,
-        //    not a substring, so an allow pattern of `/tmp/foo` no
-        //    longer matches `/tmp/foobar` or `/etc/tmp/foo`.
         if let Ok(guard) = self.allowed_patterns.read() {
             for (allowed_action, allowed_target) in guard.iter() {
                 if allowed_action != &action_str {
@@ -397,7 +400,6 @@ impl Sandbox {
             }
         }
 
-        // 2. Base permission config check
         match self.config.check_permission(action, target, description) {
             Ok(()) => Ok(()),
             Err(ToolError::PermissionRequired {
@@ -406,7 +408,6 @@ impl Sandbox {
                 target: tgt,
                 description: desc,
             }) => {
-                // Check if this specific request_id has been approved (Allow Once)
                 if let Ok(guard) = self.approved_requests.read()
                     && guard.contains(&request_id)
                 {
@@ -443,7 +444,7 @@ impl Sandbox {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                tracing::warn!("[Sandbox] Failed to get undo manager: {e}");
                 return;
             }
         };
@@ -456,7 +457,7 @@ impl Sandbox {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                tracing::warn!("[Sandbox] Failed to get undo manager: {e}");
                 return;
             }
         };
@@ -469,7 +470,7 @@ impl Sandbox {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                tracing::warn!("[Sandbox] Failed to get undo manager: {e}");
                 return;
             }
         };
@@ -482,28 +483,17 @@ impl Sandbox {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("[Sandbox] Failed to get undo manager: {e}");
+                tracing::warn!("[Sandbox] Failed to get undo manager: {e}");
                 return;
             }
         };
         let entry = crate::undo::UndoEntry::new("patch", operations);
         if let Err(e) = mgr.push(entry).await {
-            eprintln!("[Sandbox] Failed to push patch undo: {e}");
+            tracing::warn!("[Sandbox] Failed to push patch undo: {e}");
         }
     }
 
     /// Undoes the most recent operation
-    ///
-    /// The previous implementation called `pop` (which
-    /// removed the entry from the DB) and then applied
-    /// the operations. A failure in the apply step left
-    /// the entry permanently lost, so the next
-    /// `undo_last` would skip it. The new flow uses
-    /// `peek` + apply + `discard`: the entry is only
-    /// removed from the DB after every operation has
-    /// been applied successfully. A failed apply
-    /// surfaces the error to the caller with the entry
-    /// intact and retryable.
     pub async fn undo_last(&self) -> Result<String, ToolError> {
         let mgr = self.ensure_undo_manager().await?;
         let entry = mgr.peek().await.map_err(|e| ToolError::ExecutionFailed {
@@ -516,9 +506,6 @@ impl Sandbox {
             });
         };
 
-        // Apply every operation before touching the DB.
-        // We collect into a Result so a mid-loop failure
-        // returns the error and the entry is preserved.
         let mut logs: Vec<String> = Vec::new();
         let mut apply_error: Option<ToolError> = None;
         for op in &entry.operations {
@@ -568,14 +555,9 @@ impl Sandbox {
         }
 
         if let Some(e) = apply_error {
-            // Leave the entry in the DB so the user can
-            // retry the undo once the underlying issue
-            // (e.g. permission denied) is resolved.
             return Err(e);
         }
 
-        // All operations applied; only now is it safe
-        // to discard the entry.
         mgr.discard(&entry.id)
             .await
             .map_err(|e| ToolError::ExecutionFailed {

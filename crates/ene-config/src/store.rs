@@ -1,7 +1,7 @@
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::{CharacterConfig, EneConfig, save_full_config};
+use crate::{CharacterConfig, EneConfig, EneConfigError, save_full_config};
 
 /// Centralized configuration store with dirty tracking for auto-save.
 ///
@@ -10,7 +10,7 @@ use crate::{CharacterConfig, EneConfig, save_full_config};
 /// tracking whether each has unsaved changes via atomic dirty flags.
 ///
 /// The intended usage is:
-/// 1. Mutate config via [`config_mut`](Self::config_mut) or [`set_config`](Self::set_config).
+/// 1. Mutate config via [`with_config_mut`](Self::with_config_mut) or [`set_config`](Self::set_config).
 /// 2. The store is automatically marked dirty on mutation.
 /// 3. A periodic flush (e.g. a Bevy system each frame) calls [`flush_if_dirty`](Self::flush_if_dirty).
 pub struct ConfigStore {
@@ -114,7 +114,9 @@ impl ConfigStore {
     where
         T: serde::Serialize + crate::HasConfigKey,
     {
-        let _ = self.config.write().set_section(section);
+        if let Err(e) = self.config.write().set_section(section) {
+            tracing::error!(component = "ConfigStore", error = %e, "Failed to set global config section");
+        }
         self.global_dirty.store(true, Ordering::Release);
     }
 
@@ -135,11 +137,23 @@ impl ConfigStore {
     /// Replaces the per-character config and loads its state from disk for the given character.
     pub fn load_character_config(&self, character_name: &str) {
         let path = crate::character_settings_path(character_name);
-        let content = std::fs::read_to_string(&path).ok();
-        let mut guard = self.character_config.write();
-        *guard = content
-            .and_then(|json| serde_json::from_str::<CharacterConfig>(&json).ok())
-            .unwrap_or_default();
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            *self.character_config.write() = CharacterConfig::default();
+            return;
+        };
+        match serde_json::from_str::<CharacterConfig>(&content) {
+            Ok(config) => *self.character_config.write() = config,
+            Err(e) => {
+                tracing::warn!(
+                    component = "ConfigStore",
+                    character = character_name,
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to parse character config, using defaults"
+                );
+                *self.character_config.write() = CharacterConfig::default();
+            }
+        }
     }
 
     /// Replaces the per-character config and marks dirty.
@@ -148,7 +162,7 @@ impl ConfigStore {
         self.character_dirty.store(true, Ordering::Release);
     }
 
-    /// `character_settings` の extra セクションを型安全に取得（新規）
+    /// Reads a typed section from the per-character config.
     pub fn get_character_section<T>(&self) -> T
     where
         T: serde::de::DeserializeOwned + Default + crate::HasConfigKey,
@@ -158,13 +172,15 @@ impl ConfigStore {
             .unwrap_or_default()
     }
 
-    /// `character_settings` の extra セクションを型安全に書き込み（新規）
+    /// Writes a typed section into the per-character config and marks dirty.
     pub fn set_character_section<T>(&self, section: &T)
     where
         T: serde::Serialize + crate::HasConfigKey,
     {
         self.with_character_config_mut(|c| {
-            let _ = c.set_section(section);
+            if let Err(e) = c.set_section(section) {
+                tracing::error!(component = "ConfigStore", error = %e, "Failed to set character config section");
+            }
         });
     }
 
@@ -174,37 +190,40 @@ impl ConfigStore {
     /// Saves the per-character config if dirty and `character_name` is given.
     ///
     /// Returns `Ok(true)` if any write occurred, `Ok(false)` if nothing was dirty.
-    pub fn flush_if_dirty(&self, character_name: Option<&str>) -> std::io::Result<bool> {
-        let global_saved = if self.global_dirty.swap(false, Ordering::AcqRel) {
+    ///
+    /// The dirty flag is only cleared **after** a successful write, preventing
+    /// data loss if `save_full_config` fails.
+    pub fn flush_if_dirty(&self, character_name: Option<&str>) -> Result<bool, EneConfigError> {
+        let mut any_saved = false;
+
+        if self.global_dirty.load(Ordering::Acquire) {
             let config = self.config.read();
             save_full_config(&config)?;
-            true
-        } else {
-            false
-        };
+            drop(config);
+            self.global_dirty.store(false, Ordering::Release);
+            any_saved = true;
+        }
 
-        let char_saved = if self.character_dirty.swap(false, Ordering::AcqRel) {
+        if self.character_dirty.load(Ordering::Acquire) {
             if let Some(name) = character_name {
                 let char_config = self.character_config.read();
                 let path = crate::character_settings_path(name);
                 if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
+                    std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
                 }
-                let json = serde_json::to_string_pretty(&*char_config)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                std::fs::write(&path, json)?;
+                let json = serde_json::to_string_pretty(&*char_config)?;
+                std::fs::write(&path, json).map_err(EneConfigError::IoError)?;
                 drop(char_config);
             }
-            true
-        } else {
-            false
-        };
+            self.character_dirty.store(false, Ordering::Release);
+            any_saved = true;
+        }
 
-        Ok(global_saved || char_saved)
+        Ok(any_saved)
     }
 
     /// Forces a save of both global and per-character config regardless of dirty state.
-    pub fn flush(&self, character_name: Option<&str>) -> std::io::Result<()> {
+    pub fn flush(&self, character_name: Option<&str>) -> Result<(), EneConfigError> {
         self.global_dirty.store(true, Ordering::Release);
         self.character_dirty.store(true, Ordering::Release);
         self.flush_if_dirty(character_name)?;
@@ -214,5 +233,12 @@ impl ConfigStore {
     /// Returns `true` if either config has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.global_dirty.load(Ordering::Acquire) || self.character_dirty.load(Ordering::Acquire)
+    }
+
+    /// Marks the global config as dirty without modifying it.
+    /// Use when the caller knows the in-memory state has diverged
+    /// from disk and will call [`flush_if_dirty`] on the next cycle.
+    pub fn mark_dirty(&self) {
+        self.global_dirty.store(true, Ordering::Release);
     }
 }

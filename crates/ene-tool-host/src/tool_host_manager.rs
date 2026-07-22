@@ -6,7 +6,6 @@ use crate::tools::CompositeToolRegistry;
 use crate::tools::registry::ToolRegistry;
 use ene_config as paths;
 use ene_config::{EneConfig, register_runtime_schema};
-use ene_tool_proto::ToolError;
 use ene_tool_proto::ToolSpec;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -138,11 +137,7 @@ impl SupervisedIpcRegistry {
         let delay = guard.delay_for_restart();
         tokio::time::sleep(delay).await;
 
-        guard
-            .restart()
-            .map_err(|e| ToolHostError::ExecutionFailed {
-                message: e.to_string(),
-            })?;
+        guard.restart()?;
 
         let socket_path = guard.socket_path.clone();
         let sandbox = guard.sandbox.clone();
@@ -600,7 +595,14 @@ impl ToolHostManager {
                 Ok(supervised_entry) => {
                     if let Some(schema) = supervised_entry.config_schema().await {
                         let schema_key = format!("{name}_config");
-                        register_runtime_schema(&schema_key, schema);
+                        if let Err(e) = register_runtime_schema(&schema_key, schema) {
+                            tracing::warn!(
+                                component = "ToolHostManager",
+                                tool = %name,
+                                error = %e,
+                                "Failed to register runtime schema"
+                            );
+                        }
                     }
                     supervised.push(supervised_entry);
                 }
@@ -869,7 +871,7 @@ impl ToolHostManager {
         max_retries: u32,
         delay_ms: u64,
         timeout_ms: u64,
-    ) -> Result<IpcToolRegistry, ToolError> {
+    ) -> Result<IpcToolRegistry, ToolHostError> {
         let mut attempts = 0_u32;
         loop {
             match IpcToolRegistry::new(
@@ -884,7 +886,7 @@ impl ToolHostManager {
                 Err(e) => {
                     attempts = attempts.saturating_add(1);
                     if attempts >= max_retries {
-                        return Err(ToolError::ExecutionFailed {
+                        return Err(ToolHostError::ExecutionFailed {
                             message: format!(
                                 "Failed to connect to tool at {} after {} attempts: {}",
                                 socket_path.display(),

@@ -232,7 +232,11 @@ impl DbIpcServer {
                 }
                 Err(e) => return Err(DbServerError::Io(e)),
             }
-            let msg_len = u32::from_le_bytes(len_buf) as usize;
+            let Ok(msg_len) = usize::try_from(u32::from_le_bytes(len_buf)) else {
+                return Err(DbServerError::Internal(
+                    "message length overflow on this platform".to_string(),
+                ));
+            };
             if msg_len > 64 * 1024 * 1024 {
                 return Err(DbServerError::Internal(format!(
                     "message too large: {msg_len}"
@@ -949,11 +953,17 @@ impl DbIpcServer {
             .get(table)
             .ok_or_else(|| DbServerError::UnknownTable(table.to_string()))?;
 
+        let col_def_map: HashMap<&str, &ene_tool_db::DbColumn> = table_def
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c))
+            .collect();
+
         let mut rows = Vec::new();
         for result in query_results {
             let mut row = Row::new();
             for col in &cols_to_fetch {
-                let col_def = table_def.columns.iter().find(|c| &c.name == col);
+                let col_def = col_def_map.get(col.as_str());
                 let val = if let Some(def) = col_def {
                     match def.ty {
                         ene_tool_db::DbType::Integer => {

@@ -42,15 +42,25 @@ impl BrowserSessionStore {
         }
     }
 
-    /// Removes every `ene-browser-*` directory in
+    /// Removes stale `ene-browser-*` directories from
     /// `std::env::temp_dir()`. The directory layout is
     /// `<temp>/ene-browser-<uuid>` and is created
     /// exclusively by [`get_or_create`](Self::get_or_create),
     /// so the prefix is a safe namespace marker.
+    ///
+    /// A directory is only considered stale when its
+    /// modification time is older than [`STALE_DIR_AGE`].
+    /// This prevents corrupting active sessions owned by
+    /// concurrently running processes.
     fn sweep_stale_dirs() {
+        /// Directories younger than this are assumed to
+        /// belong to a live process and are left alone.
+        const STALE_DIR_AGE: std::time::Duration = std::time::Duration::from_mins(5);
+
         let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
             return;
         };
+        let now = std::time::SystemTime::now();
         for entry in entries.flatten() {
             let name = entry.file_name();
             let Some(name_str) = name.to_str() else {
@@ -64,10 +74,24 @@ impl BrowserSessionStore {
             // A stray file matching the prefix (e.g. a
             // user-created `ene-browser-foo.txt`) must not
             // be deleted.
-            if path.is_dir()
-                && let Err(e) = std::fs::remove_dir_all(&path)
-            {
-                eprintln!(
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip directories whose metadata cannot be
+            // read or whose mtime is within the grace
+            // period — they may belong to a live session
+            // in another process.
+            let is_stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .is_some_and(|age| age >= STALE_DIR_AGE);
+            if !is_stale {
+                continue;
+            }
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                tracing::warn!(
                     "[BrowserSessionStore] Failed to sweep stale user-data-dir {}: {e}",
                     path.display()
                 );
@@ -75,6 +99,13 @@ impl BrowserSessionStore {
         }
     }
 
+    /// Returns the session for `session_id`, launching Chrome and
+    /// creating it if it does not yet exist.
+    ///
+    /// Concurrent callers for the same `session_id` are serialized
+    /// through a per-session creation lock so that only one Chrome
+    /// process is launched; late arrivals observe the session that
+    /// the first caller installed.
     pub async fn get_or_create(
         &self,
         session_id: &str,
@@ -186,24 +217,35 @@ impl BrowserSessionStore {
         Ok(session_guard.page.clone())
     }
 
-    pub fn close(&self, session_id: &str) {
-        if let Some((_, session_arc)) = self.sessions.remove(session_id) {
-            tokio::spawn(async move {
-                let session = session_arc.lock().await;
-                session.handler_task.abort();
-                let dir = session.user_data_dir.clone();
-                drop(session);
-                let _ = tokio::fs::remove_dir_all(&dir).await;
-            });
-        }
+    /// Closes and removes the session identified by `session_id`.
+    ///
+    /// Awaits browser shutdown and user-data-dir removal inline so
+    /// that cleanup completes even if the caller's future is dropped
+    /// shortly after (e.g. during process shutdown). Returns `true`
+    /// if a session existed and was closed, `false` otherwise.
+    pub async fn close(&self, session_id: &str) -> bool {
+        let existed = if let Some((_, session_arc)) = self.sessions.remove(session_id) {
+            let mut session = session_arc.lock().await;
+            session.handler_task.abort();
+            let _ = session.browser.close().await;
+            let dir = session.user_data_dir.clone();
+            drop(session);
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            true
+        } else {
+            false
+        };
         // Also drop the per-session creation lock so the
         // map does not grow unboundedly across many
         // `close` cycles. A fresh `get_or_create` for
         // the same `session_id` will lazily re-insert
         // the lock on demand.
         self.creation_locks.remove(session_id);
+        existed
     }
 
+    /// Shuts down all active sessions, closing browsers and removing
+    /// user-data-dirs. Called once during process teardown.
     pub async fn shutdown(&self) {
         let keys: Vec<String> = self
             .sessions
@@ -220,5 +262,69 @@ impl BrowserSessionStore {
             }
         }
         self.creation_locks.clear();
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "test fixtures use unwrap for temp dir setup"
+)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn close_nonexistent_session_returns_false() {
+        let store = BrowserSessionStore {
+            sessions: DashMap::new(),
+            creation_locks: DashMap::new(),
+        };
+        assert!(!store.close("default").await);
+        assert!(!store.close("nonexistent").await);
+    }
+
+    #[tokio::test]
+    async fn shutdown_empty_store_does_not_panic() {
+        let store = BrowserSessionStore {
+            sessions: DashMap::new(),
+            creation_locks: DashMap::new(),
+        };
+        store.shutdown().await;
+        assert!(store.sessions.is_empty());
+    }
+
+    #[test]
+    fn sweep_stale_dirs_skips_fresh_dirs() {
+        let dir = std::env::temp_dir().join(format!("ene-browser-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A freshly created dir has mtime ≈ now, well within the 5-min
+        // threshold, so sweep must not delete it.
+        BrowserSessionStore::sweep_stale_dirs();
+        assert!(dir.exists(), "fresh dir must survive sweep");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_stale_dirs_ignores_non_matching_prefix() {
+        let dir = std::env::temp_dir().join(format!("other-prefix-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        BrowserSessionStore::sweep_stale_dirs();
+        assert!(dir.exists(), "non-matching prefix must be untouched");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_stale_dirs_ignores_files_with_matching_prefix() {
+        let file = std::env::temp_dir().join(format!("ene-browser-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&file, "not a dir").unwrap();
+
+        BrowserSessionStore::sweep_stale_dirs();
+        assert!(file.exists(), "file matching prefix must not be deleted");
+
+        std::fs::remove_file(&file).unwrap();
     }
 }

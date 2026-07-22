@@ -1,6 +1,6 @@
 use ene_tool_proto::ToolError;
 
-use super::{WlCompositor, gvariant_string, parse_gdbus_tuple_string};
+use super::{WlCompositor, gvariant_string, js_string_literal, parse_gdbus_tuple_string};
 
 pub(super) struct Gnome;
 
@@ -48,9 +48,9 @@ impl WlCompositor for Gnome {
     }
 
     fn focus_window(&self, title: &str) -> Result<String, ToolError> {
-        let escaped = title.replace('\\', "\\\\").replace('\'', "\\'");
+        let title_literal = js_string_literal(title);
         let js = format!(
-            "global.get_window_actors().forEach(function(a){{var w=a.meta_window;if(w.get_title().indexOf('{escaped}')!=-1||w.get_wm_class().indexOf('{escaped}')!=-1){{w.activate(global.get_current_time());w.get_workspace().activate(global.get_current_time())}}}})"
+            "global.get_window_actors().forEach(function(a){{var w=a.meta_window;if(w.get_title().indexOf({title_literal})!=-1||w.get_wm_class().indexOf({title_literal})!=-1){{w.activate(global.get_current_time());w.get_workspace().activate(global.get_current_time())}}}})"
         );
 
         let output = std::process::Command::new("gdbus")

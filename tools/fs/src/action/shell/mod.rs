@@ -2,11 +2,11 @@ mod shell_platform;
 
 use self::shell_platform::execute_shell_command;
 use crate::utils::sandbox::SandboxConfig;
+use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_tool_common::prelude::*;
 use ene_tool_common::truncate::Truncate;
 use std::fmt::Write;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 pub async fn shell_exec(
@@ -94,12 +94,6 @@ pub async fn shell_exec(
     Ok(final_output)
 }
 
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
-}
-
 #[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "shell",
@@ -140,15 +134,7 @@ impl ShellAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
-            })
-        };
+        let sandbox = resolve_sandbox(&self.sandbox);
 
         let description = self.description.as_deref().unwrap_or("");
         let command = self.command.as_str();
@@ -177,7 +163,7 @@ mod tests {
 
     #[test]
     fn schema_does_not_require_description() {
-        let action = ShellAction::new(Arc::new(RwLock::new(None)));
+        let action = ShellAction::new(crate::utils::default_sandbox());
         let def = action.definition();
         let required = def
             .parameters

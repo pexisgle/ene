@@ -4,9 +4,9 @@
 //! embedding, store, tool registry, and assets categories. Secrets
 //! (API keys, private paths) are masked in all output.
 
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
-use crate::style;
+use crate::{style, util};
 use async_trait::async_trait;
 use ene_runtime::{AiConfig, EneDiagnostics, EneStateSnapshot, StoreConfig};
 use serde::Serialize;
@@ -169,27 +169,6 @@ impl DoctorSummary {
     }
 }
 
-/// Mask an API key, showing at most a short prefix and suffix.
-fn mask_api_key(key: &str) -> String {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return "[not set]".to_string();
-    }
-    if trimmed.chars().count() <= 8 {
-        return "[redacted]".to_string();
-    }
-    let prefix: String = trimmed.chars().take(3).collect();
-    let suffix: String = trimmed
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{prefix}…{suffix}")
-}
-
 /// Mask an absolute path by replacing the home directory with `~`.
 fn mask_path(path: &std::path::Path) -> String {
     let path_str = path.display().to_string();
@@ -226,7 +205,7 @@ impl CliCommand for DoctorCommand {
         "/doctor [--json]"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let json_mode = arg.trim() == "--json";
         let checks = run_checks(ctx).await;
 
@@ -243,7 +222,7 @@ impl CliCommand for DoctorCommand {
             print_human(&checks);
         }
 
-        Ok(())
+        Ok(CommandOutcome::Continue)
     }
 }
 
@@ -357,7 +336,7 @@ async fn check_ai_provider(results: &mut Vec<CheckResult>, snapshot: &EneStateSn
                 format!(
                     "Provider reachable (model: {}, key: {})",
                     chat.model,
-                    mask_api_key(&chat.api_key)
+                    util::mask_api_key(&chat.api_key)
                 ),
             ));
         }
@@ -421,7 +400,7 @@ async fn check_provider_fallback(results: &mut Vec<CheckResult>, ai_config: &AiC
                     candidate.provider,
                     status,
                     report.latency_ms,
-                    mask_api_key(&candidate.api_key)
+                    util::mask_api_key(&candidate.api_key)
                 ),
             ));
         } else {
@@ -558,13 +537,13 @@ fn check_assets(results: &mut Vec<CheckResult>) {
         results.push(CheckResult::ok(
             CheckCategory::Assets,
             "directory",
-            format!("Assets directory found ({})", mask_path(&assets)),
+            format!("Assets directory found ({})", mask_path(assets)),
         ));
     } else {
         results.push(CheckResult::warning(
             CheckCategory::Assets,
             "directory",
-            format!("Assets directory not found ({})", mask_path(&assets)),
+            format!("Assets directory not found ({})", mask_path(assets)),
             "Run from the repository root or check assets/ installation",
         ));
     }

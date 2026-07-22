@@ -177,9 +177,53 @@ fn active_app_label() -> Option<String> {
 pub(crate) fn redact_paths(input: &str) -> String {
     input
         .split_whitespace()
-        .filter(|t| !t.contains('/') && !t.contains('\\') && !t.contains('@'))
+        .filter(|t| !looks_like_path_or_email(t))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Returns `true` when a token is likely a filesystem path or email
+/// address rather than a meaningful application/window-title word.
+///
+/// Heuristic: a token is path-like when it contains a path separator
+/// AND at least one of:
+/// - starts with `/`, `\`, or `~` (absolute / home paths)
+/// - contains a drive-letter prefix (`X:/` or `X:\`)
+/// - has two or more separators (multi-component relative paths)
+/// - ends with a file extension (e.g. `docs/report.md`)
+///
+/// A single interior slash with no extension (e.g. `and/or`) is kept.
+fn looks_like_path_or_email(t: &str) -> bool {
+    if t.contains('@') && t.contains('.') {
+        return true;
+    }
+    let sep_count = t.chars().filter(|c| *c == '/' || *c == '\\').count();
+    if sep_count == 0 {
+        return false;
+    }
+    if t.starts_with('/') || t.starts_with('\\') || t.starts_with('~') {
+        return true;
+    }
+    if t.len() >= 3 {
+        let bytes = t.as_bytes();
+        if bytes[1] == b':' && (bytes[2] == b'/' || bytes[2] == b'\\') {
+            return true;
+        }
+    }
+    if sep_count >= 2 {
+        return true;
+    }
+    has_file_extension(t)
+}
+
+/// Returns `true` when the token ends with a short file extension
+/// (1–5 alphanumeric chars after the last `.`), e.g. `report.md`.
+fn has_file_extension(t: &str) -> bool {
+    let Some(dot) = t.rfind('.') else {
+        return false;
+    };
+    let ext = &t[dot + 1..];
+    !ext.is_empty() && ext.len() <= 5 && ext.chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 pub(crate) fn truncate(input: &str, max: usize) -> String {
@@ -200,6 +244,30 @@ mod tests {
         assert!(!cleaned.contains("/home"));
         assert!(cleaned.contains("Editor"));
         assert!(cleaned.contains("note"));
+    }
+
+    #[test]
+    fn redact_keeps_single_slash_words() {
+        // A single interior slash is not a path (e.g. "and/or").
+        let cleaned = redact_paths("and/or maybe");
+        assert!(cleaned.contains("and/or"));
+        assert!(cleaned.contains("maybe"));
+    }
+
+    #[test]
+    fn redact_drops_drive_and_relative_paths() {
+        let cleaned = redact_paths("C:\\Users\\me docs/report.md app");
+        assert!(!cleaned.contains("C:\\"));
+        assert!(!cleaned.contains("docs/report.md"));
+        assert!(cleaned.contains("app"));
+    }
+
+    #[test]
+    fn redact_drops_email() {
+        let cleaned = redact_paths("contact me@example.com now");
+        assert!(!cleaned.contains("me@example.com"));
+        assert!(cleaned.contains("contact"));
+        assert!(cleaned.contains("now"));
     }
 
     #[test]

@@ -22,26 +22,27 @@ impl ListMonitorsAction {
             for monitor in monitors {
                 let name = monitor.name().unwrap_or_else(|_| "Unknown".to_string());
                 let id = monitor.id();
-                let id_str = id.map_or_else(|_| "?".to_string(), |v| v.to_string());
+                let id_val = id.map_or(serde_json::Value::Null, |v| {
+                    serde_json::Value::Number(v.into())
+                });
                 let is_primary = monitor.is_primary().unwrap_or(false);
                 let width = monitor.width().unwrap_or(0);
                 let height = monitor.height().unwrap_or(0);
                 let x = monitor.x().unwrap_or(0);
                 let y = monitor.y().unwrap_or(0);
                 let scale = monitor.scale_factor().unwrap_or(1.0);
-                result.push(format!(
-                    "{} (id: {}) {}x{} at ({},{}) scale={:.1}{}",
-                    name,
-                    id_str,
-                    width,
-                    height,
-                    x,
-                    y,
-                    scale,
-                    if is_primary { " [PRIMARY]" } else { "" }
-                ));
+                result.push(serde_json::json!({
+                    "name": name,
+                    "id": id_val,
+                    "width": width,
+                    "height": height,
+                    "x": x,
+                    "y": y,
+                    "scale": scale,
+                    "is_primary": is_primary,
+                }));
             }
-            Ok::<_, ToolError>(result.join("\n"))
+            Ok::<_, ToolError>(serde_json::json!({ "monitors": result }).to_string())
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed {

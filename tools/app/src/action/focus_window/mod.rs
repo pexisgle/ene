@@ -38,9 +38,9 @@ impl FocusWindowAction {
             let win_title = window.title().unwrap_or_default();
             let app_name = window.app_name().unwrap_or_default();
             if win_title.contains(title) || app_name.contains(title) {
-                return Err(ToolError::Internal {
+                return Err(ToolError::ExecutionFailed {
                     message: format!(
-                        "Found window '{win_title}' ({app_name}) but x11 focus is not implemented in this build (xcap exposes no focus() call); on Wayland this path is unreachable because detect_wayland() short-circuits to wayland::focus_window_wayland."
+                        "Window focus is not supported on X11 (found '{win_title}'). Only Wayland compositors are supported."
                     ),
                 });
             }

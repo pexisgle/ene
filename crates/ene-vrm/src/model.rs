@@ -1,11 +1,11 @@
 //! GPU-side data types produced by [`crate::loader::load_vrm`].
 //!
-//! loads **every primitive of every mesh** in the glTF
+//! The loader loads **every primitive of every mesh** in the glTF
 //! document. A VRM 1.0 model like AliciaSolid.vrm has 12 separate
 //! glTF Mesh objects (body, clothes, hair, face, accessories,
 //! etc.) — not one mesh with 12 primitives. Iterating only
 //! `meshes[0]` (this struct) rendered the head/face area only;
-//! fixes this by walking every `Mesh` and every `Primitive`.
+//! the loader fixes this by walking every `Mesh` and every `Primitive`.
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
@@ -56,11 +56,11 @@ pub struct VrmPrimitive {
     /// `alphaMode`. Controls draw order and pipeline selection
     /// in the renderer.
     pub alpha_mode: AlphaMode,
-    /// whether this primitive's material declares
+    /// Whether this primitive's material declares
     /// `KHR_materials_unlit`. Unlit primitives skip all lighting
     /// in the fragment shader and output the base color directly.
     pub unlit: bool,
-    /// parsed `VRMC_materials_mtoon` parameters. `None`
+    /// Parsed `VRMC_materials_mtoon` parameters. `None`
     /// for materials without the extension (the renderer falls
     /// back to the half-Lambert lite shader in that case).
     pub mtoon: Option<MToonMaterial>,
@@ -75,6 +75,7 @@ pub struct VrmPrimitive {
 /// glTF `material.alphaMode`. Controls draw order and pipeline
 /// selection in the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum AlphaMode {
     /// Opaque surface — depth write enabled, no blending.
     #[default]
@@ -352,6 +353,10 @@ pub struct VrmModel {
     /// [`SpringBoneSimulator`](crate::spring_bone::SpringBoneSimulator)
     /// from this to drive hair / cloth sway.
     pub spring_bones: Option<SpringBoneProperties>,
+    /// Reusable skin palette buffer. Stored on the model to
+    /// avoid a per-frame `Vec::with_capacity` allocation in
+    /// [`Self::rebuild_skin_palette`].
+    skin_palette: Vec<Mat4>,
 }
 
 impl VrmModel {
@@ -455,6 +460,7 @@ impl VrmModel {
             expressions_meta,
             node_constraints,
             spring_bones,
+            skin_palette: Vec::new(),
         }
     }
 
@@ -529,17 +535,18 @@ impl VrmModel {
     /// rotations) or when no cursor sample has been
     /// processed yet. `None` makes step 2 a no-op.
     ///
-    /// Returns an empty `Vec` when the model has zero
+    /// Returns an empty slice when the model has zero
     /// skeleton joints — the renderer's identity palette
     /// stays in effect and no GPU write is needed.
     pub fn update_skin_palette(
         &mut self,
         frame: &VrmaFrame,
         look_at: Option<&LookAtBoneOutput>,
-    ) -> Vec<Mat4> {
+    ) -> &[Mat4] {
         let joint_count = self.skeleton.joint_count();
         if joint_count == 0 || self.nodes.is_empty() {
-            return Vec::new();
+            self.skin_palette.clear();
+            return &self.skin_palette;
         }
 
         // 1. Reset to rest. We have to copy from
@@ -612,10 +619,11 @@ impl VrmModel {
     /// same rest-relative hips delta [`update_skin_palette`]
     /// would have applied — pass it again after a local-only
     /// recompute so locomotion is preserved.
-    pub fn rebuild_skin_palette(&mut self, hips_translation: Option<Vec3>) -> Vec<Mat4> {
+    pub fn rebuild_skin_palette(&mut self, hips_translation: Option<Vec3>) -> &[Mat4] {
         let joint_count = self.skeleton.joint_count();
         if joint_count == 0 || self.nodes.is_empty() {
-            return Vec::new();
+            self.skin_palette.clear();
+            return &self.skin_palette;
         }
 
         self.nodes.compute_world_transforms();
@@ -629,26 +637,15 @@ impl VrmModel {
             && let Some(hips_entry) = self.humanoid.hips()
         {
             self.nodes.world_positions[hips_entry.node] += hips_delta;
-            let n = self.nodes.local_rotations.len();
-            for i in 0..n {
-                if i == hips_entry.node {
-                    continue;
-                }
-                if self.is_descendant_of(hips_entry.node, i) {
-                    let p = self.nodes.parents[i] as usize;
-                    self.nodes.world_rotations[i] =
-                        self.nodes.world_rotations[p] * self.nodes.local_rotations[i];
-                    self.nodes.world_positions[i] = self.nodes.world_rotations[p]
-                        * self.nodes.local_positions[i]
-                        + self.nodes.world_positions[p];
-                }
-            }
+            self.cascade_hips_descendants(hips_entry.node);
         }
 
         // Build the palette. The standard glTF skinning
         // identity is `joint_world * inverse_bind[j]`, which
-        // is identity at rest.
-        let mut palette: Vec<Mat4> = Vec::with_capacity(joint_count);
+        // is identity at rest. Reuse the stored buffer to avoid
+        // a per-frame allocation.
+        self.skin_palette.clear();
+        self.skin_palette.reserve(joint_count);
         for j in 0..joint_count {
             let node_idx = self
                 .skeleton
@@ -670,27 +667,38 @@ impl VrmModel {
                 .get(j)
                 .copied()
                 .unwrap_or(Mat4::IDENTITY);
-            palette.push(joint_world * inverse_bind);
+            self.skin_palette.push(joint_world * inverse_bind);
         }
-        palette
+        &self.skin_palette
     }
 
-    /// `true` when `descendant` is reachable from `ancestor`
-    /// via the parent chain (i.e. `ancestor` is on the path
-    /// from the root to `descendant`, including `ancestor`
-    /// itself). Used to cascade a single hips translation
-    /// without re-walking the entire hierarchy.
-    fn is_descendant_of(&self, ancestor: usize, descendant: usize) -> bool {
-        let mut cur = descendant;
-        loop {
-            if cur == ancestor {
-                return true;
+    /// Cascade a hips translation to every descendant of
+    /// `hips_node` in O(n) using a topological walk (parents
+    /// before children). Replaces the previous O(n × h)
+    /// `is_descendant_of` per-node parent-chain walk.
+    fn cascade_hips_descendants(&mut self, hips_node: usize) {
+        let n = self.nodes.local_rotations.len();
+        // `in_subtree[i]` marks nodes reachable from the hips.
+        // glTF guarantees parents appear before children, so a
+        // single forward pass propagates the flag correctly.
+        let mut in_subtree = vec![false; n];
+        in_subtree[hips_node] = true;
+        for i in 0..n {
+            let p = self.nodes.parents[i];
+            if p >= 0 && in_subtree[p as usize] {
+                in_subtree[i] = true;
             }
-            let p = self.nodes.parents[cur];
-            if p < 0 {
-                return false;
+        }
+        for (i, &in_sub) in in_subtree.iter().enumerate() {
+            if i == hips_node || !in_sub {
+                continue;
             }
-            cur = p as usize;
+            let p = self.nodes.parents[i] as usize;
+            self.nodes.world_rotations[i] =
+                self.nodes.world_rotations[p] * self.nodes.local_rotations[i];
+            self.nodes.world_positions[i] = self.nodes.world_rotations[p]
+                * self.nodes.local_positions[i]
+                + self.nodes.world_positions[p];
         }
     }
 }
@@ -1330,7 +1338,7 @@ mod tests {
     /// call `model.update_skin_palette(&frame, look_at)`
     /// directly.
     fn model_palette(mut model: VrmModel, frame: &VrmaFrame) -> (VrmModel, Vec<Mat4>) {
-        let palette = model.update_skin_palette(frame, None);
+        let palette = model.update_skin_palette(frame, None).to_vec();
         (model, palette)
     }
 
@@ -1454,11 +1462,11 @@ mod tests {
         let look_at = LookAtBoneOutput::default();
         let palette_lookat = {
             let mut m = model_lookat;
-            m.update_skin_palette(&frame, Some(&look_at))
+            m.update_skin_palette(&frame, Some(&look_at)).to_vec()
         };
         let palette_none = {
             let mut m = model_none;
-            m.update_skin_palette(&frame, None)
+            m.update_skin_palette(&frame, None).to_vec()
         };
         assert_eq!(palette_lookat, palette_none);
     }

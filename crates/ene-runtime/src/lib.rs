@@ -140,9 +140,11 @@ pub use ene_tool_proto::ToolSpec;
 pub use error::EneRuntimeError;
 
 // ── Stream types ──
+/// A single answer in a multi-question interactive prompt (re-exported from `ene-tool-proto`).
 pub use streaming::MultiAnswer;
 /// Permission decision type.
 pub use streaming::PermissionDecision;
+/// User's response to an interactive tool's input request.
 pub use streaming::UserInputResponse;
 /// Permission grant scope and lifetime (#177).
 pub use streaming::{GrantType, PermissionScope};

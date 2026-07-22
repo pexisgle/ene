@@ -78,7 +78,7 @@ async fn memory_writer_persists_tool_grounded_procedure_when_enabled() {
             assistant_message: Some("saved"),
             tool_results: &tools,
         },
-        affect,
+        affect: &affect,
         character_id: "ene",
         user_id: "user",
     };
@@ -117,7 +117,7 @@ async fn memory_writer_persists_tool_grounded_episodic_when_enabled() {
             assistant_message: Some("done"),
             tool_results: &tools,
         },
-        affect,
+        affect: &affect,
         character_id: "ene",
         user_id: "user",
     };
@@ -145,13 +145,14 @@ async fn memory_writer_default_does_not_persist_successful_tools_without_llm() {
         success: true,
         summary: "ls output here".to_string(),
     }];
+    let affect = AffectState::neutral("ene");
     let input = PostTurnInput {
         turn: TurnInput {
             user_message: "list files",
             assistant_message: Some("done"),
             tool_results: &tools,
         },
-        affect: AffectState::neutral("ene"),
+        affect: &affect,
         character_id: "ene",
         user_id: "user",
     };

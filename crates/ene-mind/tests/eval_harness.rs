@@ -265,7 +265,7 @@ async fn scenario_identity_kernel_survives_long_history() {
                 llm_provider: Some(llm),
                 post_history_block: None,
             },
-            &pre,
+            pre,
             ene_mind::ComposePrefetch::default(),
         )
         .await

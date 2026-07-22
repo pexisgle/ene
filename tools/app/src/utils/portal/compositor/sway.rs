@@ -4,6 +4,22 @@ use super::WlCompositor;
 
 pub(super) struct Sway;
 
+/// Escapes a string for safe embedding in sway `[title="..."]` criteria.
+///
+/// Sway criteria values are double-quoted; a title containing `"` or `\`
+/// could break out of the criteria and inject arbitrary sway commands.
+fn escape_sway_criteria(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len() * 2);
+    for c in s.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
 fn sway_find_windows(node: &serde_json::Value, windows: &mut Vec<String>) {
     let node_type = node["type"].as_str().unwrap_or("");
     if node_type == "con" || node_type == "floating_con" {
@@ -61,7 +77,8 @@ impl WlCompositor for Sway {
     }
 
     fn focus_window(&self, title: &str) -> Result<String, ToolError> {
-        let criteria = format!("[title=\"{title}\"] focus");
+        let escaped = escape_sway_criteria(title);
+        let criteria = format!("[title=\"{escaped}\"] focus");
         let output = std::process::Command::new("swaymsg")
             .arg(&criteria)
             .output()

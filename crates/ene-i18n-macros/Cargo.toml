@@ -16,5 +16,12 @@ quote = { workspace = true }
 syn = { workspace = true }
 fluent-syntax = { workspace = true }
 
+[dev-dependencies]
+trybuild = "1"
+i18n-embed = { version = "0.16", features = ["fluent-system", "fluent"] }
+i18n-embed-fl = "0.10"
+fluent-bundle = { workspace = true }
+rust-embed = "8.11"
+
 [lints]
 workspace = true

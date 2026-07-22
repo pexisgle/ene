@@ -40,7 +40,7 @@ pub fn block_anchor_replace(
         return None;
     }
 
-    let single_threshold = 0.0f64;
+    let single_threshold = 0.6f64;
     let multi_threshold = 0.3f64;
 
     let check_candidate = |start_line: usize, end_line: usize| -> Option<(usize, usize)> {

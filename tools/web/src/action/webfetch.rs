@@ -5,6 +5,7 @@ use ene_tool_common::prelude::*;
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
+const MAX_REDIRECTS: usize = 5;
 
 /// Returns `Ok(())` if `host` resolves (or, when it is already a
 /// literal IP, is) an address we are willing to fetch from. The
@@ -90,6 +91,67 @@ fn is_blocked_address(ip: IpAddr) -> bool {
     }
 }
 
+/// Returns `true` for MIME types that represent binary content which
+/// cannot be meaningfully displayed as text.
+fn is_binary_content_type(mime: &str) -> bool {
+    let lower = mime.to_ascii_lowercase();
+    lower.starts_with("image/")
+        || lower.starts_with("audio/")
+        || lower.starts_with("video/")
+        || lower.starts_with("font/")
+        || lower == "application/pdf"
+        || lower == "application/octet-stream"
+        || lower == "application/zip"
+        || lower == "application/gzip"
+        || lower == "application/x-tar"
+        || lower == "application/x-gzip"
+        || lower.starts_with("application/x-")
+}
+
+/// Strips HTML tags and returns plain text content.
+///
+/// Detaches script/style/noscript/template subtrees before extracting
+/// text nodes, then collapses whitespace into a single readable line.
+fn html_to_plain_text(html: &str) -> String {
+    use scraper::{Html, Node, Selector};
+
+    const SKIP_TAGS: &[&str] = &["script", "style", "noscript", "template"];
+
+    let mut document = Html::parse_document(html);
+
+    // Detach non-content subtrees so their text is not extracted.
+    let root_id = document.root_element().id();
+    let skip_ids: Vec<_> = document
+        .tree
+        .get(root_id)
+        .map(|root| {
+            root.descendants()
+                .filter_map(|node| match node.value() {
+                    Node::Element(el) if SKIP_TAGS.contains(&el.name()) => Some(node.id()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    for id in skip_ids {
+        if let Some(mut node) = document.tree.get_mut(id) {
+            node.detach();
+        }
+    }
+
+    // Prefer <body> content; fall back to the full document.
+    let text: String = if let Ok(sel) = Selector::parse("body")
+        && let Some(body) = document.select(&sel).next()
+    {
+        body.text().collect::<Vec<_>>().join(" ")
+    } else {
+        document.root_element().text().collect::<Vec<_>>().join(" ")
+    };
+
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn default_client() -> reqwest::Client {
     reqwest::Client::new()
 }
@@ -142,10 +204,11 @@ impl WebFetchAction {
         // hostname is resolved up front so a public DNS name that
         // points at a private IP cannot bypass the check via the
         // OS resolver inside reqwest.
-        let parsed = reqwest::Url::parse(url).map_err(|e| ToolError::InvalidArguments {
-            message: format!("Invalid URL: {e}"),
-        })?;
-        assert_safe_host(&parsed).await?;
+        let mut current_url =
+            reqwest::Url::parse(url).map_err(|e| ToolError::InvalidArguments {
+                message: format!("Invalid URL: {e}"),
+            })?;
+        assert_safe_host(&current_url).await?;
 
         let timeout_secs = self
             .timeout
@@ -159,17 +222,64 @@ impl WebFetchAction {
             _ => "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         };
 
-        let response = self
-            .client
-            .get(url)
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .header("Accept", accept_header)
-            .header("Accept-Language", "en-US,en;q=0.9")
-            .send()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("HTTP request failed: {e}"),
-            })?;
+        // Manual redirect loop: the client is configured with
+        // `redirect::Policy::none()` so we can re-validate each
+        // redirect target against the SSRF blocklist before
+        // following it.
+        let mut redirects_remaining = MAX_REDIRECTS;
+        let response = loop {
+            let resp = self
+                .client
+                .get(current_url.clone())
+                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .header("Accept", accept_header)
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .send()
+                .await
+                .map_err(|e| ToolError::ExecutionFailed {
+                    message: format!("HTTP request failed: {e}"),
+                })?;
+
+            let status = resp.status();
+            if status.is_redirection() {
+                if redirects_remaining == 0 {
+                    return Err(ToolError::ExecutionFailed {
+                        message: format!("Too many redirects (max {MAX_REDIRECTS})"),
+                    });
+                }
+                redirects_remaining -= 1;
+
+                let location = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| ToolError::ExecutionFailed {
+                        message: format!(
+                            "Redirect ({}) without a valid Location header",
+                            status.as_u16()
+                        ),
+                    })?;
+
+                let next_url =
+                    current_url
+                        .join(location)
+                        .map_err(|e| ToolError::ExecutionFailed {
+                            message: format!("Invalid redirect target '{location}': {e}"),
+                        })?;
+
+                if next_url.scheme() != "http" && next_url.scheme() != "https" {
+                    return Err(ToolError::ExecutionFailed {
+                        message: format!("Redirect to unsupported scheme '{}'", next_url.scheme()),
+                    });
+                }
+
+                assert_safe_host(&next_url).await?;
+                current_url = next_url;
+                continue;
+            }
+
+            break resp;
+        };
 
         let status = response.status();
         if !status.is_success() {
@@ -180,6 +290,21 @@ impl WebFetchAction {
                     status.canonical_reason().unwrap_or("Unknown")
                 ),
             });
+        }
+
+        // Reject known binary content types before attempting
+        // UTF-8 conversion, which would produce garbage.
+        if let Some(content_type) = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+        {
+            let mime = content_type.split(';').next().unwrap_or_default().trim();
+            if is_binary_content_type(mime) {
+                return Err(ToolError::ExecutionFailed {
+                    message: format!("Cannot display binary content (Content-Type: {mime})"),
+                });
+            }
         }
 
         let content_length = response.content_length();
@@ -208,6 +333,7 @@ impl WebFetchAction {
 
         match format {
             "html" => Ok(body.to_string()),
+            "text" => Ok(html_to_plain_text(&body)),
             _ => Ok(ene_tool_common::html::html_to_markdown(&body)),
         }
     }

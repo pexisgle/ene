@@ -7,26 +7,35 @@
 //! out so new tool binaries don't have to hand-write a `ToolProvider` impl
 //! just to dispatch a fixed action list — see the ABI compatibility table in
 //! `docs/reference/tools/sdk.md` for how this fits into the wider tool ABI.
+//!
+//! ## Deferred (background) execution
+//!
+//! Neither [`ActionSetProvider`] nor [`SingleActionProvider`] overrides
+//! `call_tool_deferred`, `poll_deferred`, or `cancel_deferred`. This is
+//! **intentional**: the `ToolAction` trait models synchronous, request–response
+//! actions, and deferred execution requires task-spawning infrastructure
+//! (a task store, polling loop, and cancellation handles) that is specific to
+//! each tool binary's concurrency model. Tools that need background execution
+//! should implement `ToolProvider` manually, overriding the three deferred
+//! methods with their own task management. The default trait implementations
+//! fall back to synchronous execution, so existing tools are unaffected.
 
 use crate::ToolAction;
 use async_trait::async_trait;
 use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolRagProfile, ToolSpec};
 
-type SetCallContextHook = Box<dyn Fn(&str) + Send + Sync>;
+type SetCallContextHook = Box<dyn Fn(&str, Option<&str>) + Send + Sync>;
 type SandboxHook = Box<dyn Fn(&SandboxConfigData) + Send + Sync>;
 type PermissionHook = Box<dyn Fn(&str) + Send + Sync>;
 type AllowPatternHook = Box<dyn Fn(&str, &str) + Send + Sync>;
 type SetConfigHook = Box<dyn Fn(&serde_json::Value) + Send + Sync>;
 type ConfigSchemaHook = Box<dyn Fn() -> Option<serde_json::Value> + Send + Sync>;
 
-/// Adapts a flat `Vec<Box<dyn ToolAction>>` into a [`ToolProvider`].
-///
-/// `list_specs` and `call_tool` are dispatched generically over the action
-/// list; lifecycle hooks (`set_call_context`, `set_sandbox`, permissions,
-/// config) are no-ops unless registered via the corresponding `with_*`
-/// builders.
-pub struct ActionSetProvider {
-    actions: Vec<Box<dyn ToolAction>>,
+/// Shared hook storage used by both [`ActionSetProvider`] and
+/// [`SingleActionProvider`]. Avoids duplicating the seven `Option<…Hook>`
+/// fields and their `ToolProvider` implementations.
+#[derive(Default)]
+struct ProviderHooks {
     on_set_call_context: Option<SetCallContextHook>,
     on_sandbox: Option<SandboxHook>,
     on_approve_permission: Option<PermissionHook>,
@@ -36,19 +45,124 @@ pub struct ActionSetProvider {
     config_schema: Option<ConfigSchemaHook>,
 }
 
+impl ProviderHooks {
+    fn with_set_call_context_hook(
+        mut self,
+        hook: impl Fn(&str, Option<&str>) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_set_call_context = Some(Box::new(hook));
+        self
+    }
+
+    fn with_sandbox_hook(
+        mut self,
+        hook: impl Fn(&SandboxConfigData) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_sandbox = Some(Box::new(hook));
+        self
+    }
+
+    fn with_approve_permission_hook(mut self, hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.on_approve_permission = Some(Box::new(hook));
+        self
+    }
+
+    fn with_allow_pattern_hook(
+        mut self,
+        hook: impl Fn(&str, &str) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_allow_pattern = Some(Box::new(hook));
+        self
+    }
+
+    fn with_revoke_pattern_hook(
+        mut self,
+        hook: impl Fn(&str, &str) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_revoke_pattern = Some(Box::new(hook));
+        self
+    }
+
+    fn with_set_config_hook(
+        mut self,
+        hook: impl Fn(&serde_json::Value) + Send + Sync + 'static,
+    ) -> Self {
+        self.on_set_config = Some(Box::new(hook));
+        self
+    }
+
+    fn with_config_schema_hook(
+        mut self,
+        hook: impl Fn() -> Option<serde_json::Value> + Send + Sync + 'static,
+    ) -> Self {
+        self.config_schema = Some(Box::new(hook));
+        self
+    }
+
+    fn call_set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+        if let Some(hook) = &self.on_set_call_context {
+            let turn_id = if ctx.turn_id.is_empty() {
+                None
+            } else {
+                Some(ctx.turn_id.as_str())
+            };
+            hook(&ctx.conversation_id, turn_id);
+        }
+    }
+
+    fn call_set_sandbox(&self, sandbox: &SandboxConfigData) {
+        if let Some(hook) = &self.on_sandbox {
+            hook(sandbox);
+        }
+    }
+
+    fn call_approve_permission(&self, request_id: &str) {
+        if let Some(hook) = &self.on_approve_permission {
+            hook(request_id);
+        }
+    }
+
+    fn call_allow_pattern(&self, action: &str, target_pattern: &str) {
+        if let Some(hook) = &self.on_allow_pattern {
+            hook(action, target_pattern);
+        }
+    }
+
+    fn call_revoke_pattern(&self, action: &str, target_pattern: &str) {
+        if let Some(hook) = &self.on_revoke_pattern {
+            hook(action, target_pattern);
+        }
+    }
+
+    fn call_set_config(&self, config: &serde_json::Value) {
+        if let Some(hook) = &self.on_set_config {
+            hook(config);
+        }
+    }
+
+    fn call_config_schema(&self) -> Option<serde_json::Value> {
+        self.config_schema.as_ref().and_then(|hook| hook())
+    }
+}
+
+/// Adapts a flat `Vec<Box<dyn ToolAction>>` into a [`ToolProvider`].
+///
+/// `list_specs` and `call_tool` are dispatched generically over the action
+/// list; lifecycle hooks (`set_call_context`, `set_sandbox`, permissions,
+/// config) are no-ops unless registered via the corresponding `with_*`
+/// builders.
+pub struct ActionSetProvider {
+    actions: Vec<Box<dyn ToolAction>>,
+    hooks: ProviderHooks,
+}
+
 impl ActionSetProvider {
     /// Creates a provider dispatching over the given actions.
     #[must_use]
     pub fn new(actions: Vec<Box<dyn ToolAction>>) -> Self {
         Self {
             actions,
-            on_set_call_context: None,
-            on_sandbox: None,
-            on_approve_permission: None,
-            on_allow_pattern: None,
-            on_revoke_pattern: None,
-            on_set_config: None,
-            config_schema: None,
+            hooks: ProviderHooks::default(),
         }
     }
 
@@ -56,9 +170,9 @@ impl ActionSetProvider {
     #[must_use]
     pub fn with_set_call_context_hook(
         mut self,
-        hook: impl Fn(&str) + Send + Sync + 'static,
+        hook: impl Fn(&str, Option<&str>) + Send + Sync + 'static,
     ) -> Self {
-        self.on_set_call_context = Some(Box::new(hook));
+        self.hooks = self.hooks.with_set_call_context_hook(hook);
         self
     }
 
@@ -68,7 +182,7 @@ impl ActionSetProvider {
         mut self,
         hook: impl Fn(&SandboxConfigData) + Send + Sync + 'static,
     ) -> Self {
-        self.on_sandbox = Some(Box::new(hook));
+        self.hooks = self.hooks.with_sandbox_hook(hook);
         self
     }
 
@@ -78,7 +192,7 @@ impl ActionSetProvider {
         mut self,
         hook: impl Fn(&str) + Send + Sync + 'static,
     ) -> Self {
-        self.on_approve_permission = Some(Box::new(hook));
+        self.hooks = self.hooks.with_approve_permission_hook(hook);
         self
     }
 
@@ -88,7 +202,7 @@ impl ActionSetProvider {
         mut self,
         hook: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Self {
-        self.on_allow_pattern = Some(Box::new(hook));
+        self.hooks = self.hooks.with_allow_pattern_hook(hook);
         self
     }
 
@@ -98,7 +212,7 @@ impl ActionSetProvider {
         mut self,
         hook: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Self {
-        self.on_revoke_pattern = Some(Box::new(hook));
+        self.hooks = self.hooks.with_revoke_pattern_hook(hook);
         self
     }
 
@@ -108,7 +222,7 @@ impl ActionSetProvider {
         mut self,
         hook: impl Fn(&serde_json::Value) + Send + Sync + 'static,
     ) -> Self {
-        self.on_set_config = Some(Box::new(hook));
+        self.hooks = self.hooks.with_set_config_hook(hook);
         self
     }
 
@@ -118,7 +232,7 @@ impl ActionSetProvider {
         mut self,
         hook: impl Fn() -> Option<serde_json::Value> + Send + Sync + 'static,
     ) -> Self {
-        self.config_schema = Some(Box::new(hook));
+        self.hooks = self.hooks.with_config_schema_hook(hook);
         self
     }
 }
@@ -145,60 +259,41 @@ impl ToolProvider for ActionSetProvider {
     }
 
     fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
-        if let Some(hook) = &self.on_set_call_context {
-            hook(&ctx.conversation_id);
-        }
+        self.hooks.call_set_call_context(ctx);
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        if let Some(hook) = &self.on_sandbox {
-            hook(sandbox);
-        }
+        self.hooks.call_set_sandbox(sandbox);
     }
 
     fn approve_permission(&self, request_id: &str) {
-        if let Some(hook) = &self.on_approve_permission {
-            hook(request_id);
-        }
+        self.hooks.call_approve_permission(request_id);
     }
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        if let Some(hook) = &self.on_allow_pattern {
-            hook(action, target_pattern);
-        }
+        self.hooks.call_allow_pattern(action, target_pattern);
     }
 
     fn revoke_pattern(&self, action: &str, target_pattern: &str) {
-        if let Some(hook) = &self.on_revoke_pattern {
-            hook(action, target_pattern);
-        }
+        self.hooks.call_revoke_pattern(action, target_pattern);
     }
 
     fn set_config(&self, config: &serde_json::Value) {
-        if let Some(hook) = &self.on_set_config {
-            hook(config);
-        }
+        self.hooks.call_set_config(config);
     }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
-        self.config_schema.as_ref().and_then(|hook| hook())
+        self.hooks.call_config_schema()
     }
 }
 
 /// Adapts a single [`ToolAction`] into a [`ToolProvider`].
 ///
-/// Thin newtype for tools that expose exactly one action — avoids the
-/// `Vec` allocation and linear scan of [`ActionSetProvider::new(vec![one])]`.
-/// Same lifecycle hook builders as [`ActionSetProvider`].
+/// Thin wrapper over [`ActionSetProvider`] for tools that expose exactly
+/// one action. Delegates all dispatch and lifecycle hook logic to the
+/// inner `ActionSetProvider`, avoiding code duplication.
 pub struct SingleActionProvider {
-    action: Box<dyn ToolAction>,
-    on_set_call_context: Option<SetCallContextHook>,
-    on_sandbox: Option<SandboxHook>,
-    on_approve_permission: Option<PermissionHook>,
-    on_allow_pattern: Option<AllowPatternHook>,
-    on_revoke_pattern: Option<AllowPatternHook>,
-    on_set_config: Option<SetConfigHook>,
-    config_schema: Option<ConfigSchemaHook>,
+    inner: ActionSetProvider,
 }
 
 impl SingleActionProvider {
@@ -206,14 +301,7 @@ impl SingleActionProvider {
     #[must_use]
     pub fn new(action: Box<dyn ToolAction>) -> Self {
         Self {
-            action,
-            on_set_call_context: None,
-            on_sandbox: None,
-            on_approve_permission: None,
-            on_allow_pattern: None,
-            on_revoke_pattern: None,
-            on_set_config: None,
-            config_schema: None,
+            inner: ActionSetProvider::new(vec![action]),
         }
     }
 
@@ -221,9 +309,9 @@ impl SingleActionProvider {
     #[must_use]
     pub fn with_set_call_context_hook(
         mut self,
-        hook: impl Fn(&str) + Send + Sync + 'static,
+        hook: impl Fn(&str, Option<&str>) + Send + Sync + 'static,
     ) -> Self {
-        self.on_set_call_context = Some(Box::new(hook));
+        self.inner = self.inner.with_set_call_context_hook(hook);
         self
     }
 
@@ -233,7 +321,7 @@ impl SingleActionProvider {
         mut self,
         hook: impl Fn(&SandboxConfigData) + Send + Sync + 'static,
     ) -> Self {
-        self.on_sandbox = Some(Box::new(hook));
+        self.inner = self.inner.with_sandbox_hook(hook);
         self
     }
 
@@ -243,7 +331,7 @@ impl SingleActionProvider {
         mut self,
         hook: impl Fn(&str) + Send + Sync + 'static,
     ) -> Self {
-        self.on_approve_permission = Some(Box::new(hook));
+        self.inner = self.inner.with_approve_permission_hook(hook);
         self
     }
 
@@ -253,7 +341,7 @@ impl SingleActionProvider {
         mut self,
         hook: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Self {
-        self.on_allow_pattern = Some(Box::new(hook));
+        self.inner = self.inner.with_allow_pattern_hook(hook);
         self
     }
 
@@ -263,7 +351,7 @@ impl SingleActionProvider {
         mut self,
         hook: impl Fn(&str, &str) + Send + Sync + 'static,
     ) -> Self {
-        self.on_revoke_pattern = Some(Box::new(hook));
+        self.inner = self.inner.with_revoke_pattern_hook(hook);
         self
     }
 
@@ -273,7 +361,7 @@ impl SingleActionProvider {
         mut self,
         hook: impl Fn(&serde_json::Value) + Send + Sync + 'static,
     ) -> Self {
-        self.on_set_config = Some(Box::new(hook));
+        self.inner = self.inner.with_set_config_hook(hook);
         self
     }
 
@@ -283,7 +371,7 @@ impl SingleActionProvider {
         mut self,
         hook: impl Fn() -> Option<serde_json::Value> + Send + Sync + 'static,
     ) -> Self {
-        self.config_schema = Some(Box::new(hook));
+        self.inner = self.inner.with_config_schema_hook(hook);
         self
     }
 }
@@ -291,61 +379,43 @@ impl SingleActionProvider {
 #[async_trait]
 impl ToolProvider for SingleActionProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        vec![self.action.definition()]
+        self.inner.list_specs()
     }
 
     fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
-        vec![self.action.rag_profile()]
+        self.inner.list_rag_profiles()
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        if self.action.name() == name {
-            self.action.execute(arguments).await
-        } else {
-            Err(ToolError::NotFound {
-                tool_name: name.to_string(),
-            })
-        }
+        self.inner.call_tool(name, arguments).await
     }
 
     fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
-        if let Some(hook) = &self.on_set_call_context {
-            hook(&ctx.conversation_id);
-        }
+        self.inner.set_call_context(ctx);
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        if let Some(hook) = &self.on_sandbox {
-            hook(sandbox);
-        }
+        self.inner.set_sandbox(sandbox);
     }
 
     fn approve_permission(&self, request_id: &str) {
-        if let Some(hook) = &self.on_approve_permission {
-            hook(request_id);
-        }
+        self.inner.approve_permission(request_id);
     }
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        if let Some(hook) = &self.on_allow_pattern {
-            hook(action, target_pattern);
-        }
+        self.inner.allow_pattern(action, target_pattern);
     }
 
     fn revoke_pattern(&self, action: &str, target_pattern: &str) {
-        if let Some(hook) = &self.on_revoke_pattern {
-            hook(action, target_pattern);
-        }
+        self.inner.revoke_pattern(action, target_pattern);
     }
 
     fn set_config(&self, config: &serde_json::Value) {
-        if let Some(hook) = &self.on_set_config {
-            hook(config);
-        }
+        self.inner.set_config(config);
     }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
-        self.config_schema.as_ref().and_then(|hook| hook())
+        self.inner.config_schema()
     }
 }
 
@@ -404,7 +474,9 @@ mod tests {
         let seen = Arc::new(AtomicBool::new(false));
         let seen2 = seen.clone();
         let provider = ActionSetProvider::new(vec![Box::new(EchoAction)])
-            .with_set_call_context_hook(move |_conv_id| seen2.store(true, Ordering::SeqCst));
+            .with_set_call_context_hook(move |_conv_id, _turn_id| {
+                seen2.store(true, Ordering::SeqCst);
+            });
         provider.set_call_context(&ene_tool_proto::CallContext {
             conversation_id: "abc".to_string(),
             turn_id: String::new(),
@@ -456,8 +528,9 @@ mod tests {
     async fn single_action_provider_session_id_hook_runs() {
         let seen = Arc::new(AtomicBool::new(false));
         let seen2 = seen.clone();
-        let provider = SingleActionProvider::new(Box::new(EchoAction))
-            .with_set_call_context_hook(move |_conv_id| seen2.store(true, Ordering::SeqCst));
+        let provider = SingleActionProvider::new(Box::new(EchoAction)).with_set_call_context_hook(
+            move |_conv_id, _turn_id| seen2.store(true, Ordering::SeqCst),
+        );
         provider.set_call_context(&ene_tool_proto::CallContext {
             conversation_id: "abc".to_string(),
             turn_id: String::new(),

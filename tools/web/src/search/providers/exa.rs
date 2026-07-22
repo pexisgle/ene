@@ -34,13 +34,14 @@ struct ExaSearchRequest {
 }
 
 /// Exa Search API provider.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ExaProvider {
     api_key: String,
+    client: reqwest::Client,
 }
 
 impl ExaProvider {
-    pub fn new(api_key: &str) -> Result<Self, SearchError> {
+    pub fn new(api_key: &str, client: reqwest::Client) -> Result<Self, SearchError> {
         if api_key.is_empty() {
             return Err(SearchError::ConfigError(
                 "Exa API key is required".to_string(),
@@ -49,6 +50,7 @@ impl ExaProvider {
 
         Ok(Self {
             api_key: api_key.to_string(),
+            client,
         })
     }
 }
@@ -60,7 +62,6 @@ impl SearchProvider for ExaProvider {
     }
 
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
-        let client = reqwest::Client::new();
         let request_body = ExaSearchRequest {
             query: options.query.clone(),
             max_results: options.max_results.map(|n| n as usize),
@@ -68,7 +69,8 @@ impl SearchProvider for ExaProvider {
             include_contents: false,
         };
 
-        let response = client
+        let response = self
+            .client
             .post("https://api.exa.ai/search")
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", self.api_key))

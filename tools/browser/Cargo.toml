@@ -22,10 +22,14 @@ async-trait = { workspace = true }
 schemars = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
+tracing = { workspace = true }
 
 [[bin]]
 name = "ene-tool-browser"
 path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -20,6 +20,7 @@ scraper = { workspace = true }
 quick-xml = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 reqwest = { workspace = true, features = ["rustls", "json", "query", "form"] }

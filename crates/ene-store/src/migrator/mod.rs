@@ -7,7 +7,11 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Migration), Box::new(PendingMemoryWritesMigration)]
+        vec![
+            Box::new(Migration),
+            Box::new(PendingMemoryWritesMigration),
+            Box::new(SourceRefIndexMigration),
+        ]
     }
 }
 
@@ -1176,4 +1180,43 @@ enum PendingMemoryWrites {
     CreatedAt,
     NextRetryAt,
     UpdatedAt,
+}
+
+/// Adds composite index on `(character_id, source_ref)` for `typed_memories`.
+pub struct SourceRefIndexMigration;
+
+impl MigrationName for SourceRefIndexMigration {
+    fn name(&self) -> &'static str {
+        "m20260722_000002_source_ref_index"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for SourceRefIndexMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_typed_mem_character_source_ref")
+                    .table(TypedMemories::Table)
+                    .col(TypedMemories::CharacterId)
+                    .col(TypedMemories::SourceRef)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_typed_mem_character_source_ref")
+                    .table(TypedMemories::Table)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
 }

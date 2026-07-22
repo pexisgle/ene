@@ -10,6 +10,10 @@ pub enum EneMemoryError {
     #[error("Memory store connection error: {0}")]
     MemoryStoreConnectionError(String),
     /// API request failed.
+    #[deprecated(
+        since = "0.1.0",
+        note = "out of scope for persistence-only store; will be removed"
+    )]
     #[error("API request failed: {0}")]
     ApiRequestError(String),
     /// Embedding failed structural validation: wrong length
@@ -26,6 +30,15 @@ pub enum EneMemoryError {
         from: crate::MemoryStatus,
         /// Requested target status.
         to: crate::MemoryStatus,
+    },
+
+    /// A stored string value does not match any known variant.
+    #[error("Unrecognized {type_name} value in DB: {value}")]
+    UnrecognizedValue {
+        /// The domain type that was being parsed.
+        type_name: &'static str,
+        /// The raw string value from the database.
+        value: String,
     },
 
     /// Session export uses an unsupported `format_version`.
@@ -71,4 +84,5 @@ pub enum EneMemoryError {
 }
 
 /// Type alias for internal module usages.
+#[deprecated(since = "0.1.0", note = "use `EneMemoryError` directly")]
 pub type MemoryError = EneMemoryError;

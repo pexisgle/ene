@@ -1,31 +1,10 @@
-use crate::commands::{CliCommand, CliError};
-use crate::{context::AppContext, style};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
+use crate::{context::AppContext, style, util};
 use async_trait::async_trait;
 use ene_mind::MindConfig;
 use ene_store::StoreConfig;
 
 pub struct ConfigCommand;
-
-/// Mask an API key for display (#241), matching `/doctor`.
-fn mask_api_key(key: &str) -> String {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
-        return "[not set]".to_string();
-    }
-    if trimmed.chars().count() <= 8 {
-        return "[redacted]".to_string();
-    }
-    let prefix: String = trimmed.chars().take(3).collect();
-    let suffix: String = trimmed
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{prefix}…{suffix}")
-}
 
 #[async_trait]
 impl CliCommand for ConfigCommand {
@@ -41,7 +20,7 @@ impl CliCommand for ConfigCommand {
         "/config [set <dotted.key> <value>]"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let trimmed = arg.trim();
         if trimmed.is_empty() {
             return show_config(ctx).await;
@@ -60,7 +39,7 @@ impl CliCommand for ConfigCommand {
     }
 }
 
-async fn show_config(ctx: &mut AppContext) -> Result<(), CliError> {
+async fn show_config(ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
     let snapshot = ctx
         .handle
         .diagnostics()
@@ -91,9 +70,9 @@ async fn show_config(ctx: &mut AppContext) -> Result<(), CliError> {
     );
     if let Some(chat) = &chat {
         println!("Base URL: {}", chat.base_url);
-        println!("API Key: {}", mask_api_key(&chat.api_key));
+        println!("API Key: {}", util::mask_api_key(&chat.api_key));
     } else {
-        println!("API Key: {}", mask_api_key(""));
+        println!("API Key: {}", util::mask_api_key(""));
     }
     println!("Card Path: {}", snapshot.config.character);
     let tool_config = snapshot
@@ -138,10 +117,10 @@ async fn show_config(ctx: &mut AppContext) -> Result<(), CliError> {
         }
     }
     println!("----------------------");
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn set_config(rest: &str) -> Result<(), CliError> {
+fn set_config(rest: &str) -> Result<CommandOutcome, CliError> {
     let rest = rest.trim();
     let Some((key, value)) = rest.split_once(' ') else {
         return Err(CliError::UsageError {
@@ -166,7 +145,7 @@ fn set_config(rest: &str) -> Result<(), CliError> {
         .map_err(|e| CliError::ExecutionFailed(format!("Failed to save settings: {e}")))?;
 
     let display_value = if key.to_ascii_lowercase().contains("api_key") {
-        mask_api_key(value)
+        util::mask_api_key(value)
     } else {
         value.to_string()
     };
@@ -175,17 +154,17 @@ fn set_config(rest: &str) -> Result<(), CliError> {
     for issue in issues {
         println!("{} {}", style::warning("WARN"), issue.message());
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::mask_api_key;
+    use super::*;
 
     #[test]
     fn mask_api_key_hides_middle() {
-        assert_eq!(mask_api_key(""), "[not set]");
-        assert_eq!(mask_api_key("short"), "[redacted]");
-        assert_eq!(mask_api_key("sk-abcdefghijklmnop"), "sk-…mnop");
+        assert_eq!(util::mask_api_key(""), "[not set]");
+        assert_eq!(util::mask_api_key("short"), "[redacted]");
+        assert_eq!(util::mask_api_key("sk-abcdefghijklmnop"), "sk-…mnop");
     }
 }

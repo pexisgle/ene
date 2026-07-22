@@ -1,7 +1,7 @@
 use async_openai::{Client, config::OpenAIConfig};
 use async_trait::async_trait;
 use std::pin::Pin;
-use std::sync::OnceLock;
+use std::time::Duration;
 use tokio_stream::{Stream, StreamExt};
 
 use crate::config::AiConfig;
@@ -139,7 +139,15 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Llm
 }
 
 fn sanitize_tool_name(name: &str) -> String {
-    name.replace('.', "_")
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn convert_tools(
@@ -172,6 +180,20 @@ pub struct OpenAiProvider {
     thinking_disabled: bool,
     /// Retry policy for transient failures (#237).
     retry_policy: RetryPolicy,
+}
+
+impl std::fmt::Debug for OpenAiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiProvider")
+            .field("api_base", &self.api_base)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("chat_max_tokens", &self.chat_max_tokens)
+            .field("thinking_disabled", &self.thinking_disabled)
+            .field("retry_policy", &self.retry_policy)
+            .field("client", &"<async-openai Client>")
+            .finish()
+    }
 }
 
 impl OpenAiProvider {
@@ -210,6 +232,9 @@ impl OpenAiProvider {
     }
 }
 
+/// Heuristic: models whose name contains "mimo" (case-insensitive) fill
+/// `reasoning_content` instead of `content` unless thinking is disabled.
+/// Extend the match if other reasoning models exhibit the same behavior.
 fn model_wants_thinking_disabled(model: &str) -> bool {
     model.to_ascii_lowercase().contains("mimo")
 }
@@ -282,16 +307,10 @@ fn text_from_delta_value(delta: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_mins(2))
-                .build()
-                .map_err(|e| e.to_string())
-        })
-        .as_ref()
+fn byot_http_client(timeout: Duration) -> Result<reqwest::Client, LlmProviderError> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
         .map_err(|e| LlmProviderError::Provider(format!("HTTP client init failed: {e}")))
 }
 
@@ -327,9 +346,10 @@ async fn post_chat_byot_via_http(
     api_base: &str,
     api_key: &str,
     body: serde_json::Value,
+    timeout: Duration,
 ) -> Result<serde_json::Value, LlmProviderError> {
     let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    let response = byot_http_client()?
+    let response = byot_http_client(timeout)?
         .post(url)
         .bearer_auth(api_key)
         .header("Content-Type", "application/json")
@@ -385,10 +405,14 @@ impl LlmProvider for OpenAiProvider {
             Some(convert_tools(tools))
         };
 
-        let mut name_mapping = std::collections::HashMap::new();
-        for t in tools {
-            name_mapping.insert(sanitize_tool_name(t.name.as_str()), t.name.to_string());
-        }
+        let name_mapping: std::collections::HashMap<String, String> = if tools.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            tools
+                .iter()
+                .map(|t| (sanitize_tool_name(t.name.as_str()), t.name.to_string()))
+                .collect()
+        };
 
         let mut req_builder = async_openai::types::chat::CreateChatCompletionRequestArgs::default();
         req_builder.model(self.model.clone()).messages(oa_messages);
@@ -454,7 +478,9 @@ impl LlmProvider for OpenAiProvider {
                     description: Some("Structured output".to_string()),
                     name: "StructuredOutput".to_string(),
                     schema,
-                    strict: Some(true),
+                    // Not all OpenAI-compatible providers support `strict: true`;
+                    // omit it for broader compatibility (OpenRouter, etc.).
+                    strict: None,
                 },
             });
         }
@@ -470,12 +496,13 @@ impl LlmProvider for OpenAiProvider {
             let body = merge_request_body(request, false, true)?;
             let api_base = self.api_base.clone();
             let api_key = self.api_key.clone();
+            let timeout = self.retry_policy.timeout;
             let response = self
                 .retry_policy
                 .run_with_retry_after(
                     LlmProviderError::is_retryable,
                     LlmProviderError::retry_after_secs,
-                    || post_chat_byot_via_http(&api_base, &api_key, body.clone()),
+                    || post_chat_byot_via_http(&api_base, &api_key, body.clone(), timeout),
                 )
                 .await?;
 
@@ -533,7 +560,7 @@ impl LlmProvider for OpenAiProvider {
             }
         }
 
-        let content = choice.message.content.as_deref().unwrap_or("").to_string();
+        let content = choice.message.content.clone().unwrap_or_default();
 
         Ok(content)
     }
@@ -785,7 +812,7 @@ async fn establish_sse_connection(
             LlmProviderError::is_retryable,
             LlmProviderError::retry_after_secs,
             || async {
-                let response = byot_http_client()?
+                let response = byot_http_client(retry_policy.timeout)?
                     .post(url.clone())
                     .bearer_auth(api_key)
                     .header("Content-Type", "application/json")
@@ -858,6 +885,11 @@ async fn run_direct_sse_stream(
             break;
         }
         let Ok(chunk) = serde_json::from_str::<serde_json::Value>(payload) else {
+            tracing::debug!(
+                component = "OpenAI",
+                payload = %payload,
+                "skipping malformed SSE chunk"
+            );
             continue;
         };
 

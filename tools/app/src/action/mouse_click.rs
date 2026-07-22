@@ -33,11 +33,18 @@ impl MouseClickAction {
                 }
             })?;
             let btn = match button.as_str() {
+                "left" => Button::Left,
                 "right" => Button::Right,
                 "middle" => Button::Middle,
                 "back" => Button::Back,
                 "forward" => Button::Forward,
-                _ => Button::Left,
+                other => {
+                    return Err(ToolError::InvalidArguments {
+                        message: format!(
+                            "Invalid button '{other}'. Valid values: left, right, middle, back, forward"
+                        ),
+                    });
+                }
             };
             for _ in 0..count {
                 enigo

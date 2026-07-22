@@ -17,7 +17,7 @@ async fn main() {
     let result = run_tool_server(Box::new(provider)).await;
     store.shutdown().await;
     if let Err(e) = result {
-        eprintln!("[ene-tool-browser] Fatal error: {e}");
+        tracing::error!("[ene-tool-browser] Fatal error: {e}");
         std::process::exit(1);
     }
 }

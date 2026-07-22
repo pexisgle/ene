@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use ene_store::{ActiveCommitmentPrompt, AffectAnnotation, AffectState, Query, ScoredMemory};
 
 use super::input::RecallPlannerInput;
-use super::intent::{RecallIntent, contains_any, infer_intents, kinds_for_intents};
+use super::intent::{RecallIntent, infer_intents, kinds_for_intents};
 use super::plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 use super::result::RecalledMemory;
 use super::topic::{current_topic, normalize_text, recent_user_turn};
@@ -174,7 +174,7 @@ fn semantic_queries(
     if intents.contains(&RecallIntent::Procedure) {
         push_query(&mut queries, &format!("{topic} procedure steps"));
     }
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &["what do you know", "tell me about", "とは", "について"],
     ) {

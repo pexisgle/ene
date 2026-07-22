@@ -84,19 +84,6 @@ impl PermissionGate {
         let req = PermissionRequest::new(&format!("{action:?}"), target, description);
         Err(req)
     }
-
-    /// Simple permission check
-    pub fn check_simple(request: &PermissionRequest) -> PermissionLevel {
-        match request.level {
-            PermissionLevel::Allow => PermissionLevel::Allow,
-            PermissionLevel::RequiresApproval { .. } => PermissionLevel::Deny {
-                reason: "Approval UI not yet implemented".to_string(),
-            },
-            PermissionLevel::Deny { ref reason } => PermissionLevel::Deny {
-                reason: reason.clone(),
-            },
-        }
-    }
 }
 
 impl Default for PermissionGate {

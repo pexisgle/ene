@@ -43,6 +43,10 @@
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
 )]
+#![expect(
+    deprecated,
+    reason = "MemoryError type alias is deprecated internally; callers should use EneMemoryError"
+)]
 #![cfg_attr(
     test,
     expect(
@@ -107,7 +111,10 @@ pub use search::document_lexical_similarity;
 /// Session metadata types (#176).
 pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
-pub use store::{ActiveSceneSummaryRow, KeyFact, MemoryStore, NaturalDecayReport, NewMemorySpan};
+pub use store::{
+    ActiveSceneSummaryRow, ConversationLogEntry, KeyFact, MemoryStore, NaturalDecayReport,
+    NewMemorySpan,
+};
 /// Typed memory domain types.
 pub use typed_memory::{
     AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,

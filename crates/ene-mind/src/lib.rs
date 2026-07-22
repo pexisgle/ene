@@ -178,3 +178,8 @@ pub use session::{
 /// Conversation summary result and LLM summarization entry point.
 #[doc(no_inline)]
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
+
+/// Returns `true` if `haystack` contains any of the `needles` as a substring.
+pub(crate) fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| haystack.contains(n))
+}

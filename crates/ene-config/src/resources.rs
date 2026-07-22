@@ -20,7 +20,7 @@ pub fn ensure_resource_dirs() -> Result<PathBuf, crate::EneConfigError> {
             "[Resources] Dev build: using source assets at {}",
             assets_dir.display()
         );
-        Ok(assets_dir)
+        Ok(assets_dir.to_path_buf())
     }
 
     #[cfg(not(debug_assertions))]
@@ -43,7 +43,7 @@ pub fn ensure_resource_dirs() -> Result<PathBuf, crate::EneConfigError> {
                     if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                         if let Err(e) = copy_dir_all(&entry.path(), &dst) {
                             tracing::error!(component = "Resources", file = ?name, error = %e, "Failed to copy dir");
-                            return Err(crate::EneConfigError::GenericConfigError(e));
+                            return Err(crate::EneConfigError::IoError(e));
                         }
                     } else {
                         if let Err(e) = fs::copy(&entry.path(), &dst) {
@@ -57,11 +57,13 @@ pub fn ensure_resource_dirs() -> Result<PathBuf, crate::EneConfigError> {
                     component = "Resources",
                     "Default assets not found; running without defaults."
                 );
-                let _ = fs::create_dir_all(&assets_dir);
+                if let Err(e) = fs::create_dir_all(&assets_dir) {
+                    tracing::error!(component = "Resources", error = %e, "Failed to create fallback assets dir");
+                }
             }
         }
 
-        Ok(assets_dir)
+        Ok(assets_dir.to_path_buf())
     }
 }
 
@@ -93,19 +95,16 @@ fn find_source_dir() -> Option<PathBuf> {
 }
 
 #[cfg(not(debug_assertions))]
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst).map_err(|e| format!("Failed to create {}: {e}", dst.display()))?;
-    for entry in fs::read_dir(src).map_err(|e| format!("Failed to read {}: {e}", src.display()))? {
-        let entry = entry.map_err(|e| format!("Entry error: {e}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("File type error: {e}"))?;
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
             copy_dir_all(&entry.path(), &dst_path)?;
         } else {
-            fs::copy(&entry.path(), &dst_path)
-                .map_err(|e| format!("Failed to copy {}: {e}", entry.path().display()))?;
+            fs::copy(&entry.path(), &dst_path)?;
         }
     }
     Ok(())

@@ -261,16 +261,36 @@ pub async fn prefetch_configured_gguf(
         });
     }
 
+    let mut first_error: Option<LlmProviderError> = None;
+
     while let Some(result) = set.join_next().await {
         match result {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
+            Ok(Err(e)) => {
+                tracing::error!(
+                    component = "GgufDownload",
+                    error = %e,
+                    "GGUF prefetch task failed"
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
             Err(e) => {
-                return Err(LlmProviderError::Provider(format!(
-                    "GGUF prefetch task join error: {e}"
-                )));
+                let err = LlmProviderError::Provider(format!("GGUF prefetch task join error: {e}"));
+                tracing::error!(
+                    component = "GgufDownload",
+                    error = %err,
+                    "GGUF prefetch task join failed"
+                );
+                if first_error.is_none() {
+                    first_error = Some(err);
+                }
             }
         }
+    }
+    if let Some(e) = first_error {
+        return Err(e);
     }
     Ok(())
 }

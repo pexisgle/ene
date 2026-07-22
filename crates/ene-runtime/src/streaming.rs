@@ -79,6 +79,40 @@ pub enum UserInputResponse {
     Cancel,
 }
 
+/// Shared context for a tool execution round, reducing parameter count
+/// in [`perform_tool_executions`].
+pub(crate) struct ToolExecutionContext<'a> {
+    /// Tool registry for dispatching calls.
+    pub registry: &'a dyn ene_tool_host::ToolRegistry,
+    /// Optional RAG pipeline for semantic tool search.
+    pub tool_rag: Option<&'a ToolRag>,
+    /// Conversation session identifier.
+    pub session_id: &'a str,
+    /// Broadcast channel for emitting tool events.
+    pub event_tx: &'a broadcast::Sender<EneEvent>,
+    /// Active turn id.
+    pub turn: &'a TurnId,
+    /// Who initiated the turn.
+    pub origin: TurnOrigin,
+    /// Pending permission decision senders.
+    pub pending_permissions:
+        &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
+    /// Pending user input senders.
+    pub pending_user_inputs: &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
+    /// Per-tool call timeout in milliseconds.
+    pub timeout_ms: u64,
+    /// Maximum characters for tool result summaries.
+    pub max_summary_chars: usize,
+    /// Optional memory store for audit logging.
+    pub audit_store: Option<&'a Arc<ene_store::MemoryStore>>,
+    /// Session-wide permission grants (#177).
+    pub permission_scopes: &'a Arc<Mutex<Vec<PermissionScope>>>,
+    /// Undo stack for reversible operations (#178).
+    pub undo_stack: &'a Arc<Mutex<crate::undo::UndoStack>>,
+    /// Channel for spawning deferred tool tasks (#196).
+    pub deferred_tool_tx: &'a mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
+}
+
 /// Output of one tool execution round.
 #[derive(Debug, Default)]
 pub(crate) struct ToolExecutionOutput {
@@ -232,29 +266,17 @@ pub(crate) async fn select_relevant_tools(
 
 /// Executes a batch of tool calls and sends result events through the broadcast channel.
 pub(crate) async fn perform_tool_executions(
-    registry: &dyn ene_tool_host::ToolRegistry,
-    tool_rag: Option<&ToolRag>,
-    session_id: &str,
+    ctx: &ToolExecutionContext<'_>,
     tool_calls: Vec<LlmToolCall>,
     assistant_content: &str,
-    event_tx: &broadcast::Sender<EneEvent>,
-    turn: &crate::types::TurnId,
-    origin: TurnOrigin,
-    pending_permissions: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
-    pending_user_inputs: &Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
-    timeout_ms: u64,
-    max_summary_chars: usize,
-    audit_store: Option<&Arc<ene_store::MemoryStore>>,
-    permission_scopes: &Arc<Mutex<Vec<PermissionScope>>>,
-    undo_stack: &Arc<Mutex<crate::undo::UndoStack>>,
-    deferred_tool_tx: &mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
 ) -> Result<ToolExecutionOutput, crate::error::EneRuntimeError> {
     let mut round_messages = Vec::new();
     let mut summaries = Vec::new();
 
     // Build a lookup of background-capable tool names so deferred calls
     // are only attempted for tools that advertise support (#196).
-    let background_capable: std::collections::HashSet<String> = registry
+    let background_capable: std::collections::HashSet<String> = ctx
+        .registry
         .list_tools()
         .into_iter()
         .filter(|spec| spec.background_capable)
@@ -270,10 +292,10 @@ pub(crate) async fn perform_tool_executions(
         tool_calls: Some(tool_calls.clone()),
     });
 
-    registry
+    ctx.registry
         .set_call_context(&ene_tool_proto::CallContext {
-            conversation_id: session_id.to_string(),
-            turn_id: turn.to_string(),
+            conversation_id: ctx.session_id.to_string(),
+            turn_id: ctx.turn.to_string(),
         })
         .await;
 
@@ -281,9 +303,9 @@ pub(crate) async fn perform_tool_executions(
         let name = call.name.clone();
         let args = call.arguments.clone();
 
-        let _ = event_tx.send(EneEvent::ToolCallStart {
-            turn: turn.clone(),
-            origin,
+        let _ = ctx.event_tx.send(EneEvent::ToolCallStart {
+            turn: ctx.turn.clone(),
+            origin: ctx.origin,
             name: name.clone(),
             arguments: args.clone(),
         });
@@ -304,16 +326,16 @@ pub(crate) async fn perform_tool_executions(
                 .ok()
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
                 .unwrap_or_default();
-            execute_system_search_tool(registry, tool_rag, &query).await
+            execute_system_search_tool(ctx.registry, ctx.tool_rag, &query).await
         } else if background_capable.contains(&name) {
             // Try deferred execution for background-capable tools (#196).
-            let tool_timeout = std::time::Duration::from_millis(timeout_ms);
-            match tokio::time::timeout(tool_timeout, registry.call_tool_deferred(&name, &args))
+            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+            match tokio::time::timeout(tool_timeout, ctx.registry.call_tool_deferred(&name, &args))
                 .await
             {
                 Ok(Ok(ene_tool_host::DeferredCallResult::Deferred { task_id })) => {
                     // Task accepted for background execution.
-                    let _ = deferred_tool_tx.send(crate::handle::DeferredToolTask {
+                    let _ = ctx.deferred_tool_tx.send(crate::handle::DeferredToolTask {
                         tool_name: name.clone(),
                         task_id: task_id.clone(),
                         arguments: args.clone(),
@@ -334,8 +356,8 @@ pub(crate) async fn perform_tool_executions(
                 }),
             }
         } else {
-            let tool_timeout = std::time::Duration::from_millis(timeout_ms);
-            match tokio::time::timeout(tool_timeout, registry.call_tool(&name, &args)).await {
+            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+            match tokio::time::timeout(tool_timeout, ctx.registry.call_tool(&name, &args)).await {
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(ToolHostError::ExecutionFailed {
@@ -381,13 +403,13 @@ pub(crate) async fn perform_tool_executions(
                     // would await forever below.
                     let (decide_tx, decide_rx) = oneshot::channel::<PermissionDecision>();
                     {
-                        let mut guard = pending_permissions.lock().await;
+                        let mut guard = ctx.pending_permissions.lock().await;
                         guard.insert(req_id.clone(), decide_tx);
                     }
 
-                    let _ = event_tx.send(EneEvent::PermissionRequired {
-                        turn: turn.clone(),
-                        origin,
+                    let _ = ctx.event_tx.send(EneEvent::PermissionRequired {
+                        turn: ctx.turn.clone(),
+                        origin: ctx.origin,
                         request_id: req_id.clone(),
                         action: action.clone(),
                         target: target.clone(),
@@ -397,15 +419,15 @@ pub(crate) async fn perform_tool_executions(
                     match decide_rx.await {
                         Ok(PermissionDecision::AllowOnce) => {
                             audit_decision = ene_store::AuditDecision::AllowOnce;
-                            registry.approve_permission(req_id.as_str()).await;
-                            result = registry.call_tool(&name, &args).await;
+                            ctx.registry.approve_permission(req_id.as_str()).await;
+                            result = ctx.registry.call_tool(&name, &args).await;
                         }
                         Ok(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
-                            registry.allow_pattern(action, target).await;
-                            registry.approve_permission(req_id.as_str()).await;
+                            ctx.registry.allow_pattern(action, target).await;
+                            ctx.registry.approve_permission(req_id.as_str()).await;
                             {
-                                let mut guard = permission_scopes.lock().await;
+                                let mut guard = ctx.permission_scopes.lock().await;
                                 let next_id = guard
                                     .iter()
                                     .map(|s| s.id)
@@ -430,7 +452,7 @@ pub(crate) async fn perform_tool_executions(
                                     });
                                 }
                             }
-                            result = registry.call_tool(&name, &args).await;
+                            result = ctx.registry.call_tool(&name, &args).await;
                         }
                         _ => {
                             audit_decision = ene_store::AuditDecision::Denied;
@@ -455,13 +477,13 @@ pub(crate) async fn perform_tool_executions(
                     // branch above.
                     let (resp_tx, resp_rx) = oneshot::channel::<UserInputResponse>();
                     {
-                        let mut guard = pending_user_inputs.lock().await;
+                        let mut guard = ctx.pending_user_inputs.lock().await;
                         guard.insert(req_id.clone(), resp_tx);
                     }
 
-                    let _ = event_tx.send(EneEvent::UserInputRequired {
-                        turn: turn.clone(),
-                        origin,
+                    let _ = ctx.event_tx.send(EneEvent::UserInputRequired {
+                        turn: ctx.turn.clone(),
+                        origin: ctx.origin,
                         request_id: req_id.clone(),
                         prompt: prompt.clone(),
                     });
@@ -469,7 +491,7 @@ pub(crate) async fn perform_tool_executions(
                     match resp_rx.await {
                         Ok(UserInputResponse::Multi(answers)) => {
                             let new_args = inject_user_answers(&args, &answers);
-                            result = registry.call_tool(&name, &new_args).await;
+                            result = ctx.registry.call_tool(&name, &new_args).await;
                         }
                         Ok(UserInputResponse::Cancel) | Err(_) => {
                             result = Err(ToolHostError::ExecutionFailed {
@@ -493,11 +515,11 @@ pub(crate) async fn perform_tool_executions(
         // Record the tool call in the permission audit log (#177).
         // Arguments are redacted by the store before persistence so
         // secrets and raw prompt text never land in the audit trail.
-        if let Some(store) = audit_store {
+        if let Some(store) = ctx.audit_store {
             ene_store::MemoryStore::spawn_insert_audit_entry(
                 store,
                 ene_store::NewAuditEntry {
-                    turn_id: turn.to_string(),
+                    turn_id: ctx.turn.to_string(),
                     tool_name: name.clone(),
                     action: std::mem::take(&mut audit_action),
                     target: std::mem::take(&mut audit_target),
@@ -513,14 +535,14 @@ pub(crate) async fn perform_tool_executions(
         // meta tools are ignored by `UndoStack::record`.
         if success {
             let targets = crate::undo::extract_targets(&args);
-            undo_stack
+            ctx.undo_stack
                 .lock()
                 .await
-                .record(&name, &turn.to_string(), targets);
+                .record(&name, &ctx.turn.to_string(), targets);
         }
-        let _ = event_tx.send(EneEvent::ToolCallResult {
-            turn: turn.clone(),
-            origin,
+        let _ = ctx.event_tx.send(EneEvent::ToolCallResult {
+            turn: ctx.turn.clone(),
+            origin: ctx.origin,
             name: name.clone(),
             result: result_str.clone(),
         });
@@ -529,7 +551,7 @@ pub(crate) async fn perform_tool_executions(
             &name,
             &result_str,
             success,
-            max_summary_chars,
+            ctx.max_summary_chars,
         ));
 
         let (final_tool_text, screenshot_data) = extract_screenshot(&result_str);
@@ -559,12 +581,24 @@ pub(crate) async fn perform_tool_executions(
     })
 }
 
+/// Maximum number of tool calls per round to guard against unbounded memory growth.
+const MAX_TOOL_CALLS_PER_ROUND: usize = 64;
+
 pub(crate) fn accumulate_tool_calls(
     current_tool_calls: &mut Vec<LlmToolCallChunk>,
     tool_calls_delta: &[LlmToolCallChunk],
 ) {
     for tc_delta in tool_calls_delta {
         let idx = tc_delta.index;
+        if idx >= MAX_TOOL_CALLS_PER_ROUND {
+            tracing::warn!(
+                component = "streaming",
+                index = idx,
+                limit = MAX_TOOL_CALLS_PER_ROUND,
+                "tool call index exceeds limit; ignoring chunk"
+            );
+            continue;
+        }
         if idx >= current_tool_calls.len() {
             current_tool_calls.resize(
                 idx + 1,
@@ -629,6 +663,10 @@ fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String {
         if let Some(obj) = value.as_object_mut() {
             obj.insert("_user_answers".to_string(), answers_value);
         } else {
+            tracing::warn!(
+                component = "streaming",
+                "tool arguments are not a JSON object; wrapping under _original_args"
+            );
             let mut obj = serde_json::Map::new();
             obj.insert("_user_answers".to_string(), answers_value);
             obj.insert("_original_args".to_string(), value);
@@ -787,22 +825,24 @@ mod tests {
         }];
 
         let output = perform_tool_executions(
-            &registry,
-            None, // tool_rag None to use fallback substring filter
-            "session_123",
+            &ToolExecutionContext {
+                registry: &registry,
+                tool_rag: None,
+                session_id: "session_123",
+                event_tx: &event_tx,
+                turn: &turn,
+                origin: TurnOrigin::User,
+                pending_permissions: &pending_permissions,
+                pending_user_inputs: &pending_user_inputs,
+                timeout_ms: 1000,
+                max_summary_chars: 100,
+                audit_store: None,
+                permission_scopes: &Arc::new(Mutex::new(Vec::new())),
+                undo_stack: &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
+                deferred_tool_tx: &deferred_tool_tx,
+            },
             tool_calls,
             "assistant text",
-            &event_tx,
-            &turn,
-            TurnOrigin::User,
-            &pending_permissions,
-            &pending_user_inputs,
-            1000,
-            100,
-            None,
-            &Arc::new(Mutex::new(Vec::new())),
-            &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
-            &deferred_tool_tx,
         )
         .await
         .unwrap();
@@ -909,23 +949,27 @@ mod tests {
         }];
 
         let turn = crate::types::TurnId::new();
+        let scopes = Arc::new(Mutex::new(Vec::new()));
+        let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
         let output = perform_tool_executions(
-            &registry,
-            None,
-            "session-1",
+            &ToolExecutionContext {
+                registry: &registry,
+                tool_rag: None,
+                session_id: "session-1",
+                event_tx: &event_tx,
+                turn: &turn,
+                origin: TurnOrigin::User,
+                pending_permissions: &pending_permissions,
+                pending_user_inputs: &pending_user_inputs,
+                timeout_ms: 5_000,
+                max_summary_chars: 10,
+                audit_store: None,
+                permission_scopes: &scopes,
+                undo_stack: &undo_stack,
+                deferred_tool_tx: &deferred_tool_tx,
+            },
             tool_calls,
             "",
-            &event_tx,
-            &turn,
-            TurnOrigin::User,
-            &pending_permissions,
-            &pending_user_inputs,
-            5_000,
-            10,
-            None,
-            &Arc::new(Mutex::new(Vec::new())),
-            &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
-            &deferred_tool_tx,
         )
         .await
         .expect("tool executions");
@@ -1027,24 +1071,23 @@ mod tests {
         let turn = crate::types::TurnId::new();
         let scopes = Arc::new(Mutex::new(Vec::new()));
         let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
-        let exec = perform_tool_executions(
-            &registry,
-            None,
-            "session-1",
-            tool_calls,
-            "",
-            &event_tx,
-            &turn,
-            TurnOrigin::User,
-            &pending_permissions,
-            &pending_user_inputs,
-            5_000,
-            500,
-            None,
-            &scopes,
-            &undo_stack,
-            &deferred_tool_tx,
-        );
+        let exec_ctx = ToolExecutionContext {
+            registry: &registry,
+            tool_rag: None,
+            session_id: "session-1",
+            event_tx: &event_tx,
+            turn: &turn,
+            origin: TurnOrigin::User,
+            pending_permissions: &pending_permissions,
+            pending_user_inputs: &pending_user_inputs,
+            timeout_ms: 5_000,
+            max_summary_chars: 500,
+            audit_store: None,
+            permission_scopes: &scopes,
+            undo_stack: &undo_stack,
+            deferred_tool_tx: &deferred_tool_tx,
+        };
+        let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
 
         // Bound the test: if the fix regresses, the executor would
         // await forever on the dropped decision and this would
@@ -1174,24 +1217,23 @@ mod tests {
         let turn = crate::types::TurnId::new();
         let scopes = Arc::new(Mutex::new(Vec::new()));
         let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
-        let exec = perform_tool_executions(
-            &registry,
-            None,
-            "session-1",
-            tool_calls,
-            "",
-            &event_tx,
-            &turn,
-            TurnOrigin::User,
-            &pending_permissions,
-            &pending_user_inputs,
-            5_000,
-            500,
-            None,
-            &scopes,
-            &undo_stack,
-            &deferred_tool_tx,
-        );
+        let exec_ctx = ToolExecutionContext {
+            registry: &registry,
+            tool_rag: None,
+            session_id: "session-1",
+            event_tx: &event_tx,
+            turn: &turn,
+            origin: TurnOrigin::User,
+            pending_permissions: &pending_permissions,
+            pending_user_inputs: &pending_user_inputs,
+            timeout_ms: 5_000,
+            max_summary_chars: 500,
+            audit_store: None,
+            permission_scopes: &scopes,
+            undo_stack: &undo_stack,
+            deferred_tool_tx: &deferred_tool_tx,
+        };
+        let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;
         let _ = consumer.await;

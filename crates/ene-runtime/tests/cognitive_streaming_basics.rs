@@ -155,7 +155,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
     };
 
     let composed = engine
-        .compose_prompt_packet(compose_ctx, &pre, ene_mind::ComposePrefetch::default())
+        .compose_prompt_packet(compose_ctx, pre, ene_mind::ComposePrefetch::default())
         .await
         .expect("prompt composition succeeds");
 
@@ -176,7 +176,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
             assistant_message: Some("Got it!"),
             tool_results: &[],
         },
-        affect: affect_before.clone(),
+        affect: &affect_before,
         character_id: "ene",
         user_id: "User",
     };
@@ -245,7 +245,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         post_history_block: phi.as_deref(),
     };
     let composed = engine
-        .compose_prompt_packet(compose_ctx, &pre, ene_mind::ComposePrefetch::default())
+        .compose_prompt_packet(compose_ctx, pre, ene_mind::ComposePrefetch::default())
         .await
         .expect("prompt composition succeeds");
 
@@ -321,7 +321,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         post_history_block: None,
     };
     let composed = engine
-        .compose_prompt_packet(compose_ctx, &pre, ene_mind::ComposePrefetch::default())
+        .compose_prompt_packet(compose_ctx, pre, ene_mind::ComposePrefetch::default())
         .await
         .expect("prompt composition succeeds");
 
@@ -409,7 +409,7 @@ async fn post_turn_tool_results_persist_procedure_memory() {
             assistant_message: Some("saved"),
             tool_results: &tool_results,
         },
-        affect,
+        affect: &affect,
         character_id: "ene",
         user_id: "User",
     };

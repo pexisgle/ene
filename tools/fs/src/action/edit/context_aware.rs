@@ -44,7 +44,7 @@ pub fn context_aware_replace(
                             }
                         }
                     }
-                    if total == 0 || matching as f64 / total as f64 >= 0.5 {
+                    if total == 0 || matching as f64 / total as f64 >= 0.75 {
                         let start_idx: usize = content_lines[..i].iter().map(|l| l.len() + 1).sum();
                         let end_idx = start_idx
                             + content_lines[i..=j].iter().map(|l| l.len()).sum::<usize>()
@@ -77,8 +77,9 @@ mod tests {
 
     #[test]
     fn test_context_match_with_similar_middle() {
-        let content = "fn foo() {\n    let x = 1;\n    let y = 2;\n}\n";
-        let old = "fn foo() {\n    let x = 1;\n    let y = 3;\n}";
+        let content =
+            "fn foo() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    let w = 4;\n}\n";
+        let old = "fn foo() {\n    let x = 1;\n    let y = 3;\n    let z = 3;\n    let w = 4;\n}";
         let result = context_aware_replace(content, old, "fn bar() {}", false);
         assert!(result.is_some());
     }

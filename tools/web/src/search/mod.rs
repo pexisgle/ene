@@ -5,9 +5,8 @@ mod providers;
 mod types;
 
 pub use error::SearchError;
-pub use providers::{
-    ArxivProvider, BraveProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider,
-};
+pub(crate) use providers::search_client;
+pub use providers::{ArxivProvider, DuckDuckGoProvider, ExaProvider, TavilyProvider};
 pub use types::{SearchOptions, SearchProvider, SearchResult};
 
 /// Run a search with the provider embedded in `options`.

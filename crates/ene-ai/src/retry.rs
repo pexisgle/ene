@@ -11,6 +11,8 @@ pub struct RetryPolicy {
     pub base_delay: Duration,
     /// Maximum delay cap for exponential growth.
     pub max_delay: Duration,
+    /// Per-request timeout.
+    pub timeout: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -19,6 +21,7 @@ impl Default for RetryPolicy {
             max_attempts: 3,
             base_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(30),
+            timeout: Duration::from_mins(2),
         }
     }
 }
@@ -118,6 +121,7 @@ mod tests {
             max_attempts: 3,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(5),
+            ..RetryPolicy::default()
         };
         let calls = AtomicU32::new(0);
         let result: Result<u32, String> = policy
@@ -162,6 +166,7 @@ mod tests {
             max_attempts: 2,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(2),
+            ..RetryPolicy::default()
         };
         let calls = AtomicU32::new(0);
         let result: Result<u32, String> = policy
@@ -183,6 +188,7 @@ mod tests {
             max_attempts: 2,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_mins(1),
+            ..RetryPolicy::default()
         };
         let calls = AtomicU32::new(0);
         // retry_after of 0 seconds keeps the test fast while exercising the override path.

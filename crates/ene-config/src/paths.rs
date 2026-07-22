@@ -33,9 +33,11 @@ fn resolve_assets_dir_impl() -> PathBuf {
 
 /// In debug builds the source-tree `assets/` is used; in release builds
 /// the app data directory is returned.
-pub fn assets_dir() -> PathBuf {
+///
+/// Returns a `&'static Path` to avoid cloning the cached `PathBuf` on every call.
+pub fn assets_dir() -> &'static std::path::Path {
     static CACHED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHED.get_or_init(resolve_assets_dir_impl).clone()
+    CACHED.get_or_init(resolve_assets_dir_impl).as_path()
 }
 
 /// VRM model assets directory.

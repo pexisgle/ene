@@ -30,6 +30,7 @@ dashmap = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 flate2 = { version = "1", features = ["rust_backend"] }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

@@ -43,6 +43,11 @@ pub fn user_message(error: &EneRuntimeError) -> String {
             "runtime-error-tool",
             detail = err.to_string()
         ),
+        EneRuntimeError::ToolRag(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-tool",
+            detail = err.to_string()
+        ),
         EneRuntimeError::Ai(err) => user_message_from_ai(err),
     }
 }

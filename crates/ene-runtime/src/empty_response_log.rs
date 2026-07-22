@@ -59,7 +59,7 @@ pub fn log_empty_response_if_needed(ctx: &EmptyResponseContext<'_>) {
         message_count = ctx.messages.len(),
         messages_outline = %outline,
         system_prompt_chars = system_chars,
-        system_prompt_preview = %truncate_for_log(&system_preview, PROMPT_PREVIEW_CHARS),
+        system_prompt_preview = %truncate_for_log(system_preview, PROMPT_PREVIEW_CHARS),
         user_input = %truncate_for_log(ctx.user_input, USER_INPUT_LOG_CHARS),
         raw_content_len = ctx.raw_assistant_content.len(),
         raw_content_preview = %truncate_for_log(
@@ -156,11 +156,11 @@ fn message_outline(messages: &[LlmMessage]) -> String {
         .join(", ")
 }
 
-fn system_prompt_excerpt(messages: &[LlmMessage]) -> (usize, String) {
+fn system_prompt_excerpt(messages: &[LlmMessage]) -> (usize, &str) {
     let Some(LlmMessage::System { content }) = messages.first() else {
-        return (0, String::new());
+        return (0, "");
     };
-    (content.chars().count(), content.clone())
+    (content.chars().count(), content)
 }
 
 #[cfg(test)]

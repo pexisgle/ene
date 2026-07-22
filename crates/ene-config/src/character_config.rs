@@ -92,24 +92,35 @@ impl Default for CharacterConfig {
 
 impl CharacterConfig {
     /// Deserialise a sub-section from the `extra` map using the type's associated path.
+    ///
+    /// Walks the `BTreeMap` directly, descending into nested objects one level at a time,
+    /// instead of rebuilding the entire `extra` map into a JSON `Value` on every call.
     pub fn get_section<T>(&self) -> Result<T, EneConfigError>
     where
         T: serde::de::DeserializeOwned + Default + HasConfigKey,
     {
         debug_assert_eq!(T::TARGET, ConfigTarget::Character);
-        let mut cur = serde_json::Value::Object(
-            self.extra
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
-        for key in T::path() {
-            match cur.get(key).cloned() {
-                Some(v) => cur = v,
+        let mut current: Option<&serde_json::Value> = None;
+        for (i, key) in T::path().iter().enumerate() {
+            if i == 0 {
+                match self.extra.get(*key) {
+                    Some(v) => current = Some(v),
+                    None => return Ok(T::default()),
+                }
+                continue;
+            }
+            let Some(cur_val) = current else {
+                return Ok(T::default());
+            };
+            match cur_val.as_object().and_then(|o| o.get(*key)) {
+                Some(v) => current = Some(v),
                 None => return Ok(T::default()),
             }
         }
-        serde_json::from_value(cur).map_err(|e| {
+        let Some(final_val) = current else {
+            return Ok(T::default());
+        };
+        serde_json::from_value(final_val.clone()).map_err(|e| {
             EneConfigError::GenericConfigError(format!(
                 "Failed to deserialize character nested section: {e}"
             ))
@@ -117,6 +128,9 @@ impl CharacterConfig {
     }
 
     /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
+    ///
+    /// Reuses [`set_nested`](crate::config::set_nested) for direct `BTreeMap` mutation
+    /// instead of rebuilding the entire map from a JSON `Value`.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
     where
         T: serde::Serialize + HasConfigKey,
@@ -127,38 +141,7 @@ impl CharacterConfig {
                 "Failed to serialize character section: {e}"
             ))
         })?;
-
-        let mut root = serde_json::Value::Object(
-            self.extra
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        );
-        let mut cur = &mut root;
-        let path = T::path();
-        for (i, &key) in path.iter().enumerate() {
-            if i == path.len().saturating_sub(1) {
-                if let Some(obj) = cur.as_object_mut() {
-                    obj.insert(key.to_string(), val);
-                }
-                break;
-            }
-            if !cur.is_object() {
-                *cur = serde_json::Value::Object(serde_json::Map::new());
-            }
-            let Some(obj) = cur.as_object_mut() else {
-                return Err(EneConfigError::GenericConfigError(
-                    "Internal error: expected JSON object".to_string(),
-                ));
-            };
-            cur = obj
-                .entry(key.to_string())
-                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-        }
-        if let serde_json::Value::Object(obj) = root {
-            self.extra = obj.into_iter().collect();
-        }
-
+        crate::config::set_nested(&mut self.extra, T::path(), val)?;
         Ok(())
     }
 }

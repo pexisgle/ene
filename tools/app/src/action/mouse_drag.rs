@@ -47,9 +47,16 @@ impl MouseDragAction {
                 })?;
 
             let btn = match button.as_str() {
+                "left" => Button::Left,
                 "right" => Button::Right,
                 "middle" => Button::Middle,
-                _ => Button::Left,
+                other => {
+                    return Err(ToolError::InvalidArguments {
+                        message: format!(
+                            "Invalid button '{other}'. Valid values: left, right, middle"
+                        ),
+                    });
+                }
             };
             enigo
                 .button(btn, Direction::Press)

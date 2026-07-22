@@ -1,0 +1,11 @@
+error: i18n_keys! catalog mismatch between fixtures and fixtures:
+         - key `only-in-en` exists in fixtures but is missing from fixtures
+ --> tests/trybuild/fail/catalog_mismatch.rs:6:5
+  |
+6 | /     ene_i18n_macros::i18n_keys!(
+7 | |         "$DIR/tests/trybuild/fixtures/en.ftl",
+8 | |         "$DIR/tests/trybuild/fixtures/ja.ftl"
+9 | |     );
+  | |_____^
+  |
+  = note: this error originates in the macro `ene_i18n_macros::i18n_keys` (in Nightly builds, run with -Z macro-backtrace for more info)

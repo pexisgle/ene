@@ -181,7 +181,7 @@ impl ChatCandidate {
 }
 
 /// Resolves an explicit or env-provided base URL for OpenAI-compatible APIs.
-pub fn resolve_base_url(base_url: &str) -> Result<String, ene_config::ConfigError> {
+pub fn resolve_base_url(base_url: &str) -> Result<String, LlmProviderError> {
     if !base_url.trim().is_empty() {
         return Ok(base_url.to_string());
     }
@@ -190,9 +190,9 @@ pub fn resolve_base_url(base_url: &str) -> Result<String, ene_config::ConfigErro
     {
         return Ok(url);
     }
-    Err(ene_config::ConfigError::MissingBaseUrl {
-        env_var: "OPENAI_BASE_URL".to_string(),
-    })
+    Err(LlmProviderError::Provider(
+        "base URL not configured; set base_url or OPENAI_BASE_URL".to_string(),
+    ))
 }
 
 impl ApiKeyConfig {
@@ -542,8 +542,7 @@ impl AiConfig {
                 })?;
                 let dimensions = resolved.dimensions.unwrap_or(1536);
                 Ok(ResolvedEmbedding::Cloud {
-                    base_url: resolve_base_url(base_url)
-                        .map_err(|e| LlmProviderError::Provider(e.to_string()))?,
+                    base_url: resolve_base_url(base_url)?,
                     api_key: api_key.resolve_api_key(),
                     model: model.to_string(),
                     dimensions,
@@ -574,8 +573,7 @@ impl AiConfig {
                     ))
                 })?;
                 Ok(ResolvedChat {
-                    base_url: resolve_base_url(base_url)
-                        .map_err(|e| LlmProviderError::Provider(e.to_string()))?,
+                    base_url: resolve_base_url(base_url)?,
                     api_key: api_key.resolve_api_key(),
                     model: model.to_string(),
                     max_tokens: resolved.max_tokens,

@@ -127,18 +127,34 @@ impl DbClient {
     /// which meant every cached `schema`/`rowid` state was lost. With
     /// `socket_path` and `auth_token` captured at connect-time, the same
     /// client can be brought back online here.
+    ///
+    /// If the new connection succeeds but the handshake fails (e.g. auth
+    /// rejected), the old stream is preserved so subsequent retries don't
+    /// operate on an unauthenticated socket.
     pub async fn reconnect(&mut self) -> Result<(), DbError> {
-        let stream = IpcStream::connect(&self.socket_path).await?;
-        self.stream = stream;
+        let new_stream = IpcStream::connect(&self.socket_path).await?;
+        let old_stream = std::mem::replace(&mut self.stream, new_stream);
         if let Some(token) = self.auth_token.clone() {
-            let resp = self.send_request(&DbRequest::Handshake { token }).await?;
-            match resp {
-                DbResponse::HandshakeAck => Ok(()),
-                DbResponse::Error { code, message } => Err(DbError::Auth { code, message }),
-                other => Err(DbError::Transport(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("unexpected handshake response: {other:?}"),
-                ))),
+            match self.send_request(&DbRequest::Handshake { token }).await {
+                Ok(DbResponse::HandshakeAck) => Ok(()),
+                Ok(DbResponse::Error { code, message }) => {
+                    // Handshake failed — revert to old stream so the
+                    // client is not left with an unauthenticated socket.
+                    self.stream = old_stream;
+                    Err(DbError::Auth { code, message })
+                }
+                Ok(other) => {
+                    self.stream = old_stream;
+                    Err(DbError::Transport(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("unexpected handshake response: {other:?}"),
+                    )))
+                }
+                Err(e) => {
+                    // Transport error during handshake — revert.
+                    self.stream = old_stream;
+                    Err(e)
+                }
             }
         } else {
             Ok(())
@@ -262,7 +278,7 @@ impl DbClient {
         table: &str,
         columns: &[&str],
         filter: DbFilter,
-        order_by: Vec<DbOrderBy>,
+        order_by: &[DbOrderBy],
         limit: Option<u64>,
     ) -> Result<Vec<Row>, DbError> {
         let resp = Self::check_error(
@@ -273,7 +289,7 @@ impl DbClient {
                     .map(std::string::ToString::to_string)
                     .collect(),
                 filter,
-                order_by,
+                order_by: order_by.to_vec(),
                 limit,
             })
             .await?,

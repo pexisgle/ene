@@ -13,6 +13,17 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
+/// A single conversation log entry returned by `get_logs_by_session`.
+#[derive(Debug, Clone)]
+pub struct ConversationLogEntry {
+    /// Speaker role (e.g. "user", "assistant").
+    pub role: String,
+    /// Message content.
+    pub content: String,
+    /// When the message was recorded.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Input for inserting a compressed conversation span (#79 / #98).
 #[derive(Debug, Clone)]
 pub struct NewMemorySpan {
@@ -41,8 +52,24 @@ pub struct ActiveSceneSummaryRow {
     pub compression_level: i32,
 }
 
-/// A row of tool embedding data: `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`.
-pub type ToolEmbeddingFieldRow = (String, String, String, String, String, Vec<f32>, String);
+/// A row of tool embedding data with all fields.
+#[derive(Debug, Clone)]
+pub struct ToolEmbeddingFieldRow {
+    /// Tool name.
+    pub tool_name: String,
+    /// Embedding field kind (summary, description, etc.).
+    pub field: String,
+    /// Disambiguator for multiple entries of the same field type.
+    pub field_key: String,
+    /// Content hash for change detection.
+    pub version_hash: String,
+    /// Embedding model name.
+    pub model_name: String,
+    /// Deserialized embedding vector.
+    pub embedding: Vec<f32>,
+    /// Source text that was embedded.
+    pub source_text: String,
+}
 
 /// Registers the sqlite-vec extension globally for the process.
 pub fn init_sqlite_vec() {
@@ -230,13 +257,13 @@ fn model_to_memory_item(
 ) -> Result<crate::MemoryItem, MemoryError> {
     Ok(crate::MemoryItem {
         id: Some(m.id),
-        scope: str_to_scope(&m.scope),
+        scope: crate::MemoryScope::from_db_str(&m.scope),
         character_id: m.character_id,
         user_id: m.user_id,
-        kind: str_to_kind(&m.kind),
+        kind: crate::MemoryKind::from_db_str(&m.kind),
         title: m.title,
         content: m.content,
-        source: str_to_source(&m.source),
+        source: crate::MemorySource::from_db_str(&m.source),
         source_ref: m.source_ref,
         confidence: crate::MemoryConfidence::new(m.confidence),
         salience: crate::MemorySalience::new(m.salience),
@@ -251,7 +278,7 @@ fn model_to_memory_item(
         updated_at: m.updated_at,
         valid_from: m.valid_from,
         valid_until: m.valid_until,
-        status: str_to_status(&m.status),
+        status: crate::MemoryStatus::from_db_str(&m.status),
         supersedes_id: m.supersedes_id,
         pinned: m.pinned != 0,
         faded_at: m.faded_at,
@@ -278,22 +305,6 @@ fn model_to_commitment(m: entities::commitments::Model) -> Result<crate::Commitm
         updated_at: m.updated_at,
         completed_at: m.completed_at,
     })
-}
-
-fn str_to_kind(s: &str) -> crate::MemoryKind {
-    crate::MemoryKind::from_db_str(s)
-}
-
-fn str_to_scope(s: &str) -> crate::MemoryScope {
-    crate::MemoryScope::from_db_str(s)
-}
-
-fn str_to_source(s: &str) -> crate::MemorySource {
-    crate::MemorySource::from_db_str(s)
-}
-
-fn str_to_status(s: &str) -> crate::MemoryStatus {
-    crate::MemoryStatus::from_db_str(s)
 }
 
 const fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
@@ -480,7 +491,7 @@ impl MemoryStore {
             .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
         init_sqlite_vec();
         let mut opt = ConnectOptions::new(format!("sqlite:{path_str}?mode=rwc"));
-        opt.max_connections(32);
+        opt.max_connections(8);
         let db = Database::connect(opt).await?;
 
         apply_pragmas(&db).await?;
@@ -684,7 +695,7 @@ impl MemoryStore {
     pub async fn get_logs_by_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<(String, String, DateTime<Utc>)>, MemoryError> {
+    ) -> Result<Vec<ConversationLogEntry>, MemoryError> {
         let rows = entities::conversation_logs::Entity::find()
             .filter(entities::conversation_logs::Column::SessionId.eq(session_id))
             .order_by_asc(entities::conversation_logs::Column::CreatedAt)
@@ -693,7 +704,11 @@ impl MemoryStore {
 
         Ok(rows
             .into_iter()
-            .map(|row| (row.role, row.content, row.created_at))
+            .map(|row| ConversationLogEntry {
+                role: row.role,
+                content: row.content,
+                created_at: row.created_at,
+            })
             .collect())
     }
 
@@ -1109,7 +1124,12 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Lists all stored tool embeddings, one row per (`tool_name`, field, `field_key`, `model_name`).
+    /// Lists all stored tool embeddings with full data (embedding vector + source text).
+    ///
+    /// Prefer [`list_tool_embedding_hashes`](Self::list_tool_embedding_hashes) when
+    /// only `(tool_name, field, field_key, version_hash, model_name)` is needed —
+    /// that variant uses a SQL projection that avoids fetching the large `embedding`
+    /// BLOB and `source_text` columns.
     pub async fn list_tool_embedding_fields(
         &self,
     ) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
@@ -1119,16 +1139,14 @@ impl MemoryStore {
 
         Ok(rows
             .into_iter()
-            .map(|row| {
-                (
-                    row.tool_name,
-                    row.field,
-                    row.field_key,
-                    row.version_hash,
-                    row.model_name,
-                    bytes_to_embedding(&row.embedding),
-                    row.source_text,
-                )
+            .map(|row| ToolEmbeddingFieldRow {
+                tool_name: row.tool_name,
+                field: row.field,
+                field_key: row.field_key,
+                version_hash: row.version_hash,
+                model_name: row.model_name,
+                embedding: bytes_to_embedding(&row.embedding),
+                source_text: row.source_text,
             })
             .collect())
     }
@@ -1143,7 +1161,23 @@ impl MemoryStore {
     pub async fn list_tool_embedding_hashes(
         &self,
     ) -> Result<Vec<(String, String, String, String, String)>, MemoryError> {
+        #[derive(FromQueryResult)]
+        struct HashRow {
+            tool_name: String,
+            field: String,
+            field_key: String,
+            version_hash: String,
+            model_name: String,
+        }
+
         let rows = entities::tool_embedding_index::Entity::find()
+            .select_only()
+            .column(entities::tool_embedding_index::Column::ToolName)
+            .column(entities::tool_embedding_index::Column::Field)
+            .column(entities::tool_embedding_index::Column::FieldKey)
+            .column(entities::tool_embedding_index::Column::VersionHash)
+            .column(entities::tool_embedding_index::Column::ModelName)
+            .into_model::<HashRow>()
             .all(&self.db)
             .await?;
 
@@ -1504,25 +1538,19 @@ impl MemoryStore {
         &self,
         character_id: &str,
     ) -> Result<usize, MemoryError> {
-        use entities::pending_memory_writes::{
-            ActiveModel, Column, Entity, PendingMemoryWriteStatus,
-        };
-        use sea_orm::{ActiveModelTrait, EntityTrait, QueryFilter};
+        use entities::pending_memory_writes::{Column, Entity, PendingMemoryWriteStatus};
+        use sea_orm::{EntityTrait, QueryFilter};
 
         let now = Utc::now();
-        let rows = Entity::find()
+        let result = Entity::update_many()
+            .col_expr(Column::NextRetryAt, sea_orm::sea_query::Expr::value(now))
+            .col_expr(Column::UpdatedAt, sea_orm::sea_query::Expr::value(now))
             .filter(Column::CharacterId.eq(character_id))
             .filter(Column::Status.eq(PendingMemoryWriteStatus::Pending.as_str()))
-            .all(&self.db)
+            .exec(&self.db)
             .await?;
-        let count = rows.len();
-        for row in rows {
-            let mut active: ActiveModel = row.into();
-            active.next_retry_at = sea_orm::Set(now);
-            active.updated_at = sea_orm::Set(now);
-            active.update(&self.db).await?;
-        }
-        Ok(count)
+
+        Ok(result.rows_affected as usize)
     }
 
     /// Take due pending memory writes (`status=pending`, `next_retry_at` <= now) (#240).
@@ -2138,13 +2166,13 @@ impl MemoryStore {
                 Ok((
                     crate::MemoryItem {
                         id: Some(row.id),
-                        scope: str_to_scope(&row.scope),
+                        scope: crate::MemoryScope::from_db_str(&row.scope),
                         character_id: row.character_id,
                         user_id: row.user_id,
-                        kind: str_to_kind(&row.kind),
+                        kind: crate::MemoryKind::from_db_str(&row.kind),
                         title: row.title,
                         content: row.content,
-                        source: str_to_source(&row.source),
+                        source: crate::MemorySource::from_db_str(&row.source),
                         source_ref: row.source_ref,
                         confidence: crate::MemoryConfidence::new(row.confidence),
                         salience: crate::MemorySalience::new(row.salience),
@@ -2159,7 +2187,7 @@ impl MemoryStore {
                         updated_at: row.updated_at,
                         valid_from: row.valid_from,
                         valid_until: row.valid_until,
-                        status: str_to_status(&row.status),
+                        status: crate::MemoryStatus::from_db_str(&row.status),
                         supersedes_id: row.supersedes_id,
                         pinned: row.pinned != 0,
                         faded_at: row.faded_at,
@@ -2289,7 +2317,7 @@ impl MemoryStore {
                 MemoryError::Other(format!("superseded memory id={superseded_id} not found"))
             })?;
 
-        let old_status = str_to_status(&old_model.status);
+        let old_status = crate::MemoryStatus::from_db_str(&old_model.status);
         if !is_supersedeable_status(old_status) {
             return Err(MemoryError::Other(format!(
                 "memory id={superseded_id} cannot be superseded (status={})",
@@ -2375,7 +2403,7 @@ impl MemoryStore {
             return Ok(false);
         };
 
-        let current = str_to_status(&model.status);
+        let current = crate::MemoryStatus::from_db_str(&model.status);
         if let Err(invalid) = crate::forgetting::validate_transition(current, new_status) {
             return Err(MemoryError::InvalidTransition {
                 from: invalid.from,
@@ -2407,7 +2435,7 @@ impl MemoryStore {
             return Ok(false);
         };
 
-        let current = str_to_status(&model.status);
+        let current = crate::MemoryStatus::from_db_str(&model.status);
         if let Err(invalid) = crate::forgetting::validate_user_restore(current) {
             return Err(MemoryError::InvalidTransition {
                 from: invalid.from,
@@ -2943,25 +2971,26 @@ impl MemoryStore {
     pub async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryError> {
         use sea_orm::{EntityTrait, QueryFilter};
 
-        let rows = entities::commitments::Entity::find()
+        let result = entities::commitments::Entity::update_many()
+            .col_expr(
+                entities::commitments::Column::Status,
+                sea_orm::sea_query::Expr::value(
+                    crate::CommitmentStatus::Stale.as_str().to_string(),
+                ),
+            )
+            .col_expr(
+                entities::commitments::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now),
+            )
             .filter(
                 entities::commitments::Column::Status.eq(crate::CommitmentStatus::Active.as_str()),
             )
             .filter(entities::commitments::Column::DueAt.is_not_null())
             .filter(entities::commitments::Column::DueAt.lt(now))
-            .all(&self.db)
+            .exec(&self.db)
             .await?;
 
-        let mut updated = 0usize;
-        for model in rows {
-            if self
-                .update_commitment_status(model.id, crate::CommitmentStatus::Stale)
-                .await?
-            {
-                updated = updated.saturating_add(1);
-            }
-        }
-        Ok(updated)
+        Ok(result.rows_affected as usize)
     }
 }
 
@@ -3179,13 +3208,11 @@ mod tests {
         assert_eq!(rows.len(), 4);
         let web_rows: Vec<_> = rows
             .iter()
-            .filter(|(name, _, _, _, _, _, _)| name == "web_search")
+            .filter(|r| r.tool_name == "web_search")
             .collect();
         assert_eq!(web_rows.len(), 3);
-        let fields: std::collections::HashSet<&str> = web_rows
-            .iter()
-            .map(|(_, f, _, _, _, _, _)| f.as_str())
-            .collect();
+        let fields: std::collections::HashSet<&str> =
+            web_rows.iter().map(|r| r.field.as_str()).collect();
         assert!(fields.contains("summary"));
         assert!(fields.contains("description"));
         assert!(fields.contains("negative"));
@@ -3207,11 +3234,11 @@ mod tests {
         let rows = store.list_tool_embedding_fields().await.unwrap();
         let web_summary = rows
             .iter()
-            .find(|(n, f, _, _, _, _, _)| n == "web_search" && f == "summary")
+            .find(|r| r.tool_name == "web_search" && r.field == "summary")
             .unwrap();
-        assert_eq!(web_summary.3, "hash-a2");
-        assert_eq!(web_summary.5, emb2);
-        assert_eq!(web_summary.6, "sum text v2");
+        assert_eq!(web_summary.version_hash, "hash-a2");
+        assert_eq!(web_summary.embedding, emb2);
+        assert_eq!(web_summary.source_text, "sum text v2");
     }
 
     #[tokio::test]
@@ -3357,10 +3384,10 @@ mod tests {
         assert_eq!(logs.len(), 2);
         let user_log = logs.first().expect("user log");
         let assistant_log = logs.get(1).expect("assistant log");
-        assert_eq!(user_log.0, "user");
-        assert_eq!(user_log.1, "Hello");
-        assert_eq!(assistant_log.0, "assistant");
-        assert_eq!(assistant_log.1, "Hi there!");
+        assert_eq!(user_log.role, "user");
+        assert_eq!(user_log.content, "Hello");
+        assert_eq!(assistant_log.role, "assistant");
+        assert_eq!(assistant_log.content, "Hi there!");
         let _ = ids;
     }
 
@@ -4607,7 +4634,7 @@ mod tests {
         let logs = store.get_logs_by_session("s1").await.expect("logs");
         assert_eq!(logs.len(), 1);
         assert_eq!(
-            logs.first().map(|(_, content, _)| content.as_str()),
+            logs.first().map(|entry| entry.content.as_str()),
             Some("keep-me")
         );
     }

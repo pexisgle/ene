@@ -37,12 +37,14 @@ struct ArxivFeed {
 }
 
 /// `ArXiv` API provider.
-#[derive(Debug, Default)]
-pub struct ArxivProvider;
+#[derive(Debug)]
+pub struct ArxivProvider {
+    client: reqwest::Client,
+}
 
 impl ArxivProvider {
-    pub const fn new() -> Self {
-        Self
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
     }
 }
 
@@ -53,7 +55,6 @@ impl SearchProvider for ArxivProvider {
     }
 
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
-        let client = reqwest::Client::new();
         let mut url = url::Url::parse("http://export.arxiv.org/api/query")
             .map_err(|e| SearchError::ConfigError(format!("Invalid ArXiv base URL: {e}")))?;
 
@@ -67,7 +68,8 @@ impl SearchProvider for ArxivProvider {
             pairs.append_pair("max_results", &max_results_str);
         }
 
-        let response = client
+        let response = self
+            .client
             .get(url)
             .send()
             .await

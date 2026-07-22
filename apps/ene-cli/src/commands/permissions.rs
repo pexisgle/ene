@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::style;
 use async_trait::async_trait;
@@ -19,7 +19,7 @@ impl CliCommand for PermissionsCommand {
         "/permissions <list|revoke <id>|reset>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let subparts: Vec<&str> = arg.splitn(2, ' ').collect();
         match subparts.first().copied() {
             None | Some("list") => {
@@ -43,7 +43,7 @@ impl CliCommand for PermissionsCommand {
                         );
                     }
                 }
-                Ok(())
+                Ok(CommandOutcome::Continue)
             }
             Some("revoke") => {
                 let id_str = subparts.get(1).copied().map_or("", str::trim);
@@ -60,7 +60,7 @@ impl CliCommand for PermissionsCommand {
                         "{}",
                         style::success(format!("Revoked permission grant {id}."))
                     );
-                    Ok(())
+                    Ok(CommandOutcome::Continue)
                 } else {
                     Err(CliError::ExecutionFailed(format!(
                         "No permission grant with id {id}"
@@ -77,7 +77,7 @@ impl CliCommand for PermissionsCommand {
                     "{}",
                     style::success(format!("Revoked {count} permission grant(s)."))
                 );
-                Ok(())
+                Ok(CommandOutcome::Continue)
             }
             _ => Err(CliError::UsageError {
                 usage: self.usage().to_string(),

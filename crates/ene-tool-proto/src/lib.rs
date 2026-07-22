@@ -138,6 +138,17 @@ pub enum DeferredOutcome {
 ///
 /// After IPC separation, each provider on the host side implements this trait.
 /// The host-side `IpcToolRegistry` calls through IPC to the tool binary.
+///
+/// ## Setter-call ordering contract
+///
+/// During the IPC handshake the server calls [`set_sandbox`](Self::set_sandbox)
+/// and [`set_config`](Self::set_config) **once**, synchronously, before the
+/// first [`call_tool`](Self::call_tool) on the same connection. Because each
+/// connection is spawned as a separate Tokio task, interior mutability (e.g.
+/// `RwLock`) is required for any state these setters write and `call_tool`
+/// reads. Implementors may assume that after `set_sandbox`/`set_config`
+/// return, subsequent `call_tool` calls on the *same* connection will observe
+/// the values written by those setters.
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
     /// Returns the list of tool specs this provider exposes.
@@ -216,18 +227,3 @@ pub trait ToolProvider: Send + Sync {
         None
     }
 }
-
-// ── DB IPC auth-token handoff ───────────────────────────────────────
-//
-// ene-runtime generates a per-tool pre-shared auth token when it spawns
-// each per-tool DB IPC server (see `DbIpcServer::new`). The token
-// must be presented by the tool binary on the very first
-// `ene_tool_db::DbRequest::Handshake` to prevent a stray local
-// process from connecting to the (chmod-0600) unix socket and
-// declaring a schema. ene-runtime records the token here; the tool
-// host reads it back when initialising the tool's sandbox config
-// so the value reaches the binary inside `SandboxConfigData`.
-//
-// The map is process-global because the producer (ene-runtime's actor
-// thread) and the consumer (ene-tool-host's startup path) are
-// independent threads spawned at slightly different times.

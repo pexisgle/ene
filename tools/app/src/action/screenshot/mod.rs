@@ -1,5 +1,5 @@
 use ene_tool_common::prelude::*;
-use image::{DynamicImage, imageops::FilterType};
+use image::DynamicImage;
 
 #[cfg(target_os = "linux")]
 mod portal;
@@ -15,10 +15,16 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
             let app_name = window.app_name().unwrap_or_default();
             if (title == active_win.title || app_name == active_win.app_name)
                 && !window.is_minimized().unwrap_or(false)
-                && let Ok(img) = window.capture_image()
             {
-                target_image = Some(DynamicImage::ImageRgba8(img));
-                break;
+                match window.capture_image() {
+                    Ok(img) => {
+                        target_image = Some(DynamicImage::ImageRgba8(img));
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to capture active window: {e}");
+                    }
+                }
             }
         }
     }
@@ -26,10 +32,15 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
     if target_image.is_none()
         && let Ok(monitors) = xcap::Monitor::all()
     {
+        if monitors.is_empty() {
+            return Err(ToolError::ExecutionFailed {
+                message: "No monitors found".to_string(),
+            });
+        }
         let primary = monitors
             .iter()
             .find(|m| m.is_primary().unwrap_or(false))
-            .unwrap_or_else(|| &monitors[0]);
+            .unwrap_or(&monitors[0]);
         if let Ok(img) = primary.capture_image() {
             target_image = Some(DynamicImage::ImageRgba8(img));
         }
@@ -39,15 +50,7 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
         message: "Failed to capture screen".to_string(),
     })?;
 
-    let final_image = if scale_percent > 0 && scale_percent < 100 {
-        let nwidth = (image.width() as f32 * (scale_percent as f32 / 100.0)) as u32;
-        let nheight = (image.height() as f32 * (scale_percent as f32 / 100.0)) as u32;
-        image.resize(nwidth.max(1), nheight.max(1), FilterType::Lanczos3)
-    } else {
-        image
-    };
-
-    Ok(final_image)
+    Ok(crate::utils::image::resize_image(image, scale_percent))
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]

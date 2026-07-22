@@ -265,31 +265,32 @@ fn pump_win32_messages() {
 }
 
 fn pump_tray_events(event_tx: &AppEventSender) {
-    #[expect(
-        clippy::infinite_loop,
-        reason = "tray event pump runs until the process exits"
-    )]
+    let tray_rx = TrayIconEvent::receiver().clone();
+    let menu_rx = MenuEvent::receiver().clone();
     loop {
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                ..
-            } = event
-            {
-                let _ = event_tx.send(AppEvent::Tray(TrayAction::OpenSettings { page: None }));
+        crossbeam_channel::select! {
+            recv(tray_rx) -> event => {
+                let Ok(event) = event else { break };
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    ..
+                } = event
+                {
+                    let _ = event_tx.send(AppEvent::Tray(TrayAction::OpenSettings { page: None }));
+                }
+            }
+            recv(menu_rx) -> event => {
+                let Ok(event) = event else { break };
+                let action = match event.id.as_ref() {
+                    SETTINGS_MENU_ID => Some(TrayAction::OpenSettings { page: None }),
+                    CHAT_MENU_ID => Some(TrayAction::OpenChat),
+                    QUIT_MENU_ID => Some(TrayAction::Quit),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    let _ = event_tx.send(AppEvent::Tray(action));
+                }
             }
         }
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            let action = match event.id.as_ref() {
-                SETTINGS_MENU_ID => Some(TrayAction::OpenSettings { page: None }),
-                CHAT_MENU_ID => Some(TrayAction::OpenChat),
-                QUIT_MENU_ID => Some(TrayAction::Quit),
-                _ => None,
-            };
-            if let Some(action) = action {
-                let _ = event_tx.send(AppEvent::Tray(action));
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }

@@ -4,7 +4,7 @@
 //!
 //! ## Modules
 //!
-//! - [`html`] — HTML-to-Markdown conversion and content extraction ((scraper-based)
+//! - [`html`] — HTML-to-Markdown conversion and content extraction (scraper-based)
 //! - [`truncate`] — Smart content truncation helpers (by chars, lines, and tail)
 //!
 //! ## Tool Design Philosophy
@@ -26,13 +26,10 @@ pub mod html;
 
 /// Unified tool action interface.
 pub mod action;
-/// In-process store for deferred (background) tool tasks (#196).
-pub mod deferred;
 /// `ToolProvider` adapters over `Vec<Box<dyn ToolAction>>` (or a single action).
 pub mod provider;
 
 pub use action::{ToolAction, ToolSpecArgs};
-pub use deferred::DeferredTaskStore;
 pub use provider::ActionSetProvider;
 pub use provider::SingleActionProvider;
 
@@ -60,6 +57,7 @@ pub mod prelude {
 
     #[doc(no_inline)]
     pub use crate::ActionSetProvider;
+    #[doc(no_inline)]
     pub use crate::SingleActionProvider;
     #[doc(no_inline)]
     pub use crate::ToolAction as _;

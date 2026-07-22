@@ -126,6 +126,10 @@ macro_rules! define_config {
         }
 
         const _: () = {
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
             #[ctor::ctor(unsafe)]
             fn register() {
                 $crate::register_config_schema::<$name>($crate::ConfigTarget::Settings, None);
@@ -174,6 +178,10 @@ macro_rules! define_config {
         }
 
         const _: () = {
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
             #[ctor::ctor(unsafe)]
             fn register() {
                 $crate::register_config_schema::<$name>($crate::ConfigTarget::Character, None);
@@ -228,6 +236,10 @@ macro_rules! define_config {
         }
 
         const _: () = {
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
             #[ctor::ctor(unsafe)]
             fn register() {
                 $crate::register_config_schema::<$name>(
@@ -274,6 +286,10 @@ macro_rules! define_tool_config {
         }
 
         const _: () = {
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
             #[ctor::ctor(unsafe)]
             fn register() {
                 $crate::register_tool_schema::<$name>($tool_name);
@@ -283,6 +299,10 @@ macro_rules! define_tool_config {
 }
 
 /// Declarative macro for defining labeled enums with a consistent API.
+///
+/// The **first variant** listed becomes the `Default` for the enum (via
+/// `#[derive(Default)]`). Ensure the most common or safest variant is listed
+/// first.
 #[macro_export]
 macro_rules! define_label_enum {
     (

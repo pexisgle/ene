@@ -163,23 +163,51 @@ fn set_section_body(sections: &mut [PromptSection], kind: PromptSectionKind, bod
     }
 }
 
+/// Token cost of a single history entry (content estimate + per-message overhead).
+fn history_entry_tokens(entry: &HistoryEntry) -> usize {
+    estimate_tokens(&entry.content).saturating_add(4)
+}
+
 fn estimate_history_tokens(history: &[HistoryEntry]) -> usize {
-    history
-        .iter()
-        .map(|entry| estimate_tokens(&entry.content).saturating_add(4))
-        .sum()
+    history.iter().map(history_entry_tokens).sum()
 }
 
 /// Minimum history messages kept when trimming for token budget (one exchange).
 const MIN_HISTORY_MESSAGES: usize = 2;
 
 fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) -> usize {
-    let mut dropped = 0usize;
-    while history.len() > MIN_HISTORY_MESSAGES && estimate_history_tokens(history) > max_tokens {
-        history.remove(0);
-        dropped += 1;
+    // Measure each entry once and build a suffix-sum table so the binary
+    // search below accumulates cached counts instead of re-scanning the full
+    // message text on every probe.
+    let suffix = {
+        let mut suffix = vec![0usize; history.len() + 1];
+        for (i, entry) in history.iter().enumerate().rev() {
+            suffix[i] = suffix[i + 1].saturating_add(history_entry_tokens(entry));
+        }
+        suffix
+    };
+    let remaining_tokens = |start: usize| suffix[start.min(history.len())];
+
+    // Binary search for the minimum number of front elements to drain
+    // so the remaining history fits within max_tokens.
+    let mut lo = 0usize;
+    let mut hi = history.len().saturating_sub(MIN_HISTORY_MESSAGES);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if remaining_tokens(mid) > max_tokens {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
     }
-    dropped
+    // `lo` is the smallest drop count where the remainder fits; ensure we actually needed trimming.
+    if lo == 0 && remaining_tokens(0) <= max_tokens {
+        return 0;
+    }
+    // If even dropping to MIN_HISTORY_MESSAGES doesn't fit, drop everything above minimum.
+    let drop_count = lo;
+    history.drain(0..drop_count);
+    drop_count
 }
 
 fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSection> {
@@ -307,10 +335,6 @@ fn apply_section_budget(section: &mut PromptSection) {
     }
 }
 
-fn section_token_total(sections: &[PromptSection]) -> usize {
-    sections.iter().map(|s| estimate_tokens(&s.content)).sum()
-}
-
 /// Pack a prompt packet under the configured token budget.
 #[must_use]
 pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
@@ -323,8 +347,15 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         apply_section_budget(section);
     }
 
-    let mut total =
-        section_token_total(&sections).saturating_add(estimate_history_tokens(&input.history));
+    // Cache each section's estimated token count so later drop passes adjust
+    // the running total without re-scanning every section body.
+    let mut section_tokens_cache: Vec<usize> = sections
+        .iter()
+        .map(|s| estimate_tokens(&s.content))
+        .collect();
+    let mut section_tokens_sum: usize = section_tokens_cache.iter().sum();
+
+    let mut total = section_tokens_sum.saturating_add(estimate_history_tokens(&input.history));
 
     if total > budget.total_tokens {
         let mut drop_set = HashSet::new();
@@ -333,8 +364,10 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
                 break;
             }
             if let Some(idx) = sections.iter().position(|s| s.kind == kind) {
-                let removed_tokens = estimate_tokens(&sections[idx].content);
+                let removed_tokens = section_tokens_cache[idx];
                 sections[idx].content.clear();
+                section_tokens_cache[idx] = 0;
+                section_tokens_sum = section_tokens_sum.saturating_sub(removed_tokens);
                 drop_set.insert(kind);
                 total = total.saturating_sub(removed_tokens);
             }
@@ -354,13 +387,21 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
                 let removed = memories.remove(0);
                 let removed_tokens =
                     estimate_tokens(&memory_section_body(std::slice::from_ref(&removed)));
-                set_section_body(&mut sections, kind, memory_section_body(memories));
+                let body = memory_section_body(memories);
+                set_section_body(&mut sections, kind, body);
+                if let Some(idx) = sections.iter().position(|s| s.kind == kind) {
+                    let new_tokens = estimate_tokens(&sections[idx].content);
+                    section_tokens_sum =
+                        section_tokens_sum.saturating_sub(section_tokens_cache[idx]);
+                    section_tokens_cache[idx] = new_tokens;
+                    section_tokens_sum = section_tokens_sum.saturating_add(new_tokens);
+                }
                 total = total.saturating_sub(removed_tokens);
             }
         }
     }
 
-    let section_tokens = section_token_total(&sections);
+    let section_tokens = section_tokens_sum;
     let mut history = input.history;
     let mut history_messages_dropped = 0usize;
     if total > budget.total_tokens {
@@ -467,6 +508,7 @@ mod tests {
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
+            compression_language: "en".into(),
         };
         let budget = ContextBudget::from_config(&config);
         let kernel = IdentityKernel {
@@ -531,6 +573,7 @@ mod tests {
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
+            compression_language: "en".into(),
         };
         assert!(validate_context_config(&config).is_err());
     }
@@ -550,6 +593,7 @@ mod tests {
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
+            compression_language: "en".into(),
         };
         let budget = ContextBudget::from_config(&config);
         let kernel = IdentityKernel {

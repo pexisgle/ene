@@ -1,7 +1,7 @@
-use crate::utils::sandbox::{Sandbox, SandboxConfig};
+use crate::utils::sandbox::Sandbox;
+use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_tool_common::prelude::*;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<String, ToolError> {
     let resolved = sandbox.config().resolve_and_check(path, true)?;
@@ -56,12 +56,6 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
     Ok("Wrote file successfully.".to_string())
 }
 
-type SandboxRef = Arc<RwLock<Option<Arc<Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
-}
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -94,15 +88,7 @@ impl FsWriteAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard
-                .clone()
-                .unwrap_or_else(|| Arc::new(Sandbox::new(SandboxConfig::default())))
-        };
+        let sandbox = resolve_sandbox(&self.sandbox);
 
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,

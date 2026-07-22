@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use async_trait::async_trait;
 
@@ -18,7 +18,7 @@ impl CliCommand for HistoryCommand {
         "/history"
     }
 
-    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let snapshot = ctx
             .handle
             .diagnostics()
@@ -28,10 +28,15 @@ impl CliCommand for HistoryCommand {
 
         println!("--- Conversation History ---");
         for entry in &snapshot.history {
-            println!("[{:?}] {}", entry.role, entry.content);
+            let role_label = match entry.role {
+                ene_ai::Role::System => "System",
+                ene_ai::Role::User => "User",
+                ene_ai::Role::Assistant => "Assistant",
+            };
+            println!("[{role_label}] {}", entry.content);
         }
         println!("----------------------------");
 
-        Ok(())
+        Ok(CommandOutcome::Continue)
     }
 }

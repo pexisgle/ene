@@ -247,6 +247,32 @@ mod tests {
         assert_eq!(format!("{err}"), "Tool not found: nonexistent");
     }
 
+    #[tokio::test]
+    async fn host_registry_call_tool_invalid_name_via_trait() {
+        let mut reg = HostRegistry::new();
+        reg.try_add_provider(Box::new(MockProvider::new("alpha")))
+            .unwrap();
+
+        // Names with characters outside the valid set must produce a typed
+        // `InvalidName` error rather than panicking (the trait path uses
+        // `ToolName::try_new` for untrusted IPC input).
+        let err = ToolProvider::call_tool(&reg, "bad/name", "")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ToolError::InvalidName { .. }),
+            "expected InvalidName, got: {err:?}"
+        );
+
+        // Consecutive separators are also invalid.
+        let err = ToolProvider::call_tool(&reg, "a..b", "").await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidName { .. }));
+
+        // An empty name is invalid.
+        let err = ToolProvider::call_tool(&reg, "", "").await.unwrap_err();
+        assert!(matches!(err, ToolError::InvalidName { .. }));
+    }
+
     #[test]
     fn host_registry_set_call_context_broadcasts() {
         let mut reg = HostRegistry::new();

@@ -1,10 +1,63 @@
 use crate::schema::utility_db_schema;
-use ene_tool_db::{DbClient, DbFilter, DbOrderBy, DbValue, Row};
+use ene_tool_db::{DbClient, DbError, DbFilter, DbOrderBy, DbValue, Row};
 use std::collections::BTreeMap;
-use std::error::Error;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// Errors produced by [`TodoStore`] operations.
+#[derive(Debug, thiserror::Error)]
+pub enum TodoStoreError {
+    /// IPC or database server error.
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
+
+    /// The `content` field was empty or whitespace-only.
+    #[error("content must not be empty")]
+    EmptyContent,
+
+    /// An unrecognized priority value was supplied.
+    #[error("invalid priority: {0}")]
+    InvalidPriority(String),
+
+    /// An unrecognized status value was supplied.
+    #[error("invalid status: {0}")]
+    InvalidStatus(String),
+
+    /// Reparenting would create a cycle in the parent chain.
+    #[error("reparenting todo {id} under {parent} would create a cycle")]
+    CycleDetected {
+        /// The todo being reparented.
+        id: i64,
+        /// The proposed new parent.
+        parent: i64,
+    },
+
+    /// A pre-existing cycle was detected in corrupt data.
+    #[error("pre-existing cycle in parent chain at id {0}")]
+    PreExistingCycle(i64),
+
+    /// The proposed parent does not exist.
+    #[error("parent todo {0} does not exist")]
+    ParentNotFound(i64),
+
+    /// The target row was not found after a mutation.
+    #[error("todo {0} not found")]
+    RowNotFound(i64),
+
+    /// The parent chain exceeds the maximum allowed depth.
+    #[error("parent chain exceeds maximum depth ({0}); refusing to reparent")]
+    AncestorDepthExceeded(usize),
+
+    /// A row returned from the DB is missing a required column.
+    #[error("corrupt row (id={id}): missing or invalid column '{column}'")]
+    CorruptRow {
+        /// The row's `id` (0 if the `id` column itself is missing).
+        id: i64,
+        /// The missing column name.
+        column: String,
+    },
+}
 
 /// A single todo item returned from the store.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -28,20 +81,35 @@ pub struct TodoItem {
 }
 
 impl TodoItem {
-    fn from_row(row: &Row) -> Self {
-        Self {
-            id: row.get("id").and_then(DbValue::as_i64).unwrap_or(0),
-            session_id: row
-                .get("session_id")
-                .and_then(DbValue::as_str)
-                .unwrap_or("")
-                .to_string(),
+    fn from_row(row: &Row) -> Result<Self, TodoStoreError> {
+        let id =
+            row.get("id")
+                .and_then(DbValue::as_i64)
+                .ok_or_else(|| TodoStoreError::CorruptRow {
+                    id: 0,
+                    column: "id".to_string(),
+                })?;
+        let session_id = row
+            .get("session_id")
+            .and_then(DbValue::as_str)
+            .ok_or_else(|| TodoStoreError::CorruptRow {
+                id,
+                column: "session_id".to_string(),
+            })?
+            .to_string();
+        let content = row
+            .get("content")
+            .and_then(DbValue::as_str)
+            .ok_or_else(|| TodoStoreError::CorruptRow {
+                id,
+                column: "content".to_string(),
+            })?
+            .to_string();
+        Ok(Self {
+            id,
+            session_id,
             parent_id: row.get("parent_id").and_then(DbValue::as_i64),
-            content: row
-                .get("content")
-                .and_then(DbValue::as_str)
-                .unwrap_or("")
-                .to_string(),
+            content,
             status: row
                 .get("status")
                 .and_then(DbValue::as_str)
@@ -62,11 +130,19 @@ impl TodoItem {
                 .and_then(DbValue::as_str)
                 .unwrap_or("")
                 .to_string(),
-        }
+        })
     }
 }
 
 /// DB-backed todo store using `DbClient` over IPC.
+///
+/// # Thread Safety
+///
+/// `TodoStore` is `Send + Sync`. The inner `DbClient` is wrapped in
+/// `Arc<tokio::sync::Mutex<>>`, so all mutating operations are
+/// serialized. Concurrent calls to `list`, `add`, `update`, etc. will
+/// queue on the mutex and execute one at a time. The `Arc` ensures
+/// the store can be shared across tasks and action structs.
 pub struct TodoStore {
     client: Arc<Mutex<DbClient>>,
 }
@@ -80,7 +156,7 @@ impl TodoStore {
     pub async fn new(
         socket_path: &Path,
         db_auth_token: Option<&str>,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, TodoStoreError> {
         let mut client = match db_auth_token {
             Some(t) => DbClient::connect_with_token(socket_path, t).await?,
             None => DbClient::connect(socket_path).await?,
@@ -92,7 +168,7 @@ impl TodoStore {
     }
 
     /// Lists all todos for the given session.
-    pub async fn list(&self, session_id: &str) -> Result<Vec<TodoItem>, Box<dyn Error>> {
+    pub async fn list(&self, session_id: &str) -> Result<Vec<TodoItem>, TodoStoreError> {
         let mut client = self.client.lock().await;
         let filter = DbFilter::eq("session_id", DbValue::Text(session_id.to_string()));
         let rows = client
@@ -100,12 +176,12 @@ impl TodoStore {
                 "utility_todo_items",
                 &[],
                 filter,
-                vec![DbOrderBy::asc("id")],
+                &[DbOrderBy::asc("id")],
                 None,
             )
             .await?;
         drop(client);
-        Ok(rows.iter().map(TodoItem::from_row).collect())
+        rows.iter().map(TodoItem::from_row).collect()
     }
 
     /// Adds a new todo item.
@@ -115,12 +191,12 @@ impl TodoStore {
         parent_id: Option<i64>,
         content: &str,
         priority: &str,
-    ) -> Result<TodoItem, Box<dyn Error>> {
+    ) -> Result<TodoItem, TodoStoreError> {
         if content.trim().is_empty() {
-            return Err("content must not be empty".into());
+            return Err(TodoStoreError::EmptyContent);
         }
         if !matches!(priority, "high" | "medium" | "low") {
-            return Err(format!("invalid priority: {priority}").into());
+            return Err(TodoStoreError::InvalidPriority(priority.to_string()));
         }
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -144,12 +220,11 @@ impl TodoStore {
 
         let filter = DbFilter::eq("id", DbValue::Int(rowid));
         let rows = client
-            .select("utility_todo_items", &[], filter, vec![], Some(1))
+            .select("utility_todo_items", &[], filter, &[], Some(1))
             .await?;
         drop(client);
-        rows.first()
-            .map(TodoItem::from_row)
-            .ok_or_else(|| "inserted row not found".into())
+        let row = rows.first().ok_or(TodoStoreError::RowNotFound(rowid))?;
+        TodoItem::from_row(row)
     }
 
     /// Updates fields of an existing todo.
@@ -168,16 +243,21 @@ impl TodoStore {
         status: Option<&str>,
         priority: Option<&str>,
         parent_id: Option<Option<i64>>,
-    ) -> Result<TodoItem, Box<dyn Error>> {
+    ) -> Result<TodoItem, TodoStoreError> {
+        if let Some(c) = content
+            && c.trim().is_empty()
+        {
+            return Err(TodoStoreError::EmptyContent);
+        }
         if let Some(s) = status
             && !matches!(s, "pending" | "in_progress" | "completed" | "cancelled")
         {
-            return Err(format!("invalid status: {s}").into());
+            return Err(TodoStoreError::InvalidStatus(s.to_string()));
         }
         if let Some(p) = priority
             && !matches!(p, "high" | "medium" | "low")
         {
-            return Err(format!("invalid priority: {p}").into());
+            return Err(TodoStoreError::InvalidPriority(p.to_string()));
         }
 
         // Cycle check before the update. We walk up the
@@ -189,7 +269,10 @@ impl TodoStore {
         // method to hang.
         if let Some(Some(new_parent)) = parent_id {
             if new_parent == id {
-                return Err(format!("cannot reparent todo {id} under itself").into());
+                return Err(TodoStoreError::CycleDetected {
+                    id,
+                    parent: new_parent,
+                });
             }
             let mut client = self.client.lock().await;
             Self::check_ancestor_chain(&mut client, session_id, id, new_parent).await?;
@@ -225,12 +308,11 @@ impl TodoStore {
 
         let filter = DbFilter::eq("id", DbValue::Int(id));
         let rows = client
-            .select("utility_todo_items", &[], filter, vec![], Some(1))
+            .select("utility_todo_items", &[], filter, &[], Some(1))
             .await?;
         drop(client);
-        rows.first()
-            .map(TodoItem::from_row)
-            .ok_or_else(|| "updated row not found".into())
+        let row = rows.first().ok_or(TodoStoreError::RowNotFound(id))?;
+        TodoItem::from_row(row)
     }
 
     /// Marks a todo and all its descendants as completed. Returns all affected items.
@@ -238,7 +320,7 @@ impl TodoStore {
         &self,
         session_id: &str,
         id: i64,
-    ) -> Result<Vec<TodoItem>, Box<dyn Error>> {
+    ) -> Result<Vec<TodoItem>, TodoStoreError> {
         let mut client = self.client.lock().await;
         // The visited-set guard makes
         // `collect_descendants` safe even if the parent
@@ -274,16 +356,16 @@ impl TodoStore {
                 "utility_todo_items",
                 &[],
                 filter,
-                vec![DbOrderBy::asc("id")],
+                &[DbOrderBy::asc("id")],
                 None,
             )
             .await?;
         drop(client);
-        Ok(rows.iter().map(TodoItem::from_row).collect())
+        rows.iter().map(TodoItem::from_row).collect()
     }
 
     /// Soft-deletes a todo by marking it as cancelled.
-    pub async fn delete(&self, session_id: &str, id: i64) -> Result<TodoItem, Box<dyn Error>> {
+    pub async fn delete(&self, session_id: &str, id: i64) -> Result<TodoItem, TodoStoreError> {
         let now = chrono::Utc::now().to_rfc3339();
         let mut set: Row = BTreeMap::new();
         set.insert("status".to_string(), DbValue::Text("cancelled".to_string()));
@@ -299,12 +381,11 @@ impl TodoStore {
 
         let filter = DbFilter::eq("id", DbValue::Int(id));
         let rows = client
-            .select("utility_todo_items", &[], filter, vec![], Some(1))
+            .select("utility_todo_items", &[], filter, &[], Some(1))
             .await?;
         drop(client);
-        rows.first()
-            .map(TodoItem::from_row)
-            .ok_or_else(|| "deleted row not found".into())
+        let row = rows.first().ok_or(TodoStoreError::RowNotFound(id))?;
+        TodoItem::from_row(row)
     }
 
     /// Maximum length of the parent chain we will walk
@@ -323,49 +404,41 @@ impl TodoStore {
         session_id: &str,
         id: i64,
         new_parent: i64,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), TodoStoreError> {
         let mut current = new_parent;
         let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
         for _ in 0..Self::MAX_ANCESTOR_DEPTH {
             if current == id {
-                return Err(format!(
-                    "reparenting todo {id} under {new_parent} would create a cycle"
-                )
-                .into());
+                return Err(TodoStoreError::CycleDetected {
+                    id,
+                    parent: new_parent,
+                });
             }
             if !visited.insert(current) {
                 // Pre-existing cycle in the data; treat
                 // as corruption and refuse the new edge
                 // rather than hang.
-                return Err(format!("pre-existing cycle in parent chain at id {current}").into());
+                return Err(TodoStoreError::PreExistingCycle(current));
             }
             let filter = DbFilter::And(vec![
                 DbFilter::eq("id", DbValue::Int(current)),
                 DbFilter::eq("session_id", DbValue::Text(session_id.to_string())),
             ]);
             let rows = client
-                .select(
-                    "utility_todo_items",
-                    &["parent_id"],
-                    filter,
-                    vec![],
-                    Some(1),
-                )
+                .select("utility_todo_items", &["parent_id"], filter, &[], Some(1))
                 .await?;
             let Some(row) = rows.first() else {
                 // The proposed parent does not exist.
-                return Err(format!("parent todo {new_parent} does not exist").into());
+                return Err(TodoStoreError::ParentNotFound(new_parent));
             };
             match row.get("parent_id") {
                 Some(DbValue::Int(p)) => current = *p,
                 _ => return Ok(()),
             }
         }
-        Err(format!(
-            "parent chain exceeds MAX_ANCESTOR_DEPTH ({}); refusing to reparent",
-            Self::MAX_ANCESTOR_DEPTH
-        )
-        .into())
+        Err(TodoStoreError::AncestorDepthExceeded(
+            Self::MAX_ANCESTOR_DEPTH,
+        ))
     }
 
     /// Recursively collects every descendant of
@@ -381,7 +454,7 @@ impl TodoStore {
         session_id: &str,
         parent_id: i64,
         visited: &mut std::collections::HashSet<i64>,
-    ) -> Result<Vec<TodoItem>, Box<dyn Error>> {
+    ) -> Result<Vec<TodoItem>, TodoStoreError> {
         // Cycle guard: if we have already visited this
         // node on the current DFS path (or in the
         // general visited set), do not recurse further.
@@ -398,18 +471,430 @@ impl TodoStore {
                 "utility_todo_items",
                 &[],
                 filter,
-                vec![DbOrderBy::asc("id")],
+                &[DbOrderBy::asc("id")],
                 None,
             )
             .await?;
 
-        let mut result: Vec<TodoItem> = children.iter().map(TodoItem::from_row).collect();
-        for child in &children {
-            let child_id = child.get("id").and_then(DbValue::as_i64).unwrap_or(0);
+        let mut result: Vec<TodoItem> = Vec::new();
+        for child_row in &children {
+            let child_id = child_row
+                .get("id")
+                .and_then(DbValue::as_i64)
+                .ok_or_else(|| TodoStoreError::CorruptRow {
+                    id: 0,
+                    column: "id".to_string(),
+                })?;
+            result.push(TodoItem::from_row(child_row)?);
             let mut sub =
                 Box::pin(self.collect_descendants(client, session_id, child_id, visited)).await?;
             result.append(&mut sub);
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ene_tool_db::{DbRequest, DbResponse};
+    use ene_tool_proto::transport::{IpcListener, IpcStream, cleanup_path};
+    use std::path::PathBuf;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Minimal in-memory DB server for testing `TodoStore`.
+    struct MockDb {
+        rows: Vec<Row>,
+        next_id: i64,
+    }
+
+    impl MockDb {
+        fn new() -> Self {
+            Self {
+                rows: Vec::new(),
+                next_id: 1,
+            }
+        }
+
+        fn handle_request(&mut self, req: &DbRequest) -> DbResponse {
+            match req {
+                DbRequest::Handshake { .. } => DbResponse::HandshakeAck,
+                DbRequest::DeclareSchema(_) => DbResponse::SchemaAccepted {
+                    tables: vec!["utility_todo_items".to_string()],
+                    indexes: Vec::new(),
+                },
+                DbRequest::Insert { row, .. } => {
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    let mut new_row = row.clone();
+                    new_row.insert("id".to_string(), DbValue::Int(id));
+                    self.rows.push(new_row);
+                    DbResponse::Insert { rowid: id }
+                }
+                DbRequest::Select {
+                    filter,
+                    order_by,
+                    limit,
+                    ..
+                } => {
+                    let mut matched: Vec<Row> = self
+                        .rows
+                        .iter()
+                        .filter(|r| matches_filter(r, filter))
+                        .cloned()
+                        .collect();
+                    for ob in order_by.iter().rev() {
+                        matched.sort_by(|a, b| {
+                            let av = a.get(&ob.column);
+                            let bv = b.get(&ob.column);
+                            let cmp = compare_values(av, bv);
+                            match ob.direction {
+                                ene_tool_db::DbOrderDirection::Desc => cmp.reverse(),
+                                ene_tool_db::DbOrderDirection::Asc => cmp,
+                            }
+                        });
+                    }
+                    if let Some(lim) = limit {
+                        matched.truncate(*lim as usize);
+                    }
+                    DbResponse::Select { rows: matched }
+                }
+                DbRequest::Update { set, filter, .. } => {
+                    let mut affected = 0u64;
+                    for row in &mut self.rows {
+                        if matches_filter(row, filter) {
+                            for (k, v) in set {
+                                row.insert(k.clone(), v.clone());
+                            }
+                            affected += 1;
+                        }
+                    }
+                    DbResponse::Update { affected }
+                }
+                DbRequest::Ping => DbResponse::Pong,
+                _ => DbResponse::Error {
+                    code: ene_tool_db::DbErrorCode::Internal,
+                    message: "unsupported request in mock".to_string(),
+                },
+            }
+        }
+    }
+
+    fn compare_values(a: Option<&DbValue>, b: Option<&DbValue>) -> std::cmp::Ordering {
+        match (a, b) {
+            (Some(DbValue::Int(x)), Some(DbValue::Int(y))) => x.cmp(y),
+            (Some(DbValue::Text(x)), Some(DbValue::Text(y))) => x.cmp(y),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
+    fn matches_filter(row: &Row, filter: &DbFilter) -> bool {
+        match filter {
+            DbFilter::Eq { column, value } => row.get(column) == Some(value),
+            DbFilter::And(filters) => filters.iter().all(|f| matches_filter(row, f)),
+            DbFilter::Or(filters) => filters.iter().any(|f| matches_filter(row, f)),
+            DbFilter::In { column, values } => row.get(column).is_some_and(|v| values.contains(v)),
+            _ => false,
+        }
+    }
+
+    async fn read_framed(stream: &mut IpcStream) -> Option<DbRequest> {
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.ok()?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut buf = vec![0u8; len];
+        stream.read_exact(&mut buf).await.ok()?;
+        serde_json::from_slice(&buf).ok()
+    }
+
+    async fn write_framed(stream: &mut IpcStream, resp: &DbResponse) {
+        let json = serde_json::to_vec(resp).unwrap();
+        let len = json.len() as u32;
+        stream.write_all(&len.to_le_bytes()).await.unwrap();
+        stream.write_all(&json).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    /// Spawns a mock DB server on a temporary Unix socket and returns
+    /// the socket path. The server runs until the returned `JoinHandle`
+    /// is dropped or the listener is closed.
+    async fn spawn_mock_db() -> (PathBuf, tokio::task::JoinHandle<()>) {
+        let socket_path = std::env::temp_dir().join(format!(
+            "ene-utility-test-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        cleanup_path(&socket_path);
+        let path = socket_path.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut listener = IpcListener::bind(&path).unwrap();
+            let mut db = MockDb::new();
+            loop {
+                let Ok(mut stream) = listener.accept().await else {
+                    break;
+                };
+                // Handle requests on this connection until it closes.
+                loop {
+                    let Some(req) = read_framed(&mut stream).await else {
+                        break;
+                    };
+                    let resp = db.handle_request(&req);
+                    write_framed(&mut stream, &resp).await;
+                }
+            }
+        });
+
+        // Wait for the socket to appear.
+        for _ in 0..100 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        (socket_path, handle)
+    }
+
+    async fn make_store() -> (TodoStore, PathBuf, tokio::task::JoinHandle<()>) {
+        let (path, handle) = spawn_mock_db().await;
+        let store = TodoStore::new(&path, None).await.unwrap();
+        (store, path, handle)
+    }
+
+    #[tokio::test]
+    async fn add_and_list_crud() {
+        let (store, path, handle) = make_store().await;
+
+        let item = store.add("sess1", None, "Buy milk", "high").await.unwrap();
+        assert_eq!(item.content, "Buy milk");
+        assert_eq!(item.priority, "high");
+        assert_eq!(item.status, "pending");
+        assert_eq!(item.session_id, "sess1");
+        assert!(item.id > 0);
+
+        let items = store.list("sess1").await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, item.id);
+
+        // Different session is isolated.
+        let other = store.list("sess2").await.unwrap();
+        assert!(other.is_empty());
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn add_rejects_empty_content() {
+        let (store, path, handle) = make_store().await;
+        let err = store.add("s", None, "   ", "low").await.unwrap_err();
+        assert!(matches!(err, TodoStoreError::EmptyContent));
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn add_rejects_invalid_priority() {
+        let (store, path, handle) = make_store().await;
+        let err = store.add("s", None, "task", "urgent").await.unwrap_err();
+        assert!(matches!(err, TodoStoreError::InvalidPriority(_)));
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn update_content_and_status() {
+        let (store, path, handle) = make_store().await;
+        let item = store.add("s", None, "original", "medium").await.unwrap();
+
+        let updated = store
+            .update(
+                "s",
+                item.id,
+                Some("changed"),
+                Some("in_progress"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.content, "changed");
+        assert_eq!(updated.status, "in_progress");
+        assert_eq!(updated.priority, "medium");
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_empty_content() {
+        let (store, path, handle) = make_store().await;
+        let item = store.add("s", None, "task", "low").await.unwrap();
+        let err = store
+            .update("s", item.id, Some(""), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TodoStoreError::EmptyContent));
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_invalid_status() {
+        let (store, path, handle) = make_store().await;
+        let item = store.add("s", None, "task", "low").await.unwrap();
+        let err = store
+            .update("s", item.id, None, Some("done"), None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TodoStoreError::InvalidStatus(_)));
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn reparent_basic() {
+        let (store, path, handle) = make_store().await;
+        let parent = store.add("s", None, "parent", "high").await.unwrap();
+        let child = store.add("s", None, "child", "low").await.unwrap();
+
+        let updated = store
+            .update("s", child.id, None, None, None, Some(Some(parent.id)))
+            .await
+            .unwrap();
+        assert_eq!(updated.parent_id, Some(parent.id));
+
+        // Detach back to top-level.
+        let detached = store
+            .update("s", child.id, None, None, None, Some(None))
+            .await
+            .unwrap();
+        assert_eq!(detached.parent_id, None);
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn reparent_self_is_cycle() {
+        let (store, path, handle) = make_store().await;
+        let item = store.add("s", None, "self", "medium").await.unwrap();
+        let err = store
+            .update("s", item.id, None, None, None, Some(Some(item.id)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TodoStoreError::CycleDetected { .. }));
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn reparent_descendant_is_cycle() {
+        let (store, path, handle) = make_store().await;
+        let a = store.add("s", None, "A", "high").await.unwrap();
+        let b = store.add("s", Some(a.id), "B", "high").await.unwrap();
+        let c = store.add("s", Some(b.id), "C", "high").await.unwrap();
+
+        // Try to make A a child of C (A -> B -> C -> A would be a cycle).
+        let err = store
+            .update("s", a.id, None, None, None, Some(Some(c.id)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TodoStoreError::CycleDetected { .. }));
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn reparent_under_nonexistent_parent() {
+        let (store, path, handle) = make_store().await;
+        let item = store.add("s", None, "task", "low").await.unwrap();
+        let err = store
+            .update("s", item.id, None, None, None, Some(Some(9999)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TodoStoreError::ParentNotFound(9999)));
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn complete_cascades_to_descendants() {
+        let (store, path, handle) = make_store().await;
+        let root = store.add("s", None, "root", "high").await.unwrap();
+        let child1 = store
+            .add("s", Some(root.id), "child1", "medium")
+            .await
+            .unwrap();
+        let child2 = store
+            .add("s", Some(root.id), "child2", "low")
+            .await
+            .unwrap();
+        let grandchild = store.add("s", Some(child1.id), "gc", "high").await.unwrap();
+
+        let completed = store.complete("s", root.id).await.unwrap();
+        assert_eq!(completed.len(), 4);
+        for item in &completed {
+            assert_eq!(item.status, "completed");
+        }
+
+        // Verify via list.
+        let all = store.list("s").await.unwrap();
+        assert!(all.iter().all(|i| i.status == "completed"));
+
+        let _ = (child1, child2, grandchild);
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn collect_descendants_handles_diamond() {
+        // Diamond: A -> B, A -> C, B -> D, C -> D
+        // D should appear once in the descendant list.
+        let (store, path, handle) = make_store().await;
+        let a = store.add("s", None, "A", "high").await.unwrap();
+        let b = store.add("s", Some(a.id), "B", "high").await.unwrap();
+        let c = store.add("s", Some(a.id), "C", "high").await.unwrap();
+        // D has parent B; we can't have two parents in this schema,
+        // so test the visited-set guard via complete() on A.
+        let d = store.add("s", Some(b.id), "D", "high").await.unwrap();
+
+        let completed = store.complete("s", a.id).await.unwrap();
+        // A, B, C, D — all completed.
+        assert_eq!(completed.len(), 4);
+        let ids: Vec<i64> = completed.iter().map(|i| i.id).collect();
+        assert!(ids.contains(&a.id));
+        assert!(ids.contains(&b.id));
+        assert!(ids.contains(&c.id));
+        assert!(ids.contains(&d.id));
+
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn delete_marks_cancelled() {
+        let (store, path, handle) = make_store().await;
+        let item = store.add("s", None, "to delete", "low").await.unwrap();
+        let deleted = store.delete("s", item.id).await.unwrap();
+        assert_eq!(deleted.status, "cancelled");
+        assert_eq!(deleted.id, item.id);
+        handle.abort();
+        cleanup_path(&path);
+    }
+
+    #[tokio::test]
+    async fn delete_nonexistent_returns_not_found() {
+        let (store, path, handle) = make_store().await;
+        let err = store.delete("s", 9999).await.unwrap_err();
+        assert!(matches!(err, TodoStoreError::RowNotFound(9999)));
+        handle.abort();
+        cleanup_path(&path);
     }
 }

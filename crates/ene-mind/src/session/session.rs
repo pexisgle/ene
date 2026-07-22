@@ -217,6 +217,14 @@ impl ConversationSession {
         for delta in &text_deltas {
             self.display.display_buffer.push_str(delta);
         }
+        // Guard against unbounded growth from unclosed special token markers.
+        const MAX_TOKEN_CARRY: usize = 4096;
+        if self.display.token_carry.len() > MAX_TOKEN_CARRY {
+            self.display
+                .display_buffer
+                .push_str(&self.display.token_carry);
+            self.display.token_carry.clear();
+        }
         (text_deltas, special_tokens)
     }
 
@@ -231,7 +239,7 @@ impl ConversationSession {
             Some(t)
         };
 
-        let assistant_text = self.display.display_buffer.clone();
+        let assistant_text = std::mem::take(&mut self.display.display_buffer);
         self.add_assistant_message(&assistant_text);
 
         tail

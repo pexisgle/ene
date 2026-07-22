@@ -23,15 +23,15 @@ static READ_CANCEL: AtomicBool = AtomicBool::new(false);
 
 /// Ask any in-flight raw-mode line editor to exit (used on Ctrl-C).
 pub fn request_read_cancel() {
-    READ_CANCEL.store(true, Ordering::SeqCst);
+    READ_CANCEL.store(true, Ordering::Relaxed);
 }
 
 fn clear_read_cancel() {
-    READ_CANCEL.store(false, Ordering::SeqCst);
+    READ_CANCEL.store(false, Ordering::Relaxed);
 }
 
 fn read_cancel_requested() -> bool {
-    READ_CANCEL.load(Ordering::SeqCst)
+    READ_CANCEL.load(Ordering::Relaxed)
 }
 
 /// RAII guard that always restores cooked terminal mode.
@@ -46,9 +46,15 @@ impl RawModeGuard {
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
-        let _ = queue!(io::stderr(), Show);
-        let _ = io::stderr().flush();
-        let _ = terminal::disable_raw_mode();
+        if let Err(e) = queue!(io::stderr(), Show) {
+            tracing::warn!(error = %e, "Failed to queue cursor show");
+        }
+        if let Err(e) = io::stderr().flush() {
+            tracing::warn!(error = %e, "Failed to flush stderr on raw mode exit");
+        }
+        if let Err(e) = terminal::disable_raw_mode() {
+            tracing::warn!(error = %e, "Failed to disable raw mode");
+        }
     }
 }
 
@@ -139,11 +145,15 @@ impl RealBackend {
 
 impl TerminalBackend for RealBackend {
     fn write_stderr(&mut self, s: &str) {
-        let _ = queue!(self.stderr, Print(s));
+        if let Err(e) = queue!(self.stderr, Print(s)) {
+            tracing::warn!(error = %e, "Failed to queue stderr output");
+        }
     }
 
     fn flush_all(&mut self) {
-        let _ = self.stderr.flush();
+        if let Err(e) = self.stderr.flush() {
+            tracing::warn!(error = %e, "Failed to flush stderr");
+        }
     }
 
     fn clear_current_line(&mut self) {

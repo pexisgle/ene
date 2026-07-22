@@ -347,7 +347,9 @@ impl CharacterRenderer {
         // `None` for `"expression"`-type models, where the
         // LookAt signal routes into morph weights via
         // `apply_emotions` instead.
-        let mut palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
+        let mut palette = model
+            .update_skin_palette(&frame, self.look_at_bone_output.as_ref())
+            .to_vec();
 
         // Step the spring-bone simulator against the posed world
         // transforms, write updated local rotations, then rebuild
@@ -398,7 +400,7 @@ impl CharacterRenderer {
                     model.nodes.local_rotations[node] = rotation;
                 }
             }
-            palette = model.rebuild_skin_palette(frame.hips_translation);
+            palette = model.rebuild_skin_palette(frame.hips_translation).to_vec();
         }
 
         if palette.is_empty() {
@@ -705,6 +707,7 @@ impl CharacterRenderer {
             LookAtOutput::Bone(b) => {
                 self.look_at_bone_output = Some(b);
             }
+            _ => {}
         }
 
         smoothed_target

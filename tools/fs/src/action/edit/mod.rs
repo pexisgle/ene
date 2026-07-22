@@ -1,4 +1,4 @@
-use crate::utils::sandbox::{Sandbox, SandboxConfig};
+use crate::utils::sandbox::Sandbox;
 use ene_tool_common::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
@@ -63,9 +63,25 @@ pub fn find_best_match<'a>(needle: &str, haystack: &'a str) -> Option<(usize, &'
 
     let max_window = (needle_len * 2).max(100);
     let step = needle_len.max(1);
+    let haystack_bytes = haystack.len();
 
-    for start in (0..haystack.len().saturating_sub(needle_len / 2)).step_by(step) {
-        let end = (start + max_window).min(haystack.len());
+    let char_starts: Vec<usize> = haystack.char_indices().map(|(i, _)| i).collect();
+    if char_starts.is_empty() {
+        return None;
+    }
+
+    for start_pos in (0..char_starts.len()).step_by(step) {
+        let start = char_starts[start_pos];
+        if start + needle_len / 2 > haystack_bytes {
+            break;
+        }
+        let mut end = (start + max_window).min(haystack_bytes);
+        while !haystack.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end <= start {
+            continue;
+        }
         let window = &haystack[start..end];
         let dist = strsim::levenshtein(needle, window);
         let max_len = needle_len.max(window.len());
@@ -251,13 +267,8 @@ mod tests {
     }
 }
 
-use std::sync::RwLock;
-
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
-}
+use crate::utils::SandboxRef;
+use crate::utils::default_sandbox;
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
@@ -298,15 +309,7 @@ impl FsEditAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
-            })
-        };
+        let sandbox = crate::utils::resolve_sandbox(&self.sandbox);
 
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,

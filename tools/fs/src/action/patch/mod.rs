@@ -2,10 +2,10 @@ mod patch_parser;
 
 use self::patch_parser::PatchOperation;
 use crate::undo::UndoEntry;
-use crate::utils::sandbox::{Sandbox, SandboxConfig};
+use crate::utils::sandbox::Sandbox;
+use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
 use ene_tool_common::prelude::*;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
 
 pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, ToolError> {
     let normalized = patch_text.replace("\r\n", "\n").replace('\r', "\n");
@@ -224,12 +224,6 @@ pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, 
     ))
 }
 
-type SandboxRef = Arc<RwLock<Option<Arc<crate::utils::sandbox::Sandbox>>>>;
-
-fn default_sandbox() -> SandboxRef {
-    Arc::new(RwLock::new(None))
-}
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[serde(rename_all = "camelCase")]
 #[tool(
@@ -259,15 +253,7 @@ impl FsPatchAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let sandbox = {
-            let guard = self
-                .sandbox
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.clone().unwrap_or_else(|| {
-                Arc::new(crate::utils::sandbox::Sandbox::new(SandboxConfig::default()))
-            })
-        };
+        let sandbox = resolve_sandbox(&self.sandbox);
 
         sandbox.check_permission(
             crate::utils::permission::DestructiveAction::FileOverwrite,

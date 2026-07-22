@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing;
 
 /// Lifecycle status of a companion commitment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CommitmentStatus {
     /// Open and should be surfaced in prompts / recall.
     Active,
@@ -35,7 +35,7 @@ impl CommitmentStatus {
             "cancelled" => Self::Cancelled,
             "stale" => Self::Stale,
             other => {
-                tracing::warn!(
+                tracing::error!(
                     other,
                     "unrecognized CommitmentStatus in DB, falling back to Active"
                 );

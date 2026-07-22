@@ -118,26 +118,6 @@ pub fn has_tool_skip(field: &syn::Field) -> bool {
         if !attr.path().is_ident("tool") {
             continue;
         }
-        // Match the `skip` form (path) regardless of any
-        // other arguments; `parse_nested_meta` is
-        // `parse_args_with` and tolerates the trailing
-        // `, name = "…", …` we want to allow alongside.
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("skip") {
-                // Mark by panicking with a special
-                // payload? That would abort the parse;
-                // instead, signal via a side channel by
-                // mutating a thread_local — no, simpler:
-                // detect at the outer level by
-                // inspecting the path again.
-            }
-            Ok(())
-        });
-        // Re-parse the attribute as a punctuated
-        // list of nested metas so we can check the
-        // first path segment. parse_args_with into
-        // Punctuated<Meta, Comma> gives us the
-        // comma-separated form the user wrote.
         if let Ok(list) = attr.parse_args_with(
             syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
         ) && let Some(first) = list.first()
@@ -226,7 +206,7 @@ impl ToolSpecAttrs {
         }
     }
 
-    pub fn display_name_value(&self, _default: String) -> String {
+    pub fn display_name_value(&self) -> String {
         self.display_name
             .clone()
             .unwrap_or_else(|| title_case(&self.name))
@@ -279,14 +259,13 @@ impl ToolSpecAttrs {
         self.related.0.clone()
     }
 
-    pub fn version_tokens(&self) -> TokenStream2 {
-        let v = self
-            .version
-            .as_deref()
-            .and_then(parse_version)
-            .unwrap_or((1, 0, 0));
+    pub fn version_tokens(&self) -> darling::Result<TokenStream2> {
+        let v = match self.version.as_deref() {
+            Some(s) => parse_version(s)?,
+            None => (1, 0, 0),
+        };
         let (maj, min, pat) = v;
-        quote! { ToolVersion::new(#maj, #min, #pat) }
+        Ok(quote! { ToolVersion::new(#maj, #min, #pat) })
     }
 
     pub fn examples_value(&self) -> TokenStream2 {
@@ -318,31 +297,34 @@ impl ToolSpecAttrs {
 
     pub fn args_const_ident(&self, struct_ident: &syn::Ident) -> syn::Ident {
         let n = self.full_name().to_uppercase().replace('.', "_");
-        let _ = struct_ident;
         syn::Ident::new(&format!("_TOOL_ARGS_{n}"), struct_ident.span())
     }
 }
 
-fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
+fn parse_version(s: &str) -> darling::Result<(u32, u32, u32)> {
     let mut parts = s.split('.');
-    let maj = parts.next()?.parse().ok()?;
-    // Default missing minor and patch segments to 0
-    // rather than silently returning None (which
-    // would cause the macro to fall back to (1,0,0)
-    // for "1.2" — almost certainly not what the user
-    // meant). Reject more than 3 parts.
+    let maj: u32 = parts
+        .next()
+        .and_then(|p| p.parse().ok())
+        .ok_or_else(|| darling::Error::custom(format!("malformed version: '{s}'")))?;
     let min = match parts.next() {
-        Some(s) => s.parse().ok()?,
+        Some(s) => s
+            .parse()
+            .map_err(|_| darling::Error::custom(format!("malformed version minor: '{s}'")))?,
         None => 0,
     };
     let pat = match parts.next() {
-        Some(s) => s.parse().ok()?,
+        Some(s) => s
+            .parse()
+            .map_err(|_| darling::Error::custom(format!("malformed version patch: '{s}'")))?,
         None => 0,
     };
     if parts.next().is_some() {
-        return None;
+        return Err(darling::Error::custom(format!(
+            "version has too many segments: '{s}' (expected at most 3)"
+        )));
     }
-    Some((maj, min, pat))
+    Ok((maj, min, pat))
 }
 
 fn title_case(s: &str) -> String {
@@ -379,6 +361,42 @@ fn path_token(name: &str, default_module: &str) -> TokenStream2 {
     let mut parts = name.split_whitespace();
     let head = parts.next().unwrap_or("ReadOnly");
     if let Ok(ident) = syn::parse_str::<syn::Ident>(head) {
+        // Validate bare identifiers against known variants for
+        // ToolCategory and SideEffects to catch typos early.
+        let known = if default_module.contains("ToolCategory") {
+            &[
+                "Filesystem",
+                "Shell",
+                "Browser",
+                "App",
+                "WebSearch",
+                "WebFetch",
+                "Utility",
+                "Memory",
+                "Search",
+                "Meta",
+            ][..]
+        } else if default_module.contains("SideEffects") {
+            &[
+                "ReadOnly",
+                "Destructive",
+                "Idempotent",
+                "FileSystem",
+                "Network",
+                "System",
+                "Browser",
+            ][..]
+        } else {
+            &[][..]
+        };
+        let ident_str = ident.to_string();
+        if !known.is_empty() && !known.iter().any(|&k| k == ident_str) {
+            let msg = format!(
+                "unknown {default_module} variant '{ident}'; expected one of: {}",
+                known.join(", ")
+            );
+            return syn::Error::new_spanned(ident, msg).to_compile_error();
+        }
         if ident == "ReadOnly" || ident == "Destructive" || ident == "Idempotent" {
             return quote! { #mod_path::#ident };
         }

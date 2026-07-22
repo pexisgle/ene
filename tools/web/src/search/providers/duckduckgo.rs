@@ -1,20 +1,20 @@
 use async_trait::async_trait;
 use scraper::{Html, Selector};
-use std::time::Duration;
 
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
 use super::extract_domain;
 
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 /// `DuckDuckGo` HTML search provider.
-#[derive(Debug, Default)]
-pub struct DuckDuckGoProvider;
+#[derive(Debug)]
+pub struct DuckDuckGoProvider {
+    client: reqwest::Client,
+}
 
 impl DuckDuckGoProvider {
-    pub const fn new() -> Self {
-        Self
+    pub fn new(client: reqwest::Client) -> Self {
+        Self { client }
     }
 }
 
@@ -25,13 +25,8 @@ impl SearchProvider for DuckDuckGoProvider {
     }
 
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .user_agent(USER_AGENT)
-            .build()
-            .map_err(|e| SearchError::ConfigError(format!("HTTP client init failed: {e}")))?;
-
-        let response = client
+        let response = self
+            .client
             .post("https://html.duckduckgo.com/html")
             .header("Referer", "https://html.duckduckgo.com/")
             .form(&[("q", options.query.as_str()), ("b", ""), ("kl", "wt-wt")])

@@ -23,6 +23,9 @@ ene-tool-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

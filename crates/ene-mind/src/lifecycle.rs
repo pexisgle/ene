@@ -118,8 +118,9 @@ pub struct ComposePrefetch {
 pub struct PostTurnInput<'a> {
     /// Turn extraction input.
     pub turn: TurnInput<'a>,
-    /// Affect state after the turn.
-    pub affect: AffectState,
+    /// Affect state after the turn (borrowed to avoid cloning in the
+    /// deferred/owned path, see [`OwnedPostTurnInput::as_borrowed`]).
+    pub affect: &'a AffectState,
     /// Character identifier.
     pub character_id: &'a str,
     /// User identifier.
@@ -159,7 +160,7 @@ impl OwnedPostTurnInput {
                 assistant_message: self.turn.assistant_message.as_deref(),
                 tool_results: &self.turn.tool_results,
             },
-            affect: self.affect.clone(),
+            affect: &self.affect,
             character_id: &self.character_id,
             user_id: &self.user_id,
         }

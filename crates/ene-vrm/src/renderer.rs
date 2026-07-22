@@ -42,7 +42,7 @@ const SHADER_SOURCE: &str = include_str!("shaders/mtoon_skinned.wgsl");
 const UNLIT_SHADER_SOURCE: &str = include_str!("shaders/unlit_skinned.wgsl");
 const MTOON_SHADER_SOURCE: &str = include_str!("shaders/mtoon_full.wgsl");
 
-// number of skin-matrix palette slots to allocate when the
+/// Number of skin-matrix palette slots to allocate when the
 /// loaded model has no skin at all. A one-element palette of
 /// `Mat4::IDENTITY` is enough because the default `MeshVertex`
 /// falls back to `joints = [0, 0, 0, 0]` and `weights = [1, 0, 0, 0]`.
@@ -103,9 +103,8 @@ struct DummyMorphGpu {
 // per-model skin-matrix palette. One `mat4x4<f32>` per
 /// joint, uploaded once at construction time with the
 /// pre-baked `bind_matrices` (i.e. `inverse_bind[i].inverse()`).
-/// Phase 2 will overwrite the buffer every frame with
-/// `current_joint_world[i] * bind_matrices[i]` to drive the
-/// cursor look-at + two-bone IK.
+/// Overwritten every frame with the current joint world
+/// transforms to drive animation, look-at, and spring bones.
 struct SkinGpu {
     matrices_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -119,6 +118,16 @@ struct SkinGpu {
 // per-primitive MToon uniform buffer (group 5).
 struct MToonUniformGpu {
     bind_group: wgpu::BindGroup,
+}
+
+/// A single entry in the cached draw order. Computed once at
+/// renderer construction; the draw order (opaque before
+/// transparent) is determined at load time and never changes.
+#[derive(Copy, Clone)]
+struct DrawItem {
+    linear_index: usize,
+    alpha_mode: AlphaMode,
+    unlit: bool,
 }
 
 /// Render pipeline + bind group layouts for one VRM model.
@@ -173,6 +182,11 @@ pub struct VrmRenderer {
     /// One buffer per primitive that has `MToon`; `None` for
     /// primitives that use the lite shader.
     mtoon_uniforms: Vec<Option<MToonUniformGpu>>,
+    /// Cached draw order, sorted opaque/mask before transparent.
+    /// Built once at construction — the order is determined at
+    /// load time and never changes, so sorting every frame is
+    /// wasted work.
+    draw_order: Vec<DrawItem>,
     /// `MToon` opaque pipeline.
     pipeline_mtoon_opaque: wgpu::RenderPipeline,
     /// `MToon` transparent pipeline.
@@ -851,6 +865,25 @@ impl VrmRenderer {
             })
         });
 
+        // Build the cached draw order once. The order (opaque/mask
+        // before transparent) is determined at load time and never
+        // changes, so we sort here instead of every frame.
+        let mut draw_order: Vec<DrawItem> = Vec::new();
+        {
+            let mut idx: usize = 0;
+            for mesh in &model.meshes {
+                for prim in &mesh.primitives {
+                    draw_order.push(DrawItem {
+                        linear_index: idx,
+                        alpha_mode: prim.alpha_mode,
+                        unlit: prim.unlit,
+                    });
+                    idx += 1;
+                }
+            }
+        }
+        draw_order.sort_by_key(|d| d.alpha_mode.render_phase());
+
         Self {
             camera_buf,
             camera_bind_group,
@@ -865,6 +898,7 @@ impl VrmRenderer {
             meta_scratch: PrimitiveMorphMeta::default(),
             skin,
             mtoon_uniforms,
+            draw_order,
             pipeline_mtoon_opaque,
             pipeline_mtoon_transparent,
             pipeline_mask,
@@ -949,33 +983,8 @@ impl VrmRenderer {
         rp.set_bind_group(1, &self.model_bind_group, &[]);
         rp.set_bind_group(4, &self.skin.bind_group, &[]);
 
-        // Build a flat draw list with alpha mode and unlit flag
-        // so we can sort opaque/mask before transparent and
-        // route unlit primitives to the unlit pipeline.
-        #[derive(Copy, Clone)]
-        struct DrawItem {
-            linear_index: usize,
-            alpha_mode: AlphaMode,
-            unlit: bool,
-        }
-        let mut draw_items: Vec<DrawItem> = Vec::new();
-        {
-            let mut idx: usize = 0;
-            for mesh in &model.meshes {
-                for prim in &mesh.primitives {
-                    draw_items.push(DrawItem {
-                        linear_index: idx,
-                        alpha_mode: prim.alpha_mode,
-                        unlit: prim.unlit,
-                    });
-                    idx += 1;
-                }
-            }
-        }
-        draw_items.sort_by_key(|d| d.alpha_mode.render_phase());
-
-        // We need access to the vertex/index buffers by linear_index.
-        // Build a flat reference array once.
+        // Use the cached draw order (sorted opaque/mask before
+        // transparent at construction time).
         let all_prims: Vec<&_> = model
             .meshes
             .iter()
@@ -983,7 +992,8 @@ impl VrmRenderer {
             .collect();
 
         // Phase 1: opaque + mask (depth write on, no blending).
-        for item in draw_items
+        for item in self
+            .draw_order
             .iter()
             .filter(|d| d.alpha_mode.render_phase() == 0)
         {
@@ -1002,7 +1012,8 @@ impl VrmRenderer {
         // alpha blending). Drawn in declaration order (which is
         // roughly back-to-front for most humanoid VRM models);
         // a proper view-Z depth sort is a follow-up PR.
-        for item in draw_items
+        for item in self
+            .draw_order
             .iter()
             .filter(|d| d.alpha_mode.render_phase() == 1)
         {

@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 use ene_config::Truncate;
@@ -19,7 +19,7 @@ impl CliCommand for SessionCommand {
         "/session <info|split|summaries|list|export <id>|import <path>|search <query>|archive <id>|unarchive <id>>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
         let subcmd = parts.first().copied().unwrap_or("");
         let rest = parts.get(1).copied().unwrap_or("").trim();
@@ -45,12 +45,12 @@ impl CliCommand for SessionCommand {
         match subcmd {
             "info" => {
                 handle_info(&snapshot);
-                Ok(())
+                Ok(CommandOutcome::Continue)
             }
             "split" => handle_split(ctx, &snapshot).await,
             "summaries" => {
                 handle_summaries(&snapshot);
-                Ok(())
+                Ok(CommandOutcome::Continue)
             }
             _ => Err(CliError::UsageError {
                 usage: self.usage().to_string(),
@@ -59,7 +59,7 @@ impl CliCommand for SessionCommand {
     }
 }
 
-async fn handle_list(ctx: &AppContext) -> Result<(), CliError> {
+async fn handle_list(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
     let sessions = ctx
         .handle
         .list_sessions(false, 50)
@@ -85,10 +85,10 @@ async fn handle_list(ctx: &AppContext) -> Result<(), CliError> {
             );
         }
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-async fn handle_export(ctx: &AppContext, session_id: &str) -> Result<(), CliError> {
+async fn handle_export(ctx: &AppContext, session_id: &str) -> Result<CommandOutcome, CliError> {
     if session_id.is_empty() {
         return Err(CliError::UsageError {
             usage: "Usage: /session export <session_id>".to_string(),
@@ -102,10 +102,10 @@ async fn handle_export(ctx: &AppContext, session_id: &str) -> Result<(), CliErro
         .map_err(|e| CliError::ExecutionFailed(format!("Failed to export session: {e}")))?;
 
     println!("{json}");
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-async fn handle_import(ctx: &AppContext, path: &str) -> Result<(), CliError> {
+async fn handle_import(ctx: &AppContext, path: &str) -> Result<CommandOutcome, CliError> {
     if path.is_empty() {
         return Err(CliError::UsageError {
             usage: "Usage: /session import <path-to-json>".to_string(),
@@ -126,10 +126,10 @@ async fn handle_import(ctx: &AppContext, path: &str) -> Result<(), CliError> {
         "{}",
         style::success(format!("Imported session (row id {id})."))
     );
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-async fn handle_search(ctx: &AppContext, query: &str) -> Result<(), CliError> {
+async fn handle_search(ctx: &AppContext, query: &str) -> Result<CommandOutcome, CliError> {
     if query.is_empty() {
         return Err(CliError::UsageError {
             usage: "Usage: /session search <query>".to_string(),
@@ -156,14 +156,14 @@ async fn handle_search(ctx: &AppContext, query: &str) -> Result<(), CliError> {
             );
         }
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
 async fn handle_archive(
     ctx: &AppContext,
     session_id: &str,
     archived: bool,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     if session_id.is_empty() {
         return Err(CliError::UsageError {
             usage: format!(
@@ -188,7 +188,7 @@ async fn handle_archive(
     } else {
         println!("No session found with id {session_id}.");
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
 fn handle_info(snapshot: &ene_runtime::EneStateSnapshot) {
@@ -198,7 +198,6 @@ fn handle_info(snapshot: &ene_runtime::EneStateSnapshot) {
         "Started: {}",
         snapshot.session_started_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
-    println!("Elapsed: ? (not tracked locally) min");
     println!("Turn count: {}", snapshot.current_turn_count);
     println!("History messages: {}", snapshot.history.len());
     let mind = snapshot
@@ -216,7 +215,7 @@ fn handle_info(snapshot: &ene_runtime::EneStateSnapshot) {
 async fn handle_split(
     ctx: &AppContext,
     snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     if snapshot.history.is_empty() {
         return Err(CliError::ExecutionFailed(
             "Cannot compress: No conversation history.".to_string(),
@@ -252,7 +251,7 @@ async fn handle_split(
                 "{}",
                 style::warning("[Session] Context compression completed.")
             );
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
         Err(e) => Err(CliError::ExecutionFailed(format!("Compress error: {e}"))),
     }

@@ -1,6 +1,6 @@
 //! Store backup / integrity diagnostic commands (#239).
 
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::style;
 use async_trait::async_trait;
@@ -23,7 +23,7 @@ impl CliCommand for StoreCommand {
         "/store <backup|list-backups|restore <path>|integrity>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let (sub, rest) = match arg.trim().split_once(' ') {
             Some((sub, rest)) => (sub, rest.trim()),
             None => (arg.trim(), ""),
@@ -49,7 +49,7 @@ fn require_store(ctx: &AppContext) -> Result<std::sync::Arc<ene_store::MemorySto
     Ok(std::sync::Arc::clone(store))
 }
 
-async fn backup(ctx: &AppContext) -> Result<(), CliError> {
+async fn backup(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
     let store = require_store(ctx)?;
     let path = store
         .backup()
@@ -59,10 +59,10 @@ async fn backup(ctx: &AppContext) -> Result<(), CliError> {
         "{}",
         style::success(format!("[Store] Backup created: {}", path.display()))
     );
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-fn list(ctx: &AppContext) -> Result<(), CliError> {
+fn list(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
     let store = require_store(ctx)?;
     let Some(db_path) = store.path() else {
         return Err(CliError::ExecutionFailed(
@@ -72,16 +72,16 @@ fn list(ctx: &AppContext) -> Result<(), CliError> {
     let backups = list_backups(db_path).map_err(|e| CliError::DatabaseError(e.to_string()))?;
     if backups.is_empty() {
         println!("[Store] No backups found for {}.", db_path.display());
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
     println!("--- Backups for {} ---", db_path.display());
     for b in backups {
         println!("  {}", b.display());
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-async fn restore(ctx: &mut AppContext, backup_path: &str) -> Result<(), CliError> {
+async fn restore(ctx: &mut AppContext, backup_path: &str) -> Result<CommandOutcome, CliError> {
     if backup_path.is_empty() {
         return Err(CliError::UsageError {
             usage: "/store restore <backup-path>".to_string(),
@@ -108,15 +108,15 @@ async fn restore(ctx: &mut AppContext, backup_path: &str) -> Result<(), CliError
             backup_path
         ))
     );
-    std::process::exit(0);
+    Ok(CommandOutcome::Exit(0))
 }
 
-async fn integrity(ctx: &AppContext) -> Result<(), CliError> {
+async fn integrity(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
     let store = require_store(ctx)?;
     store
         .check_integrity()
         .await
         .map_err(|e| CliError::DatabaseError(e.to_string()))?;
     println!("{}", style::success("[Store] integrity_check: ok"));
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }

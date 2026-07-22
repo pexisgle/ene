@@ -126,7 +126,11 @@ pub enum ToolError {
         /// Timeout details.
         message: String,
     },
-    /// An internal error occurred.
+    /// An internal error occurred on the **tool side** — the tool binary
+    /// encountered an unexpected condition (e.g. a logic bug, an
+    /// unrecoverable state) that does not map to any more specific
+    /// variant. Prefer this over [`Other`](Self::Other) for tool-side
+    /// failures; `Other` is reserved for host-side catch-alls.
     Internal {
         /// Internal error details.
         message: String,
@@ -195,8 +199,13 @@ pub enum ToolError {
         /// Error details.
         message: String,
     },
-    /// Catch-all error variant for host-side failures that don't fit any
-    /// specific category.
+    /// Catch-all error variant for **host-side** failures that don't fit
+    /// any specific category. Prefer [`Internal`](Self::Internal) for
+    /// tool-side errors.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use `ToolError::Internal` for tool-side errors; `Other` is kept only for backward-compatible host-side catch-alls."
+    )]
     Other {
         /// Error details.
         message: String,
@@ -278,6 +287,10 @@ impl std::fmt::Display for ToolError {
             Self::IpcClient { message } => {
                 write!(f, "IPC client error: {message}")
             }
+            #[expect(
+                deprecated,
+                reason = "Other variant kept for backward-compatible Display impl"
+            )]
             Self::Other { message } => {
                 write!(f, "Other error: {message}")
             }
@@ -394,6 +407,87 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         let deser: ToolError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, deser);
+    }
+
+    #[test]
+    fn tool_error_serde_roundtrip_all_variants() {
+        let cases: Vec<ToolError> = vec![
+            ToolError::NotFound {
+                tool_name: "t".into(),
+            },
+            ToolError::InvalidName {
+                reason: "bad".into(),
+            },
+            ToolError::DuplicateName {
+                tool_name: "dup".into(),
+            },
+            ToolError::InvalidArguments {
+                message: "arg".into(),
+            },
+            ToolError::ExecutionFailed {
+                message: "fail".into(),
+            },
+            ToolError::SandboxViolation {
+                message: "sv".into(),
+            },
+            ToolError::PermissionDenied {
+                message: "pd".into(),
+            },
+            ToolError::IoError {
+                message: "io".into(),
+            },
+            ToolError::Timeout {
+                message: "to".into(),
+            },
+            ToolError::Internal {
+                message: "int".into(),
+            },
+            ToolError::IpcTransport {
+                message: "ipc".into(),
+            },
+            ToolError::PermissionRequired {
+                request_id: "r1".into(),
+                action: "write".into(),
+                target: "/tmp".into(),
+                description: "desc".into(),
+            },
+            ToolError::UserInputRequired {
+                request_id: "u1".into(),
+                prompt: UserInputPrompt {
+                    items: vec![QuestionItem {
+                        question: "Q?".into(),
+                        options: vec![],
+                        allow_free_text: false,
+                    }],
+                },
+            },
+            ToolError::FileNotFound { path: "/f".into() },
+            ToolError::FileTooLarge {
+                path: "/f".into(),
+                size: 100,
+                limit: 50,
+            },
+            ToolError::CommandBlocked {
+                command: "rm".into(),
+                reason: "blocked".into(),
+            },
+            ToolError::ShellTimeout {
+                command: "sleep".into(),
+                timeout_ms: 1000,
+            },
+            ToolError::ShellOutputTooLarge {
+                size: 999,
+                limit: 100,
+            },
+            ToolError::IpcClient {
+                message: "ipc_client".into(),
+            },
+        ];
+        for err in cases {
+            let json = serde_json::to_string(&err).unwrap();
+            let deser: ToolError = serde_json::from_str(&json).unwrap();
+            assert_eq!(err, deser, "roundtrip failed for variant");
+        }
     }
 
     #[test]

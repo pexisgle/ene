@@ -180,8 +180,6 @@ pub fn apply_action(
 
     settings.clamp_runtime_values();
     settings.mark_dirty();
-    tracing::info!("apply_action: calling settings.save()");
-    settings.save();
 }
 
 const fn cycle_index(index: usize, len: usize, step: isize) -> usize {

@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use crate::style;
 use async_trait::async_trait;
@@ -20,7 +20,7 @@ impl CliCommand for UndoCommand {
         "/undo"
     }
 
-    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let report = ctx
             .handle
             .undo()
@@ -61,6 +61,6 @@ impl CliCommand for UndoCommand {
                 );
             }
         }
-        Ok(())
+        Ok(CommandOutcome::Continue)
     }
 }

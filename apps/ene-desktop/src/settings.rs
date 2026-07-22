@@ -9,6 +9,7 @@
 //! Methods mirror the legacy `app_config.rs` shape 1:1.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ene_config::CharacterConfig;
 use ene_config::serde::{Deserialize, Serialize};
@@ -188,7 +189,10 @@ pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
 }
 
 fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> T {
-    let index = choices.iter().position(|c| *c == current).unwrap_or(1);
+    if choices.is_empty() {
+        return current;
+    }
+    let index = choices.iter().position(|c| *c == current).unwrap_or(0);
     let len = choices.len() as isize;
     let next = (index as isize + step).rem_euclid(len) as usize;
     choices[next]
@@ -265,6 +269,8 @@ impl Default for CharacterState {
 }
 
 #[derive(Clone, Debug, Default)]
+// TODO(M2): Decompose UiState into per-page sub-structs (MemoryJournalState,
+// PermissionState, SessionState, etc.) to reduce the flat 40+ field struct.
 pub struct UiState {
     pub settings_window_visible: bool,
     /// Page the settings window should jump to when it next
@@ -439,6 +445,9 @@ pub struct CharacterSettings {
     pub ai: AiConfig,
     /// Dirty-tracked config store shared with the settings UI for persistence.
     pub store: Arc<RwLock<ene_config::ConfigStore>>,
+    /// Set when in-memory settings diverge from the store; cleared by
+    /// `sync_to_store` so repeated `flush_if_dirty` calls are cheap.
+    settings_dirty: AtomicBool,
 }
 
 impl std::fmt::Debug for CharacterSettings {
@@ -513,6 +522,7 @@ impl CharacterSettings {
             store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
                 ene_config::EneConfig::default(),
             ))),
+            settings_dirty: AtomicBool::new(true),
         };
         settings.load_from_file();
         settings
@@ -632,13 +642,16 @@ impl CharacterSettings {
     }
 
     pub fn mark_dirty(&self) {
-        self.sync_to_store();
+        self.settings_dirty.store(true, Ordering::Release);
+        let store = self.store.read();
+        store.mark_dirty();
     }
 
     /// Called once per frame by the runtime; flushes the
     /// underlying `ConfigStore` to disk only if anything was
     /// changed since the last flush.
     pub fn flush_if_dirty(&self) {
+        self.sync_to_store();
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
         if let Err(e) = store.flush_if_dirty(Some(&char_name)) {
@@ -647,17 +660,20 @@ impl CharacterSettings {
     }
 
     fn sync_to_store(&self) {
-        let mut config = self.ai.ai.clone();
-        config.version = 1;
-        let desktop = DesktopSection {
-            graphics: self.graphics.clone(),
-            language: self.language,
-        };
-        if let Err(e) = config.set_section(&desktop) {
-            tracing::warn!("[Config] Failed to set desktop section: {e}");
+        if !self.settings_dirty.swap(false, Ordering::AcqRel) {
+            return;
         }
         let store = self.store.read();
-        store.set_config(config);
+        store.with_config_mut(|config| {
+            config.version = 1;
+            let desktop = DesktopSection {
+                graphics: self.graphics.clone(),
+                language: self.language,
+            };
+            if let Err(e) = config.set_section(&desktop) {
+                tracing::warn!("[Config] Failed to set desktop section: {e}");
+            }
+        });
 
         let entry = self.current_entry();
         let default_motion_name = entry
@@ -702,15 +718,12 @@ impl CharacterSettings {
         // Resolve `full.character` (a card name or full path) to
         // a card path on disk.
         let card_path = ene_config::resolve_character_path(&full.character);
-        if !card_path.is_empty() {
-            let path = Path::new(&card_path);
-            if let Some(parent) = path.parent()
-                && let Some(name_os) = parent.file_name()
-            {
-                let name = name_os.to_string_lossy();
-                if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
-                    self.character_state.selected_character = idx;
-                }
+        if let Some(parent) = card_path.parent()
+            && let Some(name_os) = parent.file_name()
+        {
+            let name = name_os.to_string_lossy();
+            if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
+                self.character_state.selected_character = idx;
             }
         }
 
@@ -749,7 +762,14 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     let Ok(dir) = std::fs::read_dir(&characters_dir) else {
         return out;
     };
-    for entry in dir.flatten() {
+    for entry in dir {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to read character directory entry");
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -776,7 +796,14 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
 
         let mut vrm_paths = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&path) {
-            for file in entries.flatten() {
+            for file in entries {
+                let file = match file {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = %path.display(), "Failed to read file in character dir");
+                        continue;
+                    }
+                };
                 let file_path = file.path();
                 if file_path.is_dir() {
                     continue;
@@ -803,7 +830,14 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
         } else {
             let motions_dir = path.join("motions");
             if let Ok(entries) = std::fs::read_dir(&motions_dir) {
-                for file in entries.flatten() {
+                for file in entries {
+                    let file = match file {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!(error = %e, path = %motions_dir.display(), "Failed to read motion file");
+                            continue;
+                        }
+                    };
                     let file_path = file.path();
                     if file_path.is_dir() {
                         continue;

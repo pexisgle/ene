@@ -15,6 +15,7 @@ pub fn user_message(error: &EneRuntimeError) -> String {
         EneRuntimeError::Memory(err) => crate::i18n::runtime_error_memory(err.to_string()),
         EneRuntimeError::Mind(err) => crate::i18n::runtime_error_mind(err.to_string()),
         EneRuntimeError::Tool(err) => crate::i18n::runtime_error_tool(err.to_string()),
+        EneRuntimeError::ToolRag(err) => crate::i18n::runtime_error_tool(err.to_string()),
         EneRuntimeError::Ai(err) => user_message_from_ai(err),
     }
 }

@@ -1,10 +1,6 @@
 use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
-    Arc::new(crate::utils::session::BrowserSessionStore::new())
-}
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "browser",
@@ -19,7 +15,7 @@ pub struct NavigateAction {
     url: String,
 
     #[tool(skip)]
-    #[serde(skip, default = "default_store")]
+    #[serde(skip, default = "crate::utils::default_store")]
     store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 

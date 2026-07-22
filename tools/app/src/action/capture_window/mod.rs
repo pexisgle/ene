@@ -1,5 +1,5 @@
 use ene_tool_common::prelude::*;
-use image::{DynamicImage, imageops::FilterType};
+use image::DynamicImage;
 
 #[cfg(target_os = "linux")]
 mod portal;
@@ -21,14 +21,7 @@ fn capture_window_by_title_xcap(
             && let Ok(img) = window.capture_image()
         {
             let image = DynamicImage::ImageRgba8(img);
-            let final_image = if scale_percent > 0 && scale_percent < 100 {
-                let nwidth = (image.width() as f32 * (scale_percent as f32 / 100.0)) as u32;
-                let nheight = (image.height() as f32 * (scale_percent as f32 / 100.0)) as u32;
-                image.resize(nwidth.max(1), nheight.max(1), FilterType::Lanczos3)
-            } else {
-                image
-            };
-            return Ok(final_image);
+            return Ok(crate::utils::image::resize_image(image, scale_percent));
         }
     }
 
@@ -60,7 +53,6 @@ impl CaptureWindowAction {
         let scale_percent = self
             .scale_percent
             .unwrap_or(crate::config::DEFAULT_SCALE_PERCENT);
-        let title = self.window_title.clone();
 
         let image = if crate::utils::portal::detect_wayland() {
             #[cfg(target_os = "linux")]
@@ -69,7 +61,7 @@ impl CaptureWindowAction {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let t = title.clone();
+                let t = self.window_title.clone();
                 let sp = scale_percent;
                 tokio::task::spawn_blocking(move || capture_window_by_title_xcap(&t, sp))
                     .await
@@ -78,7 +70,7 @@ impl CaptureWindowAction {
                     })?
             }
         } else {
-            let t = title.clone();
+            let t = self.window_title.clone();
             let sp = scale_percent;
             tokio::task::spawn_blocking(move || capture_window_by_title_xcap(&t, sp))
                 .await
@@ -91,7 +83,7 @@ impl CaptureWindowAction {
         let result = serde_json::json!({
             "type": "screenshot",
             "data": data_uri,
-            "window": title
+            "window": self.window_title
         });
         Ok(result.to_string())
     }

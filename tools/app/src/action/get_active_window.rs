@@ -19,15 +19,15 @@ impl GetActiveWindowAction {
                     message: "Failed to get active window".to_string(),
                 }
             })?;
-            Ok::<_, ToolError>(format!(
-                "Active window: {} ({}) at ({}, {}) size {}x{}",
-                active_win.title,
-                active_win.app_name,
-                active_win.position.x,
-                active_win.position.y,
-                active_win.position.width,
-                active_win.position.height,
-            ))
+            let result = serde_json::json!({
+                "title": active_win.title,
+                "app_name": active_win.app_name,
+                "x": active_win.position.x,
+                "y": active_win.position.y,
+                "width": active_win.position.width,
+                "height": active_win.position.height,
+            });
+            Ok::<_, ToolError>(result.to_string())
         })
         .await
         .map_err(|e| ToolError::ExecutionFailed {

@@ -46,6 +46,7 @@ pub mod retry;
 /// Provider traits and registry.
 pub mod traits;
 
+/// Conversation entry author roles.
 pub mod role;
 
 pub use config::{

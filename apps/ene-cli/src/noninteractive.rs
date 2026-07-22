@@ -49,17 +49,39 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
     match result {
         Ok(code) => code,
         Err(e) => {
-            emit_error(&e);
+            let format = match cmd {
+                Command::Run { jsonl, json, .. } => {
+                    if *jsonl {
+                        OutputFormat::Jsonl
+                    } else if *json {
+                        OutputFormat::Json
+                    } else {
+                        OutputFormat::Text
+                    }
+                }
+                Command::Tool { json, .. }
+                | Command::Session { json, .. }
+                | Command::Memory { json, .. }
+                | Command::Doctor { json }
+                | Command::Store { json, .. } => {
+                    if *json {
+                        OutputFormat::Json
+                    } else {
+                        OutputFormat::Text
+                    }
+                }
+            };
+            emit_error(&e, format);
             e.exit_code()
         }
     }
 }
 
 /// Print an [`OutputError`] to stdout (structured) or stderr (human).
-fn emit_error(err: &OutputError) {
-    // Always emit the machine-readable envelope on stdout so callers can parse
-    // failures uniformly, and a short human note on stderr.
-    println!("{}", err.to_json());
+fn emit_error(err: &OutputError, format: OutputFormat) {
+    if format.is_structured() {
+        println!("{}", err.to_json());
+    }
     eprintln!("error: {err}");
 }
 
@@ -167,7 +189,9 @@ async fn process_turn(
     let mut denied_permission = false;
     let mut exit_code = EXIT_OK;
     let mut terminal_message: Option<String> = None;
-    let terminal_reason;
+    // Defensive default; overwritten in every branch but guards future break paths.
+    #[expect(unused_assignments, reason = "safety net for new loop exits")]
+    let mut terminal_reason = "unknown".to_string();
 
     loop {
         let Ok(event) = rx.recv().await else {
@@ -740,24 +764,9 @@ fn parse_kind(kind: Option<&str>) -> Result<Option<ene_store::MemoryKind>, Outpu
     let Some(kind) = kind else {
         return Ok(None);
     };
-    let parsed = match kind {
-        "episodic" => ene_store::MemoryKind::Episodic,
-        "semantic" => ene_store::MemoryKind::Semantic,
-        "user_profile" => ene_store::MemoryKind::UserProfile,
-        "relationship" => ene_store::MemoryKind::Relationship,
-        "affective" => ene_store::MemoryKind::Affective,
-        "commitment" => ene_store::MemoryKind::Commitment,
-        "preference" => ene_store::MemoryKind::Preference,
-        "procedure" => ene_store::MemoryKind::Procedure,
-        "reflection" => ene_store::MemoryKind::Reflection,
-        other => {
-            return Err(OutputError::new(
-                ErrorCode::Usage,
-                format!("unknown memory kind: {other}"),
-            ));
-        }
-    };
-    Ok(Some(parsed))
+    crate::util::parse_memory_kind(kind)
+        .ok_or_else(|| OutputError::new(ErrorCode::Usage, format!("unknown memory kind: {kind}")))
+        .map(Some)
 }
 
 // ── doctor ──────────────────────────────────────────────────────────────────
@@ -778,7 +787,7 @@ async fn doctor_command(ctx: &mut AppContext, json: bool) -> Result<i32, OutputE
     };
     let arg = if json { "--json" } else { "" };
     match doctor.execute(arg, ctx).await {
-        Ok(()) => Ok(EXIT_OK),
+        Ok(_) => Ok(EXIT_OK),
         Err(CliError::ExecutionFailed(msg)) => Err(OutputError::new(ErrorCode::Runtime, msg)),
         Err(e) => Err(OutputError::new(ErrorCode::Runtime, e.to_string())),
     }

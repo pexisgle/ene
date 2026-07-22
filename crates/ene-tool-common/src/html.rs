@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 const SKIP_TAGS: &[&str] = &[
     "script", "style", "noscript", "iframe", "svg", "nav", "header", "footer", "aside", "template",
-    "code", "canvas", "audio", "video", "map", "object", "embed",
+    "canvas", "audio", "video", "map", "object", "embed",
 ];
 
 /// Converts raw HTML to Markdown text.
@@ -15,7 +15,10 @@ const SKIP_TAGS: &[&str] = &[
 /// `unwrap_or_default()` returned an empty string on every failure, which
 /// silently dropped the page content.
 pub fn html_to_markdown(html: &str) -> String {
-    htmd::convert(html).unwrap_or_else(|_| html.to_string())
+    htmd::convert(html).unwrap_or_else(|e| {
+        tracing::warn!(component = "html_to_markdown", error = %e, "htmd conversion failed, falling back to raw HTML");
+        html.to_string()
+    })
 }
 
 /// Extracts a specific region from HTML and returns it as HTML.

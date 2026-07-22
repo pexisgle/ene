@@ -179,11 +179,11 @@ fn ccv3_item_matches(existing: &MemoryItem, desired: &NewMemoryItem) -> bool {
 }
 
 fn style_content_hash(card: &CharacterCardV3) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    card.data.mes_example.hash(&mut hasher);
-    hasher.finish()
+    let hash = blake3::hash(card.data.mes_example.as_bytes());
+    let bytes = hash.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 const fn card_memory_hash_combined(lore: u64, style: u64) -> u64 {

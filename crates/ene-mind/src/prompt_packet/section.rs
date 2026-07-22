@@ -97,7 +97,7 @@ impl PromptSection {
         let content = content.into();
         Self {
             kind,
-            required: kind.is_required() && !content.is_empty(),
+            required: kind.is_required(),
             content,
             budget_tokens,
         }

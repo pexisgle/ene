@@ -1,10 +1,6 @@
 use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
-    Arc::new(crate::utils::session::BrowserSessionStore::new())
-}
-
 #[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "browser",
@@ -17,18 +13,11 @@ pub struct WaitAction {
     /// Milliseconds to wait (default: 1000).
     #[arg(default = "1000", minimum = 0)]
     wait_ms: Option<u64>,
-
-    #[tool(skip)]
-    #[serde(skip, default = "default_store")]
-    _store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
 impl WaitAction {
-    pub const fn new(store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
-        Self {
-            wait_ms: None,
-            _store: store,
-        }
+    pub fn new(_store: Arc<crate::utils::session::BrowserSessionStore>) -> Self {
+        Self { wait_ms: None }
     }
 
     async fn run(&self) -> Result<String, ToolError> {

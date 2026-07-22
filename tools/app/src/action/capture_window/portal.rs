@@ -71,8 +71,12 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
     use spa::pod::Pod;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Once;
 
-    pw::init();
+    static PW_INIT: Once = Once::new();
+    PW_INIT.call_once(|| {
+        pw::init();
+    });
 
     let mainloop =
         pw::main_loop::MainLoopRc::new(None).map_err(|e| ToolError::ExecutionFailed {
@@ -187,16 +191,26 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
 
             let d = &mut datas[0];
             let chunk = d.chunk();
-            let data_size = chunk.size() as usize;
+            let chunk_size = chunk.size();
+            let Ok(data_size) = usize::try_from(chunk_size) else {
+                return;
+            };
             if data_size == 0 {
                 return;
             }
 
-            let stride = chunk.stride() as u32;
+            let stride = u32::try_from(chunk.stride()).unwrap_or(0);
+            if stride == 0 {
+                return;
+            }
 
             let Some(raw_data) = d.data() else {
                 return;
             };
+
+            if raw_data.len() < data_size {
+                return;
+            }
 
             let mut s = state.borrow_mut();
             let pixel_stride = stride / s.bpp;
@@ -205,8 +219,9 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             s.height = (data_size as u32) / stride;
 
             let mut pixels = vec![0u8; data_size];
-            // SAFETY: `raw_data` is a valid pointer from the PipeWire stream.
-            // `pixels` was just allocated with the exact same size.
+            // SAFETY: `raw_data.len() >= data_size` was verified above, and
+            // `pixels` was just allocated with exactly `data_size` bytes, so
+            // the copy stays within both allocations.
             unsafe {
                 std::ptr::copy_nonoverlapping(raw_data.as_ptr(), pixels.as_mut_ptr(), data_size);
             }

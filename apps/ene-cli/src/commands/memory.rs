@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 
@@ -25,7 +25,7 @@ impl CliCommand for MemoryCommand {
         "/memory <list|inspect|search|why|pin|archive|forget|dispute|restore|status|pending|retry>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let (subcmd, tail) = parse_subcommand_and_tail(arg);
 
         let diag = ctx.handle.diagnostics();
@@ -75,7 +75,7 @@ async fn handle_search(
     query: &str,
     memory: &ene_runtime::MemoryQueryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     if query.is_empty() {
         return Err(CliError::UsageError {
             usage: "/memory search <query>".to_string(),
@@ -121,17 +121,20 @@ async fn handle_search(
             );
         }
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-async fn handle_list(args: &str, snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
+async fn handle_list(
+    args: &str,
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<CommandOutcome, CliError> {
     if !snapshot.memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));
     }
     let card_name = snapshot.card_name.as_str();
-    let kind = parse_kind_arg(args);
+    let kind = parse_kind_arg(args)?;
     let memories = snapshot
         .memory
         .list_typed_memories(card_name, kind, 50)
@@ -140,7 +143,7 @@ async fn handle_list(args: &str, snapshot: &ene_runtime::EneStateSnapshot) -> Re
 
     if memories.is_empty() {
         println!("[Memory] No typed memories found.");
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
     println!("--- Typed Memories ({}) ---", memories.len());
     for memory in memories {
@@ -153,13 +156,13 @@ async fn handle_list(args: &str, snapshot: &ene_runtime::EneStateSnapshot) -> Re
         );
     }
     println!("----------------------------");
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
 async fn handle_inspect(
     id_arg: &str,
     snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory inspect <id>".to_string(),
@@ -188,7 +191,7 @@ async fn handle_inspect(
                     .map_or_else(|| "-".to_string(), |ts| ts.to_rfc3339()),
                 m.access_count
             );
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
         Ok(None) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
         Err(e) => Err(CliError::ExecutionFailed(format!("Inspect error: {e}"))),
@@ -198,7 +201,7 @@ async fn handle_inspect(
 async fn handle_why(
     id_arg: &str,
     snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory why <id>".to_string(),
@@ -217,7 +220,7 @@ async fn handle_why(
                     .map_or_else(|| "never".to_string(), |ts| ts.to_rfc3339())
             );
             println!("  note: live recall score breakdown is shown by `/memory search <query>`");
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
         Ok(None) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
         Err(e) => Err(CliError::ExecutionFailed(format!("Why error: {e}"))),
@@ -227,7 +230,7 @@ async fn handle_why(
 async fn handle_pin(
     id_arg: &str,
     snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory pin <id>".to_string(),
@@ -236,7 +239,7 @@ async fn handle_pin(
     match snapshot.memory.pin_typed_memory(id, true).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] Pinned id={id}")));
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
         Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
         Err(e) => Err(CliError::ExecutionFailed(format!("Pin error: {e}"))),
@@ -246,7 +249,7 @@ async fn handle_pin(
 async fn handle_forget(
     id_arg: &str,
     snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory forget <id>".to_string(),
@@ -255,7 +258,7 @@ async fn handle_forget(
     match snapshot.memory.user_forget_typed_memory(id).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] forgotten id={id}")));
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
         Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
         Err(e) => Err(CliError::ExecutionFailed(format!("Forget error: {e}"))),
@@ -265,7 +268,7 @@ async fn handle_forget(
 async fn handle_restore(
     id_arg: &str,
     snapshot: &ene_runtime::EneStateSnapshot,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory restore <id>".to_string(),
@@ -274,7 +277,7 @@ async fn handle_restore(
     match snapshot.memory.user_restore_typed_memory(id).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] restored id={id}")));
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
         Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
         Err(e) => Err(CliError::ExecutionFailed(format!("Restore error: {e}"))),
@@ -286,7 +289,7 @@ async fn handle_transition(
     snapshot: &ene_runtime::EneStateSnapshot,
     status: ene_store::MemoryStatus,
     label: &str,
-) -> Result<(), CliError> {
+) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: format!("/memory {label} <id>"),
@@ -295,7 +298,7 @@ async fn handle_transition(
     match snapshot.memory.set_memory_status(id, status).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] {label} id={id}")));
-            Ok(())
+            Ok(CommandOutcome::Continue)
         }
         Ok(false) => Err(CliError::ExecutionFailed(format!("id={id} not found"))),
         Err(e) => Err(CliError::ExecutionFailed(format!("Update error: {e}"))),
@@ -306,26 +309,24 @@ fn parse_id(raw: &str) -> Option<i64> {
     raw.trim().parse::<i64>().ok()
 }
 
-fn parse_kind_arg(args: &str) -> Option<ene_store::MemoryKind> {
+fn parse_kind_arg(args: &str) -> Result<Option<ene_store::MemoryKind>, CliError> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() < 2 || tokens[0] != "--kind" {
-        return None;
+        return Ok(None);
     }
-    match tokens[1] {
-        "episodic" => Some(ene_store::MemoryKind::Episodic),
-        "semantic" => Some(ene_store::MemoryKind::Semantic),
-        "user_profile" => Some(ene_store::MemoryKind::UserProfile),
-        "relationship" => Some(ene_store::MemoryKind::Relationship),
-        "affective" => Some(ene_store::MemoryKind::Affective),
-        "commitment" => Some(ene_store::MemoryKind::Commitment),
-        "preference" => Some(ene_store::MemoryKind::Preference),
-        "procedure" => Some(ene_store::MemoryKind::Procedure),
-        "reflection" => Some(ene_store::MemoryKind::Reflection),
-        _ => None,
-    }
+    crate::util::parse_memory_kind(tokens[1])
+        .ok_or_else(|| CliError::UsageError {
+            usage: format!(
+                "Unknown memory kind '{}'. Valid: episodic, semantic, user_profile, relationship, affective, commitment, preference, procedure, reflection",
+                tokens[1]
+            ),
+        })
+        .map(Some)
 }
 
-async fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
+async fn handle_status(
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<CommandOutcome, CliError> {
     if !snapshot.memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
@@ -344,10 +345,12 @@ async fn handle_status(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), C
         }
     }
     println!("  note: use `/memory pending` to inspect the retry queue (#240)");
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-async fn handle_pending(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
+async fn handle_pending(
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<CommandOutcome, CliError> {
     if !snapshot.memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
@@ -364,7 +367,7 @@ async fn handle_pending(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), 
         .map_err(|e| CliError::ExecutionFailed(format!("List pending error: {e}")))?;
     if rows.is_empty() {
         println!("[Memory] No pending or permanent memory writes.");
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
     println!("--- Pending Memory Writes ({}) ---", rows.len());
     for row in rows {
@@ -378,10 +381,12 @@ async fn handle_pending(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), 
             row.last_error.unwrap_or_default()
         );
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
-async fn handle_retry(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), CliError> {
+async fn handle_retry(
+    snapshot: &ene_runtime::EneStateSnapshot,
+) -> Result<CommandOutcome, CliError> {
     if !snapshot.memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
@@ -399,7 +404,7 @@ async fn handle_retry(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), Cl
         .map_err(|e| CliError::ExecutionFailed(format!("Schedule pending error: {e}")))?;
     if scheduled == 0 {
         println!("[Memory] No pending memory writes to retry.");
-        return Ok(());
+        return Ok(CommandOutcome::Continue);
     }
     let mind = snapshot
         .config
@@ -424,11 +429,13 @@ async fn handle_retry(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), Cl
         }
         Err(e) => println!("[Memory] Retried {scheduled} write(s); count error: {e}"),
     }
-    Ok(())
+    Ok(CommandOutcome::Continue)
 }
 
 #[cfg(test)]
 mod tests {
+    #![expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")]
+
     use super::{parse_kind_arg, parse_subcommand_and_tail};
 
     #[test]
@@ -441,8 +448,13 @@ mod tests {
     #[test]
     fn parse_kind_arg_reads_kind_flag_value_pair() {
         assert_eq!(
-            parse_kind_arg("--kind preference"),
+            parse_kind_arg("--kind preference").unwrap(),
             Some(ene_store::MemoryKind::Preference)
         );
+    }
+
+    #[test]
+    fn parse_kind_arg_returns_error_for_unknown_kind() {
+        assert!(parse_kind_arg("--kind unknown_kind").is_err());
     }
 }

@@ -1,5 +1,7 @@
 //! Smart content truncation helpers (folded from former `ene-common`).
 
+use std::collections::VecDeque;
+
 /// Helper struct for high-performance and detailed string truncation.
 pub struct Truncate;
 
@@ -75,11 +77,11 @@ impl Truncate {
             bytes = bytes.saturating_add(size);
         }
 
-        let removed = if hit_bytes {
-            total_bytes.saturating_sub(bytes)
-        } else {
-            text.len().saturating_sub(out.join("\n").len())
-        };
+        // Account for the trailing newline that `text.lines()` strips:
+        // `text.len()` includes it, but `out.join("\n")` does not.
+        let trailing_newline = usize::from(text.ends_with('\n'));
+        let kept_bytes = bytes.saturating_add(trailing_newline);
+        let removed = total_bytes.saturating_sub(kept_bytes);
 
         let preview = out.join("\n");
         let unit = if hit_bytes { "bytes" } else { "lines" };
@@ -104,7 +106,7 @@ impl Truncate {
             };
         }
 
-        let mut out = Vec::new();
+        let mut out: VecDeque<&str> = VecDeque::new();
         let mut bytes = 0usize;
         let mut hit_bytes = false;
 
@@ -114,17 +116,26 @@ impl Truncate {
                 hit_bytes = true;
                 break;
             }
-            out.insert(0, *line);
+            out.push_front(*line);
             bytes = bytes.saturating_add(size);
         }
 
         let removed = if hit_bytes {
             total_bytes.saturating_sub(bytes)
         } else {
-            text.len().saturating_sub(out.join("\n").len())
+            // Account for the trailing newline that `text.lines()` strips.
+            let trailing_newline = usize::from(text.ends_with('\n'));
+            let kept_bytes = out
+                .iter()
+                .map(|l| l.len())
+                .sum::<usize>()
+                .saturating_add(out.len().saturating_sub(1))
+                .saturating_add(trailing_newline);
+            total_bytes.saturating_sub(kept_bytes)
         };
 
-        let preview = out.join("\n");
+        let preview: Vec<&str> = out.into();
+        let preview = preview.join("\n");
         let unit = if hit_bytes { "bytes" } else { "lines" };
 
         TruncateResult {

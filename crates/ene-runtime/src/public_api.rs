@@ -151,6 +151,7 @@ pub enum PublicChatEvent {
 impl PublicChatEvent {
     /// Convert an internal chat event into the stable public mirror with
     /// redaction applied to tool arguments and sensitive text.
+    #[must_use]
     pub fn from_ene_event(event: &EneEvent) -> Self {
         match event {
             EneEvent::TurnStarted { turn, origin } => Self::TurnStarted {

@@ -6,18 +6,18 @@
 //! texture) and the first skin's inverse-bind matrices preserved
 //! for's skinning pass.
 //!
-//! ## Multi-mesh scope (this struct)
+//! ## Multi-mesh scope
 //!
 //! A VRM 1.0 file such as `AliciaSolid.vrm` contains ~12 separate
 //! glTF `Mesh` objects (body, hair, face, clothes, accessories,
-//! …), not one mesh with many primitives./3.1/3.2 only
+//! …), not one mesh with many primitives. Earlier versions only
 //! loaded `meshes[0]` (the head/face area) and therefore rendered
-//! only the skin. walks the entire `gltf.meshes()` iterator,
+//! only the skin. The loader walks the entire `gltf.meshes()` iterator,
 //! computing one global AABB across all primitive positions so the
 //! per-vertex normalization (`TARGET_MODEL_SIZE = 1.5` m) is
 //! applied uniformly across the whole body.
 //!
-//! ##.x deliberately does **not** support
+//! ## Current scope (deliberately does **not** support)
 //!
 //! - `MToon`'s full PBR parameters (rim / matcap / outline /
 //!   emission). The shader applies a simple diffuse + lit + base
@@ -357,6 +357,7 @@ fn load_all_meshes(
     let mut morph_per_primitive: Vec<Option<PrimitiveMorphs>> = Vec::new();
     let mut has_nonzero_joints = false;
     for (mesh_idx, mesh) in gltf.document.meshes().enumerate() {
+        let morph_start = morph_per_primitive.len();
         let mut primitives = Vec::new();
         for (prim_idx, primitive) in mesh.primitives().enumerate() {
             if primitive.mode() != gltf::mesh::Mode::Triangles {
@@ -522,16 +523,17 @@ fn load_all_meshes(
                     .flatten()
             });
 
+            let vertex_count = vertices.len() as u32;
             primitives.push(VrmPrimitive {
                 vertex_buf,
-                vertex_count: vertices.len() as u32,
+                vertex_count,
                 index_buf,
                 index_count: indices.len() as u32,
                 // Keep the CPU-side vertex mirror so the
                 // collider builder can walk `joints` / `weights`
                 // / `position` per-primitive without a GPU
                 // readback.
-                vertices: vertices.clone(),
+                vertices,
                 base_color,
                 alpha_mode,
                 unlit,
@@ -542,18 +544,13 @@ fn load_all_meshes(
             // morph entry. The draw loop uses the same mesh-major
             // ordering.
             let pid = PrimitiveId(morph_per_primitive.len());
-            morph_per_primitive.push(morphs.map(|raw| {
-                PrimitiveMorphs::from_targets(pid, node_idx, vertices.len() as u32, raw)
-            }));
+            morph_per_primitive.push(
+                morphs.map(|raw| PrimitiveMorphs::from_targets(pid, node_idx, vertex_count, raw)),
+            );
         }
         if primitives.is_empty() {
             tracing::debug!("VRM mesh[{mesh_idx}] has no renderable primitives; skipping");
-            // Drop the morph records we pushed for this empty
-            // mesh so the morph indices stay aligned with
-            // `VrmPrimitive` in `meshes`.
-            let dropped = mesh.primitives().count();
-            let new_len = morph_per_primitive.len().saturating_sub(dropped);
-            morph_per_primitive.truncate(new_len);
+            morph_per_primitive.truncate(morph_start);
             continue;
         }
         meshes.push(VrmMesh { primitives });
@@ -1270,54 +1267,7 @@ fn load_mtoon_gpu_textures(
         ],
     });
 
-    // Create individual bind groups for each texture slot (for flexibility).
-    let single_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("vrm.mtoon_single_tex_bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-        ],
-    });
-
-    let make_single = |tex: &MToonGpuTexture, label: &str| {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout: &single_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&tex.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&tex.sampler),
-                },
-            ],
-        })
-    };
-
     let gpu_tex = std::sync::Arc::new(mtoon::MToonGpuTextures {
-        shade_multiply: make_single(&shade_multiply, "vrm.mtoon_shade_multiply_bg"),
-        shading_shift: make_single(&shading_shift, "vrm.mtoon_shading_shift_bg"),
-        emissive: make_single(&emissive, "vrm.mtoon_emissive_bg"),
-        matcap: make_single(&matcap, "vrm.mtoon_matcap_bg"),
-        rim_multiply: make_single(&rim_multiply, "vrm.mtoon_rim_multiply_bg"),
-        outline_width: make_single(&outline_width, "vrm.mtoon_outline_width_bg"),
-        uv_mask: make_single(&uv_mask, "vrm.mtoon_uv_mask_bg"),
         combined_bind_group,
     });
     cache.insert(mat_index, gpu_tex.clone());

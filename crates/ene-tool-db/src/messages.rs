@@ -138,7 +138,7 @@ pub enum DbResponse {
 }
 
 /// Error codes returned by the DB IPC server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DbErrorCode {
     /// The tool does not have permission to access the requested resource.
     PermissionDenied,

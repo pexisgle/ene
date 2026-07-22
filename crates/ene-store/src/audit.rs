@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 /// The permission decision recorded for an audited tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AuditDecision {
     /// No permission prompt was required (read-only / pre-approved).
     NotRequired,

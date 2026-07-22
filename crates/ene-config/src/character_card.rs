@@ -106,14 +106,20 @@ impl schemars::JsonSchema for Extensions {
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let ene_schema = generator.subschema_for::<Option<EneExtension>>();
-        let schema = serde_json::json!({
+        let value = serde_json::json!({
             "type": "object",
             "properties": {
                 "ene": ene_schema
             },
             "additionalProperties": true
         });
-        serde_json::from_value(schema).unwrap_or_default()
+        // The JSON literal above is a known-good object; `from_value` is
+        // infallible for this shape.
+        #[expect(
+            clippy::unwrap_used,
+            reason = "known-good JSON literal constructed inline; cannot fail"
+        )]
+        serde_json::from_value(value).unwrap()
     }
 }
 
@@ -252,34 +258,40 @@ pub struct ResolvedExpression {
 
 /// Built-in default expressions. Used when the card has no `extensions.expressions`,
 /// and as the base that card overrides are merged on top of.
-fn default_expressions() -> Vec<ResolvedExpression> {
-    [
-        ("neutral", "Default resting expression", "neutral"),
-        ("happy", "Feeling joyful, excited, or pleased", "happy"),
-        ("sad", "Feeling down, disappointed, or sorrowful", "sad"),
-        ("angry", "Feeling frustrated or upset", "angry"),
-        ("relaxed", "Feeling calm, content, or at ease", "relaxed"),
-        (
-            "surprised",
-            "Feeling shocked or caught off guard",
-            "surprised",
-        ),
-    ]
-    .into_iter()
-    .map(|(name, desc, vrm_key)| ResolvedExpression {
-        name: name.to_string(),
-        description: desc.to_string(),
-        vrm: std::iter::once((vrm_key.to_string(), 1.0f32)).collect(),
-    })
-    .collect()
+///
+/// Uses `LazyLock` to compute the list once and reuse it across calls.
+fn default_expressions() -> &'static [ResolvedExpression] {
+    use std::sync::LazyLock;
+    static DEFAULT: LazyLock<Vec<ResolvedExpression>> = LazyLock::new(|| {
+        [
+            ("neutral", "Default resting expression", "neutral"),
+            ("happy", "Feeling joyful, excited, or pleased", "happy"),
+            ("sad", "Feeling down, disappointed, or sorrowful", "sad"),
+            ("angry", "Feeling frustrated or upset", "angry"),
+            ("relaxed", "Feeling calm, content, or at ease", "relaxed"),
+            (
+                "surprised",
+                "Feeling shocked or caught off guard",
+                "surprised",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, desc, vrm_key)| ResolvedExpression {
+            name: name.to_string(),
+            description: desc.to_string(),
+            vrm: std::iter::once((vrm_key.to_string(), 1.0f32)).collect(),
+        })
+        .collect()
+    });
+    &DEFAULT
 }
 
 /// Merges the built-in defaults with card-level overrides from `extensions.expressions`.
 pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
     let overrides = card.data.get_expression_overrides();
     let mut map: indexmap::IndexMap<String, ResolvedExpression> = default_expressions()
-        .into_iter()
-        .map(|e| (e.name.clone(), e))
+        .iter()
+        .map(|e| (e.name.clone(), e.clone()))
         .collect();
 
     for ovr in &overrides {

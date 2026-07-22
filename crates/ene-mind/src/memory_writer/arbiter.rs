@@ -235,10 +235,21 @@ impl MemoryArbiter {
         candidates: &[MemoryCandidate],
         ctx: &ArbiterContext<'_>,
     ) -> Result<Vec<AppliedDecision>, CognitionError> {
-        let existing = store
-            .get_typed_memories_by_character(ctx.character_id, None, 10_000, 0)
-            .await
-            .map_err(CognitionError::Memory)?;
+        let candidate_kinds: Vec<MemoryKind> = candidates
+            .iter()
+            .map(|c| c.kind)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let mut existing: Vec<MemoryItem> = Vec::new();
+        for kind in &candidate_kinds {
+            let items = store
+                .get_typed_memories_by_character(ctx.character_id, Some(*kind), 10_000, 0)
+                .await
+                .map_err(CognitionError::Memory)?;
+            existing.extend(items);
+        }
 
         let active_existing: Vec<MemoryItem> = existing
             .into_iter()
@@ -250,6 +261,11 @@ impl MemoryArbiter {
     }
 
     /// Apply a slice of decisions to the memory store.
+    ///
+    /// **Non-transactional**: each decision is applied independently. If one
+    /// fails mid-batch, previously applied decisions are already committed and
+    /// will not be rolled back. Callers that need all-or-nothing semantics
+    /// should wrap the store connection in a transaction before calling this.
     pub async fn apply_decisions(
         store: &MemoryStore,
         decisions: &[CandidateDecision],
@@ -1111,6 +1127,92 @@ mod tests {
         let new_id = applied[0].inserted_id.unwrap();
         let new_mem = store.get_typed_memory(new_id).await.unwrap().unwrap();
         assert_eq!(new_mem.supersedes_id, Some(old_id));
+    }
+
+    /// `apply_decisions` is documented as non-transactional: when a later
+    /// decision fails, the earlier decisions in the batch stay committed and
+    /// are not rolled back. This test pins that behavior so a future move to
+    /// transactional batching is a deliberate, noticed change.
+    #[tokio::test]
+    async fn apply_decisions_is_non_transactional_on_partial_failure() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let candidate = sample_candidate(0.9);
+
+        let persist_item = NewMemoryItem {
+            scope: MemoryScope::User,
+            character_id: "ene".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Semantic,
+            title: "project X".to_string(),
+            content: "User is working on project X".to_string(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.9),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+
+        let decisions = vec![
+            CandidateDecision {
+                candidate: candidate.clone(),
+                action: ArbiterAction::Persist(persist_item),
+                reason: ArbiterReason::new(ArbiterReasonCode::ValidNewMemory, "first succeeds"),
+            },
+            CandidateDecision {
+                candidate,
+                // Superseding a non-existent id fails inside `apply_one`.
+                action: ArbiterAction::Supersede {
+                    new_item: NewMemoryItem {
+                        scope: MemoryScope::User,
+                        character_id: "ene".to_string(),
+                        user_id: "user1".to_string(),
+                        kind: MemoryKind::Semantic,
+                        title: "replacement".to_string(),
+                        content: "replacement content".to_string(),
+                        source: MemorySource::Inferred,
+                        source_ref: None,
+                        confidence: MemoryConfidence::new(0.9),
+                        salience: MemorySalience::default(),
+                        affect: AffectAnnotation::default(),
+                        relationship_impact: 0.0,
+                        valid_from: None,
+                        valid_until: None,
+                        status: MemoryStatus::Active,
+                        supersedes_id: None,
+                        pinned: false,
+                        created_at: None,
+                        commitment_id: None,
+                    },
+                    superseded_id: 999_999,
+                },
+                reason: ArbiterReason::new(
+                    ArbiterReasonCode::ContradictionSupersede,
+                    "second fails",
+                ),
+            },
+        ];
+
+        let result = MemoryArbiter::apply_decisions(&store, &decisions).await;
+        assert!(
+            result.is_err(),
+            "the batch must surface the second decision's failure"
+        );
+
+        // The first decision's write survived even though the batch failed.
+        let count = store.count_typed_memories("ene", None).await.unwrap();
+        assert_eq!(
+            count, 1,
+            "non-transactional batch must keep the first decision's committed write"
+        );
     }
 
     #[test]

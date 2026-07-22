@@ -50,5 +50,8 @@
     "generation_hint_with_topic_path": "ja/proactive/generation_hint_with_topic.md",
     "screen_summary_system_path": "ja/proactive/screen_summary_system.md",
     "screen_summary_user_path": "ja/proactive/screen_summary_user.md"
+  },
+  "compression": {
+    "system_path": "ja/compression/system.md"
   }
 }

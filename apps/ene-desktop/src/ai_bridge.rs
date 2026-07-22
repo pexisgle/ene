@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use ene_config::EneConfig;
 use ene_runtime::{
@@ -41,6 +42,10 @@ pub struct AiBridge {
     /// Proactive observation control (#168).
     proactive_observe: ProactiveObserveControl,
 }
+
+/// Maximum time a `*_blocking` call may hold the winit main thread
+/// before it is cancelled and an error is returned to the UI.
+const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl AiBridge {
     /// Build a new bridge and spawn the background drain task. Must
@@ -83,6 +88,20 @@ impl AiBridge {
         ));
 
         Ok(bridge)
+    }
+
+    /// Run a future on the bridge runtime with [`BLOCKING_TIMEOUT`].
+    ///
+    /// Prevents indefinite UI freezes when the actor is slow or
+    /// deadlocked: the future is cancelled after the timeout and an
+    /// error string is returned to the caller.
+    fn block_on_timeout<F, T>(&self, fut: F) -> Result<T, String>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        self.runtime
+            .block_on(tokio::time::timeout(BLOCKING_TIMEOUT, fut))
+            .map_err(|_| format!("Operation timed out after {}s", BLOCKING_TIMEOUT.as_secs()))
     }
 
     /// Send a `Run` command. Also sets the `processing` flag
@@ -178,26 +197,23 @@ impl AiBridge {
     /// answers, mirroring [`AiBridge::get_snapshot_blocking`]. Intended
     /// for the permission-center settings page.
     pub fn list_permissions_blocking(&self) -> Result<Vec<ene_runtime::PermissionScope>, String> {
-        self.runtime
-            .block_on(self.handle.list_permissions())
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.list_permissions())
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Revoke a single standing permission grant by id (#177).
     ///
     /// Returns whether a grant was actually removed.
     pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, String> {
-        self.runtime
-            .block_on(self.handle.revoke_permission(id))
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.revoke_permission(id))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Revoke every standing permission grant, returning the number
     /// removed (#177).
     pub fn reset_all_permissions_blocking(&self) -> Result<usize, String> {
-        self.runtime
-            .block_on(self.handle.reset_all_permissions())
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.reset_all_permissions())
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Undo the most recent reversible tool operation (#178).
@@ -205,9 +221,8 @@ impl AiBridge {
     /// Blocks the calling thread on the tokio runtime while the actor
     /// answers, mirroring [`AiBridge::reset_all_permissions_blocking`].
     pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, String> {
-        self.runtime
-            .block_on(self.handle.undo())
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.undo())
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// List stored session metadata (#176).
@@ -220,27 +235,24 @@ impl AiBridge {
         include_archived: bool,
         limit: usize,
     ) -> Result<Vec<ene_store::SessionMeta>, String> {
-        self.runtime
-            .block_on(self.handle.list_sessions(include_archived, limit))
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.list_sessions(include_archived, limit))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Export a session as a pretty-printed JSON string (#176).
     pub fn export_session_blocking(&self, session_id: impl Into<String>) -> Result<String, String> {
-        self.runtime
-            .block_on(self.handle.export_session(session_id))
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.export_session(session_id))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Import a session from a JSON string, returning the imported
     /// session's row id (#176).
     pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, String> {
-        self.runtime
-            .block_on(self.handle.import_session(json))
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.import_session(json))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Search session messages, returning matching
@@ -251,10 +263,9 @@ impl AiBridge {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<(String, ene_store::ExportedMessage)>, String> {
-        self.runtime
-            .block_on(self.handle.search_sessions(query, limit, offset))
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.search_sessions(query, limit, offset))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Archive or unarchive a session, returning whether the archived
@@ -264,10 +275,9 @@ impl AiBridge {
         session_id: impl Into<String>,
         archived: bool,
     ) -> Result<bool, String> {
-        self.runtime
-            .block_on(self.handle.archive_session(session_id, archived))
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.archive_session(session_id, archived))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Forward a `UserInputResponse` for the request
@@ -284,9 +294,8 @@ impl AiBridge {
 
     /// Fetches a fresh actor snapshot on the runtime thread.
     pub fn get_snapshot_blocking(&self) -> Result<ene_runtime::EneStateSnapshot, String> {
-        self.runtime
-            .block_on(self.handle.diagnostics().get_snapshot())
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(self.handle.diagnostics().get_snapshot())
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Snapshot of cached provider health reports for the AI settings page (#175).
@@ -301,9 +310,8 @@ impl AiBridge {
 
     /// Run [`ene_ai::validate_api_key`] on the bridge runtime (#241).
     pub fn validate_api_key_blocking(&self, base_url: &str, api_key: &str) -> Result<(), String> {
-        self.runtime
-            .block_on(ene_ai::validate_api_key(base_url, api_key))
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(ene_ai::validate_api_key(base_url, api_key))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Refresh memory journal payload (typed memories + affect + commitments).
@@ -318,7 +326,7 @@ impl AiBridge {
         let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.clone();
         let memory = self.handle.diagnostics().memory().clone();
-        self.runtime.block_on(async {
+        self.block_on_timeout(async {
             let options = ene_store::MemoryJournalListOptions {
                 character_id,
                 user_id: Some(user_id.as_str()),
@@ -354,7 +362,7 @@ impl AiBridge {
                 pending_writes,
                 permanent_writes,
             })
-        })
+        })?
     }
 
     /// Run explainable recall search for the journal debug mode.
@@ -367,7 +375,7 @@ impl AiBridge {
         let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.as_str();
         let memory = self.handle.diagnostics().memory().clone();
-        self.runtime.block_on(async {
+        self.block_on_timeout(async {
             let recalled = memory
                 .search_typed_memories_explained(character_id, Some(user_id), query, limit)
                 .await
@@ -392,7 +400,7 @@ impl AiBridge {
                     )
                 })
                 .collect())
-        })
+        })?
     }
 
     /// Execute a journal action using the correct store API.
@@ -402,7 +410,7 @@ impl AiBridge {
         action: MemoryJournalAction,
     ) -> Result<bool, String> {
         let memory = self.handle.diagnostics().memory().clone();
-        self.runtime.block_on(async {
+        self.block_on_timeout(async {
             match action {
                 MemoryJournalAction::Pin => memory
                     .pin_typed_memory(id, true)
@@ -429,7 +437,7 @@ impl AiBridge {
                     .await
                     .map_err(|e| e.to_string()),
             }
-        })
+        })?
     }
 
     /// Applies a memory lifecycle action.
@@ -440,18 +448,16 @@ impl AiBridge {
         status: ene_store::MemoryStatus,
     ) -> Result<bool, String> {
         let memory = self.handle.diagnostics().memory().clone();
-        self.runtime
-            .block_on(memory.set_memory_status(id, status))
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(memory.set_memory_status(id, status))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
     /// Pins a memory row in the typed store.
     #[expect(dead_code, reason = "replaced by execute_journal_action")]
     pub fn pin_memory(&self, id: i64) -> Result<bool, String> {
         let memory = self.handle.diagnostics().memory().clone();
-        self.runtime
-            .block_on(memory.pin_typed_memory(id, true))
-            .map_err(|e| e.to_string())
+        self.block_on_timeout(memory.pin_typed_memory(id, true))
+            .and_then(|r| r.map_err(|e| e.to_string()))
     }
 }
 

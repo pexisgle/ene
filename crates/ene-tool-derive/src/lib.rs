@@ -58,7 +58,9 @@ pub fn derive_tool_spec(input: TokenStream) -> TokenStream {
 /// The struct's fields are the JSON args. Fields marked with
 /// `#[tool(skip)]` (or `#[arg(skip)]`) are stateful — they are hidden
 /// from the schema, not deserialized from JSON, and copied from `self`
-/// in the generated `execute()` method.
+/// in the generated `execute()` method. **All `#[tool(skip)]` fields
+/// must implement `Clone`** because the generated code calls
+/// `.clone()` to copy them from `self` into the deserialized args.
 ///
 /// The user must define `async fn run(&self) -> Result<String, ToolError>`
 /// in a separate `impl` block.
@@ -217,11 +219,27 @@ impl Parse for ToolActionAttr {
         }
         let _eq: syn::Token![=] = input.parse()?;
         let ty: syn::Type = input.parse()?;
+        if !input.is_empty() {
+            return Err(syn::Error::new_spanned(
+                ty,
+                "unexpected trailing tokens after `args = MyArgs`",
+            ));
+        }
         Ok(Self(ty))
     }
 }
 
 fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) {
+    // Validate that the impl block is for the ToolAction trait.
+    if let Some((_, trait_path, _)) = &item.trait_ {
+        let is_tool_action = trait_path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "ToolAction");
+        if !is_tool_action {
+            return;
+        }
+    }
     let name_fn: syn::ImplItem = syn::parse_quote! {
         fn name(&self) -> &'static str {
             <#args_ty as ::ene_tool_common::ToolSpecArgs>::TOOL_NAME
@@ -266,7 +284,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     let tool_name_str = struct_attrs.full_name();
-    let display_name = struct_attrs.display_name_value(ident.to_string());
+    let display_name = struct_attrs.display_name_value();
     let summary = struct_attrs.summary_value()?;
     let description = struct_attrs.description_value();
     let category = struct_attrs.category_path();
@@ -278,7 +296,9 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
     let caveats = struct_attrs.string_list("caveats");
     let preconditions = struct_attrs.string_list("preconditions");
     let related = struct_attrs.related_list();
-    let version = struct_attrs.version_tokens();
+    let version = struct_attrs
+        .version_tokens()
+        .map_err(|e| syn::Error::new_spanned(ast, e.to_string()))?;
     let examples = struct_attrs.examples_value();
     let args_const_ident = struct_attrs.args_const_ident(ident);
 
@@ -315,8 +335,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                 };
 
                 if let Some(obj) = schema.as_object_mut() {
-                    obj.entry("additionalProperties".to_string())
-                        .or_insert(::serde_json::Value::Bool(false));
+                    obj.insert("additionalProperties".to_string(), ::serde_json::Value::Bool(false));
                 }
 
                 #(#field_instrs)*

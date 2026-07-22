@@ -191,7 +191,7 @@ fn mind_section_survives_in_serialised_settings_json() {
 
 #[test]
 fn mind_section_is_present_in_written_settings_schema_file() {
-    ene_config::write_schemas(&ene_config::paths::assets_dir());
+    ene_config::write_schemas(ene_config::paths::assets_dir());
 
     let schema_path = ene_config::paths::assets_dir()
         .join("schema")

@@ -9,10 +9,10 @@
 use std::fmt::Write;
 
 use ene_config::PromptLibrary;
-use ene_store::{KeyFact, MemoryError};
+use ene_store::{EneMemoryError, KeyFact};
 use serde::{Deserialize, Serialize};
 
-/// Structured conversation summary returned by the LLM
+/// Structured conversation summary returned by the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSummaryResult {
     /// Natural-language conversation summary
@@ -34,7 +34,7 @@ pub async fn summarize_conversation(
     character_name: &str,
     user_name: &str,
     existing_facts: &[KeyFact],
-) -> Result<ConversationSummaryResult, MemoryError> {
+) -> Result<ConversationSummaryResult, EneMemoryError> {
     if history.is_empty() {
         return Ok(ConversationSummaryResult {
             summary: String::new(),
@@ -46,7 +46,27 @@ pub async fn summarize_conversation(
 
     // Build conversation text from message history (tool messages excluded —
     // their content is already attributed to the assistant turn).
-    let mut conversation_text = String::new();
+    let estimated_len = history
+        .iter()
+        .map(|m| match m {
+            ene_ai::LlmMessage::User { parts } => {
+                parts
+                    .iter()
+                    .map(|p| match p {
+                        ene_ai::UserMessagePart::Text { text } => text.len(),
+                        ene_ai::UserMessagePart::Image { .. } => 0,
+                    })
+                    .sum::<usize>()
+                    + 20
+            }
+            ene_ai::LlmMessage::Assistant { content, .. } => {
+                content.as_ref().map_or(0, String::len) + 20
+            }
+            ene_ai::LlmMessage::System { content } => content.len() + 20,
+            ene_ai::LlmMessage::Tool { .. } => 0,
+        })
+        .sum::<usize>();
+    let mut conversation_text = String::with_capacity(estimated_len);
     for message in history {
         match message {
             ene_ai::LlmMessage::User { parts } => {
@@ -143,23 +163,23 @@ pub async fn summarize_conversation(
     )
     .await
     .map_err(|_| {
-        MemoryError::ApiRequestError(
+        EneMemoryError::MemoryStoreConnectionError(
             "summarization: chat completion timed out after 120s".to_string(),
         )
     })?
-    .map_err(|e| MemoryError::ApiRequestError(format!("summarization: {e}")))?;
+    .map_err(|e| EneMemoryError::MemoryStoreConnectionError(format!("summarization: {e}")))?;
 
     parse_summary_json(&content)
 }
 
 /// Extracts and parses JSON from the LLM response.
 ///
-/// Returns a structured [`MemoryError::ApiRequestError`] when the response
+/// Returns a structured [`EneMemoryError::MemoryStoreConnectionError`] when the response
 /// cannot be parsed. The previous implementation silently stored the raw
 /// LLM text as the summary when JSON parsing failed, which meant a
 /// markdown-wrapped or prose response would be persisted as a "summary" and
 /// surface later in the recalled context as noise.
-fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryError> {
+fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, EneMemoryError> {
     let cleaned = raw
         .trim()
         .trim_start_matches("```json")
@@ -180,7 +200,7 @@ fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryErro
         }
     }
 
-    Err(MemoryError::ApiRequestError(format!(
+    Err(EneMemoryError::MemoryStoreConnectionError(format!(
         "[Summarizer] LLM response was not valid JSON for the expected summary schema; \
          refusing to persist raw prose as a summary. First 200 chars: {}",
         raw.chars().take(200).collect::<String>()

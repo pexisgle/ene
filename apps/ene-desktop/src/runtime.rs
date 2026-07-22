@@ -18,6 +18,7 @@
 //! 3. Redraw happens via `request_redraw` from `about_to_wait` and
 //!    is performed in `about_to_wait` to avoid winit 0.30's
 //!    `RedrawRequested` double-fire on Windows.
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,7 +33,7 @@ use crate::acquire_error::AcquireError;
 use crate::ai_bridge::AiBridge;
 use crate::chat_ui::ChatEguiWindow;
 use crate::events::AppEventSender;
-use crate::gpu::pick_format_and_alpha;
+use crate::gpu::{WindowSurfaceError, pick_format_and_alpha};
 use crate::settings::CharacterSettings;
 use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::state::AppState;
@@ -42,6 +43,11 @@ use device_query::DeviceQuery;
 /// avatar to the camera. A value of `0.9` leaves a 10% margin around the
 /// model's normalized bounds so it is not flush against the viewport edges.
 const CHARACTER_AUTO_FIT_MARGIN: f32 = 0.9;
+
+/// Number of frames to defer GPU texture freeing. Must match the
+/// `desired_maximum_frame_latency` to avoid use-after-free on textures
+/// that are still referenced by in-flight frames.
+const TEXTURE_FREE_RING_DEPTH: usize = 3;
 
 /// Top-level runtime. One per process.
 pub struct Runtime {
@@ -1373,9 +1379,6 @@ impl Runtime {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => {
-                self.hide_settings_window();
-            }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
                 uw.window.request_redraw();
@@ -1662,7 +1665,7 @@ const fn key_code_pressed(event: &WindowEvent) -> Option<winit::keyboard::KeyCod
 
 fn window_attributes(transparent: bool, fullscreen: Option<Fullscreen>) -> WindowAttributes {
     let mut attrs = WindowAttributes::default()
-        .with_title("ene v2 (tw-test wgpu port)")
+        .with_title("Ene")
         .with_resizable(true)
         .with_decorations(!transparent)
         .with_transparent(transparent)
@@ -1698,10 +1701,10 @@ impl CharacterWindow {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, WindowSurfaceError> {
         let surface = instance
             .create_surface(window.clone())
-            .map_err(|e| format!("Failed to create wgpu surface: {e}"))?;
+            .map_err(|e| WindowSurfaceError::CreateSurface(e.to_string()))?;
 
         let caps = surface.get_capabilities(adapter);
         let (format, alpha_mode) = pick_format_and_alpha(&caps);
@@ -1768,7 +1771,7 @@ struct UiWindow {
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     settings_ui: SettingsUi,
-    textures_to_free: Vec<Vec<egui::TextureId>>,
+    textures_to_free: VecDeque<Vec<egui::TextureId>>,
 }
 
 impl UiWindow {
@@ -1778,10 +1781,10 @@ impl UiWindow {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, WindowSurfaceError> {
         let surface = instance
             .create_surface(window.clone())
-            .map_err(|e| format!("Failed to create wgpu surface: {e}"))?;
+            .map_err(|e| WindowSurfaceError::CreateSurface(e.to_string()))?;
 
         let caps = surface.get_capabilities(adapter);
         let format = *caps
@@ -1825,7 +1828,7 @@ impl UiWindow {
             egui_state,
             egui_renderer,
             settings_ui: SettingsUi::new(),
-            textures_to_free: vec![Vec::new(), Vec::new(), Vec::new()],
+            textures_to_free: VecDeque::from(vec![Vec::new(); TEXTURE_FREE_RING_DEPTH]),
         })
     }
 
@@ -1940,11 +1943,12 @@ impl UiWindow {
                 .chain(std::iter::once(encoder.finish())),
         );
 
-        let to_free_now = self.textures_to_free.remove(0);
+        let to_free_now = self.textures_to_free.pop_front().unwrap_or_default();
         for id in to_free_now {
             self.egui_renderer.free_texture(&id);
         }
-        self.textures_to_free.push(full_output.textures_delta.free);
+        self.textures_to_free
+            .push_back(full_output.textures_delta.free);
 
         frame.present();
         Ok(())

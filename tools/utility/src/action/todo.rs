@@ -1,4 +1,5 @@
 use crate::provider::UtilityState;
+use crate::todo_store::TodoStoreError;
 use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
@@ -6,6 +7,30 @@ fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ToolError> {
     serde_json::to_string_pretty(value).map_err(|e| ToolError::Internal {
         message: format!("json serialization failed: {e}"),
     })
+}
+
+/// Maps a [`TodoStoreError`] to the appropriate [`ToolError`] variant.
+///
+/// Validation errors (empty content, invalid priority/status, cycles,
+/// missing parent) map to `InvalidArguments`; database/transport errors
+/// map to `Internal`.
+fn store_err(e: &TodoStoreError) -> ToolError {
+    match e {
+        TodoStoreError::EmptyContent
+        | TodoStoreError::InvalidPriority(_)
+        | TodoStoreError::InvalidStatus(_)
+        | TodoStoreError::CycleDetected { .. }
+        | TodoStoreError::PreExistingCycle(_)
+        | TodoStoreError::ParentNotFound(_)
+        | TodoStoreError::AncestorDepthExceeded(_) => ToolError::InvalidArguments {
+            message: e.to_string(),
+        },
+        TodoStoreError::Db(_)
+        | TodoStoreError::RowNotFound(_)
+        | TodoStoreError::CorruptRow { .. } => ToolError::Internal {
+            message: e.to_string(),
+        },
+    }
 }
 
 fn default_state() -> Arc<UtilityState> {
@@ -41,12 +66,7 @@ impl TodoListAction {
     async fn run(&self) -> Result<String, ToolError> {
         let session_id = self.state.session_id();
         let store = self.state.ensure_todo_store().await?;
-        let items = store
-            .list(&session_id)
-            .await
-            .map_err(|e| ToolError::Internal {
-                message: format!("todo db error: {e}"),
-            })?;
+        let items = store.list(&session_id).await.map_err(|e| store_err(&e))?;
         let count = items.len();
         let active = items
             .iter()
@@ -110,9 +130,7 @@ impl TodoAddAction {
         let item = store
             .add(&session_id, self.parent_id, &self.content, &self.priority)
             .await
-            .map_err(|e| ToolError::InvalidArguments {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| store_err(&e))?;
         ok_json(&item)
     }
 }
@@ -195,9 +213,7 @@ impl TodoUpdateAction {
                 self.parent_id,
             )
             .await
-            .map_err(|e| ToolError::InvalidArguments {
-                message: e.to_string(),
-            })?;
+            .map_err(|e| store_err(&e))?;
         ok_json(&updated)
     }
 }
@@ -233,13 +249,10 @@ impl TodoCompleteAction {
     async fn run(&self) -> Result<String, ToolError> {
         let session_id = self.state.session_id();
         let store = self.state.ensure_todo_store().await?;
-        let cascaded =
-            store
-                .complete(&session_id, self.id)
-                .await
-                .map_err(|e| ToolError::Internal {
-                    message: format!("todo db error: {e}"),
-                })?;
+        let cascaded = store
+            .complete(&session_id, self.id)
+            .await
+            .map_err(|e| store_err(&e))?;
         ok_json(&serde_json::json!({
             "id": self.id,
             "status": "completed",
@@ -279,13 +292,10 @@ impl TodoDeleteAction {
     async fn run(&self) -> Result<String, ToolError> {
         let session_id = self.state.session_id();
         let store = self.state.ensure_todo_store().await?;
-        let updated =
-            store
-                .delete(&session_id, self.id)
-                .await
-                .map_err(|e| ToolError::Internal {
-                    message: format!("todo db error: {e}"),
-                })?;
+        let updated = store
+            .delete(&session_id, self.id)
+            .await
+            .map_err(|e| store_err(&e))?;
         ok_json(&updated)
     }
 }

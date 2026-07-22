@@ -44,6 +44,7 @@ pub const DEFAULT_DRAG_FORCE: f32 = 0.4;
 
 /// Shape of a collider: sphere or capsule.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum SpringBoneShape {
     /// Sphere collider: `offset` in the node's local space, `radius` in metres.
     Sphere {
@@ -273,11 +274,11 @@ fn parse_springs(value: &Value) -> Vec<SpringBoneChain> {
                                 as f32;
                             Some(SpringBoneJoint {
                                 node,
-                                hit_radius,
-                                stiffness,
+                                hit_radius: hit_radius.max(0.0),
+                                stiffness: stiffness.clamp(0.0, 1.0),
                                 gravity_power,
                                 gravity_dir,
-                                drag_force,
+                                drag_force: drag_force.clamp(0.0, 1.0),
                             })
                         })
                         .collect()
@@ -339,6 +340,13 @@ pub struct SpringBoneJointState {
 pub struct SpringBoneChainState {
     /// Per-joint state, parallel to [`SpringBoneChain::joints`].
     pub joints: Vec<SpringBoneJointState>,
+    /// Scratch buffer reused across frames to avoid per-frame
+    /// allocation of the full node-position map.
+    scratch_positions: HashMap<usize, Vec3>,
+    /// Scratch buffer reused across frames.
+    scratch_rotations: HashMap<usize, Quat>,
+    /// Scratch buffer reused across frames.
+    scratch_parent_rots: HashMap<usize, Quat>,
 }
 
 /// Simulator for all spring chains in the model.
@@ -465,7 +473,12 @@ impl SpringBoneSimulator {
                         }
                     })
                     .collect();
-                SpringBoneChainState { joints }
+                SpringBoneChainState {
+                    joints,
+                    scratch_positions: HashMap::new(),
+                    scratch_rotations: HashMap::new(),
+                    scratch_parent_rots: HashMap::new(),
+                }
             })
             .collect();
 
@@ -516,10 +529,20 @@ impl SpringBoneSimulator {
                 // Per-chain mutable transforms so ancestor joints that
                 // update earlier in this step are visible to descendants
                 // (VRMC_springBone: root → tip). Colliders stay on the
-                // caller-provided snapshot (body pose).
-                let mut positions = node_world_positions.clone();
-                let mut rotations = node_world_rotations.clone();
-                let mut parent_rots = node_parent_world_rotations.clone();
+                // caller-provided snapshot (body pose). Reuse scratch
+                // buffers to avoid per-frame allocation.
+                let SpringBoneChainState {
+                    joints,
+                    scratch_positions: positions,
+                    scratch_rotations: rotations,
+                    scratch_parent_rots: parent_rots,
+                } = chain_state;
+                positions.clear();
+                positions.extend(node_world_positions);
+                rotations.clear();
+                rotations.extend(node_world_rotations);
+                parent_rots.clear();
+                parent_rots.extend(node_parent_world_rotations);
 
                 // Center space: tails stay in center space; stiffness /
                 // gravity / collision run in world space (three-vrm /
@@ -533,7 +556,7 @@ impl SpringBoneSimulator {
                         break;
                     }
 
-                    let state = &mut chain_state.joints[joint_idx];
+                    let state = &mut joints[joint_idx];
 
                     let world_pos = positions
                         .get(&joint.node)

@@ -36,7 +36,7 @@ use ene_tool_proto::run_tool_server;
 async fn main() {
     let provider = provider::UtilityToolProvider::new();
     if let Err(e) = run_tool_server(Box::new(provider)).await {
-        eprintln!("[ene-tool-utility] Fatal error: {e}");
+        tracing::error!("[ene-tool-utility] Fatal error: {e}");
         std::process::exit(1);
     }
 }

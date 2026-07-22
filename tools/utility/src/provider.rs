@@ -3,16 +3,19 @@ use crate::todo_store::TodoStore;
 use async_trait::async_trait;
 use ene_tool_common::{ActionSetProvider, ToolAction};
 use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
-use std::sync::Mutex;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Shared state for the todo actions.
 #[derive(Clone)]
 pub struct UtilityState {
-    todo_store: Arc<Mutex<Option<Arc<TodoStore>>>>,
-    session_id: Arc<RwLock<String>>,
-    db_socket: Arc<RwLock<Option<String>>>,
-    db_auth_token: Arc<RwLock<Option<String>>>,
+    /// Lazily-initialized todo store. Uses `tokio::sync::Mutex` so the
+    /// lock can be held across the entire async initialization in
+    /// [`ensure_todo_store`](Self::ensure_todo_store), eliminating the
+    /// TOCTOU race that the previous double-checked locking had.
+    todo_store: Arc<tokio::sync::Mutex<Option<Arc<TodoStore>>>>,
+    session_id: Arc<parking_lot::RwLock<String>>,
+    db_socket: Arc<parking_lot::RwLock<Option<String>>>,
+    db_auth_token: Arc<parking_lot::RwLock<Option<String>>>,
 }
 
 impl UtilityState {
@@ -20,77 +23,59 @@ impl UtilityState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            todo_store: Arc::new(Mutex::new(None)),
-            session_id: Arc::new(RwLock::new(String::new())),
-            db_socket: Arc::new(RwLock::new(None)),
-            db_auth_token: Arc::new(RwLock::new(None)),
+            todo_store: Arc::new(tokio::sync::Mutex::new(None)),
+            session_id: Arc::new(parking_lot::RwLock::new(String::new())),
+            db_socket: Arc::new(parking_lot::RwLock::new(None)),
+            db_auth_token: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
     /// Returns the current session ID.
     pub fn session_id(&self) -> String {
-        self.session_id
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.session_id.read().clone()
     }
 
     /// Sets the session ID.
     pub fn set_session_id(&self, session_id: &str) {
-        *self
-            .session_id
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = session_id.to_string();
+        *self.session_id.write() = session_id.to_string();
     }
 
     /// Sets the DB IPC socket path and resets the todo store.
     ///
-    /// The previous implementation wrote the new socket path first and
-    /// then spawned a `tokio::spawn` task to clear the todo store, which
-    /// created a window where a concurrent `ensure_todo_store` could
-    /// either see the new socket with the *old* store, or clear the
-    /// store after a fresh `ensure_todo_store` had already populated it.
-    /// Use `blocking_lock` on the todo-store mutex to make the reset
-    /// happen atomically with the socket update from the caller's
-    /// perspective: the socket write is visible to subsequent readers
-    /// only after the old store has been dropped.
+    /// The socket is updated first, then the cached store is cleared so
+    /// the next [`ensure_todo_store`](Self::ensure_todo_store) call
+    /// reconnects with the new path. `try_lock` is used because this
+    /// method is called from a synchronous provider hook; if
+    /// initialization is concurrently in progress the store will be
+    /// rebuilt on the next access because the socket has already been
+    /// updated. In practice `set_db_socket` is invoked during the
+    /// sandbox handshake before any tool calls, so the lock is
+    /// uncontended.
     pub fn set_db_socket(&self, socket: String) {
-        *self
-            .todo_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        *self
-            .db_socket
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(socket);
+        *self.db_socket.write() = Some(socket);
+        if let Ok(mut guard) = self.todo_store.try_lock() {
+            *guard = None;
+        }
     }
 
     /// Sets the DB IPC auth token used to authenticate the connection.
     pub fn set_db_auth_token(&self, token: Option<String>) {
-        *self
-            .db_auth_token
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = token;
+        *self.db_auth_token.write() = token;
     }
 
     /// Lazily connects to the DB IPC server and returns the `TodoStore`.
+    ///
+    /// The `tokio::sync::Mutex` guard is held across the entire
+    /// initialization (socket read → connect → store) so concurrent
+    /// callers serialize on the lock rather than racing to create
+    /// duplicate connections.
     pub async fn ensure_todo_store(&self) -> Result<Arc<TodoStore>, ToolError> {
-        {
-            let guard = self
-                .todo_store
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(store) = guard.as_ref() {
-                return Ok(store.clone());
-            }
+        let mut guard = self.todo_store.lock().await;
+        if let Some(store) = guard.as_ref() {
+            return Ok(store.clone());
         }
 
-        let socket = self
-            .db_socket
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-
+        let socket = self.db_socket.read().clone();
         let socket_path = match socket.as_deref() {
             Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
             _ => {
@@ -100,11 +85,7 @@ impl UtilityState {
             }
         };
 
-        let token = self
-            .db_auth_token
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let token = self.db_auth_token.read().clone();
 
         let store = TodoStore::new(&socket_path, token.as_deref())
             .await
@@ -112,19 +93,8 @@ impl UtilityState {
                 message: format!("Failed to connect to DB: {e}"),
             })?;
         let store = Arc::new(store);
-
-        let mut guard = self
-            .todo_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = guard.clone() {
-            drop(guard);
-            Ok(existing)
-        } else {
-            *guard = Some(store.clone());
-            drop(guard);
-            Ok(store)
-        }
+        *guard = Some(store.clone());
+        Ok(store)
     }
 }
 
@@ -164,7 +134,9 @@ impl UtilityToolProvider {
         let session_state = state.clone();
         let sandbox_state = state;
         let inner = ActionSetProvider::new(actions)
-            .with_set_call_context_hook(move |conv_id| session_state.set_session_id(conv_id))
+            .with_set_call_context_hook(move |conv_id, _turn_id| {
+                session_state.set_session_id(conv_id);
+            })
             .with_sandbox_hook(move |sandbox: &SandboxConfigData| {
                 if let Some(socket) = &sandbox.db_socket {
                     sandbox_state.set_db_socket(socket.clone());

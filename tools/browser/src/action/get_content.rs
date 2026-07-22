@@ -1,10 +1,6 @@
 use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
-fn default_store() -> Arc<crate::utils::session::BrowserSessionStore> {
-    Arc::new(crate::utils::session::BrowserSessionStore::new())
-}
-
 #[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "browser",
@@ -29,7 +25,7 @@ pub struct GetContentAction {
     trim: Option<bool>,
 
     #[tool(skip)]
-    #[serde(skip, default = "default_store")]
+    #[serde(skip, default = "crate::utils::default_store")]
     store: Arc<crate::utils::session::BrowserSessionStore>,
 }
 
@@ -44,19 +40,28 @@ impl GetContentAction {
     }
 
     async fn run(&self) -> Result<String, ToolError> {
-        let chrome_path = crate::utils::chrome::find_chrome_executable().ok_or_else(|| ToolError::ExecutionFailed {
-            message: "No Chrome/Chromium browser found. Please install Google Chrome or Chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.".to_string(),
-        })?;
-
-        let session = self.store.get_or_create("default", chrome_path).await?;
-        let page = {
-            let session_guard = session.lock().await;
-            session_guard.page.clone()
-        };
-
         let format = self.format.as_deref().unwrap_or("markdown");
         let extract = self.extract.as_deref().unwrap_or("body");
         let trim = self.trim.unwrap_or(true);
+
+        match format {
+            "markdown" | "html" => {}
+            other => {
+                return Err(ToolError::InvalidArguments {
+                    message: format!("Invalid format '{other}'. Valid values: markdown, html"),
+                });
+            }
+        }
+        match extract {
+            "body" | "main" | "full" => {}
+            other => {
+                return Err(ToolError::InvalidArguments {
+                    message: format!("Invalid extract '{other}'. Valid values: body, main, full"),
+                });
+            }
+        }
+
+        let page = self.store.acquire_page().await?;
 
         let html = page
             .content()
@@ -73,5 +78,41 @@ impl GetContentAction {
         Ok(ene_tool_common::truncate::Truncate::simple(
             &extracted, 15000,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn action() -> GetContentAction {
+        GetContentAction::new(crate::utils::default_store())
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_format() {
+        let result = action().execute(r#"{"format":"htm"}"#).await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidArguments { .. })),
+            "unknown format must be rejected, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_extract() {
+        let result = action().execute(r#"{"extract":"sidebar"}"#).await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidArguments { .. })),
+            "unknown extract must be rejected, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_case_variant_format() {
+        let result = action().execute(r#"{"format":"Markdown"}"#).await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidArguments { .. })),
+            "case-variant format must be rejected"
+        );
     }
 }

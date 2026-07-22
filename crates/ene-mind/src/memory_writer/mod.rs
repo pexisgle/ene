@@ -311,7 +311,7 @@ impl MemoryWriter {
         input: &PostTurnInput<'_>,
     ) -> Result<(), CognitionError> {
         store
-            .upsert_affect_state(&input.affect)
+            .upsert_affect_state(input.affect)
             .await
             .map_err(CognitionError::Memory)?;
         tracing::debug!(
@@ -606,7 +606,7 @@ mod tests {
                 assistant_message: Some("hi"),
                 tool_results: &[],
             },
-            affect: affect.clone(),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -624,13 +624,14 @@ mod tests {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let config = MindConfig::default();
 
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "hello",
                 assistant_message: Some("hi"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -661,13 +662,14 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -700,13 +702,14 @@ mod tests {
         config.emotion.classifier_language = "en".into();
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -737,13 +740,14 @@ mod tests {
         config.emotion.classifier_language = "en".into();
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -786,13 +790,14 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "I have a presentation today",
                 assistant_message: Some("Good luck!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -825,13 +830,14 @@ mod tests {
         config.emotion.classifier_language = "en".into();
 
         let provider = FailingProvider;
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -861,13 +867,14 @@ mod tests {
         let mut config = MindConfig::default();
         config.emotion.classifier_language = "en".into();
 
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };
@@ -925,13 +932,14 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Forget about project X",
                 assistant_message: Some("Okay, forgotten."),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
         };

@@ -1,0 +1,5 @@
+error: i18n_keys! could not read /nonexistent/path/to/catalog.ftl: No such file or directory (os error 2)
+ --> tests/trybuild/fail/missing_file.rs:3:33
+  |
+3 |     ene_i18n_macros::i18n_keys!("/nonexistent/path/to/catalog.ftl");
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -126,6 +126,19 @@ impl From<&[u8]> for DbValue {
     }
 }
 
+impl std::fmt::Display for DbValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Null => write!(f, "NULL"),
+            Self::Bool(v) => write!(f, "{v}"),
+            Self::Int(v) => write!(f, "{v}"),
+            Self::Float(v) => write!(f, "{v}"),
+            Self::Text(v) => write!(f, "{v}"),
+            Self::Blob(v) => write!(f, "<blob {} bytes>", v.len()),
+        }
+    }
+}
+
 /// A structured filter expression for database queries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DbFilter {
@@ -268,7 +281,29 @@ impl DbFilter {
         }
     }
 
+    /// Creates an `IN` filter matching `column` against the given values.
+    pub fn in_list(
+        column: impl Into<String>,
+        values: impl IntoIterator<Item = impl Into<DbValue>>,
+    ) -> Self {
+        Self::In {
+            column: column.into(),
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Creates a `LIKE` filter matching `column` against the given pattern.
+    pub fn like(column: impl Into<String>, pattern: impl Into<String>) -> Self {
+        Self::Like {
+            column: column.into(),
+            pattern: pattern.into(),
+        }
+    }
+
     /// Combines two filters with AND, flattening nested ANDs.
+    ///
+    /// `And(vec![])` is semantically equivalent to [`Always`](Self::Always)
+    /// (SQL `TRUE`): zero predicates are trivially satisfied.
     #[must_use]
     pub fn and(self, other: Self) -> Self {
         match (self, other) {
@@ -289,6 +324,9 @@ impl DbFilter {
     }
 
     /// Combines two filters with OR, flattening nested ORs.
+    ///
+    /// `Or(vec![])` is semantically equivalent to SQL `FALSE`: zero
+    /// predicates are never satisfied.
     #[must_use]
     pub fn or(self, other: Self) -> Self {
         match (self, other) {
@@ -341,7 +379,7 @@ impl DbFilter {
 }
 
 /// Sort direction for ORDER BY clauses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DbOrderDirection {
     /// Ascending order.
     Asc,
@@ -377,7 +415,7 @@ impl DbOrderBy {
 }
 
 /// `SQLite` column type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum DbType {
     /// 64-bit signed integer.
     Integer,

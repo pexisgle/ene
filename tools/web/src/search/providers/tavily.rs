@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 use crate::search::error::SearchError;
 use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
@@ -32,26 +31,23 @@ struct TavilyRequest {
 }
 
 /// Tavily Search API provider.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TavilyProvider {
     api_key: String,
+    client: reqwest::Client,
 }
 
 impl TavilyProvider {
-    pub fn new(api_key: &str) -> Result<Self, SearchError> {
+    pub fn new(api_key: &str, client: reqwest::Client) -> Result<Self, SearchError> {
         if api_key.is_empty() {
             return Err(SearchError::ConfigError(
                 "Tavily API key is required".to_string(),
             ));
         }
-        if !api_key.starts_with("tvly-") {
-            return Err(SearchError::ConfigError(
-                "Invalid Tavily API key format. Keys should start with 'tvly-'".to_string(),
-            ));
-        }
 
         Ok(Self {
             api_key: api_key.to_string(),
+            client,
         })
     }
 }
@@ -63,11 +59,6 @@ impl SearchProvider for TavilyProvider {
     }
 
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| SearchError::ConfigError(format!("HTTP client init failed: {e}")))?;
-
         let max_results = options.max_results.unwrap_or(10).min(50);
         let request_body = TavilyRequest {
             api_key: self.api_key.clone(),
@@ -79,7 +70,8 @@ impl SearchProvider for TavilyProvider {
             max_results,
         };
 
-        let response = client
+        let response = self
+            .client
             .post("https://api.tavily.com/search")
             .header("Content-Type", "application/json")
             .json(&request_body)

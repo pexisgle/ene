@@ -11,10 +11,10 @@ publish.workspace = true
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+ctor = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "signal"] }
 ene-config = { workspace = true }
 serde = { workspace = true }
-ctor = { workspace = true }
 schemars = { workspace = true }
 
 [dev-dependencies]

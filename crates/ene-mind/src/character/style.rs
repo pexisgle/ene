@@ -193,7 +193,7 @@ async fn select_from_store(
     character_id: &str,
     intent: StyleIntent,
     max_examples: usize,
-) -> Result<Vec<StyleExample>, ene_store::MemoryError> {
+) -> Result<Vec<StyleExample>, ene_store::EneMemoryError> {
     let items = store
         .list_typed_memories_by_source_prefix(character_id, STYLE_SOURCE_PREFIX, 64)
         .await?;
@@ -231,7 +231,7 @@ const fn default_intent_for_index(index: usize) -> StyleIntent {
 /// Infer style intent from user text using deterministic keyword heuristics.
 pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     let lower = text.to_lowercase();
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "hello",
@@ -247,7 +247,7 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     ) {
         return Some(StyleIntent::Greeting);
     }
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "sorry",
@@ -264,13 +264,13 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     ) {
         return Some(StyleIntent::Comforting);
     }
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &["joke", "funny", "lol", "haha", "冗談", "笑", "面白"],
     ) {
         return Some(StyleIntent::Joking);
     }
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "explain",
@@ -285,7 +285,7 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     ) {
         return Some(StyleIntent::SeriousExplanation);
     }
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "can't",
@@ -300,7 +300,7 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     ) {
         return Some(StyleIntent::Refusal);
     }
-    if contains_any(
+    if crate::contains_any(
         &lower,
         &[
             "tool",
@@ -316,10 +316,6 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
         return Some(StyleIntent::ToolUse);
     }
     None
-}
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| haystack.contains(n))
 }
 
 #[cfg(test)]

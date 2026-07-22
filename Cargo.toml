@@ -67,6 +67,7 @@ rmcp = { version = "2", features = ["client", "transport-child-process", "transp
 syn = { version = "2", features = ["full", "extra-traits"] }
 
 # ── Data Structures ──
+crossbeam-channel = "0.5"
 dashmap = "6"
 indexmap = "2"
 once_cell = "1"

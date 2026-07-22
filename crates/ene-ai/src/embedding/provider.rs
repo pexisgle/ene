@@ -96,18 +96,16 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        let owned: Vec<(String, EmbeddingKind)> =
-            items.iter().map(|(t, k)| (t.to_string(), *k)).collect();
 
-        tokio::task::block_in_place(|| {
-            let start = Instant::now();
-            let mut out = Vec::with_capacity(owned.len());
-            for (text, kind) in &owned {
+        let start = Instant::now();
+        let result = tokio::task::block_in_place(|| {
+            let mut out = Vec::with_capacity(items.len());
+            for &(text, kind) in items {
                 if text.trim().is_empty() {
                     return Err(crate::EmbeddingError::EmptyInput);
                 }
                 let emb = self
-                    .embed_internal(text, *kind)
+                    .embed_internal(text, kind)
                     .map_err(crate::EmbeddingError::from)?;
                 if emb.len() != self.dims {
                     return Err(crate::EmbeddingError::DimensionMismatch(format!(
@@ -118,15 +116,16 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
                 }
                 out.push(emb);
             }
-            let elapsed = start.elapsed();
-            tracing::debug!(
-                "[Embedding] GGUF({}) batch {} items → {:.2}ms",
-                self.model_name,
-                owned.len(),
-                elapsed.as_secs_f64() * 1000.0,
-            );
             Ok(out)
-        })
+        });
+        let elapsed = start.elapsed();
+        tracing::debug!(
+            "[Embedding] GGUF({}) batch {} items → {:.2}ms",
+            self.model_name,
+            items.len(),
+            elapsed.as_secs_f64() * 1000.0,
+        );
+        result
     }
 
     fn dimensions(&self) -> usize {

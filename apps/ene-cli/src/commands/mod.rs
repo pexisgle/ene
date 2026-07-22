@@ -59,7 +59,7 @@ pub trait CliCommand: Send + Sync {
     fn usage(&self) -> &'static str;
 
     /// Execute the command
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError>;
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError>;
 }
 
 /// Static registry containing all CLI command implementations except `/quit`
@@ -91,28 +91,18 @@ pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
     let cmd = parts[0];
     let arg = parts.get(1).copied().unwrap_or("");
 
-    // The user requested a dedicated early exit branch specifically for quit
+    // Signal the REPL to exit; `drain_and_exit` in repl.rs handles the
+    // actual actor shutdown so we avoid a redundant double-shutdown here.
     if cmd == "/quit" || cmd == "/exit" {
-        // Send a clean shutdown command and await the actor's drain
-        // so that pending memory writes, session splits, and tool
-        // processes finish (or are killed) before we return to main.
-        match ctx.handle.shutdown(SHUTDOWN_TIMEOUT).await {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!(
-                    "{}",
-                    crate::style::error(format!(
-                        "Actor did not shut down within {SHUTDOWN_TIMEOUT:?}: {e}"
-                    ))
-                );
-            }
-        }
         return CommandOutcome::Exit(0);
     }
 
     if let Some(command) = COMMANDS.iter().find(|c| c.name() == cmd) {
-        if let Err(err) = command.execute(arg, ctx).await {
-            eprintln!("{}", crate::style::error(err.to_string()));
+        match command.execute(arg, ctx).await {
+            Ok(outcome) => return outcome,
+            Err(err) => {
+                eprintln!("{}", crate::style::error(err.to_string()));
+            }
         }
     } else {
         eprintln!(

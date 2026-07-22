@@ -28,7 +28,14 @@ impl MouseScrollAction {
         let is_horizontal = direction == "left" || direction == "right";
         let scroll_amount = match direction.as_str() {
             "up" | "left" => -amount,
-            _ => amount,
+            "down" | "right" => amount,
+            other => {
+                return Err(ToolError::InvalidArguments {
+                    message: format!(
+                        "Invalid direction '{other}'. Valid values: up, down, left, right"
+                    ),
+                });
+            }
         };
         let axis = if is_horizontal {
             Axis::Horizontal

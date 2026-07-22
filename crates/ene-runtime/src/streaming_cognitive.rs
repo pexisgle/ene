@@ -60,6 +60,10 @@ fn build_turn_context<'a>(
     }
 }
 
+/// Mutates `messages` in-place for a proactive turn: strips trailing empty
+/// user messages, injects the companion directive as a system message, and
+/// appends a synthetic user prompt (with optional screenshot) so the chat
+/// API always ends with a user-role message.
 fn apply_proactive_prompt(
     messages: &mut Vec<LlmMessage>,
     directive: Option<&str>,
@@ -493,6 +497,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         scene_summary: Some(scene_summary),
     };
 
+    // Extract the small fields still needed after composition, then move
+    // `pre_turn` by value into `compose_prompt_packet` to avoid cloning the
+    // recalled/commitment vectors (#review M2).
+    let classifier_expression_hint = pre_turn.classifier_expression_hint.clone();
+    let pre_turn_affect = pre_turn.affect.clone();
+
     tracing::info!(%turn, "Building prompt packet context...");
     let span_pre_c = tracing::info_span!("pre_turn.phase_c");
     let persist_span = tracing::info_span!(parent: &span_pre_c, "persist_affect");
@@ -510,7 +520,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             }
             .instrument(persist_span),
             engine
-                .compose_prompt_packet(compose_ctx, &pre_turn, prefetch)
+                .compose_prompt_packet(compose_ctx, pre_turn, prefetch)
                 .instrument(compose_span),
         )
     }
@@ -705,7 +715,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         ene_mind::parse_performance_marker(token)
                             .and_then(|cue| (cue.kind == PerfKind::Expression).then_some(cue.name))
                     })
-                    .or_else(|| pre_turn.classifier_expression_hint.clone());
+                    .or_else(|| classifier_expression_hint.clone());
                 let (previous_expression, elapsed_since_change) =
                     session.expression_context(&turn_affect);
                 let (decision, updated_affect) = engine.resolve_expression_turn(
@@ -764,7 +774,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     assistant_message: Some(&clean_content),
                     tool_results: &turn_tool_results,
                 },
-                affect: turn_affect.clone(),
+                affect: &turn_affect,
                 character_id: &card_name,
                 user_id: &user_name,
             };
@@ -836,7 +846,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 let classifier_context = ene_mind::engine::build_classifier_context(
                     &history,
                     &clean_content,
-                    &pre_turn.affect,
+                    &pre_turn_affect,
                     mind.context.recent_turns,
                 );
 
@@ -939,25 +949,23 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         }
 
         let tool_calls = finalize_tool_calls(current_tool_calls);
-        let tx_messages = perform_tool_executions(
-            registry.as_ref(),
-            tool_rag.as_deref(),
-            session_id_for_tools.as_str(),
-            tool_calls,
-            &assistant_content,
-            &event_tx,
-            &turn,
+        let exec_ctx = crate::streaming::ToolExecutionContext {
+            registry: registry.as_ref(),
+            tool_rag: tool_rag.as_deref(),
+            session_id: session_id_for_tools.as_str(),
+            event_tx: &event_tx,
+            turn: &turn,
             origin,
-            &pending_permissions,
-            &pending_user_inputs,
-            tool_config.timeout_ms,
-            mind.memory.tool_grounding.max_summary_chars,
-            mem_store.as_ref(),
-            &permission_scopes,
-            &undo_stack,
-            &deferred_tool_tx,
-        )
-        .await;
+            pending_permissions: &pending_permissions,
+            pending_user_inputs: &pending_user_inputs,
+            timeout_ms: tool_config.timeout_ms,
+            max_summary_chars: mind.memory.tool_grounding.max_summary_chars,
+            audit_store: mem_store.as_ref(),
+            permission_scopes: &permission_scopes,
+            undo_stack: &undo_stack,
+            deferred_tool_tx: &deferred_tool_tx,
+        };
+        let tx_messages = perform_tool_executions(&exec_ctx, tool_calls, &assistant_content).await;
 
         match tx_messages {
             Ok(output) => {
