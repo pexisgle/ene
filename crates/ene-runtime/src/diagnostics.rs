@@ -341,6 +341,21 @@ pub enum DiagnosticEvent {
         /// Current permanent failure count for the character (if known).
         permanent_count: Option<u64>,
     },
+    /// A broadcast subscriber lagged and skipped events (#189).
+    ///
+    /// Consumers must not treat the stream as gap-free after this; emit
+    /// implies a [`Self::ResyncNeeded`] on the same channel.
+    Lagged {
+        /// Channel that lagged: `events` or `diagnostics`.
+        channel: String,
+        /// Number of messages skipped by the broadcast ring.
+        skipped: u64,
+    },
+    /// Subscriber should resynchronize from a snapshot (#189).
+    ResyncNeeded {
+        /// Channel that requires resync: `events` or `diagnostics`.
+        channel: String,
+    },
 }
 
 /// Extracts a human-readable message from a caught panic payload.
@@ -355,7 +370,13 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// Event receiver for [`DiagnosticEvent`].
-pub struct DiagnosticEventReceiver(broadcast::Receiver<DiagnosticEvent>);
+///
+/// On lag, emits [`DiagnosticEvent::Lagged`] / [`DiagnosticEvent::ResyncNeeded`]
+/// onto the same channel before returning the lag error (#189).
+pub struct DiagnosticEventReceiver {
+    inner: broadcast::Receiver<DiagnosticEvent>,
+    diag_tx: broadcast::Sender<DiagnosticEvent>,
+}
 
 impl std::fmt::Debug for DiagnosticEventReceiver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -364,14 +385,36 @@ impl std::fmt::Debug for DiagnosticEventReceiver {
 }
 
 impl DiagnosticEventReceiver {
+    fn note_lag(&self, skipped: u64) {
+        let _ = self.diag_tx.send(DiagnosticEvent::Lagged {
+            channel: "diagnostics".to_string(),
+            skipped,
+        });
+        let _ = self.diag_tx.send(DiagnosticEvent::ResyncNeeded {
+            channel: "diagnostics".to_string(),
+        });
+    }
+
     /// Non-blocking poll.
     pub fn try_recv(&mut self) -> Result<DiagnosticEvent, broadcast::error::TryRecvError> {
-        self.0.try_recv()
+        match self.inner.try_recv() {
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::TryRecvError::Lagged(n))
+            }
+            other => other,
+        }
     }
 
     /// Async receive.
     pub async fn recv(&mut self) -> Result<DiagnosticEvent, broadcast::error::RecvError> {
-        self.0.recv().await
+        match self.inner.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::RecvError::Lagged(n))
+            }
+            other => other,
+        }
     }
 }
 
@@ -415,7 +458,10 @@ impl EneDiagnostics {
 
     /// Subscribe to diagnostic events (pipeline phases/metrics).
     pub fn subscribe(&self) -> DiagnosticEventReceiver {
-        DiagnosticEventReceiver(self.diag_tx.subscribe())
+        DiagnosticEventReceiver {
+            inner: self.diag_tx.subscribe(),
+            diag_tx: self.diag_tx.clone(),
+        }
     }
 
     /// Request a snapshot of the current actor state.

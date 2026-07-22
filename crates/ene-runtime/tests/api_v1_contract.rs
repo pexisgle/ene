@@ -319,3 +319,24 @@ async fn diagnostics_call_tool_intercepts_system_search_tool() {
     );
     let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }
+
+#[test]
+fn api_version_constant_is_one() {
+    assert_eq!(ene_runtime::API_VERSION, "1");
+}
+
+#[test]
+fn public_chat_event_mirrors_terminal_done() {
+    let turn = TurnId::new();
+    let event = EneEvent::Terminal {
+        turn: turn.clone(),
+        origin: ene_runtime::TurnOrigin::User,
+        reason: TerminalReason::Done,
+    };
+    let public = ene_runtime::PublicChatEvent::from_ene_event(&event);
+    let value = serde_json::to_value(&public).expect("serializable");
+    assert_eq!(value["type"], "terminal");
+    assert_eq!(value["reason"], "done");
+    assert_eq!(value["origin"], "user");
+    assert_eq!(value["turn"], turn.to_string());
+}

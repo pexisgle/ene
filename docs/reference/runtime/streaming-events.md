@@ -12,13 +12,18 @@ Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns t
 
 | `EneEvent` variant | Notes |
 |---|---|
-| `TextDelta { turn, delta }` | Plain-text chunks; emotion / performance markers are stripped. |
-| `Performance { turn, cues, source }` | Presentation cues from the Output Arbiter (`PerformanceCue` / `CueSource` in `ene-mind`). Replaces former `SpecialToken` + standalone `Expression` chat events. |
+| `TurnStarted { turn, origin }` | After the provider stream opens |
+| `TextDelta { turn, origin, delta }` | Plain-text chunks; emotion / performance markers are stripped. |
+| `Performance { turn, origin, cues, source }` | Presentation cues from the Output Arbiter (`PerformanceCue` / `CueSource` in `ene-mind`). Replaces former `SpecialToken` + standalone `Expression` chat events. |
 | `ToolCallStart` / `ToolCallResult` | Tool execution lifecycle (when the UI needs them). |
+| `ToolBackgroundCompleted` | Deferred background tool finished (may arrive after `Terminal`). |
 | `PermissionRequired` / `UserInputRequired` | Interactive tool gates. |
-| `ContextCompressed { turn, level }` | Thin signal that compression ran; details live on diagnostics. |
-| `Terminal { turn, reason }` | Exactly one per `Run`, after history commit and synchronous `finalize_turn` (affect persist). |
+| `ContextCompressed { turn, origin, level }` | Thin signal that compression ran; details live on diagnostics. |
+| `Terminal { turn, origin, reason }` | Exactly one per `Run`, after history commit and synchronous `finalize_turn` (affect persist). |
 | `StatusChanged { status }` | Actor-level Idle / Running / Error. |
+
+External JSON consumers should prefer `ene_runtime::PublicChatEvent` /
+[`schemas/public-chat-event.v1.json`](../api/schemas/public-chat-event.v1.json).
 
 ### Not on the chat bus
 
@@ -30,6 +35,7 @@ These are **not** chat `EneEvent` variants under API v1:
 | `SessionSplit` | Compression / split via `diagnostics().manual_split()`; optional thin `ContextCompressed` |
 | `PipelinePhase`, `PipelineMetrics`, `TaskProgress` | `handle.diagnostics().subscribe()` |
 | `ToolHealth`, `ProviderHealth`, `ProviderFallback`, `MemoryWrite` | `handle.diagnostics().subscribe()` |
+| `Lagged`, `ResyncNeeded` | Emitted when a broadcast subscriber overflows (#189); resync from snapshot |
 
 `DiagnosticEvent::MemoryWrite` is emitted when deferred post-turn memory extraction fails. Failures are enqueued in `pending_memory_writes` (retry with backoff); `Terminal` is not delayed. Inspect with `/memory pending` / `/memory status`, or force a drain with `/memory retry`.
 

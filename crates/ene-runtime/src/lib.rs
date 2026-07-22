@@ -40,15 +40,17 @@ pub mod error;
 pub mod handle;
 /// System prompt and message assembly helpers.
 ///
-/// Kept `pub` (rather than `pub(crate)`) because `ene-cli` calls the
-/// module-scoped prompt builders (`build_system_prompt`,
-/// `build_expression_phi`) directly for its `/prompt` debug command.
+/// Not part of the stable public API v1 contract (#189). Kept visible for the
+/// CLI `/prompt` debug command and integration tests.
+#[doc(hidden)]
 pub mod message_builder;
 mod proactive;
+/// Stable public API v1 facade: version, JSON event mirrors, redaction (#189).
+pub mod public_api;
 /// Permission types and streaming engine internals.
 ///
-/// Kept `pub` for contributor/integration-test use. Application code should
-/// prefer [`EneHandle`] instead of calling into this module.
+/// Not part of the stable public API v1 contract (#189). Prefer [`EneHandle`].
+#[doc(hidden)]
 pub mod streaming;
 mod streaming_cognitive;
 /// Type-safe identifiers for runtime concepts.
@@ -71,6 +73,13 @@ pub use handle::{
 /// Diagnostics facade and memory query handle.
 pub use diagnostics::{
     DiagnosticEvent, DiagnosticEventReceiver, EneDiagnostics, MemoryQueryHandle,
+};
+
+// ── Public API v1 ──
+/// Public API version constant and JSON chat-event mirrors.
+pub use public_api::{
+    API_VERSION, PublicChatEvent, PublicPerfCue, redact_text, redact_tool_arguments,
+    redact_tool_arguments_json,
 };
 
 // ── Config types ──

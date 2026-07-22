@@ -433,8 +433,13 @@ pub struct ShutdownTimeout(pub std::time::Duration);
 /// Event receiver handle obtained from [`EneHandle::subscribe`].
 ///
 /// Wraps the broadcast receiver and provides a ergonomic interface for
-/// consuming events from the actor.
-pub struct EneEventReceiver(broadcast::Receiver<EneEvent>);
+/// consuming events from the actor. On lag, emits
+/// [`DiagnosticEvent::Lagged`] / [`DiagnosticEvent::ResyncNeeded`] so gaps
+/// are never silent (#189).
+pub struct EneEventReceiver {
+    inner: broadcast::Receiver<EneEvent>,
+    diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
+}
 
 impl std::fmt::Debug for EneEventReceiver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -443,14 +448,40 @@ impl std::fmt::Debug for EneEventReceiver {
 }
 
 impl EneEventReceiver {
+    fn note_lag(&self, skipped: u64) {
+        let _ = self
+            .diag_tx
+            .send(crate::diagnostics::DiagnosticEvent::Lagged {
+                channel: "events".to_string(),
+                skipped,
+            });
+        let _ = self
+            .diag_tx
+            .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
+                channel: "events".to_string(),
+            });
+    }
+
     /// Non-blocking poll of the event stream.
     pub fn try_recv(&mut self) -> Result<EneEvent, broadcast::error::TryRecvError> {
-        self.0.try_recv()
+        match self.inner.try_recv() {
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::TryRecvError::Lagged(n))
+            }
+            other => other,
+        }
     }
 
     /// Async receive, waiting for the next event.
     pub async fn recv(&mut self) -> Result<EneEvent, broadcast::error::RecvError> {
-        self.0.recv().await
+        match self.inner.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::RecvError::Lagged(n))
+            }
+            other => other,
+        }
     }
 }
 
@@ -728,7 +759,10 @@ impl EneHandle {
 
     /// Subscribe to the chat event stream.
     pub fn subscribe(&self) -> EneEventReceiver {
-        EneEventReceiver(self.event_tx.subscribe())
+        EneEventReceiver {
+            inner: self.event_tx.subscribe(),
+            diag_tx: self.diag_tx.clone(),
+        }
     }
 
     /// Concrete diagnostics facade (pipeline detail, memory, tools).
@@ -2898,6 +2932,7 @@ mod tests {
 
         // Test event_tx buffer overflow (capacity is 1024)
         let mut event_rx = handle.subscribe();
+        let mut diag_rx = handle.diagnostics().subscribe();
 
         // Send 1025 events to exceed the buffer capacity of 1024
         for i in 0..1025 {
@@ -2916,6 +2951,32 @@ mod tests {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
             ),
             "Expected RecvError::Lagged for event channel overflow, got {res:?}"
+        );
+
+        let mut saw_lagged = false;
+        let mut saw_resync = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            match ev {
+                crate::diagnostics::DiagnosticEvent::Lagged { channel, .. }
+                    if channel == "events" =>
+                {
+                    saw_lagged = true;
+                }
+                crate::diagnostics::DiagnosticEvent::ResyncNeeded { channel }
+                    if channel == "events" =>
+                {
+                    saw_resync = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_lagged,
+            "expected DiagnosticEvent::Lagged after event lag"
+        );
+        assert!(
+            saw_resync,
+            "expected DiagnosticEvent::ResyncNeeded after event lag"
         );
 
         // Test diag_tx buffer overflow (capacity is 256)

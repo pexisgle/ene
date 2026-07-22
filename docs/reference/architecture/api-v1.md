@@ -106,15 +106,46 @@ handle.diagnostics() -> &EneDiagnostics;
 
 | Variant | Notes |
 |---|---|
-| `TextDelta { turn, delta }` | Markers stripped |
-| `Performance { turn, cues, source }` | Avatar cues for the UI |
-| `ToolCallStart` / `ToolCallResult` | Optional for UI |
+| `TurnStarted { turn, origin }` | Emitted after the provider stream opens |
+| `TextDelta { turn, origin, delta }` | Markers stripped |
+| `Performance { turn, origin, cues, source }` | Avatar cues for the UI |
+| `ToolCallStart` / `ToolCallResult` | Optional for UI; arguments are redacted in `PublicChatEvent` |
+| `ToolBackgroundCompleted` | Async deferred-tool completion (may arrive after `Terminal`) |
 | `PermissionRequired` / `UserInputRequired` | Gates |
-| `ContextCompressed { turn, … }` | Thin signal; details on diagnostics |
-| `Terminal { turn, reason }` | Full turn done |
+| `ContextCompressed { turn, origin, level }` | Thin signal; details on diagnostics |
+| `Terminal { turn, origin, reason }` | Full turn done (exactly one per `run`) |
 | `StatusChanged { status }` | Idle / Running / Error |
 
-Diagnostics-only (not on the chat bus): `PipelinePhase`, `PipelineMetrics`, and detailed arbiter/compression events.
+Most turn-scoped variants carry `origin` (`User` \| `Proactive`).
+
+For external JSON consumers use `ene_runtime::PublicChatEvent` (see
+[`schemas/`](../api/schemas/)) rather than serializing the internal enum.
+
+Diagnostics-only (not on the chat bus): `PipelinePhase`, `PipelineMetrics`,
+`ActorPanic`, `ToolHealth`, `ProviderHealth`, `ProviderFallback`, `MemoryWrite`,
+`Lagged`, `ResyncNeeded`.
+
+## API versioning & compatibility
+
+- **`API_VERSION = "1"`** (`ene_runtime::API_VERSION`) identifies the host/event contract.
+- **Stable surface:** `EneHandle` lifecycle (`open` / `run` / `cancel` / `subscribe` /
+  permission & user-input gates / `shutdown`), chat `EneEvent` semantics,
+  `PublicChatEvent` JSON mirrors, `DiagnosticEvent` status strings, and the
+  schemas under `docs/reference/api/schemas/`.
+- **Not public:** `streaming`, `message_builder`, raw DB handles, and other
+  `#[doc(hidden)]` modules. Apps and integrators must not depend on them.
+- **Additive changes** (new optional fields, new enum variants that clients can
+  ignore) do **not** bump `API_VERSION`.
+- **Breaking changes** (renamed/removed fields, changed Terminal timing, Busy
+  semantics, or required field additions) require a major version bump and an
+  ADR update.
+- **Redaction:** `PublicChatEvent::from_ene_event` masks tool argument secrets
+  and obvious credentials in text; do not log raw `ToolCallStart.arguments` from
+  the internal bus in external clients.
+- **Backpressure:** chat and diagnostics use bounded broadcast channels. On
+  overflow, receivers return `Lagged` **and** the runtime emits
+  `DiagnosticEvent::Lagged` + `ResyncNeeded`. Clients must treat the stream as
+  gapped and resync from `diagnostics().get_snapshot()` (or equivalent).
 
 ## Error & Async Conventions
 
@@ -122,9 +153,12 @@ Diagnostics-only (not on the chat bus): `PipelinePhase`, `PipelineMetrics`, and 
 - Fire-and-forget handle methods (`run`, `cancel`, gates): sync channel sends
 - One public `thiserror` enum per crate; no `anyhow` / bare `String` / `Box<dyn Error>` at library boundaries
 - No `unwrap` / `expect` outside tests
+- Broadcast `Lagged` / `Closed` must not be ignored; see versioning section
 
 ## References
 
 - [Cognitive Runtime ADR](cognitive-runtime.md)
 - [API Index](../api/index.md)
+- [API schemas](../api/schemas/README.md)
 - [Streaming Events](../runtime/streaming-events.md)
+- [`ene-runtime` API reference](../api/ene-runtime.md)

@@ -387,6 +387,7 @@ These are the crate's own types, re-exported at the root from their defining mod
 |---|---|
 | `handle` | `ActorDeadError`, `EneCommand` *(module-local, not re-exported)*, `EneEvent`, `EneEventReceiver`, `EneHandle`, `EneStateSnapshot`, `EneStatus`, `ShutdownTimeout`, `TerminalReason` |
 | `diagnostics` | `DiagnosticEvent`, `DiagnosticEventReceiver`, `EneDiagnostics`, `MemoryQueryHandle` |
+| `public_api` | `API_VERSION`, `PublicChatEvent`, `PublicPerfCue`, redaction helpers |
 | `error` | `EneRuntimeError` |
 | `streaming` | `MultiAnswer` *(re-exported from `ene_tool_proto`, `#[doc(no_inline)]`)*, `PermissionDecision`, `GrantType`, `PermissionScope`, `UserInputResponse` |
 | `undo` | `UndoReport`, `UndoStack`, `UndoEntry` |
@@ -395,7 +396,7 @@ These are the crate's own types, re-exported at the root from their defining mod
 
 `EneCommand` itself is `pub` from the `handle` module but is **not** re-exported at the crate root — consumers reach it only indirectly through `EneHandle`'s command-sending methods.
 
-`streaming` and `message_builder` are the two modules kept `pub` (not `pub(crate)`) for reasons other than "apps need this": `streaming::{StreamContext, run_stream}` is exercised directly by `ene-runtime`'s own integration tests, and `message_builder`'s module-scoped prompt builders (`build_system_prompt`, `build_expression_phi`, …) are called directly by `ene-cli`'s `/prompt` debug command. Application code should still prefer `EneHandle` for normal use — these two modules are not part of the `EneHandle` facade and may change without a deprecation cycle.
+`streaming` and `message_builder` are `#[doc(hidden)]` and **not** part of the stable public API v1 contract (#189). They remain reachable for CLI `/prompt` debug and crate integration tests. Application integrators must prefer `EneHandle` + `PublicChatEvent`.
 
 ---
 

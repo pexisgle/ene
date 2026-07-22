@@ -381,6 +381,7 @@ Mind 設定型は `ene-mind` が所有するため、そこから直接インポ
 |---|---|
 | `handle` | `ActorDeadError`、`EneCommand`（*モジュールローカルで、再エクスポートされない*）、`EneEvent`、`EneEventReceiver`、`EneHandle`、`EneStateSnapshot`、`EneStatus`、`ShutdownTimeout`、`TerminalReason` |
 | `diagnostics` | `DiagnosticEvent`、`DiagnosticEventReceiver`、`EneDiagnostics`、`MemoryQueryHandle` |
+| `public_api` | `API_VERSION`、`PublicChatEvent`、`PublicPerfCue`、redaction ヘルパー |
 | `error` | `EneRuntimeError` |
 | `streaming` | `MultiAnswer`（*`ene_tool_proto` から再エクスポート、`#[doc(no_inline)]`*）、`PermissionDecision`、`GrantType`、`PermissionScope`、`UserInputResponse` |
 | `undo` | `UndoReport`、`UndoStack`、`UndoEntry` |
@@ -389,7 +390,7 @@ Mind 設定型は `ene-mind` が所有するため、そこから直接インポ
 
 `EneCommand` 自体は `handle` モジュールから `pub` ですが、クレートルートでは再エクスポートされません — コンシューマーは `EneHandle` のコマンド送信メソッドを介して間接的にのみこれに到達します。
 
-`streaming` と `message_builder` は、「アプリが必要としているから」以外の理由で `pub`（`pub(crate)` ではなく）に保たれている2つのモジュールです。`streaming::{StreamContext, run_stream}` は `ene-runtime` 自身の統合テストから直接呼び出されており、`message_builder` のモジュールスコープのプロンプトビルダー（`build_system_prompt`、`build_expression_phi` など）は `ene-cli` の `/prompt` デバッグコマンドから直接呼び出されています。通常の用途ではアプリケーションコードは依然として `EneHandle` を優先すべきです — これら2つのモジュールは `EneHandle` ファサードの一部ではなく、非推奨サイクルを経ずに変更される可能性があります。
+`streaming` と `message_builder` は `#[doc(hidden)]` であり、安定パブリック API v1 契約 (#189) の対象外です。CLI の `/prompt` デバッグとクレート統合テスト向けに到達可能のままです。外部インテグレーターは `EneHandle` + `PublicChatEvent` を優先してください。
 
 ---
 

@@ -104,15 +104,37 @@ handle.diagnostics() -> &EneDiagnostics;
 
 | バリアント | 備考 |
 |---|---|
-| `TextDelta { turn, delta }` | marker 除去済み |
-| `Performance { turn, cues, source }` | UI 向けアバターキュー |
-| `ToolCallStart` / `ToolCallResult` | UI 用に任意 |
+| `TurnStarted { turn, origin }` | プロバイダーストリーム開始後 |
+| `TextDelta { turn, origin, delta }` | marker 除去済み |
+| `Performance { turn, origin, cues, source }` | UI 向けアバターキュー |
+| `ToolCallStart` / `ToolCallResult` | UI 用に任意；`PublicChatEvent` では引数をマスク |
+| `ToolBackgroundCompleted` | 遅延ツール完了（`Terminal` 後でも可） |
 | `PermissionRequired` / `UserInputRequired` | ゲート |
-| `ContextCompressed { turn, … }` | 薄い信号；詳細は diagnostics |
-| `Terminal { turn, reason }` | ターン完了 |
+| `ContextCompressed { turn, origin, level }` | 薄い信号；詳細は diagnostics |
+| `Terminal { turn, origin, reason }` | ターン完了（`run` ごとに正確に1回） |
 | `StatusChanged { status }` | Idle / Running / Error |
 
-診断専用（チャットバス外）: `PipelinePhase`、`PipelineMetrics`、arbiter/compression の詳細イベント。
+ターン範囲の多くは `origin`（`User` \| `Proactive`）を持ちます。
+
+外部 JSON は内部 enum ではなく `ene_runtime::PublicChatEvent`（[`schemas/`](../api/schemas/)）を使います。
+
+診断専用（チャットバス外）: `PipelinePhase`、`PipelineMetrics`、`ActorPanic`、
+`ToolHealth`、`ProviderHealth`、`ProviderFallback`、`MemoryWrite`、`Lagged`、
+`ResyncNeeded`。
+
+## API バージョニングと互換性
+
+- **`API_VERSION = "1"`**（`ene_runtime::API_VERSION`）がホスト/イベント契約を識別します。
+- **安定面:** `EneHandle` ライフサイクル、チャット `EneEvent` 意味論、
+  `PublicChatEvent` JSON、`DiagnosticEvent` の status 文字列、
+  `docs/reference/api/schemas/` のスキーマ。
+- **非公開:** `streaming`、`message_builder`、生 DB ハンドル、その他
+  `#[doc(hidden)]` モジュール。
+- **加算的変更**（無視可能な新フィールド/バリアント）は `API_VERSION` を上げません。
+- **破壊的変更**はメジャーバンプと ADR 更新が必要です。
+- **秘匿:** `PublicChatEvent::from_ene_event` はツール引数と明らかな秘密をマスクします。
+- **背圧:** オーバーフロー時は `Lagged` を返し、あわせて
+  `DiagnosticEvent::Lagged` + `ResyncNeeded` を発行します。スナップショットで再同期してください。
 
 ## エラーと非同期の規約
 
@@ -120,9 +142,12 @@ handle.diagnostics() -> &EneDiagnostics;
 - fire-and-forget（`run`、`cancel`、ゲート）: sync channel send
 - クレートごとに公開 `thiserror` 列挙を一つ；ライブラリ境界に `anyhow` / 生 `String` / `Box<dyn Error>` なし
 - テスト以外で `unwrap` / `expect` なし
+- ブロードキャストの `Lagged` / `Closed` を無視しないこと
 
 ## 参照
 
 - [認知ランタイム ADR](cognitive-runtime.md)
 - [API Index](../api/index.md)
+- [API スキーマ](../api/schemas/README.md)
 - [ストリーミングイベント](../runtime/streaming-events.md)
+- [`ene-runtime` APIリファレンス](../api/ene-runtime.md)

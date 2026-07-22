@@ -12,13 +12,18 @@
 
 | `EneEvent` バリアント | 補足 |
 |---|---|
-| `TextDelta { turn, delta }` | プレーンテキスト。感情 / Performance マーカーは除去済み。 |
-| `Performance { turn, cues, source }` | Output Arbiter からの提示 cue（`PerformanceCue` / `CueSource` は `ene-mind`）。旧 `SpecialToken` + 単独 `Expression` を置換。 |
+| `TurnStarted { turn, origin }` | プロバイダーストリーム開始後 |
+| `TextDelta { turn, origin, delta }` | プレーンテキスト。感情 / Performance マーカーは除去済み。 |
+| `Performance { turn, origin, cues, source }` | Output Arbiter からの提示 cue（`PerformanceCue` / `CueSource` は `ene-mind`）。旧 `SpecialToken` + 単独 `Expression` を置換。 |
 | `ToolCallStart` / `ToolCallResult` | ツール実行ライフサイクル（UI が必要な場合）。 |
+| `ToolBackgroundCompleted` | 遅延バックグラウンドツール完了（`Terminal` 後でも可）。 |
 | `PermissionRequired` / `UserInputRequired` | 対話型ツールのゲート。 |
-| `ContextCompressed { turn, level }` | 圧縮実行の薄い信号。詳細は diagnostics。 |
-| `Terminal { turn, reason }` | `Run` ごとに正確に1回。履歴コミットと同期 `finalize_turn`（感情永続化）の後。 |
+| `ContextCompressed { turn, origin, level }` | 圧縮実行の薄い信号。詳細は diagnostics。 |
+| `Terminal { turn, origin, reason }` | `Run` ごとに正確に1回。履歴コミットと同期 `finalize_turn`（感情永続化）の後。 |
 | `StatusChanged { status }` | Idle / Running / Error。 |
+
+外部 JSON は `ene_runtime::PublicChatEvent` /
+[`schemas/public-chat-event.v1.json`](../api/schemas/public-chat-event.v1.json) を優先。
 
 ### チャットバスにないもの
 
@@ -30,6 +35,7 @@ API v1 では次はチャット `EneEvent` ではありません。
 | `SessionSplit` | `diagnostics().manual_split()`；任意で薄い `ContextCompressed` |
 | `PipelinePhase`、`PipelineMetrics`、`TaskProgress` | `handle.diagnostics().subscribe()` |
 | `ToolHealth`、`ProviderHealth`、`ProviderFallback`、`MemoryWrite` | `handle.diagnostics().subscribe()` |
+| `Lagged`、`ResyncNeeded` | ブロードキャスト購読者がオーバーフローしたとき (#189)；スナップショットで再同期 |
 
 `DiagnosticEvent::MemoryWrite` は遅延ポストターン記憶抽出が失敗したときに発行されます。失敗は `pending_memory_writes` にエンキューされ（バックオフ付き再試行）、`Terminal` は遅延しません。確認は `/memory pending` / `/memory status`、強制ドレインは `/memory retry`。
 
