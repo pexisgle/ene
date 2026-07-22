@@ -32,14 +32,10 @@ impl ClickAction {
 
         page.find_element(&self.selector)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Element not found: {e}"),
-            })?
+            .map_err(|e| ToolError::execution_failed(format!("Element not found: {e}")))?
             .click()
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Click failed: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Click failed: {e}")))?;
 
         Ok(format!("Clicked element: {}", self.selector))
     }

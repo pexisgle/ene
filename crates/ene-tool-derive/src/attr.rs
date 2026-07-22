@@ -196,6 +196,10 @@ pub struct ToolSpecAttrs {
     /// `examples = "desc1|input1|output1; desc2|input2"`.
     #[darling(default)]
     pub examples: SemiList,
+
+    /// When `true`, the tool can run in background mode (non-blocking).
+    #[darling(default)]
+    pub background_capable: bool,
 }
 
 impl ToolSpecAttrs {
@@ -226,12 +230,12 @@ impl ToolSpecAttrs {
     }
 
     pub fn category_path(&self) -> TokenStream2 {
-        path_token(&self.category, "ene_tool_proto::ToolCategory")
+        path_token(&self.category, "ene_tool_proto::ToolCategory", "Utility")
     }
 
     pub fn side_effects_path(&self) -> TokenStream2 {
         if let Some(s) = &self.side_effects {
-            path_token(s, "ene_tool_proto::SideEffects")
+            path_token(s, "ene_tool_proto::SideEffects", "ReadOnly")
         } else {
             quote! { ::ene_tool_proto::SideEffects::ReadOnly }
         }
@@ -344,7 +348,7 @@ fn title_case(s: &str) -> String {
         .join(" ")
 }
 
-fn path_token(name: &str, default_module: &str) -> TokenStream2 {
+fn path_token(name: &str, default_module: &str, default_variant: &str) -> TokenStream2 {
     if name.contains("::")
         && let Ok(path) = syn::parse_str::<Path>(name)
     {
@@ -359,7 +363,7 @@ fn path_token(name: &str, default_module: &str) -> TokenStream2 {
         Err(err) => return err.to_compile_error(),
     };
     let mut parts = name.split_whitespace();
-    let head = parts.next().unwrap_or("ReadOnly");
+    let head = parts.next().unwrap_or(default_variant);
     if let Ok(ident) = syn::parse_str::<syn::Ident>(head) {
         // Validate bare identifiers against known variants for
         // ToolCategory and SideEffects to catch typos early.
@@ -402,13 +406,13 @@ fn path_token(name: &str, default_module: &str) -> TokenStream2 {
         }
         if name.contains('{') {
             let combined = format!("{default_module} :: {name}");
-            let stream: TokenStream2 = combined
-                .parse()
-                .unwrap_or_else(|_| quote! { #mod_path::ReadOnly });
+            let fallback = quote! { #mod_path::#default_variant };
+            let stream: TokenStream2 = combined.parse().unwrap_or(fallback);
             return stream;
         }
         return quote! { #mod_path::#ident };
     }
-    let stream: TokenStream2 = syn::parse_str(name).unwrap_or_else(|_| quote! { ReadOnly });
+    let fallback_ident = syn::Ident::new(default_variant, proc_macro2::Span::call_site());
+    let stream: TokenStream2 = syn::parse_str(name).unwrap_or_else(|_| quote! { #fallback_ident });
     stream
 }

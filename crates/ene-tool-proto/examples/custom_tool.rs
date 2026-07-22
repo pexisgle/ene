@@ -165,9 +165,7 @@ impl ToolProvider for CalculatorProvider {
                         message: e.to_string(),
                     })?;
                 if args.b == 0.0 {
-                    return Err(ToolError::ExecutionFailed {
-                        message: "Division by zero".into(),
-                    });
+                    return Err(ToolError::execution_failed("Division by zero"));
                 }
                 Ok(format!("{} / {} = {}", args.a, args.b, args.a / args.b))
             }

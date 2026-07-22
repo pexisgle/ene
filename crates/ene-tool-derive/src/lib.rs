@@ -289,6 +289,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
     let description = struct_attrs.description_value();
     let category = struct_attrs.category_path();
     let side_effects = struct_attrs.side_effects_path();
+    let background_capable = struct_attrs.background_capable;
     let keywords_primary = struct_attrs.keywords_list("primary");
     let keywords_secondary = struct_attrs.keywords_list("secondary");
     let keywords_domain = struct_attrs.keywords_list("domain");
@@ -353,7 +354,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                     name: ToolName::new(#tool_name_str),
                     description,
                     parameters: schema,
-                    background_capable: false,
+                    background_capable: #background_capable,
                 }
             }
 

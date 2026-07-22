@@ -38,40 +38,35 @@ pub async fn read(
             }
         }
         if suggestions.is_empty() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!("File not found: {}", resolved.display()),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "File not found: {}",
+                resolved.display()
+            )));
         }
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "File not found: {}\n\nDid you mean one of these?\n{}",
-                resolved.display(),
-                suggestions.join("\n")
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "File not found: {}\n\nDid you mean one of these?\n{}",
+            resolved.display(),
+            suggestions.join("\n")
+        )));
     }
 
-    let metadata =
-        tokio::fs::metadata(&resolved)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Cannot stat {}: {}", resolved.display(), e),
-            })?;
+    let metadata = tokio::fs::metadata(&resolved).await.map_err(|e| {
+        ToolError::execution_failed(format!("Cannot stat {}: {}", resolved.display(), e))
+    })?;
 
     if metadata.is_dir() {
         return read_directory(&resolved, offset, limit).await;
     }
 
-    let sample = tokio::fs::read(&resolved)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Cannot read {}: {}", resolved.display(), e),
-        })?;
+    let sample = tokio::fs::read(&resolved).await.map_err(|e| {
+        ToolError::execution_failed(format!("Cannot read {}: {}", resolved.display(), e))
+    })?;
 
     if is_binary_file(&resolved, &sample) {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("Cannot read binary file: {}", resolved.display()),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "Cannot read binary file: {}",
+            resolved.display()
+        )));
     }
 
     let text = String::from_utf8_lossy(&sample);
@@ -112,13 +107,11 @@ pub async fn read(
     let lines: Vec<&str> = text.lines().collect();
     let start = offset.unwrap_or(1).saturating_sub(1);
     if start > lines.len() && !(lines.is_empty() && start == 0) {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Offset {} is out of range for this file ({} lines)",
-                start + 1,
-                lines.len()
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "Offset {} is out of range for this file ({} lines)",
+            start + 1,
+            lines.len()
+        )));
     }
 
     let default_limit = DEFAULT_LINE_LIMIT;
@@ -168,11 +161,9 @@ async fn read_directory(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> Result<String, ToolError> {
-    let mut entries = tokio::fs::read_dir(path)
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Cannot read directory {}: {}", path.display(), e),
-        })?;
+    let mut entries = tokio::fs::read_dir(path).await.map_err(|e| {
+        ToolError::execution_failed(format!("Cannot read directory {}: {}", path.display(), e))
+    })?;
 
     let mut items = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {

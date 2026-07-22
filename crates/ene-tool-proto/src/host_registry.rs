@@ -12,6 +12,10 @@ use std::collections::HashMap;
 pub struct HostRegistry {
     providers: Vec<Box<dyn ToolProvider>>,
     tool_index: HashMap<String, usize>,
+    /// Cached specs from all registered providers, populated at
+    /// `try_add_provider` time so `list_specs()` never re-queries
+    /// the underlying providers.
+    cached_specs: Vec<ToolSpec>,
 }
 
 impl HostRegistry {
@@ -27,8 +31,9 @@ impl HostRegistry {
     /// name already registered by a previous provider (#135).
     pub fn try_add_provider(&mut self, provider: Box<dyn ToolProvider>) -> Result<(), ToolError> {
         let idx = self.providers.len();
+        let specs = provider.list_specs();
         let mut pending = Vec::new();
-        for spec in provider.list_specs() {
+        for spec in &specs {
             // `spec.name` was built by the provider via
             // `ToolName::new` (compile-time-validated string
             // literal from the `#[tool]` macro), so the inner
@@ -44,17 +49,14 @@ impl HostRegistry {
         for name in pending {
             self.tool_index.insert(name, idx);
         }
+        self.cached_specs.extend(specs);
         self.providers.push(provider);
         Ok(())
     }
 
     /// Returns all tool specs from all registered providers.
     pub fn list_specs(&self) -> Vec<ToolSpec> {
-        let mut specs = Vec::with_capacity(self.tool_index.len());
-        for provider in &self.providers {
-            specs.extend(provider.list_specs());
-        }
-        specs
+        self.cached_specs.clone()
     }
 
     /// Returns all RAG profiles from all registered providers.
@@ -117,15 +119,11 @@ impl ToolProvider for HostRegistry {
     }
 
     fn set_call_context(&self, ctx: &CallContext) {
-        for provider in &self.providers {
-            provider.set_call_context(ctx);
-        }
+        HostRegistry::set_call_context(self, ctx);
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        for provider in &self.providers {
-            provider.set_sandbox(sandbox);
-        }
+        HostRegistry::set_sandbox(self, sandbox);
     }
 }
 

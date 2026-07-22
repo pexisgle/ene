@@ -1,3 +1,6 @@
+//! IPC client used by tool binaries to perform typed CRUD operations against
+//! the core DB server over a length-prefixed JSON Unix socket connection.
+
 use crate::messages::{DbErrorCode, DbRequest, DbResponse};
 use crate::types::{DbFilter, DbOrderBy, DbSchema, DbValue, Row};
 use ene_tool_proto::transport::IpcStream;
@@ -81,9 +84,10 @@ pub struct DbClient {
 impl DbClient {
     /// Connects to the DB IPC server at the given socket path without
     /// authenticating. The server will close the connection on the
-    /// first non-Handshake request. Prefer [`connect_with_token`]
-    /// when an auth token is available.
-    pub async fn connect(socket_path: &Path) -> Result<Self, DbError> {
+    /// first non-Handshake request, so this is only useful as the
+    /// first step of [`connect_with_token`](Self::connect_with_token),
+    /// which immediately presents the auth token.
+    pub(crate) async fn connect(socket_path: &Path) -> Result<Self, DbError> {
         let stream = IpcStream::connect(socket_path).await?;
         Ok(Self {
             stream,

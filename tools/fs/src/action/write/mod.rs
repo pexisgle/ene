@@ -7,11 +7,9 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
     let resolved = sandbox.config().resolve_and_check(path, true)?;
 
     if let Some(parent) = resolved.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| ToolError::SandboxViolation {
-                message: format!("Cannot create parent directory: {e}"),
-            })?;
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            ToolError::sandbox_violation(format!("Cannot create parent directory: {e}"))
+        })?;
     }
 
     let original = if resolved.exists() {
@@ -36,20 +34,16 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
     // a content that's already at the limit used to push the write 3
     // bytes over the configured max_write_bytes.
     if output.len() > sandbox.config().max_write_bytes {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "File too large: {} bytes exceeds maximum of {} bytes",
-                output.len(),
-                sandbox.config().max_write_bytes
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "File too large: {} bytes exceeds maximum of {} bytes",
+            output.len(),
+            sandbox.config().max_write_bytes
+        )));
     }
 
     tokio::fs::write(&resolved, output)
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to write file: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Failed to write file: {e}")))?;
 
     sandbox.track_overwrite(&resolved, original).await;
 

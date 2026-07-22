@@ -11,14 +11,13 @@ pub async fn grep_search(
     sandbox: &SandboxConfig,
 ) -> Result<String, ToolError> {
     if pattern.is_empty() {
-        return Err(ToolError::ExecutionFailed {
-            message: "pattern is required".to_string(),
-        });
+        return Err(ToolError::execution_failed(
+            "pattern is required".to_string(),
+        ));
     }
 
-    let re = regex::Regex::new(pattern).map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Invalid regex pattern: {e}"),
-    })?;
+    let re = regex::Regex::new(pattern)
+        .map_err(|e| ToolError::execution_failed(format!("Invalid regex pattern: {e}")))?;
 
     let base = if let Some(p) = path {
         sandbox.resolve_and_check(Path::new(p), false)?

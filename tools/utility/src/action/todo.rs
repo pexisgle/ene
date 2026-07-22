@@ -4,9 +4,8 @@ use ene_tool_common::prelude::*;
 use std::sync::Arc;
 
 fn ok_json<T: serde::Serialize>(value: &T) -> Result<String, ToolError> {
-    serde_json::to_string_pretty(value).map_err(|e| ToolError::Internal {
-        message: format!("json serialization failed: {e}"),
-    })
+    serde_json::to_string_pretty(value)
+        .map_err(|e| ToolError::internal(format!("json serialization failed: {e}")))
 }
 
 /// Maps a [`TodoStoreError`] to the appropriate [`ToolError`] variant.
@@ -26,10 +25,9 @@ fn store_err(e: &TodoStoreError) -> ToolError {
             message: e.to_string(),
         },
         TodoStoreError::Db(_)
+        | TodoStoreError::MissingAuthToken
         | TodoStoreError::RowNotFound(_)
-        | TodoStoreError::CorruptRow { .. } => ToolError::Internal {
-            message: e.to_string(),
-        },
+        | TodoStoreError::CorruptRow { .. } => ToolError::internal(e.to_string()),
     }
 }
 

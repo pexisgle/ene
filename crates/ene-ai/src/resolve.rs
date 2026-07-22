@@ -84,9 +84,9 @@ pub enum ResolvedEmbedding {
 }
 
 impl ResolvedEmbedding {
-    /// Cloud embedding fields (panics in debug if local).
+    /// Cloud embedding fields, or `None` if this is a local embedding.
     #[must_use]
-    pub fn cloud_fields(&self) -> (&str, &str, &str, usize, Option<&str>) {
+    pub fn cloud_fields(&self) -> Option<(&str, &str, &str, usize, Option<&str>)> {
         match self {
             Self::Cloud {
                 base_url,
@@ -94,33 +94,27 @@ impl ResolvedEmbedding {
                 model,
                 dimensions,
                 query_prefix,
-            } => (
+            } => Some((
                 base_url.as_str(),
                 api_key.as_str(),
                 model.as_str(),
                 *dimensions,
                 query_prefix.as_deref(),
-            ),
-            Self::Local(_) => {
-                debug_assert!(false, "ResolvedEmbedding::cloud_fields on Local variant");
-                ("", "", "", 0, None)
-            }
+            )),
+            Self::Local(_) => None,
         }
     }
 
-    /// Local embedding fields (panics in debug if cloud).
+    /// Local embedding fields, or `None` if this is a cloud embedding.
     #[must_use]
-    pub fn local_fields(&self) -> (&str, &str, &str) {
+    pub fn local_fields(&self) -> Option<(&str, &str, &str)> {
         match self {
-            Self::Local(local) => (
+            Self::Local(local) => Some((
                 local.name.as_str(),
                 local.quantization.as_str(),
                 local.url.as_str(),
-            ),
-            Self::Cloud { .. } => {
-                debug_assert!(false, "ResolvedEmbedding::local_fields on Cloud variant");
-                ("", "", "")
-            }
+            )),
+            Self::Cloud { .. } => None,
         }
     }
 

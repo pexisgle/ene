@@ -347,7 +347,7 @@ Rather than building variants by hand, prefer the associated functions below, wh
 | `is_not_null` | `fn is_not_null(column: impl Into<String>) -> Self` | `column IS NOT NULL`. |
 | `and` | `fn and(self, other: DbFilter) -> Self` | Combines two filters with AND. Flattens nested `And`s on either side instead of nesting (`a.and(b).and(c)` produces one `And(vec![a, b, c])`, not `And(vec![And(vec![a, b]), c])`). |
 | `or` | `fn or(self, other: DbFilter) -> Self` | Combines two filters with OR. Flattens nested `Or`s the same way `and` does. |
-| `columns_referenced` | `fn columns_referenced(&self) -> Vec<&str>` | Recursively collects every column name referenced anywhere in the filter tree. Useful for validating a filter against a known column set before sending it. |
+| `columns_referenced` | `fn columns_referenced(&self) -> BTreeSet<&str>` | Recursively collects every column name referenced anywhere in the filter tree, deduplicated and sorted. Useful for validating a filter against a known column set before sending it. |
 
 `In { column, values }` and `Like { column, pattern }` have no dedicated
 constructor function; construct them as struct-variant literals directly.

@@ -83,15 +83,13 @@ async fn show_config(ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
     println!("Memory Enabled: {}", mem_config.enabled);
     match provider_config.resolve_embedding() {
         Ok(embed) => {
-            let (local_model, _, _) = embed.local_fields();
-            if local_model.is_empty() {
-                let (_, _, cloud_model, dimensions, _) = embed.cloud_fields();
+            if let Some((local_model, _, _)) = embed.local_fields() {
+                println!("Embedding Backend: local");
+                println!("Local Embedding Model: {local_model}");
+            } else if let Some((_, _, cloud_model, dimensions, _)) = embed.cloud_fields() {
                 println!("Embedding Backend: cloud");
                 println!("Cloud Embedding Model: {cloud_model}");
                 println!("Cloud Embedding Dims: {dimensions}");
-            } else {
-                println!("Embedding Backend: local");
-                println!("Local Embedding Model: {local_model}");
             }
         }
         Err(_) => println!("Embedding Backend: unknown"),

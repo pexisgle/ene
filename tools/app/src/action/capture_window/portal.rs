@@ -6,11 +6,9 @@ pub(super) async fn capture_window_portal(scale_percent: u32) -> Result<DynamicI
         CursorMode, Screencast, SelectSourcesOptions, SourceType, StartCastOptions,
     };
 
-    let proxy = Screencast::new()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to create Screencast proxy: {e}"),
-        })?;
+    let proxy = Screencast::new().await.map_err(|e| {
+        ToolError::execution_failed(format!("Failed to create Screencast proxy: {e}"))
+    })?;
 
     // `CreateSessionOptions` is private; can't name it, so use Default::default()
     #[expect(
@@ -20,8 +18,8 @@ pub(super) async fn capture_window_portal(scale_percent: u32) -> Result<DynamicI
     let session = proxy
         .create_session(Default::default())
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to create screencast session: {e}"),
+        .map_err(|e| {
+            ToolError::execution_failed(format!("Failed to create screencast session: {e}"))
         })?;
 
     let source_opts = SelectSourcesOptions::default()
@@ -32,35 +30,29 @@ pub(super) async fn capture_window_portal(scale_percent: u32) -> Result<DynamicI
     proxy
         .select_sources(&session, source_opts)
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to select sources: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Failed to select sources: {e}")))?;
 
     let response = proxy
         .start(&session, None, StartCastOptions::default())
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to start screencast: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Failed to start screencast: {e}")))?
         .response()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Screencast start response failed: {e}"),
+        .map_err(|e| {
+            ToolError::execution_failed(format!("Screencast start response failed: {e}"))
         })?;
 
     let streams = response.streams();
     if streams.is_empty() {
-        return Err(ToolError::ExecutionFailed {
-            message: "No PipeWire streams returned from screencast".to_string(),
-        });
+        return Err(ToolError::execution_failed(
+            "No PipeWire streams returned from screencast".to_string(),
+        ));
     }
 
     let node_id = streams[0].pipe_wire_node_id();
 
     tokio::task::spawn_blocking(move || capture_pipewire_frame(node_id))
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("PipeWire task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("PipeWire task failed: {e}")))?
         .map(|img| crate::utils::image::resize_image(img, scale_percent))
 }
 
@@ -78,21 +70,17 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
         pw::init();
     });
 
-    let mainloop =
-        pw::main_loop::MainLoopRc::new(None).map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to create PipeWire mainloop: {e}"),
-        })?;
+    let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| {
+        ToolError::execution_failed(format!("Failed to create PipeWire mainloop: {e}"))
+    })?;
 
-    let context =
-        pw::context::ContextRc::new(&mainloop, None).map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to create PipeWire context: {e}"),
-        })?;
+    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| {
+        ToolError::execution_failed(format!("Failed to create PipeWire context: {e}"))
+    })?;
 
-    let core = context
-        .connect_rc(None)
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to connect PipeWire core: {e}"),
-        })?;
+    let core = context.connect_rc(None).map_err(|e| {
+        ToolError::execution_failed(format!("Failed to connect PipeWire core: {e}"))
+    })?;
 
     struct CaptureState {
         pixels: Option<Vec<u8>>,
@@ -123,9 +111,7 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             *pw::keys::MEDIA_ROLE => "Screen",
         },
     )
-    .map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to create PipeWire stream: {e}"),
-    })?;
+    .map_err(|e| ToolError::execution_failed(format!("Failed to create PipeWire stream: {e}")))?;
 
     let state_for_listener = state.clone();
     let _listener = stream
@@ -232,8 +218,8 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             }
         })
         .register()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to register stream listener: {e}"),
+        .map_err(|e| {
+            ToolError::execution_failed(format!("Failed to register stream listener: {e}"))
         })?;
 
     let obj = spa::pod::object!(
@@ -294,15 +280,12 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(obj),
     )
-    .map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to serialize pod: {e}"),
-    })?
+    .map_err(|e| ToolError::execution_failed(format!("Failed to serialize pod: {e}")))?
     .0
     .into_inner();
 
-    let pod = Pod::from_bytes(&values).ok_or_else(|| ToolError::ExecutionFailed {
-        message: "Failed to parse pod from bytes".to_string(),
-    })?;
+    let pod = Pod::from_bytes(&values)
+        .ok_or_else(|| ToolError::execution_failed("Failed to parse pod from bytes".to_string()))?;
     let mut params = [pod];
 
     stream
@@ -312,19 +295,16 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
             &mut params,
         )
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to connect PipeWire stream: {e}"),
+        .map_err(|e| {
+            ToolError::execution_failed(format!("Failed to connect PipeWire stream: {e}"))
         })?;
 
     mainloop.run();
 
     let s = state.borrow();
-    let pixels = s
-        .pixels
-        .as_ref()
-        .ok_or_else(|| ToolError::ExecutionFailed {
-            message: "No frame captured from PipeWire".to_string(),
-        })?;
+    let pixels = s.pixels.as_ref().ok_or_else(|| {
+        ToolError::execution_failed("No frame captured from PipeWire".to_string())
+    })?;
     let width = s.width;
     let height = s.height;
     let is_bgr = s.is_bgr;
@@ -339,16 +319,12 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
             match bpp {
                 4 => DynamicImage::ImageRgba8(
                     image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
-                        ToolError::ExecutionFailed {
-                            message: "Invalid image dimensions".to_string(),
-                        }
+                        ToolError::execution_failed("Invalid image dimensions".to_string())
                     })?,
                 ),
                 _ => DynamicImage::ImageRgba8(
                     image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
-                        ToolError::ExecutionFailed {
-                            message: "Invalid image dimensions".to_string(),
-                        }
+                        ToolError::execution_failed("Invalid image dimensions".to_string())
                     })?,
                 ),
             }
@@ -358,24 +334,18 @@ fn capture_pipewire_frame(node_id: u32) -> Result<DynamicImage, ToolError> {
                 chunk.swap(0, 2);
             }
             DynamicImage::ImageRgb8(image::RgbImage::from_raw(width, height, rgb).ok_or_else(
-                || ToolError::ExecutionFailed {
-                    message: "Invalid image dimensions".to_string(),
-                },
+                || ToolError::execution_failed("Invalid image dimensions".to_string()),
             )?)
         } else if bpp == 4 {
             DynamicImage::ImageRgba8(
                 image::RgbaImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
-                    ToolError::ExecutionFailed {
-                        message: "Invalid image dimensions".to_string(),
-                    }
+                    ToolError::execution_failed("Invalid image dimensions".to_string())
                 })?,
             )
         } else {
             DynamicImage::ImageRgb8(
                 image::RgbImage::from_raw(width, height, pixels.clone()).ok_or_else(|| {
-                    ToolError::ExecutionFailed {
-                        message: "Invalid image dimensions".to_string(),
-                    }
+                    ToolError::execution_failed("Invalid image dimensions".to_string())
                 })?,
             )
         };

@@ -19,20 +19,15 @@ impl ClipboardWriteAction {
     async fn run(&self) -> Result<String, ToolError> {
         let text = self.text.clone();
         tokio::task::spawn_blocking(move || {
-            let mut clipboard =
-                arboard::Clipboard::new().map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Failed to access clipboard: {e}"),
-                })?;
-            clipboard
-                .set_text(&text)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Failed to write clipboard: {e}"),
-                })?;
+            let mut clipboard = arboard::Clipboard::new().map_err(|e| {
+                ToolError::execution_failed(format!("Failed to access clipboard: {e}"))
+            })?;
+            clipboard.set_text(&text).map_err(|e| {
+                ToolError::execution_failed(format!("Failed to write clipboard: {e}"))
+            })?;
             Ok::<_, ToolError>("Clipboard updated.".to_string())
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

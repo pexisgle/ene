@@ -94,6 +94,8 @@ pub mod transport;
 /// Shared types (`ToolCategory`, etc.).
 pub mod types;
 
+/// Error kind discriminator for [`ToolError::Generic`].
+pub use error::ErrorKind;
 /// Tool error type.
 pub use error::ToolError;
 /// Interactive user input prompt (used inside [`ToolError::UserInputRequired`]).

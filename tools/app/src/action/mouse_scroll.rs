@@ -45,20 +45,14 @@ impl MouseScrollAction {
 
         tokio::task::spawn_blocking(move || {
             let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    message: format!("Failed to initialize enigo: {e}"),
-                }
+                ToolError::execution_failed(format!("Failed to initialize enigo: {e}"))
             })?;
             enigo
                 .scroll(scroll_amount, axis)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Scroll failed: {e}"),
-                })?;
+                .map_err(|e| ToolError::execution_failed(format!("Scroll failed: {e}")))?;
             Ok::<_, ToolError>(format!("Scrolled {dir_str} by {amount}"))
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

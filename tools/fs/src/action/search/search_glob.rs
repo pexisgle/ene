@@ -16,9 +16,10 @@ pub fn glob_search(
     };
 
     if !base.is_dir() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("glob path must be a directory: {}", base.display()),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "glob path must be a directory: {}",
+            base.display()
+        )));
     }
 
     let pattern_path = base.join(pattern);
@@ -35,9 +36,9 @@ pub fn glob_search(
             }
         }
         Err(e) => {
-            return Err(ToolError::ExecutionFailed {
-                message: format!("Invalid glob pattern: {e}"),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "Invalid glob pattern: {e}"
+            )));
         }
     }
 

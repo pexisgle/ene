@@ -21,21 +21,19 @@ impl WlCompositor for Gnome {
                 &gvariant_string(js),
             ])
             .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to run gdbus: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to run gdbus: {e}")))?;
 
         if !output.status.success() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!("gdbus failed: {}", String::from_utf8_lossy(&output.stderr)),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "gdbus failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result =
-            parse_gdbus_tuple_string(&stdout).ok_or_else(|| ToolError::ExecutionFailed {
-                message: "Failed to parse gdbus output".to_string(),
-            })?;
+        let result = parse_gdbus_tuple_string(&stdout).ok_or_else(|| {
+            ToolError::execution_failed("Failed to parse gdbus output".to_string())
+        })?;
 
         let mut windows = Vec::new();
         for line in result.lines() {
@@ -66,29 +64,24 @@ impl WlCompositor for Gnome {
                 &gvariant_string(&js),
             ])
             .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to run gdbus: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to run gdbus: {e}")))?;
 
         if !output.status.success() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "gdbus focus failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "gdbus focus failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result =
-            parse_gdbus_tuple_string(&stdout).ok_or_else(|| ToolError::ExecutionFailed {
-                message: "Failed to parse gdbus output".to_string(),
-            })?;
+        let result = parse_gdbus_tuple_string(&stdout).ok_or_else(|| {
+            ToolError::execution_failed("Failed to parse gdbus output".to_string())
+        })?;
 
         if result == "not found" || result.is_empty() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!("Window not found: {title}"),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "Window not found: {title}"
+            )));
         }
 
         Ok(format!("Focused window matching: {title}"))

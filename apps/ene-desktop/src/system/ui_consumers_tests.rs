@@ -229,9 +229,7 @@ fn apply_ai_user_input_allocates_drafts() {
     };
     world.write_message(AiUserInputRequested {
         request_id: RequestId::new("req-2"),
-        prompt: UserInputPrompt {
-            items: vec![item.clone(), item.clone(), item],
-        },
+        prompt: UserInputPrompt::new(vec![item.clone(), item.clone(), item]).unwrap(),
     });
     run_consumers(&mut world);
 

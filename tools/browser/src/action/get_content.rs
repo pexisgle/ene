@@ -66,9 +66,7 @@ impl GetContentAction {
         let html = page
             .content()
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to get content: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to get content: {e}")))?;
 
         let extracted = match format {
             "html" => ene_tool_common::html::extract_html(&html, extract, trim),

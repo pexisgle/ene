@@ -39,9 +39,7 @@ impl ScrollAction {
         let js = format!("window.scrollBy({x}, {y});");
         page.evaluate(js)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Scroll failed: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Scroll failed: {e}")))?;
 
         Ok(format!("Scrolled by ({x}, {y})"))
     }

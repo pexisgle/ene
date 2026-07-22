@@ -45,6 +45,15 @@ pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
 /// Extracts and converts a specific region of HTML to Markdown.
 ///
 /// Applies `extract_html` first, then converts the result to Markdown.
+///
+/// # Performance
+///
+/// This function parses the HTML document twice: once in `extract_html`
+/// (via `scraper`) and again in `htmd::convert`. The double-parse is
+/// unavoidable because `htmd` 0.x only accepts a `&str` input and does
+/// not expose an API that accepts a pre-parsed DOM tree. For typical
+/// page sizes the cost is acceptable, but callers processing very large
+/// documents in a tight loop should be aware of the overhead.
 pub fn extract_markdown(html: &str, extract: &str, trim: bool) -> String {
     let html_input = if trim || extract != "full" {
         extract_html(html, extract, trim)
@@ -104,8 +113,8 @@ fn strip_subtrees(tree: &mut ego_tree::Tree<Node>, root_id: NodeId, skip_tags: &
 
 fn normalize_text(text: &str) -> String {
     static RE_MULTISPACE: OnceLock<regex::Regex> = OnceLock::new();
-    static RE_MULTILINE: OnceLock<regex::Regex> = OnceLock::new();
-    static RE_LEADING_SPACE: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_TRAILING_WS: OnceLock<regex::Regex> = OnceLock::new();
+    static RE_EXCESSIVE_BLANKS: OnceLock<regex::Regex> = OnceLock::new();
 
     let re_multispace = RE_MULTISPACE.get_or_init(|| {
         #[expect(
@@ -114,24 +123,27 @@ fn normalize_text(text: &str) -> String {
         )]
         regex::Regex::new(r"[ \t]+").expect("invalid constant regex")
     });
-    let re_multiline = RE_MULTILINE.get_or_init(|| {
+    // Strip trailing whitespace before newlines without touching leading
+    // indentation on the following line (preserves code-block structure).
+    let re_trailing_ws = RE_TRAILING_WS.get_or_init(|| {
         #[expect(
             clippy::expect_used,
             reason = "constant regex pattern compiled once at first use"
         )]
-        regex::Regex::new(r"\n[ \t]*\n[ \t\n]*").expect("invalid constant regex")
+        regex::Regex::new(r"[ \t]+\n").expect("invalid constant regex")
     });
-    let re_leading_space = RE_LEADING_SPACE.get_or_init(|| {
+    // Collapse 3+ consecutive newlines into a paragraph break.
+    let re_excessive_blanks = RE_EXCESSIVE_BLANKS.get_or_init(|| {
         #[expect(
             clippy::expect_used,
             reason = "constant regex pattern compiled once at first use"
         )]
-        regex::Regex::new(r"[ \t]*\n[ \t]*").expect("invalid constant regex")
+        regex::Regex::new(r"\n{3,}").expect("invalid constant regex")
     });
 
     let step1 = re_multispace.replace_all(text, " ");
-    let step2 = re_multiline.replace_all(&step1, "\n\n");
-    let step3 = re_leading_space.replace_all(&step2, "\n");
+    let step2 = re_trailing_ws.replace_all(&step1, "\n");
+    let step3 = re_excessive_blanks.replace_all(&step2, "\n\n");
 
     step3.trim().to_string()
 }

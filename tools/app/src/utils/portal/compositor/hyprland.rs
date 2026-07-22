@@ -9,22 +9,18 @@ impl WlCompositor for Hyprland {
         let output = std::process::Command::new("hyprctl")
             .args(["clients", "-j"])
             .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to run hyprctl: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to run hyprctl: {e}")))?;
 
         if !output.status.success() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "hyprctl failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "hyprctl failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         let clients: Vec<serde_json::Value> =
-            serde_json::from_slice(&output.stdout).map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to parse hyprctl JSON: {e}"),
+            serde_json::from_slice(&output.stdout).map_err(|e| {
+                ToolError::execution_failed(format!("Failed to parse hyprctl JSON: {e}"))
             })?;
 
         let mut windows = Vec::new();
@@ -42,24 +38,20 @@ impl WlCompositor for Hyprland {
         let output = std::process::Command::new("hyprctl")
             .args(["dispatch", "focuswindow", &format!("title:{title}")])
             .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to run hyprctl: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to run hyprctl: {e}")))?;
 
         if !output.status.success() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "hyprctl focus failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "hyprctl focus failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if stdout.contains("Invalid") || stdout.contains("error") {
-            return Err(ToolError::ExecutionFailed {
-                message: format!("hyprctl focus failed for '{title}': {stdout}"),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "hyprctl focus failed for '{title}': {stdout}"
+            )));
         }
 
         Ok(format!("Focused window matching: {title}"))

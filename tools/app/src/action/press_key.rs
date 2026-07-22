@@ -22,27 +22,21 @@ impl PressKeyAction {
         let key = self.key.clone();
         tokio::task::spawn_blocking(move || {
             let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    message: format!("Failed to initialize enigo: {e}"),
-                }
+                ToolError::execution_failed(format!("Failed to initialize enigo: {e}"))
             })?;
 
             if let Some(enigo_key) = crate::utils::parse_key(&key) {
-                enigo.key(enigo_key, enigo::Direction::Click).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        message: format!("Key press failed: {e}"),
-                    }
-                })?;
+                enigo
+                    .key(enigo_key, enigo::Direction::Click)
+                    .map_err(|e| ToolError::execution_failed(format!("Key press failed: {e}")))?;
                 Ok::<_, ToolError>(format!("Pressed key: {key}"))
             } else {
-                Err(ToolError::ExecutionFailed {
-                    message: format!("Unsupported key: {key}"),
-                })
+                Err(ToolError::execution_failed(format!(
+                    "Unsupported key: {key}"
+                )))
             }
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

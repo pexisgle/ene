@@ -92,17 +92,13 @@ fn capture_kwin_print_output(since_epoch_secs: u64) -> Result<String, ToolError>
             &format!("--since=@{since_epoch_secs}"),
         ])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run journalctl: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Failed to run journalctl: {e}")))?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "journalctl failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "journalctl failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -119,9 +115,8 @@ fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolE
     let script_name = format!("ene-{}", std::process::id());
     let tmp_dir = std::env::temp_dir();
     let script_path = tmp_dir.join(format!("{script_name}.js"));
-    std::fs::write(&script_path, js).map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to write KWin script: {e}"),
-    })?;
+    std::fs::write(&script_path, js)
+        .map_err(|e| ToolError::execution_failed(format!("Failed to write KWin script: {e}")))?;
 
     let path_str = script_path.to_string_lossy().to_string();
     let since_ts = std::time::SystemTime::now()
@@ -136,42 +131,35 @@ fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolE
             &[&path_str, &script_name],
         )
         .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run {label} loadScript: {e}"),
+        .map_err(|e| {
+            ToolError::execution_failed(format!("Failed to run {label} loadScript: {e}"))
         })?;
 
     if !output.status.success() {
         let _ = std::fs::remove_file(&script_path);
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "{label} loadScript failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "{label} loadScript failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let script_id =
-        transport
-            .parse_script_id(&stdout)
-            .ok_or_else(|| ToolError::ExecutionFailed {
-                message: format!("Failed to parse script ID from: {stdout}"),
-            })?;
+    let script_id = transport.parse_script_id(&stdout).ok_or_else(|| {
+        ToolError::execution_failed(format!("Failed to parse script ID from: {stdout}"))
+    })?;
 
     if script_id < 0 {
         let _ = std::fs::remove_file(&script_path);
-        return Err(ToolError::ExecutionFailed {
-            message: "KWin loadScript returned negative ID".to_string(),
-        });
+        return Err(ToolError::execution_failed(
+            "KWin loadScript returned negative ID".to_string(),
+        ));
     }
 
     let script_obj = format!("/Scripting/Script{script_id}");
     let run_output = transport
         .call(&script_obj, "org.kde.kwin.Script.run", &[])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run {label} run: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Failed to run {label} run: {e}")))?;
 
     std::thread::sleep(std::time::Duration::from_millis(300));
 
@@ -196,12 +184,10 @@ fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolE
     let _ = std::fs::remove_file(&script_path);
 
     if !run_output.status.success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "{label} run failed: {}",
-                String::from_utf8_lossy(&run_output.stderr)
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "{label} run failed: {}",
+            String::from_utf8_lossy(&run_output.stderr)
+        )));
     }
 
     capture_kwin_print_output(since_ts)
@@ -214,27 +200,20 @@ fn kwin_eval(transport: DbusTransport, js: &str) -> Result<String, ToolError> {
     let output = transport
         .call("/Scripting", "org.kde.KWin.Scripting.evaluateScript", &[js])
         .output()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to run {label}: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Failed to run {label}: {e}")))?;
 
     if !output.status.success() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "{label} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "{label} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     match transport {
         DbusTransport::Qdbus => Ok(stdout.trim().to_string()),
-        DbusTransport::Gdbus => {
-            parse_gdbus_tuple_string(&stdout).ok_or_else(|| ToolError::ExecutionFailed {
-                message: "Failed to parse gdbus output".to_string(),
-            })
-        }
+        DbusTransport::Gdbus => parse_gdbus_tuple_string(&stdout)
+            .ok_or_else(|| ToolError::execution_failed("Failed to parse gdbus output".to_string())),
     }
 }
 

@@ -11,9 +11,8 @@ use serde::{Deserialize, Serialize};
 /// - Individual tools: `"<name>"` (e.g. `"utility.get_current_time"`)
 ///
 /// Use [`ToolName::try_new`] to validate untrusted input (IPC, MCP,
-/// config, DB rows). The panicking constructors
-/// ([`ToolName::new`], [`From<&str>`], [`From<String>`]) are intended
-/// for compile-time-validated string literals only.
+/// config, DB rows). The panicking constructor [`ToolName::new`] is
+/// intended for compile-time-validated string literals only.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ToolName(pub(crate) String);
@@ -130,18 +129,6 @@ impl ToolName {
 impl std::fmt::Display for ToolName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-impl From<&str> for ToolName {
-    fn from(s: &str) -> Self {
-        Self::new(s)
-    }
-}
-
-impl From<String> for ToolName {
-    fn from(s: String) -> Self {
-        Self::new(s)
     }
 }
 
@@ -856,17 +843,5 @@ mod tests {
     #[should_panic(expected = "Invalid ToolName:")]
     fn tool_name_new_panics_on_invalid() {
         let _ = ToolName::new("has space");
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid ToolName:")]
-    fn tool_name_from_str_panics_on_invalid() {
-        let _ = ToolName::from("bad/name");
-    }
-
-    #[test]
-    #[should_panic(expected = "Invalid ToolName:")]
-    fn tool_name_from_string_panics_on_invalid() {
-        let _ = ToolName::from(String::from("bad/name"));
     }
 }

@@ -78,9 +78,8 @@ impl SandboxConfig {
         require_writable: bool,
     ) -> Result<PathBuf, ToolError> {
         let check_path = if path.exists() {
-            std::fs::canonicalize(path).map_err(|e| ToolError::SandboxViolation {
-                message: format!("Cannot resolve path: {e}"),
-            })?
+            std::fs::canonicalize(path)
+                .map_err(|e| ToolError::sandbox_violation(format!("Cannot resolve path: {e}")))?
         } else {
             let abs = if path.is_absolute() {
                 path.to_path_buf()
@@ -91,15 +90,17 @@ impl SandboxConfig {
             };
             if let Some(parent) = abs.parent() {
                 if parent.exists() {
-                    let canonical_parent =
-                        std::fs::canonicalize(parent).map_err(|e| ToolError::SandboxViolation {
-                            message: format!("Cannot resolve parent directory: {e}"),
-                        })?;
+                    let canonical_parent = std::fs::canonicalize(parent).map_err(|e| {
+                        ToolError::sandbox_violation(format!(
+                            "Cannot resolve parent directory: {e}"
+                        ))
+                    })?;
                     canonical_parent.join(abs.file_name().unwrap_or_default())
                 } else {
-                    return Err(ToolError::SandboxViolation {
-                        message: format!("Parent directory does not exist: {}", parent.display()),
-                    });
+                    return Err(ToolError::sandbox_violation(format!(
+                        "Parent directory does not exist: {}",
+                        parent.display()
+                    )));
                 }
             } else {
                 abs
@@ -154,13 +155,11 @@ impl SandboxConfig {
             }
         }
 
-        Err(ToolError::SandboxViolation {
-            message: format!(
-                "Path not allowed: {}. Allowed dirs: {:?}",
-                check_path.display(),
-                allowed
-            ),
-        })
+        Err(ToolError::sandbox_violation(format!(
+            "Path not allowed: {}. Allowed dirs: {:?}",
+            check_path.display(),
+            allowed
+        )))
     }
 
     /// Checks whether a command matches the blocklist.
@@ -184,13 +183,13 @@ impl SandboxConfig {
 
         let compiled = compiled
             .as_ref()
-            .map_err(|e| ToolError::Internal { message: e.clone() })?;
+            .map_err(|e| ToolError::internal(e.clone()))?;
 
         for (re, pattern) in compiled {
             if re.is_match(command) {
-                return Err(ToolError::SandboxViolation {
-                    message: format!("Command matches blocked pattern: {pattern}"),
-                });
+                return Err(ToolError::sandbox_violation(format!(
+                    "Command matches blocked pattern: {pattern}"
+                )));
             }
         }
         Ok(())
@@ -303,9 +302,7 @@ impl Sandbox {
             .config
             .db_socket
             .as_deref()
-            .ok_or_else(|| ToolError::Internal {
-                message: "DB socket path not configured".to_string(),
-            })?;
+            .ok_or_else(|| ToolError::internal("DB socket path not configured".to_string()))?;
 
         let session_id = self.session_id();
         let mgr = UndoManager::new(
@@ -314,9 +311,7 @@ impl Sandbox {
             self.config.db_auth_token.as_deref(),
         )
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to connect to DB: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Failed to connect to DB: {e}")))?;
 
         let mgr = Arc::new(mgr);
         let mut guard = self
@@ -496,14 +491,15 @@ impl Sandbox {
     /// Undoes the most recent operation
     pub async fn undo_last(&self) -> Result<String, ToolError> {
         let mgr = self.ensure_undo_manager().await?;
-        let entry = mgr.peek().await.map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Undo failed: {e}"),
-        })?;
+        let entry = mgr
+            .peek()
+            .await
+            .map_err(|e| ToolError::execution_failed(format!("Undo failed: {e}")))?;
 
         let Some(entry) = entry else {
-            return Err(ToolError::ExecutionFailed {
-                message: "No operations to undo".to_string(),
-            });
+            return Err(ToolError::execution_failed(
+                "No operations to undo".to_string(),
+            ));
         };
 
         let mut logs: Vec<String> = Vec::new();
@@ -520,9 +516,9 @@ impl Sandbox {
                                 logs.push(format!("Restored: {path}"));
                                 Ok(())
                             }
-                            Err(e) => Err(ToolError::ExecutionFailed {
-                                message: format!("Failed to restore file {path}: {e}"),
-                            }),
+                            Err(e) => Err(ToolError::execution_failed(format!(
+                                "Failed to restore file {path}: {e}"
+                            ))),
                         }
                     } else {
                         match tokio::fs::remove_file(path).await {
@@ -530,9 +526,9 @@ impl Sandbox {
                                 logs.push(format!("Removed (was not tracked): {path}"));
                                 Ok(())
                             }
-                            Err(e) => Err(ToolError::ExecutionFailed {
-                                message: format!("Failed to remove file {path}: {e}"),
-                            }),
+                            Err(e) => Err(ToolError::execution_failed(format!(
+                                "Failed to remove file {path}: {e}"
+                            ))),
                         }
                     };
                     if let Err(e) = result {
@@ -544,9 +540,9 @@ impl Sandbox {
                     match tokio::fs::remove_file(path).await {
                         Ok(()) => logs.push(format!("Deleted: {path}")),
                         Err(e) => {
-                            apply_error = Some(ToolError::ExecutionFailed {
-                                message: format!("Failed to delete created file {path}: {e}"),
-                            });
+                            apply_error = Some(ToolError::execution_failed(format!(
+                                "Failed to delete created file {path}: {e}"
+                            )));
                             break;
                         }
                     }
@@ -558,11 +554,9 @@ impl Sandbox {
             return Err(e);
         }
 
-        mgr.discard(&entry.id)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Undo applied but failed to discard entry: {e}"),
-            })?;
+        mgr.discard(&entry.id).await.map_err(|e| {
+            ToolError::execution_failed(format!("Undo applied but failed to discard entry: {e}"))
+        })?;
 
         Ok(logs.join("\n"))
     }

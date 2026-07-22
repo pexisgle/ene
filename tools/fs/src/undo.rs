@@ -21,6 +21,11 @@ pub enum UndoError {
 
     #[error("value overflow: {0}")]
     Overflow(String),
+
+    /// No DB auth token was supplied. The DB server requires
+    /// authentication and rejects unauthenticated connections.
+    #[error("DB auth token is required: the DB server rejects unauthenticated connections")]
+    MissingAuthToken,
 }
 
 #[derive(Debug, Clone)]
@@ -80,10 +85,8 @@ impl UndoManager {
         session_id: String,
         db_auth_token: Option<&str>,
     ) -> Result<Self, UndoError> {
-        let mut client = match db_auth_token {
-            Some(t) => DbClient::connect_with_token(socket_path, t).await?,
-            None => DbClient::connect(socket_path).await?,
-        };
+        let token = db_auth_token.ok_or(UndoError::MissingAuthToken)?;
+        let mut client = DbClient::connect_with_token(socket_path, token).await?;
         client.declare_schema(fs_db_schema()).await?;
 
         Ok(Self {

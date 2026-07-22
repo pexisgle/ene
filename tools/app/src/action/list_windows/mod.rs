@@ -25,8 +25,8 @@ impl ListWindowsAction {
             return wayland::list_windows_wayland();
         }
 
-        let windows = xcap::Window::all().map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to enumerate windows: {e}"),
+        let windows = xcap::Window::all().map_err(|e| {
+            ToolError::execution_failed(format!("Failed to enumerate windows: {e}"))
         })?;
 
         let mut result = Vec::new();

@@ -8,9 +8,8 @@ fn capture_window_by_title_xcap(
     title: &str,
     scale_percent: u32,
 ) -> Result<DynamicImage, ToolError> {
-    let windows = xcap::Window::all().map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to enumerate windows: {e}"),
-    })?;
+    let windows = xcap::Window::all()
+        .map_err(|e| ToolError::execution_failed(format!("Failed to enumerate windows: {e}")))?;
 
     for window in windows {
         let win_title = window.title().unwrap_or_default();
@@ -25,9 +24,9 @@ fn capture_window_by_title_xcap(
         }
     }
 
-    Err(ToolError::ExecutionFailed {
-        message: format!("Window not found: {title}"),
-    })
+    Err(ToolError::execution_failed(format!(
+        "Window not found: {title}"
+    )))
 }
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]
@@ -65,18 +64,14 @@ impl CaptureWindowAction {
                 let sp = scale_percent;
                 tokio::task::spawn_blocking(move || capture_window_by_title_xcap(&t, sp))
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Task failed: {e}"),
-                    })?
+                    .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
             }
         } else {
             let t = self.window_title.clone();
             let sp = scale_percent;
             tokio::task::spawn_blocking(move || capture_window_by_title_xcap(&t, sp))
                 .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Task failed: {e}"),
-                })?
+                .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
         }?;
 
         let data_uri = crate::utils::encode_image_to_data_uri(&image)?;

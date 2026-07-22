@@ -6,9 +6,7 @@ pub async fn undo(sandbox: &crate::utils::sandbox::Sandbox) -> Result<String, To
     let logs = sandbox
         .undo_last()
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Undo failed: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Undo failed: {e}")))?;
     Ok(format!("Undo successful:\n{logs}"))
 }
 

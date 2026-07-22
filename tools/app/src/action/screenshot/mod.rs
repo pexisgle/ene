@@ -33,9 +33,7 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
         && let Ok(monitors) = xcap::Monitor::all()
     {
         if monitors.is_empty() {
-            return Err(ToolError::ExecutionFailed {
-                message: "No monitors found".to_string(),
-            });
+            return Err(ToolError::execution_failed("No monitors found".to_string()));
         }
         let primary = monitors
             .iter()
@@ -46,9 +44,8 @@ fn capture_screen_xcap(scale_percent: u32) -> Result<DynamicImage, ToolError> {
         }
     }
 
-    let image = target_image.ok_or_else(|| ToolError::ExecutionFailed {
-        message: "Failed to capture screen".to_string(),
-    })?;
+    let image = target_image
+        .ok_or_else(|| ToolError::execution_failed("Failed to capture screen".to_string()))?;
 
     Ok(crate::utils::image::resize_image(image, scale_percent))
 }
@@ -85,17 +82,13 @@ impl ScreenshotAction {
                 let sp = scale_percent;
                 tokio::task::spawn_blocking(move || capture_screen_xcap(sp))
                     .await
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Task failed: {e}"),
-                    })?
+                    .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
             }
         } else {
             let sp = scale_percent;
             tokio::task::spawn_blocking(move || capture_screen_xcap(sp))
                 .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Task failed: {e}"),
-                })?
+                .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
         }?;
 
         let data_uri = crate::utils::encode_image_to_data_uri(&image)?;

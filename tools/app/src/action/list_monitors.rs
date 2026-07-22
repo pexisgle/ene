@@ -14,8 +14,8 @@ pub struct ListMonitorsAction {}
 impl ListMonitorsAction {
     async fn run(&self) -> Result<String, ToolError> {
         tokio::task::spawn_blocking(move || {
-            let monitors = xcap::Monitor::all().map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to enumerate monitors: {e}"),
+            let monitors = xcap::Monitor::all().map_err(|e| {
+                ToolError::execution_failed(format!("Failed to enumerate monitors: {e}"))
             })?;
 
             let mut result = Vec::new();
@@ -45,8 +45,6 @@ impl ListMonitorsAction {
             Ok::<_, ToolError>(serde_json::json!({ "monitors": result }).to_string())
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

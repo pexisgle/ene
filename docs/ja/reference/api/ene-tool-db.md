@@ -347,7 +347,7 @@ pub enum DbFilter {
 | `is_not_null` | `fn is_not_null(column: impl Into<String>) -> Self` | `column IS NOT NULL`。 |
 | `and` | `fn and(self, other: DbFilter) -> Self` | 2つのフィルターを AND で結合する。どちらかの側にネストした `And` があれば（ネストさせるのではなく）フラット化する（`a.and(b).and(c)` は `And(vec![And(vec![a, b]), c])` ではなく、1つの `And(vec![a, b, c])` を生成する）。 |
 | `or` | `fn or(self, other: DbFilter) -> Self` | 2つのフィルターを OR で結合する。`and` と同様にネストした `Or` をフラット化する。 |
-| `columns_referenced` | `fn columns_referenced(&self) -> Vec<&str>` | フィルターツリー内のすべての参照列名を再帰的に収集する。既知の列セットに対してフィルターを送信前に検証するのに便利。 |
+| `columns_referenced` | `fn columns_referenced(&self) -> BTreeSet<&str>` | フィルターツリー内のすべての参照列名を再帰的に収集し、重複を除去してソート済みで返す。既知の列セットに対してフィルターを送信前に検証するのに便利。 |
 
 `In { column, values }` と `Like { column, pattern }` には専用のコンストラクタ関数がありません。構造体バリアントリテラルとして直接構築してください。
 

@@ -53,23 +53,18 @@ impl WlCompositor for Sway {
         let output = std::process::Command::new("swaymsg")
             .args(["-t", "get_tree"])
             .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to run swaymsg: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to run swaymsg: {e}")))?;
 
         if !output.status.success() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "swaymsg failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "swaymsg failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
-        let tree: serde_json::Value =
-            serde_json::from_slice(&output.stdout).map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to parse sway tree JSON: {e}"),
-            })?;
+        let tree: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to parse sway tree JSON: {e}"))
+        })?;
 
         let mut windows = Vec::new();
         sway_find_windows(&tree, &mut windows);
@@ -82,17 +77,13 @@ impl WlCompositor for Sway {
         let output = std::process::Command::new("swaymsg")
             .arg(&criteria)
             .output()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to run swaymsg: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to run swaymsg: {e}")))?;
 
         if !output.status.success() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "swaymsg focus failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "swaymsg focus failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         Ok(format!("Focused window matching: {title}"))

@@ -456,9 +456,9 @@ pub(crate) async fn perform_tool_executions(
                         }
                         _ => {
                             audit_decision = ene_store::AuditDecision::Denied;
-                            result = Err(ToolHostError::Protocol(ToolError::PermissionDenied {
-                                message: "Permission denied by user".to_string(),
-                            }));
+                            result = Err(ToolHostError::Protocol(ToolError::permission_denied(
+                                "Permission denied by user".to_string(),
+                            )));
                             // Decision resolved; no further
                             // pending rounds needed.
                             break;
@@ -1144,13 +1144,14 @@ mod tests {
                     })),
                     1 => Err(ToolHostError::Protocol(ToolError::UserInputRequired {
                         request_id: self.input_id.clone(),
-                        prompt: ene_tool_proto::UserInputPrompt {
-                            items: vec![ene_tool_proto::QuestionItem {
+                        prompt: ene_tool_proto::UserInputPrompt::new(vec![
+                            ene_tool_proto::QuestionItem {
                                 question: "Pick a value".to_string(),
                                 options: Vec::new(),
                                 allow_free_text: true,
-                            }],
-                        },
+                            },
+                        ])
+                        .unwrap(),
                     })),
                     _ => Ok("ok".to_string()),
                 }

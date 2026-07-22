@@ -113,9 +113,8 @@ impl WebSearchAction {
 
         // A single shared client is reused across providers so TLS
         // setup and connection pooling are not repeated per request.
-        let client = search_client().map_err(|e| ToolError::ExecutionFailed {
-            message: format!("HTTP client init failed: {e}"),
-        })?;
+        let client = search_client()
+            .map_err(|e| ToolError::execution_failed(format!("HTTP client init failed: {e}")))?;
 
         let provider: Box<dyn crate::search::SearchProvider> = match backend {
             Backend::Arxiv => Box::new(ArxivProvider::new(client)),
@@ -123,17 +122,13 @@ impl WebSearchAction {
             Backend::Tavily => {
                 let api_key = resolve_api_key(config.as_ref(), backend, "TAVILY_API_KEY")?;
                 Box::new(TavilyProvider::new(&api_key, client).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        message: format!("Tavily provider init failed: {e}"),
-                    }
+                    ToolError::execution_failed(format!("Tavily provider init failed: {e}"))
                 })?)
             }
             Backend::Exa => {
                 let api_key = resolve_api_key(config.as_ref(), backend, "EXA_API_KEY")?;
                 Box::new(ExaProvider::new(&api_key, client).map_err(|e| {
-                    ToolError::ExecutionFailed {
-                        message: format!("Exa provider init failed: {e}"),
-                    }
+                    ToolError::execution_failed(format!("Exa provider init failed: {e}"))
                 })?)
             }
         };
@@ -144,9 +139,7 @@ impl WebSearchAction {
             provider,
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Search failed: {e}"),
-        })?;
+        .map_err(|e| ToolError::execution_failed(format!("Search failed: {e}")))?;
 
         if results.is_empty() {
             return Ok("No results found.".to_string());
@@ -187,7 +180,5 @@ fn resolve_api_key(
             return Ok(configured.to_string());
         }
     }
-    std::env::var(env_var).map_err(|_| ToolError::ExecutionFailed {
-        message: format!("{env_var} not set. Set it in settings.json (tools.web.{}_api_key) or as environment variable {env_var}.", backend.name()),
-    })
+    std::env::var(env_var).map_err(|_| ToolError::execution_failed(format!("{env_var} not set. Set it in settings.json (tools.web.{}_api_key) or as environment variable {env_var}.", backend.name())))
 }

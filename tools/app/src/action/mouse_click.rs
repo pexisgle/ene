@@ -28,9 +28,7 @@ impl MouseClickAction {
         let count = self.count.unwrap_or(1);
         tokio::task::spawn_blocking(move || {
             let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    message: format!("Failed to initialize enigo: {e}"),
-                }
+                ToolError::execution_failed(format!("Failed to initialize enigo: {e}"))
             })?;
             let btn = match button.as_str() {
                 "left" => Button::Left,
@@ -49,15 +47,11 @@ impl MouseClickAction {
             for _ in 0..count {
                 enigo
                     .button(btn, Direction::Click)
-                    .map_err(|e| ToolError::ExecutionFailed {
-                        message: format!("Mouse click failed: {e}"),
-                    })?;
+                    .map_err(|e| ToolError::execution_failed(format!("Mouse click failed: {e}")))?;
             }
             Ok::<_, ToolError>(format!("Mouse {button} click x{count}"))
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

@@ -35,16 +35,12 @@ impl MouseDragAction {
         let button = self.button.clone().unwrap_or_else(|| "left".to_string());
         tokio::task::spawn_blocking(move || {
             let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    message: format!("Failed to initialize enigo: {e}"),
-                }
+                ToolError::execution_failed(format!("Failed to initialize enigo: {e}"))
             })?;
 
             enigo
                 .move_mouse(start_x, start_y, Coordinate::Abs)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Mouse move failed: {e}"),
-                })?;
+                .map_err(|e| ToolError::execution_failed(format!("Mouse move failed: {e}")))?;
 
             let btn = match button.as_str() {
                 "left" => Button::Left,
@@ -60,29 +56,21 @@ impl MouseDragAction {
             };
             enigo
                 .button(btn, Direction::Press)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Mouse press failed: {e}"),
-                })?;
+                .map_err(|e| ToolError::execution_failed(format!("Mouse press failed: {e}")))?;
 
             enigo
                 .move_mouse(end_x, end_y, Coordinate::Abs)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Mouse move failed: {e}"),
-                })?;
+                .map_err(|e| ToolError::execution_failed(format!("Mouse move failed: {e}")))?;
 
             enigo
                 .button(btn, Direction::Release)
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Mouse release failed: {e}"),
-                })?;
+                .map_err(|e| ToolError::execution_failed(format!("Mouse release failed: {e}")))?;
 
             Ok::<_, ToolError>(format!(
                 "Dragged from ({start_x},{start_y}) to ({end_x},{end_y}) with {button} button"
             ))
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

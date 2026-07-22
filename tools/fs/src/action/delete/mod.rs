@@ -7,28 +7,25 @@ pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<S
     let resolved = sandbox.config().resolve_and_check(path, true)?;
 
     if !resolved.exists() {
-        return Err(ToolError::ExecutionFailed {
-            message: format!("Path not found: {}", resolved.display()),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "Path not found: {}",
+            resolved.display()
+        )));
     }
 
     let is_dir = resolved.is_dir();
 
     if is_dir && !recursive {
-        return Err(ToolError::ExecutionFailed {
-            message: format!(
-                "Path is a directory. Use recursive=true to delete directories: {}",
-                resolved.display()
-            ),
-        });
+        return Err(ToolError::execution_failed(format!(
+            "Path is a directory. Use recursive=true to delete directories: {}",
+            resolved.display()
+        )));
     }
 
     if is_dir {
         tokio::fs::remove_dir_all(&resolved)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to delete directory: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to delete directory: {e}")))?;
 
         sandbox.track_deletion(&resolved, None).await;
 
@@ -38,9 +35,7 @@ pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<S
 
         tokio::fs::remove_file(&resolved)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to delete file: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to delete file: {e}")))?;
 
         sandbox.track_deletion(&resolved, original).await;
 

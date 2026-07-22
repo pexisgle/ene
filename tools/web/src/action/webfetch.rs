@@ -31,8 +31,8 @@ async fn assert_safe_host(url: &reqwest::Url) -> Result<(), ToolError> {
         let host_string = host.to_string();
         let addrs = tokio::net::lookup_host(format!("{host_string}:0"))
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("DNS lookup failed for {host}: {e}"),
+            .map_err(|e| {
+                ToolError::execution_failed(format!("DNS lookup failed for {host}: {e}"))
             })?;
         addrs.map(|s| s.ip()).collect()
     };
@@ -236,16 +236,14 @@ impl WebFetchAction {
                 .header("Accept-Language", "en-US,en;q=0.9")
                 .send()
                 .await
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("HTTP request failed: {e}"),
-                })?;
+                .map_err(|e| ToolError::execution_failed(format!("HTTP request failed: {e}")))?;
 
             let status = resp.status();
             if status.is_redirection() {
                 if redirects_remaining == 0 {
-                    return Err(ToolError::ExecutionFailed {
-                        message: format!("Too many redirects (max {MAX_REDIRECTS})"),
-                    });
+                    return Err(ToolError::execution_failed(format!(
+                        "Too many redirects (max {MAX_REDIRECTS})"
+                    )));
                 }
                 redirects_remaining -= 1;
 
@@ -253,24 +251,24 @@ impl WebFetchAction {
                     .headers()
                     .get(reqwest::header::LOCATION)
                     .and_then(|v| v.to_str().ok())
-                    .ok_or_else(|| ToolError::ExecutionFailed {
-                        message: format!(
+                    .ok_or_else(|| {
+                        ToolError::execution_failed(format!(
                             "Redirect ({}) without a valid Location header",
                             status.as_u16()
-                        ),
+                        ))
                     })?;
 
-                let next_url =
-                    current_url
-                        .join(location)
-                        .map_err(|e| ToolError::ExecutionFailed {
-                            message: format!("Invalid redirect target '{location}': {e}"),
-                        })?;
+                let next_url = current_url.join(location).map_err(|e| {
+                    ToolError::execution_failed(format!(
+                        "Invalid redirect target '{location}': {e}"
+                    ))
+                })?;
 
                 if next_url.scheme() != "http" && next_url.scheme() != "https" {
-                    return Err(ToolError::ExecutionFailed {
-                        message: format!("Redirect to unsupported scheme '{}'", next_url.scheme()),
-                    });
+                    return Err(ToolError::execution_failed(format!(
+                        "Redirect to unsupported scheme '{}'",
+                        next_url.scheme()
+                    )));
                 }
 
                 assert_safe_host(&next_url).await?;
@@ -283,13 +281,11 @@ impl WebFetchAction {
 
         let status = response.status();
         if !status.is_success() {
-            return Err(ToolError::ExecutionFailed {
-                message: format!(
-                    "HTTP request returned status: {} {}",
-                    status.as_u16(),
-                    status.canonical_reason().unwrap_or("Unknown")
-                ),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "HTTP request returned status: {} {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown")
+            )));
         }
 
         // Reject known binary content types before attempting
@@ -301,9 +297,9 @@ impl WebFetchAction {
         {
             let mime = content_type.split(';').next().unwrap_or_default().trim();
             if is_binary_content_type(mime) {
-                return Err(ToolError::ExecutionFailed {
-                    message: format!("Cannot display binary content (Content-Type: {mime})"),
-                });
+                return Err(ToolError::execution_failed(format!(
+                    "Cannot display binary content (Content-Type: {mime})"
+                )));
             }
         }
 
@@ -311,22 +307,19 @@ impl WebFetchAction {
         if let Some(len) = content_length
             && len > MAX_RESPONSE_SIZE as u64
         {
-            return Err(ToolError::ExecutionFailed {
-                message: "Response too large (exceeds 5MB limit)".to_string(),
-            });
+            return Err(ToolError::execution_failed(
+                "Response too large (exceeds 5MB limit)".to_string(),
+            ));
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to read response body: {e}"),
-            })?;
+        let bytes = response.bytes().await.map_err(|e| {
+            ToolError::execution_failed(format!("Failed to read response body: {e}"))
+        })?;
 
         if bytes.len() > MAX_RESPONSE_SIZE {
-            return Err(ToolError::ExecutionFailed {
-                message: "Response too large (exceeds 5MB limit)".to_string(),
-            });
+            return Err(ToolError::execution_failed(
+                "Response too large (exceeds 5MB limit)".to_string(),
+            ));
         }
 
         let body = String::from_utf8_lossy(&bytes);

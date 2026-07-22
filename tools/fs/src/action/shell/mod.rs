@@ -36,14 +36,14 @@ pub async fn shell_exec(
     let result = match result {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-            return Err(ToolError::Timeout {
-                message: format!("Command timed out after {timeout_ms} ms"),
-            });
+            return Err(ToolError::timeout(format!(
+                "Command timed out after {timeout_ms} ms"
+            )));
         }
         Err(e) => {
-            return Err(ToolError::ExecutionFailed {
-                message: format!("Failed to execute command: {e}"),
-            });
+            return Err(ToolError::execution_failed(format!(
+                "Failed to execute command: {e}"
+            )));
         }
     };
 

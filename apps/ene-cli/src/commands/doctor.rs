@@ -448,7 +448,7 @@ fn check_embedding(results: &mut Vec<CheckResult>, snapshot: &EneStateSnapshot) 
                     format!("Local embedding configured (model: {})", local.name),
                 ));
             } else {
-                let (_, _, cloud_model, dimensions, _) = embed.cloud_fields();
+                let (_, _, cloud_model, dimensions, _) = embed.cloud_fields().unwrap_or_default();
                 results.push(CheckResult::ok(
                     CheckCategory::Embedding,
                     "backend",

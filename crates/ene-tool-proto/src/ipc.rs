@@ -266,9 +266,9 @@ pub async fn read_ipc_request<R: AsyncReadExt + Unpin>(
         return Ok(None);
     }
     if len > MAX_MESSAGE_SIZE {
-        return Err(ToolError::IpcTransport {
-            message: format!("Request size {len} exceeds maximum {MAX_MESSAGE_SIZE}"),
-        });
+        return Err(ToolError::ipc_transport(format!(
+            "Request size {len} exceeds maximum {MAX_MESSAGE_SIZE}"
+        )));
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(ToolError::from)?;
@@ -313,9 +313,9 @@ pub async fn read_ipc_response<R: AsyncReadExt + Unpin>(
         return Ok(None);
     }
     if len > MAX_MESSAGE_SIZE {
-        return Err(ToolError::IpcTransport {
-            message: format!("Response size {len} exceeds maximum {MAX_MESSAGE_SIZE}"),
-        });
+        return Err(ToolError::ipc_transport(format!(
+            "Response size {len} exceeds maximum {MAX_MESSAGE_SIZE}"
+        )));
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf).await.map_err(ToolError::from)?;

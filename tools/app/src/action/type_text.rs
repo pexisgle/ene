@@ -21,18 +21,14 @@ impl TypeTextAction {
         let text = self.text.clone();
         tokio::task::spawn_blocking(move || {
             let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| {
-                ToolError::ExecutionFailed {
-                    message: format!("Failed to initialize enigo: {e}"),
-                }
+                ToolError::execution_failed(format!("Failed to initialize enigo: {e}"))
             })?;
-            enigo.text(&text).map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Type failed: {e}"),
-            })?;
+            enigo
+                .text(&text)
+                .map_err(|e| ToolError::execution_failed(format!("Type failed: {e}")))?;
             Ok::<_, ToolError>("Text typed successfully.".to_string())
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

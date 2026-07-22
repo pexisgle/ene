@@ -15,9 +15,7 @@ impl GetActiveWindowAction {
     async fn run(&self) -> Result<String, ToolError> {
         tokio::task::spawn_blocking(move || {
             let active_win = active_win_pos_rs::get_active_window().map_err(|()| {
-                ToolError::ExecutionFailed {
-                    message: "Failed to get active window".to_string(),
-                }
+                ToolError::execution_failed("Failed to get active window".to_string())
             })?;
             let result = serde_json::json!({
                 "title": active_win.title,
@@ -30,8 +28,6 @@ impl GetActiveWindowAction {
             Ok::<_, ToolError>(result.to_string())
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

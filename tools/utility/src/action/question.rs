@@ -40,9 +40,7 @@ impl AskQuestionAction {
             });
         }
 
-        let prompt = UserInputPrompt {
-            items: self.questions.clone(),
-        };
+        let prompt = UserInputPrompt::new(self.questions.clone())?;
         let request_id = Uuid::new_v4().to_string();
         Err(ToolError::UserInputRequired { request_id, prompt })
     }
@@ -178,7 +176,7 @@ mod tests {
                 allow_free_text: true,
             },
         ];
-        let p = UserInputPrompt { items: qs };
+        let p = UserInputPrompt::new(qs).unwrap();
         assert_eq!(p.items.len(), 2);
         assert_eq!(p.items[0].question, "Q1");
         assert_eq!(p.items[1].options, vec![] as Vec<String>);

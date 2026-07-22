@@ -148,8 +148,8 @@ impl BrowserSessionStore {
 
         let user_data_dir =
             std::env::temp_dir().join(format!("ene-browser-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&user_data_dir).map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to create user data dir: {e}"),
+        std::fs::create_dir_all(&user_data_dir).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to create user data dir: {e}"))
         })?;
 
         let config = chromiumoxide::browser::BrowserConfig::builder()
@@ -157,15 +157,13 @@ impl BrowserSessionStore {
             .user_data_dir(&user_data_dir)
             .no_sandbox()
             .build()
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to build browser config: {e}"),
+            .map_err(|e| {
+                ToolError::execution_failed(format!("Failed to build browser config: {e}"))
             })?;
 
         let (browser, mut handler) = chromiumoxide::browser::Browser::launch(config)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Failed to launch browser: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Failed to launch browser: {e}")))?;
 
         let handler_task = tokio::spawn(async move {
             while let Some(h) = handler.next().await {
@@ -179,9 +177,7 @@ impl BrowserSessionStore {
             // Clean up the half-launched user-data-dir
             // on the failure path so it does not leak.
             let _ = std::fs::remove_dir_all(&user_data_dir);
-            ToolError::ExecutionFailed {
-                message: format!("Failed to create page: {e}"),
-            }
+            ToolError::execution_failed(format!("Failed to create page: {e}"))
         })?;
 
         let session = BrowserSession {
@@ -207,9 +203,7 @@ impl BrowserSessionStore {
     pub async fn acquire_page(&self) -> Result<chromiumoxide::page::Page, ToolError> {
         let chrome_path =
             crate::utils::chrome::find_chrome_executable().ok_or_else(|| {
-                ToolError::ExecutionFailed {
-                    message: "No Chrome/Chromium browser found. Please install Google Chrome or Chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.".to_string(),
-                }
+                ToolError::execution_failed("No Chrome/Chromium browser found. Please install Google Chrome or Chromium, or set PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH environment variable.".to_string())
             })?;
 
         let session = self.get_or_create("default", chrome_path).await?;

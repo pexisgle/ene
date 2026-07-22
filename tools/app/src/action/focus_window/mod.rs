@@ -30,23 +30,21 @@ impl FocusWindowAction {
             return wayland::focus_window_wayland(title);
         }
 
-        let windows = xcap::Window::all().map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Failed to enumerate windows: {e}"),
+        let windows = xcap::Window::all().map_err(|e| {
+            ToolError::execution_failed(format!("Failed to enumerate windows: {e}"))
         })?;
 
         for window in windows {
             let win_title = window.title().unwrap_or_default();
             let app_name = window.app_name().unwrap_or_default();
             if win_title.contains(title) || app_name.contains(title) {
-                return Err(ToolError::ExecutionFailed {
-                    message: format!(
-                        "Window focus is not supported on X11 (found '{win_title}'). Only Wayland compositors are supported."
-                    ),
-                });
+                return Err(ToolError::execution_failed(format!(
+                    "Window focus is not supported on X11 (found '{win_title}'). Only Wayland compositors are supported."
+                )));
             }
         }
-        Err(ToolError::ExecutionFailed {
-            message: format!("Window not found: {title}"),
-        })
+        Err(ToolError::execution_failed(format!(
+            "Window not found: {title}"
+        )))
     }
 }

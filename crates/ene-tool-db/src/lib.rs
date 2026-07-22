@@ -14,7 +14,10 @@
 //! use std::collections::BTreeMap;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut client = DbClient::connect(std::path::Path::new("/tmp/db.sock")).await?;
+//! let mut client = DbClient::connect_with_token(
+//!     std::path::Path::new("/tmp/db.sock"),
+//!     "pre-shared-token",
+//! ).await?;
 //!
 //! let schema = DbSchema {
 //!     prefix: "my_tool_".to_string(),

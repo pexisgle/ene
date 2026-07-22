@@ -12,6 +12,12 @@ pub enum TodoStoreError {
     #[error("database error: {0}")]
     Db(#[from] DbError),
 
+    /// No DB auth token was supplied. The DB server requires
+    /// authentication and rejects unauthenticated connections, so
+    /// connecting without a token can never succeed.
+    #[error("DB auth token is required: the DB server rejects unauthenticated connections")]
+    MissingAuthToken,
+
     /// The `content` field was empty or whitespace-only.
     #[error("content must not be empty")]
     EmptyContent,
@@ -151,16 +157,15 @@ impl TodoStore {
     /// Connects to the DB socket and declares the schema.
     ///
     /// `db_auth_token` is the pre-shared auth token presented on the
-    /// DB IPC handshake; pass `None` to use the unauthenticated
-    /// connect path (which the server will reject for the DB server).
+    /// DB IPC handshake. It is required: the DB server rejects
+    /// unauthenticated connections, so a `None` token returns
+    /// [`TodoStoreError::MissingAuthToken`].
     pub async fn new(
         socket_path: &Path,
         db_auth_token: Option<&str>,
     ) -> Result<Self, TodoStoreError> {
-        let mut client = match db_auth_token {
-            Some(t) => DbClient::connect_with_token(socket_path, t).await?,
-            None => DbClient::connect(socket_path).await?,
-        };
+        let token = db_auth_token.ok_or(TodoStoreError::MissingAuthToken)?;
+        let mut client = DbClient::connect_with_token(socket_path, token).await?;
         client.declare_schema(utility_db_schema()).await?;
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
@@ -662,7 +667,7 @@ mod tests {
 
     async fn make_store() -> (TodoStore, PathBuf, tokio::task::JoinHandle<()>) {
         let (path, handle) = spawn_mock_db().await;
-        let store = TodoStore::new(&path, None).await.unwrap();
+        let store = TodoStore::new(&path, Some("test-token")).await.unwrap();
         (store, path, handle)
     }
 

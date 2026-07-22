@@ -1,8 +1,51 @@
+//! Data model shared between tool binaries and the core DB server.
+//!
+//! This module defines the wire-level types used to describe and manipulate
+//! tool databases: dynamically-typed values ([`DbValue`]) and rows ([`Row`]),
+//! structured query filters ([`DbFilter`]) and ordering ([`DbOrderBy`]), and
+//! schema declarations ([`DbSchema`], [`DbTable`], [`DbColumn`], [`DbIndex`],
+//! [`DbType`]). All types serialize to JSON for transport over the DB IPC
+//! protocol.
+
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A single database row represented as a map of column names to values.
 pub type Row = BTreeMap<String, DbValue>;
+
+/// Builds a [`Row`] from `"column" => value` pairs.
+///
+/// Column keys accept anything implementing `Into<String>` and values
+/// anything implementing `Into<DbValue>`, so plain literals work via the
+/// [`From`] impls on [`DbValue`].
+///
+/// A `FromIterator` impl is not possible here because [`Row`] is a type alias
+/// for a foreign type (the orphan rule), hence this macro.
+///
+/// # Examples
+///
+/// ```
+/// use ene_tool_db::{row, DbValue};
+///
+/// let row = row! {
+///     "name" => DbValue::Text("Alice".into()),
+///     "age" => DbValue::Int(30),
+/// };
+/// assert_eq!(row.len(), 2);
+/// ```
+#[macro_export]
+macro_rules! row {
+    () => {
+        $crate::Row::new()
+    };
+    ($($column:expr => $value:expr),+ $(,)?) => {{
+        let mut row = $crate::Row::new();
+        $(
+            row.insert($column.into(), $value.into());
+        )+
+        row
+    }};
+}
 
 /// A dynamically-typed database value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,10 +65,7 @@ pub enum DbValue {
 }
 
 impl DbValue {
-    #[expect(
-        missing_docs,
-        reason = "method name and return type are self-documenting"
-    )]
+    /// Returns the contained integer if this value is [`Int`](Self::Int).
     pub const fn as_i64(&self) -> Option<i64> {
         match self {
             Self::Int(v) => Some(*v),
@@ -33,10 +73,7 @@ impl DbValue {
         }
     }
 
-    #[expect(
-        missing_docs,
-        reason = "method name and return type are self-documenting"
-    )]
+    /// Returns the contained text if this value is [`Text`](Self::Text).
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::Text(v) => Some(v),
@@ -44,10 +81,7 @@ impl DbValue {
         }
     }
 
-    #[expect(
-        missing_docs,
-        reason = "method name and return type are self-documenting"
-    )]
+    /// Returns the contained boolean if this value is [`Bool`](Self::Bool).
     pub const fn as_bool(&self) -> Option<bool> {
         match self {
             Self::Bool(v) => Some(*v),
@@ -55,10 +89,7 @@ impl DbValue {
         }
     }
 
-    #[expect(
-        missing_docs,
-        reason = "method name and return type are self-documenting"
-    )]
+    /// Returns the contained float if this value is [`Float`](Self::Float).
     pub const fn as_f64(&self) -> Option<f64> {
         match self {
             Self::Float(v) => Some(*v),
@@ -66,10 +97,7 @@ impl DbValue {
         }
     }
 
-    #[expect(
-        missing_docs,
-        reason = "method name and return type are self-documenting"
-    )]
+    /// Returns the contained bytes if this value is [`Blob`](Self::Blob).
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Self::Blob(v) => Some(v),
@@ -346,14 +374,16 @@ impl DbFilter {
         }
     }
 
-    /// Returns all column names referenced by this filter.
-    pub fn columns_referenced(&self) -> Vec<&str> {
-        let mut cols = Vec::new();
+    /// Returns the set of column names referenced by this filter.
+    ///
+    /// Duplicates are removed and names are returned in sorted order.
+    pub fn columns_referenced(&self) -> BTreeSet<&str> {
+        let mut cols = BTreeSet::new();
         self.collect_columns(&mut cols);
         cols
     }
 
-    fn collect_columns<'a>(&'a self, out: &mut Vec<&'a str>) {
+    fn collect_columns<'a>(&'a self, out: &mut BTreeSet<&'a str>) {
         match self {
             Self::Always => {}
             Self::And(filters) | Self::Or(filters) => {
@@ -372,7 +402,7 @@ impl DbFilter {
             | Self::Like { column, .. }
             | Self::IsNull { column }
             | Self::IsNotNull { column } => {
-                out.push(column);
+                out.insert(column);
             }
         }
     }

@@ -114,10 +114,23 @@ pub enum IpcListener {
 
 impl IpcListener {
     /// Bind to an IPC endpoint.
+    ///
+    /// On Unix, if the initial bind fails with `AddrInUse` (typically a
+    /// stale socket file left by a crashed server), the socket file is
+    /// removed and the bind is retried once. This closes the TOCTOU gap
+    /// between the caller's `cleanup_path` and the actual bind.
     pub fn bind(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            tokio::net::UnixListener::bind(path).map(IpcListener::Unix)
+            match tokio::net::UnixListener::bind(path) {
+                Ok(listener) => Ok(IpcListener::Unix(listener)),
+                Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                    // Stale socket file — remove and retry once.
+                    let _ = std::fs::remove_file(path);
+                    tokio::net::UnixListener::bind(path).map(IpcListener::Unix)
+                }
+                Err(e) => Err(e),
+            }
         }
         #[cfg(windows)]
         {

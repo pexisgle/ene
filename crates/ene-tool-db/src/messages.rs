@@ -1,9 +1,13 @@
+//! Wire protocol messages exchanged between a tool's [`DbClient`](crate::DbClient)
+//! and the core DB IPC server: [`DbRequest`] for tool-to-server calls,
+//! [`DbResponse`] for server replies, and [`DbErrorCode`] for structured errors.
+
 use crate::types::{DbFilter, DbOrderBy, DbSchema, DbValue, Row};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Requests sent from the tool's `DbClient` to the per-tool DB IPC server.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum DbRequest {
     /// Authenticate the connection. The first request of every new
     /// connection must be a `Handshake` carrying the auth token handed
@@ -78,7 +82,7 @@ pub enum DbRequest {
 }
 
 /// Responses sent from the DB IPC server back to the tool's `DbClient`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum DbResponse {
     /// Handshake accepted; the connection is now authenticated.
     HandshakeAck,

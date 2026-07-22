@@ -9,20 +9,17 @@ pub(super) async fn capture_screen_portal(scale_percent: u32) -> Result<DynamicI
         .modal(false)
         .send()
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Portal screenshot request failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Portal screenshot request failed: {e}")))?
         .response()
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Portal screenshot response failed: {e}"),
+        .map_err(|e| {
+            ToolError::execution_failed(format!("Portal screenshot response failed: {e}"))
         })?;
 
     let uri = response.uri();
     let path = uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str());
 
-    let image = image::open(path).map_err(|e| ToolError::ExecutionFailed {
-        message: format!("Failed to open screenshot file: {e}"),
-    })?;
+    let image = image::open(path)
+        .map_err(|e| ToolError::execution_failed(format!("Failed to open screenshot file: {e}")))?;
 
     let _ = std::fs::remove_file(path);
 

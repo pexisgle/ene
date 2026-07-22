@@ -35,14 +35,10 @@ impl TypeAction {
 
         page.find_element(&self.selector)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Element not found: {e}"),
-            })?
+            .map_err(|e| ToolError::execution_failed(format!("Element not found: {e}")))?
             .type_str(&self.text)
             .await
-            .map_err(|e| ToolError::ExecutionFailed {
-                message: format!("Type failed: {e}"),
-            })?;
+            .map_err(|e| ToolError::execution_failed(format!("Type failed: {e}")))?;
 
         Ok(format!("Typed into element: {}", self.selector))
     }

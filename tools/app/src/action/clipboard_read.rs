@@ -14,20 +14,15 @@ pub struct ClipboardReadAction {}
 impl ClipboardReadAction {
     async fn run(&self) -> Result<String, ToolError> {
         tokio::task::spawn_blocking(move || {
-            let mut clipboard =
-                arboard::Clipboard::new().map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Failed to access clipboard: {e}"),
-                })?;
-            let content = clipboard
-                .get_text()
-                .map_err(|e| ToolError::ExecutionFailed {
-                    message: format!("Failed to read clipboard: {e}"),
-                })?;
+            let mut clipboard = arboard::Clipboard::new().map_err(|e| {
+                ToolError::execution_failed(format!("Failed to access clipboard: {e}"))
+            })?;
+            let content = clipboard.get_text().map_err(|e| {
+                ToolError::execution_failed(format!("Failed to read clipboard: {e}"))
+            })?;
             Ok::<_, ToolError>(content)
         })
         .await
-        .map_err(|e| ToolError::ExecutionFailed {
-            message: format!("Task failed: {e}"),
-        })?
+        .map_err(|e| ToolError::execution_failed(format!("Task failed: {e}")))?
     }
 }

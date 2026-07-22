@@ -79,9 +79,9 @@ impl UtilityState {
         let socket_path = match socket.as_deref() {
             Some(p) if !p.trim().is_empty() => std::path::PathBuf::from(p),
             _ => {
-                return Err(ToolError::Internal {
-                    message: "DB socket path not configured for utility tool".to_string(),
-                });
+                return Err(ToolError::internal(
+                    "DB socket path not configured for utility tool".to_string(),
+                ));
             }
         };
 
@@ -89,9 +89,7 @@ impl UtilityState {
 
         let store = TodoStore::new(&socket_path, token.as_deref())
             .await
-            .map_err(|e| ToolError::Internal {
-                message: format!("Failed to connect to DB: {e}"),
-            })?;
+            .map_err(|e| ToolError::internal(format!("Failed to connect to DB: {e}")))?;
         let store = Arc::new(store);
         *guard = Some(store.clone());
         Ok(store)
