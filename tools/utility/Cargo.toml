@@ -3,6 +3,9 @@ name = "ene-tool-utility"
 version.workspace = true
 edition.workspace = true
 description = "Built-in utility tools: user questioning, todo list management, system time/info"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 ene-tool-proto = { workspace = true }

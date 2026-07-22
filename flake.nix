@@ -35,6 +35,7 @@
           with pkgs;
           mkShell {
             buildInputs = [
+              git-cliff
               # sccache — compiler cache to shorten rebuild times
               sccache
               # Stable Rust compiler and standard library sources

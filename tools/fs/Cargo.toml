@@ -3,6 +3,9 @@ name = "ene-tool-fs"
 version.workspace = true
 edition.workspace = true
 description = "Filesystem tools: read, write, edit, glob, grep, patch, shell execution, and undo with sandbox security"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "ene-tool-fs"

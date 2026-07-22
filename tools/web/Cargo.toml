@@ -3,6 +3,9 @@ name = "ene-tool-web"
 version.workspace = true
 edition.workspace = true
 description = "Web tools: URL fetching with HTML-to-Markdown conversion and multi-backend web search"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 ene-tool-proto = { workspace = true }

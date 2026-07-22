@@ -1,8 +1,11 @@
 [package]
 name = "ene-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Interactive CLI REPL for chatting with AI characters, testing tools, and managing memory/sessions"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 ene-ai = { workspace = true }

@@ -3,6 +3,9 @@ name = "ene-tool-rag"
 version.workspace = true
 edition.workspace = true
 description = "Tool RAG pipeline — multi-vector tool embedding, weighted field similarity, HyDE, and LLM rerank"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["lib"]

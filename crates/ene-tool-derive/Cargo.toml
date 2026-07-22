@@ -3,6 +3,9 @@ name = "ene-tool-derive"
 version.workspace = true
 edition.workspace = true
 description = "Proc-macro derive crate for ene-tool-proto's ToolSpec and ActionSpec"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 proc-macro = true

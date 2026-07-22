@@ -3,6 +3,9 @@ name = "ene-tool-proto"
 version.workspace = true
 edition.workspace = true
 description = "IPC protocol definitions, ToolProvider trait, sandbox configuration, and tool server runtime"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 serde_json = { workspace = true }

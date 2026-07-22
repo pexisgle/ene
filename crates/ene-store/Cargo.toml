@@ -3,6 +3,9 @@ name = "ene-store"
 version.workspace = true
 edition.workspace = true
 description = "Persistence-only SQLite-vec store with vector similarity search, key facts, and conversation history"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["lib"]

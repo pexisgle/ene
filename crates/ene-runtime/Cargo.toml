@@ -3,6 +3,9 @@ name = "ene-runtime"
 version.workspace = true
 edition.workspace = true
 description = "Unified runtime facade integrating LLM streaming, tool orchestration, long-term memory, and session management"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["lib"]

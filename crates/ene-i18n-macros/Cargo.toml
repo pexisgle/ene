@@ -3,6 +3,9 @@ name = "ene-i18n-macros"
 version.workspace = true
 edition.workspace = true
 description = "Proc-macro that generates type-safe i18n accessor functions from Fluent .ftl files"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 proc-macro = true

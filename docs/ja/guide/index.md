@@ -11,7 +11,8 @@ ene の実行方法と拡張方法を説明する開発者向けドキュメン�
 3. [設定](configure.md) — よく触る項目
 4. 概念: [ターン](concepts/turns.md) · [セッション](concepts/sessions.md) · [記憶](concepts/memory.md) · [感情](concepts/emotions.md)
 5. アプリ: [CLI](apps/cli.md) · [Desktop](apps/desktop.md)
-6. ツール: [カタログ](tools/overview.md) · [ツールを書く](tools/write-a-tool.md)
+6. [リリース](release.md) — タグ駆動の Linux リリース
+7. ツール: [カタログ](tools/overview.md) · [ツールを書く](tools/write-a-tool.md)
 
 ## ツール
 

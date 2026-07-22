@@ -3,6 +3,9 @@ name = "ene-tool-host"
 version.workspace = true
 edition.workspace = true
 description = "Tool process lifecycle manager — spawns, supervises, and auto-restarts tool binaries with exponential backoff"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["lib"]

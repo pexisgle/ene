@@ -3,6 +3,9 @@ name = "ene-tool-db"
 version.workspace = true
 edition.workspace = true
 description = "Feature-agnostic typed CRUD database API for tool binaries, communicating with the core DB server over IPC"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 serde = { workspace = true }
