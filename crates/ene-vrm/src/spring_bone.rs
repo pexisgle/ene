@@ -439,8 +439,7 @@ impl SpringBoneSimulator {
                         // current_tail: child's world position at rest,
                         // converted to center space when the chain has a
                         // center node (three-vrm / UniVRM).
-                        let current_tail_world =
-                            world_pos + world_rot * (bone_axis * bone_length);
+                        let current_tail_world = world_pos + world_rot * (bone_axis * bone_length);
                         let current_tail = if let Some(center_node) = chain.center {
                             let c_pos = node_world_positions
                                 .get(&center_node)
@@ -525,12 +524,8 @@ impl SpringBoneSimulator {
                 // Center space: tails stay in center space; stiffness /
                 // gravity / collision run in world space (three-vrm /
                 // UniVRM). Alicia has no centers; still handle correctly.
-                let center_pos = chain
-                    .center
-                    .and_then(|c| positions.get(&c).copied());
-                let center_rot = chain
-                    .center
-                    .and_then(|c| rotations.get(&c).copied());
+                let center_pos = chain.center.and_then(|c| positions.get(&c).copied());
+                let center_rot = chain.center.and_then(|c| rotations.get(&c).copied());
 
                 for (joint_idx, joint) in chain.joints.iter().enumerate() {
                     // Skip the last joint (it's only a tail target)
@@ -552,11 +547,15 @@ impl SpringBoneSimulator {
                         .unwrap_or(Quat::IDENTITY);
 
                     // Heal state if NaN is present (world-space rest)
-                    let rest_tail_world =
-                        world_pos + parent_world_rot * state.initial_local_rotation * (state.bone_axis * state.bone_length);
+                    let rest_tail_world = world_pos
+                        + parent_world_rot
+                            * state.initial_local_rotation
+                            * (state.bone_axis * state.bone_length);
                     if !state.current_tail.is_finite() {
                         state.current_tail = match (center_pos, center_rot) {
-                            (Some(c_pos), Some(c_rot)) => c_rot.inverse() * (rest_tail_world - c_pos),
+                            (Some(c_pos), Some(c_rot)) => {
+                                c_rot.inverse() * (rest_tail_world - c_pos)
+                            }
                             _ => rest_tail_world,
                         };
                     }

@@ -167,11 +167,13 @@ async fn process_turn(
     let mut denied_permission = false;
     let mut exit_code = EXIT_OK;
     let mut terminal_message: Option<String> = None;
-    let mut terminal_reason = "done".to_string();
+    let terminal_reason;
 
     loop {
         let Ok(event) = rx.recv().await else {
             exit_code = EXIT_RUNTIME;
+            terminal_reason = "failed".to_string();
+            terminal_message = Some("event channel closed unexpectedly".to_string());
             break;
         };
 

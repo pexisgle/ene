@@ -49,8 +49,6 @@ pub use session::ConversationSession;
 /// Session ID and split/compression result types.
 pub use session_split::{SplitReason, SplitResult, generate_session_id};
 /// Performance-marker parsing utilities.
-pub use special_token::{
-    parse_performance_marker, split_text_and_special_tokens, strip_markers,
-};
+pub use special_token::{parse_performance_marker, split_text_and_special_tokens, strip_markers};
 /// Type-safe identifiers.
 pub use types::{CardName, SessionId};

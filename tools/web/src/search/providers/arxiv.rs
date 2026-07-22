@@ -54,9 +54,8 @@ impl SearchProvider for ArxivProvider {
 
     async fn search(&self, options: &SearchOptions) -> Result<Vec<SearchResult>, SearchError> {
         let client = reqwest::Client::new();
-        let mut url = url::Url::parse("http://export.arxiv.org/api/query").map_err(|e| {
-            SearchError::ConfigError(format!("Invalid ArXiv base URL: {e}"))
-        })?;
+        let mut url = url::Url::parse("http://export.arxiv.org/api/query")
+            .map_err(|e| SearchError::ConfigError(format!("Invalid ArXiv base URL: {e}")))?;
 
         let search_query = format!("all:{}", options.query.trim());
         let max_results = options.max_results.unwrap_or(10).min(50);
@@ -68,11 +67,15 @@ impl SearchProvider for ArxivProvider {
             pairs.append_pair("max_results", &max_results_str);
         }
 
-        let response = client.get(url).send().await.map_err(|e| SearchError::HttpError {
-            message: format!("ArXiv API request failed: {e}"),
-            status_code: None,
-            response_body: None,
-        })?;
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| SearchError::HttpError {
+                message: format!("ArXiv API request failed: {e}"),
+                status_code: None,
+                response_body: None,
+            })?;
 
         let status = response.status();
         let xml_text = response.text().await.map_err(|e| SearchError::HttpError {
@@ -89,20 +92,14 @@ impl SearchProvider for ArxivProvider {
             });
         }
 
-        let feed: ArxivFeed = quick_xml::de::from_str(&xml_text).map_err(|e| {
-            SearchError::ParseError(format!("Failed to parse ArXiv XML: {e}"))
-        })?;
+        let feed: ArxivFeed = quick_xml::de::from_str(&xml_text)
+            .map_err(|e| SearchError::ParseError(format!("Failed to parse ArXiv XML: {e}")))?;
 
         Ok(feed
             .entries
             .into_iter()
             .map(|entry| {
-                let arxiv_id = entry
-                    .id
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&entry.id)
-                    .to_string();
+                let arxiv_id = entry.id.rsplit('/').next().unwrap_or(&entry.id).to_string();
                 let paper_url = entry
                     .links
                     .iter()

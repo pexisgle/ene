@@ -311,10 +311,7 @@ mod tests {
             "A <|perf:expr=happy|> B <|perf:expr=sad|> C",
         );
         assert_eq!(text, vec!["A ", " B ", " C"]);
-        assert_eq!(
-            tokens,
-            vec!["<|perf:expr=happy|>", "<|perf:expr=sad|>"]
-        );
+        assert_eq!(tokens, vec!["<|perf:expr=happy|>", "<|perf:expr=sad|>"]);
         assert!(carry.is_empty());
     }
 
@@ -334,8 +331,7 @@ mod tests {
         assert_eq!(text1, vec!["Hello "]);
         assert_eq!(carry, "<|perf");
 
-        let (text2, tokens2) =
-            split_text_and_special_tokens(&mut carry, ":expr=happy|> world");
+        let (text2, tokens2) = split_text_and_special_tokens(&mut carry, ":expr=happy|> world");
         assert_eq!(text2, vec![" world"]);
         assert_eq!(tokens2, vec!["<|perf:expr=happy|>"]);
         assert!(carry.is_empty());

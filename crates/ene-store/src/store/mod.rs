@@ -1533,15 +1533,18 @@ impl MemoryStore {
         use entities::pending_memory_writes::{
             ActiveModel, Column, Entity, PendingMemoryWriteStatus,
         };
-        use sea_orm::{ActiveModelTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        use sea_orm::{
+            ActiveModelTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
+        };
 
         let now = Utc::now();
+        let txn = self.db.begin().await?;
         let rows = Entity::find()
             .filter(Column::Status.eq(PendingMemoryWriteStatus::Pending.as_str()))
             .filter(Column::NextRetryAt.lte(now))
             .order_by_asc(Column::NextRetryAt)
             .limit(limit as u64)
-            .all(&self.db)
+            .all(&txn)
             .await?;
 
         // Mark them as in-flight by bumping next_retry_at so concurrent drainers
@@ -1554,9 +1557,10 @@ impl MemoryStore {
             let mut active: ActiveModel = row.clone().into();
             active.next_retry_at = sea_orm::Set(lease);
             active.updated_at = sea_orm::Set(now);
-            active.update(&self.db).await?;
+            active.update(&txn).await?;
             out.push(row.into());
         }
+        txn.commit().await?;
         Ok(out)
     }
 
