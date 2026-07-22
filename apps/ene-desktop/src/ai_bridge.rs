@@ -20,6 +20,15 @@ use crate::memory_journal::{MemoryJournalAction, MemoryJournalPresenter};
 use crate::proactive_observe::{ProactiveObserveControl, spawn_proactive_observer};
 use crate::settings::MemoryJournalRecallRow;
 
+/// Payload returned by [`AiBridge::refresh_memory_journal`].
+pub struct MemoryJournalPayload {
+    pub memories: Vec<ene_store::MemoryItem>,
+    pub affect: ene_store::AffectState,
+    pub commitments: Vec<ene_store::Commitment>,
+    pub pending_writes: usize,
+    pub permanent_writes: usize,
+}
+
 /// Owns the actor handle. The runtime can also send user input
 /// back through [`AiBridge::run`] and [`AiBridge::cancel`].
 pub struct AiBridge {
@@ -309,14 +318,7 @@ impl AiBridge {
         include_user_deleted: bool,
         include_archived: bool,
         include_superseded: bool,
-    ) -> Result<
-        (
-            Vec<ene_store::MemoryItem>,
-            ene_store::AffectState,
-            Vec<ene_store::Commitment>,
-        ),
-        String,
-    > {
+    ) -> Result<MemoryJournalPayload, String> {
         let snapshot = self.get_snapshot_blocking()?;
         let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.clone();
@@ -344,7 +346,19 @@ impl AiBridge {
                 .list_active_commitments(character_id, Some(&user_id), limit)
                 .await
                 .map_err(|e| e.to_string())?;
-            Ok((memories, affect, commitments))
+            let (pending_writes, permanent_writes) = memory
+                .store()
+                .ok_or_else(|| "Memory store is not available".to_string())?
+                .count_pending_memory_writes(character_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(MemoryJournalPayload {
+                memories,
+                affect,
+                commitments,
+                pending_writes,
+                permanent_writes,
+            })
         })
     }
 

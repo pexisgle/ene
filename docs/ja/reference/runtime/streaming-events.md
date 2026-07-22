@@ -29,6 +29,9 @@ API v1 では次はチャット `EneEvent` ではありません。
 | `SpecialToken`、単独 `Expression` | `Performance` に畳み込み（またはテキストから除去） |
 | `SessionSplit` | `diagnostics().manual_split()`；任意で薄い `ContextCompressed` |
 | `PipelinePhase`、`PipelineMetrics`、`TaskProgress` | `handle.diagnostics().subscribe()` |
+| `ToolHealth`、`ProviderHealth`、`ProviderFallback`、`MemoryWrite` | `handle.diagnostics().subscribe()` |
+
+`DiagnosticEvent::MemoryWrite` は遅延ポストターン記憶抽出が失敗したときに発行されます。失敗は `pending_memory_writes` にエンキューされ（バックオフ付き再試行）、`Terminal` は遅延しません。確認は `/memory pending` / `/memory status`、強制ドレインは `/memory retry`。
 
 ## Diagnostics
 

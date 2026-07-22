@@ -35,10 +35,21 @@ pub struct MemoryStore {
 - `conversation_logs` — 生のターン記録
 - `typed_memories` / `memory_embeddings` / `memory_links` / `memory_spans` — 認知型付きメモリ
 - `affect_states` / `pending_affect_proposals` — 感情レジャー
+- `pending_memory_writes` — 遅延ポストターン記憶書き込みの再試行キュー (#240)
 - `commitments` — コンパニオンコミットメントレジャー
 - `tool_embedding_index` / `__tool_schemas` — Tool RAG + ツール DB IPC メタデータ
 
 列レベルの詳細は [型付きメモリと Memory Arbiter](#typed-memory--memory-arbiter-cognitive-runtime) およびコミットメント節を参照。
+
+### 遅延メモリ書き込みの再試行 (#240)
+
+ポストターンの LLM 抽出と忘却は `Terminal` の後に実行されます。失敗時ランタイムは:
+
+1. `OwnedPostTurnInput` JSON を `pending_memory_writes` にエンキュー
+2. `DiagnosticEvent::MemoryWrite` を発行（チャット `EneEvent` ではない）
+3. 次回の遅延メモリタスク（および起動時ドレイン）で指数バックオフ再試行
+
+CLI: `/memory status` で pending/permanent 件数、`/memory pending` で一覧、`/memory retry` で即時ドレイン。
 
 ### 会話ログ
 

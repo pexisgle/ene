@@ -7,7 +7,7 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(Migration)]
+        vec![Box::new(Migration), Box::new(PendingMemoryWritesMigration)]
     }
 }
 
@@ -1060,4 +1060,120 @@ enum Sessions {
     UpdatedAt,
     Archived,
     TurnCount,
+}
+
+/// Adds the deferred memory-write retry queue (#240).
+pub struct PendingMemoryWritesMigration;
+
+impl MigrationName for PendingMemoryWritesMigration {
+    fn name(&self) -> &'static str {
+        "m20260722_000001_pending_memory_writes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for PendingMemoryWritesMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(PendingMemoryWrites::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::CharacterId)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::PayloadJson)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::Attempts)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::MaxAttempts)
+                            .integer()
+                            .not_null()
+                            .default(5),
+                    )
+                    .col(ColumnDef::new(PendingMemoryWrites::LastError).string())
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::Status)
+                            .string()
+                            .not_null()
+                            .default("pending"),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::NextRetryAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_pending_memory_writes_retry")
+                    .table(PendingMemoryWrites::Table)
+                    .col(PendingMemoryWrites::Status)
+                    .col(PendingMemoryWrites::NextRetryAt)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(PendingMemoryWrites::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Iden)]
+enum PendingMemoryWrites {
+    #[iden = "pending_memory_writes"]
+    Table,
+    Id,
+    CharacterId,
+    UserId,
+    PayloadJson,
+    Attempts,
+    MaxAttempts,
+    LastError,
+    Status,
+    CreatedAt,
+    NextRetryAt,
+    UpdatedAt,
 }

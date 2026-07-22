@@ -1420,6 +1420,197 @@ impl MemoryStore {
         Ok(proposal)
     }
 
+    // ── Pending memory writes (#240) ────────────────────────────────────────
+
+    /// Default maximum retry attempts for a deferred memory write.
+    pub const PENDING_MEMORY_WRITE_MAX_ATTEMPTS: i32 = 5;
+
+    /// Enqueue a failed deferred memory write for later retry (#240).
+    pub async fn enqueue_pending_memory_write(
+        &self,
+        character_id: &str,
+        user_id: &str,
+        payload_json: impl Into<String>,
+        last_error: impl Into<String>,
+    ) -> Result<i64, MemoryError> {
+        use entities::pending_memory_writes::{ActiveModel, PendingMemoryWriteStatus};
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let now = Utc::now();
+        let backoff = chrono::Duration::seconds(30);
+        let next_retry = now.checked_add_signed(backoff).unwrap_or(now);
+        let active = ActiveModel {
+            id: sea_orm::NotSet,
+            character_id: Set(character_id.to_string()),
+            user_id: Set(user_id.to_string()),
+            payload_json: Set(payload_json.into()),
+            attempts: Set(1),
+            max_attempts: Set(Self::PENDING_MEMORY_WRITE_MAX_ATTEMPTS),
+            last_error: Set(Some(last_error.into())),
+            status: Set(PendingMemoryWriteStatus::Pending.as_str().to_string()),
+            created_at: Set(now),
+            next_retry_at: Set(next_retry),
+            updated_at: Set(now),
+        };
+        let res = active.insert(&self.db).await?;
+        Ok(res.id)
+    }
+
+    /// List pending / permanent memory-write rows for a character (#240).
+    pub async fn list_pending_memory_writes(
+        &self,
+        character_id: &str,
+        limit: usize,
+    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, MemoryError> {
+        use entities::pending_memory_writes::{Column, Entity};
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let rows = Entity::find()
+            .filter(Column::CharacterId.eq(character_id))
+            .order_by_desc(Column::UpdatedAt)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    /// Count pending (retryable) and permanent failed memory writes (#240).
+    pub async fn count_pending_memory_writes(
+        &self,
+        character_id: &str,
+    ) -> Result<(usize, usize), MemoryError> {
+        use entities::pending_memory_writes::{Column, Entity, PendingMemoryWriteStatus};
+        use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+        let pending = Entity::find()
+            .filter(Column::CharacterId.eq(character_id))
+            .filter(Column::Status.eq(PendingMemoryWriteStatus::Pending.as_str()))
+            .count(&self.db)
+            .await? as usize;
+        let permanent = Entity::find()
+            .filter(Column::CharacterId.eq(character_id))
+            .filter(Column::Status.eq(PendingMemoryWriteStatus::Permanent.as_str()))
+            .count(&self.db)
+            .await? as usize;
+        Ok((pending, permanent))
+    }
+
+    /// Force pending rows for a character to be due immediately (#240).
+    ///
+    /// Used by `/memory retry` so the operator can drain the queue without
+    /// waiting for exponential backoff.
+    pub async fn schedule_pending_memory_writes_now(
+        &self,
+        character_id: &str,
+    ) -> Result<usize, MemoryError> {
+        use entities::pending_memory_writes::{
+            ActiveModel, Column, Entity, PendingMemoryWriteStatus,
+        };
+        use sea_orm::{ActiveModelTrait, EntityTrait, QueryFilter};
+
+        let now = Utc::now();
+        let rows = Entity::find()
+            .filter(Column::CharacterId.eq(character_id))
+            .filter(Column::Status.eq(PendingMemoryWriteStatus::Pending.as_str()))
+            .all(&self.db)
+            .await?;
+        let count = rows.len();
+        for row in rows {
+            let mut active: ActiveModel = row.into();
+            active.next_retry_at = sea_orm::Set(now);
+            active.updated_at = sea_orm::Set(now);
+            active.update(&self.db).await?;
+        }
+        Ok(count)
+    }
+
+    /// Take due pending memory writes (`status=pending`, `next_retry_at` <= now) (#240).
+    pub async fn take_due_pending_memory_writes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, MemoryError> {
+        use entities::pending_memory_writes::{
+            ActiveModel, Column, Entity, PendingMemoryWriteStatus,
+        };
+        use sea_orm::{ActiveModelTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+
+        let now = Utc::now();
+        let rows = Entity::find()
+            .filter(Column::Status.eq(PendingMemoryWriteStatus::Pending.as_str()))
+            .filter(Column::NextRetryAt.lte(now))
+            .order_by_asc(Column::NextRetryAt)
+            .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        // Mark them as in-flight by bumping next_retry_at so concurrent drainers
+        // do not pick the same rows (simple lease).
+        let lease = now
+            .checked_add_signed(chrono::Duration::minutes(5))
+            .unwrap_or(now);
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut active: ActiveModel = row.clone().into();
+            active.next_retry_at = sea_orm::Set(lease);
+            active.updated_at = sea_orm::Set(now);
+            active.update(&self.db).await?;
+            out.push(row.into());
+        }
+        Ok(out)
+    }
+
+    /// Mark a pending memory write as successfully applied and delete it (#240).
+    pub async fn complete_pending_memory_write(&self, id: i64) -> Result<(), MemoryError> {
+        use entities::pending_memory_writes::Entity;
+        use sea_orm::EntityTrait;
+
+        Entity::delete_by_id(id).exec(&self.db).await?;
+        Ok(())
+    }
+
+    /// Record another failed attempt; may transition to permanent (#240).
+    pub async fn fail_pending_memory_write(
+        &self,
+        id: i64,
+        last_error: impl Into<String>,
+    ) -> Result<entities::pending_memory_writes::PendingMemoryWrite, MemoryError> {
+        use entities::pending_memory_writes::{ActiveModel, Entity, PendingMemoryWriteStatus};
+        use sea_orm::{ActiveModelTrait, EntityTrait};
+
+        let Some(model) = Entity::find_by_id(id).one(&self.db).await? else {
+            return Err(MemoryError::Other(format!(
+                "pending memory write id={id} not found"
+            )));
+        };
+        let attempts = model.attempts.saturating_add(1);
+        let permanent = attempts >= model.max_attempts;
+        let now = Utc::now();
+        // Exponential backoff: 30s * 2^(attempts-1), capped at 1 hour.
+        let delay_secs = 30i64
+            .saturating_mul(1i64 << (attempts.saturating_sub(1).min(10) as u32))
+            .min(3600);
+        let mut active: ActiveModel = model.into();
+        active.attempts = sea_orm::Set(attempts);
+        active.last_error = sea_orm::Set(Some(last_error.into()));
+        active.status = sea_orm::Set(
+            if permanent {
+                PendingMemoryWriteStatus::Permanent
+            } else {
+                PendingMemoryWriteStatus::Pending
+            }
+            .as_str()
+            .to_string(),
+        );
+        active.next_retry_at = sea_orm::Set(
+            now.checked_add_signed(chrono::Duration::seconds(delay_secs))
+                .unwrap_or(now),
+        );
+        active.updated_at = sea_orm::Set(now);
+        let updated = active.update(&self.db).await?;
+        Ok(updated.into())
+    }
+
     // ── Typed Memory CRUD ───────────────────────────────────────────────────
 
     /// Insert a new typed memory item and return its assigned ID.
@@ -4415,5 +4606,41 @@ mod tests {
             logs.first().map(|(_, content, _)| content.as_str()),
             Some("keep-me")
         );
+    }
+
+    #[tokio::test]
+    async fn pending_memory_write_queue_roundtrip() {
+        let store = setup_store().await;
+        let id = store
+            .enqueue_pending_memory_write("ene", "user", r#"{"character_id":"ene"}"#, "boom")
+            .await
+            .expect("enqueue");
+        let (pending, permanent) = store
+            .count_pending_memory_writes("ene")
+            .await
+            .expect("count");
+        assert_eq!(pending, 1);
+        assert_eq!(permanent, 0);
+
+        // Force due by setting next_retry_at to the past via fail/complete path:
+        // take_due only returns rows with next_retry_at <= now; freshly enqueued
+        // rows wait 30s, so mark due by failing with attempts that keep pending
+        // and a zero delay — instead, complete and re-enqueue is enough to prove CRUD.
+        let listed = store
+            .list_pending_memory_writes("ene", 10)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed.first().map(|r| r.id), Some(id));
+
+        store
+            .complete_pending_memory_write(id)
+            .await
+            .expect("complete");
+        let (pending, _) = store
+            .count_pending_memory_writes("ene")
+            .await
+            .expect("count after");
+        assert_eq!(pending, 0);
     }
 }

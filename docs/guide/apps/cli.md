@@ -154,7 +154,9 @@ Commands are entered with `/` prefix:
 | `/memory forget <id>` | Mark memory as user-deleted |
 | `/memory dispute <id>` | Mark memory as disputed |
 | `/memory restore <id>` | Restore memory status to active |
-| `/memory status` | Show whether the typed memory store is enabled |
+| `/memory status` | Show whether the typed memory store is enabled (includes pending write counts) |
+| `/memory pending` | List deferred memory-write retry queue rows |
+| `/memory retry` | Force due and drain pending memory writes now |
 
 ### Affect Commands
 

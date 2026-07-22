@@ -29,6 +29,9 @@ These are **not** chat `EneEvent` variants under API v1:
 | `SpecialToken`, standalone `Expression` | Folded into `Performance` (or stripped from text) |
 | `SessionSplit` | Compression / split via `diagnostics().manual_split()`; optional thin `ContextCompressed` |
 | `PipelinePhase`, `PipelineMetrics`, `TaskProgress` | `handle.diagnostics().subscribe()` |
+| `ToolHealth`, `ProviderHealth`, `ProviderFallback`, `MemoryWrite` | `handle.diagnostics().subscribe()` |
+
+`DiagnosticEvent::MemoryWrite` is emitted when deferred post-turn memory extraction fails. Failures are enqueued in `pending_memory_writes` (retry with backoff); `Terminal` is not delayed. Inspect with `/memory pending` / `/memory status`, or force a drain with `/memory retry`.
 
 ## Diagnostics
 

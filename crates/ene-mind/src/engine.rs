@@ -48,6 +48,24 @@ impl Default for CognitionEngine {
     }
 }
 
+/// Outcome of a deferred memory-write task (#240).
+#[derive(Debug, Clone)]
+pub enum MemoryWriteOutcome {
+    /// Write and forgetting completed successfully.
+    Ok,
+    /// Write failed; a retry row was enqueued (or marked permanent).
+    Failed {
+        /// Human-readable error.
+        message: String,
+        /// Pending queue id when enqueued.
+        pending_id: Option<i64>,
+        /// Whether the failure is permanent.
+        permanent: bool,
+        /// Character id for diagnostics.
+        character_id: String,
+    },
+}
+
 impl CognitionEngine {
     /// Create a new cognitive engine with default components.
     #[must_use]
@@ -463,6 +481,7 @@ impl CognitionEngine {
 
     /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
     ///
+    /// On failure, enqueues a [`ene_store::PendingMemoryWrite`] for later retry (#240).
     /// Returns the task handle so callers can track or abort it.
     pub fn spawn_deferred_memory_work(
         store: std::sync::Arc<MemoryStore>,
@@ -470,7 +489,7 @@ impl CognitionEngine {
         input: crate::lifecycle::OwnedPostTurnInput,
         llm: std::sync::Arc<dyn ene_ai::LlmProvider>,
         embedder: Option<std::sync::Arc<dyn ene_ai::EmbeddingProvider>>,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> tokio::task::JoinHandle<MemoryWriteOutcome> {
         tokio::spawn(
             async move {
                 tracing::info!(
@@ -479,6 +498,16 @@ impl CognitionEngine {
                     user_id = %input.user_id,
                     "Post-turn memory extraction and forgetting starting"
                 );
+                // Drain due retries before writing the new turn (#240).
+                Self::drain_pending_memory_writes(
+                    store.as_ref(),
+                    &config,
+                    llm.as_ref(),
+                    embedder.as_ref().map(std::convert::AsRef::as_ref),
+                    3,
+                )
+                .await;
+
                 let borrowed = input.as_borrowed();
                 let providers = crate::memory_writer::MemoryWriteProviders {
                     llm: Some(llm.as_ref()),
@@ -496,6 +525,7 @@ impl CognitionEngine {
                             component = "MemoryWriter",
                             "Post-turn memory extraction and forgetting completed"
                         );
+                        MemoryWriteOutcome::Ok
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -503,11 +533,115 @@ impl CognitionEngine {
                             error = %error,
                             "Post-turn memory extraction failed"
                         );
+                        let message = error.to_string();
+                        let payload = serde_json::to_string(&input).unwrap_or_else(|_| {
+                            format!(
+                                "{{\"character_id\":{},\"user_id\":{}}}",
+                                serde_json::to_string(&input.character_id).unwrap_or_default(),
+                                serde_json::to_string(&input.user_id).unwrap_or_default()
+                            )
+                        });
+                        match store
+                            .enqueue_pending_memory_write(
+                                &input.character_id,
+                                &input.user_id,
+                                payload,
+                                message.clone(),
+                            )
+                            .await
+                        {
+                            Ok(pending_id) => MemoryWriteOutcome::Failed {
+                                message,
+                                pending_id: Some(pending_id),
+                                permanent: false,
+                                character_id: input.character_id,
+                            },
+                            Err(enqueue_err) => {
+                                tracing::error!(
+                                    component = "MemoryWriter",
+                                    error = %enqueue_err,
+                                    "Failed to enqueue pending memory write"
+                                );
+                                MemoryWriteOutcome::Failed {
+                                    message,
+                                    pending_id: None,
+                                    permanent: true,
+                                    character_id: input.character_id,
+                                }
+                            }
+                        }
                     }
                 }
             }
             .instrument(tracing::info_span!("post_turn.memory")),
         )
+    }
+
+    /// Retry due pending memory writes from the persistent queue (#240).
+    pub async fn drain_pending_memory_writes(
+        store: &MemoryStore,
+        config: &MindConfig,
+        llm: &dyn ene_ai::LlmProvider,
+        embedder: Option<&dyn ene_ai::EmbeddingProvider>,
+        limit: usize,
+    ) {
+        let Ok(due) = store.take_due_pending_memory_writes(limit).await else {
+            return;
+        };
+        for row in due {
+            let Ok(input) =
+                serde_json::from_str::<crate::lifecycle::OwnedPostTurnInput>(&row.payload_json)
+            else {
+                let _ = store
+                    .fail_pending_memory_write(row.id, "invalid payload JSON")
+                    .await;
+                continue;
+            };
+            let borrowed = input.as_borrowed();
+            let providers = crate::memory_writer::MemoryWriteProviders {
+                llm: Some(llm),
+                embedder,
+            };
+            let result = async {
+                MemoryWriter::write_memories(store, config, &borrowed, providers).await?;
+                MemoryWriter::apply_forgetting(store, config, &borrowed).await
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    let _ = store.complete_pending_memory_write(row.id).await;
+                    tracing::info!(
+                        component = "MemoryWriter",
+                        pending_id = row.id,
+                        "Retried pending memory write succeeded"
+                    );
+                }
+                Err(error) => {
+                    match store
+                        .fail_pending_memory_write(row.id, error.to_string())
+                        .await
+                    {
+                        Ok(updated) => {
+                            tracing::warn!(
+                                component = "MemoryWriter",
+                                pending_id = row.id,
+                                status = updated.status.as_str(),
+                                attempts = updated.attempts,
+                                "Retried pending memory write failed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                component = "MemoryWriter",
+                                pending_id = row.id,
+                                error = %e,
+                                "Failed to update pending memory write after retry"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Resolve the final character expression after an assistant turn (#89).

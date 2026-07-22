@@ -326,6 +326,21 @@ pub enum DiagnosticEvent {
         /// Reason for the fallback.
         reason: String,
     },
+    /// A deferred memory-write failure or permanent queue warning (#240).
+    MemoryWrite {
+        /// Character scope for the failed write.
+        character_id: String,
+        /// Stable status: `failed`, `enqueued`, or `permanent`.
+        status: String,
+        /// Human-readable error detail.
+        message: String,
+        /// Optional pending-queue row id.
+        pending_id: Option<i64>,
+        /// Current pending retry count for the character (if known).
+        pending_count: Option<u64>,
+        /// Current permanent failure count for the character (if known).
+        permanent_count: Option<u64>,
+    },
 }
 
 /// Extracts a human-readable message from a caught panic payload.

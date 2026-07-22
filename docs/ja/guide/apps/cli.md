@@ -152,7 +152,9 @@ pub trait CliCommand: Send + Sync {
 | `/memory forget <id>` | メモリを user_deleted に遷移 |
 | `/memory dispute <id>` | メモリを disputed に遷移 |
 | `/memory restore <id>` | メモリを active に戻す |
-| `/memory status` | 型付きメモリストアが有効かどうかを表示 |
+| `/memory status` | 型付きメモリストアが有効かどうかを表示（pending 書き込み件数を含む） |
+| `/memory pending` | 遅延メモリ書き込みの再試行キューを一覧 |
+| `/memory retry` | pending を即時 due にしてドレイン |
 
 ### 感情コマンド
 

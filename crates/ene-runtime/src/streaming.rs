@@ -175,7 +175,8 @@ pub struct StreamContext {
     /// The actor drains this into its classifier `JoinSet` for lifecycle management.
     pub classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Sender for deferred memory-writer `JoinHandles` spawned after Terminal emission.
-    pub memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
+    pub memory_writer_tx:
+        mpsc::UnboundedSender<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
     /// Sender for deferred tool tasks accepted during tool execution (#196).
     pub deferred_tool_tx: mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
 }

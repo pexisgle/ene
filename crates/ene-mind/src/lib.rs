@@ -121,7 +121,7 @@ pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
 #[doc(no_inline)]
 pub use ene_store::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Central cognitive engine facade.
-pub use engine::CognitionEngine;
+pub use engine::{CognitionEngine, MemoryWriteOutcome};
 /// Cognitive runtime error type.
 pub use error::{CognitionError, EneCognitionError, MindError};
 /// Turn lifecycle types for streaming integration.

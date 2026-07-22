@@ -311,6 +311,10 @@ pub struct UiState {
     pub memory_journal_recall_query: String,
     /// Cached recall-debug rows.
     pub memory_journal_recall_rows: Vec<MemoryJournalRecallRow>,
+    /// Pending deferred memory-write retries (#240).
+    pub memory_journal_pending_writes: usize,
+    /// Permanent deferred memory-write failures (#240).
+    pub memory_journal_permanent_writes: usize,
     /// Pending tool-permission approvals awaiting a user decision
     /// (#177). Accumulated by the permission-center consumer system
     /// from `AiPermissionRequested` messages; a request is removed

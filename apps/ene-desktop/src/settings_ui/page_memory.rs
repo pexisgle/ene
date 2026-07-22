@@ -94,6 +94,20 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
     }
 
     ui.group(|ui| {
+        ui.label(fl!(crate::i18n::loader(), "memory-journal-pending-writes"));
+        ui.label(format!(
+            "{}: {}",
+            fl!(crate::i18n::loader(), "memory-journal-pending-count"),
+            snapshot.memory_journal_pending_writes
+        ));
+        ui.label(format!(
+            "{}: {}",
+            fl!(crate::i18n::loader(), "memory-journal-permanent-count"),
+            snapshot.memory_journal_permanent_writes
+        ));
+    });
+
+    ui.group(|ui| {
         ui.label(fl!(crate::i18n::loader(), "memory-journal-affect"));
         ui.label(format!(
             "{}: {}",
@@ -305,22 +319,26 @@ fn refresh_journal(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
         });
 
     match ai.refresh_memory_journal(48, filters.0, filters.1, filters.2) {
-        Ok((memories, affect, commitments)) => {
+        Ok(payload) => {
             if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-                state.0.memory_journal_rows = memories
+                state.0.memory_journal_rows = payload
+                    .memories
                     .iter()
                     .map(MemoryJournalPresenter::row_from_item)
                     .collect();
                 state.0.memory_journal_affect = crate::settings::MemoryJournalAffect {
-                    mood: affect.mood_label,
-                    expression: affect.last_expression,
-                    affinity: affect.affinity,
-                    trust: affect.trust,
+                    mood: payload.affect.mood_label,
+                    expression: payload.affect.last_expression,
+                    affinity: payload.affect.affinity,
+                    trust: payload.affect.trust,
                 };
-                state.0.memory_journal_commitments = commitments
+                state.0.memory_journal_commitments = payload
+                    .commitments
                     .into_iter()
                     .map(|c| format!("{} [{}]", c.title, c.status.as_str()))
                     .collect();
+                state.0.memory_journal_pending_writes = payload.pending_writes;
+                state.0.memory_journal_permanent_writes = payload.permanent_writes;
                 state.0.memory_journal_message =
                     Some(fl!(crate::i18n::loader(), "memory-journal-refresh-ok"));
             }

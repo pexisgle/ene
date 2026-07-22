@@ -35,10 +35,21 @@ Core tables created by the initial schema migration:
 - `conversation_logs` — raw turn transcripts
 - `typed_memories` / `memory_embeddings` / `memory_links` / `memory_spans` — cognitive typed memory
 - `affect_states` / `pending_affect_proposals` — affect ledger
+- `pending_memory_writes` — deferred post-turn memory write retry queue (#240)
 - `commitments` — companion commitment ledger
 - `tool_embedding_index` / `__tool_schemas` — Tool RAG + tool DB IPC metadata
 
 See [Typed Memory & Memory Arbiter](#typed-memory--memory-arbiter-cognitive-runtime) and [Companion Commitment Ledger](#companion-commitment-ledger) for column-level detail.
+
+### Deferred memory write retries (#240)
+
+Post-turn LLM extraction and forgetting run after `Terminal`. On failure the runtime:
+
+1. Enqueues the `OwnedPostTurnInput` JSON into `pending_memory_writes`
+2. Emits `DiagnosticEvent::MemoryWrite` (not a chat `EneEvent`)
+3. Retries with exponential backoff on the next deferred memory task (and at startup drain)
+
+CLI: `/memory status` shows pending/permanent counts; `/memory pending` lists rows; `/memory retry` forces due and drains immediately.
 
 ### Conversation Logs
 

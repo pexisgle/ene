@@ -1055,13 +1055,14 @@ struct EneActor {
     /// [`EneEvent::ToolBackgroundCompleted`]. Reaped so panics are not lost.
     deferred_tool_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
-    memory_writer_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
+    memory_writer_rx:
+        mpsc::UnboundedReceiver<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
     /// Receiver for deferred (background) tool tasks accepted by the stream (#196).
     deferred_tool_rx: mpsc::UnboundedReceiver<DeferredToolTask>,
     /// Sender for classifier `JoinHandles` from the stream task.
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Sender for deferred memory-writer `JoinHandles` from the stream task.
-    memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
+    memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
     /// Sender for deferred (background) tool tasks accepted by the stream (#196).
     deferred_tool_tx: mpsc::UnboundedSender<DeferredToolTask>,
     /// Shared with the running stream task; first party to flip emits Terminal.
@@ -1277,13 +1278,59 @@ impl EneActor {
 
             // Drain deferred memory-writer JoinHandles sent from the stream.
             while let Ok(handle) = self.memory_writer_rx.try_recv() {
+                let diag_tx = self.diag_tx.clone();
+                let store = self.session.memory.memory_store.clone();
                 self.memory_writer_tasks.spawn(async move {
-                    if let Err(e) = handle.await {
-                        tracing::error!(
-                            component = "MemoryWriter",
-                            error = %e,
-                            "Deferred memory-writer task panicked"
-                        );
+                    match handle.await {
+                        Ok(ene_mind::MemoryWriteOutcome::Ok) => {}
+                        Ok(ene_mind::MemoryWriteOutcome::Failed {
+                            message,
+                            pending_id,
+                            permanent,
+                            character_id,
+                        }) => {
+                            let (pending_count, permanent_count) = if let Some(store) =
+                                store.as_ref()
+                            {
+                                store
+                                    .count_pending_memory_writes(&character_id)
+                                    .await
+                                    .ok()
+                                    .map_or((None, None), |(p, f)| (Some(p as u64), Some(f as u64)))
+                            } else {
+                                (None, None)
+                            };
+                            let status = if permanent {
+                                "permanent"
+                            } else if pending_id.is_some() {
+                                "enqueued"
+                            } else {
+                                "failed"
+                            };
+                            let _ = diag_tx.send(DiagnosticEvent::MemoryWrite {
+                                character_id,
+                                status: status.to_string(),
+                                message,
+                                pending_id,
+                                pending_count,
+                                permanent_count,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                component = "MemoryWriter",
+                                error = %e,
+                                "Deferred memory-writer task panicked"
+                            );
+                            let _ = diag_tx.send(DiagnosticEvent::MemoryWrite {
+                                character_id: String::new(),
+                                status: "failed".to_string(),
+                                message: format!("memory writer task panicked: {e}"),
+                                pending_id: None,
+                                pending_count: None,
+                                permanent_count: None,
+                            });
+                        }
                     }
                 });
             }

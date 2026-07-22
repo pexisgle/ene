@@ -127,7 +127,7 @@ pub struct PostTurnInput<'a> {
 }
 
 /// Owned turn input for deferred post-turn memory writing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnedTurnInput {
     /// The user's message text.
     pub user_message: String,
@@ -138,7 +138,7 @@ pub struct OwnedTurnInput {
 }
 
 /// Owned post-turn input for deferred memory writing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OwnedPostTurnInput {
     /// Turn extraction input.
     pub turn: OwnedTurnInput,
