@@ -53,6 +53,7 @@ fn init_messages(world: &mut World) {
     world.init_resource::<Messages<ExpressionCommand>>();
     world.init_resource::<Messages<CancelCommand>>();
     world.init_resource::<Messages<PointerMoved>>();
+    world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
 }
 
 fn run_consumers(world: &mut World) {
@@ -271,6 +272,7 @@ fn emote_token_emits_message_via_pump() {
     world.init_resource::<Messages<CancelCommand>>();
     world.init_resource::<Messages<OpenSettings>>();
     world.init_resource::<Messages<OpenChat>>();
+    world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
     #[cfg(target_os = "linux")]
     world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
 
