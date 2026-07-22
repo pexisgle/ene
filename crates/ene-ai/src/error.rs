@@ -116,6 +116,12 @@ pub enum AiError {
     /// API key is missing or empty (#237).
     #[error("API key not configured: {0}")]
     MissingApiKey(String),
+    /// Provider base URL is missing (#241).
+    #[error("base URL not configured: {0}")]
+    MissingBaseUrl(String),
+    /// Provider base URL failed format checks (#241).
+    #[error("invalid base URL: {0}")]
+    InvalidBaseUrl(String),
 }
 
 #[cfg(test)]

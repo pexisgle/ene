@@ -32,6 +32,19 @@ async fn drain_and_exit(ctx: &AppContext, code: i32) -> i32 {
 }
 
 pub async fn run(ctx: &mut AppContext) -> i32 {
+    if let Ok(snapshot) = ctx.handle.diagnostics().get_snapshot().await {
+        let issues = ene_ai::validate_settings(&snapshot.config);
+        if !issues.is_empty() {
+            eprintln!(
+                "{} AI settings look incomplete — use `/config` to review or `/config set` to fix.",
+                crate::style::warning("WARN")
+            );
+            for issue in issues {
+                eprintln!("  - {}", issue.message());
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             biased;

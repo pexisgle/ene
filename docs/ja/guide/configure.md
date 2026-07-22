@@ -22,6 +22,9 @@
 | `mind.*` | 想起、圧縮、感情、Performance に関するポリシー |
 | `tools` | バイナリ有効化、サンドボックス、MCP、Tool RAG |
 
+検証は `ene_ai::validate_settings`（ネットワークなし）または Desktop の接続テスト /
+`ene_ai::validate_api_key`。CLI: `/config`（キーはマスク）と `/config set <dotted.key> <value>`。
+
 トップレベルの `memory.*` ポリシーや二重の「cognition」スイッチはありません。ストリーミング経路は mind のみです。永続化は `store`、想起・書き込み方針は `mind.*`。
 
 ## プロバイダの例

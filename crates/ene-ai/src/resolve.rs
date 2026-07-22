@@ -214,6 +214,96 @@ impl ApiKeyConfig {
     }
 }
 
+/// A single settings validation finding (#241).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsIssue {
+    /// Chat provider API key resolves empty.
+    MissingApiKey {
+        /// Provider key in `ai.providers`.
+        provider: String,
+    },
+    /// Chat provider base URL is empty.
+    MissingBaseUrl {
+        /// Provider key in `ai.providers`.
+        provider: String,
+    },
+    /// Chat provider base URL is not an http(s) URL.
+    InvalidBaseUrl {
+        /// Provider key in `ai.providers`.
+        provider: String,
+        /// Human-readable detail.
+        detail: String,
+    },
+}
+
+impl SettingsIssue {
+    /// Stable English message for CLI / UI.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::MissingApiKey { provider } => {
+                format!("API key not set for provider `{provider}`")
+            }
+            Self::MissingBaseUrl { provider } => {
+                format!("Base URL not set for provider `{provider}`")
+            }
+            Self::InvalidBaseUrl { provider, detail } => {
+                format!("Invalid base URL for provider `{provider}`: {detail}")
+            }
+        }
+    }
+}
+
+/// Validate chat-provider settings without performing a network call (#241).
+///
+/// Checks that the configured chat provider has a non-empty base URL with an
+/// `http`/`https` scheme and a resolvable API key. Returns an empty vec when
+/// the section is missing or the chat provider is local/GGUF.
+#[must_use]
+pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
+    let Ok(ai) = config.get_section::<crate::AiConfig>() else {
+        return Vec::new();
+    };
+    let provider_key = ai.tasks.chat.provider.clone();
+    if crate::AiConfig::is_local_provider(&provider_key) {
+        return Vec::new();
+    }
+    let Some(crate::AiProviderDef::OpenaiCompatible { base_url, api_key }) =
+        ai.providers.get(&provider_key)
+    else {
+        return vec![SettingsIssue::MissingBaseUrl {
+            provider: provider_key,
+        }];
+    };
+
+    let mut issues = Vec::new();
+    let url = base_url.trim();
+    if url.is_empty() {
+        issues.push(SettingsIssue::MissingBaseUrl {
+            provider: provider_key.clone(),
+        });
+    } else if !(url.starts_with("http://") || url.starts_with("https://")) {
+        issues.push(SettingsIssue::InvalidBaseUrl {
+            provider: provider_key.clone(),
+            detail: "must start with http:// or https://".to_string(),
+        });
+    }
+    if api_key.resolve_api_key().trim().is_empty() {
+        issues.push(SettingsIssue::MissingApiKey {
+            provider: provider_key,
+        });
+    }
+    issues
+}
+
+/// Whether chat settings look incomplete enough to warrant first-run onboarding.
+#[must_use]
+pub fn needs_onboarding(config: &ene_config::EneConfig) -> bool {
+    validate_settings(config)
+        .iter()
+        .any(|i| matches!(i, SettingsIssue::MissingApiKey { .. }))
+}
+
 /// Lightweight API-key validation for an OpenAI-compatible provider (#237).
 ///
 /// Performs a `GET {base_url}/models` request with a short timeout so an

@@ -142,6 +142,10 @@ completed turn.
 
 Opened with F1 or Tray → Settings. Tabs:
 
+On first launch, if the chat API key is missing, an onboarding banner opens
+Settings on the **AI** tab (#241). The AI tab shows inline validation and a
+**Test connection** button (`validate_api_key`).
+
 | Tab | Contents |
 |-----|----------|
 | Character | VRM selection, motion, look-at, position, expression test |

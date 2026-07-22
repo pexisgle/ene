@@ -74,7 +74,7 @@ pub use openai::{
 };
 pub use resolve::{
     ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedTaskRef,
-    resolve_base_url, validate_api_key,
+    SettingsIssue, needs_onboarding, resolve_base_url, validate_api_key, validate_settings,
 };
 pub use retry::RetryPolicy;
 pub use role::Role;

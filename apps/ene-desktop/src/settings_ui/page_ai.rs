@@ -208,6 +208,30 @@ pub fn render(
             });
         }
 
+        // Inline validation + connection test (#241).
+        let issues = ene_ai::validate_settings(&settings.ai.ai);
+        if !issues.is_empty() {
+            for issue in &issues {
+                ui.colored_label(egui::Color32::from_rgb(200, 120, 40), issue.message());
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.button(crate::i18n::ai_test_connection()).clicked() {
+                input.ai_validation_message = Some(match ai_cfg.resolve_chat() {
+                    Ok(resolved) => {
+                        match ai.validate_api_key_blocking(&resolved.base_url, &resolved.api_key) {
+                            Ok(()) => crate::i18n::ai_test_connection_ok(),
+                            Err(e) => format!("{}: {e}", crate::i18n::ai_test_connection_error()),
+                        }
+                    }
+                    Err(e) => format!("{}: {e}", crate::i18n::ai_test_connection_error()),
+                });
+            }
+        });
+        if let Some(message) = input.ai_validation_message.as_deref() {
+            ui.label(message);
+        }
+
         ui.separator();
         ui.label(crate::i18n::embedding_settings());
 

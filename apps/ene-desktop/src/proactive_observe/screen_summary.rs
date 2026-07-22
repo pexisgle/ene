@@ -92,12 +92,7 @@ impl ScreenSummaryProvider {
         let rgb = captured.image.to_rgb8();
         let (width, height) = rgb.dimensions();
         self.handle
-            .summarize_screen_image(
-                width,
-                height,
-                rgb.into_raw(),
-                captured.app_label.clone(),
-            )
+            .summarize_screen_image(width, height, rgb.into_raw(), captured.app_label.clone())
             .await
     }
 }

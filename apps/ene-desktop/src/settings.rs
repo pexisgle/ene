@@ -343,6 +343,8 @@ pub struct UiState {
     pub session_show_archived: bool,
     /// Last sessions-page operation status/error message.
     pub session_message: Option<String>,
+    /// First-run onboarding banner when the chat API key is missing (#241).
+    pub show_onboarding: bool,
 }
 
 /// A single session message search hit shown on the sessions page (#176).

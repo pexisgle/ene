@@ -22,6 +22,9 @@ Schema JSON under `assets/` is auto-generated when you run the CLI — do not ha
 | `mind.*` | Recall, compression, affect, performance policy |
 | `tools` | Enable binaries, sandbox, MCP, Tool RAG |
 
+Validate with `ene_ai::validate_settings` (no network) or Desktop **Test connection** /
+`ene_ai::validate_api_key`. CLI: `/config` (keys masked) and `/config set <dotted.key> <value>`.
+
 There is no top-level `memory.*` policy block and no dual “cognition” switch — the mind path is the only streaming path. Persistence toggles are under `store`; recall/write policy under `mind.*`.
 
 ## Provider sketch

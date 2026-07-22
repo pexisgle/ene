@@ -311,6 +311,13 @@ impl AiBridge {
         self.handle.diagnostics().provider_fallback_history()
     }
 
+    /// Run [`ene_ai::validate_api_key`] on the bridge runtime (#241).
+    pub fn validate_api_key_blocking(&self, base_url: &str, api_key: &str) -> Result<(), String> {
+        self.runtime
+            .block_on(ene_ai::validate_api_key(base_url, api_key))
+            .map_err(|e| e.to_string())
+    }
+
     /// Refresh memory journal payload (typed memories + affect + commitments).
     pub fn refresh_memory_journal(
         &self,

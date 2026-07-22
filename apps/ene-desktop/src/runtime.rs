@@ -87,6 +87,14 @@ impl Runtime {
         // runs strictly *after* the first `resumed`.
         state.app.update();
 
+        // First-run onboarding when the chat API key is missing (#241).
+        if ene_ai::needs_onboarding(&state.settings.ai.ai) {
+            let mut ui = state.ui_bevy_state_mut();
+            ui.0.show_onboarding = true;
+            ui.0.focused_page = Some(crate::settings_ui::PageKind::Ai);
+            ui.0.settings_window_visible = true;
+        }
+
         Self {
             state,
             event_tx,

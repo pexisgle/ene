@@ -262,7 +262,8 @@ impl CharacterRenderer {
         // (VRMA_05–07); identity when source/dest rests match (VRMA_01–04).
         if let (Some(asset), Some(model)) = (self.vrma.as_ref(), self.model.as_ref()) {
             let dst_world_rots = collect_world_rest_rotations(model);
-            let mut retargeted = std::collections::HashMap::with_capacity(frame.bone_rotations.len());
+            let mut retargeted =
+                std::collections::HashMap::with_capacity(frame.bone_rotations.len());
             for (bone_name, src_pose) in &frame.bone_rotations {
                 let Some(&src_node) = asset.properties.humanoid_bones.get(bone_name) else {
                     retargeted.insert(bone_name.clone(), *src_pose);

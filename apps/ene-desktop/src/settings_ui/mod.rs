@@ -70,6 +70,9 @@ impl SettingsUi {
         ui_state: &crate::settings::UiState,
     ) {
         self.input.sync_from_settings(settings, ui_state);
+        if let Some(page) = ui_state.focused_page {
+            self.current_page = page;
+        }
     }
 
     /// Render the full settings window. The caller is expected to
@@ -85,6 +88,53 @@ impl SettingsUi {
         now_secs: f64,
     ) {
         apply_egui_visuals(ui.ctx());
+
+        // First-run onboarding panel (#241).
+        let mut open_ai = false;
+        let mut dismiss = false;
+        let show_onboarding = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .is_some_and(|s| s.0.show_onboarding);
+        if show_onboarding {
+            egui::Window::new(crate::i18n::onboarding_title())
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 24.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(crate::i18n::onboarding_body());
+                    ui.horizontal(|ui| {
+                        if ui.button(crate::i18n::onboarding_open_settings()).clicked() {
+                            open_ai = true;
+                        }
+                        if ui.button(crate::i18n::onboarding_dismiss()).clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+        }
+        if (open_ai || dismiss)
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            if open_ai {
+                state.0.focused_page = Some(PageKind::Ai);
+                state.0.settings_window_visible = true;
+                state.0.show_onboarding = false;
+            }
+            if dismiss {
+                state.0.show_onboarding = false;
+            }
+        }
+        if open_ai {
+            self.current_page = PageKind::Ai;
+        }
+
+        // Consume a one-shot page focus request from tray / onboarding (#241).
+        if let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+            && let Some(page) = state.0.focused_page.take()
+        {
+            self.current_page = page;
+        }
 
         // Top-level page tab strip.
         ui.horizontal(|ui| {

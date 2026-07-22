@@ -129,7 +129,8 @@ pub trait CliCommand: Send + Sync {
 
 | コマンド | 動作 |
 |---------|------|
-| `/config` | 現在の設定を表示 (provider, model, embedding, memory) |
+| `/config` | 現在の設定を表示 (provider, model, APIキーはマスク、embedding, memory) |
+| `/config set <dotted.key> <value>` | `settings.json` をパッチ（AI プロバイダー変更は再起動が必要） |
 | `/tool list` | 登録済みの全ツールを一覧 |
 | `/tool search <query>` | RAGまたは名前/説明フィルタを使用して登録済みツールを検索 |
 | `/tool help <name>` | ツールの詳細ヘルプを表示 |

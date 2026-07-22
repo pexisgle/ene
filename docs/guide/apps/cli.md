@@ -131,7 +131,8 @@ Commands are entered with `/` prefix:
 
 | Command | Action |
 |---------|--------|
-| `/config` | Show current settings (provider, model, embedding, memory) |
+| `/config` | Show current settings (provider, model, API key masked, embedding, memory) |
+| `/config set <dotted.key> <value>` | Patch `settings.json` (restart required for AI provider changes) |
 | `/tool list` | List all registered tools |
 | `/tool search <query>` | Search registered tools using RAG or name/description filter |
 | `/tool help <name>` | Show detailed help for a tool |

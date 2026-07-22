@@ -24,6 +24,8 @@ pub struct SettingsInputState {
     pub ai_embedding_provider: String,
     pub ai_embedding_model: String,
     pub ai_embedding_dimensions: String,
+    /// Last AI settings validation / connection-test message (#241).
+    pub ai_validation_message: Option<String>,
 }
 
 impl SettingsInputState {

@@ -248,6 +248,37 @@ impl EneConfig {
         set_nested(&mut self.extra, T::path(), val)?;
         Ok(())
     }
+
+    /// Set a value at a dotted JSON path under `extra` (e.g. `ai.tasks.chat.model`).
+    ///
+    /// `value` is parsed as JSON when possible; otherwise treated as a string.
+    /// Used by CLI `/config set` (#241).
+    pub fn set_path(&mut self, dotted_path: &str, raw_value: &str) -> Result<(), EneConfigError> {
+        let path: Vec<&str> = dotted_path
+            .split('.')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if path.is_empty() {
+            return Err(EneConfigError::GenericConfigError(
+                "empty config path".to_string(),
+            ));
+        }
+        let value = match serde_json::from_str::<serde_json::Value>(raw_value) {
+            Ok(v) => v,
+            Err(_) => serde_json::Value::String(raw_value.to_string()),
+        };
+        set_nested(&mut self.extra, &path, value)
+    }
+
+    /// Read a value at a dotted JSON path under `extra` (#241).
+    pub fn get_path(&self, dotted_path: &str) -> Option<serde_json::Value> {
+        let mut cur = serde_json::to_value(&self.extra).ok()?;
+        for key in dotted_path.split('.').filter(|s| !s.is_empty()) {
+            cur = cur.get(key)?.clone();
+        }
+        Some(cur)
+    }
 }
 
 fn set_nested(
@@ -852,5 +883,15 @@ mod tests {
             Some(&serde_json::Value::String("some string".to_string())),
             "non-object leaf should not be replaced with a fresh object"
         );
+    }
+
+    #[test]
+    fn set_path_writes_dotted_json_value() {
+        let mut config = EneConfig::default();
+        config
+            .set_path("ai.tasks.chat.model", "gpt-test")
+            .expect("set_path");
+        let value = config.get_path("ai.tasks.chat.model").expect("get_path");
+        assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
     }
 }
