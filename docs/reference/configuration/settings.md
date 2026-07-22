@@ -273,7 +273,10 @@ Health probes never send user data — only an authenticated `GET {base_url}/mod
 ```json
 {
   "store": {
-    "enabled": false
+    "enabled": false,
+    "backup_on_migrate": true,
+    "max_backups": 5,
+    "integrity_check_on_open": false
   }
 }
 ```
@@ -281,8 +284,13 @@ Health probes never send user data — only an authenticated `GET {base_url}/mod
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | bool | `false` | Enable the persistence store |
+| `backup_on_migrate` | bool | `true` | Create a `{db}.bak.{timestamp}` file backup before applying pending migrations (#239) |
+| `max_backups` | usize | `5` | Maximum number of backup files to retain |
+| `integrity_check_on_open` | bool | `false` | Run `PRAGMA integrity_check` when opening the database |
 
 The database path is resolved automatically (`assets/characters/{name}/memory.db`). It is not user-configurable in the public schema.
+
+Manual backup / restore / integrity checks are available via `/store` (REPL) and `ene store …` (non-interactive). On migration failure the pre-migration backup is restored automatically. If the on-disk schema is newer than the binary, open fails with a clear downgrade error.
 
 ### `tools` — Tool Configuration
 

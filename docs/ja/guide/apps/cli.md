@@ -50,6 +50,7 @@ cargo run -p ene-cli -- doctor --json
 | `session list\|export\|import\|search\|archive\|unarchive [--json]` | 会話セッションの管理（`/session` に対応） |
 | `memory list\|inspect\|search [--json]` | 認知メモリの検査（`/memory` に対応） |
 | `doctor [--json]` | 環境ヘルスチェックの実行（`/doctor` に対応） |
+| `store backup\|list-backups\|restore\|integrity [--json]` | メモリ DB のバックアップ / リストア / 整合性チェック (#239) |
 
 ### 出力契約
 
@@ -187,6 +188,10 @@ pub trait CliCommand: Send + Sync {
 |---------|------|
 | `/doctor` | 環境ヘルスチェックを実行し、カラー表示のサマリーを出力 |
 | `/doctor --json` | 同一チェックを実行し、機械可読な JSON を出力 |
+| `/store backup` | メモリ DB のタイムスタンプ付きファイルバックアップを作成 |
+| `/store list-backups` | `{db}.bak.*` バックアップを一覧（新しい順） |
+| `/store restore <path>` | バックアップから復元（ストアを安全に開き直すため終了する） |
+| `/store integrity` | `PRAGMA integrity_check` を実行 |
 
 `/doctor` は以下のカテゴリを検査し、各チェックをステータス（`OK` / `WARN` /
 `ERROR` / `SKIP`）と、問題が見つかった場合の修復ヒント付きで報告します:

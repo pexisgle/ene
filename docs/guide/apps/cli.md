@@ -50,6 +50,7 @@ cargo run -p ene-cli -- doctor --json
 | `session list\|export\|import\|search\|archive\|unarchive [--json]` | Manage conversation sessions (mirrors `/session`) |
 | `memory list\|inspect\|search [--json]` | Inspect cognitive memories (mirrors `/memory`) |
 | `doctor [--json]` | Run environment health checks (mirrors `/doctor`) |
+| `store backup\|list-backups\|restore\|integrity [--json]` | Backup / restore / integrity-check the memory database (#239) |
 
 ### Output contract
 
@@ -189,6 +190,10 @@ Commands are entered with `/` prefix:
 |---------|--------|
 | `/doctor` | Run environment health checks and print a colored summary |
 | `/doctor --json` | Run the same checks and print machine-readable JSON |
+| `/store backup` | Create a timestamped file backup of the memory database |
+| `/store list-backups` | List `{db}.bak.*` backups (newest first) |
+| `/store restore <path>` | Restore from a backup (shuts down and exits so the store can reopen) |
+| `/store integrity` | Run `PRAGMA integrity_check` |
 
 `/doctor` inspects the following categories and reports each check with a
 status (`OK` / `WARN` / `ERROR` / `SKIP`) plus a remediation hint when a

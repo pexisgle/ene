@@ -23,5 +23,8 @@ ene-config = { workspace = true }
 serde = { workspace = true }
 ctor = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

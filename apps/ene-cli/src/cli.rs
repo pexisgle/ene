@@ -88,6 +88,16 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Backup, restore, and integrity-check the memory database (#239).
+    Store {
+        /// Store subcommand.
+        #[command(subcommand)]
+        action: StoreAction,
+
+        /// Emit machine-readable JSON on stdout.
+        #[arg(long, global = true)]
+        json: bool,
+    },
 }
 
 /// `tool` subcommands.
@@ -170,4 +180,23 @@ pub enum MemoryAction {
         /// Search query.
         query: String,
     },
+}
+
+/// `store` subcommands (#239).
+#[derive(Debug, Subcommand)]
+pub enum StoreAction {
+    /// Create a timestamped file backup of the memory database.
+    Backup,
+    /// List existing `{db}.bak.*` backups (newest first).
+    ListBackups,
+    /// Restore the memory database from a backup file (exits afterward).
+    Restore {
+        /// Path to the backup file.
+        path: PathBuf,
+        /// Confirm the destructive restore.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Run `PRAGMA integrity_check` on the open database.
+    Integrity,
 }

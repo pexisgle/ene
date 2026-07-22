@@ -7,11 +7,13 @@ SQLite + sqlite-vec + Diesel ベースのエピソディック記憶。ベクト
 ランタイムは `EneHandle::open` 中に記憶を初期化します:
 
 1. `embedding` / AI タスク設定から埋め込みプロバイダを作成
-2. `store.enabled == true` なら `MemoryStore::open()` を呼び出し
-3. sqlite-vec 拡張を登録しマイグレーションを実行
-4. ストアと埋め込みを `session.memory` にアタッチ
+2. `store.enabled == true` なら `MemoryStore::open_with_options()` を呼び出し（`StoreConfig` から）
+3. `store.integrity_check_on_open` が有効なら `PRAGMA integrity_check` を実行
+4. 適用済み SeaORM マイグレーションとバイナリを照合し、DB スキーマが新しい場合はオープンを拒否
+5. 未適用マイグレーションがあり `store.backup_on_migrate` が有効なら `{db}.bak.{timestamp}` バックアップを作成してからマイグレーション。失敗時はバックアップから復元
+6. sqlite-vec 拡張を登録し、ストア / 埋め込みを `session.memory` にアタッチ
 
-**スキーマリセット:** ストアは単一の初期マイグレーションのみを持ちます。スキーマ統合をまたぐアップグレード前に、ユーザーデータディレクトリ下の既存 SQLite メモリ DB を削除してください。インプレースのレガシー移行パスはありません。
+**バックアップ / 復旧 (#239):** `/store backup|list-backups|restore|integrity` または `ene store …` を使用。マイグレーション失敗時は事前バックアップを復元し、半適用状態を残しません。保持数は `store.max_backups`。
 
 記憶は `EneStateSnapshot` 経由でも CLI コマンド (`/memory search`) で利用可能。
 

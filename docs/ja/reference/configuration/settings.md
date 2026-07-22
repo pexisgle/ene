@@ -273,7 +273,10 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 ```json
 {
   "store": {
-    "enabled": false
+    "enabled": false,
+    "backup_on_migrate": true,
+    "max_backups": 5,
+    "integrity_check_on_open": false
   }
 }
 ```
@@ -281,8 +284,13 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
 | `enabled` | bool | `false` | 永続化ストアを有効化 |
+| `backup_on_migrate` | bool | `true` | 未適用マイグレーション実行前に `{db}.bak.{timestamp}` バックアップを作成する (#239) |
+| `max_backups` | usize | `5` | 保持するバックアップファイルの最大数 |
+| `integrity_check_on_open` | bool | `false` | オープン時に `PRAGMA integrity_check` を実行する |
 
 データベースパスは自動解決されます（`assets/characters/{name}/memory.db`）。公開スキーマではユーザー設定不可。
+
+手動のバックアップ / リストア / 整合性チェックは `/store`（REPL）および `ene store …`（非対話）で利用できます。マイグレーション失敗時は事前バックアップから自動復元されます。オンディスクのスキーマがバイナリより新しい場合は、明確なダウングレードエラーでオープンに失敗します。
 
 ### `tools` — ツール設定
 

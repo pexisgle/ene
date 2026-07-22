@@ -207,6 +207,8 @@ pub struct KeyFact {
 pub struct MemoryStore {
     db: DatabaseConnection,
     embedding_dim: usize,
+    /// On-disk path when opened from a file (`None` for `:memory:`).
+    path: Option<std::path::PathBuf>,
 }
 
 /// Result of a natural-decay batch run (#76).
@@ -365,6 +367,37 @@ async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), MemoryError> {
     Ok(())
 }
 
+/// Read applied `SeaORM` migration names from `seaql_migrations`.
+async fn applied_migration_names(db: &DatabaseConnection) -> Result<Vec<String>, MemoryError> {
+    use sea_orm::{DbBackend, Statement};
+
+    // Table may not exist yet on a brand-new database.
+    let exists = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='seaql_migrations'"
+                .to_string(),
+        ))
+        .await?;
+    if exists.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = db
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "SELECT version FROM seaql_migrations ORDER BY version".to_string(),
+        ))
+        .await?;
+    let mut names = Vec::with_capacity(rows.len());
+    for row in rows {
+        let name: String = row.try_get_by_index(0).map_err(|e| {
+            MemoryError::MemoryStoreConnectionError(format!("decode seaql_migrations: {e}"))
+        })?;
+        names.push(name);
+    }
+    Ok(names)
+}
+
 async fn list_session_ids_for_card_on_conn<C: ConnectionTrait>(
     conn: &C,
     card_name: &str,
@@ -383,8 +416,16 @@ async fn list_session_ids_for_card_on_conn<C: ConnectionTrait>(
 }
 
 impl MemoryStore {
-    const fn init(db: DatabaseConnection, embedding_dim: usize) -> Self {
-        Self { db, embedding_dim }
+    const fn init(
+        db: DatabaseConnection,
+        embedding_dim: usize,
+        path: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self {
+            db,
+            embedding_dim,
+            path,
+        }
     }
 
     /// Decode stored embedding bytes.
@@ -397,12 +438,19 @@ impl MemoryStore {
         &self.db
     }
 
+    /// On-disk path when this store was opened from a file.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     /// Vector dimensionality for this store's embedding model.
     pub const fn embedding_dim(&self) -> usize {
         self.embedding_dim
     }
 
-    /// Opens a persistent memory store at the given file path.
+    /// Opens a persistent memory store at the given file path with default
+    /// [`crate::backup::OpenOptions`].
     ///
     /// Creates the database file if it doesn't exist. Registers the
     /// `sqlite-vec` extension process-globally *before* opening the connection
@@ -413,7 +461,20 @@ impl MemoryStore {
     /// `foreign_keys=ON` set on every pooled connection. WAL lets readers
     /// proceed concurrently with a writer; the busy timeout avoids
     /// spurious `database is locked` errors under contention.
+    ///
+    /// When pending migrations exist and `backup_on_migrate` is enabled, a
+    /// file backup is taken first; on migration failure the backup is
+    /// restored (#239).
     pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
+        Self::open_with_options(path, embedding_dim, &crate::backup::OpenOptions::default()).await
+    }
+
+    /// Opens a persistent memory store with explicit backup / integrity options (#239).
+    pub async fn open_with_options(
+        path: &Path,
+        embedding_dim: usize,
+        options: &crate::backup::OpenOptions,
+    ) -> Result<Self, MemoryError> {
         let path_str = path
             .to_str()
             .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
@@ -424,9 +485,71 @@ impl MemoryStore {
 
         apply_pragmas(&db).await?;
 
-        Migrator::up(&db, None).await?;
+        if options.integrity_check_on_open {
+            crate::backup::check_integrity(&db).await?;
+        }
 
-        Ok(Self::init(db, embedding_dim))
+        let expected: Vec<String> = Migrator::migrations()
+            .into_iter()
+            .map(|m| m.name().to_string())
+            .collect();
+        let applied = applied_migration_names(&db).await?;
+
+        let unknown: Vec<&String> = applied
+            .iter()
+            .filter(|name| !expected.iter().any(|e| e == *name))
+            .collect();
+        if !unknown.is_empty() {
+            return Err(MemoryError::SchemaTooNew {
+                unknown: unknown
+                    .into_iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+        }
+
+        let pending: Vec<&String> = expected
+            .iter()
+            .filter(|name| !applied.iter().any(|a| a == *name))
+            .collect();
+
+        if pending.is_empty() {
+            return Ok(Self::init(db, embedding_dim, Some(path.to_path_buf())));
+        }
+
+        let backup_path = if options.backup_on_migrate && path.exists() {
+            let meta = std::fs::metadata(path).ok();
+            if meta.is_some_and(|m| m.len() > 0) {
+                Some(crate::backup::backup_database(path, Some(&db)).await?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        match Migrator::up(&db, None).await {
+            Ok(()) => {
+                if backup_path.is_some() {
+                    crate::backup::prune_backups(path, options.max_backups)?;
+                }
+                Ok(Self::init(db, embedding_dim, Some(path.to_path_buf())))
+            }
+            Err(cause) => {
+                // Drop the pool before restoring so the file is not locked.
+                drop(db);
+                if let Some(backup) = backup_path {
+                    crate::backup::restore_database(&backup, path)?;
+                    Err(MemoryError::MigrationRolledBack {
+                        backup: backup.display().to_string(),
+                        cause: cause.to_string(),
+                    })
+                } else {
+                    Err(MemoryError::from(cause))
+                }
+            }
+        }
     }
 
     /// Opens an in-memory memory store (useful for testing).
@@ -447,7 +570,22 @@ impl MemoryStore {
 
         Migrator::up(&db, None).await?;
 
-        Ok(Self::init(db, embedding_dim))
+        Ok(Self::init(db, embedding_dim, None))
+    }
+
+    /// Run `PRAGMA integrity_check` on the open connection (#239).
+    pub async fn check_integrity(&self) -> Result<(), MemoryError> {
+        crate::backup::check_integrity(&self.db).await
+    }
+
+    /// Create a timestamped file backup of this store's database (#239).
+    ///
+    /// Returns an error when the store is in-memory (no path).
+    pub async fn backup(&self) -> Result<std::path::PathBuf, MemoryError> {
+        let path = self.path().ok_or_else(|| {
+            MemoryError::BackupError("in-memory store cannot be backed up to a file".into())
+        })?;
+        crate::backup::backup_database(path, Some(&self.db)).await
     }
 
     // ── Conversation Logs ─────────────────────────────────────────────────────
@@ -4202,5 +4340,80 @@ mod tests {
         assert_eq!(results.len(), 1);
         let result = results.first().expect("pinned search result");
         assert!(result.item.pinned);
+    }
+
+    #[tokio::test]
+    async fn file_backup_restore_and_integrity_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.db");
+        let store = MemoryStore::open(&path, 4).await.expect("open");
+        store
+            .insert_log("s1", "card", "user", "hello")
+            .await
+            .expect("insert");
+        store.check_integrity().await.expect("integrity");
+        let backup = store.backup().await.expect("backup");
+        drop(store);
+
+        // Corrupt the live DB, then restore from the backup.
+        std::fs::write(&path, b"not-a-sqlite-database").expect("corrupt");
+        crate::backup::restore_database(&backup, &path).expect("restore");
+        let store = MemoryStore::open(&path, 4).await.expect("reopen");
+        store
+            .check_integrity()
+            .await
+            .expect("integrity after restore");
+        let logs = store.get_logs_by_session("s1").await.expect("logs");
+        assert_eq!(logs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn schema_too_new_is_reported() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.db");
+        let store = MemoryStore::open(&path, 4).await.expect("open");
+        // Inject an unknown migration name into seaql_migrations.
+        store
+            .connection()
+            .execute_unprepared(
+                "INSERT INTO seaql_migrations (version, applied_at) VALUES ('m20990101_future', 0)",
+            )
+            .await
+            .expect("inject");
+        drop(store);
+
+        let err = MemoryStore::open(&path, 4)
+            .await
+            .err()
+            .expect("expected SchemaTooNew");
+        assert!(
+            matches!(err, MemoryError::SchemaTooNew { .. }),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_after_simulated_migration_failure_keeps_db_usable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory.db");
+        let store = MemoryStore::open(&path, 4).await.expect("open");
+        store
+            .insert_log("s1", "card", "user", "keep-me")
+            .await
+            .expect("insert");
+        let backup = store.backup().await.expect("backup");
+        drop(store);
+
+        // Simulate a half-applied migration by wiping the live file, then
+        // restoring the backup the way open_with_options does on failure.
+        std::fs::write(&path, b"").expect("wipe");
+        crate::backup::restore_database(&backup, &path).expect("restore");
+        let store = MemoryStore::open(&path, 4).await.expect("reopen");
+        let logs = store.get_logs_by_session("s1").await.expect("logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs.first().map(|(_, content, _)| content.as_str()),
+            Some("keep-me")
+        );
     }
 }

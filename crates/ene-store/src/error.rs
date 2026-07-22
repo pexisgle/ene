@@ -36,6 +36,35 @@ pub enum EneMemoryError {
     #[error("Session export serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
+    /// File backup / restore failed (#239).
+    #[error("Database backup error: {0}")]
+    BackupError(String),
+
+    /// `PRAGMA integrity_check` reported corruption (#239).
+    #[error("Database integrity check failed: {0}")]
+    IntegrityCheckFailed(String),
+
+    /// The on-disk schema is newer than this binary can handle (#239).
+    ///
+    /// Recovery: upgrade the binary, or restore a backup created by a
+    /// compatible version (`ene store restore <backup>`).
+    #[error(
+        "Database schema is newer than this binary (applied migrations not known to the binary: {unknown}). Upgrade ene, or restore a compatible backup."
+    )]
+    SchemaTooNew {
+        /// Migration names present in the DB but not in this binary.
+        unknown: String,
+    },
+
+    /// A migration failed and the pre-migration backup was restored (#239).
+    #[error("Migration failed; database restored from backup {backup}: {cause}")]
+    MigrationRolledBack {
+        /// Path of the backup that was restored.
+        backup: String,
+        /// Underlying migration error.
+        cause: String,
+    },
+
     /// Catch-all error variant.
     #[error("Other error: {0}")]
     Other(String),

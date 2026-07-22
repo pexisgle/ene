@@ -56,6 +56,8 @@
 pub mod affect;
 /// Tool-permission audit log domain model (#177).
 pub mod audit;
+/// File-level SQLite backup, restore, and integrity helpers (#239).
+pub mod backup;
 /// Companion commitment ledger domain model.
 pub mod commitment;
 /// Store configuration types.
@@ -83,6 +85,8 @@ pub mod typed_memory;
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 /// Audit log types (#177).
 pub use audit::{AuditDecision, AuditEntry, NewAuditEntry, redact_arguments};
+/// Backup / integrity open options (#239).
+pub use backup::{OpenOptions, list_backups, restore_database};
 /// Commitment ledger types.
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Store feature toggle configuration.

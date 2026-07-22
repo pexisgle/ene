@@ -2777,10 +2777,10 @@ async fn init_memory_store(
     config: &EneConfig,
     embedder: &dyn ene_ai::EmbeddingProvider,
 ) -> Result<Arc<ene_store::MemoryStore>, String> {
-    let db_path = config
+    let store_config = config
         .get_section::<ene_store::StoreConfig>()
-        .unwrap_or_default()
-        .resolve_memory_db_path(&config.character);
+        .unwrap_or_default();
+    let db_path = store_config.resolve_memory_db_path(&config.character);
 
     if let Some(parent) = db_path.parent()
         && !parent.exists()
@@ -2790,7 +2790,8 @@ async fn init_memory_store(
     }
 
     let dims = embedder.dimensions();
-    let store = ene_store::MemoryStore::open(&db_path, dims)
+    let options = ene_store::OpenOptions::from(&store_config);
+    let store = ene_store::MemoryStore::open_with_options(&db_path, dims, &options)
         .await
         .map_err(|e| format!("Failed to open memory store: {e}"))?;
 

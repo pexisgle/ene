@@ -7,11 +7,13 @@ SQLite + sqlite-vec + Diesel powered episodic memory with vector similarity sear
 The runtime initializes memory during `EneHandle::open`:
 
 1. Create embedding provider from `embedding` / AI task config
-2. If `store.enabled == true`, call `MemoryStore::open()`
-3. Register sqlite-vec extension and run migrations
-4. Attach store and embedder to `session.memory`
+2. If `store.enabled == true`, call `MemoryStore::open_with_options()` (from `StoreConfig`)
+3. Optionally run `PRAGMA integrity_check` when `store.integrity_check_on_open`
+4. Compare applied SeaORM migrations with the binary; refuse to open if the DB schema is newer
+5. When pending migrations exist and `store.backup_on_migrate`, create a `{db}.bak.{timestamp}` file backup, then run migrations; on failure restore the backup
+6. Register sqlite-vec extension and attach store / embedder to `session.memory`
 
-**Schema reset:** the store uses a single initial migration. Delete any pre-existing SQLite memory database under the user data directory before upgrading across the schema collapse; there is no in-place legacy migration path.
+**Backup / recovery (#239):** use `/store backup|list-backups|restore|integrity` or `ene store …`. Migration failure restores the pre-migration backup so the DB does not remain half-applied. Keep at most `store.max_backups` files.
 
 Memory is also available in snapshots (`EneStateSnapshot`) for CLI commands like `/memory search`.
 

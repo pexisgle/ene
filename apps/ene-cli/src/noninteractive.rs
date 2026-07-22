@@ -14,7 +14,7 @@ use ene_runtime::{
 };
 use serde::Serialize;
 
-use crate::cli::{Command, MemoryAction, SessionAction, ToolAction};
+use crate::cli::{Command, MemoryAction, SessionAction, StoreAction, ToolAction};
 use crate::context::AppContext;
 use crate::output::{
     self, EXIT_OK, EXIT_RUNTIME, ErrorCode, OutputError, OutputFormat, PerfCue, StreamEvent,
@@ -43,6 +43,7 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
         Command::Session { action, json } => session_command(ctx, action, *json).await,
         Command::Memory { action, json } => memory_command(ctx, action, *json).await,
         Command::Doctor { json } => doctor_command(ctx, *json).await,
+        Command::Store { action, json } => store_command(ctx, action, *json).await,
     };
 
     match result {
@@ -764,5 +765,100 @@ async fn doctor_command(ctx: &mut AppContext, json: bool) -> Result<i32, OutputE
         Ok(()) => Ok(EXIT_OK),
         Err(CliError::ExecutionFailed(msg)) => Err(OutputError::new(ErrorCode::Runtime, msg)),
         Err(e) => Err(OutputError::new(ErrorCode::Runtime, e.to_string())),
+    }
+}
+
+// ── store ───────────────────────────────────────────────────────────────────
+
+async fn store_command(
+    ctx: &mut AppContext,
+    action: &StoreAction,
+    json: bool,
+) -> Result<i32, OutputError> {
+    let diag = ctx.handle.diagnostics();
+    let store = diag
+        .memory()
+        .store()
+        .ok_or_else(|| OutputError::new(ErrorCode::Runtime, "memory store is not enabled"))?;
+
+    match action {
+        StoreAction::Backup => {
+            let path = store
+                .backup()
+                .await
+                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
+            if json {
+                output::print_json(&serde_json::json!({ "backup": path.display().to_string() }))?;
+            } else {
+                println!("Backup created: {}", path.display());
+            }
+            Ok(EXIT_OK)
+        }
+        StoreAction::ListBackups => {
+            let db_path = store.path().ok_or_else(|| {
+                OutputError::new(ErrorCode::Runtime, "in-memory store has no file backups")
+            })?;
+            let backups = ene_store::list_backups(db_path)
+                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
+            if json {
+                let rows: Vec<String> = backups.iter().map(|p| p.display().to_string()).collect();
+                output::print_json(&rows)?;
+            } else if backups.is_empty() {
+                println!("No backups found.");
+            } else {
+                for b in backups {
+                    println!("{}", b.display());
+                }
+            }
+            Ok(EXIT_OK)
+        }
+        StoreAction::Restore { path, yes } => {
+            if !yes {
+                return Err(OutputError::new(
+                    ErrorCode::ConfirmationRequired,
+                    "restore requires --yes (destroys the current database file)",
+                ));
+            }
+            let db_path = store
+                .path()
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| {
+                    OutputError::new(
+                        ErrorCode::Runtime,
+                        "in-memory store cannot be restored from a file",
+                    )
+                })?;
+            ctx.handle
+                .shutdown(crate::commands::SHUTDOWN_TIMEOUT)
+                .await
+                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
+            ene_store::restore_database(path, &db_path)
+                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
+            if json {
+                output::print_json(&serde_json::json!({
+                    "restored": db_path.display().to_string(),
+                    "from": path.display().to_string(),
+                }))?;
+            } else {
+                println!(
+                    "Restored {} from {}. Restart ene to reopen.",
+                    db_path.display(),
+                    path.display()
+                );
+            }
+            Ok(EXIT_OK)
+        }
+        StoreAction::Integrity => {
+            store
+                .check_integrity()
+                .await
+                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
+            if json {
+                output::print_json(&serde_json::json!({ "integrity": "ok" }))?;
+            } else {
+                println!("integrity_check: ok");
+            }
+            Ok(EXIT_OK)
+        }
     }
 }
