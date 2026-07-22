@@ -345,6 +345,16 @@ pub struct UiState {
     pub session_message: Option<String>,
     /// First-run onboarding banner when the chat API key is missing (#241).
     pub show_onboarding: bool,
+    /// Localized startup failure when the runtime actor could not open (#242).
+    pub runtime_startup_error: Option<String>,
+    /// Actor broadcast channel closed; show reconnect banner (#242).
+    pub runtime_disconnected: bool,
+    /// Whether the single reconnect attempt has already been used (#242).
+    pub reconnect_attempted: bool,
+    /// Set by the reconnect banner; consumed by the winit runtime (#242).
+    pub reconnect_requested: bool,
+    /// Dismiss the fatal startup dialog until the next failure (#242).
+    pub fatal_startup_dismissed: bool,
 }
 
 /// A single session message search hit shown on the sessions page (#176).

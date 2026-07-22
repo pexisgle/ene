@@ -19,6 +19,7 @@ mod i18n;
 mod noninteractive;
 mod output;
 mod repl;
+mod runtime_error;
 mod stream;
 mod style;
 mod terminal_ui;
@@ -65,7 +66,15 @@ async fn main() {
     let handle = match config::init(&opts).await {
         Ok(h) => h,
         Err(e) => {
-            tracing::error!(error = %e, "Fatal: Failed to initialize runtime");
+            let message = runtime_error::user_message(&e);
+            eprintln!(
+                "{}",
+                style::error(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "init-failed",
+                    error = message
+                ))
+            );
             std::process::exit(1);
         }
     };

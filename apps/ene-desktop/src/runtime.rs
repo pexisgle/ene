@@ -95,6 +95,14 @@ impl Runtime {
             ui.0.settings_window_visible = true;
         }
 
+        // Startup runtime failure: surface a fatal dialog in settings (#242).
+        if let Some(error) = state.runtime_startup_error.clone() {
+            let mut ui = state.ui_bevy_state_mut();
+            ui.0.settings_window_visible = true;
+            ui.0.fatal_startup_dismissed = false;
+            ui.0.runtime_startup_error = Some(error);
+        }
+
         Self {
             state,
             event_tx,
@@ -420,6 +428,8 @@ impl ApplicationHandler for Runtime {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.sync_runtime_to_bevy();
         self.state.app.update();
+        self.state.pull_runtime_health_from_ui();
+        self.handle_runtime_reconnect();
         if self.handle_exit(event_loop) {
             return;
         }
@@ -465,6 +475,33 @@ impl Runtime {
             pipeline.expression_hold_secs = expression_hold_secs;
         }
         self.state.settings.flush_if_dirty();
+        self.state.sync_runtime_health_to_ui();
+    }
+
+    fn handle_runtime_reconnect(&mut self) {
+        if !self.state.take_reconnect_request() {
+            return;
+        }
+        let handle = self
+            .state
+            .app
+            .world()
+            .resource::<crate::resource::tokio::TokioHandle>()
+            .0
+            .clone();
+        match self.state.reconnect_runtime(&self.event_tx, &handle) {
+            Ok(()) => {
+                tracing::info!(component = "AiBridge", "Runtime reconnected");
+            }
+            Err(message) => {
+                tracing::warn!(
+                    component = "AiBridge",
+                    error = %message,
+                    "Runtime reconnect failed"
+                );
+            }
+        }
+        self.state.sync_runtime_health_to_ui();
     }
 
     /// Check the `ExitRequested` bevy resource. Returns `true`
@@ -580,14 +617,14 @@ impl Runtime {
         let Some(chat_entity) = self.state.chat_bevy_entity() else {
             return;
         };
-        let AppState {
-            ref gpu,
-            ref ai,
-            ref mut app,
-            ..
-        } = self.state;
-        let bevy_world = app.world_mut();
-        match cw.render_frame(&gpu.device, &gpu.queue, ai, bevy_world, chat_entity) {
+        let bevy_world = self.state.app.world_mut();
+        match cw.render_frame(
+            &self.state.gpu.device,
+            &self.state.gpu.queue,
+            self.state.ai.as_ref(),
+            bevy_world,
+            chat_entity,
+        ) {
             Ok(()) => {}
             Err(e) => match e {
                 AcquireError::Reconfigure => {
@@ -622,22 +659,15 @@ impl Runtime {
             let Some(ui_entity) = self.state.ui_bevy_entity() else {
                 return;
             };
-            let AppState {
-                ref gpu,
-                ref mut settings,
-                ref ai,
-                ref mut app,
-                ..
-            } = self.state;
-            let bevy_world = app.world_mut();
+            let bevy_world = self.state.app.world_mut();
             let now_secs = self
                 .emotion_clock
                 .map_or(0.0, |t| t.elapsed().as_secs_f64());
             match uw.render_frame(
-                &gpu.device,
-                &gpu.queue,
-                settings,
-                ai,
+                &self.state.gpu.device,
+                &self.state.gpu.queue,
+                &mut self.state.settings,
+                self.state.ai.as_ref(),
                 bevy_world,
                 ui_entity,
                 now_secs,
@@ -1403,6 +1433,9 @@ impl Runtime {
             ref mut app,
             ..
         } = self.state;
+        let Some(ai) = ai.as_ref() else {
+            return;
+        };
         let Some(ui_entity) = app
             .world_mut()
             .query_filtered::<
@@ -1810,7 +1843,7 @@ impl UiWindow {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         settings: &mut CharacterSettings,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut bevy_ecs::world::World,
         ui_entity: bevy_ecs::entity::Entity,
         now_secs: f64,

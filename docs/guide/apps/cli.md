@@ -20,6 +20,13 @@ cargo run -p ene-cli
 
 User-facing CLI output is localized through Fluent catalogs under `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`. The active language is negotiated from the system locale unless overridden with `--lang`.
 
+## Error handling (#242)
+
+- **Initialization failure:** Prints a styled, localized error to stderr and exits with code `1`.
+- **Turn failure (REPL):** `TerminalReason::Failed` is printed to stderr after the stream ends.
+- **Turn failure (`ene run`, text mode):** The localized failure message is printed to stderr before exit.
+- Runtime errors are mapped to Fluent strings in `apps/ene-cli/src/runtime_error.rs` (EN/JA catalogs).
+
 ## Non-interactive mode (#186)
 
 With no subcommand, `ene` starts the interactive REPL. With a subcommand, it

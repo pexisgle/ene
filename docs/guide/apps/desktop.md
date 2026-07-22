@@ -185,6 +185,13 @@ The messages registered by `CorePlugin` include:
 | `SettingsActionEvent` | `system::ui_dispatcher` | `apply_settings_action_system` (drain-only placeholder) |
 | `TickGtk` | `pump_legacy_events` (Linux) | `tray_tick::tick_gtk_system` (drain-only) |
 
+## Error handling (#242)
+
+- **Startup failure:** If `EneHandle::open` fails, the desktop app keeps running and shows a localized fatal dialog in the settings window (no process panic).
+- **Turn failures:** Chat bubbles show a localized `[Error]` prefix with a user-facing message mapped from the runtime error.
+- **Runtime disconnect:** When the actor broadcast channel closes, a banner offers a single **Reconnect** attempt (`shutdown` + `open_with_config`).
+- **Unexpected panics:** A custom panic hook shows a localized dialog with the app data directory path for diagnostics.
+
 ## Window Properties
 
 | Property | Value |

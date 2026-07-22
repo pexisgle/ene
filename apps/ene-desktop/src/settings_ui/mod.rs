@@ -82,12 +82,85 @@ impl SettingsUi {
         &mut self,
         ui: &mut egui::Ui,
         settings: &mut CharacterSettings,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         ui_entity: Entity,
         now_secs: f64,
     ) {
         apply_egui_visuals(ui.ctx());
+
+        let mut dismiss_fatal = false;
+        let fatal_message = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .and_then(|state| state.0.runtime_startup_error.clone())
+            .filter(|_| {
+                world
+                    .get::<crate::component::ui::UiStateComponent>(ui_entity)
+                    .is_some_and(|state| !state.0.fatal_startup_dismissed)
+            });
+        if let Some(message) = fatal_message {
+            egui::Window::new(crate::i18n::runtime_fatal_title())
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(crate::i18n::runtime_fatal_body(message));
+                    if ui.button(crate::i18n::runtime_fatal_dismiss()).clicked() {
+                        dismiss_fatal = true;
+                    }
+                });
+        }
+        if dismiss_fatal
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            state.0.fatal_startup_dismissed = true;
+        }
+
+        let mut reconnect_requested = false;
+        let show_disconnect_banner = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .is_some_and(|state| state.0.runtime_disconnected);
+        if show_disconnect_banner {
+            let reconnect_attempted = world
+                .get::<crate::component::ui::UiStateComponent>(ui_entity)
+                .is_some_and(|state| state.0.reconnect_attempted);
+            egui::Window::new(crate::i18n::runtime_disconnected_title())
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
+                .show(ui.ctx(), |ui| {
+                    ui.colored_label(
+                        egui::Color32::LIGHT_RED,
+                        crate::i18n::runtime_disconnected_body(),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !reconnect_attempted,
+                                egui::Button::new(crate::i18n::runtime_reconnect()),
+                            )
+                            .clicked()
+                        {
+                            reconnect_requested = true;
+                        }
+                    });
+                    if reconnect_attempted {
+                        ui.weak(crate::i18n::runtime_reconnect_already_attempted());
+                    }
+                });
+        }
+        if reconnect_requested
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            state.0.reconnect_requested = true;
+        }
+
+        let Some(ai) = ai else {
+            ui.colored_label(egui::Color32::LIGHT_RED, crate::i18n::runtime_unavailable());
+            return;
+        };
 
         // First-run onboarding panel (#241).
         let mut open_ai = false;

@@ -102,7 +102,16 @@ pub async fn process_stream(
                 }
                 ui.end_stream();
                 if let ene_runtime::TerminalReason::Failed { message } = &reason {
+                    let user_message = crate::runtime_error::user_message_from_turn(message);
                     tracing::error!(%turn, error = %message, "Terminal failure");
+                    eprintln!(
+                        "{}",
+                        crate::style::error(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "turn-failed",
+                            detail = user_message
+                        ))
+                    );
                 } else {
                     tracing::debug!(%turn, ?reason, "Stream terminal");
                 }

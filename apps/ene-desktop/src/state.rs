@@ -38,7 +38,13 @@ pub struct DebugState {
 pub struct AppState {
     pub gpu: GpuContext,
     pub settings: CharacterSettings,
-    pub ai: Arc<AiBridge>,
+    pub ai: Option<Arc<AiBridge>>,
+    /// Localized startup failure when [`AiBridge::try_new`] fails (#242).
+    pub runtime_startup_error: Option<String>,
+    /// Actor broadcast channel closed; chat is disabled until reconnect.
+    pub runtime_disconnected: bool,
+    /// Whether the single automatic reconnect has already been attempted.
+    pub reconnect_attempted: bool,
     pub tray: Option<TrayHandle>,
     /// Character renderer (depth texture + default VRM).
     pub character: CharacterRenderer,
@@ -74,7 +80,18 @@ impl AppState {
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
         let config = settings.ai.ai.clone();
-        let ai = Arc::new(AiBridge::new(tx.clone(), bootstrap_handle, config));
+        let (ai, runtime_startup_error) =
+            match AiBridge::try_new(tx.clone(), bootstrap_handle, config) {
+                Ok(bridge) => (Some(Arc::new(bridge)), None),
+                Err(error) => {
+                    tracing::error!(
+                        component = "AiBridge",
+                        error = %error,
+                        "EneHandle::open failed"
+                    );
+                    (None, Some(crate::runtime_error::user_message(&error)))
+                }
+            };
         let character =
             CharacterRenderer::uninit(&settings.assets_dir, settings.current_character());
 
@@ -85,6 +102,9 @@ impl AppState {
                 gpu,
                 settings,
                 ai,
+                runtime_startup_error,
+                runtime_disconnected: false,
+                reconnect_attempted: false,
                 tray: None,
                 character,
                 character_physics_registration: None,
@@ -127,7 +147,9 @@ impl AppState {
         reason = "transitional AI bridge entry point for external callers"
     )]
     pub fn ai_run(&self, input: impl Into<String>) {
-        self.ai.run(input);
+        if let Some(ai) = &self.ai {
+            ai.run(input);
+        }
     }
 
     /// Persist current runtime state.
@@ -315,7 +337,10 @@ impl AppState {
         if !needs {
             return;
         }
-        let Ok(snapshot) = self.ai.get_snapshot_blocking() else {
+        let Some(ai) = self.ai.as_ref() else {
+            return;
+        };
+        let Ok(snapshot) = ai.get_snapshot_blocking() else {
             return;
         };
         if let Some(mut chat) = self
@@ -325,6 +350,87 @@ impl AppState {
         {
             chat.0.sync_from_history(&snapshot.history);
         }
+    }
+
+    /// Attempt a single runtime reconnect after actor death (#242).
+    pub fn reconnect_runtime(
+        &mut self,
+        event_tx: &AppEventSender,
+        bootstrap_handle: &tokio::runtime::Handle,
+    ) -> Result<(), String> {
+        if self.reconnect_attempted {
+            return Err(crate::i18n::runtime_reconnect_already_attempted());
+        }
+        self.reconnect_attempted = true;
+        let config = self.settings.ai.ai.clone();
+        match AiBridge::try_new(event_tx.clone(), bootstrap_handle, config) {
+            Ok(bridge) => {
+                self.ai = Some(Arc::new(bridge));
+                self.runtime_disconnected = false;
+                self.runtime_startup_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                let message = crate::runtime_error::user_message(&error);
+                self.runtime_startup_error = Some(message.clone());
+                Err(message)
+            }
+        }
+    }
+
+    /// Mirror runtime health into the settings UI state.
+    pub fn sync_runtime_health_to_ui(&mut self) {
+        let Some(entity) = self.ui_bevy_entity() else {
+            return;
+        };
+        let startup_error = self.runtime_startup_error.clone();
+        let disconnected = self.runtime_disconnected;
+        let reconnect_attempted = self.reconnect_attempted;
+        if let Some(mut ui) = self
+            .app
+            .world_mut()
+            .get_mut::<crate::component::ui::UiStateComponent>(entity)
+        {
+            ui.0.runtime_startup_error = startup_error;
+            ui.0.runtime_disconnected = disconnected;
+            ui.0.reconnect_attempted = reconnect_attempted;
+        }
+    }
+
+    /// Pull disconnect state produced by bevy consumer systems.
+    pub fn pull_runtime_health_from_ui(&mut self) {
+        let Some(entity) = self.ui_bevy_entity() else {
+            return;
+        };
+        if self
+            .app
+            .world()
+            .get::<crate::component::ui::UiStateComponent>(entity)
+            .is_some_and(|ui| ui.0.runtime_disconnected)
+        {
+            self.runtime_disconnected = true;
+        }
+    }
+
+    /// Apply UI reconnect requests queued from the settings window.
+    pub fn take_reconnect_request(&mut self) -> bool {
+        let Some(entity) = self.ui_bevy_entity() else {
+            return false;
+        };
+        let requested = self
+            .app
+            .world()
+            .get::<crate::component::ui::UiStateComponent>(entity)
+            .is_some_and(|ui| ui.0.reconnect_requested);
+        if requested
+            && let Some(mut ui) = self
+                .app
+                .world_mut()
+                .get_mut::<crate::component::ui::UiStateComponent>(entity)
+        {
+            ui.0.reconnect_requested = false;
+        }
+        requested
     }
 }
 

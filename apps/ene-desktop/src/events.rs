@@ -53,6 +53,8 @@ pub enum AppEvent {
     LookAtCue { target: String },
     /// Request the event loop to exit.
     Quit,
+    /// The runtime actor broadcast channel closed (#242).
+    RuntimeDisconnected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -21,3 +21,22 @@ user-input-cancel = (cancel all)
 ## /help command
 help-commands-title = Commands:
 help-quit = Exit the CLI
+
+init-failed = Failed to initialize: { $error }
+turn-failed = Error: { $detail }
+runtime-error-no-character-card = Character card not found or could not be loaded.
+runtime-error-channel-closed = Connection to the AI runtime was lost.
+runtime-error-mind-prerequisite = A required component is missing: { $name }
+runtime-error-bootstrap = Startup failed: { $message }
+runtime-error-config = Configuration error: { $detail }
+runtime-error-memory = Memory store error: { $detail }
+runtime-error-mind = Mind engine error: { $detail }
+runtime-error-tool = Tool error: { $detail }
+runtime-error-ai-auth = AI provider authentication failed. Check your API key.
+runtime-error-ai-rate-limit = AI provider rate limit exceeded. Try again later.
+runtime-error-ai-network = Could not reach the AI provider. Check your network connection.
+runtime-error-ai-local-llm = Local model error: { $detail }
+runtime-error-ai-provider = AI provider error: { $detail }
+runtime-error-ai-embedding = Embedding provider error: { $detail }
+runtime-error-turn-failed = { $detail }
+runtime-error-turn-failed-unknown = The request failed for an unknown reason.

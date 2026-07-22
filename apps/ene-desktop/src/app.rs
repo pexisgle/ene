@@ -114,6 +114,7 @@ pub fn build_app(
     app.add_message::<OpenChat>();
     app.add_message::<SettingsActionEvent>();
     app.add_message::<TickGtk>();
+    app.add_message::<crate::event::lifecycle::RuntimeDisconnected>();
     app
 }
 

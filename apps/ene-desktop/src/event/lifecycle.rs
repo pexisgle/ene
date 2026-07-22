@@ -23,3 +23,7 @@ pub struct WindowCloseRequested;
 /// on Linux, so the `dead_code` lint is now satisfied.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct TickGtk;
+
+/// The runtime actor broadcast channel closed (#242).
+#[derive(Message, Debug, Clone, Copy)]
+pub struct RuntimeDisconnected;

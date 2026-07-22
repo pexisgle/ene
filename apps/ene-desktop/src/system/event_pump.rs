@@ -15,7 +15,6 @@ use crate::event::ai::{
     CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
 };
 use crate::event::chat::OpenChat;
-#[cfg(target_os = "linux")]
 use crate::event::lifecycle::TickGtk;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
@@ -45,6 +44,7 @@ pub fn pump_legacy_events(
     mut open_settings: MessageWriter<OpenSettings>,
     mut open_chat: MessageWriter<OpenChat>,
     #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
+    mut runtime_disconnected: MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
 ) {
     while let Ok(event) = channels.rx.try_recv() {
         translate_event(
@@ -61,6 +61,7 @@ pub fn pump_legacy_events(
             &mut cancel,
             &mut open_settings,
             &mut open_chat,
+            &mut runtime_disconnected,
         );
     }
     // Phase 7.5: publish a `TickGtk` every frame on Linux so the
@@ -85,10 +86,14 @@ fn translate_event(
     cancel: &mut MessageWriter<CancelCommand>,
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
+    runtime_disconnected: &mut MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
 ) {
     match event {
         AppEvent::Quit | AppEvent::Tray(crate::events::TrayAction::Quit) => {
             exit.0 = true;
+        }
+        AppEvent::RuntimeDisconnected => {
+            runtime_disconnected.write(crate::event::lifecycle::RuntimeDisconnected);
         }
         AppEvent::Tray(crate::events::TrayAction::OpenSettings { page }) => {
             open_settings.write(OpenSettings { page });
@@ -202,6 +207,7 @@ mod tests {
         world.init_resource::<Messages<CancelCommand>>();
         world.init_resource::<Messages<OpenSettings>>();
         world.init_resource::<Messages<OpenChat>>();
+        world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
         #[cfg(target_os = "linux")]
         world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
         (world, tx)

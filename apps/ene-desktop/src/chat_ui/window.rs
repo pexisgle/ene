@@ -93,7 +93,7 @@ impl ChatEguiWindow {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         chat_entity: Entity,
     ) -> Result<(), AcquireError> {

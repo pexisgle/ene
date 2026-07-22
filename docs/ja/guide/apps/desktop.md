@@ -171,6 +171,13 @@ Unavailable とし（捏造メタデータサマリは入れません）。
 | `SettingsActionEvent` | `system::ui_dispatcher` | `apply_settings_action_system` (drain 専用プレースホルダ) |
 | `TickGtk` | `pump_legacy_events` (Linux) | `tray_tick::tick_gtk_system` (drain 専用) |
 
+## エラーハンドリング (#242)
+
+- **起動失敗:** `EneHandle::open` が失敗してもプロセスは panic せず、設定ウィンドウにローカライズされた致命的エラーダイアログを表示します。
+- **ターン失敗:** チャットにはローカライズされた `[エラー]` 接頭辞と、ランタイムエラーから変換したユーザー向けメッセージを表示します。
+- **ランタイム切断:** アクターのブロードキャストチャンネルが閉じると、バナーから **再接続** を 1 回試行できます（`shutdown` + `open_with_config`）。
+- **予期しない panic:** カスタム panic フックが診断用のアプリデータディレクトリパス付きでローカライズされたダイアログを表示します。
+
 ## ウィンドウプロパティ
 
 | プロパティ | 値 |

@@ -339,6 +339,20 @@ async fn process_turn(
         println!();
     }
 
+    if format == OutputFormat::Text
+        && let Some(message) = terminal_message.as_deref()
+    {
+        let user_message = crate::runtime_error::user_message_from_turn(message);
+        eprintln!(
+            "{}",
+            crate::style::error(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "turn-failed",
+                detail = user_message
+            ))
+        );
+    }
+
     if format == OutputFormat::Json {
         output::print_json(&RunSummary {
             turn: turn.to_string(),

@@ -78,20 +78,22 @@ impl ChatState {
     /// End a failed stream, optionally appending an error note to the
     /// in-flight assistant bubble so the user sees why processing stopped.
     pub fn finish_streaming_with_error(&mut self, message: &str) {
+        let prefix = crate::i18n::chat_error_prefix();
+        let labeled = format!("[{prefix}] {message}");
         if let Some(last) = self.messages.last_mut()
             && last.role == Role::Assistant
             && last.is_streaming
         {
             if last.content.is_empty() {
-                last.content = format!("[Error] {message}");
+                last.content = labeled;
             } else {
-                let _ = write!(last.content, "\n[Error] {message}");
+                let _ = write!(last.content, "\n{labeled}");
             }
             last.is_streaming = false;
         } else {
             self.messages.push(ChatMessage {
                 role: Role::Assistant,
-                content: format!("[Error] {message}"),
+                content: labeled,
                 is_streaming: false,
             });
         }

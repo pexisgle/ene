@@ -46,6 +46,19 @@ pub fn open_chat_system(
     chat.0.chat_window_visible = true;
 }
 
+pub fn apply_runtime_disconnected_system(
+    mut events: MessageReader<crate::event::lifecycle::RuntimeDisconnected>,
+    mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,
+) {
+    if events.read().last().is_none() {
+        return;
+    }
+    let Some(mut ui) = ui_query.iter_mut().next() else {
+        return;
+    };
+    ui.0.runtime_disconnected = true;
+}
+
 pub fn apply_ai_text_deltas_system(
     mut events: MessageReader<AiTextDelta>,
     mut chat_query: Query<&mut ChatStateComponent, With<ChatWindow>>,

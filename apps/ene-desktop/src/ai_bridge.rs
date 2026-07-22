@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ene_config::EneConfig;
 use ene_runtime::{
-    EneEvent, EneEventReceiver, EneHandle, PermissionDecision, RunError, TurnId, UserInputResponse,
-    open_with_config,
+    EneEvent, EneEventReceiver, EneHandle, EneRuntimeError, PermissionDecision, RunError, TurnId,
+    UserInputResponse, open_with_config,
 };
 
 use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
@@ -52,28 +52,16 @@ impl AiBridge {
     /// `config` must be the same [`EneConfig`] already loaded by
     /// [`crate::settings::CharacterSettings::discover`] so the actor
     /// does not reload settings from disk a second time.
-    pub fn new(
+    /// Open the runtime actor and spawn the background event pump.
+    pub fn try_new(
         event_tx: AppEventSender,
         bootstrap_handle: &tokio::runtime::Handle,
         config: EneConfig,
-    ) -> Self {
+    ) -> Result<Self, EneRuntimeError> {
         let mind = config
             .get_section::<ene_mind::MindConfig>()
             .unwrap_or_default();
-        let handle = match bootstrap_handle.block_on(open_with_config(config)) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(
-                    component = "AiBridge",
-                    error = %e,
-                    "EneHandle::open failed"
-                );
-                // Fall back is not available — panic would brick desktop.
-                // Surface as processing=false with no handle is impossible;
-                // rethrow via expect so startup fails loudly.
-                panic!("EneHandle::open failed: {e}");
-            }
-        };
+        let handle = bootstrap_handle.block_on(open_with_config(config))?;
         let receiver = handle.subscribe();
         let processing = Arc::new(AtomicBool::new(false));
         let active_turn = Arc::new(Mutex::new(None));
@@ -94,7 +82,7 @@ impl AiBridge {
             active_turn,
         ));
 
-        bridge
+        Ok(bridge)
     }
 
     /// Send a `Run` command. Also sets the `processing` flag
@@ -647,7 +635,8 @@ async fn pump_events(
                 }
                 clear_active_turn(&active_turn, &turn);
                 processing.store(false, Ordering::Relaxed);
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(message)));
+                let user_message = crate::runtime_error::user_message_from_turn(&message);
+                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(user_message)));
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(
@@ -666,7 +655,21 @@ async fn pump_events(
                 }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                tracing::error!(
+                    component = "AiBridge",
+                    "Actor broadcast channel closed; runtime disconnected"
+                );
+                processing.store(false, Ordering::Relaxed);
+                let shutdown_handle = handle.clone();
+                tokio::spawn(async move {
+                    let _ = shutdown_handle
+                        .shutdown(std::time::Duration::from_secs(2))
+                        .await;
+                });
+                let _ = event_tx.send(AppEvent::RuntimeDisconnected);
+                break;
+            }
         }
     }
 }

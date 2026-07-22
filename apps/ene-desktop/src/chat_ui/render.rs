@@ -19,10 +19,14 @@ impl ChatUi {
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         chat_entity: Entity,
     ) {
+        let Some(ai) = ai else {
+            ui.colored_label(egui::Color32::LIGHT_RED, crate::i18n::runtime_unavailable());
+            return;
+        };
         let Some(mut chat_state) = world.get_mut::<ChatStateComponent>(chat_entity) else {
             return;
         };
