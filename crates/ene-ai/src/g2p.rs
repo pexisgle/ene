@@ -11,6 +11,14 @@
 //! - **Japanese**: a kana → phoneme lookup table (hiragana/katakana → IPA).
 //!
 //! Unknown characters are dropped, matching the reference Kokoro tokenizer.
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "phoneme tokenization uses bounded counter arithmetic over VOCAB indices"
+)]
+#![allow(
+    clippy::indexing_slicing,
+    reason = "vocab lookup indexes into the bounded static VOCAB table"
+)]
 
 /// A single Kokoro vocabulary entry: phoneme character → token id.
 const VOCAB: &[(char, u8)] = &[
@@ -349,6 +357,20 @@ fn kana_to_phoneme(ch: char) -> Option<&'static str> {
         'ぷ' | 'プ' => "pɯ",
         'ぺ' | 'ペ' => "pe",
         'ぽ' | 'ポ' => "po",
+        // Small vowels (map to the same phoneme as their full-size form)
+        'ぁ' | 'ァ' => "a",
+        'ぃ' | 'ィ' => "i",
+        'ぅ' | 'ゥ' => "ɯ",
+        'ぇ' | 'ェ' => "e",
+        'ぉ' | 'ォ' => "o",
+        // Yoon (contracted sounds, e.g. きゃ -> kja)
+        'ゃ' | 'ャ' => "ja",
+        'ゅ' | 'ュ' => "jɯ",
+        'ょ' | 'ョ' => "jo",
+        // Gemination: sokuon marks a glottal stop / consonant doubling (VOCAB id 148)
+        'っ' | 'ッ' => "ʔ",
+        // Long vowel mark (chōonpu, VOCAB id 158)
+        'ー' => "ː",
         // Punctuation
         '、' => ",",
         '。' => ".",
@@ -410,6 +432,32 @@ mod tests {
     fn japanese_katakana_mapping() {
         let ph = japanese_to_phonemes("カキ");
         assert_eq!(ph, "kaki");
+    }
+
+    #[test]
+    fn japanese_yoon_and_gemination() {
+        // Yoon kana map per-character (ゃ -> ja), so きゃ -> ki + ja.
+        assert_eq!(japanese_to_phonemes("きゃ"), "kija");
+        assert_eq!(japanese_to_phonemes("しゅ"), "ɕijɯ");
+        // Gemination (sokuon) maps to a glottal stop.
+        assert_eq!(japanese_to_phonemes("っか"), "ʔka");
+        assert_eq!(japanese_to_phonemes("ッカ"), "ʔka");
+        // Long vowel mark (chōonpu) maps to the length marker.
+        assert_eq!(japanese_to_phonemes("カー"), "kaː");
+    }
+
+    #[test]
+    fn japanese_yoon_gemination_tokenize() {
+        // 'ʔ' -> 148 and 'ː' -> 158 exist in VOCAB, so they survive tokenization.
+        let tokens = text_to_tokens("っー", Some("ja"));
+        assert!(
+            tokens.contains(&148),
+            "glottal stop token missing: {tokens:?}"
+        );
+        assert!(
+            tokens.contains(&158),
+            "long vowel token missing: {tokens:?}"
+        );
     }
 
     #[test]

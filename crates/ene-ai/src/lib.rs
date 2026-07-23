@@ -11,14 +11,6 @@
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
 )]
-#![allow(
-    clippy::arithmetic_side_effects,
-    reason = "audio DSP (resampling, FIR, voice indexing) uses bounded counter arithmetic"
-)]
-#![allow(
-    clippy::indexing_slicing,
-    reason = "audio DSP indexes into bounded PCM buffers and voice embeddings"
-)]
 #![cfg_attr(
     test,
     expect(

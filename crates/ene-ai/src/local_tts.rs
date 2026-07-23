@@ -4,6 +4,14 @@
 //! When the feature is disabled, [`LocalTtsProviderFactory`] still registers
 //! but fails fast with [`AudioProviderError::Init`] so the crate (and the
 //! workspace) keeps compiling without the ONNX Runtime toolchain.
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "voice indexing and PCM chunk arithmetic use bounded counters"
+)]
+#![allow(
+    clippy::indexing_slicing,
+    reason = "voice embedding slicing indexes into bounds-checked `voices.bin` floats"
+)]
 
 #[cfg(feature = "local-tts")]
 use crate::audio::TtsChunk;
@@ -316,6 +324,13 @@ impl TtsProvider for LocalTtsProvider {
         PROVIDER_NAME
     }
 
+    /// Deliver synthesized PCM as fixed-size chunks (H10).
+    ///
+    /// This is chunked delivery of batch inference results via mpsc, not true
+    /// streaming synthesis: Kokoro runs a single batch inference over all
+    /// phoneme tokens on a blocking thread, and the resulting PCM buffer is
+    /// then sliced into [`CHUNK_SAMPLES`]-sized chunks pushed through the
+    /// channel as the consumer polls them.
     async fn synthesize_stream(
         &self,
         text: &str,
@@ -336,8 +351,10 @@ impl TtsProvider for LocalTtsProvider {
         let voice = self.voice.clone();
         let speed = self.speed;
 
-        // Stream PCM chunks as they are produced (H10): inference runs on a
-        // blocking thread and pushes fixed-size chunks through the channel.
+        // Chunked delivery of batch inference results via mpsc (H10): a single
+        // batch inference runs on a blocking thread, then the full PCM buffer
+        // is pushed as fixed-size chunks through the channel. This is not true
+        // token-by-token streaming synthesis.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<TtsChunk, AudioProviderError>>(4);
         tokio::task::spawn_blocking(move || {
             let result = {

@@ -49,6 +49,10 @@ pub struct AudioChunkPayload {
     pub sample_rate: u32,
     /// Whether this is the final audio chunk for the turn.
     pub is_final: bool,
+    /// Whether the playback sink should stop immediately (barge-in) instead
+    /// of draining queued audio. Only meaningful on a final marker: `true`
+    /// for a cancelled turn, `false` for normal completion.
+    pub abort: bool,
 }
 
 /// Sender half used by the AI bridge pump to forward `AudioChunk`
@@ -193,26 +197,18 @@ impl VisemeState {
     /// analyzer sees a smooth, time-aligned stream.
     pub fn advance(&self) {
         let now = std::time::Instant::now();
-        // Determine how many samples should have played from the front
-        // chunk. Without a chunk there is nothing to pace against.
-        let (target_samples, sample_rate) = {
-            let queue = self.queue.lock();
-            match queue.front() {
-                Some(front) => {
-                    let elapsed = now.duration_since(front.enqueued_at).as_secs_f64();
-                    let samples = (elapsed * f64::from(front.sample_rate)).floor() as usize;
-                    (samples, front.sample_rate)
-                }
-                None => return,
-            }
-        };
 
         let mut cursor = self.cursor.lock();
         let mut driver = self.driver.lock();
         let mut queue = self.queue.lock();
 
-        // Feed samples from the front chunk up to `target_samples`.
+        // Pace each chunk against its own enqueue time rather than a single
+        // target derived from the original front chunk. Recomputing the target
+        // per chunk keeps the play-head estimate correct after the front is
+        // popped mid-call (a stale target mis-aligned every later chunk).
         while let Some(front) = queue.front() {
+            let elapsed = now.duration_since(front.enqueued_at).as_secs_f64();
+            let target = (elapsed * f64::from(front.sample_rate)).floor() as usize;
             let start = *cursor as usize;
             if start >= front.pcm.len() {
                 // Front chunk fully consumed: drop it and move on.
@@ -220,9 +216,9 @@ impl VisemeState {
                 *cursor = 0.0;
                 continue;
             }
-            let end = target_samples.min(front.pcm.len());
+            let end = target.min(front.pcm.len());
             if end > start {
-                driver.feed_pcm(&front.pcm[start..end], sample_rate);
+                driver.feed_pcm(&front.pcm[start..end], front.sample_rate);
                 *cursor = end as f64;
             }
             break;

@@ -653,10 +653,12 @@ async fn pump_events(
                         // bounded playback channel is full (L10); a full
                         // buffer means the sink is behind and the dropped
                         // chunk is preferable to stalling all event routing.
+                        // The natural TTS final marker never aborts playback.
                         if let Err(e) = tx.try_send(AudioChunkPayload {
                             pcm,
                             sample_rate,
                             is_final,
+                            abort: false,
                         }) {
                             tracing::warn!(
                                 component = "AiBridge",
@@ -685,7 +687,9 @@ async fn pump_events(
             Ok(EneEvent::Terminal {
                 turn,
                 origin: _,
-                reason: ene_runtime::TerminalReason::Done | ene_runtime::TerminalReason::Cancelled,
+                reason:
+                    reason @ (ene_runtime::TerminalReason::Done
+                    | ene_runtime::TerminalReason::Cancelled),
             }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;
@@ -694,15 +698,28 @@ async fn pump_events(
                 processing.store(false, Ordering::Relaxed);
                 // Ensure the playback subsystem releases `tts_playing` even
                 // if the TTS worker never emitted an `is_final` marker (M2).
+                // A cancelled turn is a barge-in: `abort` stops the sink
+                // immediately instead of draining the queued audio.
                 #[cfg(feature = "voice")]
                 if audio_turn.take().is_some()
                     && let Some(tx) = &audio_tx
                 {
-                    let _ = tx.try_send(AudioChunkPayload {
+                    let abort = matches!(reason, ene_runtime::TerminalReason::Cancelled);
+                    // Blocking send: dropping a synthetic final marker would
+                    // leave `tts_playing` stuck (self-voice suppression never
+                    // releases), so wait for capacity rather than discarding.
+                    if let Err(e) = tx.send(AudioChunkPayload {
                         pcm: Vec::new(),
                         sample_rate: 0,
                         is_final: true,
-                    });
+                        abort,
+                    }) {
+                        tracing::warn!(
+                            component = "AiBridge",
+                            error = %e,
+                            "playback channel closed; dropping synthetic final marker"
+                        );
+                    }
                 }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
             }
@@ -720,11 +737,20 @@ async fn pump_events(
                 if audio_turn.take().is_some()
                     && let Some(tx) = &audio_tx
                 {
-                    let _ = tx.try_send(AudioChunkPayload {
+                    // Blocking send so a dropped marker cannot wedge
+                    // `tts_playing` (see the Done/Cancelled arm).
+                    if let Err(e) = tx.send(AudioChunkPayload {
                         pcm: Vec::new(),
                         sample_rate: 0,
                         is_final: true,
-                    });
+                        abort: false,
+                    }) {
+                        tracing::warn!(
+                            component = "AiBridge",
+                            error = %e,
+                            "playback channel closed; dropping synthetic final marker"
+                        );
+                    }
                 }
                 let user_message = crate::runtime_error::user_message_from_turn(&message);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(user_message)));
@@ -738,16 +764,24 @@ async fn pump_events(
                 processing.store(false, Ordering::Relaxed);
                 // The `is_final` marker may have been among the dropped
                 // events; send a synthetic final so `tts_playing` does not
-                // stay stuck (M2).
+                // stay stuck (M2). Use a blocking send so the marker itself
+                // is never dropped (which would re-introduce the stuck flag).
                 #[cfg(feature = "voice")]
                 if audio_turn.take().is_some()
                     && let Some(tx) = &audio_tx
                 {
-                    let _ = tx.try_send(AudioChunkPayload {
+                    if let Err(e) = tx.send(AudioChunkPayload {
                         pcm: Vec::new(),
                         sample_rate: 0,
                         is_final: true,
-                    });
+                        abort: false,
+                    }) {
+                        tracing::warn!(
+                            component = "AiBridge",
+                            error = %e,
+                            "playback channel closed; dropping synthetic final marker"
+                        );
+                    }
                 }
                 if let Ok(guard) = active_turn.lock()
                     && let Some(turn) = guard.clone()

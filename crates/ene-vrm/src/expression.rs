@@ -340,6 +340,7 @@ impl ExpressionLayer {
     /// semantics.
     pub fn apply_viseme_weights(&mut self, weights: &crate::viseme::VisemeWeights) {
         let values = [weights.aa, weights.ih, weights.ou, weights.ee, weights.oh];
+        debug_assert_eq!(crate::expression_override::MOUTH_TARGET_NAMES.len(), 5);
         for (name, weight) in crate::expression_override::MOUTH_TARGET_NAMES
             .iter()
             .zip(values)

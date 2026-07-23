@@ -85,15 +85,13 @@ impl Drop for MicHandle {
 
 /// Stateful linear resampler from the device rate to [`CAPTURE_SAMPLE_RATE`].
 ///
-/// Carries a fractional input position and the previous buffer's last
-/// sample across callbacks so the output stream stays continuous.
+/// Carries a fractional input position across callbacks so the output
+/// stream stays continuous.
 struct Resampler {
     /// Input samples consumed per output sample (`src_rate / dst_rate`).
     ratio: f64,
     /// Fractional input position carried across buffers.
     pos: f64,
-    /// Last sample of the previous buffer (interpolation anchor).
-    prev: f32,
 }
 
 impl Resampler {
@@ -102,7 +100,6 @@ impl Resampler {
         Self {
             ratio: ratio.max(f64::from(f32::EPSILON)),
             pos: 0.0,
-            prev: 0.0,
         }
     }
 
@@ -130,7 +127,6 @@ impl Resampler {
             self.pos += self.ratio;
         }
         self.pos -= len;
-        self.prev = *input.last().unwrap_or(&self.prev);
     }
 }
 
@@ -199,16 +195,21 @@ impl CaptureState {
                     .map(|frame| frame.iter().sum::<f32>() / ch as f32)
                     .collect()
             };
-            self.resampler.process(&mono, &mut self.resampled);
+            // Resample into a scratch buffer and gate on its RMS so the
+            // decision reflects only the current callback's audio, not the
+            // variable-length accumulation left in `self.resampled` from
+            // earlier callbacks.
+            let mut resampled = Vec::new();
+            self.resampler.process(&mono, &mut resampled);
             // Energy gate: only process frames that are loud enough to
             // plausibly be user speech over the speaker output.
-            let rms = rms_energy(&self.resampled);
+            let rms = rms_energy(&resampled);
             if rms < SILENCE_RMS * BARGE_IN_ENERGY_FACTOR {
-                self.resampled.clear();
                 return;
             }
-            // Loud frame during TTS: run VAD and emit barge-in if speech
-            // is detected.
+            // Loud frame during TTS: keep the resampled audio, run VAD, and
+            // emit barge-in if speech is detected.
+            self.resampled.extend(resampled);
             self.drain_vad_frames();
             return;
         }

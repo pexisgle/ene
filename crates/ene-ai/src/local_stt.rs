@@ -4,6 +4,14 @@
 //! When the feature is disabled, [`LocalSttProviderFactory`] still registers
 //! but fails fast with [`AudioProviderError::Init`] so the crate (and the
 //! workspace) keeps compiling without the whisper.cpp toolchain.
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "FIR filter and resampler use bounded counter arithmetic over PCM buffers"
+)]
+#![allow(
+    clippy::indexing_slicing,
+    reason = "resampler indexes into bounded PCM buffers with clamped positions"
+)]
 
 #[cfg(feature = "local-stt")]
 use crate::audio::SttResult;

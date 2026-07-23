@@ -118,6 +118,9 @@ ene-tool-proto = { path = "crates/ene-tool-proto" }
 ene-tool-rag = { path = "crates/ene-tool-rag" }
 ene-vrm = { path = "crates/ene-vrm" }
 
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "vendor/llama-cpp-sys-2" }
+
 [workspace.metadata.cargo-husky]
 run-for-all = true
 

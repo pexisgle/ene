@@ -138,10 +138,17 @@ fn playback_loop(
         };
 
         match state.process_chunk(&chunk) {
-            PlaybackAction::Final { was_speaking } => {
-                // Final marker: wait for queued audio to finish, then release
-                // the self-voice suppression flag and reset lip-sync.
-                if was_speaking {
+            PlaybackAction::Final {
+                was_speaking,
+                abort,
+            } => {
+                // Final marker: release the self-voice suppression flag and
+                // reset lip-sync. On a barge-in (`abort`) stop the sink
+                // immediately so queued audio is discarded; otherwise let the
+                // utterance drain naturally before resetting.
+                if abort {
+                    sink.stop();
+                } else if was_speaking {
                     sink.sleep_until_end();
                 }
                 tts_playing.store(false, Ordering::Relaxed);
@@ -207,7 +214,10 @@ impl PlaybackState {
         if chunk.is_final {
             let was_speaking = self.speaking;
             self.speaking = false;
-            return PlaybackAction::Final { was_speaking };
+            return PlaybackAction::Final {
+                was_speaking,
+                abort: chunk.abort,
+            };
         }
         if chunk.pcm.is_empty() || chunk.sample_rate == 0 {
             return PlaybackAction::Skip;
@@ -222,8 +232,9 @@ impl PlaybackState {
 #[derive(Debug, PartialEq, Eq)]
 enum PlaybackAction {
     /// Chunk is a final marker; `was_speaking` indicates whether the
-    /// sink needs to drain before resetting.
-    Final { was_speaking: bool },
+    /// sink needs to drain before resetting, and `abort` requests an
+    /// immediate `sink.stop()` (barge-in) instead of draining.
+    Final { was_speaking: bool, abort: bool },
     /// Chunk carries audio; `first` indicates this is the first chunk
     /// of the utterance (set `tts_playing`).
     Audio { first: bool },
@@ -240,6 +251,16 @@ mod tests {
             pcm,
             sample_rate,
             is_final,
+            abort: false,
+        }
+    }
+
+    fn final_chunk(abort: bool) -> AudioChunkPayload {
+        AudioChunkPayload {
+            pcm: Vec::new(),
+            sample_rate: 0,
+            is_final: true,
+            abort,
         }
     }
 
@@ -264,7 +285,13 @@ mod tests {
         let mut state = PlaybackState::new();
         state.process_chunk(&chunk(vec![0.1; 100], 24_000, false));
         let action = state.process_chunk(&chunk(vec![], 0, true));
-        assert_eq!(action, PlaybackAction::Final { was_speaking: true });
+        assert_eq!(
+            action,
+            PlaybackAction::Final {
+                was_speaking: true,
+                abort: false
+            }
+        );
         assert!(!state.speaking);
     }
 
@@ -275,9 +302,25 @@ mod tests {
         assert_eq!(
             action,
             PlaybackAction::Final {
-                was_speaking: false
+                was_speaking: false,
+                abort: false
             }
         );
+    }
+
+    #[test]
+    fn playback_state_final_abort_propagates() {
+        let mut state = PlaybackState::new();
+        state.process_chunk(&chunk(vec![0.1; 100], 24_000, false));
+        let action = state.process_chunk(&final_chunk(true));
+        assert_eq!(
+            action,
+            PlaybackAction::Final {
+                was_speaking: true,
+                abort: true
+            }
+        );
+        assert!(!state.speaking);
     }
 
     #[test]
@@ -312,7 +355,10 @@ mod tests {
         // End of utterance.
         assert_eq!(
             state.process_chunk(&chunk(vec![], 0, true)),
-            PlaybackAction::Final { was_speaking: true }
+            PlaybackAction::Final {
+                was_speaking: true,
+                abort: false
+            }
         );
         // Next utterance starts fresh.
         assert_eq!(

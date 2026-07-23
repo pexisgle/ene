@@ -247,6 +247,19 @@ pub struct NaturalDecayReport {
     pub archived_count: usize,
 }
 
+/// Strip the trailing `ene:tags` metadata footer from memory content.
+///
+/// The memory arbiter appends `\n\n<!-- ene:tags {"tags":[...]} -->` at
+/// write time. This footer is internal metadata and must not leak into
+/// LLM prompts or recall scoring. Stripping at the model-to-item
+/// conversion layer covers all readers with a single choke point.
+fn strip_tags_footer(content: &str) -> &str {
+    match content.find("\n\n<!-- ene:tags ") {
+        Some(pos) => &content[..pos],
+        None => content,
+    }
+}
+
 /// Convert a typed memory model row to a [`crate::MemoryItem`].
 #[expect(
     clippy::unnecessary_wraps,
@@ -262,7 +275,7 @@ fn model_to_memory_item(
         user_id: m.user_id,
         kind: crate::MemoryKind::from_db_str(&m.kind),
         title: m.title,
-        content: m.content,
+        content: strip_tags_footer(&m.content).to_owned(),
         source: crate::MemorySource::from_db_str(&m.source),
         source_ref: m.source_ref,
         confidence: crate::MemoryConfidence::new(m.confidence),
@@ -4673,5 +4686,39 @@ mod tests {
             .await
             .expect("count after");
         assert_eq!(pending, 0);
+    }
+
+    #[test]
+    fn strip_tags_footer_removes_trailing_footer() {
+        let content = "User likes coffee.\n\n<!-- ene:tags {\"tags\":[\"interrupted\"]} -->";
+        assert_eq!(strip_tags_footer(content), "User likes coffee.");
+    }
+
+    #[test]
+    fn strip_tags_footer_leaves_content_without_footer() {
+        let content = "User likes coffee.";
+        assert_eq!(strip_tags_footer(content), "User likes coffee.");
+    }
+
+    #[test]
+    fn strip_tags_footer_handles_empty_content() {
+        assert_eq!(strip_tags_footer(""), "");
+    }
+
+    #[test]
+    fn strip_tags_footer_preserves_mid_content_marker() {
+        // "ene:tags" appearing mid-content (without the `\n\n<!-- ` prefix)
+        // is not a footer and must be preserved.
+        let content = "Discussed ene:tags format in the meeting.";
+        assert_eq!(
+            strip_tags_footer(content),
+            "Discussed ene:tags format in the meeting."
+        );
+    }
+
+    #[test]
+    fn strip_tags_footer_multiline_content() {
+        let content = "Line one.\nLine two.\n\n<!-- ene:tags {\"tags\":[\"a\",\"b\"]} -->";
+        assert_eq!(strip_tags_footer(content), "Line one.\nLine two.");
     }
 }

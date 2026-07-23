@@ -4,6 +4,14 @@
 //! When the feature is disabled, [`SileroVadFactory`] still registers but fails
 //! fast with [`AudioProviderError::Init`] so the crate (and the workspace)
 //! keeps compiling without the ONNX Runtime toolchain.
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "VAD chunk and failure-counter arithmetic uses bounded counters"
+)]
+#![allow(
+    clippy::indexing_slicing,
+    reason = "VAD indexes into fixed-size recurrent state buffers"
+)]
 
 #[cfg(feature = "silero-vad")]
 use crate::audio::VadEvent;

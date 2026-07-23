@@ -770,6 +770,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     }
                 }
                 // Emit final marker only on clean completion (not on cancel).
+                // This natural final is a graceful end of the utterance, so the
+                // desktop playback pump maps it to a non-aborting final marker
+                // (`abort: false`); a barge-in abort is signalled separately by
+                // the synthetic final the pump emits on `Terminal(Cancelled)`.
                 if !tts_cancel.is_cancelled() {
                     let _ = event_tx.send(EneEvent::AudioChunk {
                         turn: turn.clone(),

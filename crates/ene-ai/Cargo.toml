@@ -11,7 +11,7 @@ publish.workspace = true
 crate-type = ["lib"]
 
 [features]
-default = ["patch-llama-fgdn"]
+default = []
 # GPU backends for llama-cpp-2 (decision + local embedding).
 vulkan = ["llama-cpp-2/vulkan"]
 cuda = ["llama-cpp-2/cuda"]
@@ -21,10 +21,6 @@ local-tts = ["dep:ort"]
 silero-vad = ["dep:ort"]
 # Enable all local voice providers.
 voice = ["local-stt", "local-tts", "silero-vad"]
-# Patches the shared cargo-registry copy of `llama-cpp-sys-2` so models that
-# omit one of the two FGDN tensor groups load without tripping a GGML_ASSERT.
-# Disable only if the upstream crate ships the fix or you vendor a patched copy.
-patch-llama-fgdn = []
 
 [dependencies]
 async-openai = { workspace = true, default-features = false }
