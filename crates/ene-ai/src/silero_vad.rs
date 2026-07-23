@@ -24,31 +24,31 @@ const VAD_CHUNK_SAMPLES: usize = 512;
 #[cfg(feature = "silero-vad")]
 const STATE_LEN: usize = 128;
 
-/// Resolve the Silero VAD ONNX model path from configuration / environment.
-///
-/// Precedence: `ENE_AI__VAD__MODEL_PATH` env, then `VadConfig::model` when it
-/// looks like a filesystem path, then a default cache location.
+/// Number of consecutive inference failures before [`SileroVadEngine`]
+/// escalates to a hard error (M13).
 #[cfg(feature = "silero-vad")]
-fn resolve_model_path(config: &ene_config::EneConfig) -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("ENE_AI__VAD__MODEL_PATH")
-        && !path.trim().is_empty()
+const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+/// Resolve the Silero VAD ONNX model path from configuration.
+///
+/// Precedence: `VadConfig::model_path` when non-empty, then `VadConfig::model`
+/// when non-empty, then a default cache location. Environment overrides are
+/// handled by the config system (`ENE_AI__VAD__MODEL_PATH`).
+#[cfg(feature = "silero-vad")]
+fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
+    if let Some(path) = ai
+        .vad
+        .model_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
     {
-        return std::path::PathBuf::from(path.trim());
+        return std::path::PathBuf::from(path);
     }
-    if let Ok(ai) = config.get_section::<crate::config::AiConfig>()
-        && !ai.vad.model.trim().is_empty()
-    {
+    if !ai.vad.model.trim().is_empty() {
         return std::path::PathBuf::from(ai.vad.model.trim());
     }
     crate::gguf::gguf_cache_dir().join("silero_vad.onnx")
-}
-
-/// Resolve the speech probability threshold from configuration.
-#[cfg(feature = "silero-vad")]
-fn resolve_threshold(config: &ene_config::EneConfig) -> f32 {
-    config
-        .get_section::<crate::config::AiConfig>()
-        .map_or(0.5, |ai| ai.vad.threshold)
 }
 
 /// Local Silero VAD voice activity detection engine.
@@ -61,17 +61,30 @@ pub struct SileroVadEngine {
     c: Vec<f32>,
     threshold: f32,
     speaking: bool,
+    /// Count of consecutive inference failures (M13 escalation).
+    consecutive_failures: u32,
 }
 
 #[cfg(feature = "silero-vad")]
 impl SileroVadEngine {
     /// Load the Silero VAD ONNX model.
     ///
+    /// ONNX Runtime is initialized exactly once per process (C3) using
+    /// `ort_dylib_path` when provided. The `threshold` is expected to already
+    /// be clamped to `[0.0, 1.0]` by the caller (see
+    /// [`AiConfig::resolve_vad`](crate::config::AiConfig::resolve_vad)).
+    ///
     /// # Errors
     ///
     /// Returns [`AudioProviderError::Init`] when the model file is missing or
     /// ONNX Runtime fails to build a session.
-    pub fn open(model_path: &std::path::Path, threshold: f32) -> Result<Self, AudioProviderError> {
+    pub fn open(
+        model_path: &std::path::Path,
+        threshold: f32,
+        ort_dylib_path: Option<&str>,
+    ) -> Result<Self, AudioProviderError> {
+        crate::ort_init::ensure_ort_init(ort_dylib_path)?;
+
         if !model_path.is_file() {
             return Err(AudioProviderError::Init(format!(
                 "Silero VAD ONNX model not found at {}",
@@ -94,6 +107,7 @@ impl SileroVadEngine {
             c: vec![0.0; STATE_LEN],
             threshold,
             speaking: false,
+            consecutive_failures: 0,
         })
     }
 
@@ -156,24 +170,48 @@ impl SileroVadEngine {
 
 #[cfg(feature = "silero-vad")]
 impl VadEngine for SileroVadEngine {
-    fn process_chunk(&mut self, pcm: &[f32]) -> VadEvent {
-        // Silero requires exactly 512 samples; pad short chunks with silence
-        // and truncate long ones so the recurrent step stays well-formed.
-        let mut chunk = [0.0_f32; VAD_CHUNK_SAMPLES];
-        for (dst, src) in chunk.iter_mut().zip(pcm.iter()) {
-            *dst = *src;
+    fn frame_size(&self) -> usize {
+        VAD_CHUNK_SAMPLES
+    }
+
+    fn process_chunk(&mut self, pcm: &[f32]) -> Result<VadEvent, AudioProviderError> {
+        // Enforce the frame-size contract (H11): Silero requires exactly 512
+        // samples per step.
+        if pcm.len() != self.frame_size() {
+            return Err(AudioProviderError::Provider(format!(
+                "Silero VAD expects {} samples per chunk, got {}",
+                self.frame_size(),
+                pcm.len()
+            )));
         }
 
+        let mut chunk = [0.0_f32; VAD_CHUNK_SAMPLES];
+        chunk.copy_from_slice(pcm);
+
         let prob = match self.step(&chunk) {
-            Ok(prob) => prob,
+            Ok(prob) => {
+                self.consecutive_failures = 0;
+                prob
+            }
             Err(e) => {
-                tracing::warn!(component = "SileroVad", error = %e, "VAD step failed");
-                return VadEvent::Silence;
+                self.consecutive_failures += 1;
+                if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    return Err(AudioProviderError::Provider(format!(
+                        "Silero VAD failed {MAX_CONSECUTIVE_FAILURES} consecutive steps: {e}"
+                    )));
+                }
+                tracing::warn!(
+                    component = "SileroVad",
+                    error = %e,
+                    consecutive_failures = self.consecutive_failures,
+                    "VAD step failed; treating as silence"
+                );
+                return Ok(VadEvent::Silence);
             }
         };
 
         let is_speech = prob >= self.threshold;
-        match (self.speaking, is_speech) {
+        Ok(match (self.speaking, is_speech) {
             (false, true) => {
                 self.speaking = true;
                 VadEvent::SpeechStart
@@ -184,13 +222,14 @@ impl VadEngine for SileroVadEngine {
                 VadEvent::SpeechEnd
             }
             (false, false) => VadEvent::Silence,
-        }
+        })
     }
 
     fn reset(&mut self) {
         self.h.fill(0.0);
         self.c.fill(0.0);
         self.speaking = false;
+        self.consecutive_failures = 0;
     }
 
     fn name(&self) -> &str {
@@ -204,9 +243,17 @@ pub struct SileroVadFactory;
 #[cfg(feature = "silero-vad")]
 impl SileroVadFactory {
     fn build(config: &ene_config::EneConfig) -> Result<Box<dyn VadEngine>, AudioProviderError> {
-        let path = resolve_model_path(config);
-        let threshold = resolve_threshold(config);
-        let engine = SileroVadEngine::open(&path, threshold)?;
+        let ai = config
+            .get_section::<crate::config::AiConfig>()
+            .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
+        let resolved = ai.resolve_vad().ok_or_else(|| {
+            AudioProviderError::Init(
+                "VAD engine is disabled (ai.vad.provider = \"none\")".to_string(),
+            )
+        })?;
+        let path = resolve_model_path(&ai);
+        let engine =
+            SileroVadEngine::open(&path, resolved.threshold, ai.ort_dylib_path.as_deref())?;
         Ok(Box::new(engine))
     }
 }

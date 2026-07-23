@@ -6,9 +6,11 @@
 //! utterance with an [`SttProvider`] and feeds the transcript into the
 //! AI bridge as a normal user turn.
 //!
-//! **Self-voice suppression**: while [`AudioState::tts_playing`] is set
-//! the callback discards audio (and resets the VAD) so the character's
-//! own synthesized voice is not transcribed back into a turn.
+//! **Echo-aware barge-in** (M3): while [`AudioState::tts_playing`] is
+//! set the callback raises the VAD energy gate instead of hard-muting,
+//! so loud user speech can still trigger a barge-in event that cancels
+//! the current TTS turn. Full acoustic echo cancellation is not
+//! implemented; the elevated threshold is a pragmatic approximation.
 //!
 //! Gated behind the `voice` feature; without it the desktop builds a
 //! text-only shell and this module is not compiled.
@@ -30,10 +32,14 @@ use ene_ai::{SttProvider, VadEngine, VadEvent};
 /// internally if it needs a different rate.
 const CAPTURE_SAMPLE_RATE: u32 = 16_000;
 
-/// VAD frame size in samples. Audio is accumulated to this size before
-/// each [`VadEngine::process_chunk`] call so recurrent engines (Silero
-/// expects 512 samples / 32 ms) see well-formed frames.
-const VAD_FRAME_SAMPLES: usize = 512;
+/// Multiplier applied to the RMS energy gate while TTS is playing (M3).
+/// Speech must exceed this factor above the normal threshold to be
+/// considered a barge-in, reducing false triggers from speaker bleed.
+const BARGE_IN_ENERGY_FACTOR: f32 = 2.0;
+
+/// RMS energy below which a frame is considered silence for the
+/// barge-in gate. Calibrated for 16-bit-equivalent float audio.
+const SILENCE_RMS: f32 = 0.01;
 
 /// Errors returned when microphone capture cannot start.
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +107,10 @@ impl Resampler {
     }
 
     /// Resample `input` (mono, device rate) into 16 kHz, appending to `out`.
+    ///
+    /// Interpolates between `input[idx]` and `input[idx + 1]` at `frac`
+    /// (standard convention, L9). When `idx + 1` is out of bounds the
+    /// output is clamped to `input[idx]`.
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
         if input.is_empty() {
             return;
@@ -110,8 +120,12 @@ impl Resampler {
             let idx_f = self.pos.floor();
             let frac = (self.pos - idx_f) as f32;
             let idx = idx_f as usize;
-            let a = if idx == 0 { self.prev } else { input[idx - 1] };
-            let b = input[idx];
+            let a = input[idx];
+            let b = if idx + 1 < input.len() {
+                input[idx + 1]
+            } else {
+                a
+            };
             out.push(a + (b - a) * frac);
             self.pos += self.ratio;
         }
@@ -123,7 +137,7 @@ impl Resampler {
 /// Per-callback capture state moved into the `cpal` data closure.
 struct CaptureState {
     resampler: Resampler,
-    /// Resampled audio waiting to be framed into [`VAD_FRAME_SAMPLES`].
+    /// Resampled audio waiting to be framed into VAD frames.
     resampled: Vec<f32>,
     /// Accumulated speech PCM for the current utterance.
     speech: Vec<f32>,
@@ -131,6 +145,8 @@ struct CaptureState {
     speaking: bool,
     /// Whether the previous callback was suppressed (self-voice).
     suppressed: bool,
+    /// Consecutive VAD inference failures; escalated after a threshold.
+    vad_errors: u32,
     vad: Box<dyn VadEngine>,
     stt: Arc<dyn SttProvider>,
     ai: Arc<AiBridge>,
@@ -142,9 +158,14 @@ struct CaptureState {
 impl CaptureState {
     /// Handle one raw callback buffer of interleaved device audio.
     fn on_data(&mut self, data: &cpal::Data) {
-        // Self-voice suppression: drop audio while TTS is playing and
-        // reset the VAD so stale "speaking" state does not leak through.
-        if self.tts_playing.load(Ordering::Relaxed) {
+        let tts_active = self.tts_playing.load(Ordering::Relaxed);
+
+        // Echo-aware barge-in (M3): while TTS is playing, apply an
+        // elevated energy gate instead of hard-muting. If the frame
+        // energy exceeds the barge-in threshold, feed it to VAD so
+        // genuine user speech can cancel the current turn. Otherwise
+        // discard the frame and keep the VAD state clean.
+        if tts_active {
             if !self.suppressed {
                 self.suppressed = true;
                 self.vad.reset();
@@ -152,6 +173,43 @@ impl CaptureState {
                 self.speaking = false;
                 self.resampled.clear();
             }
+            // Still decode and resample so we can measure energy.
+            let interleaved: Vec<f32> = match data.sample_format() {
+                SampleFormat::F32 => data.as_slice::<f32>().unwrap_or_default().to_vec(),
+                SampleFormat::I16 => data
+                    .as_slice::<i16>()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|&v| f32::from(v) / 32768.0)
+                    .collect(),
+                SampleFormat::U16 => data
+                    .as_slice::<u16>()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|&v| (f32::from(v) - 32768.0) / 32768.0)
+                    .collect(),
+                _ => return,
+            };
+            let mono: Vec<f32> = if self.channels <= 1 {
+                interleaved
+            } else {
+                let ch = self.channels;
+                interleaved
+                    .chunks(ch)
+                    .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+                    .collect()
+            };
+            self.resampler.process(&mono, &mut self.resampled);
+            // Energy gate: only process frames that are loud enough to
+            // plausibly be user speech over the speaker output.
+            let rms = rms_energy(&self.resampled);
+            if rms < SILENCE_RMS * BARGE_IN_ENERGY_FACTOR {
+                self.resampled.clear();
+                return;
+            }
+            // Loud frame during TTS: run VAD and emit barge-in if speech
+            // is detected.
+            self.drain_vad_frames();
             return;
         }
         self.suppressed = false;
@@ -188,12 +246,35 @@ impl CaptureState {
         self.drain_vad_frames();
     }
 
-    /// Consume buffered resampled audio in [`VAD_FRAME_SAMPLES`] frames.
+    /// Consume buffered resampled audio in engine-sized frames.
     fn drain_vad_frames(&mut self) {
-        while self.resampled.len() >= VAD_FRAME_SAMPLES {
-            let frame: Vec<f32> = self.resampled.drain(0..VAD_FRAME_SAMPLES).collect();
-            let event = self.vad.process_chunk(&frame);
-            self.on_vad_event(event, &frame);
+        let frame_size = self.vad.frame_size();
+        while self.resampled.len() >= frame_size {
+            let frame: Vec<f32> = self.resampled.drain(0..frame_size).collect();
+            match self.vad.process_chunk(&frame) {
+                Ok(event) => {
+                    self.vad_errors = 0;
+                    self.on_vad_event(event, &frame);
+                }
+                Err(e) => {
+                    self.vad_errors += 1;
+                    tracing::warn!(
+                        component = "MicCapture",
+                        error = %e,
+                        consecutive = self.vad_errors,
+                        "VAD process_chunk failed"
+                    );
+                    if self.vad_errors >= 10 {
+                        tracing::error!(
+                            component = "MicCapture",
+                            "VAD failed {} consecutive times; resetting engine",
+                            self.vad_errors
+                        );
+                        self.vad.reset();
+                        self.vad_errors = 0;
+                    }
+                }
+            }
         }
     }
 
@@ -204,6 +285,15 @@ impl CaptureState {
                 self.speaking = true;
                 self.speech.clear();
                 self.speech.extend_from_slice(frame);
+                // Barge-in: if TTS is playing and we detect speech start,
+                // cancel the current turn so the user can speak (M3).
+                if self.tts_playing.load(Ordering::Relaxed) {
+                    tracing::info!(
+                        component = "MicCapture",
+                        "barge-in: speech detected during TTS playback; cancelling turn"
+                    );
+                    self.ai.cancel();
+                }
             }
             VadEvent::SpeechContinue => {
                 if self.speaking {
@@ -255,6 +345,15 @@ impl CaptureState {
     }
 }
 
+/// Root-mean-square energy of a PCM buffer.
+fn rms_energy(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+    (sum_sq / samples.len() as f32).sqrt()
+}
+
 /// Start microphone capture, returning a [`MicHandle`] that keeps the
 /// stream alive.
 ///
@@ -294,6 +393,7 @@ pub fn start_mic_capture(
         speech: Vec::new(),
         speaking: false,
         suppressed: false,
+        vad_errors: 0,
         vad,
         stt,
         ai,
@@ -302,6 +402,11 @@ pub fn start_mic_capture(
         channels,
     };
     let mut state = Some(state);
+
+    // Clone state for the error callback so it can clear `mic_active`
+    // and emit a disconnect event (M1).
+    let err_mic_active = Arc::clone(&audio_state.mic_active);
+    let err_event_tx = event_tx.clone();
 
     let stream = device
         .build_input_stream_raw(
@@ -312,8 +417,12 @@ pub fn start_mic_capture(
                     state.on_data(data);
                 }
             },
-            |err| {
+            move |err| {
                 tracing::warn!(component = "MicCapture", error = %err, "input stream error");
+                // Device disconnect recovery (M1): clear the active flag
+                // and notify the UI so the mic indicator resets.
+                err_mic_active.store(false, Ordering::Relaxed);
+                let _ = err_event_tx.send(AppEvent::MicStateChanged { active: false });
             },
             Some(Duration::from_secs(5)),
         )
@@ -389,6 +498,37 @@ mod tests {
         let mut out = Vec::new();
         r.process(&[], &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resampler_interpolates_forward() {
+        // L9: verify interpolation uses input[idx] and input[idx+1].
+        // With ratio 1.5 (24 kHz -> 16 kHz), output positions are
+        // 0, 1.5, 3.0 — the second sample interpolates between
+        // input[1] and input[2] at frac=0.5.
+        let mut r = Resampler::new(24_000);
+        let mut out = Vec::new();
+        let input = vec![0.0f32, 1.0, 2.0, 3.0];
+        r.process(&input, &mut out);
+        // First output: pos=0, idx=0, frac=0 -> input[0] = 0.0.
+        assert!(!out.is_empty());
+        assert!((out[0] - 0.0).abs() < 1e-6, "first sample: {}", out[0]);
+        // Second output: pos=1.5, idx=1, frac=0.5 -> lerp(input[1], input[2], 0.5) = 1.5.
+        assert!(
+            out.len() > 1,
+            "expected at least 2 samples, got {}",
+            out.len()
+        );
+        assert!((out[1] - 1.5).abs() < 1e-6, "second sample: {}", out[1]);
+    }
+
+    #[test]
+    fn rms_energy_computes_correctly() {
+        let silence = vec![0.0f32; 100];
+        assert!((rms_energy(&silence) - 0.0).abs() < 1e-9);
+        let dc = vec![0.5f32; 100];
+        assert!((rms_energy(&dc) - 0.5).abs() < 1e-6);
+        assert!((rms_energy(&[]) - 0.0).abs() < 1e-9);
     }
 
     #[test]

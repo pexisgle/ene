@@ -120,6 +120,7 @@ The `ai` section replaces the legacy `provider` block. Named providers are defin
 | `tts` | object | Text-to-speech provider settings (see below) |
 | `stt` | object | Speech-to-text provider settings (see below) |
 | `vad` | object | Voice activity detection engine settings (see below) |
+| `ort_dylib_path` | string or null | Explicit path to the ONNX Runtime dynamic library used by local TTS / VAD providers (`null` = `ort` default resolution) |
 
 #### `ai.tasks` — Task Reference (`TaskRef`)
 
@@ -280,7 +281,10 @@ Health probes never send user data — only an authenticated `GET {base_url}/mod
       "provider": "none",
       "model": "",
       "voice": "",
-      "speed": 1.0
+      "speed": 1.0,
+      "language": "",
+      "model_path": null,
+      "voices_path": null
     }
   }
 }
@@ -292,6 +296,9 @@ Health probes never send user data — only an authenticated `GET {base_url}/mod
 | `model` | string | `""` | Model name or filesystem path (provider-specific) |
 | `voice` | string | `""` | Voice identifier (provider-specific, e.g. `"af_heart"` for Kokoro) |
 | `speed` | float | `1.0` | Speech speed multiplier (1.0 = normal) |
+| `language` | string | `""` | Language code for grapheme-to-phoneme conversion (e.g. `"en"`, `"ja"`; empty defaults to English) |
+| `model_path` | string or null | `null` | Explicit filesystem path to the TTS model (used when non-empty) |
+| `voices_path` | string or null | `null` | Explicit filesystem path to the Kokoro `voices.bin` (used when non-empty) |
 
 When `provider` is not `"none"`, the runtime resolves a `TtsProvider` from the `AudioProviderRegistry` and streams synthesized audio as `EneEvent::AudioChunk` during each turn (see [Streaming Events](../runtime/streaming-events.md#audio-streaming)).
 
@@ -303,7 +310,8 @@ When `provider` is not `"none"`, the runtime resolves a `TtsProvider` from the `
     "stt": {
       "provider": "none",
       "model": "",
-      "language": ""
+      "language": "",
+      "model_path": null
     }
   }
 }
@@ -314,6 +322,7 @@ When `provider` is not `"none"`, the runtime resolves a `TtsProvider` from the `
 | `provider` | string | `"none"` | STT provider name (`"none"` disables STT; `"whisper"` for local whisper.cpp) |
 | `model` | string | `""` | Model name or filesystem path (provider-specific) |
 | `language` | string | `""` | Language hint (e.g. `"ja"`, `"en"`; empty = auto-detect) |
+| `model_path` | string or null | `null` | Explicit filesystem path to the STT model (used when non-empty) |
 
 STT is consumed by the desktop app's microphone capture path: VAD detects speech boundaries, then the accumulated PCM is transcribed and submitted as a text turn.
 
@@ -325,7 +334,8 @@ STT is consumed by the desktop app's microphone capture path: VAD detects speech
     "vad": {
       "provider": "none",
       "model": "",
-      "threshold": 0.5
+      "threshold": 0.5,
+      "model_path": null
     }
   }
 }
@@ -336,6 +346,7 @@ STT is consumed by the desktop app's microphone capture path: VAD detects speech
 | `provider` | string | `"none"` | VAD engine name (`"none"` disables VAD; `"silero"` for local Silero VAD ONNX) |
 | `model` | string | `""` | Model name or filesystem path (provider-specific) |
 | `threshold` | float | `0.5` | Speech probability threshold (0.0–1.0); higher = less sensitive |
+| `model_path` | string or null | `null` | Explicit filesystem path to the VAD model (used when non-empty) |
 
 When the desktop microphone is active and `ai.vad.provider` is `"none"`, the app falls back to the `"silero"` engine automatically.
 
@@ -345,10 +356,14 @@ All voice settings follow the standard `ENE_` prefix pattern with `__` as the ne
 
 | Variable | Overrides |
 |----------|-----------|
+| `ENE_AI__ORT_DYLIB_PATH` | `ai.ort_dylib_path` |
 | `ENE_AI__TTS__PROVIDER` | `ai.tts.provider` |
 | `ENE_AI__TTS__MODEL` | `ai.tts.model` |
 | `ENE_AI__TTS__VOICE` | `ai.tts.voice` |
 | `ENE_AI__TTS__SPEED` | `ai.tts.speed` |
+| `ENE_AI__TTS__LANGUAGE` | `ai.tts.language` |
+| `ENE_AI__TTS__MODEL_PATH` | Explicit Kokoro ONNX path (takes precedence over `model`) |
+| `ENE_AI__TTS__VOICES_PATH` | Explicit Kokoro `voices.bin` path |
 | `ENE_AI__STT__PROVIDER` | `ai.stt.provider` |
 | `ENE_AI__STT__MODEL` | `ai.stt.model` |
 | `ENE_AI__STT__LANGUAGE` | `ai.stt.language` |
@@ -357,8 +372,6 @@ All voice settings follow the standard `ENE_` prefix pattern with `__` as the ne
 | `ENE_AI__VAD__MODEL` | `ai.vad.model` |
 | `ENE_AI__VAD__THRESHOLD` | `ai.vad.threshold` |
 | `ENE_AI__VAD__MODEL_PATH` | Explicit Silero ONNX path (takes precedence over `model`) |
-| `ENE_AI__TTS__MODEL_PATH` | Explicit Kokoro ONNX path (takes precedence over `model`) |
-| `ENE_AI__TTS__VOICES_PATH` | Explicit Kokoro `voices.bin` path |
 
 ### `store` — Persistent SQLite-vec Store
 

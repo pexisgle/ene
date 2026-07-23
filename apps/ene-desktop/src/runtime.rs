@@ -78,6 +78,10 @@ pub struct Runtime {
     emotion_clock: Option<Instant>,
     device_state: device_query::DeviceState,
     char_surface_fatal: bool,
+    /// Previous frame's `tts_playing` value, used to detect the
+    /// true→false transition and reset the viseme mouth shape (L11).
+    #[cfg(feature = "voice")]
+    prev_tts_playing: bool,
 }
 
 impl Runtime {
@@ -121,6 +125,8 @@ impl Runtime {
             emotion_clock: None,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
+            #[cfg(feature = "voice")]
+            prev_tts_playing: false,
         }
     }
 
@@ -1186,6 +1192,13 @@ impl Runtime {
                 .world()
                 .get_resource::<crate::audio::AudioState>()
                 .is_some_and(crate::audio::AudioState::is_tts_playing);
+            // Consume queued PCM up to the current playback position so the
+            // analyzer only sees samples that are actually playing (M4).
+            if tts_playing
+                && let Some(viseme) = app.world().get_resource::<crate::audio::VisemeState>()
+            {
+                viseme.advance();
+            }
             if tts_playing
                 && let Some(viseme) = app.world().get_resource::<crate::audio::VisemeState>()
                 && let Some(weights) = viseme.analyze_weights()
@@ -1195,7 +1208,19 @@ impl Runtime {
                 let layer = model.expressions_mut();
                 layer.apply_viseme_weights(&weights);
                 layer.apply_overrides(&expressions_meta);
+            } else if !tts_playing
+                && self.prev_tts_playing
+                && let Some(model) = character.model_mut()
+            {
+                // L11: on the frame where `tts_playing` transitions from
+                // true to false, apply zeroed viseme weights so the mouth
+                // shape resets instead of holding the last phoneme.
+                let expressions_meta = model.expressions_meta.clone();
+                let layer = model.expressions_mut();
+                layer.apply_viseme_weights(&ene_vrm::viseme::VisemeWeights::default());
+                layer.apply_overrides(&expressions_meta);
             }
+            self.prev_tts_playing = tts_playing;
         }
 
         let result = cw.with_surface_view(|view| {

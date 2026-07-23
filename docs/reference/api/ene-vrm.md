@@ -40,7 +40,7 @@ This document focuses on the entry points and types a desktop host actually call
 
 | Category | Symbols | Notes |
 |---|---|---|
-| **Supported (use `prelude`)** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName` | Curated in [`ene_vrm::prelude`](../../../crates/ene-vrm/src/prelude.rs). Start here for new host code. |
+| **Supported (use `prelude`)** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName`, `VisemeAnalyzer`, `VisemeWeights` | Curated in [`ene_vrm::prelude`](../../../crates/ene-vrm/src/prelude.rs). Start here for new host code. |
 | **Supported (desktop also uses)** | `camera::*`, `debug_renderer::*`, `humanoid::*`, `spring_bone::SpringBoneSimulator`, `spring_bone::SpringBoneProperties`, `model::{NodeHierarchy, Skeleton, MeshVertex}`, `expression_override::apply_overrides` | Not in `prelude` because they are secondary to the core load→render loop, but `ene-desktop` depends on them. |
 | **Internal (`#[doc(hidden)]`)** | `load_humanoid_bones`, `load_look_at`, `load_spring_bones`, `load_node_constraints`, `load_expression_overrides`, `load_mtoon_materials`, `texture_flags`, `retarget_rotation`, `quat_to_yaw_pitch`, `HUMANOID_BONE_NAMES`, `MOUTH_TARGET_NAMES`, … | Called from `load_vrm` or the renderer; hidden from rustdoc to keep the public index focused. Still `pub` — some types remain reachable as fields of supported structs. |
 
@@ -257,6 +257,7 @@ pub struct ExpressionLayer {
 | `expression_names` | `fn expression_names(&self) -> Vec<ExpressionName>` | Sorted, de-duplicated list of every expression the model defines. |
 | `set_expression` | `fn set_expression(&mut self, name: &ExpressionName, weight: f32) -> bool` | Clamps to `[0, 1]` and stores it. Returns `false` (and does **not** store) if `name` isn't one of the model's known expressions — prevents a misspelled AI token from silently accumulating. |
 | `apply_weights` | `fn apply_weights(&mut self, incoming: &BTreeMap<ExpressionName, f32>)` | Bulk-applies a weight map; unknown names are dropped the same way. Intended to be called once per frame from the desktop app's emotion-application step. |
+| `apply_viseme_weights` | `fn apply_viseme_weights(&mut self, weights: &crate::viseme::VisemeWeights)` | Maps the five `VisemeWeights` fields onto the procedural mouth targets by iterating `expression_override::MOUTH_TARGET_NAMES` (`aa`/`ih`/`ou`/`ee`/`oh`) and calling `set_expression` for each (#L7). |
 | `morphic_primitive_count` | `fn morphic_primitive_count(&self) -> usize` | Number of primitives that have at least one morph target. |
 
 `PrimitiveMorphs { primitive_id, node_index, targets: Vec<MorphTarget>, uniform_buffer_len, vertex_count }` holds one primitive's morph targets; `MorphTarget { target_index, position_offsets }` is a single named blend shape's per-vertex displacement. `ExpressionName(pub String)` is a thin newtype key.
@@ -289,6 +290,45 @@ pub struct ExpressionDefinition {
 ```
 
 `load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition>` parses the `VRMC_vrm.expressions.{preset,custom}.<name>` tree at load time. `apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[ExpressionDefinition])` applies `Block`/`Blend` semantics in-place: `Block` zeroes the procedural target while any overriding expression is active; `Blend` scales it by `1 − sum(overriding weights)`.
+
+---
+
+## `viseme` — Audio-Driven Lip Sync
+
+Pure DSP that turns a stream of PCM audio into the five mouth-shape blend-shape weights used by the VRM procedural lip-sync targets (`aa`, `ih`, `ou`, `ee`, `oh` — see `expression_override::MOUTH_TARGET_NAMES`). No audio I/O is performed, keeping `ene-vrm` rendering-only: the host captures and schedules the samples.
+
+```rust
+pub struct VisemeWeights {
+    pub aa: f32, // open mouth ("father")
+    pub ih: f32, // spread / smile ("bit")
+    pub ou: f32, // rounded ("boot")
+    pub ee: f32, // wide ("beet")
+    pub oh: f32, // small round ("boat")
+}
+// All fields in [0, 1]; `Default` is all zeros (mouth closed).
+
+pub struct VisemeAnalyzer { /* ring buffer + FFT plan + smoothed weights */ }
+
+impl VisemeAnalyzer {
+    pub fn new(sample_rate: u32) -> Self;
+    pub fn window_size(&self) -> usize;
+    pub fn push_pcm(&mut self, pcm: &[f32]);
+    pub fn analyze(&mut self) -> VisemeWeights;
+    pub fn reset(&mut self);
+}
+```
+
+| Method | Description |
+|---|---|
+| `new(sample_rate)` | Builds an analyzer for the given sample rate (Hz). The analysis window is sized to ~20 ms of audio, rounded up to the next power of two; the FFT scratch buffer is sized to `max(window_size, fft.get_inplace_scratch_len())` so `process_with_scratch` never panics on an undersized buffer (#M6). |
+| `window_size` | Number of PCM samples held in one analysis window. |
+| `push_pcm(pcm)` | Appends mono `[-1, 1]` samples to the ring buffer, dropping the oldest samples beyond the window. |
+| `analyze` | Analyzes the buffered audio and returns the smoothed weights. Call once per render frame; with too few samples the weights decay toward zero. |
+| `reset` | Clears the ring buffer and resets the smoothed weights to zero. |
+
+Per-frame features: **RMS amplitude** drives overall mouth openness (silence collapses every weight toward zero), **zero-crossing rate** discriminates rounded vowels (low rate) from spread vowels (high rate), and a small **FFT** splits each frame into five frequency bands to tell open / low-mid vowels (`aa`, `oh`) apart from high-frequency spread vowels (`ih`, `ee`). Raw estimates pass through an asymmetric exponential moving average (fast attack, slower release) to suppress jitter while still tracking speech.
+
+Typical usage: feed samples with `push_pcm`, call `analyze` once per render frame, and hand the result to `ExpressionLayer::apply_viseme_weights`.
 
 ---
 

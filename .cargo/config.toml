@@ -8,5 +8,11 @@ rustc-wrapper = "sccache"
 linker = "clang"
 rustflags = [
     "-C", "link-arg=-fuse-ld=mold",
+    # `ene-desktop` enables `ene-ai/voice` by default, which pulls in both
+    # `whisper-rs-sys` and `llama-cpp-sys-2`. Each vendors its own ggml copy,
+    # causing duplicate-symbol link errors. Cargo's feature unification during
+    # `--workspace` builds propagates the voice feature to all crates that
+    # depend on `ene-ai`, so the flag must live here (target-scoped) rather
+    # than only in `ene-desktop`'s build.rs. Harmless when no duplicates exist.
     "-C", "link-arg=-Wl,--allow-multiple-definition",
 ]

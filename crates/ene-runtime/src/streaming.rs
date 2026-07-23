@@ -215,6 +215,10 @@ pub struct StreamContext {
     pub deferred_tool_tx: mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
     /// Optional TTS provider for streaming audio synthesis.
     pub tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
+    /// Shared buffer of streamed assistant text deltas, updated live by the
+    /// stream task so the actor can recover the partial response if the task
+    /// is hard-aborted before it records the interruption itself (#H5).
+    pub partial_text: Arc<parking_lot::Mutex<String>>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, optional memory

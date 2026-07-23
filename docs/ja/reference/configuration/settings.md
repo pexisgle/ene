@@ -120,6 +120,7 @@ pub struct EneConfig {
 | `tts` | object | 音声合成（TTS）プロバイダー設定（下記参照） |
 | `stt` | object | 音声認識（STT）プロバイダー設定（下記参照） |
 | `vad` | object | 音声活動検出（VAD）エンジン設定（下記参照） |
+| `ort_dylib_path` | string または null | ローカル TTS / VAD プロバイダーが使用する ONNX Runtime 動的ライブラリの明示パス（`null` = `ort` のデフォルト解決） |
 
 #### `ai.tasks` — タスク参照 (`TaskRef`)
 
@@ -280,7 +281,10 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
       "provider": "none",
       "model": "",
       "voice": "",
-      "speed": 1.0
+      "speed": 1.0,
+      "language": "",
+      "model_path": null,
+      "voices_path": null
     }
   }
 }
@@ -292,6 +296,9 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 | `model` | string | `""` | モデル名またはファイルシステムパス（プロバイダー固有） |
 | `voice` | string | `""` | 音声識別子（プロバイダー固有、例：Kokoro の `"af_heart"`） |
 | `speed` | float | `1.0` | 読み上げ速度倍率（1.0 = 通常） |
+| `language` | string | `""` | グラフェム-音素変換の言語コード（例：`"en"`、`"ja"`。空は英語として扱う） |
+| `model_path` | string または null | `null` | TTS モデルの明示的なファイルシステムパス（非空時に使用） |
+| `voices_path` | string または null | `null` | Kokoro `voices.bin` の明示的なファイルシステムパス（非空時に使用） |
 
 `provider` が `"none"` でない場合、ランタイムは `AudioProviderRegistry` から `TtsProvider` を解決し、各ターン中に合成音声を `EneEvent::AudioChunk` としてストリーミングします（[ストリーミングイベント](../runtime/streaming-events.md#音声ストリーミング)を参照）。
 
@@ -303,7 +310,8 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
     "stt": {
       "provider": "none",
       "model": "",
-      "language": ""
+      "language": "",
+      "model_path": null
     }
   }
 }
@@ -314,6 +322,7 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 | `provider` | string | `"none"` | STT プロバイダー名（`"none"` で STT 無効、`"whisper"` でローカル whisper.cpp） |
 | `model` | string | `""` | モデル名またはファイルシステムパス（プロバイダー固有） |
 | `language` | string | `""` | 言語ヒント（例：`"ja"`、`"en"`。空 = 自動検出） |
+| `model_path` | string または null | `null` | STT モデルの明示的なファイルシステムパス（非空時に使用） |
 
 STT はデスクトップアプリのマイクキャプチャ経路で使用されます。VAD が発話境界を検出し、蓄積した PCM を文字起こししてテキストターンとして送信します。
 
@@ -325,7 +334,8 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
     "vad": {
       "provider": "none",
       "model": "",
-      "threshold": 0.5
+      "threshold": 0.5,
+      "model_path": null
     }
   }
 }
@@ -336,6 +346,7 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 | `provider` | string | `"none"` | VAD エンジン名（`"none"` で VAD 無効、`"silero"` でローカル Silero VAD ONNX） |
 | `model` | string | `""` | モデル名またはファイルシステムパス（プロバイダー固有） |
 | `threshold` | float | `0.5` | 発話確率閾値（0.0–1.0）。高いほど感度が低い |
+| `model_path` | string または null | `null` | VAD モデルの明示的なファイルシステムパス（非空時に使用） |
 
 デスクトップのマイクが有効で `ai.vad.provider` が `"none"` の場合、アプリは自動的に `"silero"` エンジンにフォールバックします。
 
@@ -345,10 +356,14 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 
 | 変数 | 上書き対象 |
 |------|-----------|
+| `ENE_AI__ORT_DYLIB_PATH` | `ai.ort_dylib_path` |
 | `ENE_AI__TTS__PROVIDER` | `ai.tts.provider` |
 | `ENE_AI__TTS__MODEL` | `ai.tts.model` |
 | `ENE_AI__TTS__VOICE` | `ai.tts.voice` |
 | `ENE_AI__TTS__SPEED` | `ai.tts.speed` |
+| `ENE_AI__TTS__LANGUAGE` | `ai.tts.language` |
+| `ENE_AI__TTS__MODEL_PATH` | 明示的な Kokoro ONNX パス（`model` より優先） |
+| `ENE_AI__TTS__VOICES_PATH` | 明示的な Kokoro `voices.bin` パス |
 | `ENE_AI__STT__PROVIDER` | `ai.stt.provider` |
 | `ENE_AI__STT__MODEL` | `ai.stt.model` |
 | `ENE_AI__STT__LANGUAGE` | `ai.stt.language` |
@@ -357,8 +372,6 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 | `ENE_AI__VAD__MODEL` | `ai.vad.model` |
 | `ENE_AI__VAD__THRESHOLD` | `ai.vad.threshold` |
 | `ENE_AI__VAD__MODEL_PATH` | 明示的な Silero ONNX パス（`model` より優先） |
-| `ENE_AI__TTS__MODEL_PATH` | 明示的な Kokoro ONNX パス（`model` より優先） |
-| `ENE_AI__TTS__VOICES_PATH` | 明示的な Kokoro `voices.bin` パス |
 
 ### `store` — SQLite-vec 永続化ストア
 

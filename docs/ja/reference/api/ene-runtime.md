@@ -120,14 +120,39 @@ pub enum EneEvent {
     PermissionRequired { turn: TurnId, request_id: RequestId, action: String, target: String, description: String },
     UserInputRequired { turn: TurnId, request_id: RequestId, prompt: UserInputPrompt },
     ContextCompressed { turn: TurnId, level: String },
+    AudioChunk { turn: TurnId, origin: TurnOrigin, pcm: Vec<f32>, sample_rate: u32, is_final: bool },
     Terminal { turn: TurnId, reason: TerminalReason },
     StatusChanged { status: EneStatus },
 }
 ```
 
+`AudioChunk` は TTS パイプライン由来の合成 PCM 音声チャンク（モノラル、`[-1.0, 1.0]` 正規化、`sample_rate` Hz）を運びます。`is_final` はそのターンの最後のチャンク（`pcm` は空）を示します。TTS プロバイダーが設定されている場合のみ発行されます。バージイン経路はターンの `CancellationToken` で TTS ワーカーを停止するため、キャンセルされたターンは final マーカーを発行しません。なお `AudioChunk` は上記の軽量イベントと同じチャット用ブロードキャストチャネルを共有します（専用チャネル化のフォローアップはバリアントの注記を参照）。
+
 チャットから削除（diagnostics へ）: `SpecialToken`、単独 `Expression`、`SessionSplit`、`PipelinePhase`、`PipelineMetrics`、`TaskProgress`。
 
 `PerformanceCue` / `CueSource` は `ene-mind` 所有（runtime が再エクスポート）。明示的 `perform` なしに `CueSource::Host` は追加しない。
+
+---
+
+## `PublicChatEvent`
+
+外部インテグレーター向けの、`EneEvent` の安定した秘匿化済みミラー（`PublicChatEvent::from_ene_event`）。チャット系バリアントを文字列の `turn`/`origin` フィールドでミラーし、音声については生の PCM ペイロードではなくサンプル数のみを公開します。
+
+```rust
+pub enum PublicChatEvent {
+    // … TurnStarted, TextDelta, Performance, ToolCallStart, ToolCallResult,
+    //   PermissionRequired, UserInputRequired, ContextCompressed, Terminal, StatusChanged …
+    AudioChunk {
+        turn: String,
+        origin: String,
+        pcm_len: usize,      // PCM サンプル数（生サンプルは公開しない）
+        sample_rate: u32,
+        is_final: bool,
+    },
+}
+```
+
+`PublicChatEvent::AudioChunk` は `EneEvent::AudioChunk` の公開側対応物で、`Vec<f32>` ペイロードの代わりに `pcm_len` を報告します（公開面をシリアライズしやすい形に保つため）。
 
 ---
 ## `TerminalReason`

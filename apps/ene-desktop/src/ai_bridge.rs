@@ -503,6 +503,13 @@ async fn pump_events(
     active_turn: Arc<Mutex<Option<TurnId>>>,
     audio_tx: Option<AudioChunkSender>,
 ) {
+    // Turn that owns the in-flight TTS audio. Tracked separately from
+    // `active_turn` because the fire-and-forget TTS worker keeps emitting
+    // chunks after `Terminal` clears `active_turn` (H1). Only cleared by
+    // the `is_final` marker or a playback reset on broadcast lag (M2).
+    #[cfg(feature = "voice")]
+    let mut audio_turn: Option<TurnId> = None;
+
     loop {
         match receiver.recv().await {
             Ok(EneEvent::TextDelta {
@@ -633,20 +640,39 @@ async fn pump_events(
                 // playback subsystem, so the chunk is dropped.
                 #[cfg(feature = "voice")]
                 {
-                    if !turn_matches(&active_turn, &turn) && !is_final {
+                    // Track the turn that owns the in-flight TTS audio
+                    // separately from `active_turn`: the fire-and-forget
+                    // TTS worker keeps emitting chunks after `Terminal`
+                    // clears `active_turn`, so filtering on `active_turn`
+                    // would drop the tail of the utterance (H1).
+                    if !route_audio_chunk(&mut audio_turn, &turn, is_final) {
                         continue;
                     }
                     if let Some(tx) = &audio_tx {
-                        let _ = tx.send(AudioChunkPayload {
+                        // `try_send` avoids blocking the async pump when the
+                        // bounded playback channel is full (L10); a full
+                        // buffer means the sink is behind and the dropped
+                        // chunk is preferable to stalling all event routing.
+                        if let Err(e) = tx.try_send(AudioChunkPayload {
                             pcm,
                             sample_rate,
                             is_final,
-                        });
+                        }) {
+                            tracing::warn!(
+                                component = "AiBridge",
+                                error = %e,
+                                "playback channel full; dropping audio chunk"
+                            );
+                        }
                     }
                 }
                 #[cfg(not(feature = "voice"))]
                 {
-                    let _ = (&audio_tx, turn, pcm, sample_rate, is_final);
+                    let _audio_tx = &audio_tx;
+                    let _turn = turn;
+                    let _pcm = pcm;
+                    let _sample_rate = sample_rate;
+                    let _is_final = is_final;
                 }
             }
             Ok(EneEvent::StatusChanged { .. } | EneEvent::ToolBackgroundCompleted { .. }) => {}
@@ -666,6 +692,18 @@ async fn pump_events(
                 }
                 clear_active_turn(&active_turn, &turn);
                 processing.store(false, Ordering::Relaxed);
+                // Ensure the playback subsystem releases `tts_playing` even
+                // if the TTS worker never emitted an `is_final` marker (M2).
+                #[cfg(feature = "voice")]
+                if audio_turn.take().is_some()
+                    && let Some(tx) = &audio_tx
+                {
+                    let _ = tx.try_send(AudioChunkPayload {
+                        pcm: Vec::new(),
+                        sample_rate: 0,
+                        is_final: true,
+                    });
+                }
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
             }
             Ok(EneEvent::Terminal {
@@ -678,6 +716,16 @@ async fn pump_events(
                 }
                 clear_active_turn(&active_turn, &turn);
                 processing.store(false, Ordering::Relaxed);
+                #[cfg(feature = "voice")]
+                if audio_turn.take().is_some()
+                    && let Some(tx) = &audio_tx
+                {
+                    let _ = tx.try_send(AudioChunkPayload {
+                        pcm: Vec::new(),
+                        sample_rate: 0,
+                        is_final: true,
+                    });
+                }
                 let user_message = crate::runtime_error::user_message_from_turn(&message);
                 let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(user_message)));
             }
@@ -688,6 +736,19 @@ async fn pump_events(
                 // Unlock input, but keep active_turn and cancel so TurnGate
                 // is freed even if Terminal was among the dropped events.
                 processing.store(false, Ordering::Relaxed);
+                // The `is_final` marker may have been among the dropped
+                // events; send a synthetic final so `tts_playing` does not
+                // stay stuck (M2).
+                #[cfg(feature = "voice")]
+                if audio_turn.take().is_some()
+                    && let Some(tx) = &audio_tx
+                {
+                    let _ = tx.try_send(AudioChunkPayload {
+                        pcm: Vec::new(),
+                        sample_rate: 0,
+                        is_final: true,
+                    });
+                }
                 if let Ok(guard) = active_turn.lock()
                     && let Some(turn) = guard.clone()
                 {
@@ -725,6 +786,37 @@ fn clear_active_turn(active_turn: &Mutex<Option<TurnId>>, turn: &TurnId) {
     }
 }
 
+/// Decide whether an incoming `AudioChunk` should be forwarded to the
+/// playback subsystem, updating the tracked `audio_turn` in place (H1).
+///
+/// The fire-and-forget TTS worker keeps emitting chunks after `Terminal`
+/// clears `active_turn`, so the audio path tracks its own turn ownership
+/// instead of filtering on `active_turn`. Returns `true` when the chunk
+/// should be forwarded.
+///
+/// - A non-final chunk claims `audio_turn` on first sight and is dropped
+///   if it belongs to a different turn than the one currently claimed.
+/// - A final marker is accepted only for the claimed turn (or when no
+///   turn is claimed, e.g. an empty utterance) and clears `audio_turn`.
+#[cfg(feature = "voice")]
+fn route_audio_chunk(audio_turn: &mut Option<TurnId>, turn: &TurnId, is_final: bool) -> bool {
+    if is_final {
+        if audio_turn.as_ref().is_some_and(|t| t != turn) {
+            return false;
+        }
+        *audio_turn = None;
+        return true;
+    }
+    match audio_turn.as_ref() {
+        None => {
+            *audio_turn = Some(turn.clone());
+            true
+        }
+        Some(current) if current != turn => false,
+        Some(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,5 +851,84 @@ mod tests {
         let turn = TurnId::new();
         let active = Mutex::new(Some(turn.clone()));
         assert!(turn_matches(&active, &turn));
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn route_audio_first_chunk_claims_turn() {
+        let mut audio_turn: Option<TurnId> = None;
+        let turn = TurnId::new();
+        assert!(route_audio_chunk(&mut audio_turn, &turn, false));
+        assert_eq!(audio_turn, Some(turn));
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn route_audio_same_turn_continues() {
+        let mut audio_turn: Option<TurnId> = None;
+        let turn = TurnId::new();
+        route_audio_chunk(&mut audio_turn, &turn, false);
+        assert!(route_audio_chunk(&mut audio_turn, &turn, false));
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn route_audio_different_turn_dropped() {
+        let mut audio_turn: Option<TurnId> = None;
+        let turn_a = TurnId::new();
+        let turn_b = TurnId::new();
+        route_audio_chunk(&mut audio_turn, &turn_a, false);
+        assert!(!route_audio_chunk(&mut audio_turn, &turn_b, false));
+        // Still claims turn_a.
+        assert_eq!(audio_turn, Some(turn_a));
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn route_audio_final_clears_turn() {
+        let mut audio_turn: Option<TurnId> = None;
+        let turn = TurnId::new();
+        route_audio_chunk(&mut audio_turn, &turn, false);
+        assert!(route_audio_chunk(&mut audio_turn, &turn, true));
+        assert_eq!(audio_turn, None);
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn route_audio_final_wrong_turn_dropped() {
+        let mut audio_turn: Option<TurnId> = None;
+        let turn_a = TurnId::new();
+        let turn_b = TurnId::new();
+        route_audio_chunk(&mut audio_turn, &turn_a, false);
+        assert!(!route_audio_chunk(&mut audio_turn, &turn_b, true));
+        assert_eq!(audio_turn, Some(turn_a));
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn route_audio_final_no_claim_accepted() {
+        let mut audio_turn: Option<TurnId> = None;
+        let turn = TurnId::new();
+        assert!(route_audio_chunk(&mut audio_turn, &turn, true));
+        assert_eq!(audio_turn, None);
+    }
+
+    #[cfg(feature = "voice")]
+    #[test]
+    fn route_audio_tail_after_terminal_not_dropped() {
+        // H1 regression: after Terminal clears active_turn, the TTS
+        // worker still emits chunks. The audio_turn tracker keeps them
+        // flowing until is_final arrives.
+        let mut audio_turn: Option<TurnId> = None;
+        let turn = TurnId::new();
+        // First chunk claims the turn.
+        assert!(route_audio_chunk(&mut audio_turn, &turn, false));
+        // Simulate Terminal clearing active_turn (not audio_turn).
+        // Subsequent chunks for the same turn must still be accepted.
+        assert!(route_audio_chunk(&mut audio_turn, &turn, false));
+        assert!(route_audio_chunk(&mut audio_turn, &turn, false));
+        // Final marker clears audio_turn.
+        assert!(route_audio_chunk(&mut audio_turn, &turn, true));
+        assert_eq!(audio_turn, None);
     }
 }

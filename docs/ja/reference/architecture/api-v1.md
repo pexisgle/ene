@@ -18,7 +18,7 @@ ene は最小ホスト契約と明確なクレート所有を公開する: 準�
 
 ### イベント
 
-5. **チャット `EneEvent` は最小:** `TextDelta`、`Performance`、対話ゲート（`PermissionRequired` / `UserInputRequired`）、必要なら tool start/result、`Terminal`、`StatusChanged`、任意の薄い `ContextCompressed`。
+5. **チャット `EneEvent` は最小:** `TextDelta`、`Performance`、対話ゲート（`PermissionRequired` / `UserInputRequired`）、必要なら tool start/result、`AudioChunk`（TTS PCM、TTS プロバイダー設定時）、`Terminal`、`StatusChanged`、任意の薄い `ContextCompressed`。
 6. **診断はオプトイン:** `PipelinePhase`、`PipelineMetrics`、arbiter/compression 詳細は `handle.diagnostics()`。
 7. **`EneDiagnostics`** はハンドル上の具象 facade — UI がトレイトを実装しない。
 
@@ -111,6 +111,7 @@ handle.diagnostics() -> &EneDiagnostics;
 | `ToolBackgroundCompleted` | 遅延ツール完了（`Terminal` 後でも可） |
 | `PermissionRequired` / `UserInputRequired` | ゲート |
 | `ContextCompressed { turn, origin, level }` | 薄い信号；詳細は diagnostics |
+| `AudioChunk { turn, origin, pcm, sample_rate, is_final }` | TTS パイプライン由来の合成 PCM 音声チャンク（モノラル、`[-1, 1]`）。TTS プロバイダー設定時のみ発行。`is_final` はそのターンの最後の（空ペイロードの）チャンクを示す。チャット用ブロードキャストチャネルを共有 — 専用チャネル化のフォローアップは runtime API ドキュメント参照 |
 | `Terminal { turn, origin, reason }` | ターン完了（`run` ごとに正確に1回） |
 | `StatusChanged { status }` | Idle / Running / Error |
 

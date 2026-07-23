@@ -220,6 +220,13 @@ pub struct TtsConfig {
     pub voice: String,
     /// Speech speed multiplier (1.0 = normal).
     pub speed: f32,
+    /// Language code for grapheme-to-phoneme conversion (e.g. `"en"`, `"ja"`;
+    /// empty defaults to English).
+    pub language: String,
+    /// Explicit filesystem path to the TTS model (used when non-empty).
+    pub model_path: Option<String>,
+    /// Explicit filesystem path to the Kokoro `voices.bin` (used when non-empty).
+    pub voices_path: Option<String>,
 }
 
 impl Default for TtsConfig {
@@ -229,6 +236,9 @@ impl Default for TtsConfig {
             model: String::new(),
             voice: String::new(),
             speed: 1.0,
+            language: String::new(),
+            model_path: None,
+            voices_path: None,
         }
     }
 }
@@ -244,6 +254,8 @@ pub struct SttConfig {
     pub model: String,
     /// Language hint (e.g. `"ja"`, `"en"`; empty = auto-detect).
     pub language: String,
+    /// Explicit filesystem path to the STT model (used when non-empty).
+    pub model_path: Option<String>,
 }
 
 impl Default for SttConfig {
@@ -252,6 +264,7 @@ impl Default for SttConfig {
             provider: "none".to_string(),
             model: String::new(),
             language: String::new(),
+            model_path: None,
         }
     }
 }
@@ -267,6 +280,8 @@ pub struct VadConfig {
     pub model: String,
     /// Speech probability threshold (0.0–1.0).
     pub threshold: f32,
+    /// Explicit filesystem path to the VAD model (used when non-empty).
+    pub model_path: Option<String>,
 }
 
 impl Default for VadConfig {
@@ -275,6 +290,7 @@ impl Default for VadConfig {
             provider: "none".to_string(),
             model: String::new(),
             threshold: 0.5,
+            model_path: None,
         }
     }
 }
@@ -371,6 +387,10 @@ ene_config::define_config!(
         pub stt: SttConfig,
         /// VAD (voice activity detection) engine settings.
         pub vad: VadConfig,
+        /// Explicit path to the ONNX Runtime dynamic library used by the local
+        /// TTS / VAD providers (used when non-empty; `None` = `ort` default
+        /// resolution).
+        pub ort_dylib_path: Option<String> = None,
     }
 );
 

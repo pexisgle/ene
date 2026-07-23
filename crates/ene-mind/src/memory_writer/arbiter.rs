@@ -633,16 +633,31 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
     // language due-date parsing is deferred (see issue #75 follow-up).
     let (valid_from, valid_until) = (None, None);
 
+    // The store has no dedicated tags column, so candidate tags are serialized
+    // into the content as a trailing JSON metadata footer. Downstream consumers
+    // (recall, export) can detect partial/interrupted episodes from this marker
+    // without a schema migration (#M7).
+    let content = append_tags_metadata(&candidate.content, &candidate.tags);
+
+    // Interrupted (barge-in / cancelled) episodes are partial and therefore
+    // less reliable: deprioritize them in recall scoring by lowering the
+    // persisted confidence (#M7).
+    let confidence = if is_interrupted_candidate(candidate) {
+        MemoryConfidence::new((candidate.confidence - INTERRUPTED_CONFIDENCE_PENALTY).max(0.0))
+    } else {
+        MemoryConfidence::new(candidate.confidence)
+    };
+
     NewMemoryItem {
         scope,
         character_id: ctx.character_id.to_string(),
         user_id: ctx.user_id.to_string(),
         kind: candidate.kind,
         title: candidate.title.clone(),
-        content: candidate.content.clone(),
+        content,
         source,
         source_ref: ctx.source_ref.map(str::to_string),
-        confidence: MemoryConfidence::new(candidate.confidence),
+        confidence,
         salience,
         affect: AffectAnnotation::default(),
         relationship_impact: 0.0,
@@ -654,6 +669,29 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
         created_at: None,
         commitment_id: None,
     }
+}
+
+/// Confidence penalty applied to memories extracted from interrupted turns (#M7).
+const INTERRUPTED_CONFIDENCE_PENALTY: f32 = 0.15;
+
+/// Tag marker used to flag episodes from interrupted (barge-in) turns (#M7).
+pub(crate) const INTERRUPTED_TAG: &str = "interrupted";
+
+/// Whether a candidate originated from an interrupted turn (#M7).
+fn is_interrupted_candidate(candidate: &MemoryCandidate) -> bool {
+    candidate.tags.iter().any(|tag| tag == INTERRUPTED_TAG)
+}
+
+/// Serialize candidate tags into a trailing JSON metadata footer so they
+/// survive persistence despite the store lacking a tags column (#M7).
+///
+/// Returns the original content unchanged when there are no tags.
+fn append_tags_metadata(content: &str, tags: &[String]) -> String {
+    if tags.is_empty() {
+        return content.to_string();
+    }
+    let footer = serde_json::json!({ "tags": tags }).to_string();
+    format!("{content}\n\n<!-- ene:tags {footer} -->")
 }
 
 fn passes_validation(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) -> bool {
@@ -1735,5 +1773,74 @@ mod tests {
         };
         assert!(item.valid_until.is_none());
         assert!(item.valid_from.is_none());
+    }
+
+    #[test]
+    fn interrupted_candidate_confidence_is_deprioritized() {
+        // An interrupted (barge-in) episode is partial and therefore less
+        // reliable: the persisted confidence is reduced by the penalty (#M7).
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let mut candidate = sample_candidate(0.9);
+        candidate.tags.push(INTERRUPTED_TAG.to_string());
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+            panic!("expected Persist");
+        };
+        let expected = 0.9 - INTERRUPTED_CONFIDENCE_PENALTY;
+        assert!(
+            (item.confidence.get() - expected).abs() < 1e-6,
+            "interrupted confidence {} should be penalized to {expected}",
+            item.confidence.get()
+        );
+    }
+
+    #[test]
+    fn interrupted_candidate_tags_are_serialized_into_content() {
+        // The store has no tags column, so tags are serialized into the
+        // content as a metadata footer (#M7).
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let mut candidate = sample_candidate(0.9);
+        candidate.tags.push(INTERRUPTED_TAG.to_string());
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+            panic!("expected Persist");
+        };
+        assert!(
+            item.content.contains("ene:tags"),
+            "content should carry the tags metadata footer: {}",
+            item.content
+        );
+        assert!(item.content.contains(INTERRUPTED_TAG));
+    }
+
+    #[test]
+    fn non_interrupted_candidate_has_no_tags_footer() {
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let decisions = MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn));
+        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+            panic!("expected Persist");
+        };
+        assert!(
+            !item.content.contains("ene:tags"),
+            "untagged content must not gain a metadata footer"
+        );
+    }
+
+    #[test]
+    fn append_tags_metadata_empty_tags_is_identity() {
+        let content = "plain content";
+        assert_eq!(append_tags_metadata(content, &[]), content);
     }
 }

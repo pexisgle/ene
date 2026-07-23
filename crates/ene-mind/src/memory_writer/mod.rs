@@ -225,8 +225,12 @@ impl MemoryWriter {
         if input.interrupted {
             for (candidates, _) in &mut batches {
                 for candidate in candidates.iter_mut() {
-                    if !candidate.tags.iter().any(|tag| tag == "interrupted") {
-                        candidate.tags.push("interrupted".to_string());
+                    if !candidate
+                        .tags
+                        .iter()
+                        .any(|tag| tag == arbiter::INTERRUPTED_TAG)
+                    {
+                        candidate.tags.push(arbiter::INTERRUPTED_TAG.to_string());
                     }
                 }
             }

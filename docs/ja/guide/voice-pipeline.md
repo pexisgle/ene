@@ -27,7 +27,7 @@
 2. **VAD** — Silero VAD が発話の開始/終了境界を検出します。
 3. **STT** — 発話終了時に、蓄積した PCM を whisper.cpp が文字起こしし、`EneHandle::run` 経由でテキストターンとして送信します。
 4. **LLM** — mind ストリーミングパイプラインが応答を `TextDelta` イベントとして生成します。
-5. **TTS** — 蓄積したテキストを文単位で Kokoro ONNX が合成し、各チャンクを `EneEvent::AudioChunk` として発行します。
+5. **TTS** — 蓄積したテキストを文単位で Kokoro ONNX が合成し、PCM チャンクを mpsc チャネル経由でプッシュして `EneEvent::AudioChunk` としてインクリメンタルに発行します。
 6. **再生** — `rodio` が PCM 音声をデフォルト出力デバイスで再生します。
 7. **ビゼーム** — 同じ PCM が `VisemeAnalyzer`（`ene-vrm` 内）を駆動し、口形ウェイト（`aa`/`ih`/`ou`/`ee`/`oh`）を算出して各レンダリングフレームで VRM 表情レイヤーに適用します。
 
@@ -79,11 +79,13 @@ rtk cargo build -p ene-desktop --no-default-features
 
 ローカルプロバイダーにはディスク上のモデル重みが必要です。それぞれの解決順序:
 
-1. 明示的な環境変数（`ENE_AI__STT__MODEL_PATH`、`ENE_AI__TTS__MODEL_PATH`、`ENE_AI__VAD__MODEL_PATH`）
-2. `ai.{stt,tts,vad}.model` がファイルシステムパスに見える場合
+1. `ai.{stt,tts,vad}.model_path` が非空の場合（環境変数 `ENE_AI__STT__MODEL_PATH`、`ENE_AI__TTS__MODEL_PATH`、`ENE_AI__VAD__MODEL_PATH` で上書き可能）
+2. `ai.{stt,tts,vad}.model` が非空の場合
 3. デフォルトキャッシュ場所: `{assets_dir}/models/gguf/{whisper.gguf,kokoro.onnx,silero_vad.onnx}`
 
-Kokoro TTS には `voices.bin` ファイルも必要です（`ENE_AI__TTS__VOICES_PATH` または同じキャッシュディレクトリで解決）。
+Kokoro TTS には `voices.bin` ファイルも必要です（`ai.tts.voices_path` / `ENE_AI__TTS__VOICES_PATH` で解決し、未設定時は同じキャッシュディレクトリにフォールバック）。
+
+ONNX Runtime（Kokoro TTS と Silero VAD が使用）は `ensure_ort_init()` によりプロセスごとに一度だけ初期化されます。`ai.ort_dylib_path`（または `ENE_AI__ORT_DYLIB_PATH`）を設定すると `libonnxruntime` を明示パスからロードします。未設定時は `ort` のデフォルト解決（例：`LD_LIBRARY_PATH`）が適用されます。
 
 重みは**同梱も自動ダウンロードもされません** — 手動で配置するか、設定で既存ファイルを指してください。
 
@@ -92,10 +94,12 @@ Kokoro TTS には `voices.bin` ファイルも必要です（`ENE_AI__TTS__VOICE
 | モダリティ | プロバイダー名 | バックエンド | サンプルレート | 備考 |
 |----------|--------------|---------|-------------|-------|
 | STT | `whisper` | whisper.cpp（`whisper-rs`） | 16 kHz モノ | デバイスレートから自動リサンプル |
-| TTS | `kokoro` | Kokoro ONNX（`ort`） | 24 kHz モノ | 約 0.25 秒チャンクをストリーミング。`voices.bin` が必要 |
-| VAD | `silero` | Silero VAD v5 ONNX（`ort`） | 16 kHz モノ | 512 サンプル（32 ms）チャンク。閾値設定可能 |
+| TTS | `kokoro` | Kokoro ONNX（`ort`） | 24 kHz モノ | 推論前にテキストを G2P トークナイザで音素化。`voice` で約 53 音声から選択可能。PCM チャンクを mpsc チャネル経由でインクリメンタルにストリーミング。`voices.bin` が必要 |
+| VAD | `silero` | Silero VAD v5 ONNX（`ort`） | 16 kHz モノ | `frame_size()` が期待フレームサイズ（512 サンプル / 32 ms @ 16 kHz）を返す。`process_chunk` は `Result` を返す。閾値設定可能 |
 
-ONNX Runtime は実行時に動的ロードされます（`load-dynamic` feature）— `libonnxruntime` 共有ライブラリが発見可能である必要があります（例：`LD_LIBRARY_PATH` またはデスクトップアプリにバンドルされたライブラリ）。
+Kokoro の `input_ids` テンソルは生テキストではなくフラットな音素語彙です。G2P トークナイザ（`crates/ene-ai/src/g2p.rs`）が入力テキストを音素 id に変換します — 英語はルールベースの音素化、日本語はかな→音素テーブル（`ai.tts.language` で選択。空は英語として扱う）。未知の文字は削除されます。
+
+ONNX Runtime は実行時に動的ロードされます（`load-dynamic` feature）— `libonnxruntime` 共有ライブラリが発見可能である必要があります（例：`LD_LIBRARY_PATH`、デスクトップアプリにバンドルされたライブラリ、または明示的な `ai.ort_dylib_path`）。
 
 ## デスクトップアプリの使い方
 
@@ -119,7 +123,7 @@ Features 設定ページで以下を操作できます:
 
 ### セルフボイス抑制
 
-TTS 音声が再生中（`AudioState::tts_playing`）の間、キャプチャコールバックはすべてのマイク入力を破棄し VAD をリセットします。これにより、キャラクター自身の合成音声が文字起こしされて新しいターンに戻ることを防ぎます。再生が終了すると抑制は自動的に解除されます。
+TTS 音声が再生中（`AudioState::tts_playing`）の間、キャプチャコールバックはマイクをハードミュートする代わりに、エコーを考慮した抑制を適用します。VAD のエネルギーゲートを引き上げ（発話が通常の無音閾値の約 2 倍を超える必要がある）、キャラクター自身の音声のスピーカー漏れを除去しつつ、本当に大きなユーザー発話は VAD に到達できるようにします。再生中に VAD が発話開始を検出すると、バージインイベントが発火して現在のターンをキャンセルします（[バージイン動作](#バージイン動作)を参照）。再生が終了すると抑制は自動的に解除されます。完全な音響エコーキャンセレーションは実装されておらず、引き上げた閾値は実用的な近似です。
 
 ## バージイン動作
 
@@ -131,6 +135,11 @@ TTS 音声が再生中（`AudioState::tts_playing`）の間、キャプチャコ
 4. **次ターンコンテキスト** — 次のターンで、`take_interruption()` が中断を認識するシステムプロンプト注記を注入し、モデルが自然に再開または認識できるようにします。
 
 マイクが有効な場合、このフローは自動です — ユーザーが明示的な「停止」操作を行う必要はありません。
+
+## 既知の制約
+
+- **ggml シンボル衝突** — `whisper-rs-sys`（STT）と `llama-cpp-sys-2`（ローカル LLM / 埋め込み）はそれぞれ独自の ggml を vendoring しているため、voice feature を有効にするとシンボル重複のリンクエラーが発生します。Linux では `.cargo/config.toml` の `[target.x86_64-unknown-linux-gnu]` にスコープした `-Wl,--allow-multiple-definition` で回避しています。`whisper-rs-sys` が external-ggml feature を公開し、両クレートが単一の共有 ggml にリンクできるようになれば削除可能です。
+- **llama-cpp-sys-2 FGDN アサーション** — `llama-cpp-sys-2` 0.1.152 には、2 つの FGDN テンソルグループの一方を省略したモデル（一部の Gemma 系）を読み込むと中断する `GGML_ASSERT` がまだ残っています。`crates/ene-ai/build.rs` が cargo レジストリのソースにパッチを当て、この assert をスキップ（`continue`）に変換します。`patch-llama-fgdn` feature（デフォルトで有効）でゲートされています。上流が修正をリリースしたら、この feature を `default` から外しビルドスクリプトを削除できます。
 
 ## トラブルシューティング
 

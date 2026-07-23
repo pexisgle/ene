@@ -11,6 +11,14 @@
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
 )]
+#![allow(
+    clippy::arithmetic_side_effects,
+    reason = "audio DSP (resampling, FIR, voice indexing) uses bounded counter arithmetic"
+)]
+#![allow(
+    clippy::indexing_slicing,
+    reason = "audio DSP indexes into bounded PCM buffers and voice embeddings"
+)]
 #![cfg_attr(
     test,
     expect(
@@ -29,6 +37,9 @@ pub mod config;
 pub mod embedding;
 /// Typed `LlmProviderError` enum returned at the library boundary.
 pub mod error;
+/// Grapheme-to-phoneme conversion and Kokoro phoneme tokenization (feature `local-tts`).
+#[cfg(feature = "local-tts")]
+pub(crate) mod g2p;
 /// GGUF download and path resolution (#171).
 pub mod gguf;
 /// Provider health checks and failover monitoring (#175).
@@ -45,6 +56,9 @@ pub mod local_tts;
 pub mod message;
 /// Built-in OpenAI-compatible provider and cloud embedding provider.
 pub mod openai;
+/// Shared ONNX Runtime one-time initialization (features `local-tts`/`silero-vad`).
+#[cfg(any(feature = "local-tts", feature = "silero-vad"))]
+pub(crate) mod ort_init;
 /// Resolved settings from [`config::AiConfig`] task routing.
 pub mod resolve;
 /// Retry policy with exponential backoff for transient provider failures.
@@ -93,7 +107,7 @@ pub use openai::{
 };
 pub use resolve::{
     ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedStt,
-    ResolvedTaskRef, ResolvedTts, SettingsIssue, needs_onboarding, resolve_base_url,
+    ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue, needs_onboarding, resolve_base_url,
     validate_api_key, validate_settings,
 };
 pub use retry::RetryPolicy;

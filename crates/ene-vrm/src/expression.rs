@@ -339,15 +339,12 @@ impl ExpressionLayer {
     /// dropped by `set_expression`, matching the usual weight-map
     /// semantics.
     pub fn apply_viseme_weights(&mut self, weights: &crate::viseme::VisemeWeights) {
-        let fields: [(&str, f32); 5] = [
-            ("aa", weights.aa),
-            ("ih", weights.ih),
-            ("ou", weights.ou),
-            ("ee", weights.ee),
-            ("oh", weights.oh),
-        ];
-        for (name, weight) in fields {
-            self.set_expression(&ExpressionName::new(name), weight);
+        let values = [weights.aa, weights.ih, weights.ou, weights.ee, weights.oh];
+        for (name, weight) in crate::expression_override::MOUTH_TARGET_NAMES
+            .iter()
+            .zip(values)
+        {
+            self.set_expression(&ExpressionName::new(*name), weight);
         }
     }
 }

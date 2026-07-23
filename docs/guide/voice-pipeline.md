@@ -27,7 +27,7 @@ Mic (cpal) → VAD (Silero) → STT (whisper.cpp) → EneHandle::run(text)
 2. **VAD** — Silero VAD detects speech start/end boundaries.
 3. **STT** — On speech end, the accumulated PCM is transcribed by whisper.cpp and submitted as a text turn via `EneHandle::run`.
 4. **LLM** — The mind streaming pipeline generates the response as `TextDelta` events.
-5. **TTS** — Accumulated text is synthesized sentence-by-sentence by Kokoro ONNX; each chunk is emitted as `EneEvent::AudioChunk`.
+5. **TTS** — Accumulated text is synthesized sentence-by-sentence by Kokoro ONNX; PCM chunks are pushed through an mpsc channel and emitted incrementally as `EneEvent::AudioChunk`.
 6. **Playback** — `rodio` plays the PCM audio through the default output device.
 7. **Viseme** — The same PCM drives `VisemeAnalyzer` (in `ene-vrm`), which computes mouth-shape weights (`aa`/`ih`/`ou`/`ee`/`oh`) applied to the VRM expression layer each render frame.
 
@@ -79,11 +79,13 @@ All providers default to `"none"` (disabled). See [Configuration reference](../r
 
 Local providers require model weights on disk. Resolution order for each:
 
-1. Explicit env var (`ENE_AI__STT__MODEL_PATH`, `ENE_AI__TTS__MODEL_PATH`, `ENE_AI__VAD__MODEL_PATH`)
-2. `ai.{stt,tts,vad}.model` when it looks like a filesystem path
+1. `ai.{stt,tts,vad}.model_path` when non-empty (env overrides via `ENE_AI__STT__MODEL_PATH`, `ENE_AI__TTS__MODEL_PATH`, `ENE_AI__VAD__MODEL_PATH`)
+2. `ai.{stt,tts,vad}.model` when non-empty
 3. Default cache location: `{assets_dir}/models/gguf/{whisper.gguf,kokoro.onnx,silero_vad.onnx}`
 
-Kokoro TTS also requires a `voices.bin` file (resolved via `ENE_AI__TTS__VOICES_PATH` or the same cache directory).
+Kokoro TTS also requires a `voices.bin` file (resolved via `ai.tts.voices_path` / `ENE_AI__TTS__VOICES_PATH`, falling back to the same cache directory).
+
+ONNX Runtime (used by Kokoro TTS and Silero VAD) is initialized once per process via `ensure_ort_init()`. Set `ai.ort_dylib_path` (or `ENE_AI__ORT_DYLIB_PATH`) to load `libonnxruntime` from an explicit path; when unset, `ort`'s default resolution applies (e.g. `LD_LIBRARY_PATH`).
 
 Weights are **not** bundled or auto-downloaded — place them manually or point the config at existing files.
 
@@ -92,10 +94,12 @@ Weights are **not** bundled or auto-downloaded — place them manually or point 
 | Modality | Provider name | Backend | Sample rate | Notes |
 |----------|--------------|---------|-------------|-------|
 | STT | `whisper` | whisper.cpp (`whisper-rs`) | 16 kHz mono | Resamples from device rate automatically |
-| TTS | `kokoro` | Kokoro ONNX (`ort`) | 24 kHz mono | Streams ~0.25 s chunks; requires `voices.bin` |
-| VAD | `silero` | Silero VAD v5 ONNX (`ort`) | 16 kHz mono | 512-sample (32 ms) chunks; threshold configurable |
+| TTS | `kokoro` | Kokoro ONNX (`ort`) | 24 kHz mono | Text is phonemized by a G2P tokenizer before inference; ~53 voices selectable via `voice`; PCM chunks stream incrementally over an mpsc channel; requires `voices.bin` |
+| VAD | `silero` | Silero VAD v5 ONNX (`ort`) | 16 kHz mono | `frame_size()` reports the expected frame (512 samples / 32 ms @ 16 kHz); `process_chunk` returns a `Result`; threshold configurable |
 
-ONNX Runtime is loaded dynamically at runtime (`load-dynamic` feature) — the `libonnxruntime` shared library must be discoverable (e.g. `LD_LIBRARY_PATH` or the desktop app's bundled library).
+Kokoro's `input_ids` tensor is a flat phoneme vocabulary, not raw text: the G2P tokenizer (`crates/ene-ai/src/g2p.rs`) converts input text into phoneme ids — rule-based phonemization for English and a kana→phoneme table for Japanese (selected via `ai.tts.language`; empty defaults to English). Unknown characters are dropped.
+
+ONNX Runtime is loaded dynamically at runtime (`load-dynamic` feature) — the `libonnxruntime` shared library must be discoverable (e.g. `LD_LIBRARY_PATH`, the desktop app's bundled library, or an explicit `ai.ort_dylib_path`).
 
 ## Desktop app usage
 
@@ -119,7 +123,7 @@ The Features settings page exposes:
 
 ### Self-voice suppression
 
-While TTS audio is playing (`AudioState::tts_playing`), the capture callback discards all microphone input and resets the VAD. This prevents the character's own synthesized voice from being transcribed back into a new turn. Suppression lifts automatically when playback finishes.
+While TTS audio is playing (`AudioState::tts_playing`), the capture callback applies echo-aware suppression instead of hard-muting the microphone. The VAD energy gate is elevated (speech must exceed roughly 2× the normal silence threshold) so that speaker bleed from the character's own voice is filtered out, while genuinely loud user speech still reaches the VAD. When the VAD detects a speech start during playback, a barge-in event fires and cancels the current turn (see [Barge-in behavior](#barge-in-behavior)). Suppression lifts automatically when playback finishes. Full acoustic echo cancellation is not implemented; the elevated threshold is a pragmatic approximation.
 
 ## Barge-in behavior
 
@@ -131,6 +135,11 @@ When the user starts speaking while the character is still responding (or its TT
 4. **Next-turn context** — On the following turn, `take_interruption()` injects a system-prompt note acknowledging the interruption, so the model can resume or acknowledge naturally.
 
 This flow is automatic when the microphone is active — no explicit "stop" action is needed from the user.
+
+## Known limitations
+
+- **ggml symbol collision** — `whisper-rs-sys` (STT) and `llama-cpp-sys-2` (local LLM / embedding) each vendor their own copy of ggml, so enabling the voice features produces duplicate-symbol link errors. On Linux this is worked around with `-Wl,--allow-multiple-definition`, scoped to `[target.x86_64-unknown-linux-gnu]` in `.cargo/config.toml`. This can be removed once `whisper-rs-sys` exposes an external-ggml feature so both crates link a single shared ggml.
+- **llama-cpp-sys-2 FGDN assertion** — `llama-cpp-sys-2` 0.1.152 still carries a `GGML_ASSERT` that aborts when loading models that omit one of the two FGDN tensor groups (some Gemma variants). `crates/ene-ai/build.rs` patches the cargo-registry source to turn the assert into a skip, gated behind the `patch-llama-fgdn` feature (enabled by default). Once upstream ships the fix, the feature can be dropped from `default` and the build script removed.
 
 ## Troubleshooting
 

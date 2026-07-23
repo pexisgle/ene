@@ -149,6 +149,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         memory_writer_tx,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
+        partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
     };
 
     let started = Instant::now();

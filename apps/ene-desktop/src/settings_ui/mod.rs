@@ -266,7 +266,7 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
-            PageKind::Features => page_features::render(ui, settings, ai),
+            PageKind::Features => page_features::render(ui, settings, ai, world),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
             PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
             PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),

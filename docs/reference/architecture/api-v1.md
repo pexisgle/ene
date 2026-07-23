@@ -18,7 +18,7 @@ ene exposes a minimal host contract with clear crate ownership: a ready `EneHand
 
 ### Events
 
-5. **Chat `EneEvent` is minimal:** `TextDelta`, `Performance`, interactive gates (`PermissionRequired` / `UserInputRequired`), tool start/result (when UI needs them), `Terminal`, `StatusChanged`, optional thin `ContextCompressed`.
+5. **Chat `EneEvent` is minimal:** `TextDelta`, `Performance`, interactive gates (`PermissionRequired` / `UserInputRequired`), tool start/result (when UI needs them), `AudioChunk` (TTS PCM, when a TTS provider is configured), `Terminal`, `StatusChanged`, optional thin `ContextCompressed`.
 6. **Diagnostics are opt-in:** `PipelinePhase`, `PipelineMetrics`, arbiter/compression detail — via `handle.diagnostics()`, not the chat bus.
 7. **`EneDiagnostics`** is a concrete facade on the handle — UIs do not implement the trait.
 
@@ -113,6 +113,7 @@ handle.diagnostics() -> &EneDiagnostics;
 | `ToolBackgroundCompleted` | Async deferred-tool completion (may arrive after `Terminal`) |
 | `PermissionRequired` / `UserInputRequired` | Gates |
 | `ContextCompressed { turn, origin, level }` | Thin signal; details on diagnostics |
+| `AudioChunk { turn, origin, pcm, sample_rate, is_final }` | One chunk of synthesized PCM audio from the TTS pipeline (mono, `[-1, 1]`). Emitted only when a TTS provider is configured; `is_final` marks the last (empty-payload) chunk for the turn. Shares the chat broadcast channel — see the runtime API doc for the dedicated-channel follow-up |
 | `Terminal { turn, origin, reason }` | Full turn done (exactly one per `run`) |
 | `StatusChanged { status }` | Idle / Running / Error |
 

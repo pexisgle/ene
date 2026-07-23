@@ -126,14 +126,39 @@ pub enum EneEvent {
     PermissionRequired { turn: TurnId, request_id: RequestId, action: String, target: String, description: String },
     UserInputRequired { turn: TurnId, request_id: RequestId, prompt: UserInputPrompt },
     ContextCompressed { turn: TurnId, level: String },  // thin signal
+    AudioChunk { turn: TurnId, origin: TurnOrigin, pcm: Vec<f32>, sample_rate: u32, is_final: bool },
     Terminal { turn: TurnId, reason: TerminalReason },  // exactly once after history commit + affect finalize_turn
     StatusChanged { status: EneStatus },
 }
 ```
 
+`AudioChunk` carries one chunk of synthesized PCM audio from the TTS pipeline (mono, normalized to `[-1.0, 1.0]`, at `sample_rate` Hz). `is_final` marks the last chunk for the turn (its `pcm` is empty). It is emitted only when a TTS provider is configured; the barge-in path stops the TTS worker via the turn's `CancellationToken`, so a cancelled turn emits no final marker. Note: `AudioChunk` shares the chat broadcast channel with the lightweight events above — see the note on the variant for the dedicated-channel follow-up.
+
 Removed from chat (use diagnostics): `SpecialToken`, standalone `Expression`, `SessionSplit`, `PipelinePhase`, `PipelineMetrics`, `TaskProgress`.
 
 `PerformanceCue` / `CueSource` live in `ene-mind` (runtime re-exports). No `CueSource::Host` without an explicit `perform` API.
+
+---
+
+## `PublicChatEvent`
+
+The stable, redacted mirror of `EneEvent` for external integrators (`PublicChatEvent::from_ene_event`). It mirrors the chat variants with string `turn`/`origin` fields and, for audio, exposes only the sample count rather than the raw PCM payload.
+
+```rust
+pub enum PublicChatEvent {
+    // … TurnStarted, TextDelta, Performance, ToolCallStart, ToolCallResult,
+    //   PermissionRequired, UserInputRequired, ContextCompressed, Terminal, StatusChanged …
+    AudioChunk {
+        turn: String,
+        origin: String,
+        pcm_len: usize,      // number of PCM samples (raw samples are not exposed)
+        sample_rate: u32,
+        is_final: bool,
+    },
+}
+```
+
+`PublicChatEvent::AudioChunk` is the public counterpart of `EneEvent::AudioChunk`; it reports `pcm_len` instead of the `Vec<f32>` payload so the public surface stays serialization-friendly.
 
 ---
 ## `TerminalReason`

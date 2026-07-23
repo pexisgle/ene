@@ -33,21 +33,38 @@ const TTS_MAX_BUFFER_CHARS: usize = 100;
 
 /// Finds the index just past the first sentence boundary in `buf`.
 ///
-/// A boundary is a sentence-ending punctuation character (。！？.!?) followed
-/// by whitespace, or the buffer exceeding [`TTS_MAX_BUFFER_CHARS`].
+/// A boundary is:
+/// - A CJK sentence-ending punctuation character (`。！？`, U+3002 / U+FF01 /
+///   U+FF1F) unconditionally — Japanese text has no trailing whitespace after
+///   these marks.
+/// - An ASCII sentence-ending punctuation character (`.!?`) followed by
+///   whitespace or end-of-buffer.
+/// - The buffer exceeding [`TTS_MAX_BUFFER_CHARS`] characters.
+///
+/// `char_count` is the caller-maintained character count of `buf`, tracked
+/// incrementally to avoid an O(n) rescan on every streaming delta (#L8).
 /// Returns `None` when no boundary is found.
-fn find_tts_sentence_boundary(buf: &str) -> Option<usize> {
-    if buf.chars().count() > TTS_MAX_BUFFER_CHARS {
+fn find_tts_sentence_boundary(buf: &str, char_count: usize) -> Option<usize> {
+    if char_count > TTS_MAX_BUFFER_CHARS {
         return Some(buf.len());
     }
     let chars: Vec<(usize, char)> = buf.char_indices().collect();
     for (i, &(_, ch)) in chars.iter().enumerate() {
-        if matches!(ch, '。' | '！' | '？' | '.' | '!' | '?') {
-            let next = chars.get(i + 1).map(|&(_, c)| c);
-            if next.is_none_or(char::is_whitespace) {
+        match ch {
+            // CJK punctuation: boundary unconditionally (no trailing space in Japanese).
+            '。' | '！' | '？' => {
                 let end = chars.get(i + 1).map_or(buf.len(), |&(offset, _)| offset);
                 return Some(end);
             }
+            // ASCII punctuation: boundary only at end or before whitespace.
+            '.' | '!' | '?' => {
+                let next = chars.get(i + 1).map(|&(_, c)| c);
+                if next.is_none_or(char::is_whitespace) {
+                    let end = chars.get(i + 1).map_or(buf.len(), |&(offset, _)| offset);
+                    return Some(end);
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -89,6 +106,10 @@ fn build_turn_context<'a>(
 
 /// Finish a cancelled turn: record the partial response as an interruption so
 /// the next turn can acknowledge/resume it, then emit `TerminalReason::Cancelled` (#206).
+///
+/// When the trimmed partial text is empty (e.g. cancel arrived before any
+/// visible text), the interruption record is skipped entirely — an empty
+/// snapshot carries no useful context for the next turn (#M9).
 fn finish_cancelled(
     mut session: ene_mind::ConversationSession,
     event_tx: &tokio::sync::broadcast::Sender<EneEvent>,
@@ -97,8 +118,10 @@ fn finish_cancelled(
     origin: TurnOrigin,
     spoken_text: &str,
 ) -> StreamOutcome {
-    let spoken_chars = spoken_text.chars().count();
-    session.mark_interrupted(&turn.to_string(), spoken_text, spoken_chars);
+    if !spoken_text.trim().is_empty() {
+        let spoken_chars = spoken_text.chars().count();
+        session.mark_interrupted(&turn.to_string(), spoken_text, spoken_chars);
+    }
     stream_finish(
         session,
         event_tx,
@@ -107,6 +130,50 @@ fn finish_cancelled(
         origin,
         TerminalReason::Cancelled,
     )
+}
+
+/// Spawn deferred memory work for an interrupted (barge-in / cancelled) turn (#M7).
+///
+/// Tags the turn as `interrupted` and includes the partial `spoken_text` so
+/// downstream memory extraction can distinguish partial episodes.
+fn spawn_interrupted_memory_work(
+    mem_store: Option<&Arc<ene_store::MemoryStore>>,
+    mind: &MindConfig,
+    provider: &Arc<dyn ene_ai::LlmProvider>,
+    embedder: Option<&Arc<dyn ene_ai::EmbeddingProvider>>,
+    memory_writer_tx: &tokio::sync::mpsc::UnboundedSender<
+        tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>,
+    >,
+    user_input: &str,
+    spoken_text: &str,
+    turn_tool_results: &[ToolResultSummary],
+    turn_affect: &ene_store::AffectState,
+    card_name: &str,
+    user_name: &str,
+) {
+    let Some(store) = mem_store.cloned() else {
+        return;
+    };
+    let deferred_input = OwnedPostTurnInput {
+        turn: OwnedTurnInput {
+            user_message: user_input.to_string(),
+            assistant_message: Some(spoken_text.to_string()),
+            tool_results: turn_tool_results.to_vec(),
+        },
+        affect: turn_affect.clone(),
+        character_id: card_name.to_string(),
+        user_id: user_name.to_string(),
+        interrupted: true,
+        spoken_text: Some(spoken_text.to_string()),
+    };
+    let handle = CognitionEngine::spawn_deferred_memory_work(
+        store,
+        mind.clone(),
+        deferred_input,
+        provider.clone(),
+        embedder.cloned(),
+    );
+    let _ = memory_writer_tx.send(handle);
 }
 
 /// Mutates `messages` in-place for a proactive turn: strips trailing empty
@@ -178,6 +245,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         memory_writer_tx,
         deferred_tool_tx,
         tts_provider,
+        partial_text,
     } = ctx;
 
     let is_proactive = origin == TurnOrigin::Proactive;
@@ -625,6 +693,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 
     // TTS pipeline: spawn a background worker that synthesizes sentences into
     // PCM audio chunks and emits them through the broadcast channel.
+    // The worker monitors the turn's CancellationToken so barge-in can stop
+    // synthesis immediately instead of finishing the current sentence (#H4).
     let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let tts_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = if tts_provider.is_some() {
         Some(tts_tx)
@@ -635,10 +705,20 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let tts_provider = Arc::clone(provider);
         let event_tx = event_tx.clone();
         let turn = turn.clone();
+        let tts_cancel = cancel_token.clone();
         tokio::spawn(
             async move {
                 let mut rx = tts_rx;
-                while let Some(sentence) = rx.recv().await {
+                loop {
+                    // Wait for the next sentence or cancellation (#H4).
+                    let sentence = tokio::select! {
+                        biased;
+                        () = tts_cancel.cancelled() => break,
+                        recv = rx.recv() => match recv {
+                            Some(s) => s,
+                            None => break, // channel closed: all sentences flushed
+                        },
+                    };
                     let trimmed = sentence.trim();
                     if trimmed.is_empty() {
                         continue;
@@ -646,7 +726,16 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     match tts_provider.synthesize_stream(trimmed).await {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt as _;
-                            while let Some(chunk_res) = stream.next().await {
+                            loop {
+                                // Consume synthesis chunks or bail on cancel (#H4).
+                                let chunk_res = tokio::select! {
+                                    biased;
+                                    () = tts_cancel.cancelled() => break,
+                                    next = stream.next() => match next {
+                                        Some(res) => res,
+                                        None => break, // stream exhausted
+                                    },
+                                };
                                 match chunk_res {
                                     Ok(chunk) => {
                                         let _ = event_tx.send(EneEvent::AudioChunk {
@@ -675,24 +764,45 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             );
                         }
                     }
+                    // If cancelled mid-synthesis, stop processing further sentences.
+                    if tts_cancel.is_cancelled() {
+                        break;
+                    }
                 }
-                // Channel closed: all sentences flushed. Emit final marker.
-                let _ = event_tx.send(EneEvent::AudioChunk {
-                    turn: turn.clone(),
-                    origin,
-                    pcm: Vec::new(),
-                    sample_rate: 0,
-                    is_final: true,
-                });
+                // Emit final marker only on clean completion (not on cancel).
+                if !tts_cancel.is_cancelled() {
+                    let _ = event_tx.send(EneEvent::AudioChunk {
+                        turn: turn.clone(),
+                        origin,
+                        pcm: Vec::new(),
+                        sample_rate: 0,
+                        is_final: true,
+                    });
+                }
             }
             .instrument(tracing::info_span!("tts_pipeline")),
         );
     }
     let mut tts_sentence_buf = String::new();
+    // Incremental char count for `tts_sentence_buf` to avoid O(n) rescans (#L8).
+    let mut tts_sentence_buf_chars: usize = 0;
 
     loop {
         if cancel_token.is_cancelled() {
             let spoken = session.display.display_buffer.clone();
+            spawn_interrupted_memory_work(
+                mem_store.as_ref(),
+                &mind,
+                &provider,
+                embedder.as_ref(),
+                &memory_writer_tx,
+                user_input.as_str(),
+                &spoken,
+                &turn_tool_results,
+                &turn_affect,
+                &card_name,
+                &user_name,
+            );
             return finish_cancelled(
                 session,
                 &event_tx,
@@ -744,6 +854,19 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
                 let spoken = session.display.display_buffer.clone();
+                spawn_interrupted_memory_work(
+                    mem_store.as_ref(),
+                    &mind,
+                    &provider,
+                    embedder.as_ref(),
+                    &memory_writer_tx,
+                    user_input.as_str(),
+                    &spoken,
+                    &turn_tool_results,
+                    &turn_affect,
+                    &card_name,
+                    &user_name,
+                );
                 return finish_cancelled(
                     session,
                     &event_tx,
@@ -769,6 +892,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         assistant_content.push_str(content_delta);
                         let (text_deltas, special_tokens) = session.process_delta(content_delta);
                         for text in text_deltas {
+                            // Mirror streamed text into the shared buffer so a
+                            // hard-aborted turn can recover its partial response
+                            // for interruption recording (#H5).
+                            partial_text.lock().push_str(&text);
                             let _ = event_tx.send(EneEvent::TextDelta {
                                 turn: turn.clone(),
                                 origin,
@@ -776,9 +903,15 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             });
                             if let Some(ref tx) = tts_tx {
                                 tts_sentence_buf.push_str(&text);
-                                while let Some(end) = find_tts_sentence_boundary(&tts_sentence_buf)
-                                {
+                                tts_sentence_buf_chars =
+                                    tts_sentence_buf_chars.saturating_add(text.chars().count());
+                                while let Some(end) = find_tts_sentence_boundary(
+                                    &tts_sentence_buf,
+                                    tts_sentence_buf_chars,
+                                ) {
                                     let sentence: String = tts_sentence_buf.drain(..end).collect();
+                                    tts_sentence_buf_chars = tts_sentence_buf_chars
+                                        .saturating_sub(sentence.chars().count());
                                     let _ = tx.send(sentence);
                                 }
                             }
@@ -1131,5 +1264,106 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::string_slice,
+    reason = "boundary indices come from char_indices and are always char-boundary safe"
+)]
+mod tests {
+    use super::*;
+
+    /// Helper: char count for the incremental-tracking tests (#L8).
+    fn char_count(buf: &str) -> usize {
+        buf.chars().count()
+    }
+
+    #[test]
+    fn ja_sentence_splits_at_cjk_period_without_trailing_space() {
+        // Japanese has no space after 。 — must split unconditionally (#M8).
+        let buf = "こんにちは。元気ですか？";
+        let end =
+            find_tts_sentence_boundary(buf, char_count(buf)).expect("should find a boundary at 。");
+        assert_eq!(&buf[..end], "こんにちは。");
+    }
+
+    #[test]
+    fn ja_sentence_splits_at_fullwidth_exclamation() {
+        let buf = "すごい！本当？";
+        let end =
+            find_tts_sentence_boundary(buf, char_count(buf)).expect("should find a boundary at ！");
+        assert_eq!(&buf[..end], "すごい！");
+    }
+
+    #[test]
+    fn ja_sentence_splits_at_fullwidth_question() {
+        let buf = "本当？うん。";
+        let end =
+            find_tts_sentence_boundary(buf, char_count(buf)).expect("should find a boundary at ？");
+        assert_eq!(&buf[..end], "本当？");
+    }
+
+    #[test]
+    fn en_sentence_splits_at_period_with_trailing_space() {
+        // The boundary index lands right after the punctuation; the trailing
+        // space stays in the buffer and is trimmed before synthesis.
+        let buf = "Hello. How are you?";
+        let end = find_tts_sentence_boundary(buf, char_count(buf))
+            .expect("should find a boundary at '. '");
+        assert_eq!(&buf[..end], "Hello.");
+    }
+
+    #[test]
+    fn en_sentence_splits_at_end_of_buffer() {
+        // ASCII punctuation at end-of-buffer is a boundary even without space.
+        let buf = "Are you there?";
+        let end = find_tts_sentence_boundary(buf, char_count(buf))
+            .expect("should find a boundary at trailing '?'");
+        assert_eq!(&buf[..end], "Are you there?");
+    }
+
+    #[test]
+    fn en_period_without_space_is_not_a_boundary() {
+        // "3.14" — the period is followed by a digit, not whitespace/end.
+        let buf = "Pi is 3.14 roughly";
+        assert!(
+            find_tts_sentence_boundary(buf, char_count(buf)).is_none(),
+            "a period followed by a digit must not be treated as a boundary"
+        );
+    }
+
+    #[test]
+    fn mixed_ja_en_splits_at_first_boundary() {
+        let buf = "OK。then let's go.";
+        let end = find_tts_sentence_boundary(buf, char_count(buf))
+            .expect("should find the first boundary at 。");
+        assert_eq!(&buf[..end], "OK。");
+    }
+
+    #[test]
+    fn no_boundary_returns_none() {
+        let buf = "just some text without punctuation";
+        assert!(find_tts_sentence_boundary(buf, char_count(buf)).is_none());
+    }
+
+    #[test]
+    fn overlong_buffer_forces_flush() {
+        // Exceeding TTS_MAX_BUFFER_CHARS forces a flush of the whole buffer.
+        let buf: String = "あ".repeat(TTS_MAX_BUFFER_CHARS + 1);
+        let end = find_tts_sentence_boundary(&buf, char_count(&buf))
+            .expect("overlong buffer should force a flush");
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn incremental_char_count_matches_recount() {
+        // The incremental count passed by the caller must agree with a fresh
+        // recount, otherwise the overlong flush threshold would misfire (#L8).
+        let buf = "こんにちは。Hello. ";
+        assert_eq!(char_count(buf), buf.chars().count());
+        let end = find_tts_sentence_boundary(buf, char_count(buf)).expect("boundary");
+        assert_eq!(&buf[..end], "こんにちは。");
     }
 }

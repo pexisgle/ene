@@ -40,7 +40,7 @@ flowchart LR
 
 | 区分 | シンボル | 備考 |
 |---|---|---|
-| **サポート（`prelude` を使用）** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName` | [`ene_vrm::prelude`](../../../../crates/ene-vrm/src/prelude.rs) に集約。新しいホストコードはここから始める。 |
+| **サポート（`prelude` を使用）** | `load_vrm`, `VrmModel`, `VrmRenderer`, `VrmError`, `VrmaAsset`, `VrmaPlayer`, `VrmaFrame`, `evaluate_clip`, `load_vrma`, `LookAtEvaluator`, `LookAtProperties`, `ExpressionLayer`, `ExpressionName`, `VisemeAnalyzer`, `VisemeWeights` | [`ene_vrm::prelude`](../../../../crates/ene-vrm/src/prelude.rs) に集約。新しいホストコードはここから始める。 |
 | **サポート（desktop も使用）** | `camera::*`, `debug_renderer::*`, `humanoid::*`, `spring_bone::SpringBoneSimulator`, `spring_bone::SpringBoneProperties`, `model::{NodeHierarchy, Skeleton, MeshVertex}`, `expression_override::apply_overrides` | コアの load→render ループに次点だが `ene-desktop` が依存している。 |
 | **内部（`#[doc(hidden)]`）** | `load_humanoid_bones`, `load_look_at`, `load_spring_bones`, `load_node_constraints`, `load_expression_overrides`, `load_mtoon_materials`, `texture_flags`, `retarget_rotation`, `quat_to_yaw_pitch`, `HUMANOID_BONE_NAMES`, `MOUTH_TARGET_NAMES`, … | `load_vrm` またはレンダラーから呼ばれる。rustdoc の索引を絞るため非表示。型は `pub` のまま — サポート型のフィールドとして到達可能なものもある。 |
 
@@ -257,6 +257,7 @@ pub struct ExpressionLayer {
 | `expression_names` | `fn expression_names(&self) -> Vec<ExpressionName>` | モデルが定義するすべての表情の、ソート済み・重複排除済みリスト。 |
 | `set_expression` | `fn set_expression(&mut self, name: &ExpressionName, weight: f32) -> bool` | `[0, 1]` にクランプして保存する。`name` がモデルの既知の表情でない場合は `false` を返し（保存**しない**）、誤字のあるAIトークンが静かに蓄積するのを防ぐ。 |
 | `apply_weights` | `fn apply_weights(&mut self, incoming: &BTreeMap<ExpressionName, f32>)` | 重みマップを一括適用する。未知の名前は同様に除外される。デスクトップアプリの感情適用ステップからフレームごとに1回呼ばれることを想定している。 |
+| `apply_viseme_weights` | `fn apply_viseme_weights(&mut self, weights: &crate::viseme::VisemeWeights)` | 5つの `VisemeWeights` フィールドを、`expression_override::MOUTH_TARGET_NAMES`（`aa`/`ih`/`ou`/`ee`/`oh`）をイテレートしてプロシージャル口ターゲットへ写像し、それぞれに `set_expression` を呼ぶ（#L7）。 |
 | `morphic_primitive_count` | `fn morphic_primitive_count(&self) -> usize` | 少なくとも1つのモーフターゲットを持つプリミティブの数。 |
 
 `PrimitiveMorphs { primitive_id, node_index, targets: Vec<MorphTarget>, uniform_buffer_len, vertex_count }` は1プリミティブのモーフターゲットを保持し、`MorphTarget { target_index, position_offsets }` は1つの名前付きブレンドシェイプの頂点ごとの変位です。`ExpressionName(pub String)` は薄いニュータイプのキーです。
@@ -289,6 +290,45 @@ pub struct ExpressionDefinition {
 ```
 
 `load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition>` は、ロード時に `VRMC_vrm.expressions.{preset,custom}.<name>` ツリーを解析します。`apply_overrides(weights: &mut BTreeMap<ExpressionName, f32>, defs: &[ExpressionDefinition])` は `Block`/`Blend` のセマンティクスをインプレースで適用します: `Block` は、上書きする表情が有効な間、プロシージャルターゲットをゼロにします。`Blend` は `1 − sum(上書きする重みの合計)` を乗算します。
+
+---
+
+## `viseme` — 音声駆動リップシンク
+
+PCM 音声のストリームを、VRM プロシージャルリップシンクターゲット（`aa`、`ih`、`ou`、`ee`、`oh` — `expression_override::MOUTH_TARGET_NAMES` 参照）で使われる5つの口形状ブレンドシェイプ重みへ変換する純粋な DSP です。音声 I/O は一切行わず、`ene-vrm` をレンダリング専用に保ちます: サンプルのキャプチャとスケジューリングはホストが担当します。
+
+```rust
+pub struct VisemeWeights {
+    pub aa: f32, // 開いた口（"father"）
+    pub ih: f32, // 横に広がる / 笑顔（"bit"）
+    pub ou: f32, // 丸めた口（"boot"）
+    pub ee: f32, // 横に広い（"beet"）
+    pub oh: f32, // 小さく丸めた（"boat"）
+}
+// すべてのフィールドは [0, 1]。`Default` はすべてゼロ（口を閉じた状態）。
+
+pub struct VisemeAnalyzer { /* リングバッファ + FFT プラン + 平滑化重み */ }
+
+impl VisemeAnalyzer {
+    pub fn new(sample_rate: u32) -> Self;
+    pub fn window_size(&self) -> usize;
+    pub fn push_pcm(&mut self, pcm: &[f32]);
+    pub fn analyze(&mut self) -> VisemeWeights;
+    pub fn reset(&mut self);
+}
+```
+
+| メソッド | 説明 |
+|---|---|
+| `new(sample_rate)` | 指定サンプルレート（Hz）用のアナライザーを構築する。解析ウィンドウは約20msの音声にサイズされ、次の2の累乗へ切り上げられる。FFT スクラッチバッファは `max(window_size, fft.get_inplace_scratch_len())` にサイズされ、`process_with_scratch` がバッファ不足でパニックしないようにする（#M6）。 |
+| `window_size` | 1つの解析ウィンドウに保持される PCM サンプル数。 |
+| `push_pcm(pcm)` | モノラル `[-1, 1]` サンプルをリングバッファに追加し、ウィンドウを超える最古のサンプルを捨てる。 |
+| `analyze` | バッファされた音声を解析し、平滑化された重みを返す。レンダーフレームごとに1回呼ぶ。サンプルが少なすぎると重みはゼロへ減衰する。 |
+| `reset` | リングバッファをクリアし、平滑化重みをゼロにリセットする。 |
+
+フレームごとの特徴量: **RMS 振幅**が口全体の開き度を駆動し（無音ではすべての重みがゼロへ収束）、**ゼロ交差率**が丸めた母音（低レート）と広がった母音（高レート）を識別し、小さな **FFT** が各フレームを5つの周波数帯域へ分割して、開いた / 中低域の母音（`aa`、`oh`）と高周波の広がった母音（`ih`、`ee`）を区別します。生の推定値は非対称な指数移動平均（高速アタック、低速リリース）を通り、ジッターを抑えつつ音声を追従します。
+
+典型的な使い方: `push_pcm` でサンプルを与え、レンダーフレームごとに1回 `analyze` を呼び、その結果を `ExpressionLayer::apply_viseme_weights` へ渡します。
 
 ---
 

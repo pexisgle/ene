@@ -370,6 +370,14 @@ pub enum EneEvent {
         origin: crate::types::TurnOrigin,
     },
     /// A chunk of synthesized PCM audio from the TTS pipeline.
+    ///
+    /// NOTE (#L6): `AudioChunk` carries a `Vec<f32>` PCM payload through the
+    /// same 1024-capacity broadcast channel as lightweight chat events. A burst
+    /// of audio chunks can therefore crowd out chat events (causing `Lagged`
+    /// for slow subscribers) and inflates every subscriber's buffer. This is
+    /// acceptable for the current single-consumer playback path, but a
+    /// dedicated bounded audio channel should be introduced before adding more
+    /// broadcast subscribers or higher sample rates.
     AudioChunk {
         /// Active turn.
         turn: TurnId,
@@ -761,6 +769,7 @@ impl EneHandle {
             cancel_token: CancellationToken::new(),
             stream_handle: None,
             stream_session_rx: None,
+            stream_partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
             active_turn: None,
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
@@ -1126,6 +1135,10 @@ struct EneActor {
     cancel_token: CancellationToken,
     stream_handle: Option<tokio::task::JoinHandle<()>>,
     stream_session_rx: Option<oneshot::Receiver<streaming::StreamOutcome>>,
+    /// Shared with the running stream task; accumulates streamed assistant
+    /// text deltas so a hard-aborted turn can still recover its partial
+    /// response for interruption recording (#H5).
+    stream_partial_text: Arc<parking_lot::Mutex<String>>,
     active_turn: Option<TurnId>,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
@@ -1943,13 +1956,14 @@ impl EneActor {
 
                 // Fallback: if the stream task was hard-aborted before it could
                 // record the interruption, capture the partial response here (#206).
-                if !self.session.has_pending_interruption()
-                    && !self.session.display.display_buffer.is_empty()
-                {
-                    let spoken = self.session.display.display_buffer.clone();
-                    let spoken_chars = spoken.chars().count();
+                // Read from the shared partial-text buffer that the stream task
+                // updates live, since the session's display buffer is a pre-stream
+                // snapshot that is empty after finalize (#H5).
+                let partial = self.stream_partial_text.lock().clone();
+                if !self.session.has_pending_interruption() && !partial.trim().is_empty() {
+                    let spoken_chars = partial.chars().count();
                     self.session
-                        .mark_interrupted(&turn.to_string(), &spoken, spoken_chars);
+                        .mark_interrupted(&turn.to_string(), &partial, spoken_chars);
                 }
 
                 self.drain_pending().await;
@@ -2404,6 +2418,10 @@ impl EneActor {
         let memory_writer_tx = self.memory_writer_tx.clone();
         let deferred_tool_tx = self.deferred_tool_tx.clone();
         let tts_provider = self.tts_provider.clone();
+        // Reset the shared partial-text buffer for this turn and hand a clone
+        // to the stream task so a hard-abort can recover streamed text (#H5).
+        self.stream_partial_text.lock().clear();
+        let partial_text = Arc::clone(&self.stream_partial_text);
         self.active_origin = origin;
 
         let _ = self.event_tx.send(EneEvent::TurnStarted {
@@ -2441,6 +2459,7 @@ impl EneActor {
                 memory_writer_tx,
                 deferred_tool_tx,
                 tts_provider,
+                partial_text,
             })
             .await;
             let _ = session_tx.send(outcome);

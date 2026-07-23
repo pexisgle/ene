@@ -11,7 +11,7 @@ publish.workspace = true
 crate-type = ["lib"]
 
 [features]
-default = []
+default = ["patch-llama-fgdn"]
 # GPU backends for llama-cpp-2 (decision + local embedding).
 vulkan = ["llama-cpp-2/vulkan"]
 cuda = ["llama-cpp-2/cuda"]
@@ -21,12 +21,16 @@ local-tts = ["dep:ort"]
 silero-vad = ["dep:ort"]
 # Enable all local voice providers.
 voice = ["local-stt", "local-tts", "silero-vad"]
+# Patches the shared cargo-registry copy of `llama-cpp-sys-2` so models that
+# omit one of the two FGDN tensor groups load without tripping a GGML_ASSERT.
+# Disable only if the upstream crate ships the fix or you vendor a patched copy.
+patch-llama-fgdn = []
 
 [dependencies]
 async-openai = { workspace = true, default-features = false }
 tokio = { workspace = true, features = ["io-util", "sync", "time", "macros", "rt", "fs"] }
 parking_lot = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
 serde = { workspace = true }
 tokio-util = { workspace = true, features = ["io"] }
 serde_json = { workspace = true }
@@ -43,6 +47,16 @@ blake3 = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 image = { workspace = true, features = ["png", "jpeg"] }
 # Local voice pipeline (optional; enabled by feature flags above).
+#
+# NOTE (ggml symbol conflict): `whisper-rs` (via `whisper-rs-sys`) and
+# `llama-cpp-2` (via `llama-cpp-sys-2`) each statically bundle their own copy
+# of ggml. `whisper-rs-sys` exposes no "external ggml" feature, so the two
+# copies cannot be unified. When both `local-stt` (whisper) and the llama
+# backend are linked into the *same* binary (e.g. `ene-desktop` with the
+# `voice` feature), duplicate ggml symbols collide at link time. The workaround
+# is the linker flag `-Wl,--allow-multiple-definition`, which must be scoped to
+# the affected binary (add it via `apps/ene-desktop`'s own build config / a
+# desktop build.rs), NOT applied globally in `.cargo/config.toml`.
 whisper-rs = { workspace = true, optional = true }
 # `load-dynamic` defers ONNX Runtime loading to runtime (dlopen) so the crate
 # compiles without a build-time binary download; the desktop app provides the

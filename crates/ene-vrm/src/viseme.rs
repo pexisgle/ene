@@ -109,10 +109,10 @@ impl VisemeAnalyzer {
         let window_size = raw.max(MIN_WINDOW).next_power_of_two();
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(window_size);
-        // Scratch sized to the FFT length is always sufficient;
-        // `get_outofplace_scratch_len()` can under-report for some
-        // power-of-two algorithms.
-        let scratch_len = window_size;
+        // Size scratch to at least what the FFT algorithm requires.
+        // `get_inplace_scratch_len()` reports the true requirement;
+        // we take the max with `window_size` as a safety floor.
+        let scratch_len = window_size.max(fft.get_inplace_scratch_len());
         Self {
             sample_rate,
             window_size,

@@ -126,7 +126,8 @@ pub fn validate_context_config(config: &ContextConfig) -> Result<(), CognitionEr
 }
 
 /// Drop priority for dynamic sections (lowest index = dropped first).
-const DROP_ORDER: [PromptSectionKind; 6] = [
+const DROP_ORDER: [PromptSectionKind; 7] = [
+    PromptSectionKind::InterruptionNote,
     PromptSectionKind::StyleExamples,
     PromptSectionKind::EpisodicMemories,
     PromptSectionKind::SemanticContext,
@@ -176,6 +177,11 @@ fn estimate_history_tokens(history: &[HistoryEntry]) -> usize {
 
 /// Minimum history messages kept when trimming for token budget (one exchange).
 const MIN_HISTORY_MESSAGES: usize = 2;
+
+/// Token budget for the advisory interruption note (#M10). Non-zero so the
+/// section participates in per-section truncation, and it is listed in
+/// [`DROP_ORDER`] so it can be dropped entirely when over budget.
+const INTERRUPTION_NOTE_BUDGET_TOKENS: usize = 200;
 
 fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) -> usize {
     // Measure each entry once and build a suffix-sum table so the binary
@@ -313,7 +319,7 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         sections.push(PromptSection::new(
             PromptSectionKind::InterruptionNote,
             text.clone(),
-            0,
+            INTERRUPTION_NOTE_BUDGET_TOKENS,
         ));
     }
 
@@ -662,5 +668,59 @@ mod tests {
         let budget = ContextBudget::from_config_and_hints(&config, &hints);
         assert_eq!(budget.budget_for(PromptSectionKind::EpisodicMemories), 999);
         assert_eq!(budget.budget_for(PromptSectionKind::SemanticContext), 888);
+    }
+
+    #[test]
+    fn interruption_note_is_dropped_when_over_budget() {
+        // The advisory interruption note is not required and is listed first in
+        // DROP_ORDER, so a tight budget drops it before the identity kernel (#M10).
+        let config = ContextConfig {
+            max_prompt_tokens: 30,
+            recent_turns: 4,
+            scene_summary_tokens: 800,
+            memory_budget_tokens: 1_800,
+            semantic_budget_tokens: 1_200,
+            style_example_budget_tokens: 600,
+            scene_turn_threshold: 12,
+            chapter_span_threshold: 5,
+            arc_span_threshold: 3,
+            compression_timeout_secs: 60,
+            compression_language: "en".into(),
+        };
+        let budget = ContextBudget::from_config(&config);
+        let kernel = IdentityKernel {
+            name: "Ene".into(),
+            text: "KERNEL".into(),
+            post_history_instructions: None,
+        };
+        let input = PackInput {
+            platform_contract: None,
+            identity_kernel: kernel,
+            behavior_contract: Some("rules ".repeat(40)),
+            style_examples: vec![],
+            recalled: vec![],
+            commitments: vec![],
+            affect_summary: None,
+            scene_summary: None,
+            history: vec![],
+            output_contract: None,
+            interruption_note: Some("your previous reply was cut off mid-sentence".repeat(4)),
+            user_input: "hello".into(),
+        };
+        let packed = pack_prompt(input, &budget);
+        assert!(
+            packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::InterruptionNote),
+            "interruption note should be dropped under a tight budget, dropped={:?}",
+            packed.meta.dropped
+        );
+        // The required identity kernel must survive.
+        let kernel_section = packed
+            .packet
+            .section(PromptSectionKind::IdentityKernel)
+            .expect("identity kernel present");
+        assert!(kernel_section.content.contains("KERNEL"));
     }
 }

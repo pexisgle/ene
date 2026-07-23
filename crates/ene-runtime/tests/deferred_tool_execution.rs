@@ -228,6 +228,7 @@ async fn deferred_tool_execution_emits_completion_event() {
         memory_writer_tx: mpsc::unbounded_channel().0,
         deferred_tool_tx,
         tts_provider: None,
+        partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
     };
 
     // Run the streaming loop in a separate task so we can poll events.

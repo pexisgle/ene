@@ -243,6 +243,51 @@ pub struct PostTurnInput<'a> {
 }
 ```
 
+### `interruption_note`
+
+```rust
+pub fn interruption_note(state: &InterruptedState) -> String
+```
+
+以前に中断された応答を説明するシステムプロンプト注記を構築します（#206）。次のターンのプロンプトに（`InterruptionNote` セクション経由で）注入され、モデルが最初からやり直すのではなく、自然に応答を再開・中断を認識できるようにします。
+
+---
+
+## `session` — 会話セッションと中断状態
+
+`ConversationSession`（`session::session` から再エクスポート）は、会話履歴、表示状態、メモリコンテキスト、読み込まれたキャラクターカードを保持します。ターン識別子はプレーンな文字列で、`ene-mind` を `ene-runtime` への依存から切り離しています（アーキテクチャ境界）。
+
+### `InterruptedState`
+
+直近で中断されたターンのスナップショット。ユーザーが実行中のターンをキャンセルした際に記録され、次のターンのプロンプトが中断を認識し、メモリ候補にタグを付けられるようにします。
+
+```rust
+pub struct InterruptedState {
+    /// 中断されたターンの識別子。
+    pub turn_id: String,
+    /// 中断前に発話された応答の文字範囲。
+    pub spoken_char_range: std::ops::Range<usize>,
+    /// これまでに生成された部分的なアシスタントテキスト。
+    pub partial_text: String,
+    /// 中断が記録された時刻。
+    pub interrupted_at: DateTime<Utc>,
+}
+```
+
+### `ConversationSession` の中断メソッド
+
+```rust
+impl ConversationSession {
+    pub fn mark_interrupted(&mut self, turn_id: &str, spoken_text: &str, spoken_chars: usize);
+    pub fn take_interruption(&mut self) -> Option<InterruptedState>;
+    pub const fn has_pending_interruption(&self) -> bool;
+}
+```
+
+- `mark_interrupted` は `InterruptedState` を記録し、部分的な応答を（空でなければ）履歴に追記し、表示バッファをリセットし、`record_assistant_response` 経由でアシスタントのターンカウントを加算します。これにより、通常の完了経路とユーザー/アシスタントの集計対称性が保たれます（#L5）。
+- `take_interruption` は保留中のスナップショットをちょうど1回だけ消費・クリアし、次のターンのプロンプトが中断された応答を認識・再開できるようにします。
+- `has_pending_interruption` は、消費せずにスナップショットが保留中かどうかを報告します。
+
 ---
 
 ## `character` — Identity Kernel & ロアブック同期
@@ -424,10 +469,10 @@ pub enum ExpressionSource {
 ```
 PlatformContract → IdentityKernel → BehaviorContract → CharacterState → SceneState
 → SemanticContext → UserProfile → ActiveCommitments → EpisodicMemories → StyleExamples
-→ OutputContract → UserInput
+→ InterruptionNote → OutputContract → UserInput
 ```
 
-`PlatformContract`、`IdentityKernel`、`OutputContract`、`UserInput` は `is_required()`（予算超過時も決して除外されない）です。`heading()` はシステムブロックセクションに対してレンダリングされるMarkdownの見出しを返します（例: `## Semantic Context`）。`PlatformContract`、`IdentityKernel`、`OutputContract`、`UserInput` は見出しなしでレンダリングされます。
+`PlatformContract`、`IdentityKernel`、`OutputContract`、`UserInput` は `is_required()`（予算超過時も決して除外されない）です。`InterruptionNote` は助言的（required ではない）で、予算圧力下では除外可能です（#M10）。`heading()` はシステムブロックセクションに対してレンダリングされるMarkdownの見出しを返します（例: `## Semantic Context`）。`PlatformContract`、`IdentityKernel`、`OutputContract`、`UserInput` は見出しなしでレンダリングされます。
 
 ### `PromptSection`
 
@@ -488,6 +533,8 @@ pub struct PackInput {
     pub scene_summary: Option<String>,
     pub history: Vec<HistoryEntry>,
     pub output_contract: Option<String>,
+    /// 以前に中断された応答に関する助言的注記（#206/#M10）。
+    pub interruption_note: Option<String>,
     pub user_input: String,
 }
 
@@ -509,7 +556,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt;
 オーバーフローポリシー。パッキングされた合計が `budget.total_tokens` を超えた場合にのみ適用されます:
 
 1. 各セクション独自の `budget_tokens` へのセクション単位の切り詰め（必須セクションは対象外）。
-2. `DROP_ORDER` の順でのセクション全体の除外: `StyleExamples → EpisodicMemories → SemanticContext → UserProfile → ActiveCommitments → CharacterState`。
+2. `DROP_ORDER` の順でのセクション全体の除外: `InterruptionNote → StyleExamples → EpisodicMemories → SemanticContext → UserProfile → ActiveCommitments → CharacterState`。`InterruptionNote` は助言的（required ではない）で、小さな `budget_tokens`（200）を持つため、タイトな予算では identity kernel より前に除外されます（#M10）。
 3. `EpisodicMemories → SemanticContext → UserProfile` のリコールメモリセクション*内*での確信度が低いものから順のトリミング（各セクションに最低1件は残す）。
 4. 古いものから順の履歴トリミング。最低 `MIN_HISTORY_MESSAGES`（`2`）は保持する。
 
@@ -629,8 +676,12 @@ pub struct MemoryCandidate {
     pub deletion_target_key: Option<String>,
     /// コミットメント候補の場合: 期日/期限の参照（例: "next week"）。
     pub commitment_due: Option<String>,
+    /// 自由形式タグ（例: 途中で切れたターンの `"interrupted"`）。デフォルトは空。
+    pub tags: Vec<String>,
 }
 ```
+
+ターンが中断（バージイン）された場合、memory writer はすべての候補に `"interrupted"` タグを付与（`memory_writer::mod`）し、調停器が部分エピソードの優先度を下げられるようにします（#M7）。
 
 ### `MemoryArbiter`
 
@@ -654,6 +705,8 @@ pub struct MemoryCandidate {
 | `AskConfirmationLater` | あいまいな矛盾。ユーザー確認まで保留 |
 
 `ArbiterOptions`（デフォルト）: `min_confidence: 0.65`、`supersede_confidence_delta: 0.05`、`semantic_similarity_threshold: 0.85`、`dispute_confidence_gap: 0.15`。`ArbiterContext::semantic_matches: HashMap<usize, Vec<SemanticMatch>>` には、呼び出し元が事前計算したベクトル検索マッチを設定する必要があります。調停器自体は埋め込み呼び出しを一切行いません。
+
+**中断された候補（#M7）。** `"interrupted"` タグの付いた候補は部分的で信頼性が低いとみなされ、`min_confidence` ゲートの前に confidence が `0.15` 引き下げられます（`0.0` でクランプ）。そのため、完全なターンなら永続化される境界線上の中断エピソードが `Ignore` される場合があります。ストアには専用の tags カラムがないため、調停器は候補のタグを、永続化される content の末尾に追記される JSON メタデータフッターとしてシリアライズします。
 
 ### `ForgettingLifecycle`
 

@@ -5,9 +5,10 @@
 //! separate factory maps for each audio modality.
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio_stream::{Stream, StreamExt};
 
 /// Errors returned by audio provider implementations at the library boundary.
@@ -25,6 +26,9 @@ pub enum AudioProviderError {
     /// The operation timed out.
     #[error("audio operation timed out")]
     Timeout,
+    /// An underlying I/O operation failed (file read, dylib load).
+    #[error("audio I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// A chunk of synthesized PCM audio from a TTS provider.
@@ -106,9 +110,29 @@ pub enum VadEvent {
 ///
 /// Engines are stateful (`&mut self`) and process fixed-size PCM chunks
 /// sequentially. Not `Sync` because internal state is mutated per chunk.
+///
+/// # Frame-size contract
+///
+/// Each engine consumes frames of a fixed length reported by
+/// [`frame_size`](Self::frame_size) (e.g. Silero VAD expects 512 samples at
+/// 16 kHz / 32 ms). Callers must accumulate microphone PCM into exactly
+/// [`frame_size`](Self::frame_size) samples before each
+/// [`process_chunk`](Self::process_chunk) call. Passing a slice of any other
+/// length is a programming error and [`process_chunk`](Self::process_chunk)
+/// returns [`AudioProviderError::Provider`].
 pub trait VadEngine: Send {
-    /// Process a chunk of PCM audio and return the current VAD event.
-    fn process_chunk(&mut self, pcm: &[f32]) -> VadEvent;
+    /// Number of PCM samples expected per [`process_chunk`](Self::process_chunk) call.
+    fn frame_size(&self) -> usize;
+
+    /// Process a single [`frame_size`](Self::frame_size)-sample chunk of PCM
+    /// audio and return the current VAD event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioProviderError::Provider`] when `pcm.len()` does not equal
+    /// [`frame_size`](Self::frame_size), or when the underlying inference step
+    /// fails repeatedly (see the engine implementation for escalation policy).
+    fn process_chunk(&mut self, pcm: &[f32]) -> Result<VadEvent, AudioProviderError>;
 
     /// Reset the engine to its initial state.
     fn reset(&mut self);
@@ -157,7 +181,8 @@ pub trait VadFactory: Send + Sync {
 ///
 /// Uses the same `OnceLock` + `Mutex` pattern as
 /// [`LlmProviderRegistry`](crate::traits::LlmProviderRegistry) with separate
-/// maps per modality.
+/// maps per modality. Locks use [`parking_lot::Mutex`] (poison-free, so no
+/// poisoning checks are required at the call sites).
 pub struct AudioProviderRegistry {
     tts: Mutex<HashMap<String, Arc<dyn TtsProviderFactory>>>,
     stt: Mutex<HashMap<String, Arc<dyn SttProviderFactory>>>,
@@ -177,25 +202,19 @@ impl AudioProviderRegistry {
     /// Registers a TTS provider factory.
     pub fn register_tts(factory: Arc<dyn TtsProviderFactory>) {
         let name = factory.provider_name().to_string();
-        if let Ok(mut guard) = Self::global().tts.lock() {
-            guard.insert(name, factory);
-        }
+        Self::global().tts.lock().insert(name, factory);
     }
 
     /// Registers an STT provider factory.
     pub fn register_stt(factory: Arc<dyn SttProviderFactory>) {
         let name = factory.provider_name().to_string();
-        if let Ok(mut guard) = Self::global().stt.lock() {
-            guard.insert(name, factory);
-        }
+        Self::global().stt.lock().insert(name, factory);
     }
 
     /// Registers a VAD engine factory.
     pub fn register_vad(factory: Arc<dyn VadFactory>) {
         let name = factory.provider_name().to_string();
-        if let Ok(mut guard) = Self::global().vad.lock() {
-            guard.insert(name, factory);
-        }
+        Self::global().vad.lock().insert(name, factory);
     }
 
     /// Tries to instantiate a TTS provider by name using the registered factories.
@@ -208,13 +227,7 @@ impl AudioProviderRegistry {
         name: &str,
         config: &ene_config::EneConfig,
     ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        let factory = {
-            if let Ok(guard) = Self::global().tts.lock() {
-                guard.get(name).cloned()
-            } else {
-                None
-            }
-        };
+        let factory = Self::global().tts.lock().get(name).cloned();
         match factory {
             Some(f) => f.create_provider(config),
             None => Err(AudioProviderError::Provider(format!(
@@ -233,13 +246,7 @@ impl AudioProviderRegistry {
         name: &str,
         config: &ene_config::EneConfig,
     ) -> Result<Box<dyn SttProvider>, AudioProviderError> {
-        let factory = {
-            if let Ok(guard) = Self::global().stt.lock() {
-                guard.get(name).cloned()
-            } else {
-                None
-            }
-        };
+        let factory = Self::global().stt.lock().get(name).cloned();
         match factory {
             Some(f) => f.create_provider(config),
             None => Err(AudioProviderError::Provider(format!(
@@ -258,18 +265,123 @@ impl AudioProviderRegistry {
         name: &str,
         config: &ene_config::EneConfig,
     ) -> Result<Box<dyn VadEngine>, AudioProviderError> {
-        let factory = {
-            if let Ok(guard) = Self::global().vad.lock() {
-                guard.get(name).cloned()
-            } else {
-                None
-            }
-        };
+        let factory = Self::global().vad.lock().get(name).cloned();
         match factory {
             Some(f) => f.create_engine(config),
             None => Err(AudioProviderError::Provider(format!(
                 "No VadFactory registered for provider name: '{name}'"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyTtsFactory;
+
+    impl TtsProviderFactory for DummyTtsFactory {
+        fn provider_name(&self) -> &'static str {
+            "dummy-tts"
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
+            Err(AudioProviderError::Init("dummy".to_string()))
+        }
+    }
+
+    struct DummySttFactory;
+
+    impl SttProviderFactory for DummySttFactory {
+        fn provider_name(&self) -> &'static str {
+            "dummy-stt"
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn SttProvider>, AudioProviderError> {
+            Err(AudioProviderError::Init("dummy".to_string()))
+        }
+    }
+
+    struct DummyVadFactory;
+
+    impl VadFactory for DummyVadFactory {
+        fn provider_name(&self) -> &'static str {
+            "dummy-vad"
+        }
+
+        fn create_engine(
+            &self,
+            _config: &ene_config::EneConfig,
+        ) -> Result<Box<dyn VadEngine>, AudioProviderError> {
+            Err(AudioProviderError::Init("dummy".to_string()))
+        }
+    }
+
+    fn config() -> ene_config::EneConfig {
+        ene_config::EneConfig::default()
+    }
+
+    /// Assert that `result` is an `Err` and return it. Used instead of
+    /// `expect_err` because the boxed provider types are not `Debug`.
+    fn unwrap_err<T>(result: Result<T, AudioProviderError>) -> AudioProviderError {
+        match result {
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn tts_registration_lookup_round_trip() {
+        AudioProviderRegistry::register_tts(Arc::new(DummyTtsFactory));
+        // Registered factory is found; its own init error surfaces (not the
+        // "no factory registered" error).
+        let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
+            "dummy-tts",
+            &config(),
+        ));
+        assert!(matches!(err, AudioProviderError::Init(_)));
+    }
+
+    #[test]
+    fn stt_registration_lookup_round_trip() {
+        AudioProviderRegistry::register_stt(Arc::new(DummySttFactory));
+        let err = unwrap_err(AudioProviderRegistry::create_stt_provider(
+            "dummy-stt",
+            &config(),
+        ));
+        assert!(matches!(err, AudioProviderError::Init(_)));
+    }
+
+    #[test]
+    fn vad_registration_lookup_round_trip() {
+        AudioProviderRegistry::register_vad(Arc::new(DummyVadFactory));
+        let err = unwrap_err(AudioProviderRegistry::create_vad_engine(
+            "dummy-vad",
+            &config(),
+        ));
+        assert!(matches!(err, AudioProviderError::Init(_)));
+    }
+
+    #[test]
+    fn unknown_provider_name_errors() {
+        let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
+            "does-not-exist",
+            &config(),
+        ));
+        assert!(matches!(err, AudioProviderError::Provider(_)));
+    }
+
+    #[test]
+    fn io_error_converts_via_from() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let err: AudioProviderError = io_err.into();
+        assert!(matches!(err, AudioProviderError::Io(_)));
     }
 }

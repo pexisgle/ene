@@ -243,6 +243,51 @@ pub struct PostTurnInput<'a> {
 }
 ```
 
+### `interruption_note`
+
+```rust
+pub fn interruption_note(state: &InterruptedState) -> String
+```
+
+Builds the system-prompt note describing a previously interrupted response (#206). Injected into the next turn's prompt (via the `InterruptionNote` section) so the model can naturally resume or acknowledge the interruption instead of restarting from scratch.
+
+---
+
+## `session` — Conversation Session & Interruption State
+
+`ConversationSession` (re-exported from `session::session`) holds conversation history, display state, memory context, and the loaded character card. Turn identifiers are plain strings to keep `ene-mind` free of any `ene-runtime` dependency (architecture boundary).
+
+### `InterruptedState`
+
+Snapshot of the most recently interrupted turn, recorded when the user cancels an in-flight turn so the next turn's prompt can acknowledge the interruption and memory candidates can be tagged.
+
+```rust
+pub struct InterruptedState {
+    /// Identifier of the interrupted turn.
+    pub turn_id: String,
+    /// Character range of the response spoken before interruption.
+    pub spoken_char_range: std::ops::Range<usize>,
+    /// The partial assistant text produced so far.
+    pub partial_text: String,
+    /// When the interruption was recorded.
+    pub interrupted_at: DateTime<Utc>,
+}
+```
+
+### Interruption methods on `ConversationSession`
+
+```rust
+impl ConversationSession {
+    pub fn mark_interrupted(&mut self, turn_id: &str, spoken_text: &str, spoken_chars: usize);
+    pub fn take_interruption(&mut self) -> Option<InterruptedState>;
+    pub const fn has_pending_interruption(&self) -> bool;
+}
+```
+
+- `mark_interrupted` records an `InterruptedState`, appends the partial response to history (if non-empty), resets the display buffer, and bumps the assistant turn count via `record_assistant_response` so user/assistant accounting stays symmetric with the normal completion path (#L5).
+- `take_interruption` consumes and clears the pending snapshot exactly once, so the next turn's prompt can acknowledge or resume the interrupted response.
+- `has_pending_interruption` reports whether a snapshot is currently pending without consuming it.
+
 ---
 
 ## `character` — Identity Kernel & Lorebook Sync
@@ -424,10 +469,10 @@ Deterministic render order (also the drop-priority reference — see `context::C
 ```
 PlatformContract → IdentityKernel → BehaviorContract → CharacterState → SceneState
 → SemanticContext → UserProfile → ActiveCommitments → EpisodicMemories → StyleExamples
-→ OutputContract → UserInput
+→ InterruptionNote → OutputContract → UserInput
 ```
 
-`PlatformContract`, `IdentityKernel`, `OutputContract`, and `UserInput` are `is_required()` (never dropped on budget overflow). `heading()` returns the markdown heading rendered for system-block sections (e.g. `## Semantic Context`); `PlatformContract`, `IdentityKernel`, `OutputContract`, and `UserInput` render without a heading.
+`PlatformContract`, `IdentityKernel`, `OutputContract`, and `UserInput` are `is_required()` (never dropped on budget overflow). `InterruptionNote` is advisory (not required) and droppable under budget pressure (#M10). `heading()` returns the markdown heading rendered for system-block sections (e.g. `## Semantic Context`); `PlatformContract`, `IdentityKernel`, `OutputContract`, and `UserInput` render without a heading.
 
 ### `PromptSection`
 
@@ -488,6 +533,8 @@ pub struct PackInput {
     pub scene_summary: Option<String>,
     pub history: Vec<HistoryEntry>,
     pub output_contract: Option<String>,
+    /// Advisory note about a previously interrupted response (#206/#M10).
+    pub interruption_note: Option<String>,
     pub user_input: String,
 }
 
@@ -509,7 +556,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt;
 Overflow policy, applied only when the packed total exceeds `budget.total_tokens`:
 
 1. Per-section truncation to each section's own `budget_tokens` (required sections are exempt).
-2. Whole-section drop, in `DROP_ORDER`: `StyleExamples → EpisodicMemories → SemanticContext → UserProfile → ActiveCommitments → CharacterState`.
+2. Whole-section drop, in `DROP_ORDER`: `InterruptionNote → StyleExamples → EpisodicMemories → SemanticContext → UserProfile → ActiveCommitments → CharacterState`. `InterruptionNote` is advisory (not required) and carries a small `budget_tokens` (200), so a tight budget drops it before the identity kernel (#M10).
 3. Lowest-confidence-first trimming *within* the `EpisodicMemories → SemanticContext → UserProfile` recalled-memory sections (at least one memory kept per section).
 4. Oldest-first history trimming, keeping at least `MIN_HISTORY_MESSAGES` (`2`).
 
@@ -629,8 +676,12 @@ pub struct MemoryCandidate {
     pub deletion_target_key: Option<String>,
     /// For commitment candidates: due date/time reference (e.g. "next week").
     pub commitment_due: Option<String>,
+    /// Free-form tags (e.g. `"interrupted"` for a cut-short turn). Empty by default.
+    pub tags: Vec<String>,
 }
 ```
+
+When a turn is interrupted (barge-in), the memory writer tags every candidate with `"interrupted"` (`memory_writer::mod`) so the arbiter can deprioritize the partial episode (#M7).
 
 ### `MemoryArbiter`
 
@@ -654,6 +705,8 @@ Validates, deduplicates, and resolves contradictions before persistence.
 | `AskConfirmationLater` | Ambiguous contradiction, deferred to user confirmation |
 
 `ArbiterOptions` (defaults): `min_confidence: 0.65`, `supersede_confidence_delta: 0.05`, `semantic_similarity_threshold: 0.85`, `dispute_confidence_gap: 0.15`. `ArbiterContext::semantic_matches: HashMap<usize, Vec<SemanticMatch>>` must be populated by the caller with pre-computed vector-search matches; the arbiter itself performs no embedding calls.
+
+**Interrupted candidates (#M7).** Candidates tagged `"interrupted"` are treated as partial and less reliable: their confidence is lowered by `0.15` (clamped at `0.0`) before the `min_confidence` gate, so a borderline interrupted episode may be `Ignore`d where a complete one would persist. Because the store has no dedicated tags column, the arbiter serializes the candidate's tags into a trailing JSON metadata footer appended to the persisted content.
 
 ### `ForgettingLifecycle`
 

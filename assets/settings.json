@@ -63,22 +63,21 @@
     "graphics": {
       "quality": "medium"
     },
-    "language": "ja",
-    "mic_device": null
+    "language": "ja"
   },
   "mind": {
     "emotion": {
-      "classifier_language": "ja",
-      "enabled": true
+      "enabled": true,
+      "classifier_language": "ja"
     },
     "proactive": {
-      "cooldown_seconds": 60,
       "enabled": true,
       "interval_seconds": 10,
       "min_idle_seconds": 20,
+      "cooldown_seconds": 60,
       "sources": {
-        "activity": true,
         "conversation": true,
+        "activity": true,
         "screen_summary": true
       }
     }

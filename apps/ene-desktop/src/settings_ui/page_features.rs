@@ -5,6 +5,7 @@
 
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
+use bevy_ecs::world::World;
 use ene_tool_host::ToolConfig;
 use ene_tool_rag::ToolRagConfig;
 use std::sync::Arc;
@@ -12,7 +13,12 @@ use std::sync::Arc;
 /// Known tool binary names shown even when absent from the saved map.
 const DEFAULT_TOOL_NAMES: &[&str] = &["app", "browser", "fs", "utility", "web"];
 
-pub fn render(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
+pub fn render(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    ai: &Arc<AiBridge>,
+    world: &mut World,
+) {
     ui.vertical(|ui| {
         ui.weak(crate::i18n::features_hint());
         ui.separator();
@@ -21,7 +27,7 @@ pub fn render(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBr
         ui.separator();
         render_tools(ui, settings, ai);
         ui.separator();
-        render_audio(ui, settings);
+        render_audio(ui, settings, ai, world);
     });
 }
 
@@ -249,7 +255,12 @@ fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &T
     sync_features(settings, ai);
 }
 
-fn render_audio(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
+fn render_audio(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    ai: &Arc<AiBridge>,
+    world: &mut World,
+) {
     ui.label(crate::i18n::audio());
 
     let mut ai_cfg = settings
@@ -258,6 +269,7 @@ fn render_audio(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
         .get_section::<ene_ai::AiConfig>()
         .unwrap_or_default();
     let mut changed = false;
+    let mut mic_device_changed = false;
 
     // Microphone device selection (stored on the desktop section).
     ui.horizontal(|ui| {
@@ -274,6 +286,7 @@ fn render_audio(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
                 Some(device.trim().to_string())
             };
             settings.mark_dirty();
+            mic_device_changed = true;
         }
     });
 
@@ -303,6 +316,28 @@ fn render_audio(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
     if changed {
         let _ = settings.ai.ai.set_section(&ai_cfg);
         settings.mark_dirty();
+    }
+
+    // Propagate audio settings into the shared `AudioState` so the next
+    // mic (re)start picks them up (H3). The capture path snapshots
+    // `AudioState.config` / `mic_device` at start, so without this the
+    // Features page edits would never reach `start_mic_capture`.
+    #[cfg(feature = "voice")]
+    if (changed || mic_device_changed)
+        && let Some(mut audio) = world.get_resource_mut::<crate::audio::AudioState>()
+    {
+        audio.config = settings.ai.ai.clone();
+        audio.mic_device.clone_from(&settings.mic_device);
+    }
+    #[cfg(not(feature = "voice"))]
+    {
+        let _ = mic_device_changed;
+    }
+
+    // Push the VAD threshold to the runtime actor like the other feature
+    // settings do (H3).
+    if changed {
+        sync_features(settings, ai);
     }
 }
 

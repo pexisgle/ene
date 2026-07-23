@@ -278,6 +278,11 @@ impl ConversationSession {
     /// produced (and typically spoken via TTS) before the interruption, and
     /// `spoken_chars` is its length in characters. The partial text is also
     /// committed to history so the exchange is not lost.
+    ///
+    /// The assistant turn count is bumped so user/assistant turn accounting
+    /// stays symmetric with the normal completion path, which calls
+    /// [`record_assistant_response`](Self::record_assistant_response) after
+    /// committing the full response (#L5).
     pub fn mark_interrupted(&mut self, turn_id: &str, spoken_text: &str, spoken_chars: usize) {
         let clamped_chars = spoken_chars.min(spoken_text.chars().count());
         if !spoken_text.is_empty() {
@@ -290,6 +295,7 @@ impl ConversationSession {
             interrupted_at: Utc::now(),
         });
         self.reset_display_buffer();
+        self.record_assistant_response();
     }
 
     /// Consumes and clears the pending interruption snapshot, if any (#206).
