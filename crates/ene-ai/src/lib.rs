@@ -21,6 +21,8 @@
     )
 )]
 
+/// Audio provider traits, types, and registry (TTS, STT, VAD).
+pub mod audio;
 /// Configuration types for providers and embedding.
 pub mod config;
 /// Local GGUF quantized embedding provider.
@@ -35,6 +37,10 @@ pub mod health;
 pub(crate) mod llama_cpp;
 /// In-process llama.cpp decision provider (#165 / #171).
 pub mod local_llm;
+/// Local whisper.cpp speech-to-text provider (feature `local-stt`).
+pub mod local_stt;
+/// Local Kokoro ONNX text-to-speech provider (feature `local-tts`).
+pub mod local_tts;
 /// Unified chat message and streaming types.
 pub mod message;
 /// Built-in OpenAI-compatible provider and cloud embedding provider.
@@ -43,15 +49,21 @@ pub mod openai;
 pub mod resolve;
 /// Retry policy with exponential backoff for transient provider failures.
 pub mod retry;
+/// Local Silero VAD voice activity detection engine (feature `silero-vad`).
+pub mod silero_vad;
 /// Provider traits and registry.
 pub mod traits;
 
 /// Conversation entry author roles.
 pub mod role;
 
+pub use audio::{
+    AudioProviderError, AudioProviderRegistry, SttProvider, SttProviderFactory, SttResult,
+    TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
+};
 pub use config::{
     AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, FallbackConfig, LOCAL_PROVIDER,
-    LocalModelDef, ProactiveAcceleration, RetryConfig, TaskRef,
+    LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef, TtsConfig, VadConfig,
 };
 pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
@@ -68,17 +80,27 @@ pub use local_llm::{
     DecisionProviderKind, DisabledDecisionProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
     ProactiveLlmHandles, build_proactive_llm_handles,
 };
+#[cfg(feature = "local-stt")]
+pub use local_stt::LocalSttProvider;
+pub use local_stt::LocalSttProviderFactory;
+#[cfg(feature = "local-tts")]
+pub use local_tts::LocalTtsProvider;
+pub use local_tts::LocalTtsProviderFactory;
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{
     AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
     create_chat_provider_from_resolved, create_task_chat_provider,
 };
 pub use resolve::{
-    ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedTaskRef,
-    SettingsIssue, needs_onboarding, resolve_base_url, validate_api_key, validate_settings,
+    ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedStt,
+    ResolvedTaskRef, ResolvedTts, SettingsIssue, needs_onboarding, resolve_base_url,
+    validate_api_key, validate_settings,
 };
 pub use retry::RetryPolicy;
 pub use role::Role;
+#[cfg(feature = "silero-vad")]
+pub use silero_vad::SileroVadEngine;
+pub use silero_vad::SileroVadFactory;
 pub use traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
     LlmProviderRegistry, cosine_similarity, embed, embed_query,

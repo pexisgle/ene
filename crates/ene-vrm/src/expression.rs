@@ -328,6 +328,28 @@ impl ExpressionLayer {
     pub fn morphic_primitive_count(&self) -> usize {
         self.per_primitive.iter().filter(|p| p.is_some()).count()
     }
+
+    /// Map audio-driven [`VisemeWeights`](crate::viseme::VisemeWeights)
+    /// onto the five procedural mouth targets (`aa`, `ih`, `ou`,
+    /// `ee`, `oh`) via [`set_expression`](Self::set_expression).
+    ///
+    /// This is a convenience wrapper for the audio-driven lip-sync
+    /// path; [`set_expression`](Self::set_expression) remains the
+    /// primary interface. Targets the model does not define are
+    /// dropped by `set_expression`, matching the usual weight-map
+    /// semantics.
+    pub fn apply_viseme_weights(&mut self, weights: &crate::viseme::VisemeWeights) {
+        let fields: [(&str, f32); 5] = [
+            ("aa", weights.aa),
+            ("ih", weights.ih),
+            ("ou", weights.ou),
+            ("ee", weights.ee),
+            ("oh", weights.oh),
+        ];
+        for (name, weight) in fields {
+            self.set_expression(&ExpressionName::new(name), weight);
+        }
+    }
 }
 
 use bytemuck::{Pod, Zeroable};
@@ -407,6 +429,54 @@ mod tests {
         // The known expression still works.
         assert!(layer.set_expression(&"happy".into(), 0.5));
         assert_eq!(layer.weights.get(&"happy".into()), Some(&0.5));
+    }
+
+    fn mouth_defs() -> Vec<crate::expression_override::ExpressionDefinition> {
+        ["aa", "ih", "ou", "ee", "oh"]
+            .iter()
+            .map(|name| crate::expression_override::ExpressionDefinition::new(*name))
+            .collect()
+    }
+
+    #[test]
+    fn apply_viseme_weights_maps_all_five_targets() {
+        let defs = mouth_defs();
+        let mut layer = ExpressionLayer::new(vec![], Some(&defs));
+        let weights = crate::viseme::VisemeWeights {
+            aa: 0.9,
+            ih: 0.1,
+            ou: 0.2,
+            ee: 0.3,
+            oh: 0.4,
+        };
+        layer.apply_viseme_weights(&weights);
+        assert_eq!(layer.weights.get(&"aa".into()), Some(&0.9));
+        assert_eq!(layer.weights.get(&"ih".into()), Some(&0.1));
+        assert_eq!(layer.weights.get(&"ou".into()), Some(&0.2));
+        assert_eq!(layer.weights.get(&"ee".into()), Some(&0.3));
+        assert_eq!(layer.weights.get(&"oh".into()), Some(&0.4));
+    }
+
+    #[test]
+    fn apply_viseme_weights_clamps_and_drops_unknown() {
+        // Only `aa` is defined on the model; the other four are
+        // dropped by `set_expression`, and an out-of-range value is
+        // clamped.
+        let defs = vec![crate::expression_override::ExpressionDefinition::new("aa")];
+        let mut layer = ExpressionLayer::new(vec![], Some(&defs));
+        let weights = crate::viseme::VisemeWeights {
+            aa: 1.5,
+            ih: 0.5,
+            ou: 0.5,
+            ee: 0.5,
+            oh: 0.5,
+        };
+        layer.apply_viseme_weights(&weights);
+        assert_eq!(layer.weights.get(&"aa".into()), Some(&1.0));
+        assert!(!layer.weights.contains_key(&"ih".into()));
+        assert!(!layer.weights.contains_key(&"ou".into()));
+        assert!(!layer.weights.contains_key(&"ee".into()));
+        assert!(!layer.weights.contains_key(&"oh".into()));
     }
 
     #[test]

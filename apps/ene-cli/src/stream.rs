@@ -248,7 +248,11 @@ pub async fn process_stream(
                 let _ = handle.submit_user_input(request_id, decision);
                 tracing::info!("User input submitted; resuming processing");
             }
-            Ok(EneEvent::ToolBackgroundCompleted { .. } | EneEvent::StatusChanged { .. }) => {}
+            Ok(
+                EneEvent::ToolBackgroundCompleted { .. }
+                | EneEvent::StatusChanged { .. }
+                | EneEvent::AudioChunk { .. },
+            ) => {}
             Err(e) => {
                 tracing::warn!(error = ?e, "Event receive error");
                 break;

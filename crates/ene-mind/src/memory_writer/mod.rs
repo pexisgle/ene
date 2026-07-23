@@ -220,6 +220,18 @@ impl MemoryWriter {
             return Ok(());
         }
 
+        // Tag every candidate from an interrupted (barge-in / cancelled) turn so
+        // downstream consumers can distinguish partial episodes (#206).
+        if input.interrupted {
+            for (candidates, _) in &mut batches {
+                for candidate in candidates.iter_mut() {
+                    if !candidate.tags.iter().any(|tag| tag == "interrupted") {
+                        candidate.tags.push("interrupted".to_string());
+                    }
+                }
+            }
+        }
+
         let options = ArbiterOptions::from_config(&config.memory);
         let sync_ctx = CommitmentSyncContext {
             character_id: input.character_id,
@@ -609,6 +621,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::finalize_turn(&store, &config, &post)
@@ -634,6 +648,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::apply_forgetting(&store, &config, &post)
@@ -672,6 +688,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -712,6 +730,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -750,6 +770,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -800,6 +822,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -840,6 +864,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -877,6 +903,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(&store, &config, &post, MemoryWriteProviders::default())
@@ -942,6 +970,8 @@ mod tests {
             affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(

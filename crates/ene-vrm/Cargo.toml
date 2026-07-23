@@ -22,6 +22,7 @@ tracing = { workspace = true }
 
 serde_json = { workspace = true }
 rayon = { workspace = true }
+rustfft = { workspace = true }
 ene-config = { workspace = true }
 
 [dev-dependencies]

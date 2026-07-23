@@ -166,6 +166,17 @@ fn translate_event(
                 "LookAt cue received (gaze system pending)"
             );
         }
+        #[cfg(feature = "voice")]
+        AppEvent::MicStateChanged { active } => {
+            // The chat UI reads `AudioState::is_mic_active` directly each
+            // frame (egui polls continuously); this event exists so future
+            // consumers (e.g. a tray indicator) can react to mic toggles.
+            tracing::debug!(
+                component = "Audio",
+                active,
+                "microphone capture state changed"
+            );
+        }
     }
 }
 

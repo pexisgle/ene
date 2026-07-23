@@ -128,6 +128,30 @@ impl ResolvedEmbedding {
     }
 }
 
+/// Fully resolved TTS provider settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTts {
+    /// Provider name (e.g. `"kokoro"`, `"openai"`).
+    pub provider: String,
+    /// Model name (provider-specific).
+    pub model: String,
+    /// Voice identifier, if configured.
+    pub voice: Option<String>,
+    /// Speech speed multiplier (1.0 = normal).
+    pub speed: f32,
+}
+
+/// Fully resolved STT provider settings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedStt {
+    /// Provider name (e.g. `"whisper"`, `"openai"`).
+    pub provider: String,
+    /// Model name (provider-specific).
+    pub model: String,
+    /// Language hint, if configured.
+    pub language: Option<String>,
+}
+
 /// Resolved task reference: provider definition plus per-task overrides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTaskRef<'a> {
@@ -574,5 +598,36 @@ impl AiConfig {
                 })
             }
         }
+    }
+
+    /// Resolve TTS provider settings from [`AiConfig::tts`].
+    ///
+    /// Returns `None` when the provider is `"none"` (TTS disabled).
+    #[must_use]
+    pub fn resolve_tts(&self) -> Option<ResolvedTts> {
+        if self.tts.provider == "none" {
+            return None;
+        }
+        Some(ResolvedTts {
+            provider: self.tts.provider.clone(),
+            model: self.tts.model.clone(),
+            voice: (!self.tts.voice.trim().is_empty()).then(|| self.tts.voice.clone()),
+            speed: self.tts.speed,
+        })
+    }
+
+    /// Resolve STT provider settings from [`AiConfig::stt`].
+    ///
+    /// Returns `None` when the provider is `"none"` (STT disabled).
+    #[must_use]
+    pub fn resolve_stt(&self) -> Option<ResolvedStt> {
+        if self.stt.provider == "none" {
+            return None;
+        }
+        Some(ResolvedStt {
+            provider: self.stt.provider.clone(),
+            model: self.stt.model.clone(),
+            language: (!self.stt.language.trim().is_empty()).then(|| self.stt.language.clone()),
+        })
     }
 }

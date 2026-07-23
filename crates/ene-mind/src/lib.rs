@@ -127,7 +127,7 @@ pub use error::{CognitionError, EneCognitionError, MindError};
 /// Turn lifecycle types for streaming integration.
 pub use lifecycle::{
     ComposePrefetch, ComposedPrompt, HistoryEntry, OwnedPostTurnInput, OwnedTurnInput,
-    PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
+    PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext, interruption_note,
 };
 /// Journal-style scored memory search (#123).
 #[doc(no_inline)]
@@ -171,9 +171,9 @@ pub use recall::{
 #[doc(no_inline)]
 pub use session::{
     CardName, CharacterAsset, CharacterCardData, CharacterCardV3, ConversationSession,
-    EneSessionError, ExpressionDefinition, ResolvedExpression, Role, SessionId, SplitReason,
-    SplitResult, Truncate, expand_cbs_macros, generate_session_id, parse_performance_marker,
-    resolve_expressions, split_text_and_special_tokens, strip_markers,
+    EneSessionError, ExpressionDefinition, InterruptedState, ResolvedExpression, Role, SessionId,
+    SplitReason, SplitResult, Truncate, expand_cbs_macros, generate_session_id,
+    parse_performance_marker, resolve_expressions, split_text_and_special_tokens, strip_markers,
 };
 /// Conversation summary result and LLM summarization entry point.
 #[doc(no_inline)]

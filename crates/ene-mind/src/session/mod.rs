@@ -45,7 +45,7 @@ pub use ene_config::{
 /// Session error type.
 pub use error::EneSessionError;
 /// Central session holder.
-pub use session::ConversationSession;
+pub use session::{ConversationSession, InterruptedState};
 /// Session ID and split/compression result types.
 pub use session_split::{SplitReason, SplitResult, generate_session_id};
 /// Performance-marker parsing utilities.

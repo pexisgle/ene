@@ -26,6 +26,8 @@ pub enum PromptSectionKind {
     EpisodicMemories,
     /// `CCv3` style example anchors (#84).
     StyleExamples,
+    /// Note about a previously interrupted response (#206).
+    InterruptionNote,
     /// Expression PHI / output contract (required).
     OutputContract,
     /// Current user turn (required; rendered as a user message).
@@ -56,6 +58,7 @@ impl PromptSectionKind {
             Self::ActiveCommitments => Some("## Active Commitments"),
             Self::EpisodicMemories => Some("## Relevant Episodic Memories"),
             Self::StyleExamples => Some("## Style Examples"),
+            Self::InterruptionNote => Some("## Previous Response Interrupted"),
         }
     }
 
@@ -72,6 +75,7 @@ impl PromptSectionKind {
             Self::ActiveCommitments,
             Self::EpisodicMemories,
             Self::StyleExamples,
+            Self::InterruptionNote,
             Self::OutputContract,
             Self::UserInput,
         ]

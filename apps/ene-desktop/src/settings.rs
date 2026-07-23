@@ -129,6 +129,10 @@ ene_config::define_config!(
         pub graphics: GraphicsSection,
         #[serde(default)]
         pub language: Language,
+        /// Selected microphone device name for voice capture, or `None`
+        /// for the OS default input device.
+        #[serde(default)]
+        pub mic_device: Option<String>,
     }
 );
 
@@ -441,6 +445,9 @@ pub struct CharacterSettings {
     pub characters: Vec<CharacterEntry>,
     pub graphics: GraphicsSettings,
     pub language: Language,
+    /// Selected microphone device name for voice capture, or `None`
+    /// for the OS default input device.
+    pub mic_device: Option<String>,
     pub character_state: CharacterState,
     pub ai: AiConfig,
     /// Dirty-tracked config store shared with the settings UI for persistence.
@@ -457,6 +464,7 @@ impl std::fmt::Debug for CharacterSettings {
             .field("characters", &self.characters)
             .field("graphics", &self.graphics)
             .field("language", &self.language)
+            .field("mic_device", &self.mic_device)
             .field("character_state", &self.character_state)
             .field("ai", &self.ai)
             .finish_non_exhaustive()
@@ -508,6 +516,7 @@ impl CharacterSettings {
             characters,
             graphics: GraphicsSettings::default(),
             language: Language::default(),
+            mic_device: None,
             character_state: CharacterState {
                 selected_character,
                 selected_motion,
@@ -669,6 +678,7 @@ impl CharacterSettings {
             let desktop = DesktopSection {
                 graphics: self.graphics.clone(),
                 language: self.language,
+                mic_device: self.mic_device.clone(),
             };
             if let Err(e) = config.set_section(&desktop) {
                 tracing::warn!("[Config] Failed to set desktop section: {e}");
@@ -730,6 +740,7 @@ impl CharacterSettings {
         if let Ok(desktop) = full.get_section::<DesktopSection>() {
             self.graphics = desktop.graphics;
             self.language = desktop.language;
+            self.mic_device = desktop.mic_device;
         }
 
         self.sync_classifier_language_from_ui();

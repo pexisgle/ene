@@ -117,6 +117,9 @@ pub struct EneConfig {
 | `tasks.proactive` | object または `null` | 能動発話の生成ルーティング；`null` → `tasks.chat` にフォールバック |
 | `retry` | object | 一時的なプロバイダー障害に対するリトライ / バックオフポリシー |
 | `fallback` | object | プロバイダーヘルスチェックおよびフェイルオーバーポリシー（#175） |
+| `tts` | object | 音声合成（TTS）プロバイダー設定（下記参照） |
+| `stt` | object | 音声認識（STT）プロバイダー設定（下記参照） |
+| `vad` | object | 音声活動検出（VAD）エンジン設定（下記参照） |
 
 #### `ai.tasks` — タスク参照 (`TaskRef`)
 
@@ -267,6 +270,95 @@ OpenRouter で chat + classifier、ローカル埋め込みと能動判定:
 | `max_history` | int | `32` | 診断用に保持するフェイルオーバーイベントの最大数 |
 
 ヘルスプローブはユーザーデータを送信しません — 認証付きの `GET {base_url}/models` のみです。結果は `cache_ttl_ms` の間キャッシュされるため、繰り返しのターンで再プローブされません。プロバイダーごとのステータス、レイテンシ、最近のフェイルオーバー履歴は、CLI の `/doctor` 出力と Desktop の AI 設定ページで確認できます。
+
+#### `ai.tts` — 音声合成（Text-to-Speech）
+
+```json
+{
+  "ai": {
+    "tts": {
+      "provider": "none",
+      "model": "",
+      "voice": "",
+      "speed": 1.0
+    }
+  }
+}
+```
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `provider` | string | `"none"` | TTS プロバイダー名（`"none"` で TTS 無効、`"kokoro"` でローカル Kokoro ONNX） |
+| `model` | string | `""` | モデル名またはファイルシステムパス（プロバイダー固有） |
+| `voice` | string | `""` | 音声識別子（プロバイダー固有、例：Kokoro の `"af_heart"`） |
+| `speed` | float | `1.0` | 読み上げ速度倍率（1.0 = 通常） |
+
+`provider` が `"none"` でない場合、ランタイムは `AudioProviderRegistry` から `TtsProvider` を解決し、各ターン中に合成音声を `EneEvent::AudioChunk` としてストリーミングします（[ストリーミングイベント](../runtime/streaming-events.md#音声ストリーミング)を参照）。
+
+#### `ai.stt` — 音声認識（Speech-to-Text）
+
+```json
+{
+  "ai": {
+    "stt": {
+      "provider": "none",
+      "model": "",
+      "language": ""
+    }
+  }
+}
+```
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `provider` | string | `"none"` | STT プロバイダー名（`"none"` で STT 無効、`"whisper"` でローカル whisper.cpp） |
+| `model` | string | `""` | モデル名またはファイルシステムパス（プロバイダー固有） |
+| `language` | string | `""` | 言語ヒント（例：`"ja"`、`"en"`。空 = 自動検出） |
+
+STT はデスクトップアプリのマイクキャプチャ経路で使用されます。VAD が発話境界を検出し、蓄積した PCM を文字起こししてテキストターンとして送信します。
+
+#### `ai.vad` — 音声活動検出（Voice Activity Detection）
+
+```json
+{
+  "ai": {
+    "vad": {
+      "provider": "none",
+      "model": "",
+      "threshold": 0.5
+    }
+  }
+}
+```
+
+| フィールド | 型 | デフォルト | 説明 |
+|-----------|------|---------|------|
+| `provider` | string | `"none"` | VAD エンジン名（`"none"` で VAD 無効、`"silero"` でローカル Silero VAD ONNX） |
+| `model` | string | `""` | モデル名またはファイルシステムパス（プロバイダー固有） |
+| `threshold` | float | `0.5` | 発話確率閾値（0.0–1.0）。高いほど感度が低い |
+
+デスクトップのマイクが有効で `ai.vad.provider` が `"none"` の場合、アプリは自動的に `"silero"` エンジンにフォールバックします。
+
+#### 環境変数オーバーライド
+
+すべての音声設定は標準の `ENE_` プレフィックスパターン（ネスト区切りは `__`）に従います:
+
+| 変数 | 上書き対象 |
+|------|-----------|
+| `ENE_AI__TTS__PROVIDER` | `ai.tts.provider` |
+| `ENE_AI__TTS__MODEL` | `ai.tts.model` |
+| `ENE_AI__TTS__VOICE` | `ai.tts.voice` |
+| `ENE_AI__TTS__SPEED` | `ai.tts.speed` |
+| `ENE_AI__STT__PROVIDER` | `ai.stt.provider` |
+| `ENE_AI__STT__MODEL` | `ai.stt.model` |
+| `ENE_AI__STT__LANGUAGE` | `ai.stt.language` |
+| `ENE_AI__STT__MODEL_PATH` | 明示的な whisper GGUF パス（`model` より優先） |
+| `ENE_AI__VAD__PROVIDER` | `ai.vad.provider` |
+| `ENE_AI__VAD__MODEL` | `ai.vad.model` |
+| `ENE_AI__VAD__THRESHOLD` | `ai.vad.threshold` |
+| `ENE_AI__VAD__MODEL_PATH` | 明示的な Silero ONNX パス（`model` より優先） |
+| `ENE_AI__TTS__MODEL_PATH` | 明示的な Kokoro ONNX パス（`model` より優先） |
+| `ENE_AI__TTS__VOICES_PATH` | 明示的な Kokoro `voices.bin` パス |
 
 ### `store` — SQLite-vec 永続化ストア
 

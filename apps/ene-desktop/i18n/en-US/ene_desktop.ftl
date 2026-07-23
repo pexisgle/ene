@@ -184,6 +184,20 @@ enable-tools = Enable tool calling
 enable-tool-rag = Enable Tool RAG
 enable-tool = Enable tool
 
+# Audio
+audio = Audio
+audio-mic = Mic
+audio-mic-active = Listening…
+audio-mic-toggle-on = Start microphone capture
+audio-mic-toggle-off = Stop microphone capture
+audio-mic-error = Microphone error
+audio-mic-device = Microphone
+audio-mic-default = Default device
+audio-vad-threshold = VAD threshold
+audio-stt-provider = Speech-to-text provider
+audio-tts-provider = Text-to-speech provider
+audio-provider-none = None
+
 # Permission
 permission-requested = Permission Requested
 action-label = Action

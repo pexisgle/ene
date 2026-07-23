@@ -22,13 +22,13 @@ pub struct ContextBudget {
     /// Total prompt token ceiling.
     pub total_tokens: usize,
     /// Per-section dynamic budgets.
-    pub section_budgets: [usize; 12],
+    pub section_budgets: [usize; 13],
 }
 
 impl ContextBudget {
     /// Build a budget from [`ContextConfig`].
     pub const fn from_config(config: &ContextConfig) -> Self {
-        let mut section_budgets = [0usize; 12];
+        let mut section_budgets = [0usize; 13];
         section_budgets[PromptSectionKind::SceneState as usize] = config.scene_summary_tokens;
         section_budgets[PromptSectionKind::SemanticContext as usize] =
             config.semantic_budget_tokens;
@@ -104,6 +104,8 @@ pub struct PackInput {
     pub history: Vec<HistoryEntry>,
     /// Expression PHI / output contract block.
     pub output_contract: Option<String>,
+    /// Note about a previously interrupted response (#206).
+    pub interruption_note: Option<String>,
     /// Current user input.
     pub user_input: String,
 }
@@ -304,6 +306,14 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
             PromptSectionKind::StyleExamples,
             body,
             budget.budget_for(PromptSectionKind::StyleExamples),
+        ));
+    }
+
+    if let Some(text) = &input.interruption_note {
+        sections.push(PromptSection::new(
+            PromptSectionKind::InterruptionNote,
+            text.clone(),
+            0,
         ));
     }
 
@@ -533,6 +543,7 @@ mod tests {
             scene_summary: Some("scene".repeat(200)),
             history: vec![],
             output_contract: Some("PHI".into()),
+            interruption_note: None,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -629,6 +640,7 @@ mod tests {
                 },
             ],
             output_contract: None,
+            interruption_note: None,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);

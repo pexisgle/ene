@@ -81,7 +81,7 @@ impl ChatEguiWindow {
             egui_ctx,
             egui_state,
             egui_renderer,
-            chat_ui: ChatUi,
+            chat_ui: ChatUi::default(),
             textures_to_free: VecDeque::from(vec![Vec::new(); 3]),
         })
     }

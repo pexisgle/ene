@@ -207,6 +207,78 @@ fn default_providers() -> BTreeMap<String, AiProviderDef> {
     providers
 }
 
+/// TTS (text-to-speech) provider configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct TtsConfig {
+    /// Provider name (`"none"` disables TTS).
+    pub provider: String,
+    /// Model name (provider-specific).
+    pub model: String,
+    /// Voice identifier (provider-specific, e.g. `"af_heart"`).
+    pub voice: String,
+    /// Speech speed multiplier (1.0 = normal).
+    pub speed: f32,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            provider: "none".to_string(),
+            model: String::new(),
+            voice: String::new(),
+            speed: 1.0,
+        }
+    }
+}
+
+/// STT (speech-to-text) provider configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct SttConfig {
+    /// Provider name (`"none"` disables STT).
+    pub provider: String,
+    /// Model name (provider-specific).
+    pub model: String,
+    /// Language hint (e.g. `"ja"`, `"en"`; empty = auto-detect).
+    pub language: String,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            provider: "none".to_string(),
+            model: String::new(),
+            language: String::new(),
+        }
+    }
+}
+
+/// VAD (voice activity detection) engine configuration.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct VadConfig {
+    /// Engine name (`"none"` disables VAD).
+    pub provider: String,
+    /// Model name (provider-specific).
+    pub model: String,
+    /// Speech probability threshold (0.0–1.0).
+    pub threshold: f32,
+}
+
+impl Default for VadConfig {
+    fn default() -> Self {
+        Self {
+            provider: "none".to_string(),
+            model: String::new(),
+            threshold: 0.5,
+        }
+    }
+}
+
 /// Retry / backoff policy for transient provider failures (#237).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
@@ -293,6 +365,12 @@ ene_config::define_config!(
         pub retry: RetryConfig,
         /// Provider health-check and failover policy (#175).
         pub fallback: FallbackConfig,
+        /// TTS (text-to-speech) provider settings.
+        pub tts: TtsConfig,
+        /// STT (speech-to-text) provider settings.
+        pub stt: SttConfig,
+        /// VAD (voice activity detection) engine settings.
+        pub vad: VadConfig,
     }
 );
 

@@ -81,6 +81,8 @@ async fn memory_writer_persists_tool_grounded_procedure_when_enabled() {
         affect: &affect,
         character_id: "ene",
         user_id: "user",
+        interrupted: false,
+        spoken_text: None,
     };
 
     MemoryWriter::write_memories(&store, &config, &input, MemoryWriteProviders::default())
@@ -120,6 +122,8 @@ async fn memory_writer_persists_tool_grounded_episodic_when_enabled() {
         affect: &affect,
         character_id: "ene",
         user_id: "user",
+        interrupted: false,
+        spoken_text: None,
     };
 
     MemoryWriter::write_memories(&store, &config, &input, MemoryWriteProviders::default())
@@ -155,6 +159,8 @@ async fn memory_writer_default_does_not_persist_successful_tools_without_llm() {
         affect: &affect,
         character_id: "ene",
         user_id: "user",
+        interrupted: false,
+        spoken_text: None,
     };
 
     MemoryWriter::write_memories(&store, &config, &input, MemoryWriteProviders::default())

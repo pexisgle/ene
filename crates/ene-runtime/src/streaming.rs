@@ -213,6 +213,8 @@ pub struct StreamContext {
         mpsc::UnboundedSender<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
     /// Sender for deferred tool tasks accepted during tool execution (#196).
     pub deferred_tool_tx: mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
+    /// Optional TTS provider for streaming audio synthesis.
+    pub tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, optional memory

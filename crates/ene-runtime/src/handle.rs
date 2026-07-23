@@ -369,6 +369,19 @@ pub enum EneEvent {
         /// Who initiated this turn.
         origin: crate::types::TurnOrigin,
     },
+    /// A chunk of synthesized PCM audio from the TTS pipeline.
+    AudioChunk {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.
+        pcm: Vec<f32>,
+        /// Sample rate in Hz (e.g. 24000).
+        sample_rate: u32,
+        /// Whether this is the final audio chunk for the turn.
+        is_final: bool,
+    },
 }
 
 /// Reason a single run terminated.
@@ -690,6 +703,40 @@ impl EneHandle {
             fallback_cfg.max_history,
         );
 
+        // Resolve TTS provider from config (None when provider is "none").
+        let tts_provider = {
+            let ai_config = config.get_section::<ene_ai::AiConfig>()?;
+            if let Some(resolved) = ai_config.resolve_tts() {
+                match ene_ai::AudioProviderRegistry::create_tts_provider(
+                    &resolved.provider,
+                    &config,
+                ) {
+                    Ok(provider) => {
+                        tracing::info!(
+                            component = "Bootstrap",
+                            provider = %provider.name(),
+                            "TTS provider initialized"
+                        );
+                        Some(Arc::from(provider))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            component = "Bootstrap",
+                            error = %e,
+                            "Failed to initialize TTS provider; audio synthesis disabled"
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    component = "Bootstrap",
+                    "TTS disabled by configuration (provider = \"none\")"
+                );
+                None
+            }
+        };
+
         let diagnostics = crate::diagnostics::EneDiagnostics {
             cmd_tx: Arc::clone(&cmd_tx),
             diag_tx: diag_tx.clone(),
@@ -744,6 +791,7 @@ impl EneHandle {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(600),
+            tts_provider,
         };
         let join = tokio::spawn(actor.run());
 
@@ -1128,6 +1176,8 @@ struct EneActor {
     /// Maximum poll iterations for deferred (background) tool tasks (#196).
     /// Configurable via `ENE_TOOLS__DEFERRED_MAX_POLLS` env var (default: 600 = 60s).
     deferred_max_polls: u32,
+    /// Resolved TTS provider for streaming audio synthesis (None when TTS is disabled).
+    tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a
@@ -1891,6 +1941,17 @@ impl EneActor {
                 }
                 let _ = self.stream_session_rx.take();
 
+                // Fallback: if the stream task was hard-aborted before it could
+                // record the interruption, capture the partial response here (#206).
+                if !self.session.has_pending_interruption()
+                    && !self.session.display.display_buffer.is_empty()
+                {
+                    let spoken = self.session.display.display_buffer.clone();
+                    let spoken_chars = spoken.chars().count();
+                    self.session
+                        .mark_interrupted(&turn.to_string(), &spoken, spoken_chars);
+                }
+
                 self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 let cancelled_turn = turn.clone();
@@ -2342,6 +2403,7 @@ impl EneActor {
         let classifier_tx = self.classifier_tx.clone();
         let memory_writer_tx = self.memory_writer_tx.clone();
         let deferred_tool_tx = self.deferred_tool_tx.clone();
+        let tts_provider = self.tts_provider.clone();
         self.active_origin = origin;
 
         let _ = self.event_tx.send(EneEvent::TurnStarted {
@@ -2378,6 +2440,7 @@ impl EneActor {
                 classifier_tx,
                 memory_writer_tx,
                 deferred_tool_tx,
+                tts_provider,
             })
             .await;
             let _ = session_tx.send(outcome);

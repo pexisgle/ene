@@ -72,6 +72,14 @@ pub struct AppState {
     /// The new `bevy_ecs` [`App`]. Its schedule is run by
     /// [`crate::runtime::Runtime::about_to_wait`] on every frame.
     pub app: App,
+    /// Kept-alive sender for the TTS playback channel. Cloned into each
+    /// `AiBridge` so the playback thread survives bridge reconnects (the
+    /// channel stays open as long as this sender lives).
+    #[cfg(feature = "voice")]
+    pub audio_tx: Option<crate::audio::AudioChunkSender>,
+    /// Keep-alive handle for the TTS playback thread; joined on drop.
+    #[cfg(feature = "voice")]
+    pub audio_playback: Option<crate::audio::playback::AudioPlaybackHandle>,
 }
 
 impl AppState {
@@ -92,8 +100,32 @@ impl AppState {
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
         let config = settings.ai.ai.clone();
+
+        // Voice pipeline: spawn the TTS playback thread once and build the
+        // shared audio state. The playback sender is cloned into the AI
+        // bridge so `AudioChunk` events reach the rodio sink; the keep-alive
+        // handle and sender live on `AppState` so the channel stays open
+        // across bridge reconnects.
+        #[cfg(feature = "voice")]
+        let (audio_tx, audio_playback, audio_state, viseme_state) = {
+            let mic_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let tts_playing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let viseme = crate::audio::VisemeState::default();
+            let (sender, handle) =
+                crate::audio::playback::spawn_playback(viseme.clone(), tts_playing.clone());
+            let state = crate::audio::AudioState {
+                mic_active,
+                tts_playing,
+                mic_device: settings.mic_device.clone(),
+                config: config.clone(),
+            };
+            (Some(sender), Some(handle), state, viseme)
+        };
+        #[cfg(not(feature = "voice"))]
+        let audio_tx: Option<crate::audio::AudioChunkSender> = None;
+
         let (ai, runtime_startup_error) =
-            match AiBridge::try_new(tx.clone(), bootstrap_handle, config) {
+            match AiBridge::try_new(tx.clone(), bootstrap_handle, config, audio_tx.clone()) {
                 Ok(bridge) => (Some(Arc::new(bridge)), None),
                 Err(error) => {
                     tracing::error!(
@@ -107,7 +139,20 @@ impl AppState {
         let character =
             CharacterRenderer::uninit(&settings.assets_dir, settings.current_character());
 
+        #[cfg(feature = "voice")]
+        let mut app = build_app(bootstrap_handle.clone(), rx, tx.clone());
+        #[cfg(not(feature = "voice"))]
         let app = build_app(bootstrap_handle.clone(), rx, tx.clone());
+
+        // Register the shared audio resources so the mic toggle, playback
+        // thread, and render-loop viseme hook can all reach them. The
+        // `cpal::Stream` mic handle is `!Send`, so it lives on the chat UI
+        // rather than in the ECS world.
+        #[cfg(feature = "voice")]
+        {
+            app.insert_resource(audio_state);
+            app.insert_resource(viseme_state);
+        }
 
         (
             Self {
@@ -122,6 +167,10 @@ impl AppState {
                 character_physics_registration: None,
                 debug: DebugState::default(),
                 app,
+                #[cfg(feature = "voice")]
+                audio_tx,
+                #[cfg(feature = "voice")]
+                audio_playback,
             },
             tx,
         )
@@ -375,7 +424,11 @@ impl AppState {
         }
         self.reconnect_attempted = true;
         let config = self.settings.ai.ai.clone();
-        match AiBridge::try_new(event_tx.clone(), bootstrap_handle, config) {
+        #[cfg(feature = "voice")]
+        let audio_tx = self.audio_tx.clone();
+        #[cfg(not(feature = "voice"))]
+        let audio_tx: Option<crate::audio::AudioChunkSender> = None;
+        match AiBridge::try_new(event_tx.clone(), bootstrap_handle, config, audio_tx) {
             Ok(bridge) => {
                 self.ai = Some(Arc::new(bridge));
                 self.runtime_disconnected = false;
@@ -443,6 +496,18 @@ impl AppState {
             ui.0.reconnect_requested = false;
         }
         requested
+    }
+}
+
+#[cfg(feature = "voice")]
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // Drop the playback channel sender first so the playback thread
+        // observes a closed channel and exits, then join it.
+        self.audio_tx = None;
+        if let Some(mut playback) = self.audio_playback.take() {
+            playback.stop();
+        }
     }
 }
 

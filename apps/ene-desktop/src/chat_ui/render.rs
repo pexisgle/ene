@@ -12,8 +12,24 @@ use crate::component::chat::ChatStateComponent;
 
 use super::dialogs::{render_permission_dialog, render_user_input_dialog};
 
-#[derive(Debug, Default)]
-pub struct ChatUi;
+#[derive(Default)]
+pub struct ChatUi {
+    /// Active microphone capture handle. Lives here (not in the ECS
+    /// world) because `cpal::Stream` is `!Send + !Sync`.
+    #[cfg(feature = "voice")]
+    mic_handle: crate::audio::MicCaptureHandle,
+    /// Placeholder so the struct has a field in text-only builds too.
+    #[cfg(not(feature = "voice"))]
+    mic_handle: Option<()>,
+}
+
+impl std::fmt::Debug for ChatUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatUi")
+            .field("mic_active", &self.mic_handle.is_some())
+            .finish()
+    }
+}
 
 impl ChatUi {
     pub fn render(
@@ -35,6 +51,13 @@ impl ChatUi {
         let scroll_to_bottom = chat_state.0.scroll_to_bottom;
         let messages = chat_state.0.messages.clone();
         chat_state.0.scroll_to_bottom = false;
+
+        // Mic state read once per frame so the toggle button can reflect it
+        // without holding a world borrow inside the egui closure.
+        #[cfg(feature = "voice")]
+        let mic_active = world
+            .get_resource::<crate::audio::AudioState>()
+            .is_some_and(crate::audio::AudioState::is_mic_active);
 
         let available = ui.available_size();
         let input_height = 88.0;
@@ -88,6 +111,31 @@ impl ChatUi {
                     .add_enabled(!processing, egui::Button::new(crate::i18n::chat_undo()))
                     .clicked();
 
+                // Microphone toggle with a live active indicator. The
+                // button stays enabled while the AI is processing so the
+                // user can stop capture at any time.
+                #[cfg(feature = "voice")]
+                let mic_clicked = {
+                    let mic_button = if mic_active {
+                        egui::Button::new(
+                            egui::RichText::new(format!("● {}", crate::i18n::audio_mic_active()))
+                                .color(egui::Color32::from_rgb(220, 80, 80)),
+                        )
+                        .fill(egui::Color32::from_rgb(60, 30, 30))
+                    } else {
+                        egui::Button::new(crate::i18n::audio_mic())
+                    };
+                    ui.add(mic_button)
+                        .on_hover_text(if mic_active {
+                            crate::i18n::audio_mic_toggle_off()
+                        } else {
+                            crate::i18n::audio_mic_toggle_on()
+                        })
+                        .clicked()
+                };
+                #[cfg(not(feature = "voice"))]
+                let mic_clicked = false;
+
                 // Multiline TextEdit inserts a newline on Enter; detect send
                 // while focused instead of waiting for lost_focus.
                 let enter_send = !processing
@@ -97,6 +145,17 @@ impl ChatUi {
 
                 if cancel_clicked || escape_cancel {
                     ai.cancel();
+                }
+
+                if mic_clicked
+                    && let Err(e) =
+                        crate::audio::toggle_mic_capture(world, ai, &mut self.mic_handle)
+                {
+                    tracing::warn!(component = "Audio", error = %e, "mic toggle failed");
+                    if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
+                        chat.0.undo_status =
+                            Some(format!("{}: {e}", crate::i18n::audio_mic_error()));
+                    }
                 }
 
                 if undo_clicked {

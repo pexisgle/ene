@@ -424,6 +424,10 @@ impl CognitionEngine {
             None
         };
 
+        // `Some(None)` means the caller checked and there is no pending
+        // interruption; `None` (legacy/test callers) injects nothing (#206).
+        let interruption_note = prefetch.interruption_note.flatten();
+
         let prompts = PromptLibrary::load(&ctx.config.emotion.classifier_language);
         let char_name = ctx.card.data.get_character_name();
         let platform_contract = Some(
@@ -451,6 +455,7 @@ impl CognitionEngine {
             scene_summary,
             history,
             output_contract: ctx.post_history_block.map(str::to_string),
+            interruption_note,
             user_input: ctx.user_input.to_string(),
         };
 
@@ -915,6 +920,7 @@ mod turn_id_tests {
                 intent: StyleIntent::Greeting,
             }]),
             scene_summary: Some(Some("PREFETCHED_SCENE_MARKER".into())),
+            interruption_note: None,
         };
         let ctx = TurnContext {
             config: &config,

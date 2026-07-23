@@ -14,6 +14,7 @@ Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns t
 |---|---|
 | `TurnStarted { turn, origin }` | After the provider stream opens |
 | `TextDelta { turn, origin, delta }` | Plain-text chunks; emotion / performance markers are stripped. |
+| `AudioChunk { turn, origin, pcm, sample_rate, is_final }` | Synthesized TTS audio streamed alongside `TextDelta` (only when a TTS provider is configured). See [Audio streaming](#audio-streaming). |
 | `Performance { turn, origin, cues, source }` | Presentation cues from the Output Arbiter (`PerformanceCue` / `CueSource` in `ene-mind`). Replaces former `SpecialToken` + standalone `Expression` chat events. |
 | `ToolCallStart` / `ToolCallResult` | Tool execution lifecycle (when the UI needs them). |
 | `ToolBackgroundCompleted` | Deferred background tool finished (may arrive after `Terminal`). |
@@ -24,6 +25,25 @@ Every turn is identified by a [`TurnId`](../api/ene-runtime.md). `run` returns t
 
 External JSON consumers should prefer `ene_runtime::PublicChatEvent` /
 [`schemas/public-chat-event.v1.json`](../api/schemas/public-chat-event.v1.json).
+
+### Audio streaming
+
+When a TTS provider is configured (`ai.tts.provider != "none"`), the mind streaming pipeline feeds accumulated `TextDelta` text to the provider sentence-by-sentence and emits the synthesized audio as `AudioChunk` events interleaved with the text stream.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `turn` | `TurnId` | The turn this audio belongs to |
+| `origin` | `TurnOrigin` | Who initiated the turn |
+| `pcm` | `Vec<f32>` | Interleaved mono PCM samples normalized to `[-1.0, 1.0]` |
+| `sample_rate` | `u32` | Sample rate in Hz (e.g. `24000` for Kokoro ONNX) |
+| `is_final` | `bool` | `true` on the terminal marker (empty `pcm`, `sample_rate = 0`) |
+
+**Emission semantics:**
+
+- Zero or more data chunks arrive with `is_final = false`, each carrying a slice of synthesized PCM. Chunks are roughly 0.25 s of audio at the provider's native sample rate.
+- Exactly one terminal marker arrives with `is_final = true`, `pcm = []`, and `sample_rate = 0`. This signals that all sentences for the turn have been flushed.
+- If TTS is disabled or the provider fails to initialize, no `AudioChunk` events are emitted — the text stream is unaffected.
+- `AudioChunk` events may arrive after `Terminal` if synthesis of trailing sentences is still in flight; consumers should key on `is_final` rather than `Terminal` to know when audio playback can stop.
 
 ### Not on the chat bus
 
@@ -50,6 +70,7 @@ Both `ene-cli` (`apps/ene-cli/src/stream.rs`) and `ene-desktop` (`apps/ene-deskt
 - Break the turn loop on `Terminal` with a matching `turn` — it is the only guaranteed one-per-run completion signal.
 - Map `Performance` cues to VRM / CLI display; do not expect `SpecialToken` or standalone `Expression` on the chat bus.
 - Treat `ContextCompressed` as an optional thin signal; poll `manual_split()` / diagnostics when you need compression details.
+- When consuming `AudioChunk`, forward `pcm` to playback and viseme analysis; use `is_final` (not `Terminal`) to detect end-of-audio.
 
 ## Related documentation
 

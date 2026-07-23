@@ -227,6 +227,7 @@ async fn deferred_tool_execution_emits_completion_event() {
         classifier_tx: mpsc::unbounded_channel().0,
         memory_writer_tx: mpsc::unbounded_channel().0,
         deferred_tool_tx,
+        tts_provider: None,
     };
 
     // Run the streaming loop in a separate task so we can poll events.

@@ -184,6 +184,20 @@ enable-tools = ツール呼び出しを有効化
 enable-tool-rag = Tool RAG を有効化
 enable-tool = ツールを有効化
 
+# Audio
+audio = オーディオ
+audio-mic = マイク
+audio-mic-active = 聴いています…
+audio-mic-toggle-on = マイク収録を開始
+audio-mic-toggle-off = マイク収録を停止
+audio-mic-error = マイクエラー
+audio-mic-device = マイク
+audio-mic-default = デフォルトデバイス
+audio-vad-threshold = VAD しきい値
+audio-stt-provider = 音声認識プロバイダー
+audio-tts-provider = 音声合成プロバイダー
+audio-provider-none = なし
+
 # Permission
 permission-requested = 権限が要求されました
 action-label = アクション

@@ -1176,6 +1176,28 @@ impl Runtime {
             layer.apply_overrides(&expressions_meta);
         }
 
+        // Viseme lip-sync: while TTS audio is playing, read the smoothed
+        // mouth-shape weights from the shared viseme driver and apply them
+        // on top of the current expression, then re-run overrides so the
+        // morph targets uploaded to the GPU reflect the viseme blend.
+        #[cfg(feature = "voice")]
+        {
+            let tts_playing = app
+                .world()
+                .get_resource::<crate::audio::AudioState>()
+                .is_some_and(crate::audio::AudioState::is_tts_playing);
+            if tts_playing
+                && let Some(viseme) = app.world().get_resource::<crate::audio::VisemeState>()
+                && let Some(weights) = viseme.analyze_weights()
+                && let Some(model) = character.model_mut()
+            {
+                let expressions_meta = model.expressions_meta.clone();
+                let layer = model.expressions_mut();
+                layer.apply_viseme_weights(&weights);
+                layer.apply_overrides(&expressions_meta);
+            }
+        }
+
         let result = cw.with_surface_view(|view| {
             let swapchain_size = (cw.config.width, cw.config.height);
             let aa_mode = settings.graphics.resolved().antialiasing_mode;

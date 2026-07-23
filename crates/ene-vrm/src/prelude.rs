@@ -31,4 +31,6 @@ pub use crate::look_at::{LookAtBoneOutput, LookAtEvaluator, LookAtOutput, LookAt
 pub use crate::model::VrmModel;
 #[doc(no_inline)]
 pub use crate::renderer::VrmRenderer;
+#[doc(no_inline)]
+pub use crate::viseme::{VisemeAnalyzer, VisemeWeights};
 pub use ene_config::MotionLayer;

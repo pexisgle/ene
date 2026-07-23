@@ -10,6 +10,19 @@ use crate::character::StyleExample;
 use crate::config::MindConfig;
 use crate::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use crate::recall::{RecallPlan, RecallTurn, RecalledMemory};
+use crate::session::InterruptedState;
+
+/// Builds the system-prompt note describing a previously interrupted response (#206).
+///
+/// Injected into the next turn so the model can naturally resume or acknowledge
+/// the interruption instead of restarting from scratch.
+#[must_use]
+pub fn interruption_note(state: &InterruptedState) -> String {
+    format!(
+        "The previous response was interrupted mid-sentence. The assistant had spoken up to: '{}'. The assistant should naturally resume or acknowledge the interruption.",
+        state.partial_text
+    )
+}
 
 /// A single history entry for prompt composition.
 #[derive(Debug, Clone)]
@@ -112,6 +125,10 @@ pub struct ComposePrefetch {
     pub style_examples: Option<Vec<StyleExample>>,
     /// Prefetched scene summary text (`Some(None)` means no active scene).
     pub scene_summary: Option<Option<String>>,
+    /// Context note about a previously interrupted response, injected into the
+    /// system prompt so the model can acknowledge or resume it (#206).
+    /// `Some(None)` means the caller checked and there is no pending interruption.
+    pub interruption_note: Option<Option<String>>,
 }
 
 /// Post-turn input for memory writing and affect persistence.
@@ -125,6 +142,10 @@ pub struct PostTurnInput<'a> {
     pub character_id: &'a str,
     /// User identifier.
     pub user_id: &'a str,
+    /// Whether the turn was interrupted (barge-in / cancel) before completion (#206).
+    pub interrupted: bool,
+    /// The partial assistant text produced before interruption, if any (#206).
+    pub spoken_text: Option<&'a str>,
 }
 
 /// Owned turn input for deferred post-turn memory writing.
@@ -149,6 +170,12 @@ pub struct OwnedPostTurnInput {
     pub character_id: String,
     /// User identifier.
     pub user_id: String,
+    /// Whether the turn was interrupted (barge-in / cancel) before completion (#206).
+    #[serde(default)]
+    pub interrupted: bool,
+    /// The partial assistant text produced before interruption, if any (#206).
+    #[serde(default)]
+    pub spoken_text: Option<String>,
 }
 
 impl OwnedPostTurnInput {
@@ -163,6 +190,8 @@ impl OwnedPostTurnInput {
             affect: &self.affect,
             character_id: &self.character_id,
             user_id: &self.user_id,
+            interrupted: self.interrupted,
+            spoken_text: self.spoken_text.as_deref(),
         }
     }
 }

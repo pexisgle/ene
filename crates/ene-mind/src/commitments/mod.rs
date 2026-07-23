@@ -294,6 +294,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: Some("Next time".to_string()),
+            tags: Vec::new(),
         }
     }
 

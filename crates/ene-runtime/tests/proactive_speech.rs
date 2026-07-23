@@ -129,6 +129,7 @@ async fn proactive_stream_does_not_add_user_history() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        tts_provider: None,
     };
 
     let outcome = run_stream_cognitive(ctx).await;
@@ -212,6 +213,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        tts_provider: None,
     };
 
     let outcome = run_stream_cognitive(ctx).await;
@@ -279,6 +281,7 @@ async fn proactive_stream_without_memory_store() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        tts_provider: None,
     };
 
     let outcome = run_stream_cognitive(ctx).await;

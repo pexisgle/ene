@@ -20,6 +20,8 @@ pub fn render(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBr
         render_mind(ui, settings, ai);
         ui.separator();
         render_tools(ui, settings, ai);
+        ui.separator();
+        render_audio(ui, settings);
     });
 }
 
@@ -245,6 +247,71 @@ fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &T
     let _ = settings.ai.ai.set_section(&rag);
     settings.mark_dirty();
     sync_features(settings, ai);
+}
+
+fn render_audio(ui: &mut egui::Ui, settings: &mut CharacterSettings) {
+    ui.label(crate::i18n::audio());
+
+    let mut ai_cfg = settings
+        .ai
+        .ai
+        .get_section::<ene_ai::AiConfig>()
+        .unwrap_or_default();
+    let mut changed = false;
+
+    // Microphone device selection (stored on the desktop section).
+    ui.horizontal(|ui| {
+        ui.label(crate::i18n::audio_mic_device());
+        let mut device = settings.mic_device.clone().unwrap_or_default();
+        if ui
+            .add(egui::TextEdit::singleline(&mut device).desired_width(200.0))
+            .on_hover_text(crate::i18n::audio_mic_default())
+            .changed()
+        {
+            settings.mic_device = if device.trim().is_empty() {
+                None
+            } else {
+                Some(device.trim().to_string())
+            };
+            settings.mark_dirty();
+        }
+    });
+
+    // VAD threshold slider.
+    ui.horizontal(|ui| {
+        ui.label(crate::i18n::audio_vad_threshold());
+        let mut threshold = ai_cfg.vad.threshold;
+        if ui
+            .add(egui::Slider::new(&mut threshold, 0.0..=1.0))
+            .changed()
+        {
+            ai_cfg.vad.threshold = threshold;
+            changed = true;
+        }
+    });
+
+    // Read-only provider info.
+    ui.horizontal(|ui| {
+        ui.label(crate::i18n::audio_stt_provider());
+        ui.weak(provider_display(&ai_cfg.stt.provider));
+    });
+    ui.horizontal(|ui| {
+        ui.label(crate::i18n::audio_tts_provider());
+        ui.weak(provider_display(&ai_cfg.tts.provider));
+    });
+
+    if changed {
+        let _ = settings.ai.ai.set_section(&ai_cfg);
+        settings.mark_dirty();
+    }
+}
+
+fn provider_display(provider: &str) -> String {
+    if provider.is_empty() || provider == "none" {
+        crate::i18n::audio_provider_none()
+    } else {
+        provider.to_string()
+    }
 }
 
 fn tool_display_name(name: &str) -> &str {

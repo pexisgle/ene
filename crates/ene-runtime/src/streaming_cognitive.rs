@@ -6,9 +6,11 @@ use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use ene_mind::{
     CognitionEngine, ComposePrefetch, HistoryEntry, MindConfig, OwnedPostTurnInput, OwnedTurnInput,
     PostTurnInput, TurnContext, character::CharacterProcessor, character::compute_card_memory_hash,
-    load_active_scene_summary,
+    interruption_note, load_active_scene_summary,
 };
 use tokio_stream::StreamExt;
+
+use std::sync::Arc;
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::empty_response_log::{EmptyResponseContext, log_empty_response_if_needed};
@@ -25,6 +27,31 @@ use ene_mind::{
     CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority, strip_markers,
 };
 use tracing::Instrument;
+
+/// Maximum sentence buffer length before forcing a TTS flush (chars).
+const TTS_MAX_BUFFER_CHARS: usize = 100;
+
+/// Finds the index just past the first sentence boundary in `buf`.
+///
+/// A boundary is a sentence-ending punctuation character (。！？.!?) followed
+/// by whitespace, or the buffer exceeding [`TTS_MAX_BUFFER_CHARS`].
+/// Returns `None` when no boundary is found.
+fn find_tts_sentence_boundary(buf: &str) -> Option<usize> {
+    if buf.chars().count() > TTS_MAX_BUFFER_CHARS {
+        return Some(buf.len());
+    }
+    let chars: Vec<(usize, char)> = buf.char_indices().collect();
+    for (i, &(_, ch)) in chars.iter().enumerate() {
+        if matches!(ch, '。' | '！' | '？' | '.' | '!' | '?') {
+            let next = chars.get(i + 1).map(|&(_, c)| c);
+            if next.is_none_or(char::is_whitespace) {
+                let end = chars.get(i + 1).map_or(buf.len(), |&(offset, _)| offset);
+                return Some(end);
+            }
+        }
+    }
+    None
+}
 
 #[expect(
     clippy::ref_option,
@@ -58,6 +85,28 @@ fn build_turn_context<'a>(
         llm_provider: Some(provider.clone()),
         post_history_block,
     }
+}
+
+/// Finish a cancelled turn: record the partial response as an interruption so
+/// the next turn can acknowledge/resume it, then emit `TerminalReason::Cancelled` (#206).
+fn finish_cancelled(
+    mut session: ene_mind::ConversationSession,
+    event_tx: &tokio::sync::broadcast::Sender<EneEvent>,
+    terminal_emitted: &std::sync::atomic::AtomicBool,
+    turn: &crate::types::TurnId,
+    origin: TurnOrigin,
+    spoken_text: &str,
+) -> StreamOutcome {
+    let spoken_chars = spoken_text.chars().count();
+    session.mark_interrupted(&turn.to_string(), spoken_text, spoken_chars);
+    stream_finish(
+        session,
+        event_tx,
+        terminal_emitted,
+        turn,
+        origin,
+        TerminalReason::Cancelled,
+    )
 }
 
 /// Mutates `messages` in-place for a proactive turn: strips trailing empty
@@ -128,6 +177,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         classifier_tx,
         memory_writer_tx,
         deferred_tool_tx,
+        tts_provider,
     } = ctx;
 
     let is_proactive = origin == TurnOrigin::Proactive;
@@ -495,6 +545,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let prefetch = ComposePrefetch {
         style_examples: Some(style_examples),
         scene_summary: Some(scene_summary),
+        // Consume any pending interruption so the model can resume it (#206).
+        interruption_note: Some(
+            session
+                .take_interruption()
+                .map(|state| interruption_note(&state)),
+        ),
     };
 
     // Extract the small fields still needed after composition, then move
@@ -567,15 +623,83 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mut round = 0usize;
     let mut turn_tool_results: Vec<ToolResultSummary> = Vec::new();
 
+    // TTS pipeline: spawn a background worker that synthesizes sentences into
+    // PCM audio chunks and emits them through the broadcast channel.
+    let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let tts_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = if tts_provider.is_some() {
+        Some(tts_tx)
+    } else {
+        None
+    };
+    if let Some(ref provider) = tts_provider {
+        let tts_provider = Arc::clone(provider);
+        let event_tx = event_tx.clone();
+        let turn = turn.clone();
+        tokio::spawn(
+            async move {
+                let mut rx = tts_rx;
+                while let Some(sentence) = rx.recv().await {
+                    let trimmed = sentence.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match tts_provider.synthesize_stream(trimmed).await {
+                        Ok(mut stream) => {
+                            use tokio_stream::StreamExt as _;
+                            while let Some(chunk_res) = stream.next().await {
+                                match chunk_res {
+                                    Ok(chunk) => {
+                                        let _ = event_tx.send(EneEvent::AudioChunk {
+                                            turn: turn.clone(),
+                                            origin,
+                                            pcm: chunk.pcm,
+                                            sample_rate: chunk.sample_rate,
+                                            is_final: false,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            component = "TtsPipeline",
+                                            error = %e,
+                                            "TTS synthesis chunk error"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                component = "TtsPipeline",
+                                error = %e,
+                                "TTS synthesis stream open failed"
+                            );
+                        }
+                    }
+                }
+                // Channel closed: all sentences flushed. Emit final marker.
+                let _ = event_tx.send(EneEvent::AudioChunk {
+                    turn: turn.clone(),
+                    origin,
+                    pcm: Vec::new(),
+                    sample_rate: 0,
+                    is_final: true,
+                });
+            }
+            .instrument(tracing::info_span!("tts_pipeline")),
+        );
+    }
+    let mut tts_sentence_buf = String::new();
+
     loop {
         if cancel_token.is_cancelled() {
-            return stream_finish(
+            let spoken = session.display.display_buffer.clone();
+            return finish_cancelled(
                 session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
                 origin,
-                TerminalReason::Cancelled,
+                &spoken,
             );
         }
 
@@ -619,13 +743,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let mut is_first_chunk = true;
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
-                return stream_finish(
+                let spoken = session.display.display_buffer.clone();
+                return finish_cancelled(
                     session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
                     origin,
-                    TerminalReason::Cancelled,
+                    &spoken,
                 );
             }
 
@@ -647,8 +772,16 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             let _ = event_tx.send(EneEvent::TextDelta {
                                 turn: turn.clone(),
                                 origin,
-                                delta: text,
+                                delta: text.clone(),
                             });
+                            if let Some(ref tx) = tts_tx {
+                                tts_sentence_buf.push_str(&text);
+                                while let Some(end) = find_tts_sentence_boundary(&tts_sentence_buf)
+                                {
+                                    let sentence: String = tts_sentence_buf.drain(..end).collect();
+                                    let _ = tx.send(sentence);
+                                }
+                            }
                         }
                         for token in special_tokens {
                             accumulated_emotion_tokens.push(token.clone());
@@ -777,6 +910,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 affect: &turn_affect,
                 character_id: &card_name,
                 user_id: &user_name,
+                interrupted: false,
+                spoken_text: None,
             };
 
             if let Some(store) = mem_store.as_deref()
@@ -820,6 +955,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     affect: turn_affect,
                     character_id: card_name.clone(),
                     user_id: user_name.clone(),
+                    interrupted: false,
+                    spoken_text: None,
                 };
                 let memory_writer_handle = CognitionEngine::spawn_deferred_memory_work(
                     store,
@@ -937,6 +1074,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 // completion, which is acceptable at shutdown.
                 let _ = classifier_tx.send(classifier_handle);
             }
+
+            // Flush any remaining TTS buffer before Terminal.
+            if let Some(ref tx) = tts_tx
+                && !tts_sentence_buf.trim().is_empty()
+            {
+                let _ = tx.send(tts_sentence_buf.clone());
+            }
+            drop(tts_tx);
 
             return stream_finish(
                 session,

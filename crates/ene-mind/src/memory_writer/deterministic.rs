@@ -133,6 +133,7 @@ fn ja_explicit_remember(
         should_persist: true,
         deletion_target_key: None,
         commitment_due: None,
+        tags: Vec::new(),
     })
 }
 
@@ -163,6 +164,7 @@ fn ja_forget_request(
             should_persist: false,
             deletion_target_key: Some(target),
             commitment_due: None,
+            tags: Vec::new(),
         });
     }
 
@@ -182,6 +184,7 @@ fn ja_forget_request(
             should_persist: false,
             deletion_target_key: Some(target),
             commitment_due: None,
+            tags: Vec::new(),
         })
     })
 }
@@ -219,6 +222,7 @@ fn en_explicit_remember(
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         })
     })
 }
@@ -246,6 +250,7 @@ fn en_forget_request(
             should_persist: false,
             deletion_target_key: Some(target),
             commitment_due: None,
+            tags: Vec::new(),
         }
     })
 }

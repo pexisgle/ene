@@ -7,6 +7,15 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = ["voice"]
+# Local voice pipeline I/O: microphone capture (cpal) and TTS playback
+# (rodio). Disable (`--no-default-features`) to build a text-only shell
+# without the native audio toolchain (ALSA / PipeWire); the `audio` module
+# compiles to inert stubs and `ene-ai`'s voice providers stay registered but
+# unreachable from the UI.
+voice = ["dep:cpal", "dep:rodio"]
+
 [dependencies]
 winit = "0.30"
 wgpu = { workspace = true }
@@ -20,7 +29,7 @@ egui-wgpu = "0.35"
 egui-winit = "0.35"
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
-ene-ai = { workspace = true }
+ene-ai = { workspace = true, features = ["voice"] }
 ene-store = { workspace = true }
 ene-config = { workspace = true }
 ene-i18n-macros = { workspace = true }
@@ -48,6 +57,9 @@ i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop
 i18n-embed-fl = "0.10"
 active-win-pos-rs = "0.11.0"
 crossbeam-channel = { workspace = true }
+# Local voice pipeline I/O (optional; enabled by the `voice` feature).
+cpal = { workspace = true, optional = true }
+rodio = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ene-ai = { workspace = true, features = ["vulkan"] }

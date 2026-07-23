@@ -11,8 +11,9 @@ Practical docs for people running and extending ene.
 3. [Configure](configure.md) — settings you will touch often
 4. Concepts: [Turns](concepts/turns.md) · [Sessions](concepts/sessions.md) · [Memory](concepts/memory.md) · [Emotions](concepts/emotions.md)
 5. Apps: [CLI](apps/cli.md) · [Desktop](apps/desktop.md)
-6. [Release](release.md) — tag-driven Linux releases
-7. Tools: [Catalog](tools/overview.md) · [Write a tool](tools/write-a-tool.md)
+6. [Voice pipeline](voice-pipeline.md) — microphone, STT, TTS, lip-sync
+7. [Release](release.md) — tag-driven Linux releases
+8. Tools: [Catalog](tools/overview.md) · [Write a tool](tools/write-a-tool.md)
 
 ## Tools
 

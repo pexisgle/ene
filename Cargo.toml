@@ -22,6 +22,9 @@ tokio-util = "0.7"
 async-openai = { version = "0.41", default-features = false, features = ["chat-completion", "embedding", "byot"] }
 llama-cpp-2 = { version = "0.1.151", default-features = false }
 encoding_rs = "0.8"
+# Local voice pipeline (STT/TTS/VAD); opt-in via ene-ai feature flags.
+whisper-rs = "0.16"
+ort = { version = "2.0.0-rc.12", default-features = false }
 
 # ── GUI / Rendering / 3D ──
 bytemuck = { version = "1", features = ["derive"] }
@@ -29,6 +32,11 @@ glam = { version = "0.33", features = ["bytemuck"] }
 gltf = { version = "1.4", default-features = false }
 image = { version = "0.25", default-features = false }
 wgpu = "29"
+
+# ── Audio / DSP ──
+cpal = "0.15"
+rodio = { version = "0.20", default-features = false }
+rustfft = "6"
 
 # ── Database ──
 libsqlite3-sys = { version = "0.37", features = ["bundled"] }

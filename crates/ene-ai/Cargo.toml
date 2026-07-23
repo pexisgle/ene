@@ -15,6 +15,12 @@ default = []
 # GPU backends for llama-cpp-2 (decision + local embedding).
 vulkan = ["llama-cpp-2/vulkan"]
 cuda = ["llama-cpp-2/cuda"]
+# Local voice pipeline providers (pull in heavy native dependencies).
+local-stt = ["dep:whisper-rs"]
+local-tts = ["dep:ort"]
+silero-vad = ["dep:ort"]
+# Enable all local voice providers.
+voice = ["local-stt", "local-tts", "silero-vad"]
 
 [dependencies]
 async-openai = { workspace = true, default-features = false }
@@ -36,6 +42,13 @@ encoding_rs = { workspace = true }
 blake3 = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 image = { workspace = true, features = ["png", "jpeg"] }
+# Local voice pipeline (optional; enabled by feature flags above).
+whisper-rs = { workspace = true, optional = true }
+# `load-dynamic` defers ONNX Runtime loading to runtime (dlopen) so the crate
+# compiles without a build-time binary download; the desktop app provides the
+# `libonnxruntime` shared library (Phase 5). `api-24` matches the ONNX Runtime
+# ABI the crate is compiled against.
+ort = { workspace = true, optional = true, default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 async-openai = { workspace = true, default-features = false, features = ["rustls", "byot"] }

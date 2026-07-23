@@ -146,6 +146,19 @@ pub enum PublicChatEvent {
         /// `idle`, `running`, or `error`.
         status: String,
     },
+    /// A chunk of synthesized PCM audio from the TTS pipeline.
+    AudioChunk {
+        /// Turn id.
+        turn: String,
+        /// Who initiated the turn.
+        origin: String,
+        /// Number of PCM samples in this chunk.
+        pcm_len: usize,
+        /// Sample rate in Hz.
+        sample_rate: u32,
+        /// Whether this is the final audio chunk for the turn.
+        is_final: bool,
+    },
 }
 
 impl PublicChatEvent {
@@ -276,6 +289,19 @@ impl PublicChatEvent {
                     EneStatus::Running => "running".to_string(),
                     EneStatus::Error => "error".to_string(),
                 },
+            },
+            EneEvent::AudioChunk {
+                turn,
+                origin,
+                pcm,
+                sample_rate,
+                is_final,
+            } => Self::AudioChunk {
+                turn: turn.to_string(),
+                origin: origin_label(*origin).to_string(),
+                pcm_len: pcm.len(),
+                sample_rate: *sample_rate,
+                is_final: *is_final,
             },
         }
     }

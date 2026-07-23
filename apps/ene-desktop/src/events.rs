@@ -51,6 +51,11 @@ pub enum AppEvent {
     /// `LookAt` cue — gaze target hint from LLM performance markers.
     /// Forwarded to VRM gaze when the gaze system is implemented.
     LookAtCue { target: String },
+    /// Microphone capture started (`active = true`) or stopped
+    /// (`active = false`). Emitted by the audio capture subsystem so
+    /// the chat UI can refresh its mic-toggle indicator.
+    #[cfg(feature = "voice")]
+    MicStateChanged { active: bool },
     /// Request the event loop to exit.
     Quit,
     /// The runtime actor broadcast channel closed (#242).

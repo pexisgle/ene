@@ -333,6 +333,7 @@ fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
         should_persist: raw.should_persist,
         deletion_target_key: raw.deletion_target_key,
         commitment_due: raw.commitment_due,
+        tags: Vec::new(),
     }
 }
 
@@ -828,6 +829,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         extract_with_timeout(&provider, &ja_turn("I like coffee"), Locale::En, 5, &[hint])
             .await

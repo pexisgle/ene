@@ -30,6 +30,7 @@
 mod acquire_error;
 mod ai_bridge;
 mod app;
+mod audio;
 mod character;
 mod character_state;
 mod chat_state;

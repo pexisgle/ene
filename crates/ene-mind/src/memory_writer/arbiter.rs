@@ -822,6 +822,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         }
     }
 
@@ -950,6 +951,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
         assert!(matches!(
@@ -1003,6 +1005,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
         assert!(matches!(
@@ -1033,6 +1036,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(
@@ -1062,6 +1066,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(
@@ -1111,6 +1116,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let arbiter_ctx = ctx(turn);
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
@@ -1231,6 +1237,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let second = MemoryCandidate {
             content: "Different detail about project X".to_string(),
@@ -1344,6 +1351,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1417,6 +1425,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1484,6 +1493,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1525,6 +1535,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
@@ -1547,6 +1558,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
@@ -1624,6 +1636,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let applied = MemoryArbiter::arbitrate_and_apply(&store, &[candidate], &ctx(turn))
             .await
@@ -1681,6 +1694,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
         assert!(matches!(
@@ -1713,6 +1727,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: Some("tomorrow 15:00".to_string()),
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         let ArbiterAction::Persist(item) = decision_action(&decisions) else {

@@ -16,6 +16,10 @@ use ene_runtime::{
     UserInputResponse, open_with_config,
 };
 
+#[cfg(not(feature = "voice"))]
+use crate::audio::AudioChunkSender;
+#[cfg(feature = "voice")]
+use crate::audio::{AudioChunkPayload, AudioChunkSender};
 use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
 use crate::memory_journal::{MemoryJournalAction, MemoryJournalPresenter};
 use crate::proactive_observe::{ProactiveObserveControl, spawn_proactive_observer};
@@ -62,6 +66,7 @@ impl AiBridge {
         event_tx: AppEventSender,
         bootstrap_handle: &tokio::runtime::Handle,
         config: EneConfig,
+        audio_tx: Option<AudioChunkSender>,
     ) -> Result<Self, EneRuntimeError> {
         let mind = config
             .get_section::<ene_mind::MindConfig>()
@@ -85,6 +90,7 @@ impl AiBridge {
             handle,
             processing,
             active_turn,
+            audio_tx,
         ));
 
         Ok(bridge)
@@ -495,6 +501,7 @@ async fn pump_events(
     handle: EneHandle,
     processing: Arc<AtomicBool>,
     active_turn: Arc<Mutex<Option<TurnId>>>,
+    audio_tx: Option<AudioChunkSender>,
 ) {
     loop {
         match receiver.recv().await {
@@ -612,6 +619,36 @@ async fn pump_events(
                 }));
             }
             Ok(EneEvent::ContextCompressed { .. }) => {}
+            Ok(EneEvent::AudioChunk {
+                turn,
+                origin: _,
+                pcm,
+                sample_rate,
+                is_final,
+            }) => {
+                // Audio chunks are forwarded to the playback subsystem
+                // regardless of the active turn so TTS audio for the
+                // current utterance plays even after the text stream
+                // has finished. Without the `voice` feature there is no
+                // playback subsystem, so the chunk is dropped.
+                #[cfg(feature = "voice")]
+                {
+                    if !turn_matches(&active_turn, &turn) && !is_final {
+                        continue;
+                    }
+                    if let Some(tx) = &audio_tx {
+                        let _ = tx.send(AudioChunkPayload {
+                            pcm,
+                            sample_rate,
+                            is_final,
+                        });
+                    }
+                }
+                #[cfg(not(feature = "voice"))]
+                {
+                    let _ = (&audio_tx, turn, pcm, sample_rate, is_final);
+                }
+            }
             Ok(EneEvent::StatusChanged { .. } | EneEvent::ToolBackgroundCompleted { .. }) => {}
             Ok(EneEvent::TurnStarted { turn, origin: _ }) => {
                 if let Ok(mut guard) = active_turn.lock() {

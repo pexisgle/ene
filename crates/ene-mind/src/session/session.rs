@@ -56,6 +56,24 @@ pub struct MemoryContext {
     pub ccv3_memory_hash: Option<u64>,
 }
 
+/// Snapshot of a turn that was interrupted mid-response (barge-in / cancel).
+///
+/// Recorded when the user cancels an in-flight turn so the next turn's prompt
+/// can acknowledge the interruption and memory candidates can be tagged.
+/// Turn identifiers are plain strings to keep `ene-mind` free of any
+/// `ene-runtime` dependency (architecture boundary).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterruptedState {
+    /// Identifier of the interrupted turn.
+    pub turn_id: String,
+    /// Character range of the response that had been spoken before interruption.
+    pub spoken_char_range: std::ops::Range<usize>,
+    /// The partial assistant text that had been produced so far.
+    pub partial_text: String,
+    /// When the interruption was recorded.
+    pub interrupted_at: DateTime<Utc>,
+}
+
 /// Tracks session metadata like embedding and timing.
 #[derive(Clone, Debug, Default)]
 pub struct SessionState {
@@ -87,6 +105,8 @@ pub struct ConversationSession {
     pub character_card: Option<CharacterCardV3>,
     /// The filesystem path to the current character card.
     current_card_path: String,
+    /// Snapshot of the most recently interrupted turn, if any (#206).
+    interrupted: Option<InterruptedState>,
 }
 
 impl std::fmt::Debug for ConversationSession {
@@ -141,6 +161,7 @@ impl ConversationSession {
             },
             character_card: None,
             current_card_path: String::new(),
+            interrupted: None,
         }
     }
 
@@ -251,6 +272,39 @@ impl ConversationSession {
         self.display.token_carry.clear();
     }
 
+    /// Records that the given turn was interrupted mid-response (#206).
+    ///
+    /// `spoken_text` is the portion of the assistant response that had been
+    /// produced (and typically spoken via TTS) before the interruption, and
+    /// `spoken_chars` is its length in characters. The partial text is also
+    /// committed to history so the exchange is not lost.
+    pub fn mark_interrupted(&mut self, turn_id: &str, spoken_text: &str, spoken_chars: usize) {
+        let clamped_chars = spoken_chars.min(spoken_text.chars().count());
+        if !spoken_text.is_empty() {
+            self.add_assistant_message(spoken_text);
+        }
+        self.interrupted = Some(InterruptedState {
+            turn_id: turn_id.to_string(),
+            spoken_char_range: 0..clamped_chars,
+            partial_text: spoken_text.to_string(),
+            interrupted_at: Utc::now(),
+        });
+        self.reset_display_buffer();
+    }
+
+    /// Consumes and clears the pending interruption snapshot, if any (#206).
+    ///
+    /// Called when composing the next turn's prompt so the model can
+    /// acknowledge or resume the interrupted response exactly once.
+    pub fn take_interruption(&mut self) -> Option<InterruptedState> {
+        self.interrupted.take()
+    }
+
+    /// Whether an interruption snapshot is currently pending (#206).
+    pub const fn has_pending_interruption(&self) -> bool {
+        self.interrupted.is_some()
+    }
+
     /// Resets all session state (history, display, turn count) and returns a new session ID.
     pub fn reset_session(&mut self) -> SessionId {
         let new_id = generate_session_id();
@@ -265,6 +319,7 @@ impl ConversationSession {
         self.state.current_turn_count = 0;
         self.state.last_resolved_expression.clear();
         self.state.last_expression_changed_at = None;
+        self.interrupted = None;
         new_id
     }
 
@@ -397,5 +452,31 @@ mod tests {
         s.add_user_message("turn 2");
         s.add_user_message("turn 3");
         assert_eq!(s.history().len(), 2);
+    }
+
+    #[test]
+    fn mark_interrupted_records_and_take_clears() {
+        let mut s = ConversationSession::default();
+        s.mark_interrupted("turn-1", "hello wor", 5);
+
+        let state = s.take_interruption().expect("interruption recorded");
+        assert_eq!(state.turn_id, "turn-1");
+        assert_eq!(state.partial_text, "hello wor");
+        assert_eq!(state.spoken_char_range, 0..5);
+        // Partial text committed to history.
+        assert_eq!(
+            s.history().last().map(|e| e.content.as_str()),
+            Some("hello wor")
+        );
+        // Consumed exactly once.
+        assert!(s.take_interruption().is_none());
+    }
+
+    #[test]
+    fn reset_session_clears_interruption() {
+        let mut s = ConversationSession::default();
+        s.mark_interrupted("turn-1", "partial", 3);
+        s.reset_session();
+        assert!(s.take_interruption().is_none());
     }
 }
