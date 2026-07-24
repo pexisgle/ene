@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_stream::StreamExt;

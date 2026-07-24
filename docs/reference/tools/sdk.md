@@ -1,6 +1,6 @@
 # SDK: Building Custom Tools
 
-`ene-tool-proto` is the lightweight SDK for building custom tool binaries that integrate with ene.
+`ene-plugin` (with `ene-plugin-proto` for wire types) is the SDK for building custom tool plugin binaries that integrate with ene. Tools are plugins: a tool binary implements the `Plugin` trait (usually via the `ToolPluginAdapter` compatibility wrapper) and is served with `run_plugin_server`.
 
 ## Quick Start
 
@@ -15,8 +15,9 @@ edition = "2024"
 
 [dependencies]
 ene-tool-common = { git = "https://github.com/pexisgle/ene" }
-ene-tool-proto = { git = "https://github.com/pexisgle/ene" }
 ene-tool-derive = { git = "https://github.com/pexisgle/ene" }
+ene-plugin = { git = "https://github.com/pexisgle/ene" }
+ene-plugin-proto = { git = "https://github.com/pexisgle/ene" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -65,7 +66,7 @@ let provider = ActionSetProvider::new(vec![Box::new(HelloAction::default())]);
 If you need custom `set_call_context`/`set_sandbox` behavior, or want full control, implement `ToolProvider` by hand instead:
 
 ```rust
-use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
+use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 
 struct MyToolProvider;
 
@@ -93,27 +94,36 @@ impl ToolProvider for MyToolProvider {
 
 ### 4. Start the Server
 
+Wrap the provider with `ToolPluginAdapter` and serve it with `run_plugin_server`:
+
 ```rust
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+
 #[tokio::main]
 async fn main() {
-    run_tool_server(Box::new(MyToolProvider)).await.unwrap();
+    let provider = MyToolProvider;
+    run_plugin_server(Box::new(ToolPluginAdapter(provider))).await.unwrap();
 }
 ```
+
+`ToolPluginAdapter` bridges the `ToolProvider` surface into the unified `Plugin` trait, advertising the tool specs as `PluginCapabilities { tools, .. }` during the v3 handshake.
 
 ### 5. Build and Deploy
 
 ```bash
 cargo build --release
-mkdir -p ~/.local/share/dev.pexisgle.ene/tools
-cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.ene/tools/
+mkdir -p ~/.local/share/dev.pexisgle.ene/plugins
+cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.ene/plugins/ene-plugin-my-cool-tool
 ```
+
+Plugin binaries must follow the `ene-plugin-{name}` naming convention so `PluginHostManager` can discover them.
 
 ### 6. Enable in Settings
 
 ```json
 {
-  "tools": {
-    "tools": {
+  "plugins": {
+    "list": {
       "my-cool-tool": { "enable": true }
     }
   }
@@ -239,13 +249,13 @@ impl ToolProvider for CalculatorProvider {
 
 ## ToolProvider Adapters
 
-`ene-tool-common` provides two adapters that implement `ToolProvider` for you, so most tools never need to hand-write the `list_specs`/`call_tool` dispatch loop:
+`ene-tool-common` provides an adapter that implements `ToolProvider` for you, so most tools never need to hand-write the `list_specs`/`call_tool` dispatch loop:
 
 | Adapter | Use for | Session/sandbox hooks |
 |---|---|---|
-| `ActionSetProvider::new(vec![...])` | One or more actions per binary (the mega-tool pattern used by `ene-tool-fs`, `ene-tool-app`, `ene-tool-browser`) | `.with_set_call_context_hook(...)`, `.with_sandbox_hook(...)` |
+| `ActionSetProvider::new(vec![...])` | One or more actions per binary (the mega-tool pattern used by `ene-plugin-fs`, `ene-plugin-app`, `ene-plugin-browser`) | `.with_set_call_context_hook(...)`, `.with_sandbox_hook(...)` |
 
-Both dispatch `call_tool` by matching `ToolAction::name()` against the requested tool name and return `ToolError::NotFound` on a miss — the same behavior every hand-written provider in this codebase used to reimplement. If an action needs to react to `set_call_context`/`set_sandbox` (e.g. to thread a conversation ID or a DB socket into shared state), register a hook instead of dropping down to a manual `ToolProvider` impl:
+It dispatches `call_tool` by matching `ToolAction::name()` against the requested tool name and returns `ToolError::NotFound` on a miss — the same behavior every hand-written provider in this codebase used to reimplement. If an action needs to react to `set_call_context`/`set_sandbox` (e.g. to thread a conversation ID or a DB socket into shared state), register a hook instead of dropping down to a manual `ToolProvider` impl:
 
 ```rust
 use ene_tool_common::ActionSetProvider;
@@ -258,9 +268,19 @@ let provider = ActionSetProvider::new(vec![Box::new(MyAction::new(state))])
     .with_set_call_context_hook(move |conv_id| session_state.set_session_id(conv_id));
 ```
 
-See `tools/utility/src/provider.rs` for a full worked example (session ID + DB sandbox socket/token both threaded through hooks).
+Then wrap it for the plugin server:
+
+```rust
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+
+run_plugin_server(Box::new(ToolPluginAdapter(provider))).await?;
+```
+
+See `plugins/tool/utility/src/main.rs` for a full worked example (session ID + DB sandbox socket/token both threaded through hooks).
 
 ## ToolProvider Trait Reference
+
+`ToolProvider` is defined in `ene-plugin-proto`:
 
 ```rust
 #[async_trait]
@@ -297,7 +317,7 @@ pub trait ToolProvider: Send + Sync {
 
 ## ToolSpec
 
-The structured, LLM-facing tool specification (slimmed at v3 / #135):
+The structured, LLM-facing tool specification:
 
 ```rust
 pub struct ToolSpec {
@@ -311,7 +331,7 @@ RAG metadata (keywords, examples, category, …) lives on [`ToolRagProfile`](#to
 
 ## ToolRagProfile
 
-Host/RAG-only metadata for a callable tool. Never passed to the LLM tool list — exchanged via `IpcResponse::RagProfiles` (IPC v4) and consumed by `ene-tool-rag`.
+Host/RAG-only metadata for a callable tool. Never passed to the LLM tool list — exchanged via `PluginIpcResponse::RagProfiles` and consumed by `ene-tool-rag`.
 
 ```rust
 pub struct ToolRagProfile {
@@ -419,58 +439,60 @@ pub enum ToolError {
 ## IPC Lifecycle
 
 ```
-Tool binary starts
-  → listens on ENE_TOOL_SOCKET (provided by ToolHostManager as env var)
-  → receives IpcRequest::Handshake → responds HandshakeAck
-  → Handshake carries sandbox + tool_config
+Plugin binary starts
+  → listens on ENE_PLUGIN_SOCKET (provided by PluginHostManager as env var)
+  → receives PluginIpcRequest::Handshake → responds HandshakeAck { capabilities }
+  → Handshake carries sandbox + plugin_config
   → ready to handle CallTool requests
 ```
 
 ## Protocol Variants
 
-The IPC wire protocol at `IPC_PROTOCOL_VERSION = 1` carries 9 request variants and 7 response variants. `UserInput` is **not** an IPC variant — it is surfaced through `ToolError::UserInputRequired` and handled by `ene-runtime`'s streaming loop.
+The plugin IPC wire protocol at `PLUGIN_IPC_PROTOCOL_VERSION = 3` carries the tool request/response variants plus streaming LLM messages. `UserInput` is **not** an IPC variant — it is surfaced through `ToolError::UserInputRequired` and handled by `ene-runtime`'s streaming loop.
 
-### Requests (host → tool)
+### Requests (host → plugin)
 
 | Variant | Payload | Semantics |
 |---|---|---|
-| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | Protocol negotiation + sandbox config + tool config push |
+| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `plugin_config: Option<Value>` | Protocol negotiation + sandbox config + plugin config push |
 | `ListTools` | — | Fetch all `ToolSpec`s from the provider |
 | `ListRagProfiles` | — | Fetch `ToolRagProfile`s for Tool RAG indexing (#137) |
-| `GetConfigSchema` | — | Request the tool's config JSON Schema (#150 exception) |
-| `CallTool` | `name: String`, `arguments: String` | Execute a tool by name with JSON arguments |
-| `SetCallContext` | `conversation_id: String`, `turn_id: String` | Thread conversation + turn identifiers into the tool |
+| `GetConfigSchema` | — | Request the plugin's config JSON Schema |
+| `CallTool` | `name: String`, `arguments: String`, `deferred: bool` | Execute a tool by name with JSON arguments |
+| `SetCallContext` | `conversation_id: String`, `turn_id: String` | Thread conversation + turn identifiers into the plugin |
 | `ApprovePermission` | `request_id: String` | Approve a pending destructive-operation permission request |
 | `AllowPattern` | `action: String`, `target_pattern: String` | Register a session-wide permission allow pattern |
+| `Ping` | — | Liveness probe |
 | `Shutdown` | — | Graceful shutdown request |
 
-### Responses (tool → host)
+### Responses (plugin → host)
 
 | Variant | Payload | Triggered by |
 |---|---|---|
-| `HandshakeAck` | `version: u32` | `Handshake` |
+| `HandshakeAck` | `version: u32`, `capabilities: PluginCapabilities` | `Handshake` |
 | `Ack` | — | `SetCallContext`, `ApprovePermission`, `AllowPattern`, `Shutdown` |
 | `Tools` | `tools: Vec<ToolSpec>` | `ListTools` |
 | `RagProfiles` | `profiles: Vec<ToolRagProfile>` | `ListRagProfiles` |
 | `ConfigSchema` | `schema: Option<Value>` | `GetConfigSchema` |
 | `CallResult` | `result: Result<String, ToolError>` | `CallTool` |
+| `Pong` | — | `Ping` |
 | `Error` | `message: String` | Any request that fails at the IPC level |
 
 ## ABI Compatibility
 
-The wire ABI is everything in `ene-tool-proto`'s IPC surface: `IpcRequest`/`IpcResponse`, `IPC_PROTOCOL_VERSION`, `ToolSpec`/`ToolRagProfile` fields, `SandboxConfigData`, and `ToolError`. `run_tool_server` **strictly rejects** a handshake with a mismatched `IPC_PROTOCOL_VERSION` — there is no downgrade/negotiation — so version-bump decisions matter.
+The wire ABI is everything in `ene-plugin-proto`'s IPC surface: `PluginIpcRequest`/`PluginIpcResponse`, `PLUGIN_IPC_PROTOCOL_VERSION`, `PluginCapabilities`, `ToolSpec`/`ToolRagProfile` fields, `SandboxConfigData`, and `ToolError`. `run_plugin_server` **strictly rejects** a handshake with a mismatched `PLUGIN_IPC_PROTOCOL_VERSION` — there is no downgrade/negotiation — so version-bump decisions matter.
 
 | Change | Compatible? | Action required |
 |---|---|---|
-| Add a new `IpcRequest`/`IpcResponse` enum variant | ✅ Additive | None — old tool binaries simply never send/receive the new variant. New host code must still handle old tool binaries not sending it. |
-| Add a new optional field to `ToolSpec`/`ToolRagProfile`/`SandboxConfigData` (with a `#[serde(default)]` or macro-provided default) | ✅ Additive | None. Follow the `define_tool_config!`/`schemars` pattern already used by `SandboxConfigData` so old JSON without the field still deserializes. |
-| Add a new `ToolError` variant | ✅ Additive | None — `ToolError` is `#[serde(tag = "kind" ...)]`-free (plain enum), so new variants deserialize fine as long as old code doesn't exhaustively `match` without a wildcard arm. Prefer adding a `_ => ...` arm in new `match`es over new crates. |
-| Add a new `ToolProvider` trait method | ✅ Additive, if it has a default impl | Give it a default (no-op / empty) implementation, exactly like `set_sandbox`, `approve_permission`, `set_config`, etc. already do — this is what keeps every existing provider (hand-written or adapter-based) compiling. |
-| Remove/rename an existing `IpcRequest`/`IpcResponse` variant, or change a field's type/meaning | ❌ Breaking | Bump `IPC_PROTOCOL_VERSION` in `ene-tool-proto` (see [AGENTS.md §6 R3](../../../AGENTS.md)). Update both the host (`ene-tool-host`) and every tool binary in the same change. |
-| Remove a `ToolProvider` trait method, or make an existing default-having method required | ❌ Breaking | Same as above — this changes what every tool binary must implement. Requires a coordinated update across `tools/*` plus a `PROTOCOL_VERSION` bump if it also changes wire behavior. |
-| Change `run_tool_server`'s signature in a way that breaks `Box::new(provider)` call sites | ❌ Breaking (source-level) | Does not require a `PROTOCOL_VERSION` bump on its own (it's a Rust API break, not a wire break), but update every `tools/*/src/main.rs` call site and the recipe in `AGENTS.md` §6 R1 in the same change. |
+| Add a new `PluginIpcRequest`/`PluginIpcResponse` enum variant | ✅ Additive | None — old plugin binaries simply never send/receive the new variant. New host code must still handle old plugin binaries not sending it. |
+| Add a new optional field to `ToolSpec`/`ToolRagProfile`/`SandboxConfigData`/`PluginCapabilities` (with a `#[serde(default)]` or macro-provided default) | ✅ Additive | None. Follow the `define_tool_config!`/`schemars` pattern already used by `SandboxConfigData` so old JSON without the field still deserializes. |
+| Add a new `ToolError` variant | ✅ Additive | None — as long as old code doesn't exhaustively `match` without a wildcard arm. Prefer adding a `_ => ...` arm in new `match`es over new crates. |
+| Add a new `ToolProvider`/`Plugin` trait method | ✅ Additive, if it has a default impl | Give it a default (no-op / empty) implementation, exactly like `set_sandbox`, `approve_permission`, `set_config`, etc. already do — this is what keeps every existing provider (hand-written or adapter-based) compiling. |
+| Remove/rename an existing `PluginIpcRequest`/`PluginIpcResponse` variant, or change a field's type/meaning | ❌ Breaking | Bump `PLUGIN_IPC_PROTOCOL_VERSION` in `ene-plugin-proto`. Update both the host (`ene-plugin-host`) and every plugin binary in the same change. |
+| Remove a `ToolProvider`/`Plugin` trait method, or make an existing default-having method required | ❌ Breaking | Same as above — this changes what every plugin binary must implement. Requires a coordinated update across `plugins/*` plus a `PLUGIN_IPC_PROTOCOL_VERSION` bump if it also changes wire behavior. |
+| Change `run_plugin_server`'s signature in a way that breaks `Box::new(...)` call sites | ❌ Breaking (source-level) | Does not require a `PLUGIN_IPC_PROTOCOL_VERSION` bump on its own (it's a Rust API break, not a wire break), but update every `plugins/*/src/main.rs` call site and the recipe in `AGENTS.md` in the same change. |
 
-In short: **additive is always safe**; anything that changes the meaning of an existing wire field/variant or removes something a tool binary might already be sending needs a `PROTOCOL_VERSION` bump plus a coordinated host+tool-binary update.
+In short: **additive is always safe**; anything that changes the meaning of an existing wire field/variant or removes something a plugin binary might already be sending needs a `PLUGIN_IPC_PROTOCOL_VERSION` bump plus a coordinated host+plugin-binary update.
 
 ## Best Practices
 

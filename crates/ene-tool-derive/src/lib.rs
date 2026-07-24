@@ -151,17 +151,17 @@ fn expand_tool_action_derive(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                 <Self as ::ene_tool_common::ToolSpecArgs>::TOOL_NAME
             }
 
-            fn definition(&self) -> ::ene_tool_proto::ToolSpec {
+            fn definition(&self) -> ::ene_plugin_proto::ToolSpec {
                 <Self as ::ene_tool_common::ToolSpecArgs>::spec()
             }
 
-            fn rag_profile(&self) -> ::ene_tool_proto::ToolRagProfile {
+            fn rag_profile(&self) -> ::ene_plugin_proto::ToolRagProfile {
                 <Self as ::ene_tool_common::ToolSpecArgs>::rag_profile()
             }
 
-            async fn execute(&self, arguments: &str) -> ::std::result::Result<::std::string::String, ::ene_tool_proto::ToolError> {
+            async fn execute(&self, arguments: &str) -> ::std::result::Result<::std::string::String, ::ene_plugin_proto::ToolError> {
                 let mut args: Self = ::serde_json::from_str(arguments).map_err(|e| {
-                    ::ene_tool_proto::ToolError::InvalidArguments {
+                    ::ene_plugin_proto::ToolError::InvalidArguments {
                         message: ::std::format!(
                             "Invalid arguments for {}: {e}",
                             <Self as ::ene_tool_common::ToolSpecArgs>::TOOL_NAME
@@ -246,12 +246,12 @@ fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) {
         }
     };
     let def_fn: syn::ImplItem = syn::parse_quote! {
-        fn definition(&self) -> ::ene_tool_proto::ToolSpec {
+        fn definition(&self) -> ::ene_plugin_proto::ToolSpec {
             <#args_ty as ::ene_tool_common::ToolSpecArgs>::spec()
         }
     };
     let rag_fn: syn::ImplItem = syn::parse_quote! {
-        fn rag_profile(&self) -> ::ene_tool_proto::ToolRagProfile {
+        fn rag_profile(&self) -> ::ene_plugin_proto::ToolRagProfile {
             <#args_ty as ::ene_tool_common::ToolSpecArgs>::rag_profile()
         }
     };
@@ -324,8 +324,8 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             /// Emits the LLM-facing fields only (`name`, `description`,
             /// `parameters`). Rich `#[tool(...)]` metadata is emitted by
             /// [`Self::rag_profile`] for Tool RAG (#137).
-            pub fn spec() -> ::ene_tool_proto::ToolSpec {
-                use ::ene_tool_proto::{ToolSpec, ToolName};
+            pub fn spec() -> ::ene_plugin_proto::ToolSpec {
+                use ::ene_plugin_proto::{ToolSpec, ToolName};
                 use ::schemars::JsonSchema as _;
                 use ::serde_json::json;
 
@@ -359,8 +359,8 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             }
 
             /// Construct the host/RAG metadata profile for this args type (#137).
-            pub fn rag_profile() -> ::ene_tool_proto::ToolRagProfile {
-                use ::ene_tool_proto::{
+            pub fn rag_profile() -> ::ene_plugin_proto::ToolRagProfile {
+                use ::ene_plugin_proto::{
                     KeywordSet, ToolName, ToolRagProfile, ToolVersion,
                 };
 
@@ -397,10 +397,10 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
 
         impl #impl_generics ::ene_tool_common::ToolSpecArgs for #ident #ty_generics #where_clause {
             const TOOL_NAME: &'static str = #tool_name_str;
-            fn spec() -> ::ene_tool_proto::ToolSpec {
+            fn spec() -> ::ene_plugin_proto::ToolSpec {
                 <Self>::spec()
             }
-            fn rag_profile() -> ::ene_tool_proto::ToolRagProfile {
+            fn rag_profile() -> ::ene_plugin_proto::ToolRagProfile {
                 <Self>::rag_profile()
             }
         }

@@ -6,12 +6,12 @@
 
 | 名前空間 | アクション（要約） | バイナリ | ガイド |
 |----------|--------------------|----------|--------|
-| `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-tool-fs` | [ファイルシステム](fs.md) |
-| `shell` | `execute` | `ene-tool-fs` | [ファイルシステム](fs.md) |
-| `app` | クリップボード、ウィンドウ、キーボード、マウス、スクリーンショットなど | `ene-tool-app` | [GUI 自動化](app.md) |
-| `browser` | `navigate`, `click`, `type`, `wait`, … | `ene-tool-browser` | [ブラウザ](browser.md) |
-| `web` | `fetch`, `search`（HTTP 経由の取得・検索） | `ene-tool-web` | [Web](web.md) |
-| `utility` | `question`、todo、時刻、システム情報、`undo` | `ene-tool-utility` / `ene-tool-fs` | [ユーティリティ](utility.md) |
+| `filesystem` | `read`, `write`, `edit`, `delete`, `glob`, `grep`, `patch` | `ene-plugin-fs` | [ファイルシステム](fs.md) |
+| `shell` | `execute` | `ene-plugin-fs` | [ファイルシステム](fs.md) |
+| `app` | クリップボード、ウィンドウ、キーボード、マウス、スクリーンショットなど | `ene-plugin-app` | [GUI 自動化](app.md) |
+| `browser` | `navigate`, `click`, `type`, `wait`, … | `ene-plugin-browser` | [ブラウザ](browser.md) |
+| `web` | `fetch`, `search`（HTTP 経由の取得・検索） | `ene-plugin-web` | [Web](web.md) |
+| `utility` | `question`、todo、時刻、システム情報、`undo` | `ene-plugin-utility` / `ene-plugin-fs` | [ユーティリティ](utility.md) |
 
 ## 安全
 

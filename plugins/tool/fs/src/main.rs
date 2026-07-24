@@ -1,6 +1,6 @@
-//! # ene-tool-fs
+//! # ene-plugin-fs
 //!
-//! IPC tool binary providing filesystem operations:
+//! Plugin binary providing filesystem operations:
 //! read, write, edit, search, glob, patch, shell execution, and undo management.
 #![warn(missing_docs)]
 #![expect(
@@ -40,13 +40,13 @@ mod schema;
 mod undo;
 mod utils;
 
-use ene_tool_proto::run_tool_server;
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
 
 #[tokio::main]
 async fn main() {
     let provider = provider::FsToolProvider::new();
-    if let Err(e) = run_tool_server(Box::new(provider)).await {
-        eprintln!("[ene-tool-fs] Fatal error: {e}");
+    if let Err(e) = run_plugin_server(Box::new(ToolPluginAdapter(provider))).await {
+        eprintln!("[ene-plugin-fs] Fatal error: {e}");
         std::process::exit(1);
     }
 }

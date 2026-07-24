@@ -3,7 +3,8 @@
 //! can tick/compose per frame (#133).
 
 use bevy_ecs::prelude::*;
-use ene_config::MotionLayer;
+use ene_vrm::MotionLayer;
+
 use ene_vrm::RepeatMode;
 use ene_vrm::layer_composer::{ComposedFrame, LayerComposer};
 

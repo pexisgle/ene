@@ -164,7 +164,7 @@ impl AiBridge {
         &self,
         mind: &ene_mind::MindConfig,
         store: &ene_store::StoreConfig,
-        tools: &ene_tool_host::ToolConfig,
+        plugins: &ene_plugin_host::PluginConfig,
         rag: &ene_tool_rag::ToolRagConfig,
     ) {
         self.proactive_observe.apply_mind(mind);
@@ -173,7 +173,7 @@ impl AiBridge {
             .update_feature_settings(ene_runtime::FeatureSettingsUpdate {
                 mind: mind.clone(),
                 store: store.clone(),
-                tools: tools.clone(),
+                plugins: plugins.clone(),
                 rag: rag.clone(),
             })
         {
@@ -688,8 +688,8 @@ async fn pump_events(
                 turn,
                 origin: _,
                 reason:
-                    reason @ (ene_runtime::TerminalReason::Done
-                    | ene_runtime::TerminalReason::Cancelled),
+                    reason
+                    @ (ene_runtime::TerminalReason::Done | ene_runtime::TerminalReason::Cancelled),
             }) => {
                 if !turn_matches(&active_turn, &turn) {
                     continue;
@@ -769,19 +769,18 @@ async fn pump_events(
                 #[cfg(feature = "voice")]
                 if audio_turn.take().is_some()
                     && let Some(tx) = &audio_tx
-                {
-                    if let Err(e) = tx.send(AudioChunkPayload {
+                    && let Err(e) = tx.send(AudioChunkPayload {
                         pcm: Vec::new(),
                         sample_rate: 0,
                         is_final: true,
                         abort: false,
-                    }) {
-                        tracing::warn!(
-                            component = "AiBridge",
-                            error = %e,
-                            "playback channel closed; dropping synthetic final marker"
-                        );
-                    }
+                    })
+                {
+                    tracing::warn!(
+                        component = "AiBridge",
+                        error = %e,
+                        "playback channel closed; dropping synthetic final marker"
+                    );
                 }
                 if let Ok(guard) = active_turn.lock()
                     && let Some(turn) = guard.clone()

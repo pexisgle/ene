@@ -7,7 +7,7 @@ mod kde;
 #[cfg(target_os = "linux")]
 mod sway;
 
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 
 // ==================== Compositor trait ====================
 

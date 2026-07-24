@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose};
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 use image::DynamicImage;
 use std::io::Cursor;
 

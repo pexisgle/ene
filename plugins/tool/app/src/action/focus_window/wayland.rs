@@ -1,4 +1,4 @@
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 
 use crate::utils::portal::compositor::dispatch;
 

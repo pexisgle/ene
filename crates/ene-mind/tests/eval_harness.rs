@@ -65,7 +65,7 @@ impl LlmProvider for EvalLlm {
     async fn create_chat_stream(
         &self,
         _messages: &[LlmMessage],
-        _tools: &[ene_tool_proto::ToolSpec],
+        _tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -95,7 +95,7 @@ impl LlmProvider for PanicLlm {
     async fn create_chat_stream(
         &self,
         _messages: &[LlmMessage],
-        _tools: &[ene_tool_proto::ToolSpec],
+        _tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,

@@ -7,7 +7,7 @@
 //! the fs tool's DB-backed undo manager, while shell execution and other
 //! side-effecting tools are treated as irreversible.
 
-use ene_tool_proto::{Reversibility, UndoMetadata};
+use ene_plugin_proto::{Reversibility, UndoMetadata};
 
 /// Tools whose mutations are reversible through the fs undo manager.
 const REVERSIBLE_TOOLS: &[&str] = &[

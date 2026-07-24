@@ -1,6 +1,6 @@
 use crate::undo::UndoManager;
 use crate::utils::permission::{DestructiveAction, PermissionGate};
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -223,8 +223,8 @@ impl SandboxConfig {
     }
 }
 
-impl From<ene_tool_proto::SandboxConfigData> for SandboxConfig {
-    fn from(mut data: ene_tool_proto::SandboxConfigData) -> Self {
+impl From<ene_plugin_proto::SandboxConfigData> for SandboxConfig {
+    fn from(mut data: ene_plugin_proto::SandboxConfigData) -> Self {
         data.sanitize();
         let canonicalize_dirs = |dirs: Vec<String>| -> Vec<PathBuf> {
             dirs.into_iter()

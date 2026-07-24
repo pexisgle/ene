@@ -262,10 +262,10 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mind = config.get_section::<MindConfig>().unwrap_or_default();
     let engine = CognitionEngine::new();
 
-    let tool_config = config
-        .get_section::<ene_tool_host::ToolConfig>()
+    let plugin_config = config
+        .get_section::<ene_plugin_host::PluginConfig>()
         .unwrap_or_default();
-    let tool_calling_enabled = tool_config.enabled && allow_tools;
+    let tool_calling_enabled = plugin_config.enabled && allow_tools;
 
     let mem_config = config
         .get_section::<ene_store::StoreConfig>()
@@ -686,7 +686,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             proactive_screen_image.as_deref(),
         );
     }
-    let max_rounds = tool_config.max_rounds;
+    let max_rounds = plugin_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
     let mut round = 0usize;
     let mut turn_tool_results: Vec<ToolResultSummary> = Vec::new();
@@ -1240,7 +1240,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             origin,
             pending_permissions: &pending_permissions,
             pending_user_inputs: &pending_user_inputs,
-            timeout_ms: tool_config.timeout_ms,
+            timeout_ms: plugin_config.timeout_ms,
             max_summary_chars: mind.memory.tool_grounding.max_summary_chars,
             audit_store: mem_store.as_ref(),
             permission_scopes: &permission_scopes,

@@ -1,5 +1,5 @@
 [package]
-name = "ene-tool-utility"
+name = "ene-plugin-utility"
 version.workspace = true
 edition.workspace = true
 description = "Built-in utility tools: user questioning, todo list management, system time/info"
@@ -8,7 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-ene-tool-proto = { workspace = true }
+ene-plugin = { workspace = true }
+ene-plugin-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
 ene-tool-db = { workspace = true }
@@ -24,7 +25,7 @@ parking_lot = { workspace = true }
 thiserror = { workspace = true }
 
 [[bin]]
-name = "ene-tool-utility"
+name = "ene-plugin-utility"
 path = "src/main.rs"
 
 [dev-dependencies]

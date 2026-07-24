@@ -121,7 +121,7 @@ impl DbIpcServer {
             tokio::fs::remove_file(&self.socket_path).await?;
         }
 
-        let mut listener = ene_tool_proto::transport::IpcListener::bind(&self.socket_path)?;
+        let mut listener = ene_plugin_proto::transport::IpcListener::bind(&self.socket_path)?;
 
         // Restrict the unix socket to the owning user. Without this
         // chmod the socket in /tmp is world-connectable, allowing any
@@ -196,7 +196,7 @@ impl DbIpcServer {
     }
 
     async fn handle_connection(
-        stream: ene_tool_proto::transport::IpcStream,
+        stream: ene_plugin_proto::transport::IpcStream,
         db: DatabaseConnection,
         tool_name: String,
         prefix: String,
@@ -327,7 +327,7 @@ impl DbIpcServer {
     }
 
     async fn send_response(
-        stream: &mut ene_tool_proto::transport::IpcStream,
+        stream: &mut ene_plugin_proto::transport::IpcStream,
         response: &DbResponse,
     ) -> Result<(), DbServerError> {
         let json = serde_json::to_vec(response)?;

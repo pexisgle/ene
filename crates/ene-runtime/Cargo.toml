@@ -33,21 +33,15 @@ base64 = { workspace = true, features = ["std"] }
 image = { workspace = true, features = ["jpeg"] }
 parking_lot = { workspace = true }
 
-ene-tool-host = { workspace = true }
 ene-tool-rag = { workspace = true }
-ene-tool-proto = { workspace = true }
+ene-plugin-proto = { workspace = true }
+ene-plugin-host = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
-ene-tool-proto = { workspace = true }
 tracing-subscriber = { workspace = true }
-ene-config = { workspace = true }
-ene-store = { workspace = true }
-ene-ai = { workspace = true }
-ene-tool-host = { workspace = true }
-ene-mind = { workspace = true }
 
 [lints]
 workspace = true

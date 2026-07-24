@@ -12,10 +12,10 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
+use ene_plugin_host::{ToolHostError, ToolRegistry};
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{EneEvent, TerminalReason};
 use ene_store::MemoryStore;
-use ene_tool_host::{ToolHostError, ToolRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -55,7 +55,7 @@ impl LlmProvider for MockLlm {
     async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        _tools: &[ene_tool_proto::ToolSpec],
+        _tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -88,7 +88,7 @@ struct EmptyRegistry;
 
 #[async_trait]
 impl ToolRegistry for EmptyRegistry {
-    fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+    fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
         vec![]
     }
 

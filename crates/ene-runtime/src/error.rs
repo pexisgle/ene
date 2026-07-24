@@ -18,9 +18,9 @@ pub enum EneRuntimeError {
     /// Mind (cognition / session) error.
     #[error(transparent)]
     Mind(#[from] ene_mind::MindError),
-    /// Tool host error.
+    /// Plugin host error.
     #[error(transparent)]
-    Tool(#[from] ene_tool_host::EneToolHostError),
+    Tool(#[from] ene_plugin_host::PluginHostError),
     /// Tool RAG pipeline error.
     #[error(transparent)]
     ToolRag(#[from] ene_tool_rag::ToolRagError),

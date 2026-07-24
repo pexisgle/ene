@@ -5,8 +5,8 @@ use ene_ai::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_config::EneConfig;
 use ene_mind::ConversationSession;
 use ene_mind::memory_writer::{ToolResultSummary, tool_grounding};
-use ene_tool_host::ToolHostError;
-use ene_tool_proto::ToolError;
+use ene_plugin_host::ToolHostError;
+use ene_plugin_proto::ToolError;
 use ene_tool_rag::ToolRag;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -67,7 +67,7 @@ pub struct PermissionScope {
 /// Re-exported from `ene-tool-proto` so consumers of `ene-runtime` only need to
 /// import one crate.
 #[doc(no_inline)]
-pub use ene_tool_proto::MultiAnswer;
+pub use ene_plugin_proto::MultiAnswer;
 
 /// Represents a user's response to an interactive tool's input request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +83,7 @@ pub enum UserInputResponse {
 /// in [`perform_tool_executions`].
 pub(crate) struct ToolExecutionContext<'a> {
     /// Tool registry for dispatching calls.
-    pub registry: &'a dyn ene_tool_host::ToolRegistry,
+    pub registry: &'a dyn ene_plugin_host::ToolRegistry,
     /// Optional RAG pipeline for semantic tool search.
     pub tool_rag: Option<&'a ToolRag>,
     /// Conversation session identifier.
@@ -179,7 +179,7 @@ pub struct StreamContext {
     pub session: ConversationSession,
     pub user_input: String,
     pub embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
-    pub registry: Arc<dyn ene_tool_host::ToolRegistry>,
+    pub registry: Arc<dyn ene_plugin_host::ToolRegistry>,
     pub tool_rag: Option<Arc<ToolRag>>,
     pub provider: Arc<dyn ene_ai::LlmProvider>,
     pub event_tx: broadcast::Sender<EneEvent>,
@@ -234,12 +234,12 @@ pub use crate::streaming_cognitive::run_stream_cognitive;
 /// Selects relevant tools using the `ToolRag` pipeline if available,
 /// otherwise falls back to the registry's `select_tools` or `list_tools`.
 pub(crate) async fn select_relevant_tools(
-    registry: &dyn ene_tool_host::ToolRegistry,
+    registry: &dyn ene_plugin_host::ToolRegistry,
     tool_rag: Option<&ToolRag>,
     user_input: &str,
     query_embedding: Option<&[f32]>,
     tool_calling_enabled: bool,
-) -> Vec<ene_tool_proto::ToolSpec> {
+) -> Vec<ene_plugin_proto::ToolSpec> {
     if !tool_calling_enabled {
         return vec![];
     }
@@ -299,7 +299,7 @@ pub(crate) async fn perform_tool_executions(
     });
 
     ctx.registry
-        .set_call_context(&ene_tool_proto::CallContext {
+        .set_call_context(&ene_plugin_proto::CallContext {
             conversation_id: ctx.session_id.to_string(),
             turn_id: ctx.turn.to_string(),
         })
@@ -339,7 +339,7 @@ pub(crate) async fn perform_tool_executions(
             match tokio::time::timeout(tool_timeout, ctx.registry.call_tool_deferred(&name, &args))
                 .await
             {
-                Ok(Ok(ene_tool_host::DeferredCallResult::Deferred { task_id })) => {
+                Ok(Ok(ene_plugin_host::DeferredCallResult::Deferred { task_id })) => {
                     // Task accepted for background execution.
                     let _ = ctx.deferred_tool_tx.send(crate::handle::DeferredToolTask {
                         tool_name: name.clone(),
@@ -351,7 +351,7 @@ pub(crate) async fn perform_tool_executions(
                         "Task queued for background execution with task_id: {task_id}"
                     ))
                 }
-                Ok(Ok(ene_tool_host::DeferredCallResult::Sync(res))) => Ok(res),
+                Ok(Ok(ene_plugin_host::DeferredCallResult::Sync(res))) => Ok(res),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(ToolHostError::ExecutionFailed {
                     message: format!(
@@ -691,9 +691,9 @@ fn inject_user_answers(args_json: &str, answers: &[MultiAnswer]) -> String {
     }
 }
 
-pub(crate) fn search_tools_spec() -> ene_tool_proto::ToolSpec {
-    ene_tool_proto::ToolSpec {
-        name: ene_tool_proto::ToolName::new("system.search_tools"),
+pub(crate) fn search_tools_spec() -> ene_plugin_proto::ToolSpec {
+    ene_plugin_proto::ToolSpec {
+        name: ene_plugin_proto::ToolName::new("system.search_tools"),
         description: "Search for registered tools by a semantic query. Returns a list of matching tool names, descriptions, and parameter schemas. Use this when you need to perform an action but the necessary tool is not in your active tool list.".to_string(),
         parameters: serde_json::json!({
             "type": "object",
@@ -710,7 +710,7 @@ pub(crate) fn search_tools_spec() -> ene_tool_proto::ToolSpec {
 }
 
 pub(crate) async fn execute_system_search_tool(
-    registry: &dyn ene_tool_host::ToolRegistry,
+    registry: &dyn ene_plugin_host::ToolRegistry,
     tool_rag: Option<&ToolRag>,
     query: &str,
 ) -> Result<String, ToolHostError> {
@@ -772,15 +772,15 @@ mod tests {
     async fn select_relevant_tools_includes_system_search_tool() {
         struct DummyRegistry;
         #[async_trait::async_trait]
-        impl ene_tool_host::ToolRegistry for DummyRegistry {
-            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+        impl ene_plugin_host::ToolRegistry for DummyRegistry {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
                 vec![]
             }
             async fn call_tool(
                 &self,
                 _name: &str,
                 _arguments: &str,
-            ) -> Result<String, ene_tool_host::ToolHostError> {
+            ) -> Result<String, ene_plugin_host::ToolHostError> {
                 Ok(String::new())
             }
         }
@@ -799,10 +799,10 @@ mod tests {
 
         struct DummyRegistry;
         #[async_trait::async_trait]
-        impl ene_tool_host::ToolRegistry for DummyRegistry {
-            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
-                vec![ene_tool_proto::ToolSpec {
-                    name: ene_tool_proto::ToolName::new("filesystem.read"),
+        impl ene_plugin_host::ToolRegistry for DummyRegistry {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+                vec![ene_plugin_proto::ToolSpec {
+                    name: ene_plugin_proto::ToolName::new("filesystem.read"),
                     description: "Read files".to_string(),
                     parameters: serde_json::json!({}),
                     background_capable: false,
@@ -812,7 +812,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
-            ) -> Result<String, ene_tool_host::ToolHostError> {
+            ) -> Result<String, ene_plugin_host::ToolHostError> {
                 Ok("fail".to_string())
             }
         }
@@ -914,7 +914,7 @@ mod tests {
     #[tokio::test]
     async fn perform_tool_executions_respects_summary_char_limit() {
         use ene_ai::LlmToolCall;
-        use ene_tool_host::ToolRegistry;
+        use ene_plugin_host::ToolRegistry;
 
         struct AlwaysOk {
             output: String,
@@ -922,7 +922,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ToolRegistry for AlwaysOk {
-            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
                 Vec::new()
             }
 
@@ -998,8 +998,8 @@ mod tests {
     #[tokio::test]
     async fn fast_consumer_does_not_lose_permission_decision() {
         use ene_ai::LlmToolCall;
-        use ene_tool_host::ToolRegistry;
-        use ene_tool_proto::ToolError;
+        use ene_plugin_host::ToolRegistry;
+        use ene_plugin_proto::ToolError;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1010,7 +1010,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ToolRegistry for PermissionThenOk {
-            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
                 Vec::new()
             }
             async fn call_tool(
@@ -1119,8 +1119,8 @@ mod tests {
     #[tokio::test]
     async fn chained_permission_then_user_input_is_resolved() {
         use ene_ai::LlmToolCall;
-        use ene_tool_host::ToolRegistry;
-        use ene_tool_proto::ToolError;
+        use ene_plugin_host::ToolRegistry;
+        use ene_plugin_proto::ToolError;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1132,7 +1132,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl ToolRegistry for Chained {
-            fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
                 Vec::new()
             }
             async fn call_tool(
@@ -1150,8 +1150,8 @@ mod tests {
                     })),
                     1 => Err(ToolHostError::Protocol(ToolError::UserInputRequired {
                         request_id: self.input_id.clone(),
-                        prompt: ene_tool_proto::UserInputPrompt::new(vec![
-                            ene_tool_proto::QuestionItem {
+                        prompt: ene_plugin_proto::UserInputPrompt::new(vec![
+                            ene_plugin_proto::QuestionItem {
                                 question: "Pick a value".to_string(),
                                 options: Vec::new(),
                                 allow_free_text: true,

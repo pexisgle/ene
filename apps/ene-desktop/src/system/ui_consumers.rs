@@ -242,9 +242,9 @@ pub fn apply_cancel_system(
             }
             scope if scope.starts_with("motion:") => {
                 let layer = match scope.strip_prefix("motion:") {
-                    Some("upper") => ene_config::MotionLayer::Upper,
-                    Some("lower") => ene_config::MotionLayer::Lower,
-                    _ => ene_config::MotionLayer::Full,
+                    Some("upper") => ene_vrm::MotionLayer::Upper,
+                    Some("lower") => ene_vrm::MotionLayer::Lower,
+                    _ => ene_vrm::MotionLayer::Full,
                 };
                 state.cancel_motion(layer);
             }
@@ -266,12 +266,12 @@ pub fn apply_motion_commands_system(
 ) {
     for cmd in events.read() {
         let layer = match cmd.layer.as_str() {
-            "upper" => ene_config::MotionLayer::Upper,
-            "lower" => ene_config::MotionLayer::Lower,
-            _ => ene_config::MotionLayer::Full,
+            "upper" => ene_vrm::MotionLayer::Upper,
+            "lower" => ene_vrm::MotionLayer::Lower,
+            _ => ene_vrm::MotionLayer::Full,
         };
         let repeat = match layer {
-            ene_config::MotionLayer::Lower => ene_vrm::RepeatMode::Loop,
+            ene_vrm::MotionLayer::Lower => ene_vrm::RepeatMode::Loop,
             _ => ene_vrm::RepeatMode::Once,
         };
         state.accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration, repeat);

@@ -396,7 +396,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "mock: not implemented".to_string(),
@@ -424,7 +424,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "timeout: not implemented".to_string(),
@@ -455,7 +455,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "garbage: not implemented".to_string(),
@@ -790,7 +790,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "recording: not implemented".to_string(),

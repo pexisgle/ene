@@ -11,6 +11,7 @@ use crate::resolve::ResolvedChat;
 use crate::retry::RetryPolicy;
 use crate::traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
+    LlmProviderRegistry,
 };
 
 /// Builds an OpenAI-compatible client with the given base URL and API key.
@@ -151,7 +152,7 @@ fn sanitize_tool_name(name: &str) -> String {
 }
 
 fn convert_tools(
-    tools: &[ene_tool_proto::ToolSpec],
+    tools: &[ene_plugin_proto::ToolSpec],
 ) -> Vec<async_openai::types::chat::ChatCompletionTools> {
     let mut res = Vec::new();
     for t in tools {
@@ -389,7 +390,7 @@ impl LlmProvider for OpenAiProvider {
     async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        tools: &[ene_tool_proto::ToolSpec],
+        tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -606,6 +607,10 @@ pub fn create_chat_provider_from_resolved(resolved: &ResolvedChat) -> OpenAiProv
 }
 
 /// Build a chat provider for a named cognitive task.
+///
+/// OpenAI-compatible providers resolve to the native HTTP client. Any other
+/// provider kind (e.g. plugin-provided `"anthropic"`) falls back to the global
+/// [`LlmProviderRegistry`], which routes to a plugin-registered factory (#247).
 pub fn create_task_chat_provider(
     config: &ene_config::EneConfig,
     task: AiTaskKind,
@@ -613,6 +618,30 @@ pub fn create_task_chat_provider(
     let ai_config = config
         .get_section::<AiConfig>()
         .map_err(|e| LlmProviderError::Provider(format!("Failed to parse AI config: {e}")))?;
+
+    let task_ref = match task {
+        AiTaskKind::Chat => &ai_config.tasks.chat,
+        AiTaskKind::Classifier => ai_config
+            .tasks
+            .classifier
+            .as_ref()
+            .unwrap_or(&ai_config.tasks.chat),
+        AiTaskKind::Proactive => ai_config
+            .tasks
+            .proactive
+            .as_ref()
+            .unwrap_or(&ai_config.tasks.chat),
+    };
+
+    // Non-OpenAI-compatible kinds (plugin providers) resolve via the global
+    // registry instead of the OpenAI HTTP path (#247).
+    if !crate::config::AiConfig::is_local_provider(&task_ref.provider)
+        && let Ok(resolved_ref) = ai_config.resolve_task_ref(task_ref)
+        && !resolved_ref.provider.is_openai_compatible()
+    {
+        return LlmProviderRegistry::create_provider(&resolved_ref.provider.kind, config);
+    }
+
     let resolved = match task {
         AiTaskKind::Chat => ai_config.resolve_chat()?,
         AiTaskKind::Classifier => ai_config.resolve_classifier()?,

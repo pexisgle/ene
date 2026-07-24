@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ene_tool_proto::{ToolError, ToolRagProfile, ToolSpec};
+use ene_plugin_proto::{ToolError, ToolRagProfile, ToolSpec};
 use serde::de::DeserializeOwned;
 
 /// Marker trait for tool argument structs produced by `#[derive(ToolSpec)]`.

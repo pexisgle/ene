@@ -1,6 +1,6 @@
-//! # ene-tool-app
+//! # ene-plugin-app
 //!
-//! IPC tool binary providing desktop application control:
+//! Plugin binary providing desktop application control:
 //! window management, input simulation, and portal overlay.
 #![warn(missing_docs)]
 #![expect(
@@ -21,13 +21,13 @@ mod config;
 mod provider;
 mod utils;
 
-use ene_tool_proto::run_tool_server;
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
 
 #[tokio::main]
 async fn main() {
     let provider = provider::AppToolProvider::new();
-    if let Err(e) = run_tool_server(Box::new(provider)).await {
-        tracing::error!("[ene-tool-app] Fatal error: {e}");
+    if let Err(e) = run_plugin_server(Box::new(ToolPluginAdapter(provider))).await {
+        tracing::error!("[ene-plugin-app] Fatal error: {e}");
         std::process::exit(1);
     }
 }

@@ -1,18 +1,17 @@
 # Tool System (IPC / Host)
 
-Each tool runs as an independent binary process, communicating with the host over IPC (Unix Domain Sockets on Linux, Named Pipes on Windows).
+Each tool runs as an independent plugin binary process, communicating with the host over IPC (Unix Domain Sockets on Linux, Named Pipes on Windows). All tool plugins use the unified plugin protocol v3 (`ene-plugin-proto`).
 
 For the human-facing action catalog, see the [Tool catalog](../../guide/tools/overview.md).
 
 ## Architecture
 
 ```
-ToolHostManager (binary discovery, spawning, supervision)
-  ├── SupervisedIpcRegistry × N (IPC + restart)
-  │   └── IpcToolRegistry (reconnect)
-  │       └── ene-tool-proto protocol
-  ├── extra_registries × N (MCP, etc.)
-  │   └── McpToolRegistry
+PluginHostManager (binary discovery, spawning, supervision)
+  ├── IpcPluginRegistry × N (IPC + restart)
+  │   └── ene-plugin-proto protocol v3
+  ├── McpToolRegistry × N (MCP servers)
+  ├── ToolRegistry adapter (capabilities.tools → ToolRegistry)
   └── CompositeToolRegistry
        └── First-wins dedup
 
@@ -22,8 +21,8 @@ ToolRag (separate from registry, owned by EneActor)
   └── Weighted multi-field cosine similarity
 
 DbIpcServer × N (per-tool database, Unix only)
-  ├── ene-tool-fs  → ene-db-fs.sock   (prefix: fs_)
-  ├── ene-tool-utility → ene-db-utility.sock (prefix: utility_)
+  ├── ene-plugin-fs  → ene-db-fs.sock   (prefix: fs_)
+  ├── ene-plugin-utility → ene-db-utility.sock (prefix: utility_)
   └── …
 ```
 
@@ -31,14 +30,20 @@ DbIpcServer × N (per-tool database, Unix only)
 
 All tools use namespaced names: `<namespace>.<action>`. Namespace tables live in the [catalog](../../guide/tools/overview.md).
 
-## IPC Protocol (`ene-tool-proto`)
+## IPC Protocol (`ene-plugin-proto`)
+
+Plugin IPC uses protocol v3, which extends the legacy tool IPC v2 with streaming LLM messages and a richer handshake. Tool plugins use the tool-related subset of the protocol.
+
+Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `PLUGIN_IPC_PROTOCOL_VERSION = 3` (see `crates/ene-plugin-proto/src/ipc.rs`).
+
+Key tool-related messages:
 
 ```rust
-pub enum IpcRequest {
+pub enum PluginIpcRequest {
     Handshake {
         version: u32,
         sandbox: SandboxConfigData,
-        tool_config: Option<Value>,
+        plugin_config: Option<Value>,
     },
     ListTools,
     ListRagProfiles,
@@ -52,10 +57,11 @@ pub enum IpcRequest {
     Ping,
     PollDeferred { task_id: String },
     CancelDeferred { task_id: String },
+    // ... streaming LLM messages (CreateChatStream, ChatCompletion, EmbedBatch)
 }
 
-pub enum IpcResponse {
-    HandshakeAck { version: u32 },
+pub enum PluginIpcResponse {
+    HandshakeAck { version: u32, capabilities: PluginCapabilities },
     Ack,
     Tools { tools: Vec<ToolSpec> },
     RagProfiles { profiles: Vec<ToolRagProfile> },
@@ -65,56 +71,39 @@ pub enum IpcResponse {
     DeferredStatus { task_id: String, status: DeferredStatus },
     Error { message: String },
     Pong,
+    // ... streaming responses (StreamChunk, StreamEnd, StreamError)
 }
 ```
 
-Wire format: 4-byte little-endian length prefix + JSON payload. Max message size: 64 MB. Protocol version: `IPC_PROTOCOL_VERSION = 2` (see `crates/ene-tool-proto/src/ipc.rs`). v2 adds the `Ping`/`Pong` liveness probe used by host health checks (#238) and the deferred-call messages (`CallTool.deferred`, `DeferredAccepted`, `PollDeferred`, `CancelDeferred`, `DeferredStatus`) that power background tool execution (#196).
+## PluginHostManager
 
-## ToolHostManager
-
-`ene-tool-host` crate. Orchestrates all tool processes.
+`ene-plugin-host` crate. Orchestrates all plugin processes (tools, providers, MCP).
 
 | Method | Description |
 |--------|-------------|
-| `start(config: &EneConfig)` | Creates socket dir, spawns enabled tool binaries, returns `ToolHostManager` |
-| `start_full(config: &EneConfig)` | Calls `start()` + connects MCP servers → returns `Arc<dyn ToolRegistry>` (with fallback on failure) |
-| `add_registry(registry)` | Registers external registries (e.g., MCP) |
-| `into_registry()` | Consumes manager, returns `Arc<dyn ToolRegistry>` |
-
-> **Note:** The `with_store(store)` method shown in earlier drafts of this doc no longer exists on `ToolHostManager`. Tool RAG wiring is performed by `EneActor::reconfigure` via `init_tool_rag(config, embedder, session)` (see `crates/ene-runtime/src/handle.rs`).
+| `start(config: &EneConfig)` | Creates socket dir, spawns enabled plugin binaries, connects MCP servers, returns `PluginHostManager` |
+| `tool_registries()` | Returns `Arc<dyn ToolRegistry>` combining all tool-capable plugins and MCP servers |
+| `shutdown()` | Gracefully shuts down all managed processes |
 
 ### Binary Discovery
 
-`find_tool_binary(name)` searches in order:
-
-1. `builtin_tools_dir()` — debug: same dir as exe, release: `exe_dir/tools/`
-2. `user_tools_dir()` — `app_data_dir()/tools/`
+Plugin binaries are discovered from `builtin_plugins_dir()` and `user_plugins_dir()` (see `ene-config` paths). Binaries must follow the `ene-plugin-{name}` naming convention.
 
 ### Crash Resilience
 
 | Layer | Behavior |
 |-------|----------|
-| `SupervisedIpcRegistry` (process) | Process death detection → exponential backoff restart (max 5: 500ms → 8s) |
-| `SupervisedIpcRegistry` (hang) | A failed call followed by a failed `Ping` probe marks the tool unhealthy (alive but unresponsive) and restarts it (#238) |
-| `IpcToolRegistry` (connection) | Connection loss → exponential backoff reconnect (base 200ms doubling, cap 10s, 5 retries), re-sends Handshake |
-| `ToolHostManager::connect_with_retry` (initial) | Constant 50ms delay, 50 retries (`CONNECT_RETRIES = 50`, `CONNECT_DELAY_MS = 50`) |
+| Process supervision | Process death detection → exponential backoff restart (max 5: 500ms → 8s) |
+| Hang detection | A failed call followed by a failed `Ping` probe marks the plugin unhealthy (alive but unresponsive) and restarts it |
+| Connection | Connection loss → exponential backoff reconnect (base 200ms doubling, cap 10s, 5 retries), re-sends Handshake |
 
-### Health Checks and Circuit Breaker (#238)
+### Health Checks and Circuit Breaker
 
-A periodic liveness probe pings every tool on a fixed interval
-(`tools.health_interval_ms`, default 30s). A tool that is dead or fails to
-answer `Ping` within the probe bound is restarted and its recovery surfaced
-as a health event.
+A periodic liveness probe pings every plugin on a fixed interval. A plugin that is dead or fails to answer `Ping` within the probe bound is restarted and its recovery surfaced as a health event.
 
-A per-tool circuit breaker pauses calls after consecutive failures
-(`tools.circuit_failure_threshold`, default 5) for a cooldown window
-(`tools.circuit_cooldown_ms`, default 30s), then allows a probe call. A
-successful call closes the breaker.
+A per-plugin circuit breaker pauses calls after consecutive failures for a cooldown window, then allows a probe call. A successful call closes the breaker.
 
-Health events are bridged into the runtime diagnostics channel as
-`DiagnosticEvent::ToolHealth` with a stable English `status` contract:
-`unhealthy`, `restarting`, `restarted`, `recovered`, `circuit_open`,
-`circuit_closed`, `disabled`.
+Health events are bridged into the runtime diagnostics channel as `DiagnosticEvent::ToolHealth` with a stable English `status` contract: `unhealthy`, `restarting`, `restarted`, `recovered`, `circuit_open`, `circuit_closed`, `disabled`.
 
 ## ToolAction Trait
 
@@ -133,7 +122,7 @@ Each tool binary has a provider struct that owns shared state and dispatches to 
 
 ## ToolProvider Trait
 
-Implemented by tool binaries. Returns the structured `ToolSpec` type:
+Implemented by tool binaries (defined in `ene-plugin-proto`). Returns the structured `ToolSpec` type:
 
 ```rust
 #[async_trait]
@@ -149,6 +138,17 @@ pub trait ToolProvider: Send + Sync {
     fn set_config(&self, _config: &serde_json::Value) {}
     fn config_schema(&self) -> Option<serde_json::Value> { None }
 }
+```
+
+## ToolPluginAdapter
+
+`ene-plugin` provides `ToolPluginAdapter<T: ToolProvider>` which wraps any `ToolProvider` into the unified `Plugin` trait, allowing tool binaries to be served via `run_plugin_server`:
+
+```rust
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+
+let provider = ActionSetProvider::new(vec![/* actions */]);
+run_plugin_server(Box::new(ToolPluginAdapter(provider))).await?;
 ```
 
 ## ToolRegistry Trait
@@ -183,9 +183,11 @@ Aggregates multiple `ToolRegistry` instances:
 
 | Method | Description |
 |--------|-------------|
-| `connect_stdio(name, cmd, args)` | Launches child process, connects via rmcp |
+| `connect_stdio(name, command, args)` | Launches child process, connects via rmcp |
 | `list_tools()` | Merges tool definitions from all servers |
 | `call_tool(name, args)` | Dispatch to correct server |
+
+MCP servers are configured under `plugins.mcp_servers` (see [Settings](../configuration/settings.md#plugins--plugin-system)).
 
 ## Custom Tool Registration
 
@@ -193,9 +195,9 @@ Practical steps for humans: [Write a tool](../../guide/tools/write-a-tool.md). F
 
 ```json
 {
-  "tools": {
-    "tools": {
-      "my-tool": { "enable": true, "config": { "foo": "bar" } }
+  "plugins": {
+    "list": {
+      "my-tool": { "enable": true }
     }
   }
 }

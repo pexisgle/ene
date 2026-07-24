@@ -1,4 +1,4 @@
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 use image::DynamicImage;
 
 pub(super) async fn capture_window_portal(scale_percent: u32) -> Result<DynamicImage, ToolError> {

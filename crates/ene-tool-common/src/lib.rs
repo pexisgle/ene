@@ -47,9 +47,9 @@ pub mod prelude {
     #[doc(no_inline)]
     pub use async_trait::async_trait;
     #[doc(no_inline)]
-    pub use ene_tool_derive::{ToolAction, ToolSpec, tool_action};
+    pub use ene_plugin_proto::ToolError;
     #[doc(no_inline)]
-    pub use ene_tool_proto::ToolError;
+    pub use ene_tool_derive::{ToolAction, ToolSpec, tool_action};
     #[doc(no_inline)]
     pub use schemars::JsonSchema;
     #[doc(no_inline)]

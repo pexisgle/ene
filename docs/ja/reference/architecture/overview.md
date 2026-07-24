@@ -30,7 +30,7 @@ User input
 | `ene-mind` | Identity、型付きメモリ方針、affect、Performance 調停、compression、セッション状態 |
 | `ene-store` | SQLite-vec 永続化のみ（`store.enabled` / `store.db_path`） |
 | `ene-ai` | LLM + batch-only 埋め込みプロバイダ |
-| `ene-tool` / `ene-tool-host` | wire/host ツール ABI とプロセス管理 |
+| `ene-plugin-proto` / `ene-plugin` / `ene-plugin-host` | wire プラグイン ABI (v3)、作成ファサード、プロセス/レジストリ管理 |
 | `ene-config` | 設定、キャラクターカード、パス |
 | `ene-vrm` | VRM レンダリング（mind/runtime 依存なし） |
 
@@ -54,6 +54,52 @@ User input
 
 - `ene-cli`: `ConfigStore::try_load` → card → `EneHandle::open`；REPL + diagnostics。
 - `ene-desktop`: 必要時 soft config load → `open`；VRM + Performance 消費。
+
+## プラグインシステム
+
+統合プラグインシステムは唯一のプロセス外拡張機構です。全ツールバイナリ（`plugins/tool/*`）、LLM プロバイダプラグイン（`plugins/ene-plugin-*`）、MCP サーバーは、IPC プロトコル v3 上で単一の `PluginHostManager` が管理します。
+
+### クレート
+
+| クレート | 役割 |
+|---|---|
+| `ene-plugin-proto` | ワイヤプロトコル v3: `PluginCapabilities`、`LlmProviderSpec`、ツール型（`tool_types`）、ストリーミング IPC メッセージ |
+| `ene-plugin` | 作成ファサード: `Plugin` trait、`ToolPluginAdapter`（`ToolProvider` をラップ）、`run_plugin_server` エントリポイント |
+| `ene-plugin-host` | ホスト側: `PluginHostManager`（プロセス管理、MCP、サーキットブレーカー、ヘルス）、`ToolRegistry`/`CompositeToolRegistry`、`IpcLlmProvider`、`IpcLlmProviderFactory` |
+
+### IPC プロトコル v3
+
+プラグイン IPC はレガシーのツール IPC と同じ 4 バイトリトルエンディアンの長さプレフィックス JSON フレーミングを使用し、ストリーミングとリッチなハンドシェイクで拡張します:
+
+- **ハンドシェイク**: ホストが `Handshake { version: 3, plugin_config }` を送信し、プラグインが `HandshakeAck { version, capabilities }` で応答。
+- **ストリーミング**: 1 リクエスト → N 個の `StreamChunk` → 終端 `StreamEnd` または `StreamError`、`request_id` で相関。
+- **ケーパビリティ**: `PluginCapabilities` が `tools`、`llm_providers`、将来の `tts_providers` / `stt_providers` を宣言。
+
+ツールバイナリもプラグインです: `ToolProvider` は `ToolPluginAdapter` でラップされ `run_plugin_server` 経由でサーブされ、`capabilities.tools` でツールスペックを通知します。
+
+### プロセス管理
+
+`PluginHostManager` が全プラグインを管理する唯一のマネージャです:
+
+- `builtin_plugins_dir()` + `user_plugins_dir()` からプラグインバイナリを探索（命名: `ene-plugin-{name}`）
+- 各バイナリを `ENE_PLUGIN_SOCKET` 環境変数付きで子プロセスとして起動
+- v3 ハンドシェイクを実行しケーパビリティを検査
+- `capabilities.tools` → `ToolRegistry` アダプタ、`capabilities.llm_providers` → `IpcLlmProviderFactory` にルーティング
+- 設定された MCP サーバー（`plugins.mcp_servers`）に接続し、統合ツールレジストリにマージ
+- サーキットブレーカーと指数バックオフ再起動付きの定期ヘルスプローブ（最大 5 回）
+
+### LLM プロバイダ統合
+
+プラグイン提供の LLM プロバイダはグローバル `LlmProviderRegistry` 経由で統合:
+
+1. `PluginHostManager::start` が各 `llm_providers` kind に対して `IpcLlmProviderFactory` を登録。
+2. `EneHandle::open` がこれらのファクトリを `LlmProviderRegistry` にマージ。
+3. `resolve.rs` が `openai_compatible` 以外のプロバイダ kind をレジストリ経由でルーティング。
+4. `IpcLlmProvider` が IPC ストリーミングプロトコルを `LlmProvider` trait にブリッジ。
+
+### 設定
+
+`plugins` 設定セクション（`plugins.enabled`、`plugins.list.<name>.enable`）がシステムを制御します。[設定](../configuration/settings.md#plugins--プラグインシステム)を参照。
 
 ## 参照
 

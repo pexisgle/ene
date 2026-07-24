@@ -2,7 +2,7 @@ pub mod search_glob;
 pub mod search_grep;
 
 use crate::utils::sandbox::SandboxConfig;
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 
 pub const MAX_RESULTS: usize = 100;
 

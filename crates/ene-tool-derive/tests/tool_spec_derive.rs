@@ -4,8 +4,8 @@
     reason = "proc-macro smoke tests use expect for schema assertions"
 )]
 
+use ene_plugin_proto::{ToolCategory, ToolName, tool_types::EmbeddingField};
 use ene_tool_derive::ToolSpec;
-use ene_tool_proto::{ToolCategory, ToolName, types::EmbeddingField};
 use schemars::JsonSchema;
 use serde::Deserialize;
 

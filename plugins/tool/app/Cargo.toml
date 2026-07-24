@@ -1,5 +1,5 @@
 [package]
-name = "ene-tool-app"
+name = "ene-plugin-app"
 version.workspace = true
 edition.workspace = true
 description = "OS-level GUI automation: window management, keyboard/mouse control, screenshots, clipboard"
@@ -8,7 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-ene-tool-proto = { workspace = true }
+ene-plugin = { workspace = true }
+ene-plugin-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
 enigo = "0.6"
@@ -25,7 +26,7 @@ tracing = { workspace = true }
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 
 [[bin]]
-name = "ene-tool-app"
+name = "ene-plugin-app"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]

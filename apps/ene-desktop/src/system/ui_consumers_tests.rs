@@ -26,8 +26,8 @@ use crate::system::ui_consumers::{
     apply_ai_permission_system, apply_ai_stream_finished_system, apply_ai_text_deltas_system,
     apply_ai_user_input_system, open_chat_system, open_settings_system,
 };
+use ene_plugin_proto::UserInputPrompt;
 use ene_runtime::RequestId;
-use ene_tool_proto::UserInputPrompt;
 use tokio::sync::mpsc;
 
 fn spawn_ui(world: &mut World) {
@@ -222,7 +222,7 @@ fn apply_ai_user_input_allocates_drafts() {
     init_messages(&mut world);
     spawn_chat(&mut world);
 
-    let item = ene_tool_proto::QuestionItem {
+    let item = ene_plugin_proto::QuestionItem {
         question: "Pick a colour".into(),
         options: vec!["red".into(), "blue".into()],
         allow_free_text: true,

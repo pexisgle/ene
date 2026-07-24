@@ -5,9 +5,9 @@
 //! config knob scheduled for removal.
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
+use ene_plugin_proto::tool_types::EmbeddingField;
+use ene_plugin_proto::{ToolName, ToolRagProfile, ToolSpec};
 use ene_store::MemoryStore;
-use ene_tool_proto::types::EmbeddingField;
-use ene_tool_proto::{ToolName, ToolRagProfile, ToolSpec};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -923,8 +923,8 @@ fn compute_index_hash(specs: &[ToolSpec], profiles: &[ToolRagProfile]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_tool_proto::types::KeywordSet;
-    use ene_tool_proto::{ToolCategory, ToolExample, ToolVersion};
+    use ene_plugin_proto::tool_types::KeywordSet;
+    use ene_plugin_proto::{ToolCategory, ToolExample, ToolVersion};
 
     fn profile(name: &str, category: ToolCategory) -> ToolRagProfile {
         ToolRagProfile {
@@ -941,7 +941,7 @@ mod tests {
             }],
             caveats: Vec::new(),
             preconditions: Vec::new(),
-            side_effects: ene_tool_proto::SideEffects::ReadOnly,
+            side_effects: ene_plugin_proto::SideEffects::ReadOnly,
             related: Vec::new(),
             version: ToolVersion::default(),
         }

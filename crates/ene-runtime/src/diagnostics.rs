@@ -7,7 +7,7 @@ use crate::error::EneRuntimeError;
 use crate::handle::{ActorDeadError, EneCommand, EneStateSnapshot};
 use crate::types::TurnId;
 use ene_mind::SplitResult;
-use ene_tool_proto::ToolSpec;
+use ene_plugin_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -288,7 +288,7 @@ pub enum DiagnosticEvent {
     ///
     /// Emitted when a tool is detected unhealthy (hung or dead), restarted,
     /// recovered, paused by the circuit breaker, or disabled. `status` is a
-    /// stable English contract mirroring [`ene_tool_host::ToolHealthEvent`].
+    /// stable English contract mirroring [`ene_plugin_host::PluginHealthEvent`].
     ToolHealth {
         /// Tool name.
         tool: String,

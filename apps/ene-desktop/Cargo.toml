@@ -32,9 +32,8 @@ ene-mind = { workspace = true }
 ene-ai = { workspace = true, features = ["voice"] }
 ene-store = { workspace = true }
 ene-config = { workspace = true }
-ene-i18n-macros = { workspace = true }
-ene-tool-proto = { workspace = true }
-ene-tool-host = { workspace = true }
+ene-plugin-proto = { workspace = true }
+ene-plugin-host = { workspace = true }
 ene-tool-rag = { workspace = true }
 ene-vrm = { workspace = true }
 tokio = { workspace = true }

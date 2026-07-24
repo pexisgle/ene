@@ -1,6 +1,6 @@
-//! # ene-tool-utility
+//! # ene-plugin-utility
 //!
-//! IPC tool binary providing utility operations:
+//! Plugin binary providing utility operations:
 //! question prompting, todo list management, time, and system info.
 #![warn(missing_docs)]
 #![expect(
@@ -30,13 +30,13 @@ pub mod schema;
 /// DB-backed todo store.
 pub mod todo_store;
 
-use ene_tool_proto::run_tool_server;
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
 
 #[tokio::main]
 async fn main() {
     let provider = provider::UtilityToolProvider::new();
-    if let Err(e) = run_tool_server(Box::new(provider)).await {
-        tracing::error!("[ene-tool-utility] Fatal error: {e}");
+    if let Err(e) = run_plugin_server(Box::new(ToolPluginAdapter(provider))).await {
+        tracing::error!("[ene-plugin-utility] Fatal error: {e}");
         std::process::exit(1);
     }
 }

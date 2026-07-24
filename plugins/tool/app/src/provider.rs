@@ -1,7 +1,7 @@
 use crate::action;
 use async_trait::async_trait;
+use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 use ene_tool_common::{ActionSetProvider, ToolAction};
-use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 
 /// App tool provider managing GUI automation tasks.
 ///
@@ -56,7 +56,7 @@ impl ToolProvider for AppToolProvider {
         self.inner.call_tool(name, arguments).await
     }
 
-    fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+    fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         self.inner.set_call_context(ctx);
     }
 }

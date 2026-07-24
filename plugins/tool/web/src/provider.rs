@@ -1,6 +1,6 @@
 use async_trait::async_trait;
+use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 use ene_tool_common::{ActionSetProvider, ToolAction};
-use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
@@ -125,7 +125,7 @@ impl ToolProvider for WebToolProvider {
         self.inner.config_schema()
     }
 
-    fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+    fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         self.inner.set_call_context(ctx);
     }
 }

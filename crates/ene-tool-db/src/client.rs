@@ -3,7 +3,7 @@
 
 use crate::messages::{DbErrorCode, DbRequest, DbResponse};
 use crate::types::{DbFilter, DbOrderBy, DbSchema, DbValue, Row};
-use ene_tool_proto::transport::IpcStream;
+use ene_plugin_proto::transport::IpcStream;
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
@@ -463,7 +463,7 @@ mod tests {
     )]
     mod reconnect_auth {
         use super::*;
-        use ene_tool_proto::transport::{IpcListener, IpcStream, cleanup_path};
+        use ene_plugin_proto::transport::{IpcListener, IpcStream, cleanup_path};
         use std::path::PathBuf;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

@@ -153,7 +153,7 @@ pub struct ToolSpecAttrs {
     pub description: Option<String>,
 
     /// Tool category. Either a bare identifier (e.g. "Filesystem") or a
-    /// fully qualified path (e.g. "`::ene_tool_proto::ToolCategory::Filesystem`").
+    /// fully qualified path (e.g. "`::ene_plugin_proto::ToolCategory::Filesystem`").
     pub category: String,
 
     /// Side effects expression. Can be a bare variant or fully qualified.
@@ -230,14 +230,14 @@ impl ToolSpecAttrs {
     }
 
     pub fn category_path(&self) -> TokenStream2 {
-        path_token(&self.category, "ene_tool_proto::ToolCategory", "Utility")
+        path_token(&self.category, "ene_plugin_proto::ToolCategory", "Utility")
     }
 
     pub fn side_effects_path(&self) -> TokenStream2 {
         if let Some(s) = &self.side_effects {
-            path_token(s, "ene_tool_proto::SideEffects", "ReadOnly")
+            path_token(s, "ene_plugin_proto::SideEffects", "ReadOnly")
         } else {
-            quote! { ::ene_tool_proto::SideEffects::ReadOnly }
+            quote! { ::ene_plugin_proto::SideEffects::ReadOnly }
         }
     }
 
@@ -283,7 +283,7 @@ impl ToolSpecAttrs {
             let output_str = parts.get(2).copied();
             let output_expr = if let Some(s) = output_str { quote! { ::std::option::Option::Some(#s.to_string()) } } else { quote! { ::std::option::Option::None } };
             quote! {
-                ::ene_tool_proto::ToolExample {
+                ::ene_plugin_proto::ToolExample {
                     description: #desc.to_string(),
                     input: {
                         let __s: &str = #input_str;

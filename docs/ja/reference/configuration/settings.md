@@ -13,7 +13,7 @@ pub struct EneConfig {
     pub version: u32,           // 現在 2
     pub character: String,      // キャラクターフォルダ名またはカードパス
     pub user_name: String,      // デフォルト "User"
-    pub extra: HashMap<String, serde_json::Value>, // セクションマップ (ai, store, tools, mind, desktop, …)
+    pub extra: HashMap<String, serde_json::Value>, // セクションマップ (ai, store, plugins, mind, desktop, …)
 }
 ```
 
@@ -49,14 +49,15 @@ pub struct EneConfig {
     }
   },
   "store": { "enabled": false },
-  "tools": {
+  "plugins": {
     "enabled": true,
     "list": {
       "fs": { "enable": true, "allowed_directories": ["."], "writable_directories": ["."] },
       "web": { "enable": true, "tavily_api_key": "", "brave_api_key": "", "exa_api_key": "" },
       "browser": { "enable": true },
       "utility": { "enable": true },
-      "app": { "enable": true }
+      "app": { "enable": true },
+      "anthropic": { "enable": true }
     },
     "mcp_servers": []
   },
@@ -397,18 +398,21 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 
 手動のバックアップ / リストア / 整合性チェックは `/store`（REPL）および `ene store …`（非対話）で利用できます。マイグレーション失敗時は事前バックアップから自動復元されます。オンディスクのスキーマがバイナリより新しい場合は、明確なダウングレードエラーでオープンに失敗します。
 
-### `tools` — ツール設定
+### `plugins` — プラグインシステム
+
+全ツール・プロバイダプラグインは統合 `plugins` セクションで設定します。
 
 ```json
 {
-  "tools": {
+  "plugins": {
     "enabled": true,
     "list": {
       "fs": { "enable": true },
       "web": { "enable": true },
       "browser": { "enable": true },
       "utility": { "enable": true },
-      "app": { "enable": true }
+      "app": { "enable": true },
+      "anthropic": { "enable": true }
     },
     "mcp_servers": []
   }
@@ -417,20 +421,23 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `enabled` | bool | `true` | 全ツールの関数呼び出しを有効化 |
-| `list` | object | (組み込みツール) | ツール個別有効化マップとフラット化された任意設定 |
+| `enabled` | bool | `true` | プラグインシステム（ツール + プロバイダ）を有効化 |
+| `list` | object | `{}` | プラグイン個別有効化マップとフラット化された任意設定 |
+| `max_concurrent` | int | `8` | 同時ツール呼び出しの最大数 |
 | `mcp_servers` | array | `[]` | MCP サーバーリスト |
 
-`max_rounds` と `timeout_ms` は**コードデフォルト**で、薄い公開 UI スキーマには含まれません。Tool RAG は `tools.rag` で設定します（下記）。
+`max_rounds` と `timeout_ms` は**コードデフォルト**で、薄い公開 UI スキーマには含まれません。
 
-#### `tools.list` — ツール個別エントリ
+プラグインバイナリは `builtin_plugins_dir()` と `user_plugins_dir()`（`ene-config` のパス参照）から探索されます。バイナリは `ene-plugin-{name}` の命名規則に従う必要があります。`plugins.enabled` が `false` の場合、プラグインは起動されません。個別のプラグインは `plugins.list.<name>.enable = false` で無効化できます。
+
+#### `plugins.list` — プラグイン個別エントリ
 
 | フィールド | 型 | デフォルト | 説明 |
 |-----------|------|---------|------|
-| `<name>.enable` | bool | `true` | 特定のツールを有効/無効化 |
-| `<name>.*` | 各種 | — | ツール固有フィールドがエントリにフラット化（ネストした `config` オブジェクトなし） |
+| `<name>.enable` | bool | `true` | 特定のプラグインを有効/無効化 |
+| `<name>.*` | 各種 | — | プラグイン固有フィールドがエントリにフラット化（ネストした `config` オブジェクトなし） |
 
-##### `tools.list.fs` — ファイルシステムサンドボックス
+##### `plugins.list.fs` — ファイルシステムサンドボックス
 
 ```json
 {
@@ -459,32 +466,7 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 | `max_shell_output_bytes` | int | `51200` | シェル出力の最大バイト数（`0` は `sanitize` で既定に戻す） |
 | `max_shell_output_lines` | int | `2000` | シェル出力の最大行数（`0` は `sanitize` で既定に戻す） |
 
-##### `tools.rag` — Tool RAG パイプライン
-
-```json
-{
-  "rag": {
-    "enabled": true,
-    "use_hyde": false,
-    "use_rerank": false,
-    "top_k": 12,
-    "final_n": 6,
-    "background_index_on_startup": true
-  }
-}
-```
-
-| フィールド | 型 | デフォルト | 説明 |
-|-----------|------|---------|------|
-| `enabled` | bool | `true` | Tool RAG を有効化（ツール有効時、これが true なら embedder 必須） |
-| `use_hyde` | bool | `false` | **非推奨**（no-op。削除予定）。LLM HyDE は無効 |
-| `use_rerank` | bool | `false` | 候補の cosine 埋め込みリランク（LLM なし） |
-| `top_k` | int | `12` | リランク前の候補数 |
-| `final_n` | int | `6` | 最終返却ツール数 |
-| `forced` | string[] | （utility 既定） | 常に含めるツール。**不正名は起動失敗** |
-| `background_index_on_startup` | bool | `true` | 起動時にバックグラウンドでインデックスをウォームアップ（`false` でスキップ） |
-
-##### `tools.list.web` — ウェブ検索 API キー
+##### `plugins.list.web` — ウェブ検索 API キー
 
 ```json
 {
@@ -503,7 +485,7 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 | `brave_api_key` | string | `""` | Brave Search API キー |
 | `exa_api_key` | string | `""` | Exa Search API キー |
 
-#### `tools.mcp_servers` — Model Context Protocol サーバー
+#### `plugins.mcp_servers` — Model Context Protocol サーバー
 
 ```json
 {
@@ -541,6 +523,27 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 |--------|-----------|------|
 | `stdio` | `command`, `args` | stdio トランスポートで子プロセスを起動 |
 | `http` | `url` | HTTP 経由で接続 |
+
+#### 例: Anthropic Claude プラグイン
+
+```json
+{
+  "plugins": { "enabled": true, "list": { "anthropic": { "enable": true } } },
+  "ai": {
+    "providers": {
+      "claude": {
+        "kind": "anthropic",
+        "api_key": { "source": "env", "env": "ANTHROPIC_API_KEY" }
+      }
+    },
+    "tasks": {
+      "chat": { "provider": "claude", "model": "claude-sonnet-4-20250514", "max_tokens": 8192 }
+    }
+  }
+}
+```
+
+`anthropic` プラグインバイナリ（`ene-plugin-anthropic`）は `kind: "anthropic"` の LLM プロバイダを提供します。`ai.providers.claude` 定義がこの kind を参照し、`ai.tasks.chat` がチャットワークロードをルーティングします。
 
 ### `mind` — 認知ランタイム（公開サーフェス）
 
@@ -622,7 +625,7 @@ STT はデスクトップアプリのマイクキャプチャ経路で使用さ�
 | `mind.memory` | 抽出、ハイブリッド recall、MMR（memory HyDE/LLM rerank は意図的に非搭載） |
 | `mind.character` | CCv3 コンパイル、Identity Kernel 予算 |
 | `mind.emotion` / `mind.proactive` | エンジンモード、分類器タイムアウト、信頼度ゲート、ツール許可 |
-| `tools` | `max_rounds`、`timeout_ms` |
+| `plugins` | `max_rounds`、`timeout_ms` |
 | `store` | `db_path` |
 
 ## 読み込み順序
@@ -700,12 +703,12 @@ ene_config::define_config!(
 
 ### `define_tool_config!`
 
-ツール固有の設定スキーマ用（`tools.list.<name>` にフラット化）:
+プラグイン固有の設定スキーマ用（`plugins.list.<name>` にフラット化）:
 
 ```rust
 ene_config::define_tool_config!(
-    "fs",              // ツール名
-    /// fs ツールのサンドボックス設定。
+    "fs",              // プラグイン名
+    /// fs プラグインのサンドボックス設定。
     pub struct SandboxConfigData {
         pub enabled: bool = true,
         pub allowed_directories: Vec<String> = vec![".".to_string()],
@@ -713,7 +716,7 @@ ene_config::define_tool_config!(
 );
 ```
 
-同じ derive/デフォルト生成を行うが、`__register_tool_schema::<T>("fs")` を呼ぶ。スキーマは `parent_key = "tools_map"` で登録され、生成される JSON スキーマの `ToolConfig` 定義の `list` プロパティにマージされる。
+同じ derive/デフォルト生成を行うが、`__register_tool_schema::<T>("fs")` を呼ぶ。スキーマは `parent_key = "plugins_map"` で登録され、生成される JSON スキーマの `PluginConfig` 定義の `list` プロパティにマージされる。
 
 ### `HasConfigKey` トレイト
 
@@ -750,7 +753,7 @@ pub enum ConfigTarget {
 pub struct SchemaEntry {
     pub schema: schemars::Schema,
     pub target: ConfigTarget,
-    pub parent_key: Option<String>,  // None = トップレベル、Some("tools_map") = ツール設定
+    pub parent_key: Option<String>,  // None = トップレベル、Some("plugins_map") = プラグイン設定
 }
 ```
 
@@ -759,12 +762,12 @@ pub struct SchemaEntry {
 | 関数 | 呼び出し元 | 目的 |
 |------|-----------|------|
 | `__register_schema::<T>(target, parent_key)` | `define_config!` の `#[ctor]` | settings/character セクションスキーマの登録 |
-| `__register_tool_schema::<T>(tool_name)` | `define_tool_config!` の `#[ctor]` | ツール固有設定スキーマの登録 |
+| `__register_tool_schema::<T>(tool_name)` | `define_tool_config!` の `#[ctor]` | プラグイン固有設定スキーマの登録 |
 | `register_runtime_schema(key, schema_json)` | ランタイム（例: MCP ツールプロバイダ） | 動的スキーマ登録 |
 
 `generate_schema_json()` 中で、レジストリがルート `EneConfig` スキーマにマージされる:
 - **トップレベルセクション**（`parent_key = None`）はルートスキーマの `properties` に追加される。
-- **ツール設定**（`parent_key = "tools_map"`）は `ToolConfig` の `list` プロパティに `allOf: [ToolEntry, <ツールスキーマ>]` として注入される。
+- **プラグイン設定**（`parent_key = "plugins_map"`）は `PluginConfig` の `list` プロパティに `allOf: [PluginEntry, <プラグインスキーマ>]` として注入される。
 - 各エントリの **定義**（`$defs`）はルートスキーマの definitions にコピーされる。
 
 ### `ConfigStore`

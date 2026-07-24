@@ -299,16 +299,19 @@ pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
     if crate::AiConfig::is_local_provider(&provider_key) {
         return Vec::new();
     }
-    let Some(crate::AiProviderDef::OpenaiCompatible { base_url, api_key }) =
-        ai.providers.get(&provider_key)
-    else {
+    let Some(def) = ai.providers.get(&provider_key) else {
         return vec![SettingsIssue::MissingBaseUrl {
             provider: provider_key,
         }];
     };
+    // base_url / api_key are only meaningful for OpenAI-compatible HTTP
+    // providers; plugin-provided kinds validate over IPC instead (#247).
+    if !def.is_openai_compatible() {
+        return Vec::new();
+    }
 
     let mut issues = Vec::new();
-    let url = base_url.trim();
+    let url = def.base_url.trim();
     if url.is_empty() {
         issues.push(SettingsIssue::MissingBaseUrl {
             provider: provider_key.clone(),
@@ -319,7 +322,7 @@ pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
             detail: "must start with http:// or https://".to_string(),
         });
     }
-    if api_key.resolve_api_key().trim().is_empty() {
+    if def.api_key.resolve_api_key().trim().is_empty() {
         issues.push(SettingsIssue::MissingApiKey {
             provider: provider_key,
         });
@@ -487,14 +490,15 @@ impl AiConfig {
             });
         }
 
-        // Fallbacks: every other cloud provider, in config order.
+        // Fallbacks: every other OpenAI-compatible provider, in config order.
+        // Only HTTP providers are health-probed here; plugin-provided kinds
+        // are checked over IPC instead (#247).
         for (name, def) in &self.providers {
-            if seen.contains(name) {
+            if seen.contains(name) || !def.is_openai_compatible() {
                 continue;
             }
             seen.insert(name.clone());
-            let AiProviderDef::OpenaiCompatible { base_url, api_key } = def;
-            let Ok(resolved_url) = resolve_base_url(base_url) else {
+            let Ok(resolved_url) = resolve_base_url(&def.base_url) else {
                 continue;
             };
             // Use the chat task's model for fallback providers since they
@@ -511,7 +515,7 @@ impl AiConfig {
             candidates.push(ChatCandidate {
                 provider: name.clone(),
                 base_url: resolved_url,
-                api_key: api_key.resolve_api_key(),
+                api_key: def.api_key.resolve_api_key(),
                 model: model.to_string(),
                 max_tokens: self.tasks.chat.max_tokens,
             });
@@ -533,10 +537,10 @@ impl AiConfig {
             if Self::is_local_provider(&proactive.provider) {
                 return self.resolve_chat();
             }
-            if matches!(
-                self.get_provider(&proactive.provider)?,
-                AiProviderDef::OpenaiCompatible { .. }
-            ) {
+            if self
+                .get_provider(&proactive.provider)?
+                .is_openai_compatible()
+            {
                 return self.resolve_openai_chat_task(proactive);
             }
         }
@@ -564,28 +568,31 @@ impl AiConfig {
             return Ok(ResolvedEmbedding::Local(local));
         }
         let resolved = self.resolve_task_ref(&self.tasks.embedding)?;
-        match resolved.provider {
-            AiProviderDef::OpenaiCompatible { base_url, api_key } => {
-                let model = resolved.model.ok_or_else(|| {
-                    LlmProviderError::Provider(
-                        "embedding task requires model for openai_compatible provider".to_string(),
-                    )
-                })?;
-                let dimensions = resolved.dimensions.unwrap_or(1536);
-                Ok(ResolvedEmbedding::Cloud {
-                    base_url: resolve_base_url(base_url)?,
-                    api_key: api_key.resolve_api_key(),
-                    model: model.to_string(),
-                    dimensions,
-                    query_prefix: self
-                        .tasks
-                        .embedding
-                        .query_prefix
-                        .clone()
-                        .filter(|p| !p.trim().is_empty()),
-                })
-            }
+        let def = resolved.provider;
+        if !def.is_openai_compatible() {
+            return Err(LlmProviderError::Provider(format!(
+                "embedding provider {:?} has kind {:?}; only openai_compatible providers are supported here (plugin providers resolve via the plugin registry)",
+                self.tasks.embedding.provider, def.kind
+            )));
         }
+        let model = resolved.model.ok_or_else(|| {
+            LlmProviderError::Provider(
+                "embedding task requires model for openai_compatible provider".to_string(),
+            )
+        })?;
+        let dimensions = resolved.dimensions.unwrap_or(1536);
+        Ok(ResolvedEmbedding::Cloud {
+            base_url: resolve_base_url(&def.base_url)?,
+            api_key: def.api_key.resolve_api_key(),
+            model: model.to_string(),
+            dimensions,
+            query_prefix: self
+                .tasks
+                .embedding
+                .query_prefix
+                .clone()
+                .filter(|p| !p.trim().is_empty()),
+        })
     }
 
     fn resolve_openai_chat_task(&self, task: &TaskRef) -> Result<ResolvedChat, LlmProviderError> {
@@ -595,22 +602,25 @@ impl AiConfig {
             ));
         }
         let resolved = self.resolve_task_ref(task)?;
-        match resolved.provider {
-            AiProviderDef::OpenaiCompatible { base_url, api_key } => {
-                let model = resolved.model.ok_or_else(|| {
-                    LlmProviderError::Provider(format!(
-                        "task for provider {:?} requires model",
-                        task.provider
-                    ))
-                })?;
-                Ok(ResolvedChat {
-                    base_url: resolve_base_url(base_url)?,
-                    api_key: api_key.resolve_api_key(),
-                    model: model.to_string(),
-                    max_tokens: resolved.max_tokens,
-                })
-            }
+        let def = resolved.provider;
+        if !def.is_openai_compatible() {
+            return Err(LlmProviderError::Provider(format!(
+                "chat provider {:?} has kind {:?}; only openai_compatible providers are supported here (plugin providers resolve via the plugin registry)",
+                task.provider, def.kind
+            )));
         }
+        let model = resolved.model.ok_or_else(|| {
+            LlmProviderError::Provider(format!(
+                "task for provider {:?} requires model",
+                task.provider
+            ))
+        })?;
+        Ok(ResolvedChat {
+            base_url: resolve_base_url(&def.base_url)?,
+            api_key: def.api_key.resolve_api_key(),
+            model: model.to_string(),
+            max_tokens: resolved.max_tokens,
+        })
     }
 
     /// Resolve TTS provider settings from [`AiConfig::tts`].

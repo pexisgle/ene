@@ -24,7 +24,7 @@ fn test_config_memory_off() -> EneConfig {
     let mut store = ene_store::StoreConfig::default();
     store.enabled = false;
     config.set_section(&store).expect("store config merges");
-    let mut tools = ene_tool_host::ToolConfig::default();
+    let mut tools = ene_plugin_host::PluginConfig::default();
     tools.enabled = false;
     let _ = config.set_section(&tools);
     let ai = ene_ai::AiConfig::default();
@@ -141,7 +141,7 @@ async fn memory_enabled_without_embedder_fails_closed_on_open() {
     let mut store = ene_store::StoreConfig::default();
     store.enabled = true;
     config.set_section(&store).unwrap();
-    let mut tools = ene_tool_host::ToolConfig::default();
+    let mut tools = ene_plugin_host::PluginConfig::default();
     tools.enabled = false;
     let _ = config.set_section(&tools);
     // Cloud embedder with no base URL → init fails → open fails closed.

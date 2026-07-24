@@ -61,7 +61,7 @@ impl HybridRerankProvider {
     pub async fn rerank(
         &self,
         query: &str,
-        candidates: &[ene_tool_proto::ToolSpec],
+        candidates: &[ene_plugin_proto::ToolSpec],
     ) -> Result<Vec<f32>, EmbeddingError> {
         rerank_tool_specs(
             self.embedder.as_ref(),
@@ -133,7 +133,7 @@ pub async fn rerank_tool_specs(
     embedder: &dyn EmbeddingProvider,
     rerank_llm: Option<&dyn LlmProvider>,
     query: &str,
-    candidates: &[ene_tool_proto::ToolSpec],
+    candidates: &[ene_plugin_proto::ToolSpec],
 ) -> Result<Vec<f32>, EmbeddingError> {
     if candidates.is_empty() {
         return Ok(Vec::new());

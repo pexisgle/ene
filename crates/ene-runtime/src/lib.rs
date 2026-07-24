@@ -133,7 +133,7 @@ pub use types::{CancelError, RunError, TurnId, TurnOrigin};
 // ── Tool types ──
 /// `ToolSpec` type (re-exported from `ene-tool-proto`).
 #[doc(no_inline)]
-pub use ene_tool_proto::ToolSpec;
+pub use ene_plugin_proto::ToolSpec;
 
 // ── Core error ──
 /// Runtime error type.

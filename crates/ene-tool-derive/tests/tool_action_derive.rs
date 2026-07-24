@@ -5,9 +5,9 @@
 )]
 
 use async_trait::async_trait;
+use ene_plugin_proto::ToolError;
 use ene_tool_common::ToolAction as _;
 use ene_tool_derive::{ToolAction, ToolSpec, tool_action};
-use ene_tool_proto::ToolError;
 use schemars::JsonSchema;
 use serde::Deserialize;
 

@@ -1,5 +1,5 @@
 [package]
-name = "ene-tool-fs"
+name = "ene-plugin-fs"
 version.workspace = true
 edition.workspace = true
 description = "Filesystem tools: read, write, edit, glob, grep, patch, shell execution, and undo with sandbox security"
@@ -8,11 +8,12 @@ repository.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "ene-tool-fs"
+name = "ene-plugin-fs"
 path = "src/main.rs"
 
 [dependencies]
-ene-tool-proto = { workspace = true }
+ene-plugin = { workspace = true }
+ene-plugin-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
 ene-tool-db = { workspace = true }

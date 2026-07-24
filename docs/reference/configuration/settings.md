@@ -13,7 +13,7 @@ pub struct EneConfig {
     pub version: u32,           // Currently 2
     pub character: String,      // Character folder name or card path
     pub user_name: String,      // Default "User"
-    pub extra: HashMap<String, serde_json::Value>, // Section map (ai, store, tools, mind, desktop, …)
+    pub extra: HashMap<String, serde_json::Value>, // Section map (ai, store, plugins, mind, desktop, …)
 }
 ```
 
@@ -49,14 +49,15 @@ pub struct EneConfig {
     }
   },
   "store": { "enabled": false },
-  "tools": {
+  "plugins": {
     "enabled": true,
     "list": {
       "fs": { "enable": true, "allowed_directories": ["."], "writable_directories": ["."] },
       "web": { "enable": true, "tavily_api_key": "", "brave_api_key": "", "exa_api_key": "" },
       "browser": { "enable": true },
       "utility": { "enable": true },
-      "app": { "enable": true }
+      "app": { "enable": true },
+      "anthropic": { "enable": true }
     },
     "mcp_servers": []
   },
@@ -397,18 +398,21 @@ The database path is resolved automatically (`assets/characters/{name}/memory.db
 
 Manual backup / restore / integrity checks are available via `/store` (REPL) and `ene store …` (non-interactive). On migration failure the pre-migration backup is restored automatically. If the on-disk schema is newer than the binary, open fails with a clear downgrade error.
 
-### `tools` — Tool Configuration
+### `plugins` — Plugin System
+
+All tool and provider plugins are configured under the unified `plugins` section.
 
 ```json
 {
-  "tools": {
+  "plugins": {
     "enabled": true,
     "list": {
       "fs": { "enable": true },
       "web": { "enable": true },
       "browser": { "enable": true },
       "utility": { "enable": true },
-      "app": { "enable": true }
+      "app": { "enable": true },
+      "anthropic": { "enable": true }
     },
     "mcp_servers": []
   }
@@ -417,20 +421,23 @@ Manual backup / restore / integrity checks are available via `/store` (REPL) and
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | bool | `true` | Enable function calling for all tools |
-| `list` | object | (built-in tools) | Per-tool enable map with optional flattened config |
+| `enabled` | bool | `true` | Enable the plugin system (tools + providers) |
+| `list` | object | `{}` | Per-plugin enable map with optional flattened config |
+| `max_concurrent` | int | `8` | Maximum number of concurrent tool calls |
 | `mcp_servers` | array | `[]` | MCP servers list |
 
-`max_rounds` and `timeout_ms` use **code defaults** and are not in the thin public UI schema. Tool RAG is configured under `tools.rag` (see below).
+`max_rounds` and `timeout_ms` use **code defaults** and are not in the thin public UI schema.
 
-#### `tools.list` — Per-Tool Entries
+Plugin binaries are discovered from `builtin_plugins_dir()` and `user_plugins_dir()` (see `ene-config` paths). Binaries must follow the `ene-plugin-{name}` naming convention. When `plugins.enabled` is `false`, no plugins are started. Individual plugins can be disabled via `plugins.list.<name>.enable = false`.
+
+#### `plugins.list` — Per-Plugin Entries
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `<name>.enable` | bool | `true` | Enable/disable a specific tool |
-| `<name>.*` | varies | — | Tool-specific fields flattened into the entry (no nested `config` object) |
+| `<name>.enable` | bool | `true` | Enable/disable a specific plugin |
+| `<name>.*` | varies | — | Plugin-specific fields flattened into the entry (no nested `config` object) |
 
-##### `tools.list.fs` — Filesystem Sandbox
+##### `plugins.list.fs` — Filesystem Sandbox
 
 ```json
 {
@@ -459,32 +466,7 @@ Manual backup / restore / integrity checks are available via `/store` (REPL) and
 | `max_shell_output_bytes` | int | `51200` | Maximum shell output bytes (`0` restored to default by `sanitize`) |
 | `max_shell_output_lines` | int | `2000` | Maximum shell output lines (`0` restored to default by `sanitize`) |
 
-##### `tools.rag` — Tool RAG Pipeline
-
-```json
-{
-  "rag": {
-    "enabled": true,
-    "use_hyde": false,
-    "use_rerank": false,
-    "top_k": 12,
-    "final_n": 6,
-    "background_index_on_startup": true
-  }
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled` | bool | `true` | Enable Tool RAG (when tools are enabled, embedder is required if this is true) |
-| `use_hyde` | bool | `false` | **Deprecated** (no-op; scheduled for removal). LLM HyDE is disabled |
-| `use_rerank` | bool | `false` | Cosine embedding rerank of candidates (no LLM) |
-| `top_k` | int | `12` | Pre-rerank candidate count |
-| `final_n` | int | `6` | Final tools returned |
-| `forced` | string[] | (utility defaults) | Always include these tools; **invalid names fail startup** |
-| `background_index_on_startup` | bool | `true` | Warm the index in a background task at startup (`false` skips warmup) |
-
-##### `tools.list.web` — Web Search API Keys
+##### `plugins.list.web` — Web Search API Keys
 
 ```json
 {
@@ -503,7 +485,7 @@ Manual backup / restore / integrity checks are available via `/store` (REPL) and
 | `brave_api_key` | string | `""` | Brave Search API key |
 | `exa_api_key` | string | `""` | Exa Search API key |
 
-#### `tools.mcp_servers` — Model Context Protocol Servers
+#### `plugins.mcp_servers` — Model Context Protocol Servers
 
 ```json
 {
@@ -541,6 +523,27 @@ Manual backup / restore / integrity checks are available via `/store` (REPL) and
 |------|--------|-------------|
 | `stdio` | `command`, `args` | Spawn a child process with stdio transport |
 | `http` | `url` | Connect via HTTP |
+
+#### Example: Anthropic Claude Plugin
+
+```json
+{
+  "plugins": { "enabled": true, "list": { "anthropic": { "enable": true } } },
+  "ai": {
+    "providers": {
+      "claude": {
+        "kind": "anthropic",
+        "api_key": { "source": "env", "env": "ANTHROPIC_API_KEY" }
+      }
+    },
+    "tasks": {
+      "chat": { "provider": "claude", "model": "claude-sonnet-4-20250514", "max_tokens": 8192 }
+    }
+  }
+}
+```
+
+The `anthropic` plugin binary (`ene-plugin-anthropic`) provides an LLM provider with `kind: "anthropic"`. The `ai.providers.claude` definition references this kind, and `ai.tasks.chat` routes chat workloads to it.
 
 ### `mind` — Mind Runtime (Public Surface)
 
@@ -622,7 +625,7 @@ The following are controlled by code defaults and are intentionally absent from 
 | `mind.memory` | Extraction, hybrid recall, MMR (memory HyDE/LLM rerank intentionally omitted) |
 | `mind.character` | CCv3 compilation, identity kernel budget |
 | `mind.emotion` / `mind.proactive` | Engine mode, classifier timeouts, confidence gates, tool allowance |
-| `tools` | `max_rounds`, `timeout_ms` |
+| `plugins` | `max_rounds`, `timeout_ms` |
 | `store` | `db_path` |
 
 ## Loading Order
@@ -700,12 +703,12 @@ Inherits `TARGET` from the parent. `path()` returns the parent's path + own key 
 
 ### `define_tool_config!`
 
-For tool-specific config schemas (flattened into `tools.list.<name>`):
+For plugin-specific config schemas (flattened into `plugins.list.<name>`):
 
 ```rust
 ene_config::define_tool_config!(
-    "fs",              // tool name
-    /// Sandbox configuration for the fs tool.
+    "fs",              // plugin name
+    /// Sandbox configuration for the fs plugin.
     pub struct SandboxConfigData {
         pub enabled: bool = true,
         pub allowed_directories: Vec<String> = vec![".".to_string()],
@@ -713,7 +716,7 @@ ene_config::define_tool_config!(
 );
 ```
 
-Generates the same derives/defaults but calls `__register_tool_schema::<T>("fs")` instead. The schema is registered under `parent_key = "tools_map"` and merged into the `ToolConfig` definition's `list` property in the generated JSON Schema.
+Generates the same derives/defaults but calls `__register_tool_schema::<T>("fs")` instead. The schema is registered under `parent_key = "plugins_map"` and merged into the `PluginConfig` definition's `list` property in the generated JSON Schema.
 
 ### `HasConfigKey` Trait
 
@@ -750,7 +753,7 @@ A global `OnceLock<Mutex<HashMap<String, SchemaEntry>>>` collects all config sch
 pub struct SchemaEntry {
     pub schema: schemars::Schema,
     pub target: ConfigTarget,
-    pub parent_key: Option<String>,  // None = top-level, Some("tools_map") = tool config
+    pub parent_key: Option<String>,  // None = top-level, Some("plugins_map") = plugin config
 }
 ```
 
@@ -759,12 +762,12 @@ Registration functions:
 | Function | Called by | Purpose |
 |----------|-----------|---------|
 | `__register_schema::<T>(target, parent_key)` | `#[ctor]` from `define_config!` | Register a settings/character section schema |
-| `__register_tool_schema::<T>(tool_name)` | `#[ctor]` from `define_tool_config!` | Register a tool-specific config schema |
+| `__register_tool_schema::<T>(tool_name)` | `#[ctor]` from `define_tool_config!` | Register a plugin-specific config schema |
 | `register_runtime_schema(key, schema_json)` | Runtime (e.g. MCP tool providers) | Register a schema dynamically |
 
 During `generate_schema_json()`, the registry is merged into the root `EneConfig` schema:
 - **Top-level sections** (`parent_key = None`) are added as `properties` of the root schema.
-- **Tool configs** (`parent_key = "tools_map"`) are injected into `ToolConfig`'s `list` property as `allOf: [ToolEntry, <tool schema>]`.
+- **Plugin configs** (`parent_key = "plugins_map"`) are injected into `PluginConfig`'s `list` property as `allOf: [PluginEntry, <plugin schema>]`.
 - **Definitions** (`$defs`) from each entry are copied into the root schema's definitions.
 
 ### `ConfigStore`

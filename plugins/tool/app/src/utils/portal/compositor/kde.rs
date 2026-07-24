@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use ene_tool_proto::ToolError;
+use ene_plugin_proto::ToolError;
 
 use super::{WlCompositor, gvariant_string, js_string_literal, parse_gdbus_tuple_string};
 

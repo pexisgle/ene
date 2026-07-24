@@ -5,8 +5,8 @@
 //! `pump_legacy_events` system in the `First` stage and consumed by
 //! the AI consumer systems in the `Update` stage.
 use bevy_ecs::prelude::*;
+use ene_plugin_proto::UserInputPrompt;
 use ene_runtime::RequestId;
-use ene_tool_proto::UserInputPrompt;
 
 #[derive(Message, Debug, Clone)]
 pub struct AiTextDelta(pub String);

@@ -15,8 +15,8 @@ use ene_mind::{
     compression_has_usable_summary,
 };
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
-use ene_tool_host::{ToolHostManager, ToolRegistry};
-use ene_tool_proto::ToolSpec;
+use ene_plugin_host::{CompositeToolRegistry, PluginHealthEvent, PluginHostError, ToolRegistry};
+use ene_plugin_proto::ToolSpec;
 use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 use std::collections::HashMap;
 /// Global monotonic counter used to generate unique DB IPC auth tokens.
@@ -245,8 +245,8 @@ pub struct FeatureSettingsUpdate {
     pub mind: ene_mind::MindConfig,
     /// Long-term memory store section.
     pub store: ene_store::StoreConfig,
-    /// Tool host section.
-    pub tools: ene_tool_host::ToolConfig,
+    /// Plugin system section (formerly tool host section).
+    pub plugins: ene_plugin_host::PluginConfig,
     /// Tool RAG section.
     pub rag: ToolRagConfig,
 }
@@ -311,7 +311,7 @@ pub enum EneEvent {
         /// The `task_id` returned by the deferred call acceptance.
         task_id: String,
         /// Terminal status of the background task.
-        status: ene_tool_proto::DeferredStatus,
+        status: ene_plugin_proto::DeferredStatus,
     },
     /// A destructive operation requires user approval before execution.
     PermissionRequired {
@@ -337,7 +337,7 @@ pub enum EneEvent {
         /// Unique identifier for this input request.
         request_id: RequestId,
         /// The prompt describing the question, options, and free-text allowance.
-        prompt: ene_tool_proto::UserInputPrompt,
+        prompt: ene_plugin_proto::UserInputPrompt,
     },
     /// Thin signal that rolling context compression completed for this turn.
     ContextCompressed {
@@ -572,6 +572,12 @@ pub struct EneHandle {
     /// `JoinHandle` for the actor task. Used by [`EneHandle::shutdown`]
     /// to await the actor's drain after sending `EneCommand::Shutdown`.
     actor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Plugin host manager (process supervision for v3 plugin binaries).
+    ///
+    /// Shared across handle clones; the last clone to drop triggers a
+    /// graceful plugin shutdown (#247). `None` when plugin startup failed
+    /// or no plugins were discovered.
+    plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
 }
 
 impl std::fmt::Debug for EneHandle {
@@ -594,6 +600,7 @@ impl Clone for EneHandle {
             },
             turn_gate: Arc::clone(&self.turn_gate),
             actor_handle: Arc::clone(&self.actor_handle),
+            plugin_host: Arc::clone(&self.plugin_host),
         }
     }
 }
@@ -617,9 +624,9 @@ impl EneHandle {
         ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
 
         let mem_config = config.get_section::<ene_store::StoreConfig>()?;
-        let tool_config = config.get_section::<ene_tool_host::ToolConfig>()?;
+        let plugin_config = config.get_section::<ene_plugin_host::PluginConfig>()?;
         let rag_config = config.get_section::<ToolRagConfig>()?;
-        let needs_embedder = mem_config.enabled || (tool_config.enabled && rag_config.enabled);
+        let needs_embedder = mem_config.enabled || (plugin_config.enabled && rag_config.enabled);
 
         // Prefetch configured GGUF weights in parallel before backends load them.
         {
@@ -668,7 +675,54 @@ impl EneHandle {
             None
         };
 
-        let registry = build_tool_registry(&config, memory_store.clone(), diag_tx.clone()).await?;
+        // Generate DB tokens and spawn DB IPC servers for tool plugins.
+        let db_tokens = spawn_db_ipc_servers(&config, memory_store.as_ref())?;
+
+        // Start the plugin host (discovers and launches v3 plugin binaries).
+        // Non-fatal: on failure we log and continue with no plugin-provided
+        // providers/tools, mirroring the tool host's empty-set fallback (#247).
+        let mut plugin_host =
+            match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
+                Ok(host) => {
+                    for (kind, factory) in host.llm_factories() {
+                        tracing::info!(
+                            component = "Bootstrap",
+                            kind = %kind,
+                            "Registered plugin-provided LLM provider factory"
+                        );
+                        LlmProviderRegistry::register(Arc::clone(factory));
+                    }
+                    tracing::info!(
+                        component = "Bootstrap",
+                        tool_registries = host.tool_registries().len(),
+                        llm_factories = host.llm_factories().len(),
+                        "Plugin host started"
+                    );
+                    Some(host)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        component = "Bootstrap",
+                        error = %e,
+                        "Plugin host failed to start; continuing without plugins"
+                    );
+                    None
+                }
+            };
+
+        // Bridge plugin health events into the diagnostics channel (#238).
+        if let Some(host) = plugin_host.as_mut()
+            && let Some(mut health_rx) = host.take_health_receiver()
+        {
+            let diag_tx = diag_tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = health_rx.recv().await {
+                    emit_diag(&diag_tx, plugin_health_event_to_diag(event));
+                }
+            });
+        }
+
+        let registry = build_tool_registry(plugin_host.as_ref())?;
         let tool_rag = match embedder.as_ref() {
             Some(emb) => init_tool_rag(&config, emb, &session)?,
             None => None,
@@ -757,6 +811,10 @@ impl EneHandle {
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
         let (deferred_tool_tx, deferred_tool_rx) = mpsc::unbounded_channel();
 
+        let plugin_tool_registries = plugin_host
+            .as_ref()
+            .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
+
         let actor = EneActor {
             cmd_rx,
             event_tx: event_tx.clone(),
@@ -801,6 +859,7 @@ impl EneHandle {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(600),
             tts_provider,
+            plugin_tool_registries,
         };
         let join = tokio::spawn(actor.run());
 
@@ -811,6 +870,7 @@ impl EneHandle {
             diagnostics,
             turn_gate,
             actor_handle: Arc::new(tokio::sync::Mutex::new(Some(join))),
+            plugin_host: Arc::new(tokio::sync::Mutex::new(plugin_host)),
         })
     }
 
@@ -860,7 +920,8 @@ impl EneHandle {
             .map_err(|_| CancelError::ActorDead)
     }
 
-    /// Send a `Shutdown` command and await the actor's drain.
+    /// Send a `Shutdown` command and await the actor's drain, then shut down
+    /// the plugin host (if still alive).
     pub async fn shutdown(&self, timeout: std::time::Duration) -> Result<(), ShutdownTimeout> {
         if self.cmd_tx.send(EneCommand::Shutdown).is_err() {
             let mut guard = self.actor_handle.lock().await;
@@ -868,27 +929,43 @@ impl EneHandle {
                 let _ = join.await;
             }
             drop(guard);
+            self.shutdown_plugin_host().await;
             return Ok(());
         }
 
         let mut guard = self.actor_handle.lock().await;
         let Some(join) = guard.as_mut() else {
             drop(guard);
+            self.shutdown_plugin_host().await;
             return Ok(());
         };
         match tokio::time::timeout(timeout, &mut *join).await {
             Ok(Ok(())) => {
                 guard.take();
                 drop(guard);
+                self.shutdown_plugin_host().await;
                 Ok(())
             }
             Ok(Err(join_err)) => {
                 tracing::warn!(component = "EneHandle", error = %join_err, "Actor task ended with error");
                 guard.take();
                 drop(guard);
+                self.shutdown_plugin_host().await;
                 Ok(())
             }
             Err(_elapsed) => Err(ShutdownTimeout(timeout)),
+        }
+    }
+
+    /// Gracefully shuts down the plugin host if it is still alive (#247).
+    ///
+    /// Called from [`EneHandle::shutdown`] after the actor drains and from
+    /// [`Drop`] when the last handle clone is released. Only the first caller
+    /// performs the shutdown; subsequent calls are no-ops.
+    async fn shutdown_plugin_host(&self) {
+        let mut guard = self.plugin_host.lock().await;
+        if let Some(mut host) = guard.take() {
+            host.shutdown().await;
         }
     }
 
@@ -1117,6 +1194,31 @@ impl Drop for EneHandle {
     fn drop(&mut self) {
         if Arc::strong_count(&self.cmd_tx) == 1 {
             let _ = self.cmd_tx.send(EneCommand::Shutdown);
+            // Last handle clone: shut down the plugin host (#247). `Drop` is
+            // synchronous, so spawn the async shutdown on the runtime when one
+            // is available; `SupervisedPlugin::drop` kills the processes as a
+            // synchronous backstop regardless.
+            if Arc::strong_count(&self.plugin_host) == 1 {
+                let plugin_host = Arc::clone(&self.plugin_host);
+                let shutdown = async move {
+                    let mut guard = plugin_host.lock().await;
+                    if let Some(mut host) = guard.take() {
+                        host.shutdown().await;
+                    }
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => {
+                        handle.spawn(shutdown);
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            component = "EneHandle",
+                            "No tokio runtime available for plugin host shutdown; \
+                             relying on process-kill backstop"
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -1191,6 +1293,9 @@ struct EneActor {
     deferred_max_polls: u32,
     /// Resolved TTS provider for streaming audio synthesis (None when TTS is disabled).
     tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
+    /// Plugin-contributed tool registries, re-merged when the tool registry is
+    /// rebuilt after a Features update (#247).
+    plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a
@@ -1265,7 +1370,7 @@ async fn poll_deferred_task(
     task: DeferredToolTask,
     max_polls: u32,
 ) {
-    use ene_tool_proto::DeferredStatus;
+    use ene_plugin_proto::DeferredStatus;
     use std::time::Duration;
 
     const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -2036,31 +2141,25 @@ impl EneActor {
                 let FeatureSettingsUpdate {
                     mind,
                     store,
-                    tools,
+                    plugins,
                     rag,
                 } = *settings;
-                let prev_tools = self
+                let prev_plugins = self
                     .config
-                    .get_section::<ene_tool_host::ToolConfig>()
+                    .get_section::<ene_plugin_host::PluginConfig>()
                     .unwrap_or_default();
-                let tools_changed = tool_enable_set_changed(&prev_tools, &tools);
+                let plugins_changed = plugin_enable_set_changed(&prev_plugins, &plugins);
 
                 let _ = self.config.set_section(&mind);
                 let _ = self.config.set_section(&store);
-                let _ = self.config.set_section(&tools);
+                let _ = self.config.set_section(&plugins);
                 let _ = self.config.set_section(&rag);
                 self.abort_proactive_decision();
 
-                if tools_changed {
-                    match build_tool_registry(
-                        &self.config,
-                        self.session.memory.memory_store.clone(),
-                        self.diag_tx.clone(),
-                    )
-                    .await
-                    {
-                        Ok(registry) => {
-                            self.registry = registry;
+                if plugins_changed {
+                    match CompositeToolRegistry::try_new(self.plugin_tool_registries.clone()) {
+                        Ok(composite) => {
+                            self.registry = Arc::new(composite);
                             tracing::info!(
                                 component = "EneActor",
                                 "Tool registry rebuilt after Features update"
@@ -2290,7 +2389,7 @@ impl EneActor {
                 let session_id = self.session.memory.session_id.to_string();
                 self.call_tool_tasks.spawn(async move {
                     if let Some(ref turn) = turn {
-                        let call_ctx = ene_tool_proto::CallContext {
+                        let call_ctx = ene_plugin_proto::CallContext {
                             conversation_id: session_id,
                             turn_id: turn.to_string(),
                         };
@@ -2755,9 +2854,9 @@ async fn warmup_character_memories_ready(
     }
 }
 
-fn tool_enable_set_changed(
-    prev: &ene_tool_host::ToolConfig,
-    next: &ene_tool_host::ToolConfig,
+fn plugin_enable_set_changed(
+    prev: &ene_plugin_host::PluginConfig,
+    next: &ene_plugin_host::PluginConfig,
 ) -> bool {
     if prev.enabled != next.enabled {
         return true;
@@ -2775,138 +2874,136 @@ fn tool_enable_set_changed(
     false
 }
 
-/// Builds the active composite tool registry based on workspace config.
-/// Spawns per-tool DB IPC servers before starting tool processes.
+/// Spawns per-tool DB IPC servers for tool plugins that need database access.
 ///
-/// Tool health events (#238) are bridged into `diag_tx` as
-/// [`DiagnosticEvent::ToolHealth`].
-async fn build_tool_registry(
+/// Returns a map of plugin name → auth token. The tokens are passed to
+/// [`ene_plugin_host::PluginHostManager::start`] which hands them to the
+/// tool binaries via `SandboxConfigData::db_auth_token`.
+fn spawn_db_ipc_servers(
     config: &EneConfig,
-    memory_store: Option<Arc<ene_store::MemoryStore>>,
-    diag_tx: broadcast::Sender<DiagnosticEvent>,
-) -> Result<Arc<dyn ToolRegistry>, EneRuntimeError> {
-    let mut db_tokens = std::collections::HashMap::new();
-    if let Some(store) = &memory_store {
-        #[cfg(any(unix, windows))]
-        {
-            let tool_config = config
-                .get_section::<ene_tool_host::ToolConfig>()
-                .unwrap_or_default();
+    memory_store: Option<&Arc<ene_store::MemoryStore>>,
+) -> Result<HashMap<String, String>, EneRuntimeError> {
+    let mut db_tokens = HashMap::new();
+    let Some(store) = memory_store else {
+        return Ok(db_tokens);
+    };
 
-            let db = store.connection().clone();
+    #[cfg(any(unix, windows))]
+    {
+        let plugin_config = config
+            .get_section::<ene_plugin_host::PluginConfig>()
+            .unwrap_or_default();
 
-            let socket_dir = ene_config::paths::tool_socket_dir();
-            std::fs::create_dir_all(&socket_dir).map_err(|e| {
-                EneRuntimeError::Tool(ene_tool_host::ToolHostError::ExecutionFailed {
-                    message: format!("Failed to create socket dir: {e}"),
-                })
-            })?;
+        let db = store.connection().clone();
 
-            for (name, entry) in &tool_config.list {
-                if !entry.enable {
-                    continue;
-                }
+        let socket_dir = ene_config::paths::tool_socket_dir();
+        std::fs::create_dir_all(&socket_dir).map_err(|e| {
+            EneRuntimeError::Tool(PluginHostError::ExecutionFailed {
+                message: format!("Failed to create socket dir: {e}"),
+            })
+        })?;
 
-                let tool_name = name.clone();
-                let prefix = format!("{name}_");
-                let socket_path = {
-                    #[cfg(unix)]
-                    {
-                        socket_dir.join(format!("ene-db-{name}.sock"))
-                    }
-                    #[cfg(windows)]
-                    {
-                        std::path::PathBuf::from(format!(r"\\.\pipe\ene-db-{}", name))
-                    }
-                };
-
-                // Generate a 128-bit pre-shared token for this tool's
-                // DB IPC connection. The token is handed to the tool
-                // binary via SandboxConfigData::db_auth_token so only
-                // the legitimate child process can authenticate.
-                // Generate a 128-bit pre-shared token for this tool's
-                // DB IPC connection. We use a 256-bit keystream from
-                // blake3 (already a dep) keyed by the current nanosecond
-                // timestamp + a monotonic counter. blake3 is a CSPRNG
-                // and the counter guarantees uniqueness across calls in
-                // the same nanosecond.
-                let counter = DB_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(
-                    &chrono::Utc::now()
-                        .timestamp_nanos_opt()
-                        .unwrap_or(0)
-                        .to_le_bytes(),
-                );
-                hasher.update(&counter.to_le_bytes());
-                let mut token_out = [0u8; 16];
-                let mut reader = hasher.finalize_xof();
-                use std::io::Read;
-                let _ = reader.read_exact(&mut token_out);
-                let auth_token = format!("ene-db-{:x}", u128::from_le_bytes(token_out));
-
-                db_tokens.insert(name.clone(), auth_token.clone());
-
-                let server = DbIpcServer::new(
-                    db.clone(),
-                    socket_path,
-                    tool_name.clone(),
-                    prefix,
-                    auth_token,
-                );
-
-                tokio::spawn(async move {
-                    if let Err(e) = server.run().await {
-                        tracing::error!(tool = %tool_name, error = %e, "DB IPC server error");
-                    }
-                });
+        for (name, entry) in &plugin_config.list {
+            if !entry.enable {
+                continue;
             }
+
+            let tool_name = name.clone();
+            let prefix = format!("{name}_");
+            let socket_path = {
+                #[cfg(unix)]
+                {
+                    socket_dir.join(format!("ene-db-{name}.sock"))
+                }
+                #[cfg(windows)]
+                {
+                    std::path::PathBuf::from(format!(r"\\.\pipe\ene-db-{}", name))
+                }
+            };
+
+            // Generate a 128-bit pre-shared token for this tool's
+            // DB IPC connection. We use a 256-bit keystream from
+            // blake3 (already a dep) keyed by the current nanosecond
+            // timestamp + a monotonic counter. blake3 is a CSPRNG
+            // and the counter guarantees uniqueness across calls in
+            // the same nanosecond.
+            let counter = DB_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(
+                &chrono::Utc::now()
+                    .timestamp_nanos_opt()
+                    .unwrap_or(0)
+                    .to_le_bytes(),
+            );
+            hasher.update(&counter.to_le_bytes());
+            let mut token_out = [0u8; 16];
+            let mut reader = hasher.finalize_xof();
+            use std::io::Read;
+            let _ = reader.read_exact(&mut token_out);
+            let auth_token = format!("ene-db-{:x}", u128::from_le_bytes(token_out));
+
+            db_tokens.insert(name.clone(), auth_token.clone());
+
+            let server = DbIpcServer::new(
+                db.clone(),
+                socket_path,
+                tool_name.clone(),
+                prefix,
+                auth_token,
+            );
+
+            tokio::spawn(async move {
+                if let Err(e) = server.run().await {
+                    tracing::error!(tool = %tool_name, error = %e, "DB IPC server error");
+                }
+            });
         }
     }
 
-    let (health_tx, mut health_rx) =
-        tokio::sync::mpsc::unbounded_channel::<ene_tool_host::ToolHealthEvent>();
-
-    let registry = ToolHostManager::start_full(config, db_tokens, Some(health_tx))
-        .await
-        .map_err(EneRuntimeError::Tool)?;
-
-    // Bridge tool health events into the diagnostics channel (#238).
-    tokio::spawn(async move {
-        while let Some(event) = health_rx.recv().await {
-            emit_diag(&diag_tx, tool_health_event_to_diag(event));
-        }
-    });
-
-    Ok(registry)
+    Ok(db_tokens)
 }
 
-/// Maps a [`ene_tool_host::ToolHealthEvent`] to a [`DiagnosticEvent::ToolHealth`]
+/// Builds the active composite tool registry from plugin-contributed registries.
+fn build_tool_registry(
+    plugin_host: Option<&ene_plugin_host::PluginHostManager>,
+) -> Result<Arc<dyn ToolRegistry>, EneRuntimeError> {
+    let Some(host) = plugin_host else {
+        return Ok(Arc::new(
+            CompositeToolRegistry::try_new(vec![]).map_err(EneRuntimeError::Tool)?,
+        ));
+    };
+
+    let registries = host.tool_registries().to_vec();
+    CompositeToolRegistry::try_new(registries)
+        .map(|composite| Arc::new(composite) as Arc<dyn ToolRegistry>)
+        .map_err(EneRuntimeError::Tool)
+}
+
+/// Maps a [`PluginHealthEvent`] to a [`DiagnosticEvent::ToolHealth`]
 /// with a stable English status contract (#238).
-fn tool_health_event_to_diag(event: ene_tool_host::ToolHealthEvent) -> DiagnosticEvent {
-    use ene_tool_host::ToolHealthEvent;
+fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
     let (tool, status, detail) = match event {
-        ToolHealthEvent::Unhealthy { tool, reason } => {
-            (tool, "unhealthy", Some(format!("tool is {reason}")))
+        PluginHealthEvent::Unhealthy { plugin, reason } => {
+            (plugin, "unhealthy", Some(format!("tool is {reason}")))
         }
-        ToolHealthEvent::Restarting { tool, attempt } => (
-            tool,
+        PluginHealthEvent::Restarting { plugin, attempt } => (
+            plugin,
             "restarting",
             Some(format!("restart attempt {attempt}")),
         ),
-        ToolHealthEvent::Restarted { tool } => (tool, "restarted", None),
-        ToolHealthEvent::Recovered { tool } => (tool, "recovered", None),
-        ToolHealthEvent::CircuitOpened {
-            tool,
+        PluginHealthEvent::Restarted { plugin } => (plugin, "restarted", None),
+        PluginHealthEvent::Recovered { plugin } => (plugin, "recovered", None),
+        PluginHealthEvent::CircuitOpened {
+            plugin,
             consecutive_failures,
         } => (
-            tool,
+            plugin,
             "circuit_open",
             Some(format!("{consecutive_failures} consecutive failures")),
         ),
-        ToolHealthEvent::CircuitClosed { tool } => (tool, "circuit_closed", None),
-        ToolHealthEvent::Disabled { tool } => (
-            tool,
+        PluginHealthEvent::CircuitClosed { plugin } => (plugin, "circuit_closed", None),
+        PluginHealthEvent::Disabled { plugin } => (
+            plugin,
             "disabled",
             Some("restart budget exhausted".to_string()),
         ),
@@ -3009,11 +3106,11 @@ mod tests {
             ..Default::default()
         };
         config.set_section(&store).expect("store config merges");
-        let tools = ene_tool_host::ToolConfig {
+        let plugins = ene_plugin_host::PluginConfig {
             enabled: false,
             ..Default::default()
         };
-        let _ = config.set_section(&tools);
+        let _ = config.set_section(&plugins);
         let ai = ene_ai::AiConfig::default();
         let _ = config.set_section(&ai);
         config

@@ -37,7 +37,7 @@ pub struct ToolRagConfig {
     /// Per-field weighting for the multi-vector similarity computation.
     pub weights: FieldWeightsConfig,
     /// Cap how many tools per category may appear in the result set.
-    /// Keys are [`ToolCategory::config_key`](ene_tool_proto::ToolCategory::config_key)
+    /// Keys are [`ToolCategory::config_key`](ene_plugin_proto::ToolCategory::config_key)
     /// values (e.g. `"Filesystem"`).
     #[serde(default)]
     pub per_category_limits: HashMap<String, usize>,

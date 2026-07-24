@@ -19,10 +19,10 @@ use ene_ai::{
     LlmToolCallChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
+use ene_plugin_host::{DeferredCallResult, ToolHostError, ToolRegistry};
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{DeferredToolTask, EneEvent, TerminalReason};
 use ene_store::MemoryStore;
-use ene_tool_host::{DeferredCallResult, ToolHostError, ToolRegistry};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ impl LlmProvider for MockLlmWithToolCall {
     async fn create_chat_stream(
         &self,
         _messages: &[LlmMessage],
-        _tools: &[ene_tool_proto::ToolSpec],
+        _tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -117,9 +117,9 @@ impl BackgroundRegistry {
 
 #[async_trait]
 impl ToolRegistry for BackgroundRegistry {
-    fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
-        vec![ene_tool_proto::ToolSpec {
-            name: ene_tool_proto::ToolName::new("background.sleep"),
+    fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+        vec![ene_plugin_proto::ToolSpec {
+            name: ene_plugin_proto::ToolName::new("background.sleep"),
             description: "Sleep for N seconds in the background".into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -158,18 +158,18 @@ impl ToolRegistry for BackgroundRegistry {
         &self,
         _tool_name: &str,
         task_id: &str,
-    ) -> ene_tool_proto::DeferredStatus {
+    ) -> ene_plugin_proto::DeferredStatus {
         let count = self.poll_count.fetch_add(1, Ordering::SeqCst);
         if task_id == "task-456" {
             if count < 3 {
-                ene_tool_proto::DeferredStatus::Pending
+                ene_plugin_proto::DeferredStatus::Pending
             } else {
-                ene_tool_proto::DeferredStatus::Completed {
+                ene_plugin_proto::DeferredStatus::Completed {
                     result: "Slept for 1 second".into(),
                 }
             }
         } else {
-            ene_tool_proto::DeferredStatus::Unknown
+            ene_plugin_proto::DeferredStatus::Unknown
         }
     }
 
@@ -294,15 +294,15 @@ async fn deferred_tool_execution_emits_completion_event() {
                 .poll_deferred(&task.tool_name, &task.task_id)
                 .await
             {
-                ene_tool_proto::DeferredStatus::Completed { result } => {
+                ene_plugin_proto::DeferredStatus::Completed { result } => {
                     let _ = poll_event_tx.send(EneEvent::ToolBackgroundCompleted {
                         tool_name: task.tool_name,
                         task_id: task.task_id,
-                        status: ene_tool_proto::DeferredStatus::Completed { result },
+                        status: ene_plugin_proto::DeferredStatus::Completed { result },
                     });
                     break;
                 }
-                ene_tool_proto::DeferredStatus::Pending => {
+                ene_plugin_proto::DeferredStatus::Pending => {
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 }
                 _ => break,
@@ -325,7 +325,7 @@ async fn deferred_tool_execution_emits_completion_event() {
             assert_eq!(task_id, "task-456");
             assert!(matches!(
                 status,
-                ene_tool_proto::DeferredStatus::Completed { .. }
+                ene_plugin_proto::DeferredStatus::Completed { .. }
             ));
             saw_completion = true;
             break;

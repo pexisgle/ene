@@ -8,9 +8,9 @@
 
 ## Source of truth
 
-This is a Rust 2024 Cargo workspace. `Cargo.toml` includes `crates/*`, `tools/*`, and
-`apps/*`; `apps/ene-cli` is the default member, so commands without `--workspace`
-do not cover the whole repository.
+This is a Rust 2024 Cargo workspace. `Cargo.toml` includes `crates/*`, `plugins/*`,
+`plugins/tool/*`, and `apps/*`; `apps/ene-cli` is the default member, so commands
+without `--workspace` do not cover the whole repository.
 
 | Need | Start here |
 |---|---|
@@ -18,7 +18,7 @@ do not cover the whole repository.
 | Config/paths | `docs/guide/configure.md`, `docs/reference/configuration/settings.md`, `crates/ene-config/src/` |
 | Architecture/API | `docs/reference/architecture/overview.md`, `docs/reference/architecture/api-v1.md` |
 | Runtime/events | `docs/reference/runtime/streaming-events.md`, `docs/reference/runtime/streaming.md` |
-| Tools/IPC | `docs/reference/tools/overview.md`, `docs/reference/tools/sdk.md`, `docs/guide/tools/write-a-tool.md` |
+| Plugins/Tools/IPC | `docs/reference/tools/overview.md`, `docs/reference/tools/sdk.md`, `docs/guide/tools/write-a-tool.md` |
 | Apps | `docs/guide/apps/cli.md`, `docs/guide/apps/desktop.md` |
 | Japanese user docs | Matching files under `docs/ja/` |
 
@@ -47,8 +47,8 @@ failing package/target and root cause; do not hide failures by relaxing lints.
 
 - `ene-runtime` is the host/actor facade and bootstrap layer. `ene-mind` owns session, recall, prompt composition, affect, performance, and memory writing; it must not depend on runtime or tool-host.
 - `ene-store` alone owns SQLite/SeaORM connections, schema, migrations, and raw DB access. It must not depend on AI/mind; callers use its public API. Stateful tool binaries use `ene-tool-db` over IPC.
-- `ene-ai` owns LLM/embedding providers. `ene-tool-rag` owns retrieval; `ene-tool-proto` is wire ABI only; `ene-tool` is the authoring facade; `ene-tool-host` owns process/registry orchestration; `ene-vrm` is rendering-only.
-- Keep `tools/*` lightweight separate binaries. Do not add arbitrary cross-crate dependencies or move business/DB logic into ABI crates.
+- `ene-ai` owns LLM/embedding providers. `ene-tool-rag` owns retrieval; `ene-plugin-proto` is wire ABI only (protocol v3); `ene-plugin` is the authoring facade; `ene-plugin-host` owns process/registry orchestration for all plugins (tools, providers, MCP); `ene-vrm` is rendering-only.
+- Keep `plugins/tool/*` lightweight separate binaries. Do not add arbitrary cross-crate dependencies or move business/DB logic into ABI crates.
 - Preserve API v1: every turn has a `TurnId`; `run` is single-flight and returns `Busy`; `Terminal` follows history commit and synchronous finalization; deferred memory work may continue; `Performance` is the presentation event; detailed pipeline diagnostics are separate from the chat bus.
 - Keep dependencies in root `[workspace.dependencies]` for workspace crates and use `{ workspace = true }`; do not silently change versions.
 
@@ -58,15 +58,15 @@ failing package/target and root cause; do not hide failures by relaxing lints.
 - Avoid `unwrap`, `expect`, and panic paths in production. Tests may use them only under existing scoped lint expectations; production exceptions need narrow `#[expect(..., reason = "...")]`.
 - Use structured `tracing` for library/runtime diagnostics. CLI output/examples may use stdout/stderr; do not use `println!` for library logging.
 - Prefer `parking_lot` for internal locks where compatible, `OnceLock` for one-time initialization, and the narrowest visibility (`pub(crate)` by default). Comments explain non-obvious why; public API changes need rustdoc and reference docs.
-- Configuration is defaults → JSON → `ENE_` environment variables (`__` separates nested keys, e.g. `ENE_AI__TASKS__CHAT__MODEL`). Current public sections are `ai.*`, `store.*`, `mind.*`, `tools.*`, and `desktop.*`; tool entries are `tools.list.<name>` with flattened fields, not legacy `tools.tools`/nested `config`.
+- Configuration is defaults → JSON → `ENE_` environment variables (`__` separates nested keys, e.g. `ENE_AI__TASKS__CHAT__MODEL`). Current public sections are `ai.*`, `store.*`, `mind.*`, `plugins.*`, and `desktop.*`; plugin entries are `plugins.list.<name>` with flattened fields.
 - Add settings at the owning `define_config!` invocation, which may be outside `ene-config`. Regenerate schemas through the CLI; never hand-edit or commit ignored `assets/schema/*`.
 - Never commit/log secrets, `.env`, `memory.db*`, `undo.db*`, `todo.db*`, downloaded model weights, or heavy ignored assets. `assets/` is for development/default resources.
 
-## Tools, IPC, and localization
+## Plugins, Tools, IPC, and localization
 
-- New tools: `cargo new --bin tools/<name>`; derive `ToolAction`; prefer `ene_tool::ActionSetProvider`/`prelude`; serve with `run_tool_server(Box::new(provider)).await`; use `ene-tool-db` for state; use namespaced `<namespace>.<action>` names; declare side effects/sandbox needs.
+- New tools are plugins: `cargo new --bin plugins/tool/<name>`; derive `ToolAction`; prefer `ene_tool_common::ActionSetProvider`/`prelude`; wrap with `ene_plugin::ToolPluginAdapter` and serve with `run_plugin_server(Box::new(ToolPluginAdapter(provider))).await`; use `ene-tool-db` for state; use namespaced `<namespace>.<action>` names; declare side effects/sandbox needs.
 - Verify tool binaries with `/tool list` and update both `docs/guide/tools/` and `docs/ja/guide/tools/`.
-- IPC work starts at `crates/ene-tool-proto/src/ipc.rs`. Preserve length-prefixed JSON, update host/tools/tests, and bump `IPC_PROTOCOL_VERSION` only for intentional wire incompatibility.
+- IPC work starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v3). Preserve length-prefixed JSON, update host/plugins/tests, and bump `PLUGIN_IPC_PROTOCOL_VERSION` only for intentional wire incompatibility.
 - Backend events/statuses stay stable English contracts. UI strings belong in `apps/ene-desktop/i18n/{en-US,ja}/ene_desktop.ftl` and `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`; keep EN/JA user docs synchronized.
 
 ## Completion

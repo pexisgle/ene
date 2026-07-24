@@ -1,5 +1,5 @@
 [package]
-name = "ene-tool-web"
+name = "ene-plugin-web"
 version.workspace = true
 edition.workspace = true
 description = "Web tools: URL fetching with HTML-to-Markdown conversion and multi-backend web search"
@@ -8,7 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-ene-tool-proto = { workspace = true }
+ene-plugin = { workspace = true }
+ene-plugin-proto = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
 ene-tool-common = { workspace = true }
@@ -29,7 +30,7 @@ reqwest = { workspace = true, features = ["rustls", "json", "query", "form"] }
 reqwest = { workspace = true, features = ["native-tls", "json", "query", "form"] }
 
 [[bin]]
-name = "ene-tool-web"
+name = "ene-plugin-web"
 path = "src/main.rs"
 
 [lints]

@@ -1,6 +1,6 @@
 # SDK: カスタムツールの作成
 
-`ene-tool-proto` は ene に統合するカスタムツールバイナリを作成するための軽量 SDK です。
+`ene-plugin`（ワイヤ型は `ene-plugin-proto`）は ene に統合するカスタムツールプラグインバイナリを作成するための SDK です。ツールはプラグインです: ツールバイナリは `Plugin` trait を実装し（通常は `ToolPluginAdapter` 互換ラッパー経由）、`run_plugin_server` でサーブされます。
 
 ## クイックスタート
 
@@ -15,8 +15,9 @@ edition = "2024"
 
 [dependencies]
 ene-tool-common = { git = "https://github.com/pexisgle/ene" }
-ene-tool-proto = { git = "https://github.com/pexisgle/ene" }
 ene-tool-derive = { git = "https://github.com/pexisgle/ene" }
+ene-plugin = { git = "https://github.com/pexisgle/ene" }
+ene-plugin-proto = { git = "https://github.com/pexisgle/ene" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -65,7 +66,7 @@ let provider = ActionSetProvider::new(vec![Box::new(HelloAction::default())]);
 カスタムの `set_call_context`/`set_sandbox` の動作が必要な場合、または完全な制御が必要な場合は、代わりに `ToolProvider` を手書きします:
 
 ```rust
-use ene_tool_proto::{ToolError, ToolProvider, ToolSpec};
+use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 
 struct MyToolProvider;
 
@@ -93,27 +94,36 @@ impl ToolProvider for MyToolProvider {
 
 ### 4. サーバーを起動
 
+プロバイダを `ToolPluginAdapter` でラップし、`run_plugin_server` でサーブします:
+
 ```rust
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+
 #[tokio::main]
 async fn main() {
-    run_tool_server(Box::new(MyToolProvider)).await.unwrap();
+    let provider = MyToolProvider;
+    run_plugin_server(Box::new(ToolPluginAdapter(provider))).await.unwrap();
 }
 ```
+
+`ToolPluginAdapter` は `ToolProvider` サーフェスを統合 `Plugin` trait にブリッジし、v3 ハンドシェイク中にツールスペックを `PluginCapabilities { tools, .. }` として通知します。
 
 ### 5. ビルドして配置
 
 ```bash
 cargo build --release
-mkdir -p ~/.local/share/dev.pexisgle.ene/tools
-cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.ene/tools/
+mkdir -p ~/.local/share/dev.pexisgle.ene/plugins
+cp target/release/my-cool-tool ~/.local/share/dev.pexisgle.ene/plugins/ene-plugin-my-cool-tool
 ```
+
+プラグインバイナリは `ene-plugin-{name}` の命名規則に従う必要があります。これにより `PluginHostManager` が探索できます。
 
 ### 6. 設定で有効化
 
 ```json
 {
-  "tools": {
-    "tools": {
+  "plugins": {
+    "list": {
       "my-cool-tool": { "enable": true }
     }
   }
@@ -243,7 +253,7 @@ impl ToolProvider for CalculatorProvider {
 
 | アダプタ | 使用場面 | セッション/サンドボックスフック |
 |---|---|---|
-| `ActionSetProvider::new(vec![...])` | バイナリあたり1つ以上のアクション（`ene-tool-fs`、`ene-tool-app`、`ene-tool-browser` で使われているメガツールパターン） | `.with_set_call_context_hook(...)`、`.with_sandbox_hook(...)` |
+| `ActionSetProvider::new(vec![...])` | バイナリあたり1つ以上のアクション（`ene-plugin-fs`、`ene-plugin-app`、`ene-plugin-browser` で使われているメガツールパターン） | `.with_set_call_context_hook(...)`、`.with_sandbox_hook(...)` |
 
 リクエストされたツール名と `ToolAction::name()` を照合して `call_tool` をディスパッチし、一致しない場合は `ToolError::NotFound` を返します — これは、このコードベース内のすべての手書きプロバイダーがこれまで再実装してきたのと同じ動作です。アクションが `set_call_context`/`set_sandbox` に反応する必要がある場合（例: 会話IDやDBソケットを共有状態に伝える）は、手動の `ToolProvider` 実装に切り替える代わりにフックを登録してください:
 
@@ -258,9 +268,19 @@ let provider = ActionSetProvider::new(vec![Box::new(MyAction::new(state))])
     .with_set_call_context_hook(move |conv_id| session_state.set_session_id(conv_id));
 ```
 
-完全な実例は `tools/utility/src/provider.rs` を参照してください（セッションIDとDBサンドボックスのソケット/トークンの両方がフック経由で伝えられています）。
+その後、プラグインサーバー用にラップします:
+
+```rust
+use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+
+run_plugin_server(Box::new(ToolPluginAdapter(provider))).await?;
+```
+
+完全な実例は `plugins/tool/utility/src/main.rs` を参照してください（セッションIDとDBサンドボックスのソケット/トークンの両方がフック経由で伝えられています）。
 
 ## ToolProvider トレイトリファレンス
+
+`ToolProvider` は `ene-plugin-proto` で定義されています:
 
 ```rust
 #[async_trait]
@@ -297,7 +317,7 @@ pub trait ToolProvider: Send + Sync {
 
 ## ToolSpec
 
-LLM 向けの構造化されたツール仕様（v3 / #135 で slim 化）:
+LLM 向けの構造化されたツール仕様:
 
 ```rust
 pub struct ToolSpec {
@@ -311,7 +331,7 @@ RAG メタデータ（キーワード、例、カテゴリなど）は [`ToolRag
 
 ## ToolRagProfile
 
-呼び出し可能なツールのホスト/RAG 専用メタデータ。LLM のツールリストには渡されません — `IpcResponse::RagProfiles`（IPC v4）経由で交換され、`ene-tool-rag` が消費します。
+呼び出し可能なツールのホスト/RAG 専用メタデータ。LLM のツールリストには渡されません — `PluginIpcResponse::RagProfiles` 経由で交換され、`ene-tool-rag` が消費します。
 
 ```rust
 pub struct ToolRagProfile {
@@ -419,58 +439,60 @@ pub enum ToolError {
 ## IPC ライフサイクル
 
 ```
-ツールバイナリ起動
-  → ENE_TOOL_SOCKET で待機 (ToolHostManager が環境変数として提供)
-  → IpcRequest::Handshake を受信 → HandshakeAck を応答
-  → Handshake が sandbox + tool_config を運ぶ
+プラグインバイナリ起動
+  → ENE_PLUGIN_SOCKET で待機 (PluginHostManager が環境変数として提供)
+  → PluginIpcRequest::Handshake を受信 → HandshakeAck { capabilities } を応答
+  → Handshake が sandbox + plugin_config を運ぶ
   → CallTool リクエストを処理可能に
 ```
 
 ## プロトコルバリアント
 
-`IPC_PROTOCOL_VERSION = 1` の IPC ワイヤープロトコルは、9 種類のリクエストバリアントと 7 種類のレスポンスバリアントを持ちます。`UserInput` は IPC バリアントでは**ありません** — `ToolError::UserInputRequired` を通じて表面化され、`ene-runtime` のストリーミングループで処理されます。
+`PLUGIN_IPC_PROTOCOL_VERSION = 3` のプラグイン IPC ワイヤープロトコルは、ツールのリクエスト/レスポンスバリアントに加えてストリーミング LLM メッセージを持ちます。`UserInput` は IPC バリアントでは**ありません** — `ToolError::UserInputRequired` を通じて表面化され、`ene-runtime` のストリーミングループで処理されます。
 
-### リクエスト（ホスト → ツール）
+### リクエスト（ホスト → プラグイン）
 
 | バリアント | ペイロード | セマンティクス |
 |---|---|---|
-| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `tool_config: Option<Value>` | プロトコル交渉 + サンドボックス設定 + ツール設定プッシュ |
+| `Handshake` | `version: u32`, `sandbox: SandboxConfigData`, `plugin_config: Option<Value>` | プロトコル交渉 + サンドボックス設定 + プラグイン設定プッシュ |
 | `ListTools` | — | プロバイダから全 `ToolSpec` を取得 |
 | `ListRagProfiles` | — | ホスト/RAG 用 `ToolRagProfile` メタデータを取得 (#137) |
-| `GetConfigSchema` | — | ツール設定の JSON Schema をリクエスト（#150 例外） |
-| `CallTool` | `name: String`, `arguments: String` | ツール名と JSON 引数でツールを実行 |
-| `SetCallContext` | `conversation_id: String`, `turn_id: String` | 会話・ターン識別子をツールに伝達 |
+| `GetConfigSchema` | — | プラグイン設定の JSON Schema をリクエスト |
+| `CallTool` | `name: String`, `arguments: String`, `deferred: bool` | ツール名と JSON 引数でツールを実行 |
+| `SetCallContext` | `conversation_id: String`, `turn_id: String` | 会話・ターン識別子をプラグインに伝達 |
 | `ApprovePermission` | `request_id: String` | ペンディング中の破壊的操作の権限リクエストを承認 |
 | `AllowPattern` | `action: String`, `target_pattern: String` | セッション全体の権限許可パターンを登録 |
+| `Ping` | — | Liveness probe |
 | `Shutdown` | — | 正常終了リクエスト |
 
-### レスポンス（ツール → ホスト）
+### レスポンス（プラグイン → ホスト）
 
 | バリアント | ペイロード | トリガー |
 |---|---|---|
-| `HandshakeAck` | `version: u32` | `Handshake` |
+| `HandshakeAck` | `version: u32`, `capabilities: PluginCapabilities` | `Handshake` |
 | `Ack` | — | `SetCallContext`, `ApprovePermission`, `AllowPattern`, `Shutdown` |
 | `Tools` | `tools: Vec<ToolSpec>` | `ListTools` |
 | `RagProfiles` | `profiles: Vec<ToolRagProfile>` | `ListRagProfiles` |
 | `ConfigSchema` | `schema: Option<Value>` | `GetConfigSchema` |
 | `CallResult` | `result: Result<String, ToolError>` | `CallTool` |
+| `Pong` | — | `Ping` |
 | `Error` | `message: String` | IPC レベルで失敗した任意のリクエスト |
 
 ## ABI 互換性
 
-ワイヤーABIは `ene-tool-proto` のIPC表面すべてを指します: `IpcRequest`/`IpcResponse`、`IPC_PROTOCOL_VERSION`、`ToolSpec`/`ToolRagProfile` のフィールド、`SandboxConfigData`、`ToolError`。`run_tool_server` は `IPC_PROTOCOL_VERSION` の不一致を**厳密に拒否**します — ダウングレードや交渉は行いません — そのため、バージョンアップの判断は重要です。
+ワイヤーABIは `ene-plugin-proto` のIPC表面すべてを指します: `PluginIpcRequest`/`PluginIpcResponse`、`PLUGIN_IPC_PROTOCOL_VERSION`、`PluginCapabilities`、`ToolSpec`/`ToolRagProfile` のフィールド、`SandboxConfigData`、`ToolError`。`run_plugin_server` は `PLUGIN_IPC_PROTOCOL_VERSION` の不一致を**厳密に拒否**します — ダウングレードや交渉は行いません — そのため、バージョンアップの判断は重要です。
 
 | 変更 | 互換性あり? | 必要な対応 |
 |---|---|---|
-| `IpcRequest`/`IpcResponse` に新しいenumバリアントを追加 | ✅ 追加的 | 不要 — 古いツールバイナリは新しいバリアントを単に送受信しません。新しいホストコードは、古いツールバイナリがそれを送らないケースも処理する必要があります。 |
-| `ToolSpec`/`ToolRagProfile`/`SandboxConfigData` に新しい任意フィールドを追加（`#[serde(default)]` またはマクロ提供のデフォルト付き） | ✅ 追加的 | 不要。`SandboxConfigData` が既に使っている `define_tool_config!`/`schemars` のパターンに従えば、フィールドのない古いJSONもそのままデシリアライズできます。 |
-| `ToolError` に新しいバリアントを追加 | ✅ 追加的 | 不要 — `ToolError` は（タグ付き列挙体ではあるが）単純な列挙型なので、古いコードがワイルドカードアームなしで網羅的に `match` していない限り、新しいバリアントは問題なくデシリアライズされます。新しい `match` にはワイルドカード（`_ => ...`）アームを追加することを推奨します。 |
-| `ToolProvider` トレイトに新しいメソッドを追加 | ✅ 追加的（デフォルト実装がある場合） | `set_sandbox`、`approve_permission`、`set_config` などが既にそうしているように、デフォルト（no-op / 空）実装を与えてください — これにより、既存のすべてのプロバイダー（手書きでもアダプタベースでも）がコンパイルされ続けます。 |
-| 既存の `IpcRequest`/`IpcResponse` バリアントを削除・改名、またはフィールドの型/意味を変更 | ❌ 破壊的 | `ene-tool-proto` で `IPC_PROTOCOL_VERSION` をバンプする（[AGENTS.md §6 R3](../../../../AGENTS.md) を参照）。同じ変更でホスト（`ene-tool-host`）とすべてのツールバイナリを更新してください。 |
-| `ToolProvider` トレイトメソッドを削除、または既存のデフォルト付きメソッドを必須化 | ❌ 破壊的 | 上記と同様 — これは各ツールバイナリが実装すべき内容を変更します。`tools/*` 全体での連携した更新に加え、ワイヤー動作も変わる場合は `PROTOCOL_VERSION` のバンプが必要です。 |
-| `Box::new(provider)` の呼び出し箇所を壊すような形で `run_tool_server` のシグネチャを変更 | ❌ 破壊的（ソースレベル） | それ自体は `PROTOCOL_VERSION` のバンプを必要としません（Rust APIの破壊であり、ワイヤーの破壊ではない）が、同じ変更内ですべての `tools/*/src/main.rs` の呼び出し箇所と `AGENTS.md` §6 R1 のレシピを更新してください。 |
+| `PluginIpcRequest`/`PluginIpcResponse` に新しいenumバリアントを追加 | ✅ 追加的 | 不要 — 古いプラグインバイナリは新しいバリアントを単に送受信しません。新しいホストコードは、古いプラグインバイナリがそれを送らないケースも処理する必要があります。 |
+| `ToolSpec`/`ToolRagProfile`/`SandboxConfigData`/`PluginCapabilities` に新しい任意フィールドを追加（`#[serde(default)]` またはマクロ提供のデフォルト付き） | ✅ 追加的 | 不要。`SandboxConfigData` が既に使っている `define_tool_config!`/`schemars` のパターンに従えば、フィールドのない古いJSONもそのままデシリアライズできます。 |
+| `ToolError` に新しいバリアントを追加 | ✅ 追加的 | 不要 — 古いコードがワイルドカードアームなしで網羅的に `match` していない限り問題ありません。新しい `match` にはワイルドカード（`_ => ...`）アームを追加することを推奨します。 |
+| `ToolProvider`/`Plugin` トレイトに新しいメソッドを追加 | ✅ 追加的（デフォルト実装がある場合） | `set_sandbox`、`approve_permission`、`set_config` などが既にそうしているように、デフォルト（no-op / 空）実装を与えてください — これにより、既存のすべてのプロバイダー（手書きでもアダプタベースでも）がコンパイルされ続けます。 |
+| 既存の `PluginIpcRequest`/`PluginIpcResponse` バリアントを削除・改名、またはフィールドの型/意味を変更 | ❌ 破壊的 | `ene-plugin-proto` で `PLUGIN_IPC_PROTOCOL_VERSION` をバンプする。同じ変更でホスト（`ene-plugin-host`）とすべてのプラグインバイナリを更新してください。 |
+| `ToolProvider`/`Plugin` トレイトメソッドを削除、または既存のデフォルト付きメソッドを必須化 | ❌ 破壊的 | 上記と同様 — これは各プラグインバイナリが実装すべき内容を変更します。`plugins/*` 全体での連携した更新に加え、ワイヤー動作も変わる場合は `PLUGIN_IPC_PROTOCOL_VERSION` のバンプが必要です。 |
+| `Box::new(...)` の呼び出し箇所を壊すような形で `run_plugin_server` のシグネチャを変更 | ❌ 破壊的（ソースレベル） | それ自体は `PLUGIN_IPC_PROTOCOL_VERSION` のバンプを必要としません（Rust APIの破壊であり、ワイヤーの破壊ではない）が、同じ変更内ですべての `plugins/*/src/main.rs` の呼び出し箇所と `AGENTS.md` のレシピを更新してください。 |
 
-要約すると: **追加的な変更は常に安全**です。既存のワイヤーフィールド/バリアントの意味を変更したり、ツールバイナリが既に送信している可能性のあるものを削除する変更には、`PROTOCOL_VERSION` のバンプとホスト・ツールバイナリ双方の連携した更新が必要です。
+要約すると: **追加的な変更は常に安全**です。既存のワイヤーフィールド/バリアントの意味を変更したり、プラグインバイナリが既に送信している可能性のあるものを削除する変更には、`PLUGIN_IPC_PROTOCOL_VERSION` のバンプとホスト・プラグインバイナリ双方の連携した更新が必要です。
 
 ## ベストプラクティス
 

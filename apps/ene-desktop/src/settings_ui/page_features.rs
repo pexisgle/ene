@@ -6,7 +6,7 @@
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
 use bevy_ecs::world::World;
-use ene_tool_host::ToolConfig;
+use ene_plugin_host::PluginConfig;
 use ene_tool_rag::ToolRagConfig;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ pub fn render(
     world: &mut World,
 ) {
     ui.vertical(|ui| {
-        ui.weak(crate::i18n::features_hint());
+        ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "features-hint"));
         ui.separator();
 
         render_mind(ui, settings, ai);
@@ -32,7 +32,7 @@ pub fn render(
 }
 
 fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    ui.label(crate::i18n::features_mind());
+    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "features-mind"));
 
     let mut memory = settings
         .ai
@@ -47,7 +47,10 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 
     let mut memory_enabled = memory.enabled;
     if ui
-        .checkbox(&mut memory_enabled, crate::i18n::enable_long_term_memory())
+        .checkbox(
+            &mut memory_enabled,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "enable-long-term-memory"),
+        )
         .changed()
     {
         memory.enabled = memory_enabled;
@@ -58,7 +61,10 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 
     let mut emotion_enabled = mind.emotion.enabled;
     if ui
-        .checkbox(&mut emotion_enabled, crate::i18n::enable_emotion())
+        .checkbox(
+            &mut emotion_enabled,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "enable-emotion"),
+        )
         .changed()
     {
         mind.emotion.enabled = emotion_enabled;
@@ -66,11 +72,17 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
     }
 
     ui.separator();
-    ui.label(crate::i18n::proactive_speech());
+    ui.label(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "proactive-speech"
+    ));
 
     let mut proactive_enabled = mind.proactive.enabled;
     if ui
-        .checkbox(&mut proactive_enabled, crate::i18n::proactive_enabled())
+        .checkbox(
+            &mut proactive_enabled,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-enabled"),
+        )
         .changed()
     {
         mind.proactive.enabled = proactive_enabled;
@@ -79,7 +91,10 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 
     ui.add_enabled_ui(mind.proactive.enabled, |ui| {
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_interval());
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "proactive-interval"
+            ));
             let mut value = mind.proactive.interval_seconds as i32;
             if ui
                 .add(egui::DragValue::new(&mut value).range(1..=3600))
@@ -91,7 +106,10 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_cooldown());
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "proactive-cooldown"
+            ));
             let mut value = mind.proactive.cooldown_seconds as i32;
             if ui
                 .add(egui::DragValue::new(&mut value).range(0..=86_400))
@@ -103,7 +121,10 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::proactive_min_idle());
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "proactive-min-idle"
+            ));
             let mut value = mind.proactive.min_idle_seconds as i32;
             if ui
                 .add(egui::DragValue::new(&mut value).range(0..=86_400))
@@ -114,13 +135,16 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             }
         });
 
-        ui.label(crate::i18n::proactive_sources());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "proactive-sources"
+        ));
 
         let mut conversation = mind.proactive.sources.conversation;
         if ui
             .checkbox(
                 &mut conversation,
-                crate::i18n::proactive_source_conversation(),
+                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-conversation"),
             )
             .changed()
         {
@@ -130,7 +154,10 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 
         let mut activity = mind.proactive.sources.activity;
         if ui
-            .checkbox(&mut activity, crate::i18n::proactive_source_activity())
+            .checkbox(
+                &mut activity,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-activity"),
+            )
             .changed()
         {
             mind.proactive.sources.activity = activity;
@@ -139,13 +166,19 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 
         let mut screen = mind.proactive.sources.screen_summary;
         if ui
-            .checkbox(&mut screen, crate::i18n::proactive_source_screen())
+            .checkbox(
+                &mut screen,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-source-screen"),
+            )
             .changed()
         {
             mind.proactive.sources.screen_summary = screen;
             persist_mind(settings, ai, &mind);
         }
-        ui.weak(crate::i18n::proactive_source_screen_hint());
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "proactive-source-screen-hint"
+        ));
     });
 }
 
@@ -169,7 +202,7 @@ fn sync_features(settings: &CharacterSettings, ai: &Arc<AiBridge>) {
     let tools = settings
         .ai
         .ai
-        .get_section::<ToolConfig>()
+        .get_section::<PluginConfig>()
         .unwrap_or_default();
     let rag = settings
         .ai
@@ -180,12 +213,12 @@ fn sync_features(settings: &CharacterSettings, ai: &Arc<AiBridge>) {
 }
 
 fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
-    ui.label(crate::i18n::features_tools());
+    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "features-tools"));
 
     let mut tools = settings
         .ai
         .ai
-        .get_section::<ToolConfig>()
+        .get_section::<PluginConfig>()
         .unwrap_or_default();
     let mut rag = settings
         .ai
@@ -195,7 +228,10 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
 
     let mut tools_enabled = tools.enabled;
     if ui
-        .checkbox(&mut tools_enabled, crate::i18n::enable_tools())
+        .checkbox(
+            &mut tools_enabled,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tools"),
+        )
         .changed()
     {
         tools.enabled = tools_enabled;
@@ -205,7 +241,10 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
     ui.add_enabled_ui(tools.enabled, |ui| {
         let mut rag_enabled = rag.enabled;
         if ui
-            .checkbox(&mut rag_enabled, crate::i18n::enable_tool_rag())
+            .checkbox(
+                &mut rag_enabled,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tool-rag"),
+            )
             .changed()
         {
             rag.enabled = rag_enabled;
@@ -214,7 +253,10 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
             sync_features(settings, ai);
         }
 
-        ui.label(crate::i18n::features_per_tool());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "features-per-tool"
+        ));
         let mut names: Vec<String> = tools.list.keys().cloned().collect();
         for name in DEFAULT_TOOL_NAMES {
             if !names.iter().any(|n| n == *name) {
@@ -228,7 +270,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
             let mut enable = tools.list.get(&name).is_none_or(|entry| entry.enable);
             let label = format!(
                 "{} ({})",
-                crate::i18n::enable_tool(),
+                i18n_embed_fl::fl!(crate::i18n::loader(), "enable-tool"),
                 tool_display_name(&name)
             );
             if ui.checkbox(&mut enable, label).changed() {
@@ -242,8 +284,8 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
     });
 }
 
-/// `ToolConfig` serializes at `tools` and would wipe sibling `tools.rag`.
-fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &ToolConfig) {
+/// `PluginConfig` serializes at `plugins` and would wipe sibling `plugins.rag`.
+fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &PluginConfig) {
     let rag = settings
         .ai
         .ai
@@ -261,7 +303,7 @@ fn render_audio(
     ai: &Arc<AiBridge>,
     world: &mut World,
 ) {
-    ui.label(crate::i18n::audio());
+    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio"));
 
     let mut ai_cfg = settings
         .ai
@@ -273,11 +315,17 @@ fn render_audio(
 
     // Microphone device selection (stored on the desktop section).
     ui.horizontal(|ui| {
-        ui.label(crate::i18n::audio_mic_device());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "audio-mic-device"
+        ));
         let mut device = settings.mic_device.clone().unwrap_or_default();
         if ui
             .add(egui::TextEdit::singleline(&mut device).desired_width(200.0))
-            .on_hover_text(crate::i18n::audio_mic_default())
+            .on_hover_text(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "audio-mic-default"
+            ))
             .changed()
         {
             settings.mic_device = if device.trim().is_empty() {
@@ -292,7 +340,10 @@ fn render_audio(
 
     // VAD threshold slider.
     ui.horizontal(|ui| {
-        ui.label(crate::i18n::audio_vad_threshold());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "audio-vad-threshold"
+        ));
         let mut threshold = ai_cfg.vad.threshold;
         if ui
             .add(egui::Slider::new(&mut threshold, 0.0..=1.0))
@@ -305,11 +356,17 @@ fn render_audio(
 
     // Read-only provider info.
     ui.horizontal(|ui| {
-        ui.label(crate::i18n::audio_stt_provider());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "audio-stt-provider"
+        ));
         ui.weak(provider_display(&ai_cfg.stt.provider));
     });
     ui.horizontal(|ui| {
-        ui.label(crate::i18n::audio_tts_provider());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "audio-tts-provider"
+        ));
         ui.weak(provider_display(&ai_cfg.tts.provider));
     });
 
@@ -343,7 +400,7 @@ fn render_audio(
 
 fn provider_display(provider: &str) -> String {
     if provider.is_empty() || provider == "none" {
-        crate::i18n::audio_provider_none()
+        i18n_embed_fl::fl!(crate::i18n::loader(), "audio-provider-none")
     } else {
         provider.to_string()
     }
@@ -366,7 +423,7 @@ mod tests {
 
     #[test]
     fn default_tool_names_cover_builtin_set() {
-        let defaults = ToolConfig::default();
+        let defaults = PluginConfig::default();
         for name in DEFAULT_TOOL_NAMES {
             assert!(
                 defaults.list.contains_key(*name),

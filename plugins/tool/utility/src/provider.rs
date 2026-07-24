@@ -1,8 +1,8 @@
 use crate::action;
 use crate::todo_store::TodoStore;
 use async_trait::async_trait;
+use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 use ene_tool_common::{ActionSetProvider, ToolAction};
-use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
 use std::sync::Arc;
 
 /// Shared state for the todo actions.
@@ -162,7 +162,7 @@ impl ToolProvider for UtilityToolProvider {
         self.inner.call_tool(name, arguments).await
     }
 
-    fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+    fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         self.inner.set_call_context(ctx);
     }
 

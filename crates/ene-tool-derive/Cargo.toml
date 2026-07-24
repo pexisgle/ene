@@ -2,7 +2,7 @@
 name = "ene-tool-derive"
 version.workspace = true
 edition.workspace = true
-description = "Proc-macro derive crate for ene-tool-proto's ToolSpec and ActionSpec"
+description = "Proc-macro derive crate for ene-plugin-proto's ToolSpec and ActionSpec"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
@@ -19,7 +19,7 @@ schemars = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-ene-tool-proto = { workspace = true }
+ene-plugin-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }

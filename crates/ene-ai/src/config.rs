@@ -46,19 +46,49 @@ ene_config::define_label_enum!(
     }
 );
 
-/// OpenAI-compatible cloud provider definition.
+/// Cloud / plugin provider definition.
+///
+/// `kind` selects the backend (`"openai_compatible"`, `"anthropic"`, …).
+/// OpenAI-compatible providers use the typed [`AiProviderDef::base_url`] and
+/// [`AiProviderDef::api_key`] fields; provider-specific options for other
+/// kinds are captured in the [`AiProviderDef::extra`] catch-all. The struct
+/// form is backward-compatible with the previous tagged-enum JSON:
+/// `{"kind": "openai_compatible", "base_url": "...", "api_key": {...}}`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
-#[serde(crate = "::ene_config::serde", tag = "kind", rename_all = "snake_case")]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
-pub enum AiProviderDef {
-    /// OpenAI-compatible HTTP API (chat, embedding, cloud decision).
-    OpenaiCompatible {
-        /// API base URL (empty → `OPENAI_BASE_URL` env).
-        #[serde(default = "default_string")]
-        base_url: String,
-        /// API key configuration.
-        api_key: ApiKeyConfig,
-    },
+pub struct AiProviderDef {
+    /// Provider backend kind (e.g. `"openai_compatible"`, `"anthropic"`).
+    pub kind: String,
+    /// API base URL (empty → `OPENAI_BASE_URL` env for `openai_compatible`).
+    #[serde(default = "default_string")]
+    pub base_url: String,
+    /// API key configuration.
+    #[serde(default)]
+    pub api_key: ApiKeyConfig,
+    /// Provider-specific options not covered by the typed fields.
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl AiProviderDef {
+    /// True when this definition is an OpenAI-compatible HTTP provider.
+    #[must_use]
+    pub fn is_openai_compatible(&self) -> bool {
+        self.kind == "openai_compatible"
+    }
+}
+
+impl Default for AiProviderDef {
+    fn default() -> Self {
+        Self {
+            kind: "openai_compatible".to_string(),
+            base_url: default_string(),
+            api_key: ApiKeyConfig::default(),
+            extra: serde_json::Map::new(),
+        }
+    }
 }
 
 /// Named local GGUF model entry under [`AiConfig::local_models`].
@@ -197,13 +227,7 @@ impl Default for AiTasksConfig {
 
 fn default_providers() -> BTreeMap<String, AiProviderDef> {
     let mut providers = BTreeMap::new();
-    providers.insert(
-        "default".to_string(),
-        AiProviderDef::OpenaiCompatible {
-            base_url: String::new(),
-            api_key: ApiKeyConfig::default(),
-        },
-    );
+    providers.insert("default".to_string(), AiProviderDef::default());
     providers
 }
 
@@ -401,10 +425,8 @@ mod tests {
 
     fn test_config() -> AiConfig {
         let mut cfg = AiConfig::default();
-        if let Some(AiProviderDef::OpenaiCompatible { base_url, .. }) =
-            cfg.providers.get_mut("default")
-        {
-            *base_url = "https://api.openai.com/v1".to_string();
+        if let Some(def) = cfg.providers.get_mut("default") {
+            def.base_url = "https://api.openai.com/v1".to_string();
         }
         cfg
     }
@@ -414,10 +436,9 @@ mod tests {
         let cfg = AiConfig::default();
         assert!(cfg.local_models.is_empty());
         assert_eq!(cfg.providers.len(), 1);
-        assert!(matches!(
-            cfg.providers.get("default"),
-            Some(AiProviderDef::OpenaiCompatible { .. })
-        ));
+        let default = cfg.providers.get("default").expect("default provider");
+        assert!(default.is_openai_compatible());
+        assert!(default.base_url.is_empty());
         assert_eq!(cfg.tasks.chat.model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(cfg.tasks.chat.max_tokens, Some(8192));
         assert_eq!(
@@ -476,9 +497,9 @@ mod tests {
         let mut cfg = AiConfig::default();
         cfg.providers.insert(
             "alt".to_string(),
-            AiProviderDef::OpenaiCompatible {
+            AiProviderDef {
                 base_url: "https://api.example.com/v1".to_string(),
-                api_key: ApiKeyConfig::default(),
+                ..AiProviderDef::default()
             },
         );
         cfg.tasks.chat.provider = "alt".to_string();
@@ -528,10 +549,43 @@ mod tests {
             r#"{"kind":"openai_compatible","base_url":"https://api.example.com/v1","api_key":{"source":"env","env":"OPENAI_API_KEY","inline":""}}"#,
         )
         .expect("deserialize");
-        match def {
-            AiProviderDef::OpenaiCompatible { base_url, .. } => {
-                assert_eq!(base_url, "https://api.example.com/v1");
-            }
-        }
+        assert!(def.is_openai_compatible());
+        assert_eq!(def.base_url, "https://api.example.com/v1");
+        assert!(def.extra.is_empty());
+    }
+
+    #[test]
+    fn ai_provider_def_captures_unknown_kind_extra() {
+        let def: AiProviderDef = serde_json::from_str(
+            r#"{"kind":"anthropic","api_key":{"source":"env","env":"ANTHROPIC_API_KEY","inline":""},"region":"us-east-1"}"#,
+        )
+        .expect("deserialize");
+        assert!(!def.is_openai_compatible());
+        assert_eq!(def.kind, "anthropic");
+        assert!(def.base_url.is_empty());
+        assert_eq!(def.api_key.env, "ANTHROPIC_API_KEY");
+        assert_eq!(
+            def.extra.get("region").and_then(serde_json::Value::as_str),
+            Some("us-east-1")
+        );
+    }
+
+    #[test]
+    fn ai_provider_def_round_trips_extra() {
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "region".to_string(),
+            serde_json::Value::String("us-east-1".to_string()),
+        );
+        let def = AiProviderDef {
+            kind: "anthropic".to_string(),
+            extra,
+            ..AiProviderDef::default()
+        };
+        let json = serde_json::to_value(&def).expect("serialize");
+        assert_eq!(json.get("kind").expect("kind field"), "anthropic");
+        assert_eq!(json.get("region").expect("region field"), "us-east-1");
+        let back: AiProviderDef = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back, def);
     }
 }

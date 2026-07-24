@@ -3,8 +3,8 @@
 //! Producers (AI bridge, tray, hotkey handlers) push into a single
 //! `UnboundedSender`. The winit event loop owns the receiver and
 //! drains it on the main thread.
+use ene_plugin_proto::UserInputPrompt;
 use ene_runtime::RequestId;
-use ene_tool_proto::UserInputPrompt;
 use tokio::sync::mpsc;
 
 /// Cheap to clone (`Sender` is `Send + Sync`).

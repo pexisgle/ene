@@ -33,7 +33,7 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 ene-config = { workspace = true }
-ene-tool-proto = { workspace = true }
+ene-plugin-proto = { workspace = true }
 ctor = { workspace = true }
 rand = { workspace = true }
 thiserror = { workspace = true }

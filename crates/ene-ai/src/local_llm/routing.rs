@@ -45,7 +45,7 @@ impl LlmProvider for DisabledDecisionProvider {
     async fn create_chat_stream(
         &self,
         _messages: &[LlmMessage],
-        _tools: &[ene_tool_proto::ToolSpec],
+        _tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -203,10 +203,9 @@ fn build_cloud_decision_provider(
     let resolved = match config.tasks.proactive.as_ref() {
         Some(proactive)
             if !AiConfig::is_local_provider(&proactive.provider)
-                && matches!(
-                    config.get_provider(&proactive.provider).ok(),
-                    Some(AiProviderDef::OpenaiCompatible { .. })
-                ) =>
+                && config
+                    .get_provider(&proactive.provider)
+                    .is_ok_and(AiProviderDef::is_openai_compatible) =>
         {
             config.resolve_chat_task(Some(proactive))?
         }

@@ -115,7 +115,7 @@ impl LlmProvider for LocalLlamaCppProvider {
     async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        tools: &[ene_tool_proto::ToolSpec],
+        tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -159,10 +159,8 @@ mod tests {
 
     fn test_config() -> AiConfig {
         let mut cfg = AiConfig::default();
-        if let Some(crate::config::AiProviderDef::OpenaiCompatible { base_url, .. }) =
-            cfg.providers.get_mut("default")
-        {
-            *base_url = "https://api.openai.com/v1".to_string();
+        if let Some(def) = cfg.providers.get_mut("default") {
+            def.base_url = "https://api.openai.com/v1".to_string();
         }
         cfg
     }

@@ -95,6 +95,34 @@ pub fn tool_socket_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{APP_ID}.tools"))
 }
 
+/// Directory for built-in plugin binaries.
+/// Same directory as the executable (debug) or its `plugins/` subdirectory (release).
+pub fn builtin_plugins_dir() -> PathBuf {
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+    {
+        if cfg!(debug_assertions) {
+            exe_dir
+        } else {
+            exe_dir.join("plugins")
+        }
+    } else {
+        PathBuf::from("plugins")
+    }
+}
+
+/// Directory for user-added plugins.
+/// `app_data_dir()/plugins`/
+pub fn user_plugins_dir() -> PathBuf {
+    app_data_dir().join("plugins")
+}
+
+/// Temporary socket directory for plugins.
+pub fn plugin_socket_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("{APP_ID}.plugins"))
+}
+
 /// Gets the path to the character-specific settings file
 /// `assets_dir/characters/{name}/character_settings.json`
 pub fn character_settings_path(character_name: &str) -> PathBuf {

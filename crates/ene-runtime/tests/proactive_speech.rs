@@ -33,7 +33,7 @@ impl LlmProvider for EchoProvider {
     async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        _tools: &[ene_tool_proto::ToolSpec],
+        _tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -58,8 +58,8 @@ impl LlmProvider for EchoProvider {
 struct EmptyRegistry;
 
 #[async_trait]
-impl ene_tool_host::ToolRegistry for EmptyRegistry {
-    fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+impl ene_plugin_host::ToolRegistry for EmptyRegistry {
+    fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
         Vec::new()
     }
 
@@ -67,8 +67,8 @@ impl ene_tool_host::ToolRegistry for EmptyRegistry {
         &self,
         _name: &str,
         _arguments: &str,
-    ) -> Result<String, ene_tool_host::ToolHostError> {
-        Err(ene_tool_host::ToolHostError::ExecutionFailed {
+    ) -> Result<String, ene_plugin_host::ToolHostError> {
+        Err(ene_plugin_host::ToolHostError::ExecutionFailed {
             message: "not used".into(),
         })
     }
@@ -107,7 +107,7 @@ async fn proactive_stream_does_not_add_user_history() {
         session,
         user_input: String::new(),
         embedder: None,
-        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_tool_host::ToolRegistry>,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
         event_tx,
@@ -192,7 +192,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         session,
         user_input: String::new(),
         embedder: None,
-        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_tool_host::ToolRegistry>,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
         event_tx,
@@ -261,7 +261,7 @@ async fn proactive_stream_without_memory_store() {
         session,
         user_input: String::new(),
         embedder: None,
-        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_tool_host::ToolRegistry>,
+        registry: Arc::new(EmptyRegistry) as Arc<dyn ene_plugin_host::ToolRegistry>,
         tool_rag: None,
         provider,
         event_tx,
@@ -295,10 +295,8 @@ async fn proactive_stream_without_memory_store() {
 #[test]
 fn proactive_generation_task_override_resolves() {
     let mut cfg = ene_ai::AiConfig::default();
-    if let Some(ene_ai::AiProviderDef::OpenaiCompatible { base_url, .. }) =
-        cfg.providers.get_mut("default")
-    {
-        *base_url = "https://api.openai.com/v1".to_string();
+    if let Some(def) = cfg.providers.get_mut("default") {
+        def.base_url = "https://api.openai.com/v1".to_string();
     }
     cfg.tasks.proactive = Some(ene_ai::TaskRef {
         provider: "default".to_string(),

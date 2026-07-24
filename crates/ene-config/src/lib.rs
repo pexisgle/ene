@@ -55,9 +55,10 @@ pub use config::{
 pub use error::ConfigError;
 pub use error::EneConfigError;
 pub use paths::{
-    IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, character_card_schema_file_path,
-    character_schema_file_path, character_settings_path, config_file_path, models_dir,
-    schema_file_path, tool_socket_dir, user_tools_dir,
+    IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,
+    character_card_schema_file_path, character_schema_file_path, character_settings_path,
+    config_file_path, models_dir, plugin_socket_dir, schema_file_path, tool_socket_dir,
+    user_plugins_dir, user_tools_dir,
 };
 pub use prompts::{PromptLibrary, substitute as substitute_prompt_vars};
 pub use resources::ensure_resource_dirs;

@@ -1,5 +1,5 @@
 [workspace]
-members = [ "crates/*", "tools/*", "apps/*" ]
+members = [ "crates/*", "apps/*", "plugins/ene-plugin-*", "plugins/tool/*" ]
 default-members = [ "apps/ene-cli" ]
 resolver = "2"
 
@@ -105,16 +105,15 @@ zip = { version = "8", default-features = false }
 # ── Internal crates ──
 ene-ai = { path = "crates/ene-ai" }
 ene-config = { path = "crates/ene-config" }
-ene-i18n-macros = { path = "crates/ene-i18n-macros" }
 ene-mind = { path = "crates/ene-mind" }
+ene-plugin = { path = "crates/ene-plugin" }
+ene-plugin-host = { path = "crates/ene-plugin-host" }
+ene-plugin-proto = { path = "crates/ene-plugin-proto" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-store = { path = "crates/ene-store" }
-ene-tool = { path = "crates/ene-tool" }
 ene-tool-common = { path = "crates/ene-tool-common" }
 ene-tool-db = { path = "crates/ene-tool-db" }
 ene-tool-derive = { path = "crates/ene-tool-derive" }
-ene-tool-host = { path = "crates/ene-tool-host" }
-ene-tool-proto = { path = "crates/ene-tool-proto" }
 ene-tool-rag = { path = "crates/ene-tool-rag" }
 ene-vrm = { path = "crates/ene-vrm" }
 

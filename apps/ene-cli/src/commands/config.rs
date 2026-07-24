@@ -77,7 +77,7 @@ async fn show_config(ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
     println!("Card Path: {}", snapshot.config.character);
     let tool_config = snapshot
         .config
-        .get_section::<ene_tool_host::ToolConfig>()
+        .get_section::<ene_plugin_host::PluginConfig>()
         .unwrap_or_default();
     println!("Tool Calling: {}", tool_config.enabled);
     println!("Memory Enabled: {}", mem_config.enabled);

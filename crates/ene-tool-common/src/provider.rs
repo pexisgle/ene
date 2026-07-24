@@ -22,7 +22,7 @@
 
 use crate::ToolAction;
 use async_trait::async_trait;
-use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolRagProfile, ToolSpec};
+use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolRagProfile, ToolSpec};
 
 type SetCallContextHook = Box<dyn Fn(&str, Option<&str>) + Send + Sync>;
 type SandboxHook = Box<dyn Fn(&SandboxConfigData) + Send + Sync>;
@@ -99,7 +99,7 @@ impl ProviderHooks {
         self
     }
 
-    fn call_set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+    fn call_set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         if let Some(hook) = &self.on_set_call_context {
             let turn_id = if ctx.turn_id.is_empty() {
                 None
@@ -258,7 +258,7 @@ impl ToolProvider for ActionSetProvider {
         })
     }
 
-    fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+    fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         self.hooks.call_set_call_context(ctx);
     }
 
@@ -390,7 +390,7 @@ impl ToolProvider for SingleActionProvider {
         self.inner.call_tool(name, arguments).await
     }
 
-    fn set_call_context(&self, ctx: &ene_tool_proto::CallContext) {
+    fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         self.inner.set_call_context(ctx);
     }
 
@@ -426,7 +426,7 @@ impl ToolProvider for SingleActionProvider {
 )]
 mod tests {
     use super::*;
-    use ene_tool_proto::{ToolName, ToolRagProfile, ToolSpec};
+    use ene_plugin_proto::{ToolName, ToolRagProfile, ToolSpec};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -477,7 +477,7 @@ mod tests {
             .with_set_call_context_hook(move |_conv_id, _turn_id| {
                 seen2.store(true, Ordering::SeqCst);
             });
-        provider.set_call_context(&ene_tool_proto::CallContext {
+        provider.set_call_context(&ene_plugin_proto::CallContext {
             conversation_id: "abc".to_string(),
             turn_id: String::new(),
         });
@@ -531,7 +531,7 @@ mod tests {
         let provider = SingleActionProvider::new(Box::new(EchoAction)).with_set_call_context_hook(
             move |_conv_id, _turn_id| seen2.store(true, Ordering::SeqCst),
         );
-        provider.set_call_context(&ene_tool_proto::CallContext {
+        provider.set_call_context(&ene_plugin_proto::CallContext {
             conversation_id: "abc".to_string(),
             turn_id: String::new(),
         });

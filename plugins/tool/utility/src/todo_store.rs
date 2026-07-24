@@ -502,8 +502,8 @@ impl TodoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_plugin_proto::transport::{IpcListener, IpcStream, cleanup_path};
     use ene_tool_db::{DbRequest, DbResponse};
-    use ene_tool_proto::transport::{IpcListener, IpcStream, cleanup_path};
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
