@@ -27,7 +27,28 @@
 use std::collections::HashMap;
 
 use crate::animation::{RepeatMode, VrmaPlayer};
-use ene_config::MotionLayer;
+/// Motion body layer classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MotionLayer {
+    /// Upper-body gesture + expression.
+    Upper,
+    /// Lower-body idle loop.
+    Lower,
+    /// Full-body override (preempts upper/lower).
+    Full,
+}
+
+impl MotionLayer {
+    /// Stable display / log label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Upper => "upper",
+            Self::Lower => "lower",
+            Self::Full => "full",
+        }
+    }
+}
 
 /// A motion slot tracking a playing animation on one layer.
 #[derive(Debug, Clone)]

@@ -1,7 +1,7 @@
 # `ene-vrm` — API Reference
 
 > **Crate:** `ene-vrm`
-> **Role:** VRM 1.0 model loader + MToon renderer for `ene-desktop`, built on `wgpu`.
+> **Role:** Standalone VRM 1.0 model loader + MToon renderer built on `wgpu` (consumed by `ene-desktop`).
 
 ---
 

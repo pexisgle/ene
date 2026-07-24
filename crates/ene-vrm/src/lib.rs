@@ -100,6 +100,7 @@ pub use humanoid::{
     BoneRestTransform, HUMANOID_BONE_NAMES, HumanoidBoneEntry, HumanoidBoneRegistry, VrmBone,
     canonicalize_bone_name, load_humanoid_bones,
 };
+pub use layer_composer::MotionLayer;
 pub use loader::load_vrm;
 pub use look_at::{
     LookAtBoneDelta, LookAtBoneOutput, LookAtDirection, LookAtEvaluator, LookAtExpressionOutput,
