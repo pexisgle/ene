@@ -6,7 +6,6 @@
 //! `sync_from_settings` is called whenever the settings window
 //! transitions from hidden → visible.
 use crate::settings::CharacterSettings;
-use ene_ai::AiProviderDef;
 
 #[derive(Debug, Default)]
 pub struct SettingsInputState {
@@ -60,13 +59,11 @@ impl SettingsInputState {
             .get_section::<ene_runtime::AiConfig>()
             .unwrap_or_default();
         self.ai_chat_model = ai_cfg.tasks.chat.model.clone().unwrap_or_default();
-        if let Some(AiProviderDef::OpenaiCompatible { base_url, api_key }) =
-            ai_cfg.providers.get(&ai_cfg.tasks.chat.provider)
-        {
-            self.ai_base_url.clone_from(base_url);
-            self.ai_api_key_source.clone_from(&api_key.source);
-            self.ai_api_key.clone_from(&api_key.inline);
-            self.ai_api_key_env.clone_from(&api_key.env);
+        if let Some(def) = ai_cfg.providers.get(&ai_cfg.tasks.chat.provider) {
+            self.ai_base_url.clone_from(&def.base_url);
+            self.ai_api_key_source.clone_from(&def.api_key.source);
+            self.ai_api_key.clone_from(&def.api_key.inline);
+            self.ai_api_key_env.clone_from(&def.api_key.env);
         } else {
             self.ai_base_url.clear();
             self.ai_api_key_source = "env".to_string();
