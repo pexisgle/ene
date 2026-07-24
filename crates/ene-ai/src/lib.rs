@@ -68,8 +68,9 @@ pub use audio::{
     TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
 };
 pub use config::{
-    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, FallbackConfig, LOCAL_PROVIDER,
-    LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef, TtsConfig, VadConfig,
+    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, BUILTIN_PROVIDER_KINDS, FallbackConfig,
+    LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
+    TtsConfig, VadConfig, is_builtin_kind, kind_typo_suggestion,
 };
 pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
@@ -100,7 +101,7 @@ pub use openai::{
 pub use resolve::{
     ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedStt,
     ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue, needs_onboarding, resolve_base_url,
-    validate_api_key, validate_settings,
+    validate_api_key, validate_provider_kinds, validate_settings,
 };
 pub use retry::RetryPolicy;
 pub use role::Role;

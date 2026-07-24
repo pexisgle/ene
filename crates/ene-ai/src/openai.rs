@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::time::Duration;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::config::AiConfig;
+use crate::config::{AiConfig, TaskRef};
 use crate::error::{LlmProviderError, map_openai_error};
 use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
 use crate::resolve::ResolvedChat;
@@ -589,8 +589,17 @@ impl LlmProviderFactory for OpenAiProviderFactory {
     fn create_provider(
         &self,
         config: &ene_config::EneConfig,
+        task: &TaskRef,
     ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-        create_task_chat_provider(config, AiTaskKind::Chat)
+        let ai_config = config
+            .get_section::<AiConfig>()
+            .map_err(|e| LlmProviderError::Provider(format!("Failed to parse AI config: {e}")))?;
+        // Honor the task's own model / max_tokens overrides rather than always
+        // resolving the `tasks.chat` defaults (#C1).
+        let resolved = ai_config.resolve_chat_task(Some(task))?;
+        let provider = create_chat_provider_from_resolved(&resolved)
+            .with_retry_policy(ai_config.retry.to_policy());
+        Ok(Box::new(provider))
     }
 }
 
@@ -634,12 +643,14 @@ pub fn create_task_chat_provider(
     };
 
     // Non-OpenAI-compatible kinds (plugin providers) resolve via the global
-    // registry instead of the OpenAI HTTP path (#247).
+    // registry instead of the OpenAI HTTP path (#247). The task's own
+    // model / max_tokens overrides are forwarded so plugin providers honor
+    // task-specific config instead of the `tasks.chat` defaults (#C1).
     if !crate::config::AiConfig::is_local_provider(&task_ref.provider)
         && let Ok(resolved_ref) = ai_config.resolve_task_ref(task_ref)
         && !resolved_ref.provider.is_openai_compatible()
     {
-        return LlmProviderRegistry::create_provider(&resolved_ref.provider.kind, config);
+        return LlmProviderRegistry::create_provider(&resolved_ref.provider.kind, config, task_ref);
     }
 
     let resolved = match task {

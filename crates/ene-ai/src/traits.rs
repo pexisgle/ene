@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio_stream::{Stream, StreamExt};
 
+use crate::config::TaskRef;
 use crate::error::LlmProviderError;
 use crate::message::{LlmMessage, LlmResponseChunk};
 
@@ -192,9 +193,15 @@ pub trait LlmProviderFactory: Send + Sync {
     fn provider_name(&self) -> &str;
 
     /// Instantiates the provider based on current `EneConfig` settings.
+    ///
+    /// `task` carries the cognitive task's routing entry — its `model` and
+    /// `max_tokens` overrides in particular — so providers can honor
+    /// task-specific configuration (e.g. `Classifier` or `Proactive`) instead
+    /// of silently falling back to the `tasks.chat` defaults.
     fn create_provider(
         &self,
         config: &ene_config::EneConfig,
+        task: &TaskRef,
     ) -> Result<Box<dyn LlmProvider>, LlmProviderError>;
 }
 
@@ -220,9 +227,14 @@ impl LlmProviderRegistry {
     }
 
     /// Tries to instantiate a provider by name using the registered factories.
+    ///
+    /// `task` is forwarded to the factory so the produced provider can honor
+    /// the task's `model` and `max_tokens` overrides (see
+    /// [`LlmProviderFactory::create_provider`]).
     pub fn create_provider(
         name: &str,
         config: &ene_config::EneConfig,
+        task: &TaskRef,
     ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
         let factory = {
             if let Ok(guard) = Self::global().factories.lock() {
@@ -233,7 +245,7 @@ impl LlmProviderRegistry {
         };
 
         match factory {
-            Some(f) => f.create_provider(config),
+            Some(f) => f.create_provider(config, task),
             None => Err(LlmProviderError::Provider(format!(
                 "No LlmProviderFactory registered for provider name: '{name}'"
             ))),

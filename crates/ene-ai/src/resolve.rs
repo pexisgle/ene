@@ -2,6 +2,7 @@
 
 use crate::config::{
     AiConfig, AiProviderDef, ApiKeyConfig, LOCAL_PROVIDER, LocalModelDef, TaskRef,
+    kind_typo_suggestion,
 };
 use crate::error::LlmProviderError;
 
@@ -265,6 +266,15 @@ pub enum SettingsIssue {
         /// Human-readable detail.
         detail: String,
     },
+    /// Provider `kind` looks like a typo of a built-in kind (#C3).
+    SuspiciousKind {
+        /// Provider key in `ai.providers`.
+        provider: String,
+        /// The configured (suspect) kind value.
+        kind: String,
+        /// Suggested built-in kind, if any.
+        suggestion: Option<String>,
+    },
 }
 
 impl SettingsIssue {
@@ -281,36 +291,74 @@ impl SettingsIssue {
             Self::InvalidBaseUrl { provider, detail } => {
                 format!("Invalid base URL for provider `{provider}`: {detail}")
             }
+            Self::SuspiciousKind {
+                provider,
+                kind,
+                suggestion,
+            } => {
+                let hint = suggestion
+                    .as_ref()
+                    .map_or_else(String::new, |s| format!(" (did you mean `{s}`?)"));
+                format!("Unknown provider kind `{kind}` for provider `{provider}`{hint}")
+            }
         }
     }
+}
+
+/// Validate provider `kind` values against known built-ins (#C3).
+///
+/// Catches obvious typos of built-in kinds (e.g. `"openai-compatible"` or
+/// `"anthroic"`) at config load / resolve time instead of failing late and
+/// quietly. The check is lenient toward plugin-provided kinds: any kind that
+/// is not a near-miss of a built-in is assumed to name a plugin backend and is
+/// left alone, since the full set of plugin kinds is only known at runtime.
+#[must_use]
+pub fn validate_provider_kinds(ai: &AiConfig) -> Vec<SettingsIssue> {
+    let mut issues = Vec::new();
+    for (name, def) in &ai.providers {
+        if let Some(suggestion) = kind_typo_suggestion(&def.kind) {
+            issues.push(SettingsIssue::SuspiciousKind {
+                provider: name.clone(),
+                kind: def.kind.clone(),
+                suggestion: Some(suggestion.to_string()),
+            });
+        }
+    }
+    issues
 }
 
 /// Validate chat-provider settings without performing a network call (#241).
 ///
 /// Checks that the configured chat provider has a non-empty base URL with an
 /// `http`/`https` scheme and a resolvable API key. Returns an empty vec when
-/// the section is missing or the chat provider is local/GGUF.
+/// the section is missing or the chat provider is local/GGUF. Also reports
+/// provider `kind` values that look like typos of built-in kinds (#C3).
 #[must_use]
 pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
     let Ok(ai) = config.get_section::<crate::AiConfig>() else {
         return Vec::new();
     };
+
+    // Validate every provider's `kind` up front, independent of which provider
+    // the chat task routes to (#C3).
+    let mut issues = validate_provider_kinds(&ai);
+
     let provider_key = ai.tasks.chat.provider.clone();
     if crate::AiConfig::is_local_provider(&provider_key) {
-        return Vec::new();
+        return issues;
     }
     let Some(def) = ai.providers.get(&provider_key) else {
-        return vec![SettingsIssue::MissingBaseUrl {
+        issues.push(SettingsIssue::MissingBaseUrl {
             provider: provider_key,
-        }];
+        });
+        return issues;
     };
     // base_url / api_key are only meaningful for OpenAI-compatible HTTP
     // providers; plugin-provided kinds validate over IPC instead (#247).
     if !def.is_openai_compatible() {
-        return Vec::new();
+        return issues;
     }
 
-    let mut issues = Vec::new();
     let url = def.base_url.trim();
     if url.is_empty() {
         issues.push(SettingsIssue::MissingBaseUrl {
@@ -770,5 +818,66 @@ mod tests {
     #[test]
     fn clamp_with_warn_noop_in_range() {
         assert!((clamp_with_warn(0.5, 0.0, 1.0, "x") - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn validate_provider_kinds_accepts_builtin_and_plugin() {
+        let mut cfg = AiConfig::default();
+        cfg.providers.insert(
+            "claude".to_string(),
+            AiProviderDef {
+                kind: "anthropic".to_string(),
+                ..AiProviderDef::default()
+            },
+        );
+        cfg.providers.insert(
+            "custom".to_string(),
+            AiProviderDef {
+                kind: "my-plugin-provider".to_string(),
+                ..AiProviderDef::default()
+            },
+        );
+        assert!(validate_provider_kinds(&cfg).is_empty());
+    }
+
+    #[test]
+    fn validate_provider_kinds_flags_typo() {
+        let mut cfg = AiConfig::default();
+        cfg.providers.insert(
+            "bad".to_string(),
+            AiProviderDef {
+                kind: "openai-compatible".to_string(),
+                ..AiProviderDef::default()
+            },
+        );
+        let issues = validate_provider_kinds(&cfg);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues.first(),
+            Some(&SettingsIssue::SuspiciousKind {
+                provider: "bad".to_string(),
+                kind: "openai-compatible".to_string(),
+                suggestion: Some("openai_compatible".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn validate_settings_reports_suspicious_kind() {
+        let mut ai = AiConfig::default();
+        ai.providers.insert(
+            "typo".to_string(),
+            AiProviderDef {
+                kind: "anthroic".to_string(),
+                ..AiProviderDef::default()
+            },
+        );
+        let mut config = ene_config::EneConfig::default();
+        config.set_section(&ai).expect("ai config merges");
+        let issues = validate_settings(&config);
+        assert!(issues.iter().any(|i| matches!(
+            i,
+            SettingsIssue::SuspiciousKind { kind, .. } if kind == "anthroic"
+        )));
     }
 }

@@ -9,6 +9,13 @@ use ene_config::schemars;
 /// Reserved task provider name that resolves against [`AiConfig::local_models`].
 pub const LOCAL_PROVIDER: &str = "local";
 
+/// Built-in provider [`AiProviderDef::kind`] values recognized without a plugin.
+///
+/// Any other `kind` is assumed to name a plugin-provided backend and is
+/// validated leniently (see [`crate::resolve::validate_provider_kinds`]). Use
+/// [`kind_typo_suggestion`] to catch near-misses of these built-in kinds.
+pub const BUILTIN_PROVIDER_KINDS: &[&str] = &["openai_compatible", "anthropic"];
+
 ene_config::define_config!(
     AiConfig,
     "api_key",
@@ -89,6 +96,82 @@ impl Default for AiProviderDef {
             extra: serde_json::Map::new(),
         }
     }
+}
+
+/// True when `kind` is a built-in provider backend recognized without a
+/// plugin (one of [`BUILTIN_PROVIDER_KINDS`]).
+#[must_use]
+pub fn is_builtin_kind(kind: &str) -> bool {
+    BUILTIN_PROVIDER_KINDS.contains(&kind)
+}
+
+/// Suggests a built-in kind when `kind` looks like a typo of one (#C3).
+///
+/// Returns the closest built-in kind when the edit distance is small enough to
+/// indicate a likely typo (e.g. `"openai_compatable"` → `"openai_compatible"`,
+/// `"openai-compatible"` → `"openai_compatible"`, `"anthroic"` →
+/// `"anthropic"`). Returns `None` when `kind` is already built-in or too
+/// different to be a plausible typo, so genuinely plugin-provided kinds are
+/// left untouched.
+#[must_use]
+pub fn kind_typo_suggestion(kind: &str) -> Option<&'static str> {
+    if is_builtin_kind(kind) {
+        return None;
+    }
+    let mut best: Option<(&'static str, usize)> = None;
+    for &candidate in BUILTIN_PROVIDER_KINDS {
+        let distance = levenshtein(kind, candidate);
+        let is_better = best.is_none_or(|(_, best_distance)| distance < best_distance);
+        if distance <= typo_tolerance(kind, candidate) && is_better {
+            best = Some((candidate, distance));
+        }
+    }
+    best.map(|(candidate, _)| candidate)
+}
+
+/// Maximum edit distance still considered a plausible typo for a given pair of
+/// kind strings. Short kinds must match almost exactly; longer kinds tolerate
+/// a couple of stray characters.
+fn typo_tolerance(kind: &str, candidate: &str) -> usize {
+    let max_len = kind.len().max(candidate.len());
+    if max_len <= 8 { 1 } else { 2 }
+}
+
+/// Classic character-based Levenshtein edit distance.
+///
+/// Only ever called on short provider-kind strings, so the quadratic DP cost
+/// is negligible. Indexing and integer arithmetic are bounds-safe by
+/// construction (indices derive from the row/column lengths).
+#[expect(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    reason = "bounded Levenshtein DP: indices derive from row/column lengths and counts stay within small kind strings"
+)]
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr = vec![0_usize; b_len + 1];
+    for i in 1..=a_len {
+        curr[0] = i;
+        for j in 1..=b_len {
+            let cost = usize::from(a_chars[i - 1] != b_chars[j - 1]);
+            let deletion = prev[j] + 1;
+            let insertion = curr[j - 1] + 1;
+            let substitution = prev[j - 1] + cost;
+            curr[j] = deletion.min(insertion).min(substitution);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_len]
 }
 
 /// Named local GGUF model entry under [`AiConfig::local_models`].
@@ -587,5 +670,46 @@ mod tests {
         assert_eq!(json.get("region").expect("region field"), "us-east-1");
         let back: AiProviderDef = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, def);
+    }
+
+    #[test]
+    fn builtin_kind_recognizes_known_kinds() {
+        assert!(is_builtin_kind("openai_compatible"));
+        assert!(is_builtin_kind("anthropic"));
+        assert!(!is_builtin_kind("my-plugin"));
+        assert!(!is_builtin_kind(""));
+    }
+
+    #[test]
+    fn kind_typo_suggestion_catches_near_misses() {
+        // Hyphen vs underscore and single-character typos of built-ins.
+        assert_eq!(
+            kind_typo_suggestion("openai-compatible"),
+            Some("openai_compatible")
+        );
+        assert_eq!(
+            kind_typo_suggestion("openai_compatable"),
+            Some("openai_compatible")
+        );
+        assert_eq!(kind_typo_suggestion("anthroic"), Some("anthropic"));
+    }
+
+    #[test]
+    fn kind_typo_suggestion_ignores_builtin_and_plugin_kinds() {
+        // Already built-in: no suggestion.
+        assert_eq!(kind_typo_suggestion("openai_compatible"), None);
+        assert_eq!(kind_typo_suggestion("anthropic"), None);
+        // Genuinely different plugin kinds: no suggestion.
+        assert_eq!(kind_typo_suggestion("my-custom-plugin"), None);
+        assert_eq!(kind_typo_suggestion("gemini"), None);
+    }
+
+    #[test]
+    fn levenshtein_basic_distances() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
+        assert_eq!(levenshtein("anthropic", "anthroic"), 1);
     }
 }
