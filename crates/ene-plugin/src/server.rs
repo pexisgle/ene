@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ene_plugin_proto::DeferredStatus;
+use ene_plugin_proto::{CallContext, DeferredOutcome};
 use ene_plugin_proto::{
     IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginError, PluginIpcRequest,
     PluginIpcResponse, cleanup_path, read_plugin_request, write_plugin_response,
@@ -225,10 +225,24 @@ async fn dispatch(plugin: &dyn Plugin, req: &PluginIpcRequest) -> PluginIpcRespo
             tools: plugin.list_tool_specs(),
         },
         PluginIpcRequest::CallTool {
-            name, arguments, ..
+            name,
+            arguments,
+            deferred,
         } => {
-            let result = plugin.call_tool(name, arguments).await;
-            PluginIpcResponse::CallResult { result }
+            if *deferred {
+                match plugin.call_tool_deferred(name, arguments).await {
+                    Ok(DeferredOutcome::Sync(result)) => {
+                        PluginIpcResponse::CallResult { result: Ok(result) }
+                    }
+                    Ok(DeferredOutcome::Deferred { task_id }) => {
+                        PluginIpcResponse::DeferredAccepted { task_id }
+                    }
+                    Err(e) => PluginIpcResponse::CallResult { result: Err(e) },
+                }
+            } else {
+                let result = plugin.call_tool(name, arguments).await;
+                PluginIpcResponse::CallResult { result }
+            }
         }
         PluginIpcRequest::ChatCompletion {
             request_id,
@@ -267,7 +281,8 @@ async fn dispatch(plugin: &dyn Plugin, req: &PluginIpcRequest) -> PluginIpcRespo
         } => {
             let items: Vec<(String, String)> = items
                 .iter()
-                .map(|text| (String::new(), text.clone()))
+                .enumerate()
+                .map(|(index, text)| (index.to_string(), text.clone()))
                 .collect();
             match plugin
                 .embed_batch(
@@ -288,16 +303,63 @@ async fn dispatch(plugin: &dyn Plugin, req: &PluginIpcRequest) -> PluginIpcRespo
                 },
             }
         }
-        PluginIpcRequest::PollDeferred { task_id } => PluginIpcResponse::DeferredStatus {
-            task_id: task_id.clone(),
-            status: DeferredStatus::Unknown,
+        PluginIpcRequest::PollDeferred { task_id } => match plugin.poll_deferred(task_id) {
+            Ok(status) => PluginIpcResponse::DeferredStatus {
+                task_id: task_id.clone(),
+                status,
+            },
+            Err(e) => PluginIpcResponse::Error {
+                message: e.to_string(),
+            },
         },
-        PluginIpcRequest::SetCallContext { .. }
-        | PluginIpcRequest::ApprovePermission { .. }
-        | PluginIpcRequest::AllowPattern { .. }
-        | PluginIpcRequest::RevokePattern { .. }
-        | PluginIpcRequest::CancelDeferred { .. }
-        | PluginIpcRequest::Shutdown => PluginIpcResponse::Ack,
+        PluginIpcRequest::SetCallContext {
+            conversation_id,
+            turn_id,
+        } => {
+            let ctx = CallContext {
+                conversation_id: conversation_id.clone(),
+                turn_id: turn_id.clone(),
+            };
+            match plugin.set_call_context(&ctx) {
+                Ok(()) => PluginIpcResponse::Ack,
+                Err(e) => PluginIpcResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::ApprovePermission { request_id } => {
+            match plugin.approve_permission(request_id) {
+                Ok(()) => PluginIpcResponse::Ack,
+                Err(e) => PluginIpcResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::AllowPattern {
+            action,
+            target_pattern,
+        } => match plugin.allow_pattern(action, target_pattern) {
+            Ok(()) => PluginIpcResponse::Ack,
+            Err(e) => PluginIpcResponse::Error {
+                message: e.to_string(),
+            },
+        },
+        PluginIpcRequest::RevokePattern {
+            action,
+            target_pattern,
+        } => match plugin.revoke_pattern(action, target_pattern) {
+            Ok(()) => PluginIpcResponse::Ack,
+            Err(e) => PluginIpcResponse::Error {
+                message: e.to_string(),
+            },
+        },
+        PluginIpcRequest::CancelDeferred { task_id } => match plugin.cancel_deferred(task_id) {
+            Ok(()) => PluginIpcResponse::Ack,
+            Err(e) => PluginIpcResponse::Error {
+                message: e.to_string(),
+            },
+        },
+        PluginIpcRequest::Shutdown => PluginIpcResponse::Ack,
         // CreateChatStream is handled by handle_chat_stream, not here.
         PluginIpcRequest::CreateChatStream { .. } => PluginIpcResponse::Error {
             message: "CreateChatStream must be handled by the streaming path".to_string(),
@@ -399,7 +461,7 @@ mod tests {
     use crate::plugin::PluginStreamChunk;
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
-    use ene_plugin_proto::{LlmProviderSpec, PluginCapabilities, ToolSpec};
+    use ene_plugin_proto::{DeferredStatus, LlmProviderSpec, PluginCapabilities, ToolSpec};
 
     /// A mock plugin that returns fixed responses for testing dispatch logic.
     struct MockPlugin;
@@ -591,6 +653,23 @@ mod tests {
                 assert!(result.is_err());
             }
             other => panic!("expected CallResult with error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_call_tool_deferred_falls_back_to_sync() {
+        let plugin = MockPlugin;
+        let req = PluginIpcRequest::CallTool {
+            name: "test.echo".into(),
+            arguments: r#"{"msg":"hi"}"#.into(),
+            deferred: true,
+        };
+        let resp = dispatch(&plugin, &req).await;
+        match resp {
+            PluginIpcResponse::CallResult { result } => {
+                assert_eq!(result.unwrap(), r#"{"msg":"hi"}"#);
+            }
+            other => panic!("expected CallResult (sync fallback), got {other:?}"),
         }
     }
 

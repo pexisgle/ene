@@ -9,8 +9,10 @@
 use std::pin::Pin;
 
 use async_trait::async_trait;
-use ene_plugin_proto::SandboxConfigData;
-use ene_plugin_proto::{PluginCapabilities, PluginError, ToolError, ToolSpec};
+use ene_plugin_proto::{
+    CallContext, DeferredOutcome, DeferredStatus, PluginCapabilities, PluginError,
+    SandboxConfigData, ToolError, ToolSpec,
+};
 use tokio_stream::Stream;
 
 /// A single chunk from a streaming LLM response.
@@ -83,6 +85,68 @@ pub trait Plugin: Send + Sync {
         Err(ToolError::NotFound {
             tool_name: name.to_string(),
         })
+    }
+
+    /// Executes a tool in deferred (background) mode.
+    ///
+    /// A background-capable plugin should start the work asynchronously and
+    /// return [`DeferredOutcome::Deferred`] with a unique `task_id`; the
+    /// completion is delivered later out-of-band. Plugins that do not support
+    /// deferral keep the default implementation, which runs the call
+    /// synchronously via [`call_tool`](Self::call_tool) and returns
+    /// [`DeferredOutcome::Sync`].
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<DeferredOutcome, ToolError> {
+        Ok(DeferredOutcome::Sync(
+            self.call_tool(name, arguments).await?,
+        ))
+    }
+
+    /// Polls the status of a deferred (background) task by id.
+    ///
+    /// The default returns [`DeferredStatus::Unknown`] for plugins that do
+    /// not support deferral.
+    fn poll_deferred(&self, _task_id: &str) -> Result<DeferredStatus, ToolError> {
+        Ok(DeferredStatus::Unknown)
+    }
+
+    /// Cancels a deferred (background) task by id.
+    ///
+    /// The default is a no-op for plugins that do not support deferral.
+    fn cancel_deferred(&self, _task_id: &str) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Sets the call context (conversation + turn identifiers).
+    ///
+    /// Plugins that want session-scoped state (e.g. undo checkpoints)
+    /// should override this method. The default is a no-op.
+    fn set_call_context(&self, _ctx: &CallContext) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Approves a pending destructive-operation permission request by ID.
+    ///
+    /// The default is a no-op for plugins that do not gate on permissions.
+    fn approve_permission(&self, _request_id: &str) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Adds a session-wide permission allow pattern (action + target glob).
+    ///
+    /// The default is a no-op for plugins that do not gate on permissions.
+    fn allow_pattern(&self, _action: &str, _target_pattern: &str) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Revokes a previously granted session-wide permission allow pattern.
+    ///
+    /// The default is a no-op for plugins that do not gate on permissions.
+    fn revoke_pattern(&self, _action: &str, _target_pattern: &str) -> Result<(), ToolError> {
+        Ok(())
     }
 
     /// Returns the tool specs this plugin exposes.
