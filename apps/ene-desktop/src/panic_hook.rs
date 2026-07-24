@@ -9,8 +9,13 @@ pub fn install() {
     std::panic::set_hook(Box::new(move |info| {
         let detail = format_panic_detail(info);
         let log_dir = log_hint();
-        let body = crate::i18n::panic_body(log_dir, detail);
-        let title = crate::i18n::panic_title();
+        let body = i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "panic-body",
+            log_dir = log_dir,
+            detail = detail
+        );
+        let title = i18n_embed_fl::fl!(crate::i18n::loader(), "panic-title");
         show_fatal_dialog(&title, &body);
         default_hook(info);
     }));

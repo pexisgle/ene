@@ -185,7 +185,10 @@ impl Runtime {
 
     fn create_chat_window(&mut self, event_loop: &ActiveEventLoop) {
         let mut chat_attrs = WindowAttributes::default()
-            .with_title(crate::i18n::chat_window_title())
+            .with_title(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "chat-window-title"
+            ))
             .with_inner_size(LogicalSize::new(400.0, 600.0))
             .with_resizable(true);
         if let Some(monitor) = event_loop.primary_monitor() {

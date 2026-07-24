@@ -19,7 +19,7 @@ pub fn render(
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::language());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "language"));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::LanguageDown,
@@ -54,7 +54,10 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::graphics_quality());
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "graphics-quality"
+            ));
             if ui.button("<").clicked() {
                 apply_action(
                     SettingsAction::GraphicsQualityDown,

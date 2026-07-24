@@ -34,8 +34,8 @@ pub fn select_language(lang: Language) {
     }
 }
 
-mod __generated_i18n_keys {
-    use super::loader;
-    ene_i18n_macros::i18n_keys!("i18n/en-US/ene_desktop.ftl", "i18n/ja/ene_desktop.ftl");
-}
-pub use __generated_i18n_keys::*;
+#[expect(
+    unused_imports,
+    reason = "convenience re-export of i18n_embed_fl::fl macro"
+)]
+pub use i18n_embed_fl::fl;

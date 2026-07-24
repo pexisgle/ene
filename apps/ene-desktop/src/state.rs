@@ -420,7 +420,10 @@ impl AppState {
         bootstrap_handle: &tokio::runtime::Handle,
     ) -> Result<(), String> {
         if self.reconnect_attempted {
-            return Err(crate::i18n::runtime_reconnect_already_attempted());
+            return Err(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-reconnect-already-attempted"
+            ));
         }
         self.reconnect_attempted = true;
         let config = self.settings.ai.ai.clone();

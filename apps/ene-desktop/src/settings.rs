@@ -171,9 +171,9 @@ pub fn cycle_graphics_quality(current: GraphicsQuality, step: isize) -> Graphics
 pub fn graphics_quality_label(lang: Language, quality: GraphicsQuality) -> String {
     let _ = lang;
     match quality {
-        GraphicsQuality::Low => crate::i18n::low(),
-        GraphicsQuality::Medium => crate::i18n::medium(),
-        GraphicsQuality::High => crate::i18n::high(),
+        GraphicsQuality::Low => i18n_embed_fl::fl!(crate::i18n::loader(), "low"),
+        GraphicsQuality::Medium => i18n_embed_fl::fl!(crate::i18n::loader(), "medium"),
+        GraphicsQuality::High => i18n_embed_fl::fl!(crate::i18n::loader(), "high"),
     }
 }
 
@@ -186,7 +186,7 @@ pub fn cycle_language(current: Language, step: isize) -> Language {
 pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
     let _ = lang;
     if debug_fps == 0 {
-        crate::i18n::match_window()
+        i18n_embed_fl::fl!(crate::i18n::loader(), "match-window")
     } else {
         format!("{debug_fps} FPS")
     }
@@ -392,7 +392,7 @@ pub struct PendingPermission {
 #[derive(Clone, Debug)]
 pub struct PendingUserInput {
     pub request_id: ene_runtime::RequestId,
-    pub prompt: ene_tool_proto::UserInputPrompt,
+    pub prompt: ene_plugin_proto::UserInputPrompt,
 }
 
 #[derive(Clone, Debug, Default)]

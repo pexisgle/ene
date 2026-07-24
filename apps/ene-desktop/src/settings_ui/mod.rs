@@ -99,16 +99,29 @@ impl SettingsUi {
                     .is_some_and(|state| !state.0.fatal_startup_dismissed)
             });
         if let Some(message) = fatal_message {
-            egui::Window::new(crate::i18n::runtime_fatal_title())
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ui.ctx(), |ui| {
-                    ui.label(crate::i18n::runtime_fatal_body(message));
-                    if ui.button(crate::i18n::runtime_fatal_dismiss()).clicked() {
-                        dismiss_fatal = true;
-                    }
-                });
+            egui::Window::new(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-fatal-title"
+            ))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "runtime-fatal-body",
+                    message = message
+                ));
+                if ui
+                    .button(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "runtime-fatal-dismiss"
+                    ))
+                    .clicked()
+                {
+                    dismiss_fatal = true;
+                }
+            });
         }
         if dismiss_fatal
             && let Some(mut state) =
@@ -125,30 +138,39 @@ impl SettingsUi {
             let reconnect_attempted = world
                 .get::<crate::component::ui::UiStateComponent>(ui_entity)
                 .is_some_and(|state| state.0.reconnect_attempted);
-            egui::Window::new(crate::i18n::runtime_disconnected_title())
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
-                .show(ui.ctx(), |ui| {
-                    ui.colored_label(
-                        egui::Color32::LIGHT_RED,
-                        crate::i18n::runtime_disconnected_body(),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !reconnect_attempted,
-                                egui::Button::new(crate::i18n::runtime_reconnect()),
-                            )
-                            .clicked()
-                        {
-                            reconnect_requested = true;
-                        }
-                    });
-                    if reconnect_attempted {
-                        ui.weak(crate::i18n::runtime_reconnect_already_attempted());
+            egui::Window::new(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-disconnected-title"
+            ))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
+            .show(ui.ctx(), |ui| {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-disconnected-body"),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !reconnect_attempted,
+                            egui::Button::new(i18n_embed_fl::fl!(
+                                crate::i18n::loader(),
+                                "runtime-reconnect"
+                            )),
+                        )
+                        .clicked()
+                    {
+                        reconnect_requested = true;
                     }
                 });
+                if reconnect_attempted {
+                    ui.weak(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "runtime-reconnect-already-attempted"
+                    ));
+                }
+            });
         }
         if reconnect_requested
             && let Some(mut state) =
@@ -158,7 +180,10 @@ impl SettingsUi {
         }
 
         let Some(ai) = ai else {
-            ui.colored_label(egui::Color32::LIGHT_RED, crate::i18n::runtime_unavailable());
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-unavailable"),
+            );
             return;
         };
 
@@ -169,21 +194,36 @@ impl SettingsUi {
             .get::<crate::component::ui::UiStateComponent>(ui_entity)
             .is_some_and(|s| s.0.show_onboarding);
         if show_onboarding {
-            egui::Window::new(crate::i18n::onboarding_title())
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 24.0])
-                .show(ui.ctx(), |ui| {
-                    ui.label(crate::i18n::onboarding_body());
-                    ui.horizontal(|ui| {
-                        if ui.button(crate::i18n::onboarding_open_settings()).clicked() {
-                            open_ai = true;
-                        }
-                        if ui.button(crate::i18n::onboarding_dismiss()).clicked() {
-                            dismiss = true;
-                        }
-                    });
+            egui::Window::new(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "onboarding-title"
+            ))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 24.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "onboarding-body"));
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "onboarding-open-settings"
+                        ))
+                        .clicked()
+                    {
+                        open_ai = true;
+                    }
+                    if ui
+                        .button(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "onboarding-dismiss"
+                        ))
+                        .clicked()
+                    {
+                        dismiss = true;
+                    }
                 });
+            });
         }
         if (open_ai || dismiss)
             && let Some(mut state) =
@@ -222,11 +262,17 @@ impl SettingsUi {
                 PageKind::Debug,
             ] {
                 let label = match page {
-                    PageKind::Character => crate::i18n::character(),
-                    PageKind::Graphics => crate::i18n::graphics(),
-                    PageKind::Debug => crate::i18n::debug(),
-                    PageKind::Ai => crate::i18n::ai(),
-                    PageKind::Features => crate::i18n::features(),
+                    PageKind::Character => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "character")
+                    }
+                    PageKind::Graphics => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "graphics")
+                    }
+                    PageKind::Debug => i18n_embed_fl::fl!(crate::i18n::loader(), "debug"),
+                    PageKind::Ai => i18n_embed_fl::fl!(crate::i18n::loader(), "ai"),
+                    PageKind::Features => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "features")
+                    }
                     PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
                     PageKind::Permissions => {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "permissions")

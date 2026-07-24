@@ -15,9 +15,9 @@ use std::sync::Arc;
 const DEFAULT_LOCAL_EMBED_MODEL: &str = "jina-v5-small";
 
 fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
-    ai.providers.iter().find_map(|(name, def)| {
-        matches!(def, AiProviderDef::OpenaiCompatible { .. }).then(|| name.clone())
-    })
+    ai.providers
+        .iter()
+        .find_map(|(name, def)| def.is_openai_compatible().then(|| name.clone()))
 }
 
 fn ensure_local_embedding_provider(ai: &mut AiConfig) {
@@ -40,15 +40,10 @@ fn ensure_local_embedding_provider(ai: &mut AiConfig) {
 fn set_embedding_cloud(ai: &mut AiConfig) {
     let chat_key = ai.tasks.chat.provider.clone();
     let provider_key = match ai.providers.get(&chat_key) {
-        Some(AiProviderDef::OpenaiCompatible { .. }) => chat_key,
+        Some(def) if def.is_openai_compatible() => chat_key,
         _ => first_openai_compatible_provider(ai).unwrap_or_else(|| {
-            ai.providers.insert(
-                chat_key.clone(),
-                AiProviderDef::OpenaiCompatible {
-                    base_url: String::new(),
-                    api_key: ene_ai::ApiKeyConfig::default(),
-                },
-            );
+            ai.providers
+                .insert(chat_key.clone(), AiProviderDef::default());
             chat_key
         }),
     };
@@ -75,11 +70,11 @@ pub fn render(
         .unwrap_or_default();
 
     ui.vertical(|ui| {
-        ui.weak(crate::i18n::chat_open_hint());
+        ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "chat-open-hint"));
         ui.separator();
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::character_card());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "character-card"));
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(settings.current_character_card()),
@@ -87,7 +82,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::user_name());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "user-name"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_user_name).desired_width(f32::INFINITY),
             );
@@ -101,7 +96,7 @@ pub fn render(
         ui.label("Chat");
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::model());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_chat_model).desired_width(f32::INFINITY),
             );
@@ -113,7 +108,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::base_url());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "base-url"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_base_url).desired_width(f32::INFINITY),
             );
@@ -121,15 +116,15 @@ pub fn render(
                 let url = input.ai_base_url.trim().to_string();
                 let provider_key = ai_cfg.tasks.chat.provider.clone();
                 match ai_cfg.providers.get_mut(&provider_key) {
-                    Some(AiProviderDef::OpenaiCompatible { base_url, .. }) => {
-                        *base_url = url;
+                    Some(def) if def.is_openai_compatible() => {
+                        def.base_url = url;
                     }
                     _ => {
                         ai_cfg.providers.insert(
                             provider_key,
-                            AiProviderDef::OpenaiCompatible {
+                            AiProviderDef {
                                 base_url: url,
-                                api_key: ene_ai::ApiKeyConfig::default(),
+                                ..AiProviderDef::default()
                             },
                         );
                     }
@@ -140,7 +135,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::api_key_source());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key-source"));
             let mut current_source = input.ai_api_key_source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
                 .selected_text(current_source.as_str())
@@ -148,21 +143,21 @@ pub fn render(
                     ui.selectable_value(
                         &mut current_source,
                         "inline".to_string(),
-                        crate::i18n::inline_settings(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "inline-settings"),
                     );
                     ui.selectable_value(
                         &mut current_source,
                         "env".to_string(),
-                        crate::i18n::environment(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "environment"),
                     );
                 });
             if current_source != input.ai_api_key_source {
                 input.ai_api_key_source.clone_from(&current_source);
                 let provider_key = ai_cfg.tasks.chat.provider.clone();
-                if let Some(AiProviderDef::OpenaiCompatible { api_key, .. }) =
-                    ai_cfg.providers.get_mut(&provider_key)
+                if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                    && def.is_openai_compatible()
                 {
-                    api_key.source = current_source;
+                    def.api_key.source = current_source;
                 }
                 let _ = settings.ai.ai.set_section(&ai_cfg);
                 settings.mark_dirty();
@@ -171,17 +166,17 @@ pub fn render(
 
         if input.ai_api_key_source == "env" {
             ui.horizontal(|ui| {
-                ui.label(crate::i18n::api_key_env_var());
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key-env-var"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut input.ai_api_key_env)
                         .desired_width(f32::INFINITY),
                 );
                 if response.changed() {
                     let provider_key = ai_cfg.tasks.chat.provider.clone();
-                    if let Some(AiProviderDef::OpenaiCompatible { api_key, .. }) =
-                        ai_cfg.providers.get_mut(&provider_key)
+                    if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                        && def.is_openai_compatible()
                     {
-                        api_key.env = input.ai_api_key_env.trim().to_string();
+                        def.api_key.env = input.ai_api_key_env.trim().to_string();
                         let _ = settings.ai.ai.set_section(&ai_cfg);
                         settings.mark_dirty();
                     }
@@ -189,7 +184,7 @@ pub fn render(
             });
         } else {
             ui.horizontal(|ui| {
-                ui.label(crate::i18n::api_key());
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut input.ai_api_key)
                         .password(true)
@@ -197,10 +192,10 @@ pub fn render(
                 );
                 if response.changed() {
                     let provider_key = ai_cfg.tasks.chat.provider.clone();
-                    if let Some(AiProviderDef::OpenaiCompatible { api_key, .. }) =
-                        ai_cfg.providers.get_mut(&provider_key)
+                    if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                        && def.is_openai_compatible()
                     {
-                        api_key.inline = input.ai_api_key.trim().to_string();
+                        def.api_key.inline = input.ai_api_key.trim().to_string();
                         let _ = settings.ai.ai.set_section(&ai_cfg);
                         settings.mark_dirty();
                     }
@@ -216,15 +211,32 @@ pub fn render(
             }
         }
         ui.horizontal(|ui| {
-            if ui.button(crate::i18n::ai_test_connection()).clicked() {
+            if ui
+                .button(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "ai-test-connection"
+                ))
+                .clicked()
+            {
                 input.ai_validation_message = Some(match ai_cfg.resolve_chat() {
                     Ok(resolved) => {
                         match ai.validate_api_key_blocking(&resolved.base_url, &resolved.api_key) {
-                            Ok(()) => crate::i18n::ai_test_connection_ok(),
-                            Err(e) => format!("{}: {e}", crate::i18n::ai_test_connection_error()),
+                            Ok(()) => {
+                                i18n_embed_fl::fl!(crate::i18n::loader(), "ai-test-connection-ok")
+                            }
+                            Err(e) => format!(
+                                "{}: {e}",
+                                i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "ai-test-connection-error"
+                                )
+                            ),
                         }
                     }
-                    Err(e) => format!("{}: {e}", crate::i18n::ai_test_connection_error()),
+                    Err(e) => format!(
+                        "{}: {e}",
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "ai-test-connection-error")
+                    ),
                 });
             }
         });
@@ -233,10 +245,13 @@ pub fn render(
         }
 
         ui.separator();
-        ui.label(crate::i18n::embedding_settings());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "embedding-settings"
+        ));
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::provider());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider"));
             let mut current_provider = input.ai_embedding_provider.clone();
             egui::ComboBox::from_id_salt("embedding_provider")
                 .selected_text(current_provider.as_str())
@@ -244,12 +259,12 @@ pub fn render(
                     ui.selectable_value(
                         &mut current_provider,
                         "cloud".to_string(),
-                        crate::i18n::cloud_api(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "cloud-api"),
                     );
                     ui.selectable_value(
                         &mut current_provider,
                         "local".to_string(),
-                        crate::i18n::local_gguf(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "local-gguf"),
                     );
                 });
             if current_provider != input.ai_embedding_provider {
@@ -287,7 +302,7 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::model());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_embedding_model)
                     .desired_width(f32::INFINITY),
@@ -300,11 +315,11 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::dimensions());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "dimensions"));
             if input.ai_embedding_provider == "local" {
                 ui.add_sized(
                     [100.0, 0.0],
-                    egui::Label::new(crate::i18n::auto_from_model()),
+                    egui::Label::new(i18n_embed_fl::fl!(crate::i18n::loader(), "auto-from-model")),
                 );
             } else {
                 let response = ui.add(
@@ -328,26 +343,41 @@ pub fn render(
 
 /// Provider health and failover status display (#175).
 fn render_provider_health(ui: &mut egui::Ui, ai: &Arc<AiBridge>, ai_cfg: &AiConfig) {
-    ui.label(crate::i18n::provider_health());
+    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider-health"));
 
     if !ai_cfg.fallback.enabled {
-        ui.weak(crate::i18n::provider_health_failover_disabled());
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "provider-health-failover-disabled"
+        ));
         return;
     }
 
     let reports = ai.provider_health_reports();
     if reports.is_empty() {
-        ui.weak(crate::i18n::provider_health_no_reports());
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "provider-health-no-reports"
+        ));
         return;
     }
 
     egui::Grid::new("provider_health_grid")
         .striped(true)
         .show(ui, |ui| {
-            ui.strong(crate::i18n::provider());
-            ui.strong(crate::i18n::provider_health_status());
-            ui.strong(crate::i18n::provider_health_latency());
-            ui.strong(crate::i18n::provider_health_detail());
+            ui.strong(i18n_embed_fl::fl!(crate::i18n::loader(), "provider"));
+            ui.strong(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "provider-health-status"
+            ));
+            ui.strong(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "provider-health-latency"
+            ));
+            ui.strong(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "provider-health-detail"
+            ));
             ui.end_row();
             for report in &reports {
                 ui.label(&report.provider);
@@ -366,9 +396,15 @@ fn render_provider_health(ui: &mut egui::Ui, ai: &Arc<AiBridge>, ai_cfg: &AiConf
 
     let history = ai.provider_fallback_history();
     ui.add_space(8.0);
-    ui.label(crate::i18n::provider_health_fallback_history());
+    ui.label(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "provider-health-fallback-history"
+    ));
     if history.is_empty() {
-        ui.weak(crate::i18n::provider_health_no_fallbacks());
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "provider-health-no-fallbacks"
+        ));
     } else {
         for record in history.iter().rev().take(5) {
             ui.weak(format!(

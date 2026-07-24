@@ -5,17 +5,47 @@ use ene_runtime::EneRuntimeError;
 /// Map a bootstrap / open failure into a localized user message.
 pub fn user_message(error: &EneRuntimeError) -> String {
     match error {
-        EneRuntimeError::NoCharacterCard => crate::i18n::runtime_error_no_character_card(),
-        EneRuntimeError::ChannelClosed => crate::i18n::runtime_error_channel_closed(),
-        EneRuntimeError::MindPrerequisite(name) => {
-            crate::i18n::runtime_error_mind_prerequisite((*name).to_string())
+        EneRuntimeError::NoCharacterCard => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-no-character-card")
         }
-        EneRuntimeError::Bootstrap(msg) => crate::i18n::runtime_error_bootstrap(msg.clone()),
-        EneRuntimeError::Config(err) => crate::i18n::runtime_error_config(err.to_string()),
-        EneRuntimeError::Memory(err) => crate::i18n::runtime_error_memory(err.to_string()),
-        EneRuntimeError::Mind(err) => crate::i18n::runtime_error_mind(err.to_string()),
-        EneRuntimeError::Tool(err) => crate::i18n::runtime_error_tool(err.to_string()),
-        EneRuntimeError::ToolRag(err) => crate::i18n::runtime_error_tool(err.to_string()),
+        EneRuntimeError::ChannelClosed => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-channel-closed")
+        }
+        EneRuntimeError::MindPrerequisite(name) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-mind-prerequisite",
+            name = (*name).to_string()
+        ),
+        EneRuntimeError::Bootstrap(msg) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-bootstrap",
+            message = msg.clone()
+        ),
+        EneRuntimeError::Config(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-config",
+            detail = err.to_string()
+        ),
+        EneRuntimeError::Memory(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-memory",
+            detail = err.to_string()
+        ),
+        EneRuntimeError::Mind(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-mind",
+            detail = err.to_string()
+        ),
+        EneRuntimeError::Tool(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-tool",
+            detail = err.to_string()
+        ),
+        EneRuntimeError::ToolRag(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-tool",
+            detail = err.to_string()
+        ),
         EneRuntimeError::Ai(err) => user_message_from_ai(err),
     }
 }
@@ -24,33 +54,57 @@ pub fn user_message(error: &EneRuntimeError) -> String {
 pub fn user_message_from_turn(message: &str) -> String {
     let trimmed = message.trim();
     if trimmed.is_empty() {
-        return crate::i18n::runtime_error_turn_failed_unknown();
+        return i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-turn-failed-unknown");
     }
-    crate::i18n::runtime_error_turn_failed(trimmed.to_string())
+    i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "runtime-error-turn-failed",
+        detail = trimmed.to_string()
+    )
 }
 
 fn user_message_from_ai(error: &ene_ai::AiError) -> String {
     match error {
         ene_ai::AiError::Llm(err) => match err {
-            ene_ai::LlmProviderError::Auth(_) => crate::i18n::runtime_error_ai_auth(),
-            ene_ai::LlmProviderError::RateLimit(_) => crate::i18n::runtime_error_ai_rate_limit(),
-            ene_ai::LlmProviderError::Network(_) => crate::i18n::runtime_error_ai_network(),
-            ene_ai::LlmProviderError::LocalLlm(_) => {
-                crate::i18n::runtime_error_ai_local_llm(err.to_string())
+            ene_ai::LlmProviderError::Auth(_) => {
+                i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-ai-auth")
             }
+            ene_ai::LlmProviderError::RateLimit(_) => {
+                i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-ai-rate-limit")
+            }
+            ene_ai::LlmProviderError::Network(_) => {
+                i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-ai-network")
+            }
+            ene_ai::LlmProviderError::LocalLlm(_) => i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-error-ai-local-llm",
+                detail = err.to_string()
+            ),
             ene_ai::LlmProviderError::ContentFilter(_)
             | ene_ai::LlmProviderError::Truncated { .. }
-            | ene_ai::LlmProviderError::Provider(_) => {
-                crate::i18n::runtime_error_ai_provider(err.to_string())
-            }
+            | ene_ai::LlmProviderError::Provider(_) => i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-error-ai-provider",
+                detail = err.to_string()
+            ),
         },
-        ene_ai::AiError::Embedding(err) => crate::i18n::runtime_error_ai_embedding(err.to_string()),
-        ene_ai::AiError::MissingApiKey(_) => crate::i18n::runtime_error_ai_auth(),
-        ene_ai::AiError::MissingBaseUrl(provider) => {
-            crate::i18n::runtime_error_config(format!("missing base URL for {provider}"))
+        ene_ai::AiError::Embedding(err) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-ai-embedding",
+            detail = err.to_string()
+        ),
+        ene_ai::AiError::MissingApiKey(_) => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-ai-auth")
         }
-        ene_ai::AiError::InvalidBaseUrl(url) => {
-            crate::i18n::runtime_error_config(format!("invalid base URL: {url}"))
-        }
+        ene_ai::AiError::MissingBaseUrl(provider) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-config",
+            detail = format!("missing base URL for {provider}")
+        ),
+        ene_ai::AiError::InvalidBaseUrl(url) => i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "runtime-error-config",
+            detail = format!("invalid base URL: {url}")
+        ),
     }
 }
