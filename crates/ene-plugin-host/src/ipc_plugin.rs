@@ -6,10 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ene_plugin_proto::SandboxConfigData;
 use ene_plugin_proto::{
-    IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest,
-    PluginIpcResponse, read_plugin_response, write_plugin_request,
+    CallContext, DeferredOutcome, DeferredStatus, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
+    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData,
+    read_plugin_response, write_plugin_request,
 };
 
 use crate::error::PluginHostError;
@@ -134,6 +134,13 @@ impl IpcPluginConnection {
     }
 
     /// Calls a tool exposed by the plugin and returns the result string.
+    ///
+    /// Tool-level failures are propagated as
+    /// [`PluginHostError::Protocol`] so callers (e.g. the runtime's
+    /// streaming layer) can still match on structured variants such as
+    /// `PermissionRequired` and `UserInputRequired`. Flattening the
+    /// [`ene_plugin_proto::ToolError`] into a string here would silently
+    /// disable the interactive permission / user-input contract.
     pub async fn call_tool(
         &mut self,
         name: &str,
@@ -147,14 +154,129 @@ impl IpcPluginConnection {
             })
             .await?;
         match resp {
-            PluginIpcResponse::CallResult { result } => {
-                result.map_err(|e| PluginHostError::execution(e.to_string()))
-            }
+            PluginIpcResponse::CallResult { result } => result.map_err(PluginHostError::Protocol),
             PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to CallTool: {other:?}"
             ))),
         }
+    }
+
+    /// Sets the call context (conversation + turn identifiers) on the plugin.
+    ///
+    /// The context applies to every subsequent tool call on this connection;
+    /// the wire protocol carries only the identifiers, so no tool name is
+    /// needed at the connection level (tool routing happens in the composite
+    /// registry above).
+    pub async fn set_call_context(&mut self, ctx: &CallContext) -> Result<(), PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::SetCallContext {
+                conversation_id: ctx.conversation_id.clone(),
+                turn_id: ctx.turn_id.clone(),
+            })
+            .await?;
+        Self::expect_ack(resp, "SetCallContext")
+    }
+
+    /// Approves (or denies) a pending permission request by its identifier.
+    pub async fn approve_permission(&mut self, request_id: &str) -> Result<(), PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::ApprovePermission {
+                request_id: request_id.to_string(),
+            })
+            .await?;
+        Self::expect_ack(resp, "ApprovePermission")
+    }
+
+    /// Registers a session-wide permission allow pattern (action + target glob).
+    pub async fn allow_pattern(
+        &mut self,
+        action: &str,
+        target_pattern: &str,
+    ) -> Result<(), PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::AllowPattern {
+                action: action.to_string(),
+                target_pattern: target_pattern.to_string(),
+            })
+            .await?;
+        Self::expect_ack(resp, "AllowPattern")
+    }
+
+    /// Revokes a previously granted session-wide permission allow pattern.
+    pub async fn revoke_pattern(
+        &mut self,
+        action: &str,
+        target_pattern: &str,
+    ) -> Result<(), PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::RevokePattern {
+                action: action.to_string(),
+                target_pattern: target_pattern.to_string(),
+            })
+            .await?;
+        Self::expect_ack(resp, "RevokePattern")
+    }
+
+    /// Calls a tool in deferred (background) mode.
+    ///
+    /// A background-capable tool responds with [`DeferredOutcome::Deferred`]
+    /// carrying a `task_id`; any other tool falls back to
+    /// [`DeferredOutcome::Sync`] with the ordinary synchronous result.
+    pub async fn call_tool_deferred(
+        &mut self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<DeferredOutcome, PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::CallTool {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+                deferred: true,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::CallResult { result } => match result {
+                Ok(value) => Ok(DeferredOutcome::Sync(value)),
+                Err(e) => Err(PluginHostError::Protocol(e)),
+            },
+            PluginIpcResponse::DeferredAccepted { task_id } => {
+                Ok(DeferredOutcome::Deferred { task_id })
+            }
+            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to deferred CallTool: {other:?}"
+            ))),
+        }
+    }
+
+    /// Polls the status of a deferred (background) task by its identifier.
+    pub async fn poll_deferred(
+        &mut self,
+        task_id: &str,
+    ) -> Result<DeferredStatus, PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::PollDeferred {
+                task_id: task_id.to_string(),
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::DeferredStatus { status, .. } => Ok(status),
+            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to PollDeferred: {other:?}"
+            ))),
+        }
+    }
+
+    /// Cancels a deferred (background) task by its identifier.
+    pub async fn cancel_deferred(&mut self, task_id: &str) -> Result<(), PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::CancelDeferred {
+                task_id: task_id.to_string(),
+            })
+            .await?;
+        Self::expect_ack(resp, "CancelDeferred")
     }
 
     /// Sends a `CreateChatStream` request (does not read responses).
@@ -306,6 +428,18 @@ impl IpcPluginConnection {
 
     // ── Internal helpers ──
 
+    /// Validates that a response is the expected [`PluginIpcResponse::Ack`],
+    /// mapping anything else to an execution error.
+    fn expect_ack(resp: PluginIpcResponse, what: &str) -> Result<(), PluginHostError> {
+        match resp {
+            PluginIpcResponse::Ack => Ok(()),
+            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to {what}: {other:?}"
+            ))),
+        }
+    }
+
     async fn connect_with_retry(
         socket_path: &Path,
         name: &str,
@@ -337,21 +471,57 @@ impl IpcPluginConnection {
     }
 
     /// Sends a request and reads a single response with an explicit timeout.
+    ///
+    /// On a transport failure (broken pipe, connection reset, EOF) the stale
+    /// stream is dropped, the connection is re-established via
+    /// [`reconnect`](Self::reconnect), and the request is retried **once**.
+    /// This is safe only for the request/response pattern: a transport error
+    /// means the request never reached (or was never answered by) the plugin,
+    /// so replaying it cannot double-execute a call. Timeouts are deliberately
+    /// **not** retried — a timed-out plugin may still be processing a
+    /// non-idempotent call. Streaming reads
+    /// ([`read_response`](Self::read_response)) bypass this path entirely and
+    /// never trigger reconnection mid-stream.
     async fn do_request_with_timeout(
         &mut self,
         req: PluginIpcRequest,
         timeout: Duration,
     ) -> Result<PluginIpcResponse, PluginHostError> {
-        self.send_request(&req).await?;
+        match self.request_once(&req, timeout).await {
+            Ok(resp) => Ok(resp),
+            Err(e @ PluginHostError::TransportFailed { .. }) => {
+                tracing::warn!(
+                    component = "IpcPluginConnection",
+                    error = %e,
+                    "Transport failure; reconnecting and retrying request once"
+                );
+                // Drop the stale stream so reconnect starts from a clean slate.
+                self.stream = None;
+                self.reconnect().await?;
+                self.request_once(&req, timeout).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Performs a single request/response round-trip, classifying transport
+    /// failures as [`PluginHostError::TransportFailed`] so the caller can
+    /// decide whether a reconnect-and-retry is warranted.
+    async fn request_once(
+        &mut self,
+        req: &PluginIpcRequest,
+        timeout: Duration,
+    ) -> Result<PluginIpcResponse, PluginHostError> {
+        self.send_request(req).await?;
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| PluginHostError::execution("not connected to plugin"))?;
+            .ok_or_else(|| PluginHostError::transport("not connected to plugin"))?;
         let fut = read_plugin_response(stream);
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(Some(resp))) => Ok(resp),
-            Ok(Ok(None)) => Err(PluginHostError::execution("connection closed by plugin")),
-            Ok(Err(e)) => Err(PluginHostError::execution(format!("read failed: {e}"))),
+            Ok(Ok(None)) => Err(PluginHostError::transport("connection closed by plugin")),
+            Ok(Err(e)) => Err(PluginHostError::transport(format!("read failed: {e}"))),
             Err(_elapsed) => Err(PluginHostError::execution(format!(
                 "timed out after {} ms",
                 timeout.as_millis()
@@ -360,13 +530,17 @@ impl IpcPluginConnection {
     }
 
     /// Writes a request to the stream (no read).
+    ///
+    /// A missing stream or a failed write is reported as
+    /// [`PluginHostError::TransportFailed`], which the request path treats as
+    /// reconnectable.
     async fn send_request(&mut self, req: &PluginIpcRequest) -> Result<(), PluginHostError> {
         let stream = self
             .stream
             .as_mut()
-            .ok_or_else(|| PluginHostError::execution("not connected to plugin"))?;
+            .ok_or_else(|| PluginHostError::transport("not connected to plugin"))?;
         write_plugin_request(stream, req)
             .await
-            .map_err(|e| PluginHostError::execution(format!("write failed: {e}")))
+            .map_err(|e| PluginHostError::transport(format!("write failed: {e}")))
     }
 }

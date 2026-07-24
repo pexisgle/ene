@@ -22,7 +22,7 @@ use crate::health::PluginHealthEvent;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
 use crate::mcp_registry::McpToolRegistry;
-use crate::tool_registry::ToolRegistry;
+use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 
 /// Maximum number of restart attempts before a plugin is disabled.
 const MAX_RESTARTS: usize = 5;
@@ -30,8 +30,6 @@ const MAX_RESTARTS: usize = 5;
 const BASE_DELAY_MS: u64 = 500;
 /// Maximum delay cap for exponential backoff.
 const MAX_DELAY_MS: u64 = 30_000;
-/// Interval between health probe pings.
-const HEALTH_PROBE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// A supervised plugin process and its IPC connection.
 struct SupervisedPlugin {
@@ -97,7 +95,10 @@ impl Drop for SupervisedPlugin {
             plugin = %self.name,
             "Stopping plugin"
         );
+        // Kill the child and reap it to avoid leaving a zombie process.
+        // Both are best-effort: the process may already have exited.
         let _ = self.child.kill();
+        let _ = self.child.wait();
         ene_plugin_proto::cleanup_path(&self.socket_path);
     }
 }
@@ -111,7 +112,12 @@ fn delay_for_restart(restart_count: usize) -> Duration {
 /// A `ToolRegistry` adapter that routes tool calls to a plugin over IPC,
 /// guarded by a per-plugin circuit breaker.
 struct PluginToolRegistry {
+    /// Name of the plugin that owns these tools (used for health events).
+    plugin_name: String,
     conn: Arc<Mutex<IpcPluginConnection>>,
+    /// Handle to the supervised process, used to reset the restart budget
+    /// after a successful call (restoring the old `ToolHostManager` behavior).
+    supervised: Arc<Mutex<SupervisedPlugin>>,
     tools: Vec<ene_plugin_proto::ToolSpec>,
     breaker: parking_lot::Mutex<CircuitBreaker>,
     health_tx: Option<mpsc::UnboundedSender<PluginHealthEvent>>,
@@ -148,23 +154,29 @@ impl ToolRegistry for PluginToolRegistry {
         };
 
         if result.is_ok() {
-            let mut breaker = self.breaker.lock();
-            if breaker.consecutive_failures() != 0 {
-                self.emit_health(PluginHealthEvent::CircuitClosed {
-                    plugin: name.to_string(),
-                });
+            {
+                let mut breaker = self.breaker.lock();
+                if breaker.consecutive_failures() != 0 {
+                    self.emit_health(PluginHealthEvent::CircuitClosed {
+                        plugin: self.plugin_name.clone(),
+                    });
+                }
+                breaker.record_success();
             }
-            breaker.record_success();
+            // A healthy round-trip clears the restart budget so a plugin
+            // that has been running well is not penalized for old crashes.
+            self.supervised.lock().await.restart_count = 0;
         } else {
             let mut breaker = self.breaker.lock();
             if breaker.record_failure() {
                 let failures = breaker.consecutive_failures();
                 self.emit_health(PluginHealthEvent::CircuitOpened {
-                    plugin: name.to_string(),
+                    plugin: self.plugin_name.clone(),
                     consecutive_failures: failures,
                 });
                 tracing::warn!(
                     component = "PluginHostManager",
+                    plugin = %self.plugin_name,
                     tool = %name,
                     consecutive_failures = failures,
                     "Circuit breaker opened for plugin tool"
@@ -172,9 +184,113 @@ impl ToolRegistry for PluginToolRegistry {
             }
         }
 
-        result.map_err(|e| PluginHostError::ExecutionFailed {
-            message: e.to_string(),
+        // Propagate structured `ToolError` (e.g. `PermissionRequired`,
+        // `UserInputRequired`) untouched so the streaming layer can match on
+        // the interactive variants. Flattening to a string here would silently
+        // disable the permission / user-input contract.
+        result
+    }
+
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+    ) -> Result<DeferredCallResult, PluginHostError> {
+        let outcome = {
+            let mut conn = self.conn.lock().await;
+            conn.call_tool_deferred(name, arguments).await?
+        };
+        Ok(match outcome {
+            ene_plugin_proto::DeferredOutcome::Sync(value) => DeferredCallResult::Sync(value),
+            ene_plugin_proto::DeferredOutcome::Deferred { task_id } => {
+                DeferredCallResult::Deferred { task_id }
+            }
         })
+    }
+
+    async fn poll_deferred(
+        &self,
+        _tool_name: &str,
+        task_id: &str,
+    ) -> ene_plugin_proto::DeferredStatus {
+        let mut conn = self.conn.lock().await;
+        match conn.poll_deferred(task_id).await {
+            Ok(status) => status,
+            Err(e) => {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    plugin = %self.plugin_name,
+                    task_id = %task_id,
+                    error = %e,
+                    "Failed to poll deferred task"
+                );
+                ene_plugin_proto::DeferredStatus::Unknown
+            }
+        }
+    }
+
+    async fn cancel_deferred(&self, _tool_name: &str, task_id: &str) {
+        let mut conn = self.conn.lock().await;
+        if let Err(e) = conn.cancel_deferred(task_id).await {
+            tracing::warn!(
+                component = "PluginHostManager",
+                plugin = %self.plugin_name,
+                task_id = %task_id,
+                error = %e,
+                "Failed to cancel deferred task"
+            );
+        }
+    }
+
+    async fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
+        let mut conn = self.conn.lock().await;
+        if let Err(e) = conn.set_call_context(ctx).await {
+            tracing::warn!(
+                component = "PluginHostManager",
+                plugin = %self.plugin_name,
+                error = %e,
+                "Failed to set call context"
+            );
+        }
+    }
+
+    async fn approve_permission(&self, request_id: &str) {
+        let mut conn = self.conn.lock().await;
+        if let Err(e) = conn.approve_permission(request_id).await {
+            tracing::warn!(
+                component = "PluginHostManager",
+                plugin = %self.plugin_name,
+                request_id = %request_id,
+                error = %e,
+                "Failed to approve permission"
+            );
+        }
+    }
+
+    async fn allow_pattern(&self, action: &str, target_pattern: &str) {
+        let mut conn = self.conn.lock().await;
+        if let Err(e) = conn.allow_pattern(action, target_pattern).await {
+            tracing::warn!(
+                component = "PluginHostManager",
+                plugin = %self.plugin_name,
+                action = %action,
+                error = %e,
+                "Failed to allow pattern"
+            );
+        }
+    }
+
+    async fn revoke_pattern(&self, action: &str, target_pattern: &str) {
+        let mut conn = self.conn.lock().await;
+        if let Err(e) = conn.revoke_pattern(action, target_pattern).await {
+            tracing::warn!(
+                component = "PluginHostManager",
+                plugin = %self.plugin_name,
+                action = %action,
+                error = %e,
+                "Failed to revoke pattern"
+            );
+        }
     }
 }
 
@@ -196,6 +312,16 @@ pub struct PluginHostManager {
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     health_task: Option<tokio::task::JoinHandle<()>>,
     health_rx: Option<mpsc::UnboundedReceiver<PluginHealthEvent>>,
+}
+
+impl Drop for PluginHostManager {
+    fn drop(&mut self) {
+        // Ensure the health probe loop does not outlive the manager (and the
+        // plugins it supervises) even when `shutdown` was not called.
+        if let Some(task) = self.health_task.take() {
+            task.abort();
+        }
+    }
 }
 
 impl PluginHostManager {
@@ -274,7 +400,9 @@ impl PluginHostManager {
                     // Route tool capabilities.
                     if !caps.tools.is_empty() {
                         let registry = PluginToolRegistry {
+                            plugin_name: name.clone(),
                             conn: Arc::clone(&conn),
+                            supervised: Arc::clone(&plugin),
                             tools: caps.tools.clone(),
                             breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
                             health_tx: Some(health_tx.clone()),
@@ -293,8 +421,12 @@ impl PluginHostManager {
                             );
                             continue;
                         }
-                        let factory =
-                            IpcLlmProviderFactory::new(spec.kind.clone(), Arc::clone(&conn));
+                        let factory = IpcLlmProviderFactory::new(
+                            spec.kind.clone(),
+                            Arc::clone(&conn),
+                            name.clone(),
+                            is_builtin_plugin(name),
+                        );
                         llm_factories.insert(
                             spec.kind.clone(),
                             Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
@@ -349,8 +481,15 @@ impl PluginHostManager {
             tool_registries.push(Arc::new(mcp));
         }
 
-        // Spawn the periodic health probe loop.
-        let health_task = if supervised.is_empty() {
+        // Spawn the periodic health probe loop (disabled when the interval is 0).
+        let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
+        let health_task = if supervised.is_empty() || health_interval.is_zero() {
+            if health_interval.is_zero() && !supervised.is_empty() {
+                tracing::info!(
+                    component = "PluginHostManager",
+                    "Health probes disabled by configuration (health_interval_ms = 0)"
+                );
+            }
             None
         } else {
             let probes: Vec<Arc<Mutex<SupervisedPlugin>>> =
@@ -359,7 +498,7 @@ impl PluginHostManager {
                 connections.iter().map(Arc::clone).collect();
             let tx = health_tx.clone();
             Some(tokio::spawn(async move {
-                health_probe_loop(HEALTH_PROBE_INTERVAL, probes, conns, tx).await;
+                health_probe_loop(health_interval, probes, conns, tx).await;
             }))
         };
 
@@ -395,6 +534,11 @@ impl PluginHostManager {
 
     /// Sends a graceful `Shutdown` to all plugins and kills the processes.
     pub async fn shutdown(&mut self) {
+        // Abort the health probe loop first so it cannot race with shutdown
+        // (e.g. restart a plugin we are about to kill).
+        if let Some(task) = self.health_task.take() {
+            task.abort();
+        }
         for conn in &self.connections {
             let mut c = conn.lock().await;
             c.shutdown().await;
@@ -404,9 +548,6 @@ impl PluginHostManager {
             let _ = p.child.kill();
             let _ = p.child.wait();
             ene_plugin_proto::cleanup_path(&p.socket_path);
-        }
-        if let Some(task) = self.health_task.take() {
-            task.abort();
         }
     }
 
@@ -550,6 +691,16 @@ fn is_executable(path: &std::path::Path) -> bool {
         let _ = path;
         true
     }
+}
+
+/// Returns `true` when the plugin binary resolves from the builtin plugins
+/// directory. Used by the API key trust gate: only builtin or explicitly
+/// configured plugins receive resolved credentials.
+fn is_builtin_plugin(name: &str) -> bool {
+    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
+    let dir = ene_config::builtin_plugins_dir();
+    dir.join(format!("ene-plugin-{name}{exe_suffix}")).is_file()
+        || dir.join(format!("{name}{exe_suffix}")).is_file()
 }
 
 /// Finds the binary path for a plugin by name, searching builtin and user

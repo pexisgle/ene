@@ -3,6 +3,17 @@
 //! Connects to MCP (Model Context Protocol) servers via stdio transport and
 //! exposes their tools through the [`ToolRegistry`] trait so they integrate
 //! seamlessly with plugin-provided tools.
+//!
+//! ## Liveness
+//!
+//! MCP servers are external child processes that can die at any time. A dead
+//! server's tools must not keep being advertised to the model, or calls would
+//! fail with confusing transport errors. Before tools are listed or dispatched,
+//! the registry checks each server's transport liveness via
+//! `rmcp::Peer::is_transport_closed` and prunes any server whose
+//! process has exited, logging a warning. This is a simple on-access circuit
+//! breaker: once pruned, a server's tools disappear from the registry until it
+//! is reconnected explicitly via [`connect_stdio`](McpToolRegistry::connect_stdio).
 
 use crate::error::PluginHostError;
 use crate::tool_registry::ToolRegistry;
@@ -21,6 +32,18 @@ pub struct McpServerConnection {
     pub client: Arc<rmcp::Peer<rmcp::RoleClient>>,
     /// Tools provided by this server.
     pub tools: Vec<ToolSpec>,
+}
+
+impl McpServerConnection {
+    /// Returns `true` when the underlying transport (and thus the stdio child
+    /// process) is still alive.
+    ///
+    /// When an MCP stdio process exits, its pipes close and rmcp marks the
+    /// peer's transport as closed; this is the cheapest reliable liveness
+    /// signal available without polling the OS for the child's PID.
+    fn is_alive(&self) -> bool {
+        !self.client.is_transport_closed()
+    }
 }
 
 /// Registry for MCP server connections and their tools.
@@ -86,21 +109,71 @@ impl McpToolRegistry {
 
         Ok(())
     }
+
+    /// Removes servers whose process has died, logging a warning for each.
+    ///
+    /// This is the on-access circuit breaker: dead servers stop advertising
+    /// their tools as soon as the liveness check observes a closed transport.
+    /// Pruning requires a write lock, so callers that only hold a read lock
+    /// must drop it first.
+    fn prune_dead_servers(&self) {
+        let mut servers = self
+            .servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = servers.len();
+        servers.retain(|s| {
+            let alive = s.is_alive();
+            if !alive {
+                tracing::warn!(
+                    component = "McpToolRegistry",
+                    server = %s.name,
+                    tools = s.tools.len(),
+                    "MCP server process is dead; no longer advertising its tools"
+                );
+            }
+            alive
+        });
+        let pruned = before.saturating_sub(servers.len());
+        drop(servers);
+        if pruned > 0 {
+            tracing::info!(
+                component = "McpToolRegistry",
+                pruned = pruned,
+                "Pruned dead MCP server(s) from registry"
+            );
+        }
+    }
 }
 
 #[async_trait]
 impl ToolRegistry for McpToolRegistry {
     fn list_tools(&self) -> Vec<ToolSpec> {
-        let mut res = Vec::new();
-        let servers = self
-            .servers
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for s in servers.iter() {
-            res.extend(s.tools.clone());
+        // First pass: read-locked snapshot + liveness detection. We cannot
+        // prune while holding the read lock, so collect the dead names and
+        // prune in a second (write-locked) pass only when needed.
+        let (tools, dead) = {
+            let servers = self
+                .servers
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut tools = Vec::new();
+            let mut dead = Vec::new();
+            for s in servers.iter() {
+                if s.is_alive() {
+                    tools.extend(s.tools.clone());
+                } else {
+                    dead.push(s.name.clone());
+                }
+            }
+            (tools, dead)
+        };
+
+        if !dead.is_empty() {
+            self.prune_dead_servers();
         }
-        drop(servers);
-        res
+
+        tools
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, PluginHostError> {
@@ -112,7 +185,11 @@ impl ToolRegistry for McpToolRegistry {
             let mut found = None;
             for s in servers.iter() {
                 if s.tools.iter().any(|t| t.name.as_str() == name) {
-                    found = Some(s.client.clone());
+                    // Refuse to dispatch to a dead server; the liveness check
+                    // will prune it on the next `list_tools`.
+                    if s.is_alive() {
+                        found = Some(s.client.clone());
+                    }
                     break;
                 }
             }
@@ -121,7 +198,7 @@ impl ToolRegistry for McpToolRegistry {
         };
 
         let client = client_opt.ok_or_else(|| PluginHostError::ExecutionFailed {
-            message: format!("Tool {name} not found in MCP"),
+            message: format!("Tool {name} not found in MCP (server may be dead or disconnected)"),
         })?;
 
         let args_val: serde_json::Value =
@@ -142,5 +219,23 @@ impl ToolRegistry for McpToolRegistry {
         serde_json::to_string(&result.content).map_err(|e| PluginHostError::ExecutionFailed {
             message: e.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_registry_lists_no_tools() {
+        let registry = McpToolRegistry::new();
+        assert!(registry.list_tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_registry_call_tool_not_found() {
+        let registry = McpToolRegistry::new();
+        let result = registry.call_tool("nonexistent", "{}").await;
+        assert!(result.is_err());
     }
 }

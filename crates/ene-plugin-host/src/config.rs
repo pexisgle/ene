@@ -10,6 +10,18 @@ const fn default_timeout_ms() -> u64 {
     60_000
 }
 
+const fn default_health_interval_ms() -> u64 {
+    30_000
+}
+
+/// Default plugin list containing the builtin tool plugins.
+fn default_plugin_list() -> HashMap<String, PluginEntry> {
+    ["app", "browser", "fs", "utility", "web"]
+        .into_iter()
+        .map(|name| (name.to_string(), PluginEntry::default()))
+        .collect()
+}
+
 /// A single plugin entry in the `plugins.list` map.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -38,17 +50,21 @@ ene_config::define_config!(
         /// Enable the plugin system.
         pub enabled: bool = true,
         /// Named plugin entries (tools and providers).
-        pub list: HashMap<String, PluginEntry> = HashMap::new(),
+        #[serde(default = "default_plugin_list")]
+        pub list: HashMap<String, PluginEntry> = default_plugin_list(),
         /// Maximum number of concurrent tool calls.
         pub max_concurrent: usize = 8,
         /// Maximum number of sequential tool calls per turn.
-        #[serde(skip_deserializing, default = "default_max_rounds", skip_serializing)]
-        #[schemars(skip)]
+        #[serde(default = "default_max_rounds")]
         pub max_rounds: usize = default_max_rounds(),
         /// Tool call execution timeout in milliseconds.
-        #[serde(skip_deserializing, default = "default_timeout_ms", skip_serializing)]
-        #[schemars(skip)]
+        #[serde(default = "default_timeout_ms")]
         pub timeout_ms: u64 = default_timeout_ms(),
+        /// Interval between health probe pings in milliseconds.
+        ///
+        /// Set to `0` to disable periodic health checks.
+        #[serde(default = "default_health_interval_ms")]
+        pub health_interval_ms: u64 = default_health_interval_ms(),
         /// MCP servers to connect to.
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig> = Vec::new(),
     }

@@ -59,6 +59,22 @@ pub enum PluginHostError {
         message: String,
     },
 
+    /// A transport-level failure on the IPC connection (broken pipe,
+    /// connection reset, EOF, or a missing stream).
+    ///
+    /// Deliberately distinct from [`ExecutionFailed`](Self::ExecutionFailed)
+    /// so the connection layer can transparently reconnect and retry a
+    /// request/response round-trip once (see
+    /// [`IpcPluginConnection`](crate::IpcPluginConnection)). Timeouts are
+    /// **not** transport failures — a hung plugin may still be processing a
+    /// non-idempotent call, so timed-out requests are surfaced as
+    /// [`ExecutionFailed`](Self::ExecutionFailed) and never auto-retried.
+    #[error("plugin transport failed: {message}")]
+    TransportFailed {
+        /// Descriptive transport failure message.
+        message: String,
+    },
+
     /// The circuit breaker is open after consecutive failures.
     #[error(
         "circuit breaker open for tool '{tool}' after {consecutive_failures} consecutive failures; call paused"
@@ -107,6 +123,13 @@ impl PluginHostError {
     /// Creates an [`ExecutionFailed`](Self::ExecutionFailed) error.
     pub fn execution(message: impl Into<String>) -> Self {
         Self::ExecutionFailed {
+            message: message.into(),
+        }
+    }
+
+    /// Creates a [`TransportFailed`](Self::TransportFailed) error.
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::TransportFailed {
             message: message.into(),
         }
     }
