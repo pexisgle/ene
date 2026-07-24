@@ -534,9 +534,7 @@ async fn pump_events(
                 for cue in cues {
                     match cue.kind {
                         ene_mind::PerfKind::Motion => {
-                            let layer = cue
-                                .motion_layer
-                                .map_or_else(|| "full".to_string(), |l| l.as_str().to_string());
+                            let layer = cue.motion_layer.unwrap_or(ene_config::MotionLayer::Full);
                             let priority = cue_source_to_u8(source);
                             let _ = event_tx.send(AppEvent::MotionCue {
                                 name: cue.name,

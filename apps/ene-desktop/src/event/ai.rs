@@ -43,10 +43,14 @@ pub use PerformanceCue as EmoteToken;
 
 /// Motion cue routed from [`ene_runtime::EneEvent::Performance`] when
 /// the cue kind is [`PerfKind::Motion`] (#133).
+///
+/// `layer` carries the canonical [`ene_config::MotionLayer`]; the consumer
+/// system converts it to `ene_vrm::MotionLayer` before feeding the
+/// [`MotionLayerState`](crate::resource::motion_layer::MotionLayerState).
 #[derive(Message, Debug, Clone)]
 pub struct MotionCommand {
     pub name: String,
-    pub layer: String,
+    pub layer: ene_config::MotionLayer,
     pub priority: u8,
     pub duration: f32,
 }

@@ -27,7 +27,13 @@
 use std::collections::HashMap;
 
 use crate::animation::{RepeatMode, VrmaPlayer};
-/// Motion body layer classification.
+/// Motion body layer classification (rendering-side mirror).
+///
+/// The canonical definition lives in `ene-config` (`ene_config::MotionLayer`).
+/// `ene-vrm` is a rendering-only crate and must not depend on `ene-config`,
+/// and the orphan rule prevents a cross-crate `From` impl, so this crate
+/// keeps its own mirror with identical variants. Hosts (e.g. `ene-desktop`)
+/// convert between the two by matching variants directly at the boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MotionLayer {

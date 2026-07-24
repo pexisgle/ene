@@ -319,6 +319,42 @@ fn question_draft_default_is_blank() {
 }
 
 #[test]
+fn motion_command_routes_typed_layer_to_vrm() {
+    use crate::resource::motion_layer::MotionLayerState;
+    use crate::system::ui_consumers::apply_motion_commands_system;
+
+    let mut world = World::new();
+    world.init_resource::<MotionLayerState>();
+    world.init_resource::<Messages<MotionCommand>>();
+
+    // A `Lower` motion should land on the VRM lower layer (and loop).
+    world.write_message(MotionCommand {
+        name: "idle".into(),
+        layer: ene_config::MotionLayer::Lower,
+        priority: 3,
+        duration: 0.0,
+    });
+    let mut schedule = Schedule::default();
+    schedule.add_systems(apply_motion_commands_system);
+    schedule.run(&mut world);
+
+    // Cancel the upper layer: the lower motion must survive, proving the
+    // typed `ene_config::MotionLayer::Lower` mapped to `ene_vrm::Lower`.
+    world
+        .resource_mut::<MotionLayerState>()
+        .cancel_motion(ene_vrm::MotionLayer::Upper);
+    let frame = world.resource::<MotionLayerState>().compose();
+    assert_eq!(frame.active_motions, vec!["idle".to_string()]);
+
+    // Cancel the lower layer: the motion is now cleared.
+    world
+        .resource_mut::<MotionLayerState>()
+        .cancel_motion(ene_vrm::MotionLayer::Lower);
+    let frame = world.resource::<MotionLayerState>().compose();
+    assert!(frame.active_motions.is_empty());
+}
+
+#[test]
 fn apply_emotions_system_drains_bevy_queue_into_pipeline() {
     use crate::component::ui::UiEmotionQueue;
     use crate::system::ui_consumers::apply_emotions_system;

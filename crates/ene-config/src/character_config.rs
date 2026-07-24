@@ -26,6 +26,19 @@ impl MotionLayer {
             Self::Full => "full",
         }
     }
+
+    /// Parse a stable label (the inverse of [`as_str`](Self::as_str)).
+    ///
+    /// Returns `None` for unknown labels so callers can decide on a
+    /// fallback rather than silently coercing to a specific layer.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "upper" => Some(Self::Upper),
+            "lower" => Some(Self::Lower),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
 }
 
 /// A single motion entry with a display name and relative file path.
@@ -143,5 +156,23 @@ impl CharacterConfig {
         })?;
         crate::config::set_nested(&mut self.extra, T::path(), val)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MotionLayer;
+
+    #[test]
+    fn motion_layer_label_round_trips() {
+        for layer in [MotionLayer::Upper, MotionLayer::Lower, MotionLayer::Full] {
+            assert_eq!(MotionLayer::from_label(layer.as_str()), Some(layer));
+        }
+    }
+
+    #[test]
+    fn motion_layer_from_label_rejects_unknown() {
+        assert_eq!(MotionLayer::from_label("sideways"), None);
+        assert_eq!(MotionLayer::from_label(""), None);
     }
 }

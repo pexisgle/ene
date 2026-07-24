@@ -33,9 +33,3 @@ pub fn select_language(lang: Language) {
         let _ = localizer.select(&requested_languages);
     }
 }
-
-#[expect(
-    unused_imports,
-    reason = "convenience re-export of i18n_embed_fl::fl macro"
-)]
-pub use i18n_embed_fl::fl;

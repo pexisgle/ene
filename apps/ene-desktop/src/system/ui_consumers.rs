@@ -220,6 +220,20 @@ pub fn apply_expression_commands_system(
     }
 }
 
+/// Converts the canonical [`ene_config::MotionLayer`] (carried on performance
+/// cues and cancel scopes) into the rendering-side [`ene_vrm::MotionLayer`].
+///
+/// `ene-vrm` is rendering-only and cannot depend on `ene-config`, and the
+/// orphan rule blocks a cross-crate `From` impl, so the desktop bridges the
+/// two mirrors here by matching variants directly (#133).
+fn to_vrm_layer(layer: ene_config::MotionLayer) -> ene_vrm::MotionLayer {
+    match layer {
+        ene_config::MotionLayer::Upper => ene_vrm::MotionLayer::Upper,
+        ene_config::MotionLayer::Lower => ene_vrm::MotionLayer::Lower,
+        ene_config::MotionLayer::Full => ene_vrm::MotionLayer::Full,
+    }
+}
+
 /// Applies [`CancelCommand`] to clear expression or motion state (#132).
 pub fn apply_cancel_system(
     mut events: MessageReader<CancelCommand>,
@@ -241,12 +255,12 @@ pub fn apply_cancel_system(
                 state.cancel_all_motions();
             }
             scope if scope.starts_with("motion:") => {
-                let layer = match scope.strip_prefix("motion:") {
-                    Some("upper") => ene_vrm::MotionLayer::Upper,
-                    Some("lower") => ene_vrm::MotionLayer::Lower,
-                    _ => ene_vrm::MotionLayer::Full,
-                };
-                state.cancel_motion(layer);
+                let label = scope.strip_prefix("motion:").unwrap_or_default();
+                // Unknown layer labels fall back to `Full` (preempts
+                // everything), matching the pre-typing behavior.
+                let layer = ene_config::MotionLayer::from_label(label)
+                    .unwrap_or(ene_config::MotionLayer::Full);
+                state.cancel_motion(to_vrm_layer(layer));
             }
             _ => {
                 tracing::debug!(
@@ -260,16 +274,16 @@ pub fn apply_cancel_system(
 }
 
 /// Feeds [`MotionCommand`] messages into the [`MotionLayerState`] (#133).
+///
+/// Converts the canonical [`ene_config::MotionLayer`] carried on the command
+/// into the rendering-side [`ene_vrm::MotionLayer`] via [`to_vrm_layer`] — no
+/// string round-trip.
 pub fn apply_motion_commands_system(
     mut events: MessageReader<MotionCommand>,
     mut state: ResMut<MotionLayerState>,
 ) {
     for cmd in events.read() {
-        let layer = match cmd.layer.as_str() {
-            "upper" => ene_vrm::MotionLayer::Upper,
-            "lower" => ene_vrm::MotionLayer::Lower,
-            _ => ene_vrm::MotionLayer::Full,
-        };
+        let layer = to_vrm_layer(cmd.layer);
         let repeat = match layer {
             ene_vrm::MotionLayer::Lower => ene_vrm::RepeatMode::Loop,
             _ => ene_vrm::RepeatMode::Once,
