@@ -26,7 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: nixbuild/nix-quick-install-action@v30
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
@@ -40,7 +39,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: nixbuild/nix-quick-install-action@v30
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
