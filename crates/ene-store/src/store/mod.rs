@@ -255,6 +255,10 @@ pub struct NaturalDecayReport {
 /// conversion layer covers all readers with a single choke point.
 fn strip_tags_footer(content: &str) -> &str {
     match content.find("\n\n<!-- ene:tags ") {
+        #[expect(
+            clippy::string_slice,
+            reason = "find(...) matches ASCII string '\\n\\n<!-- ene:tags ' guaranteeing valid UTF-8 boundary"
+        )]
         Some(pos) => &content[..pos],
         None => content,
     }
