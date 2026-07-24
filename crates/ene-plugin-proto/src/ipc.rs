@@ -273,12 +273,24 @@ pub async fn read_plugin_request<R: AsyncReadExt + Unpin>(
 }
 
 /// Writes a [`PluginIpcRequest`] as 4-byte LE length-prefixed JSON.
+///
+/// # Errors
+///
+/// Returns [`PluginError::Protocol`] if the serialized message exceeds
+/// [`MAX_MESSAGE_SIZE`], preventing oversized messages from being silently
+/// sent to the peer.
 pub async fn write_plugin_request<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     req: &PluginIpcRequest,
 ) -> Result<(), PluginError> {
     let json = serde_json::to_vec(req)
         .map_err(|e| PluginError::protocol(format!("Failed to serialize PluginIpcRequest: {e}")))?;
+    if json.len() > MAX_MESSAGE_SIZE {
+        return Err(PluginError::protocol(format!(
+            "Request size {} exceeds maximum {MAX_MESSAGE_SIZE}",
+            json.len()
+        )));
+    }
     let len = json.len() as u32;
     writer.write_all(&len.to_le_bytes()).await?;
     writer.write_all(&json).await?;
@@ -289,6 +301,17 @@ pub async fn write_plugin_request<W: AsyncWriteExt + Unpin>(
 /// Reads a [`PluginIpcResponse`] as 4-byte LE length-prefixed JSON.
 ///
 /// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed.
+///
+/// # Correlation invariant
+///
+/// Non-streaming responses (`Ack`, `Pong`, `ConfigSchema`, `CallResult`,
+/// `DeferredAccepted`, `DeferredStatus`, `ChatCompletionResult`,
+/// `EmbedBatchResult`, `Error`) carry **no `request_id`**, so the reader
+/// cannot correlate a response to a specific request. Callers must therefore
+/// ensure that **at most one non-streaming request is in-flight per
+/// connection** at any time. Streaming responses (`StreamChunk`, `StreamEnd`,
+/// `StreamError`) do carry a `request_id` and are not subject to this
+/// constraint.
 pub async fn read_plugin_response<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<Option<PluginIpcResponse>, PluginError> {
@@ -316,6 +339,12 @@ pub async fn read_plugin_response<R: AsyncReadExt + Unpin>(
 }
 
 /// Writes a [`PluginIpcResponse`] as 4-byte LE length-prefixed JSON.
+///
+/// # Errors
+///
+/// Returns [`PluginError::Protocol`] if the serialized message exceeds
+/// [`MAX_MESSAGE_SIZE`], preventing oversized messages from being silently
+/// sent to the peer.
 pub async fn write_plugin_response<W: AsyncWriteExt + Unpin>(
     writer: &mut W,
     resp: &PluginIpcResponse,
@@ -323,6 +352,12 @@ pub async fn write_plugin_response<W: AsyncWriteExt + Unpin>(
     let json = serde_json::to_vec(resp).map_err(|e| {
         PluginError::protocol(format!("Failed to serialize PluginIpcResponse: {e}"))
     })?;
+    if json.len() > MAX_MESSAGE_SIZE {
+        return Err(PluginError::protocol(format!(
+            "Response size {} exceeds maximum {MAX_MESSAGE_SIZE}",
+            json.len()
+        )));
+    }
     let len = json.len() as u32;
     writer.write_all(&len.to_le_bytes()).await?;
     writer.write_all(&json).await?;
@@ -771,5 +806,59 @@ mod tests {
                 deferred: false,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn read_request_rejects_oversized_message() {
+        let oversized_len = (MAX_MESSAGE_SIZE + 1) as u32;
+        let mut buf = oversized_len.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[0u8; 16]);
+        let mut cursor: &[u8] = &buf;
+        let result = read_plugin_request(&mut cursor).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    #[tokio::test]
+    async fn read_response_rejects_oversized_message() {
+        let oversized_len = (MAX_MESSAGE_SIZE + 1) as u32;
+        let mut buf = oversized_len.to_le_bytes().to_vec();
+        buf.extend_from_slice(&[0u8; 16]);
+        let mut cursor: &[u8] = &buf;
+        let result = read_plugin_response(&mut cursor).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+    }
+
+    #[tokio::test]
+    async fn write_request_rejects_oversized_message() {
+        let big_arguments = "x".repeat(MAX_MESSAGE_SIZE + 1);
+        let req = PluginIpcRequest::CallTool {
+            name: "test".into(),
+            arguments: big_arguments,
+            deferred: false,
+        };
+        let mut buf = Vec::new();
+        let result = write_plugin_request(&mut buf, &req).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+        assert!(buf.is_empty(), "nothing must be written on rejection");
+    }
+
+    #[tokio::test]
+    async fn write_response_rejects_oversized_message() {
+        let resp = PluginIpcResponse::ChatCompletionResult {
+            request_id: "big-1".into(),
+            content: "x".repeat(MAX_MESSAGE_SIZE + 1),
+        };
+        let mut buf = Vec::new();
+        let result = write_plugin_response(&mut buf, &resp).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, PluginError::Protocol(_)));
+        assert!(err.to_string().contains("exceeds maximum"));
+        assert!(buf.is_empty(), "nothing must be written on rejection");
     }
 }

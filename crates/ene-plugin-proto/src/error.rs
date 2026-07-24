@@ -1,5 +1,7 @@
 //! Plugin error types.
 
+use crate::tool_error::ToolError;
+
 /// Errors that can occur during plugin IPC communication and provider
 /// operations.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +25,20 @@ pub enum PluginError {
     /// An operation timed out.
     #[error("timeout: {0}")]
     Timeout(String),
+
+    /// An I/O error occurred on the underlying IPC transport.
+    ///
+    /// Unlike [`Transport`](Self::Transport), this variant preserves the
+    /// original [`std::io::Error`] as the error source.
+    #[error("I/O error: {0}")]
+    Io(#[source] std::io::Error),
+
+    /// A structured tool error surfaced through the plugin boundary.
+    ///
+    /// Preserves the original [`ToolError`] as the error source rather than
+    /// flattening it into a transport error.
+    #[error("tool error: {0}")]
+    Tool(#[source] ToolError),
 }
 
 impl PluginError {
@@ -54,13 +70,13 @@ impl PluginError {
 
 impl From<std::io::Error> for PluginError {
     fn from(e: std::io::Error) -> Self {
-        Self::Transport(e.to_string())
+        Self::Io(e)
     }
 }
 
-impl From<crate::tool_error::ToolError> for PluginError {
-    fn from(e: crate::tool_error::ToolError) -> Self {
-        Self::Transport(e.to_string())
+impl From<ToolError> for PluginError {
+    fn from(e: ToolError) -> Self {
+        Self::Tool(e)
     }
 }
 
@@ -100,17 +116,21 @@ mod tests {
 
     #[test]
     fn plugin_error_from_io_error() {
+        use std::error::Error;
         let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe broke");
         let err: PluginError = io_err.into();
-        assert!(matches!(err, PluginError::Transport(_)));
+        assert!(matches!(err, PluginError::Io(_)));
         assert!(err.to_string().contains("pipe broke"));
+        assert!(err.source().is_some(), "source must be preserved");
     }
 
     #[test]
     fn plugin_error_from_tool_error() {
+        use std::error::Error;
         let tool_err = crate::ToolError::ipc_transport("lost connection");
         let err: PluginError = tool_err.into();
-        assert!(matches!(err, PluginError::Transport(_)));
+        assert!(matches!(err, PluginError::Tool(_)));
         assert!(err.to_string().contains("lost connection"));
+        assert!(err.source().is_some(), "source must be preserved");
     }
 }
