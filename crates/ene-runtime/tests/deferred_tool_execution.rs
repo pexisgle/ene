@@ -19,7 +19,7 @@ use ene_ai::{
     LlmToolCallChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
-use ene_plugin_host::{DeferredCallResult, ToolHostError, ToolRegistry};
+use ene_plugin_host::{DeferredCallResult, PluginHostError, ToolRegistry};
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{DeferredToolTask, EneEvent, TerminalReason};
 use ene_store::MemoryStore;
@@ -131,8 +131,8 @@ impl ToolRegistry for BackgroundRegistry {
         }]
     }
 
-    async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, ToolHostError> {
-        Err(ToolHostError::ExecutionFailed {
+    async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, PluginHostError> {
+        Err(PluginHostError::ExecutionFailed {
             message: "should use call_tool_deferred".into(),
         })
     }
@@ -141,14 +141,14 @@ impl ToolRegistry for BackgroundRegistry {
         &self,
         name: &str,
         _arguments: &str,
-    ) -> Result<DeferredCallResult, ToolHostError> {
+    ) -> Result<DeferredCallResult, PluginHostError> {
         if name == "background.sleep" {
             self.deferred_calls.fetch_add(1, Ordering::SeqCst);
             Ok(DeferredCallResult::Deferred {
                 task_id: "task-456".into(),
             })
         } else {
-            Err(ToolHostError::ExecutionFailed {
+            Err(PluginHostError::ExecutionFailed {
                 message: format!("unknown tool: {name}"),
             })
         }

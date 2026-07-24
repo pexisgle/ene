@@ -5,7 +5,7 @@ use ene_ai::{LlmMessage, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 use ene_config::EneConfig;
 use ene_mind::ConversationSession;
 use ene_mind::memory_writer::{ToolResultSummary, tool_grounding};
-use ene_plugin_host::ToolHostError;
+use ene_plugin_host::PluginHostError;
 use ene_plugin_proto::ToolError;
 use ene_tool_rag::ToolRag;
 use std::collections::HashMap;
@@ -353,7 +353,7 @@ pub(crate) async fn perform_tool_executions(
                 }
                 Ok(Ok(ene_plugin_host::DeferredCallResult::Sync(res))) => Ok(res),
                 Ok(Err(e)) => Err(e),
-                Err(_) => Err(ToolHostError::ExecutionFailed {
+                Err(_) => Err(PluginHostError::ExecutionFailed {
                     message: format!(
                         "Tool '{}' timed out after {:.2} seconds",
                         name,
@@ -366,7 +366,7 @@ pub(crate) async fn perform_tool_executions(
             match tokio::time::timeout(tool_timeout, ctx.registry.call_tool(&name, &args)).await {
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
-                Err(_) => Err(ToolHostError::ExecutionFailed {
+                Err(_) => Err(PluginHostError::ExecutionFailed {
                     message: format!(
                         "Tool '{}' timed out after {:.2} seconds",
                         name,
@@ -387,7 +387,7 @@ pub(crate) async fn perform_tool_executions(
         let mut audit_target = String::new();
         for _ in 0..MAX_PENDING_ROUNDS {
             match &result {
-                Err(ToolHostError::Protocol(ToolError::PermissionRequired {
+                Err(PluginHostError::Protocol(ToolError::PermissionRequired {
                     request_id,
                     action,
                     target,
@@ -462,7 +462,7 @@ pub(crate) async fn perform_tool_executions(
                         }
                         _ => {
                             audit_decision = ene_store::AuditDecision::Denied;
-                            result = Err(ToolHostError::Protocol(ToolError::permission_denied(
+                            result = Err(PluginHostError::Protocol(ToolError::permission_denied(
                                 "Permission denied by user".to_string(),
                             )));
                             // Decision resolved; no further
@@ -471,7 +471,7 @@ pub(crate) async fn perform_tool_executions(
                         }
                     }
                 }
-                Err(ToolHostError::Protocol(ToolError::UserInputRequired {
+                Err(PluginHostError::Protocol(ToolError::UserInputRequired {
                     request_id,
                     prompt,
                 })) => {
@@ -500,7 +500,7 @@ pub(crate) async fn perform_tool_executions(
                             result = ctx.registry.call_tool(&name, &new_args).await;
                         }
                         Ok(UserInputResponse::Cancel) | Err(_) => {
-                            result = Err(ToolHostError::ExecutionFailed {
+                            result = Err(PluginHostError::ExecutionFailed {
                                 message: "User cancelled the question".to_string(),
                             });
                             // Decision resolved; no further
@@ -713,7 +713,7 @@ pub(crate) async fn execute_system_search_tool(
     registry: &dyn ene_plugin_host::ToolRegistry,
     tool_rag: Option<&ToolRag>,
     query: &str,
-) -> Result<String, ToolHostError> {
+) -> Result<String, PluginHostError> {
     if query.is_empty() {
         return Ok("Please provide a search query.".to_string());
     }
@@ -780,7 +780,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
-            ) -> Result<String, ene_plugin_host::ToolHostError> {
+            ) -> Result<String, ene_plugin_host::PluginHostError> {
                 Ok(String::new())
             }
         }
@@ -812,7 +812,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
-            ) -> Result<String, ene_plugin_host::ToolHostError> {
+            ) -> Result<String, ene_plugin_host::PluginHostError> {
                 Ok("fail".to_string())
             }
         }
@@ -930,7 +930,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
-            ) -> Result<String, ToolHostError> {
+            ) -> Result<String, PluginHostError> {
                 Ok(self.output.clone())
             }
 
@@ -1017,10 +1017,10 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
-            ) -> Result<String, ToolHostError> {
+            ) -> Result<String, PluginHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
-                    Err(ToolHostError::Protocol(ToolError::PermissionRequired {
+                    Err(PluginHostError::Protocol(ToolError::PermissionRequired {
                         request_id: self.request_id.clone(),
                         action: "fs.delete".to_string(),
                         target: "/tmp/x".to_string(),
@@ -1139,16 +1139,16 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
-            ) -> Result<String, ToolHostError> {
+            ) -> Result<String, PluginHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 match n {
-                    0 => Err(ToolHostError::Protocol(ToolError::PermissionRequired {
+                    0 => Err(PluginHostError::Protocol(ToolError::PermissionRequired {
                         request_id: self.perm_id.clone(),
                         action: "fs.write".to_string(),
                         target: "/tmp/x".to_string(),
                         description: "write file".to_string(),
                     })),
-                    1 => Err(ToolHostError::Protocol(ToolError::UserInputRequired {
+                    1 => Err(PluginHostError::Protocol(ToolError::UserInputRequired {
                         request_id: self.input_id.clone(),
                         prompt: ene_plugin_proto::UserInputPrompt::new(vec![
                             ene_plugin_proto::QuestionItem {

@@ -13,7 +13,7 @@ use ene_ai::{
 };
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_mind::MindConfig;
-use ene_plugin_host::{ToolHostError, ToolRegistry};
+use ene_plugin_host::{PluginHostError, ToolRegistry};
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{EneEvent, TerminalReason, TurnOrigin};
 use ene_store::MemoryStore;
@@ -87,8 +87,8 @@ impl ToolRegistry for EmptyRegistry {
         vec![]
     }
 
-    async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, ToolHostError> {
-        Err(ToolHostError::ExecutionFailed {
+    async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, PluginHostError> {
+        Err(PluginHostError::ExecutionFailed {
             message: "not used".into(),
         })
     }

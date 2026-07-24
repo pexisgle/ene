@@ -578,6 +578,11 @@ pub struct EneHandle {
     /// graceful plugin shutdown (#247). `None` when plugin startup failed
     /// or no plugins were discovered.
     plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
+    /// Join handle for the plugin health → diagnostics bridge task (#238).
+    ///
+    /// Shared across handle clones. Aborted during plugin host shutdown so
+    /// the bridge does not outlive the host whose events it forwards.
+    health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for EneHandle {
@@ -601,6 +606,7 @@ impl Clone for EneHandle {
             turn_gate: Arc::clone(&self.turn_gate),
             actor_handle: Arc::clone(&self.actor_handle),
             plugin_host: Arc::clone(&self.plugin_host),
+            health_bridge_handle: Arc::clone(&self.health_bridge_handle),
         }
     }
 }
@@ -711,15 +717,18 @@ impl EneHandle {
             };
 
         // Bridge plugin health events into the diagnostics channel (#238).
+        // The task's `JoinHandle` is retained so it can be aborted during
+        // plugin host shutdown rather than leaking past the host's lifetime.
+        let mut health_bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
         if let Some(host) = plugin_host.as_mut()
             && let Some(mut health_rx) = host.take_health_receiver()
         {
             let diag_tx = diag_tx.clone();
-            tokio::spawn(async move {
+            health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
-            });
+            }));
         }
 
         let registry = build_tool_registry(plugin_host.as_ref())?;
@@ -815,6 +824,11 @@ impl EneHandle {
             .as_ref()
             .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
 
+        // Share the plugin host and its health-bridge task between the handle
+        // (for shutdown) and the actor (for Features-update reconfiguration).
+        let plugin_host = Arc::new(tokio::sync::Mutex::new(plugin_host));
+        let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
+
         let actor = EneActor {
             cmd_rx,
             event_tx: event_tx.clone(),
@@ -860,6 +874,8 @@ impl EneHandle {
                 .unwrap_or(600),
             tts_provider,
             plugin_tool_registries,
+            plugin_host: Arc::clone(&plugin_host),
+            health_bridge_handle: Arc::clone(&health_bridge_handle),
         };
         let join = tokio::spawn(actor.run());
 
@@ -870,7 +886,8 @@ impl EneHandle {
             diagnostics,
             turn_gate,
             actor_handle: Arc::new(tokio::sync::Mutex::new(Some(join))),
-            plugin_host: Arc::new(tokio::sync::Mutex::new(plugin_host)),
+            plugin_host,
+            health_bridge_handle,
         })
     }
 
@@ -961,11 +978,19 @@ impl EneHandle {
     ///
     /// Called from [`EneHandle::shutdown`] after the actor drains and from
     /// [`Drop`] when the last handle clone is released. Only the first caller
-    /// performs the shutdown; subsequent calls are no-ops.
+    /// performs the shutdown; subsequent calls are no-ops. Also aborts the
+    /// plugin health → diagnostics bridge task so it does not outlive the
+    /// host whose events it forwards (#238).
     async fn shutdown_plugin_host(&self) {
         let mut guard = self.plugin_host.lock().await;
         if let Some(mut host) = guard.take() {
             host.shutdown().await;
+        }
+        drop(guard);
+
+        let mut bridge = self.health_bridge_handle.lock().await;
+        if let Some(handle) = bridge.take() {
+            handle.abort();
         }
     }
 
@@ -1200,10 +1225,19 @@ impl Drop for EneHandle {
             // synchronous backstop regardless.
             if Arc::strong_count(&self.plugin_host) == 1 {
                 let plugin_host = Arc::clone(&self.plugin_host);
+                let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
                 let shutdown = async move {
                     let mut guard = plugin_host.lock().await;
                     if let Some(mut host) = guard.take() {
                         host.shutdown().await;
+                    }
+                    drop(guard);
+
+                    // Abort the health → diagnostics bridge so it does not
+                    // outlive the host whose events it forwards (#238).
+                    let mut bridge = health_bridge_handle.lock().await;
+                    if let Some(handle) = bridge.take() {
+                        handle.abort();
                     }
                 };
                 match tokio::runtime::Handle::try_current() {
@@ -1296,6 +1330,15 @@ struct EneActor {
     /// Plugin-contributed tool registries, re-merged when the tool registry is
     /// rebuilt after a Features update (#247).
     plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
+    /// Shared plugin host manager handle. Held by the actor so a Features
+    /// update that changes the enabled plugin set can restart the host with
+    /// the new configuration (E1). Shared with [`EneHandle`] so shutdown
+    /// tears down whichever host is currently live.
+    plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
+    /// Shared handle to the plugin health → diagnostics bridge task. Kept in
+    /// sync when the plugin host is restarted so shutdown aborts the live
+    /// bridge rather than a stale one (#238).
+    health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a
@@ -1704,6 +1747,123 @@ impl EneActor {
             handle.abort();
         }
         self.proactive_decision_rx = None;
+    }
+
+    /// Restarts the plugin host to apply a changed enabled-plugin set (E1).
+    ///
+    /// Shuts down the live host (stopping disabled plugins), spawns fresh DB
+    /// IPC servers for the newly-detected plugin set, starts a new host with
+    /// the updated configuration, re-registers any plugin-provided LLM
+    /// factories, re-bridges health events into diagnostics, and rebuilds the
+    /// tool registry from the new host.
+    ///
+    /// Remaining limitations:
+    /// - Plugin-provided LLM factories are re-registered into the global
+    ///   [`LlmProviderRegistry`], but factories from the previous host are not
+    ///   unregistered (the registry has no deregistration API); a re-registered
+    ///   kind simply replaces its entry.
+    /// - DB IPC servers spawned for the previous host are not torn down; the
+    ///   new set replaces them on the same per-plugin socket paths (the stale
+    ///   socket file is removed before re-binding), so at most one live server
+    ///   serves each plugin.
+    async fn reconfigure_plugin_host(&mut self) {
+        // Stop the previous host (and its health bridge) first.
+        {
+            let mut guard = self.plugin_host.lock().await;
+            if let Some(mut host) = guard.take() {
+                host.shutdown().await;
+            }
+            drop(guard);
+
+            let mut bridge = self.health_bridge_handle.lock().await;
+            if let Some(handle) = bridge.take() {
+                handle.abort();
+            }
+        }
+
+        // Spawn DB IPC servers for the (possibly changed) plugin set.
+        let db_tokens =
+            match spawn_db_ipc_servers(&self.config, self.session.memory.memory_store.as_ref()) {
+                Ok(tokens) => tokens,
+                Err(e) => {
+                    tracing::warn!(
+                        component = "EneActor",
+                        error = %e,
+                        "Failed to spawn DB IPC servers during plugin reconfiguration; \
+                         continuing without plugin DB access"
+                    );
+                    HashMap::new()
+                }
+            };
+
+        // Start the new host with the updated configuration.
+        let mut new_host =
+            match ene_plugin_host::PluginHostManager::start(&self.config, db_tokens).await {
+                Ok(host) => Some(host),
+                Err(e) => {
+                    tracing::warn!(
+                        component = "EneActor",
+                        error = %e,
+                        "Plugin host failed to restart after Features update; \
+                         continuing without plugins"
+                    );
+                    None
+                }
+            };
+
+        // Re-register plugin-provided LLM factories (replaces prior entries).
+        if let Some(host) = new_host.as_ref() {
+            for (kind, factory) in host.llm_factories() {
+                tracing::info!(
+                    component = "EneActor",
+                    kind = %kind,
+                    "Re-registered plugin-provided LLM provider factory after Features update"
+                );
+                LlmProviderRegistry::register(Arc::clone(factory));
+            }
+        }
+
+        // Re-bridge health events into diagnostics with a fresh task.
+        let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
+        if let Some(host) = new_host.as_mut()
+            && let Some(mut health_rx) = host.take_health_receiver()
+        {
+            let diag_tx = self.diag_tx.clone();
+            bridge_handle = Some(tokio::spawn(async move {
+                while let Some(event) = health_rx.recv().await {
+                    emit_diag(&diag_tx, plugin_health_event_to_diag(event));
+                }
+            }));
+        }
+
+        // Rebuild the tool registry from the new host's registries.
+        let registries = new_host
+            .as_ref()
+            .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
+        let registry_count = registries.len();
+        match CompositeToolRegistry::try_new(registries.clone()) {
+            Ok(composite) => {
+                self.registry = Arc::new(composite);
+                self.plugin_tool_registries = registries;
+                tracing::info!(
+                    component = "EneActor",
+                    tool_registries = registry_count,
+                    "Plugin host reconfigured and tool registry rebuilt after Features update"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    component = "EneActor",
+                    error = %e,
+                    "Failed to rebuild tool registry after plugin reconfiguration"
+                );
+            }
+        }
+
+        // Publish the new host and bridge handle to the shared slots so the
+        // handle's shutdown path tears down the live instances.
+        *self.plugin_host.lock().await = new_host;
+        *self.health_bridge_handle.lock().await = bridge_handle;
     }
 
     async fn ensure_proactive_llm(&mut self) -> Result<(), String> {
@@ -2157,22 +2317,12 @@ impl EneActor {
                 self.abort_proactive_decision();
 
                 if plugins_changed {
-                    match CompositeToolRegistry::try_new(self.plugin_tool_registries.clone()) {
-                        Ok(composite) => {
-                            self.registry = Arc::new(composite);
-                            tracing::info!(
-                                component = "EneActor",
-                                "Tool registry rebuilt after Features update"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                component = "EneActor",
-                                error = %e,
-                                "Failed to rebuild tool registry after Features update"
-                            );
-                        }
-                    }
+                    // The enabled plugin set changed: restart the plugin host
+                    // so newly-enabled plugins are spawned and disabled ones
+                    // are stopped, then rebuild the tool registry from the new
+                    // host (E1). The previous behavior rebuilt a static list of
+                    // already-live registries, which was effectively a no-op.
+                    self.reconfigure_plugin_host().await;
                 }
                 true
             }
@@ -2879,6 +3029,14 @@ fn plugin_enable_set_changed(
 /// Returns a map of plugin name → auth token. The tokens are passed to
 /// [`ene_plugin_host::PluginHostManager::start`] which hands them to the
 /// tool binaries via `SandboxConfigData::db_auth_token`.
+///
+/// Token generation is driven by the **detected plugin set** (the binaries
+/// actually discovered on disk) rather than by `plugins.list` config keys.
+/// The host manager discovers plugins by scanning for `ene-plugin-{name}`
+/// binaries and only consults config to skip explicitly-disabled names, so
+/// keying tokens off config would orphan DB servers (config key with no
+/// matching binary) or starve plugins of tokens (binary with no config
+/// entry). Mirroring the manager's discovery here keeps the two sets aligned.
 fn spawn_db_ipc_servers(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
@@ -2894,6 +3052,12 @@ fn spawn_db_ipc_servers(
             .get_section::<ene_plugin_host::PluginConfig>()
             .unwrap_or_default();
 
+        // When the plugin system is disabled the host manager spawns nothing,
+        // so no DB servers are needed; spawning them anyway would orphan them.
+        if !plugin_config.enabled {
+            return Ok(db_tokens);
+        }
+
         let db = store.connection().clone();
 
         let socket_dir = ene_config::paths::tool_socket_dir();
@@ -2903,8 +3067,13 @@ fn spawn_db_ipc_servers(
             })
         })?;
 
-        for (name, entry) in &plugin_config.list {
-            if !entry.enable {
+        for name in discover_plugin_names() {
+            // Skip plugins explicitly disabled in configuration, mirroring
+            // `PluginHostManager::start`'s enable filter (a discovered binary
+            // with no config entry is enabled by default).
+            if let Some(entry) = plugin_config.list.get(&name)
+                && !entry.enable
+            {
                 continue;
             }
 
@@ -2961,6 +3130,76 @@ fn spawn_db_ipc_servers(
     }
 
     Ok(db_tokens)
+}
+
+/// Discovers plugin binary names by scanning the builtin and user plugin
+/// directories for executables following the `ene-plugin-{name}` convention.
+///
+/// This intentionally mirrors `ene_plugin_host::manager::discover_plugins`
+/// (which is private to that crate) so that DB token generation keys off the
+/// exact same set of plugins the host manager will actually spawn. Keeping the
+/// two discovery routines in lockstep is what prevents config-key ↔ binary-name
+/// mismatches from orphaning DB servers or starving plugins of tokens.
+#[cfg(any(unix, windows))]
+fn discover_plugin_names() -> Vec<String> {
+    let mut names = Vec::new();
+    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
+
+    for dir in [
+        ene_config::builtin_plugins_dir(),
+        ene_config::user_plugins_dir(),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || !is_plugin_executable(&path) {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            // Strip the exe suffix before matching the plugin prefix.
+            let stem = file_name
+                .strip_suffix(exe_suffix)
+                .unwrap_or(file_name)
+                .to_string();
+
+            // Only the `ene-plugin-{name}` convention is accepted; a bare
+            // `{name}` fallback is intentionally omitted to avoid spawning
+            // unrelated build artifacts (see the manager's discovery docs).
+            let Some(plugin_name) = stem.strip_prefix("ene-plugin-") else {
+                continue;
+            };
+            let plugin_name = plugin_name.to_string();
+
+            if !plugin_name.is_empty() && !names.contains(&plugin_name) {
+                names.push(plugin_name);
+            }
+        }
+    }
+
+    names
+}
+
+/// Returns `true` when `path` has an executable permission bit set.
+///
+/// On Unix this checks the mode bits; on non-Unix targets every existing file
+/// is considered executable (the `.exe` suffix already gates matching there).
+#[cfg(any(unix, windows))]
+fn is_plugin_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        true
+    }
 }
 
 /// Builds the active composite tool registry from plugin-contributed registries.
