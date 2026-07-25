@@ -1,9 +1,7 @@
-use crate::ToolProvider;
-use crate::sandbox::SandboxConfigData;
-use crate::tool_error::ToolError;
-use crate::tool_ipc::CallContext;
-use crate::tool_types::{ToolName, ToolRagProfile, ToolSpec};
 use async_trait::async_trait;
+use ene_plugin_proto::{
+    CallContext, SandboxConfigData, ToolError, ToolName, ToolProvider, ToolRagProfile, ToolSpec,
+};
 use std::collections::HashMap;
 
 /// Registry that aggregates multiple `ToolProvider`s and dispatches by tool name.
@@ -132,7 +130,6 @@ impl ToolProvider for HostRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_types::ToolName;
     use std::sync::{Arc, Mutex};
 
     struct MockProvider {

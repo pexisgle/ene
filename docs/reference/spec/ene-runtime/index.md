@@ -8,7 +8,7 @@ The `ene-runtime` crate provides the top-level public interface (facade) for con
 
 ### Physical Dependencies (`Cargo.toml`)
 - **External Dependencies**: `tokio`, `tokio-stream`, `tokio-util`, `serde`, `serde_json`, `chrono`, `tracing`, `async-trait`
-- **Workspace Dependencies**: `ene-ai`, `ene-config`, `ene-mind`, `ene-store`, `ene-tool-host`, `ene-tool-proto`, `ene-tool-rag`
+- **Workspace Dependencies**: `ene-ai`, `ene-config`, `ene-mind`, `ene-store`, `ene-plugin-host`, `ene-plugin-proto`, `ene-tool-rag`
 - **Architectural Rules**: No other crate can depend on `ene-runtime`. To avoid circular references, lower-level domain crates (e.g. `ene-mind` and `ene-store`) must not import `ene-runtime`.
 
 ### Logical Isolation

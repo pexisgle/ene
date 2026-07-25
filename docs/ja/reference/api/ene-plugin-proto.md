@@ -1,13 +1,13 @@
-# `ene-tool-proto` — APIリファレンス
+# `ene-plugin-proto` — APIリファレンス
 
-> **クレート:** `ene-tool-proto`
+> **クレート:** `ene-plugin-proto`
 > **役割:** Eneツールシステムの IPC ワイヤープロトコル — `ToolProvider`、`ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`、およびトランスポートヘルパー。
 
 ---
 
 ## 概要
 
-`ene-tool-proto` は、ホストランタイム（`ene-runtime` / `ene-tool-host`）とスタンドアロンのツールバイナリとの間でプロセス境界を越えるすべての型とヘルパーを定義します。IPC チャンネルの両サイドはこのクレートに依存しています。`ene-runtime` への依存がないため、ツールバイナリは完全なランタイムを引き込まずにこのクレートをリンクできます。
+`ene-plugin-proto` は、ホストランタイム（`ene-runtime` / `ene-plugin-host`）とスタンドアロンのツールバイナリとの間でプロセス境界を越えるすべての型とヘルパーを定義します。IPC チャンネルの両サイドはこのクレートに依存しています。`ene-runtime` への依存がないため、ツールバイナリは完全なランタイムを引き込まずにこのクレートをリンクできます。
 
 このクレートには3つの責務があります。
 
@@ -15,7 +15,7 @@
 2. **ワイヤープロトコル** — `IpcRequest` / `IpcResponse`。Unix ドメインソケット（Unix）または名前付きパイプ（Windows）上でフレーム化された長さプレフィックス付き JSON として送受信され、`ToolProvider` を稼働中の IPC サーバーに変換する [`run_tool_server`](#run_tool_server) ヘルパーが付属します。
 3. **共有メタデータ型** — `ToolSpec`（LLM 向け）、`ToolRagProfile`（ホスト/RAG、#137）、`ToolName`、`ToolVersion`、`ToolCategory`、`KeywordSet`、`SideEffects`、`ToolError`。
 
-関連ページ：ホスト側の接続管理については [`ene-tool-host`](./ene-tool-host.md)、ツール側の `ToolAction`/`ToolSpecArgs` トレイトについては [`ene-tool-common`](./ene-tool-common.md)、`ToolSpec` を生成するプロシージャルマクロについては [`ene-tool-derive`](./ene-tool-derive.md) を参照してください。
+関連ページ：ホスト側の接続管理については [`ene-plugin-host`](./ene-plugin-host.md)、ツール側の `ToolAction`/`ToolSpecArgs` トレイトについては [`ene-tool-common`](./ene-tool-common.md)、`ToolSpec` を生成するプロシージャルマクロについては [`ene-tool-derive`](./ene-tool-derive.md) を参照してください。
 
 ---
 
@@ -31,7 +31,7 @@ pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 ## `ToolProvider` トレイト
 
-各ツールバイナリが実装するインターフェースです。ホスト側の `IpcToolRegistry`（`ene-tool-host` 内）は、IPC のみを通じて `ToolProvider` と通信します — このトレイトはツールプロセスの*内部*で実行される内容の契約です。
+各ツールバイナリが実装するインターフェースです。ホスト側の `IpcToolRegistry`（`ene-plugin-host` 内）は、IPC のみを通じて `ToolProvider` と通信します — このトレイトはツールプロセスの*内部*で実行される内容の契約です。
 
 ```rust
 #[async_trait]
@@ -85,6 +85,8 @@ pub trait ToolProvider: Send + Sync {
 
 ## `run_tool_server`
 
+> **`ene-plugin` へ移動しました**（#249）。このヘルパーは現在 [`ene-plugin::tool_server`](./ene-plugin.md) にあり、`ene_plugin::run_tool_server` として再エクスポートされます。シグネチャと動作は変わりません。
+
 ```rust
 pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), ToolError>;
 ```
@@ -101,6 +103,8 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
 ---
 
 ## `HostRegistry`
+
+> **`ene-plugin` へ移動しました**（#249）。この型は現在 [`ene-plugin::host_registry`](./ene-plugin.md) にあり、`ene_plugin::HostRegistry` として再エクスポートされます。API は変わりません。
 
 ```rust
 #[derive(Default)]
@@ -255,7 +259,7 @@ pub struct KeywordSet {
 }
 ```
 
-Tool RAG スコアリングで使用される構造化されたキーワードバッグです。各層は異なる重みを持ちます（`ene-tool-host::rag` の `FieldWeights`）：`primary` ≈ `1.0`、`secondary` ≈ `0.6`、`domain` ≈ `0.3`、`negative` ≈ `-0.5`（クエリ語が重なった場合の緩やかなペナルティ）。
+Tool RAG スコアリングで使用される構造化されたキーワードバッグです。各層は異なる重みを持ちます（`ene-plugin-host::rag` の `FieldWeights`）：`primary` ≈ `1.0`、`secondary` ≈ `0.6`、`domain` ≈ `0.3`、`negative` ≈ `-0.5`（クエリ語が重なった場合の緩やかなペナルティ）。
 
 | メソッド | シグネチャ | 説明 |
 |---|---|---|
@@ -366,7 +370,7 @@ impl ToolConfigAccessor {
 
 ## `ToolError`
 
-すべてのツールの失敗は `ToolError`（`EneToolProtoError` の型エイリアス）のバリアントとして表現されます。`Serialize`/`Deserialize` に対応しており、`IpcResponse::CallResult` の内部で IPC 境界を越えます。
+すべてのツールの失敗は `ToolError` のバリアントとして表現されます。`Serialize`/`Deserialize` に対応しており、`IpcResponse::CallResult` の内部で IPC 境界を越えます。
 
 ```rust
 pub enum ToolError {
@@ -469,7 +473,7 @@ pub enum MultiAnswer {
 
 ## `IpcRequest`
 
-**コア**（`ene-runtime` / `ene-tool-host`）からツールバイナリへ送信されるメッセージです。
+**コア**（`ene-runtime` / `ene-plugin-host`）からツールバイナリへ送信されるメッセージです。
 
 ```rust
 pub enum IpcRequest {
@@ -511,7 +515,7 @@ pub enum IpcRequest {
 
 ## `IpcResponse`
 
-ツールバイナリから**コア**（`ene-runtime` / `ene-tool-host`）へ返送されるメッセージです。
+ツールバイナリから**コア**（`ene-runtime` / `ene-plugin-host`）へ返送されるメッセージです。
 
 ```rust
 pub enum IpcResponse {
@@ -625,13 +629,13 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
 ) -> Result<(), ToolError>;
 ```
 
-フレーミング形式：`[u32 リトルエンディアン長][JSON ペイロード]`。最大メッセージサイズは 64 MB（`ene_tool_proto::ipc` に非公開の `MAX_MESSAGE_SIZE`）。これを超えるリクエスト／レスポンスは `ToolError::IpcTransport` で拒否されます。
+フレーミング形式：`[u32 リトルエンディアン長][JSON ペイロード]`。最大メッセージサイズは 64 MB（`ene_plugin_proto::ipc` に非公開の `MAX_MESSAGE_SIZE`）。これを超えるリクエスト／レスポンスは `ToolError::IpcTransport` で拒否されます。
 
 ---
 
 ## エラー
 
-このクレートのすべての失敗しうる操作は [`ToolError`](#toolerror)（エイリアス `EneToolProtoError`）を通じて報告されます。独立した「トランスポートエラー」型は存在しません — ワイヤーヘルパーでの I/O 失敗は `From<std::io::Error>` を介して `ToolError::IoError` に変換され、不正な JSON は `ToolError::InvalidArguments` として報告されます。
+このクレートのすべての失敗しうる操作は [`ToolError`](#toolerror) を通じて報告されます。独立した「トランスポートエラー」型は存在しません — ワイヤーヘルパーでの I/O 失敗は `From<std::io::Error>` を介して `ToolError::IoError` に変換され、不正な JSON は `ToolError::InvalidArguments` として報告されます。
 
 ---
 
@@ -641,7 +645,7 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
 
 ```rust,no_run
 use async_trait::async_trait;
-use ene_tool_proto::{
+use ene_plugin_proto::{
     KeywordSet, SideEffects, ToolCategory, ToolError, ToolName, ToolProvider, ToolSpec,
     run_tool_server,
 };
@@ -684,7 +688,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ### `HostRegistry` で複数プロバイダーをまとめる
 
 ```rust,no_run
-use ene_tool_proto::{HostRegistry, ToolProvider, run_tool_server};
+use ene_plugin_proto::{HostRegistry, ToolProvider, run_tool_server};
 
 fn build_registry(a: Box<dyn ToolProvider>, b: Box<dyn ToolProvider>) -> Result<HostRegistry, ToolError> {
     let mut registry = HostRegistry::new();
@@ -706,7 +710,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ### 信頼できないツール名の検証
 
 ```rust,no_run
-use ene_tool_proto::{ToolError, ToolName};
+use ene_plugin_proto::{ToolError, ToolName};
 
 fn handle_ipc_call_tool(raw_name: &str) -> Result<ToolName, ToolError> {
     // 信頼できない入力（ワイヤーから届いたもの）— new ではなく try_new を使う。
@@ -717,7 +721,7 @@ fn handle_ipc_call_tool(raw_name: &str) -> Result<ToolName, ToolError> {
 ### メガツールのアクション用に `ToolRagProfile` を構築する
 
 ```rust,no_run
-use ene_tool_proto::{KeywordSet, SideEffects, ToolCategory, ToolName, ToolRagProfile, ToolVersion};
+use ene_plugin_proto::{KeywordSet, SideEffects, ToolCategory, ToolName, ToolRagProfile, ToolVersion};
 
 let read_profile = ToolRagProfile {
     name: ToolName::new("filesystem.read"),
@@ -738,7 +742,7 @@ let read_profile = ToolRagProfile {
 ### RAG 埋め込みテキストの算出
 
 ```rust,no_run
-use ene_tool_proto::{EmbeddingField, ToolRagProfile};
+use ene_plugin_proto::{EmbeddingField, ToolRagProfile};
 
 fn summary_embedding(profile: &ToolRagProfile) -> String {
     profile.embedding_text(EmbeddingField::Summary, None, None)
@@ -749,7 +753,7 @@ fn summary_embedding(profile: &ToolRagProfile) -> String {
 
 ## 関連ページ
 
-- [`ene-tool-host`](./ene-tool-host.md) — ホスト側のライフサイクルとレジストリ
+- [`ene-plugin-host`](./ene-plugin-host.md) — ホスト側のライフサイクルとレジストリ
 - [`ene-tool-common`](./ene-tool-common.md) — ツール側の `ToolAction`/`ToolSpecArgs` トレイト
 - [`ene-tool-derive`](./ene-tool-derive.md) — `ToolSpec` 生成プロシージャルマクロ
 - [`ene-tool-db`](./ene-tool-db.md) — `SandboxConfigData::db_socket` 上で動作する、ツールごとのデータベース IPC

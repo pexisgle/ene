@@ -70,7 +70,7 @@ impl MemoryStore {
 
 ## Tool Embeddings
 
-Powers the Tool RAG pipeline in `ene-tool-host`. Each tool spec is embedded as **multiple rows** — one per field (`summary`, `description`, `capability`, `example`, `negative`) — enabling per-field weighting and max-pool aggregation at query time.
+Powers the Tool RAG pipeline in `ene-plugin-host`. Each tool spec is embedded as **multiple rows** — one per field (`summary`, `description`, `capability`, `example`, `negative`) — enabling per-field weighting and max-pool aggregation at query time.
 
 ```rust
 /// `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`

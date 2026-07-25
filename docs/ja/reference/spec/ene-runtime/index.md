@@ -8,7 +8,7 @@
 
 ### 物理的依存関係 (`Cargo.toml`)
 - **依存先**: `tokio`, `tokio-stream`, `tokio-util`, `serde`, `serde_json`, `chrono`, `tracing`, `async-trait`
-- **内部クレート依存先**: `ene-ai`, `ene-config`, `ene-mind`, `ene-store`, `ene-tool-host`, `ene-tool-proto`, `ene-tool-rag`
+- **内部クレート依存先**: `ene-ai`, `ene-config`, `ene-mind`, `ene-store`, `ene-plugin-host`, `ene-plugin-proto`, `ene-tool-rag`
 - **禁止されている依存**: 他のすべてのクレートは `ene-runtime` に依存できません。循環参照を防ぐため、`ene-mind` や `ene-store` などの下位ドメインは `ene-runtime` をインポートしてはなりません。
 
 ### 論理的境界

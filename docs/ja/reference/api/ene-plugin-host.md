@@ -1,13 +1,13 @@
-# `ene-tool-host` — APIリファレンス
+# `ene-plugin-host` — APIリファレンス
 
-> **クレート:** `ene-tool-host`
+> **クレート:** `ene-plugin-host`
 > **役割:** ツールプロセスのライフサイクル、IPCクライアント管理、MCPサーバー接続、およびTool RAG選択パイプライン。
 
 ---
 
 ## 概要
 
-`ene-tool-host` は `ene-runtime` とスタンドアロンのツールバイナリとの間の橋渡しを行います。担う責務は以下の通りです:
+`ene-plugin-host` は `ene-runtime` とスタンドアロンのツールバイナリとの間の橋渡しを行います。担う責務は以下の通りです:
 
 1. ツール子プロセスの**生成と監視** — クラッシュ時の自動再接続・再起動を含む。
 2. IPCハンドシェイクの**交渉**と、永続的なUnixソケット接続の維持。
@@ -15,7 +15,7 @@
 4. **MCPサーバーへの接続**（stdioトランスポート）と、それらのツールを同じ `ToolRegistry` インターフェースで公開する。
 5. **Tool RAGパイプラインの実行** — 全ツールリストがLLMのコンテキスト予算を超える場合に、各ターンに関連する部分集合を選択する。
 
-参照: 配線型（`ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`）については [`ene-tool-proto`](./ene-tool-proto.md)、ツール側APIについては [`ene-tool-common`](./ene-tool-common.md) を参照してください。
+参照: 配線型（`ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`）については [`ene-plugin-proto`](./ene-plugin-proto.md)、ツール側APIについては [`ene-tool-common`](./ene-tool-common.md) を参照してください。
 
 ---
 
@@ -51,7 +51,7 @@ pub trait ToolRegistry: Send + Sync {
 | `allow_pattern` | `async fn allow_pattern(&self, action: &str, target_pattern: &str)` | デフォルトはno-op。アクションクラスのサンドボックス許可リストにグロブパターンを追加する。 |
 | `config_schema` | `async fn config_schema(&self) -> Option<serde_json::Value>` | デフォルトは `None`。このレジストリの設定用JSON Schemaを返す。 |
 
-> **注記:** `call_tool` は `Result<String, ToolHostError>` を返します — このクレート独自のエラー型であり、`ene_tool_proto::ToolError` **ではありません**。`ToolHostError` はプロトコルレベルの `ToolError` をラップしています（下記の[エラー](#エラー-toolhosterror--eneToolhosterror) を参照）。
+> **注記:** `call_tool` は `Result<String, ToolHostError>` を返します — このクレート独自のエラー型であり、`ene_plugin_proto::ToolError` **ではありません**。`ToolHostError` はプロトコルレベルの `ToolError` をラップしています（下記の[エラー](#エラー-toolhosterror--eneToolhosterror) を参照）。
 
 ---
 
@@ -80,7 +80,7 @@ pub struct ToolHostManager { /* private */ }
 ### 例
 
 ```rust,no_run
-use ene_tool_host::ToolHostManager;
+use ene_plugin_host::ToolHostManager;
 use std::collections::HashMap;
 
 # async fn run(config: &ene_config::EneConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -277,14 +277,14 @@ impl ToolEntry {
 
 ---
 
-## エラー: `ToolHostError` / `EneToolHostError`
+## エラー: `ToolHostError` / `PluginHostError`
 
 ```rust
 #[derive(Debug, Error)]
-pub enum EneToolHostError {
+pub enum PluginHostError {
     /// 基盤となるツールプロトコル（IPC）由来のエラー。
     #[error(transparent)]
-    Protocol(#[from] ene_tool_proto::ToolError),
+    Protocol(#[from] ene_plugin_proto::ToolError),
     /// 設定エラー（例: 無効なRAG設定）。
     #[error("Configuration error: {0}")]
     Config(String),
@@ -296,20 +296,20 @@ pub enum EneToolHostError {
     ExecutionFailed { message: String },
 }
 
-impl EneToolHostError {
+impl PluginHostError {
     /// 指定したメッセージで `Protocol(ToolError::IpcClient { .. })` エラーを作成する。
     pub fn ipc(message: impl Into<String>) -> Self;
 }
 
 /// クレートの公開API全体で使われるエイリアス。
-pub type ToolHostError = EneToolHostError;
+pub type ToolHostError = PluginHostError;
 ```
 
 ---
 
 ## 関連項目
 
-- [`ene-tool-proto`](./ene-tool-proto.md) — IPC配線型（`ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`）
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — IPC配線型（`ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`）
 - [`ene-tool-common`](./ene-tool-common.md) — ツール側の `ToolAction` トレイトとツールバイナリ向けヘルパー
 - [`ene-tool-derive`](./ene-tool-derive.md) — ツール作者向けのプロシージャルマクロ（`#[derive(ToolSpec)]`）
 - [`ene-store`](./ene-store.md) — `ToolRag` の永続的な埋め込みインデックス（`tool_embedding_index` テーブル）を支える

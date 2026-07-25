@@ -83,5 +83,5 @@ Crate-boundary error enum (`thiserror`). Prefer matching on `AiError` at host/mi
 ## Related
 
 - [`ene-mind`](./ene-mind.md) — `HistoryEntry`, recall / compression
-- [`ene-tool-host`](./ene-tool-host.md) — Tool RAG uses `hyde_document` / `rerank_tool_specs`
+- [`ene-plugin-host`](./ene-plugin-host.md) — Tool RAG uses `hyde_document` / `rerank_tool_specs`
 - [API v1 ADR](../architecture/api-v1.md)

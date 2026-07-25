@@ -69,7 +69,7 @@ Undo is backed by a SQLite database accessed through the per-tool DB IPC server 
 
 ## Error Types
 
-Sandbox violations return `ToolError::SandboxViolation { message }` from `ene-tool-proto`. This is a unified error type (`EneToolProtoError`) shared across all tool crates — no boundary mapping is required.
+Sandbox violations return `ToolError::SandboxViolation { message }` from `ene-plugin-proto`. This is a unified error type shared across all tool crates — no boundary mapping is required.
 
 ```rust
 pub enum ToolError {

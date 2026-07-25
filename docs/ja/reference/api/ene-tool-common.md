@@ -16,7 +16,7 @@
 
 `ToolAction` は意図的に `ToolSpecArgs` のスーパートレイトに**なっていません** — その理由は [`ToolAction` トレイト](#toolaction-トレイト) を参照してください — これにより、ツールバイナリのディスパッチテーブルは単純な `Vec<Box<dyn ToolAction>>` を保持できます。
 
-関連ページ：これらのトレイトを自動実装するプロシージャルマクロについては [`ene-tool-derive`](./ene-tool-derive.md)、基盤となるワイヤー型（`ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`）については [`ene-tool-proto`](./ene-tool-proto.md) を参照してください。
+関連ページ：これらのトレイトを自動実装するプロシージャルマクロについては [`ene-tool-derive`](./ene-tool-derive.md)、基盤となるワイヤー型（`ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`）については [`ene-plugin-proto`](./ene-plugin-proto.md) を参照してください。
 
 ---
 
@@ -92,7 +92,7 @@ use ene_tool_common::prelude::*;
 | `async_trait` | `async-trait` クレート（アトリビュートマクロ） |
 | `ToolAction`（トレイト、`as _` によって非修飾でスコープに導入される） | このクレート |
 | `ToolSpec`、`tool_action`、`ToolSpec`（derive マクロ）、`ToolAction`（derive マクロ） | `ene-tool-derive` |
-| `ToolError` | `ene-tool-proto` |
+| `ToolError` | `ene-plugin-proto` |
 | `JsonSchema` | `schemars` の derive マクロ |
 | `Deserialize` | `serde` の derive マクロ |
 
@@ -161,7 +161,7 @@ async fn fetch_article(url: &str) -> Result<String, Box<dyn std::error::Error>> 
 
 ## エラー
 
-`ene-tool-common` は独自のエラー型を定義していません。ツール境界を越えるすべての失敗しうる操作は `ene-tool-proto` の [`ToolError`](./ene-tool-proto.md#toolerror) を使用します。バリアントの完全な一覧はそのクレートのドキュメントを参照してください。`ToolAction::execute` は `Result<String, ToolError>` を返し、`#[derive(ToolAction)]` によって生成される `execute` は JSON デシリアライズの失敗を `ToolError::InvalidArguments` として報告します。
+`ene-tool-common` は独自のエラー型を定義していません。ツール境界を越えるすべての失敗しうる操作は `ene-plugin-proto` の [`ToolError`](./ene-plugin-proto.md#toolerror) を使用します。バリアントの完全な一覧はそのクレートのドキュメントを参照してください。`ToolAction::execute` は `Result<String, ToolError>` を返し、`#[derive(ToolAction)]` によって生成される `execute` は JSON デシリアライズの失敗を `ToolError::InvalidArguments` として報告します。
 
 ---
 
@@ -206,13 +206,13 @@ impl ToolAction for EchoAction {
 
 ### ツールバイナリの組み込み方
 
-1つ以上の `ToolAction` を実装したら、それらを `ToolProvider` の背後に集約し、そのプロバイダーを `ene-tool-proto` の `run_tool_server` に渡します。`run_tool_server` は**ジェネリックではありません** — `run_tool_server::<T>()` ではなく、ボックス化されたトレイトオブジェクトを受け取ります。
+1つ以上の `ToolAction` を実装したら、それらを `ToolProvider` の背後に集約し、そのプロバイダーを `ene-plugin-proto` の `run_tool_server` に渡します。`run_tool_server` は**ジェネリックではありません** — `run_tool_server::<T>()` ではなく、ボックス化されたトレイトオブジェクトを受け取ります。
 
 ```rust,no_run
 // tools/my_tool/src/main.rs
 use async_trait::async_trait;
 use ene_tool_common::ToolAction;
-use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
+use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
 
 mod actions;
 use actions::MyAction;
@@ -248,14 +248,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-`run_tool_server` は、ハンドシェイク・初期化・ツールリスト・ディスパッチループという IPC ライフサイクル全体を処理します。詳細は [`ene-tool-proto`](./ene-tool-proto.md) を参照してください。
+`run_tool_server` は、ハンドシェイク・初期化・ツールリスト・ディスパッチループという IPC ライフサイクル全体を処理します。詳細は [`ene-plugin-proto`](./ene-plugin-proto.md) を参照してください。
 
 ---
 
 ## 関連ページ
 
 - [`ene-tool-derive`](./ene-tool-derive.md) — プロシージャルマクロ：`#[derive(ToolAction)]`、`#[derive(ToolSpec)]`、`#[tool_action(args = T)]`
-- [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`、`IpcRequest`/`IpcResponse`
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — `ToolSpec`、`ToolError`、`ToolProvider`、`run_tool_server`、`IpcRequest`/`IpcResponse`
 - [`ene-config`](./ene-config.md) — `Truncate`/`TruncateResult` の所有者
-- [`ene-tool-host`](./ene-tool-host.md) — ホスト側のプロセス管理と `ToolRegistry`
+- [`ene-plugin-host`](./ene-plugin-host.md) — ホスト側のプロセス管理と `ToolRegistry`
 - [ツールの作成方法](../tools/sdk.md)

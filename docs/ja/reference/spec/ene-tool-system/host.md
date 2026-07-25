@@ -1,6 +1,6 @@
-# ツールプロセスマネージャーおよび MCP クライアント仕様 (`ene-tool-host`)
+# ツールプロセスマネージャーおよび MCP クライアント仕様 (`ene-plugin-host`)
 
-`ene-tool-host` クレートは、外部ツール子プロセスの起動・監視、IPC 通信用のチャネル確立、名前衝突のチェック、クラッシュ回復のための再接続ループ、および外部 MCP (Model Context Protocol) サーバーの接続統合を管理します。
+`ene-plugin-host` クレートは、外部ツール子プロセスの起動・監視、IPC 通信用のチャネル確立、名前衝突のチェック、クラッシュ回復のための再接続ループ、および外部 MCP (Model Context Protocol) サーバーの接続統合を管理します。
 
 ---
 
@@ -11,7 +11,7 @@
 *   **説明**: ツール個別のカスタム JSON 設定ブロックを、構造化オブジェクトへとデシリアライズします。
 
 #### `compute_tool_version_hash`
-*   **シグネチャ**: `pub fn compute_tool_version_hash(tool: &ene_tool_proto::ToolSpec) -> String`
+*   **シグネチャ**: `pub fn compute_tool_version_hash(tool: &ene_plugin_proto::ToolSpec) -> String`
 *   **説明**: ツールで定義されている引数の構成、キーワード、バージョン値から Blake3 ハッシュ値を算出し、定義変更が生じていないかを照合判定します。
 
 ---
@@ -37,7 +37,7 @@
 *   **説明**: 構築された統合型の `CompositeToolRegistry` オブジェクトを返します。
 
 #### `start_tool`
-*   **シグネチャ**: `async fn start_tool(name: &str, sandbox: &ene_tool_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64, db_token: Option<String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>`
+*   **シグネチャ**: `async fn start_tool(name: &str, sandbox: &ene_plugin_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64, db_token: Option<String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>`
 *   **プロセス**:
     1.  `find_tool_binary` を実行して、該当ツールのバイナリ実体ファイルの絶対パスを取得します。
     2.  ツール固有のテンポラリ UDS チャネルソケットファイルを配置し、リスナーをバインドします。
@@ -73,7 +73,7 @@
 *   **説明**: 対象の UDS ソケットと接続し、非同期メッセージ通信セッションを確立します。
 
 #### `connect_with_retry`
-*   **シグネチャ**: `pub(crate) async fn connect_with_retry(socket_path: &Path, sandbox: &ene_tool_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, max_retries: u32, delay_ms: u64, timeout_ms: u64) -> Result<IpcToolRegistry, ToolError>` (および同名関数)
+*   **シグネチャ**: `pub(crate) async fn connect_with_retry(socket_path: &Path, sandbox: &ene_plugin_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, max_retries: u32, delay_ms: u64, timeout_ms: u64) -> Result<IpcToolRegistry, ToolError>` (および同名関数)
 *   **説明**: ネットワークエラー等に対して指数バックオフ待機をかけながら、指定ソケットへの接続試行を繰り返します。
 
 #### `do_request`

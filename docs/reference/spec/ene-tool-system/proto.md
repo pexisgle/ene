@@ -1,6 +1,6 @@
-# IPC Wire Protocol & Sandbox Data Specifications (`ene-tool-proto`)
+# IPC Wire Protocol & Sandbox Data Specifications (`ene-plugin-proto`)
 
-The `ene-tool-proto` crate defines the serialized wire contract, network stream transport, and sandbox configuration limits between Ene's core runtime and standalone tool processes.
+The `ene-plugin-proto` crate defines the serialized wire contract, network stream transport, and sandbox configuration limits between Ene's core runtime and standalone tool processes.
 
 ---
 

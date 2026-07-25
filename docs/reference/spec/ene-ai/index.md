@@ -74,7 +74,7 @@ The `ene-ai` crate defines Ene's core abstractions for LLM (Large Language Model
 *   **Description**: Constructs a cloud LLM provider.
 
 #### `OpenAiProvider::create_chat_stream`
-*   **Signature**: `async fn create_chat_stream(&self, messages: &[LlmMessage], tools: &[ene_tool_proto::ToolSpec]) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>, LlmProviderError>`
+*   **Signature**: `async fn create_chat_stream(&self, messages: &[LlmMessage], tools: &[ene_plugin_proto::ToolSpec]) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>, LlmProviderError>`
 *   **Description**: Sends requests and returns the token stream.
 
 #### `OpenAiProvider::chat_completion`

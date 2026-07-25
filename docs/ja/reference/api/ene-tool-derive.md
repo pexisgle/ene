@@ -161,7 +161,7 @@ impl DoThingAction {
 // tools/my_tool/src/main.rs
 use async_trait::async_trait;
 use ene_tool_common::ToolAction;
-use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
+use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
 
 mod actions;
 use actions::DoThingAction;
@@ -231,5 +231,5 @@ impl ToolAction for DoThingWrapper {
 ## 関連ページ
 
 - [`ene-tool-common`](ene-tool-common.md) — `ToolAction` と `ToolSpecArgs` トレイトの定義
-- [`ene-tool-proto`](ene-tool-proto.md) — `ToolSpec` の構造
+- [`ene-plugin-proto`](ene-plugin-proto.md) — `ToolSpec` の構造
 - [ツールの作成方法](../tools/sdk.md) — エンドツーエンドのチュートリアル

@@ -28,9 +28,10 @@
 
 /// Shared runtime bootstrap helpers (folded into [`EneHandle::open`]).
 pub mod bootstrap;
-/// Per-tool DB IPC server.
+/// Per-tool DB IPC server (re-exported from `ene-store`).
 #[cfg(any(unix, windows))]
-pub mod db_server;
+#[doc(no_inline)]
+pub use ene_store::db_server;
 /// Opt-in diagnostics facade (pipeline detail, memory, tools).
 pub mod diagnostics;
 mod empty_response_log;

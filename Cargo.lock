@@ -2712,7 +2712,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2772,13 +2771,11 @@ dependencies = [
  "ene-plugin-host",
  "ene-plugin-proto",
  "ene-store",
- "ene-tool-db",
  "ene-tool-rag",
  "futures",
  "image",
  "parking_lot",
  "regex",
- "sea-orm",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2794,9 +2791,12 @@ dependencies = [
 name = "ene-store"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "ctor",
  "ene-config",
+ "ene-plugin-proto",
+ "ene-tool-db",
  "libsqlite3-sys",
  "sea-orm",
  "sea-orm-migration",

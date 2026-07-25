@@ -46,7 +46,7 @@ pub struct DbIpcServer {
     5.  Spawns `handle_connection` tasks for each accepted client socket.
 
 #### `handle_connection`
-*   **Signature**: `async fn handle_connection(stream: ene_tool_proto::transport::IpcStream, db: DatabaseConnection, tool_name: String, prefix: String, auth_token: String) -> Result<(), DbServerError>`
+*   **Signature**: `async fn handle_connection(stream: ene_plugin_proto::transport::IpcStream, db: DatabaseConnection, tool_name: String, prefix: String, auth_token: String) -> Result<(), DbServerError>`
 *   **Process**:
     1.  **Connection Local State**:
         -   `last_rowid`: A cell (`Arc<Mutex<Option<i64>>>`) tracking the most recent `Insert` row ID. Because SeaORM uses a connection pool, executing a raw SQLite `last_insert_rowid()` query is racy. Storing it in memory per socket connection prevents cross-tool data races.
@@ -59,7 +59,7 @@ pub struct DbIpcServer {
         -   If the token does not match `auth_token`, the socket is closed immediately.
 
 #### `send_response`
-*   **Signature**: `async fn send_response(stream: &mut ene_tool_proto::transport::IpcStream, response: &DbResponse) -> Result<(), DbServerError>`
+*   **Signature**: `async fn send_response(stream: &mut ene_plugin_proto::transport::IpcStream, response: &DbResponse) -> Result<(), DbServerError>`
 *   **Description**: Serializes the `DbResponse` object as JSON, pre-pends the 4-byte little-endian length prefix, and writes the frame to the client stream.
 
 #### `handle_request`

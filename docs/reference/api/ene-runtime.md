@@ -21,7 +21,7 @@ flowchart TD
     Events -->|subscribe| App
     Actor --> Memory[ene-store]
     Actor --> Provider[ene-ai]
-    Actor --> ToolHost[ene-tool-host]
+    Actor --> ToolHost[ene-plugin-host]
     Actor --> Cognition[ene-mind]
 ```
 
@@ -292,7 +292,7 @@ pub enum UserInputResponse {
 }
 ```
 
-`MultiAnswer` (re-exported `#[doc(no_inline)]` from `ene_tool_proto`) is one of `Selected { option: String }`, `Answer { text: String }`, or `Skip` — the user's response to a single sub-question in a `UserInputPrompt`.
+`MultiAnswer` (re-exported `#[doc(no_inline)]` from `ene_plugin_proto`) is one of `Selected { option: String }`, `Answer { text: String }`, or `Skip` — the user's response to a single sub-question in a `UserInputPrompt`.
 
 ---
 
@@ -398,7 +398,7 @@ As of [API v1](../architecture/api-v1.md), this list is curated: it keeps only t
 | `ene_ai` | `LlmMessage`, `LlmProvider`, `ProviderConfig`, `Role` |
 | `ene_store` | `StoreConfig` |
 | `ene_mind` | `CardName`, `SessionId`, `HistoryEntry`, `CueSource`, `PerformanceCue` |
-| `ene_tool_proto` | `ToolSpec` |
+| `ene_plugin_proto` | `ToolSpec` |
 
 Mind configuration types are owned by and imported directly from `ene-mind`. `ene-runtime`
 depends on `ene-mind` normally, so its `define_config!` constructor registers the
@@ -414,7 +414,7 @@ These are the crate's own types, re-exported at the root from their defining mod
 | `diagnostics` | `DiagnosticEvent`, `DiagnosticEventReceiver`, `EneDiagnostics`, `MemoryQueryHandle` |
 | `public_api` | `API_VERSION`, `PublicChatEvent`, `PublicPerfCue`, redaction helpers |
 | `error` | `EneRuntimeError` |
-| `streaming` | `MultiAnswer` *(re-exported from `ene_tool_proto`, `#[doc(no_inline)]`)*, `PermissionDecision`, `GrantType`, `PermissionScope`, `UserInputResponse` |
+| `streaming` | `MultiAnswer` *(re-exported from `ene_plugin_proto`, `#[doc(no_inline)]`)*, `PermissionDecision`, `GrantType`, `PermissionScope`, `UserInputResponse` |
 | `undo` | `UndoReport`, `UndoStack`, `UndoEntry` |
 | `message_builder` | `MessageBuildContext`, `build_messages` |
 | `types` | `RequestId`, `TurnId`, `RunError`, `CancelError` |
@@ -437,7 +437,7 @@ These are the crate's own types, re-exported at the root from their defining mod
 | `EneStatus` | See [above](#enestatus). | |
 | `PermissionDecision` | See [above](#permissiondecision--userinputresponse--multianswer). | |
 | `UserInputResponse` | See [above](#permissiondecision--userinputresponse--multianswer). | |
-| `MultiAnswer` | Re-exported from `ene_tool_proto` | See [above](#permissiondecision--userinputresponse--multianswer). |
+| `MultiAnswer` | Re-exported from `ene_plugin_proto` | See [above](#permissiondecision--userinputresponse--multianswer). |
 | `RequestId` | `Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize` newtype (`String`) | Opaque identifier correlating a `PermissionRequired`/`UserInputRequired` event with its later `decide_permission`/`submit_user_input` call. Constructible via `RequestId::new`, `From<String>`, `From<&str>`. |
 | `EneRuntimeError` | `thiserror` enum | The crate's error type — see below. |
 
@@ -450,7 +450,7 @@ pub enum EneRuntimeError {
     Config(#[from] ene_config::EneConfigError),
     Memory(#[from] ene_store::EneMemoryError),
     Session(#[from] ene_mind::EneSessionError),
-    Tool(#[from] ene_tool_host::EneToolHostError),
+    Tool(#[from] ene_plugin_host::PluginHostError),
     Embedding(#[from] ene_ai::EmbeddingError),
     ChannelClosed,
     MindPrerequisite(&'static str),
@@ -556,5 +556,5 @@ async fn main() -> anyhow::Result<()> {
 - [API v1](../architecture/api-v1.md) — Locked host / event contracts
 - [`ene-ai`](./ene-ai.md) — LLM and embedding provider traits
 - [`ene-store`](./ene-store.md) — Persistent memory store
-- [`ene-tool-host`](./ene-tool-host.md) — Tool process lifecycle and Tool RAG
+- [`ene-plugin-host`](./ene-plugin-host.md) — Tool process lifecycle and Tool RAG
 - [`ene-config`](./ene-config.md) — Configuration loading and schema registration

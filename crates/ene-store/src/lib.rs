@@ -18,7 +18,7 @@
 //!   for the entire workspace. No other crate (`ene-mind`, `ene-runtime`, tool
 //!   binaries) opens its own database connection or issues raw SQL against
 //!   `memory.db`; they call into `MemoryStore` (or, for tool binaries, the IPC-based
-//!   `ene-tool-db` client backed by `ene-runtime`'s `db_server`) instead.
+//!   `ene-tool-db` client backed by `ene-store`'s `db_server`) instead.
 //! - Depends on: `ene-config`. The store has no LLM, embedding
 //!   provider, or prompt-assembly dependency; callers supply vectors and the mind
 //!   runtime owns summarization and prompt formatting.
@@ -66,6 +66,9 @@ pub mod backup;
 pub mod commitment;
 /// Store configuration types.
 pub mod config;
+/// Per-tool DB IPC server (Unix socket / named pipe).
+#[cfg(any(unix, windows))]
+pub mod db_server;
 /// `SeaORM` entities representation.
 pub mod entities;
 /// Memory-related error types.

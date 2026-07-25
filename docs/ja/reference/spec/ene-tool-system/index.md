@@ -10,8 +10,8 @@ Ene は、コンパニオンが外部システムと協調するための柔軟�
 
 | クレート名 | フォルダ | 責務と依存関係 |
 |---|---|---|
-| `ene-tool-proto` | `crates/ene-tool-proto` | **ワイヤープロトコル層**。IPCメッセージ定義、ソケットトランスポート、`ToolProvider` トレイト、Sandbox構造体データ。 |
-| `ene-tool-host` | `crates/ene-tool-host` | **オーケストレーション層**。ツールプロセスの起動・管理、環境変数によるIPCセキュリティトークンの伝播、MCP（Model Context Protocol）接続。 |
+| `ene-plugin-proto` | `crates/ene-plugin-proto` | **ワイヤープロトコル層**。IPCメッセージ定義、ソケットトランスポート、`ToolProvider` トレイト、Sandbox構造体データ。 |
+| `ene-plugin-host` | `crates/ene-plugin-host` | **オーケストレーション層**。ツールプロセスの起動・管理、環境変数によるIPCセキュリティトークンの伝播、MCP（Model Context Protocol）接続。 |
 | `ene-tool-rag` | `crates/ene-tool-rag` | **ツール回収（RAG）層**。LLMの文脈に合わせた最適なツールの検索、多ベクトル類似度、HyDE、LLMリランク。 |
 | `ene-tool-common`| `crates/ene-tool-common`| **ツールユーティリティ層**。ツールバイナリ用の共通コード、HTML-to-markdown変換など。 |
 | `ene-tool-derive`| `crates/ene-tool-derive`| **コード生成マクロ**。`#[derive(ToolSpec)]` によるスキーマの自動生成。 |
@@ -23,10 +23,10 @@ Ene は、コンパニオンが外部システムと協調するための柔軟�
 
 Ene のツールインターフェースは、セキュリティ保護と統合モデルのため、ワイヤー（Wire）層とホスト（Host）層の2層構造に明確に分離されています。
 
-1.  **ワイヤー (Wire) レイヤー (`ene-tool-proto`)**:
+1.  **ワイヤー (Wire) レイヤー (`ene-plugin-proto`)**:
     -   ツールバイナリ自身、または外部のIPC接続先が実装すべき物理的な境界定義。
     -   `ToolProvider` トレイトがこれに相当し、`call_tool` によるJSON文字列の受け渡しのみを行います。
-2.  **ホスト (Host) レイヤー (`ene-tool-host`)**:
+2.  **ホスト (Host) レイヤー (`ene-plugin-host`)**:
     -   `ene-runtime` にリンクされ、ツール全体を束ねてLLMに提示・実行する制御部分。
     -   `ToolRegistry` トレイトがこれに相当し、IPCツール、内蔵（Built-in）ツール、および外部の MCP サーバーを透過的にまとめて単一のレジストリとして振る舞わせます。
 

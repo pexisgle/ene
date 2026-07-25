@@ -34,16 +34,16 @@ ene は最小ホスト契約と明確なクレート所有を公開する: 準�
 | `ene-mind` | 認知エンジン + セッション |
 | `ene-store` | 永続化 |
 | `ene-ai` | LLM + 埋め込みプロバイダ |
-| `ene-tool` | ツール ABI ファサード（`ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`） |
-| `ene-tool-db` | ツールバイナリ用 IPC CRUD クライアント → `ene-runtime` の `DbIpcServer`；依存は `ene-tool-proto` のみ |
-| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | ツールオーケストレーション、Tool RAG、設定、VRM レンダリング |
+| `ene-plugin` | ツール ABI ファサード（`ene-plugin-proto` + `ene-tool-common` + `ene-tool-derive`） |
+| `ene-tool-db` | ツールバイナリ用 IPC CRUD クライアント → `ene-runtime` の `DbIpcServer`；依存は `ene-plugin-proto` のみ |
+| `ene-plugin-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | ツールオーケストレーション、Tool RAG、設定、VRM レンダリング |
 
 ### 依存ルール
 
-- `ene-mind` ↛ `ene-runtime` / `ene-tool-host`
+- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
 - `ene-store` ↛ `ene-ai` / `ene-mind`（LLM・埋め込みプロバイダなし）
-- `ene-tool` ↛ runtime / mind / store
-- `ene-tool-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG は `ene-tool-rag` に配置
+- `ene-plugin` ↛ runtime / mind / store
+- `ene-plugin-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG は `ene-tool-rag` に配置
 - `ene-tool-rag` は `ene-ai`（埋め込み、HyDE、rerank）+ `ene-store`（永続ツール埋め込み）に依存
 - **`PerformanceCue` は `ene-mind` 所有**；runtime が再エクスポート；**`ene-vrm` は mind/runtime に依存しない**
 
@@ -70,12 +70,12 @@ flowchart TD
   runtime --> mind["ene-mind"]
   runtime --> store["ene-store"]
   runtime --> ai["ene-ai"]
-  runtime --> toolHost["ene-tool-host"]
+  runtime --> toolHost["ene-plugin-host"]
   runtime --> toolRag["ene-tool-rag"]
   mind --> store
   mind --> ai
-  ai --> toolProto["ene-tool-proto"]
-  toolHost --> tool["ene-tool"]
+  ai --> toolProto["ene-plugin-proto"]
+  toolHost --> tool["ene-plugin"]
   toolRag --> ai
   toolRag --> store
   toolRag --> toolProto

@@ -11,7 +11,7 @@
 
 すべての接続状態（基盤となるソケットに加え、[`reconnect`](#reconnect) に必要なソケットパスと認証トークン）は `&mut self` の背後にあります。各呼び出しは単一のストリーム上で行われる同期的なリクエスト/レスポンスのラウンドトリップであるため、すべての CRUD メソッドは `&mut DbClient` を取ります。また `reconnect` は、サーバー再起動後にそのストリームを置き換えるために排他アクセスを必要とします。
 
-参照: [AGENTS.md §7.3 メモリシステムのルール](../../../../AGENTS.md) および [`ene-tool-host`](./ene-tool-host.md)。
+参照: [AGENTS.md §7.3 メモリシステムのルール](../../../../AGENTS.md) および [`ene-plugin-host`](./ene-plugin-host.md)。
 
 ---
 
@@ -30,7 +30,7 @@ pub struct DbClient { /* 非公開 */ }
 | `connect` | `async fn connect(socket_path: &Path) -> Result<Self, DbError>` | 認証せずに `socket_path` の `DbIpcServer` に接続する。サーバーは、未認証クライアントから最初の非 `Handshake` リクエストを受け取った時点で接続を閉じるため、これはサーバーが認証トークンなしで設定されている場合のみ有用。トークンが利用可能な場合は `connect_with_token` を優先すべき。 |
 | `connect_with_token` | `async fn connect_with_token(socket_path: &Path, token: &str) -> Result<Self, DbError>` | 接続し、直ちに `token` を伴う `Handshake` リクエストを送信する。サーバーがトークンを拒否した場合は `Err(DbError::Auth { .. })` を返す。ソケットパスとトークンはクライアント上にキャプチャされ、後で `reconnect` が透過的に再認証できるようにする。 |
 
-ソケットパスは、プロセスが起動される際に `ene-tool-host` が設定する環境変数を通じてツールバイナリに渡されます。認証トークンは `ENE_DB_AUTH_TOKEN` を通じて渡されます。
+ソケットパスは、プロセスが起動される際に `ene-plugin-host` が設定する環境変数を通じてツールバイナリに渡されます。認証トークンは `ENE_DB_AUTH_TOKEN` を通じて渡されます。
 
 ### 接続管理
 
@@ -407,6 +407,6 @@ impl DbOrderBy {
 
 ## 関連項目
 
-- [`ene-tool-host`](./ene-tool-host.md) — ツールバイナリを起動し、`DbClient::connect_with_token` が使用するソケットパス／認証トークンを提供する
-- [`ene-tool-proto`](./ene-tool-proto.md) — `DbClient` が使用する基盤の `IpcStream` トランスポート
+- [`ene-plugin-host`](./ene-plugin-host.md) — ツールバイナリを起動し、`DbClient::connect_with_token` が使用するソケットパス／認証トークンを提供する
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — `DbClient` が使用する基盤の `IpcStream` トランスポート
 - [`ene-tool-common`](./ene-tool-common.md) — `ene-tool-db` と並んでツールバイナリが利用できる共有ユーティリティ

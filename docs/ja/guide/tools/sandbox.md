@@ -69,7 +69,7 @@ Undo はツールごと DB IPC サーバー (`db_socket`) 経由でアクセス�
 
 ## エラー型
 
-サンドボックス違反は `ene-tool-proto` から `ToolError::SandboxViolation { message }` を返します。これは全ツールクレートで共有される統一エラー型 (`EneToolProtoError`) であり、境界マッピングは不要です。
+サンドボックス違反は `ene-plugin-proto` から `ToolError::SandboxViolation { message }` を返します。これは全ツールクレートで共有される統一エラー型であり、境界マッピングは不要です。
 
 ```rust
 pub enum ToolError {

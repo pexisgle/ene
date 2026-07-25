@@ -19,10 +19,10 @@ The host contract is **API v1**: `EneHandle::open`, mandatory `TurnId`, single-f
 | [`ene-store`](ene-store.md) | SQLite vector memory store (summaries, facts, tool index). | [→](ene-store.md) |
 | [`ene-config`](ene-config.md) | Configuration loading, character cards, CBS macros, `Truncate`. | [→](ene-config.md) |
 | [`ene-vrm`](ene-vrm.md) | VRM 1.0 model loader + MToon renderer for `ene-desktop` (wgpu). No mind/runtime dependency. | [→](ene-vrm.md) |
-| [`ene-tool`](ene-tool.md) | Tool ABI facade (proto + common + derive re-exports). Preferred import for new tools. | [→](ene-tool.md) |
-| [`ene-tool-host`](ene-tool-host.md) | Tool process lifecycle, IPC client, MCP server connections. | [→](ene-tool-host.md) |
+| [`ene-plugin`](ene-plugin.md) | Tool ABI facade (proto + common + derive re-exports). Preferred import for new tools. | [→](ene-plugin.md) |
+| [`ene-plugin-host`](ene-plugin-host.md) | Tool process lifecycle, IPC client, MCP server connections. | [→](ene-plugin-host.md) |
 | [`ene-tool-rag`](ene-tool-rag.md) | Tool RAG pipeline — multi-vector embedding, HyDE, LLM rerank, weighted field similarity. | [→](ene-tool-rag.md) |
-| [`ene-tool-proto`](ene-tool-proto.md) | IPC wire protocol — `ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`. | [→](ene-tool-proto.md) |
+| [`ene-plugin-proto`](ene-plugin-proto.md) | IPC wire protocol — `ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`. | [→](ene-plugin-proto.md) |
 | [`ene-tool-common`](ene-tool-common.md) | `ToolAction` trait and helpers for tool binaries. | [→](ene-tool-common.md) |
 | [`ene-tool-derive`](ene-tool-derive.md) | Proc-macros: `#[derive(ToolSpec)]`, `#[derive(ToolAction)]`. | [→](ene-tool-derive.md) |
 | [`ene-tool-db`](ene-tool-db.md) | Typed CRUD database client for tool binaries via IPC. | [→](ene-tool-db.md) |
@@ -53,7 +53,7 @@ flowchart TD
   Runtime --> Mind[ene-mind]
   Runtime --> Store[ene-store]
   Runtime --> Ai[ene-ai]
-  Runtime --> ToolHost[ene-tool-host]
+  Runtime --> ToolHost[ene-plugin-host]
   Runtime --> ToolRag[ene-tool-rag]
   Runtime --> Config[ene-config]
   Runtime -.optional.-> ToolDb[ene-tool-db]
@@ -62,15 +62,15 @@ flowchart TD
   Mind --> Config
   Mind --> Ai
 
-  ToolHost --> Tool[ene-tool]
+  ToolHost --> Tool[ene-plugin]
   ToolRag --> Ai
   ToolRag --> Store
-  ToolRag --> ToolProto[ene-tool-proto]
+  ToolRag --> ToolProto[ene-plugin-proto]
   Ai --> Config
   Ai --> ToolProto
   Store --> Config
 
-  Tool --> Proto[ene-tool-proto]
+  Tool --> Proto[ene-plugin-proto]
   Tool --> CommonTool[ene-tool-common]
   Tool --> Derive[ene-tool-derive]
 
@@ -84,17 +84,17 @@ flowchart TD
 **Dependency rules (enforced):**
 
 - `ene-store` ↛ `ene-ai` / `ene-mind`
-- `ene-mind` ↛ `ene-runtime` / `ene-tool-host`
+- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime`
-- `ene-tool` ↛ `ene-runtime` / `ene-mind` / `ene-store`
+- `ene-plugin` ↛ `ene-runtime` / `ene-mind` / `ene-store`
 
 `ene-runtime` links `ene-tool-db` only to open the shared per-tool DB IPC server socket (see [`ene-runtime` `db_server`](./ene-runtime.md#db_server)); it is not used for the runtime's own persistence.
 
 New tool binaries should prefer:
 
 ```
-ene-tool  (facade)
-  → ene-tool-proto / ene-tool-common / ene-tool-derive
+ene-plugin  (facade)
+  → ene-plugin-proto / ene-tool-common / ene-tool-derive
   ↘ ene-tool-db  (optional, for persistent state)
 ```
 
@@ -105,9 +105,9 @@ ene-tool  (facade)
 When a crate re-exports an item from another workspace crate in its public API, it must annotate the re-export with `#[doc(no_inline)]`. This ensures that generated rustdoc links point back to the *original* crate's documentation page rather than duplicating it.
 
 ```rust
-// In ene-tool/src/lib.rs (facade)
+// In ene-plugin/src/lib.rs (facade)
 #[doc(no_inline)]
-pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
+pub use ene_plugin_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 ```
 
 ---
@@ -126,7 +126,7 @@ See also [API v1](../architecture/api-v1.md).
 ### Errors
 
 - Library boundaries return `Result<T, E>` where `E` is a `thiserror`-derived enum, not `anyhow::Error`, `String`, or `Box<dyn Error>`. `anyhow` is a dev-dependency only.
-- One public error name per crate, matching the crate: e.g. `EneRuntimeError`, `EneMemoryError` (`ene-store`), `CognitionError` / `EneSessionError` (`ene-mind`), `EneToolHostError`, `ToolError` (`ene-tool-proto`), `EneConfigError`, `AiError` (`ene-ai`; nested `LlmProviderError` / `EmbeddingError`).
+- One public error name per crate, matching the crate: e.g. `EneRuntimeError`, `EneMemoryError` (`ene-store`), `CognitionError` / `EneSessionError` (`ene-mind`), `PluginHostError`, `ToolError` (`ene-plugin-proto`), `EneConfigError`, `AiError` (`ene-ai`; nested `LlmProviderError` / `EmbeddingError`).
 - Narrower purpose-specific errors are fine alongside the crate-wide enum (`ActorDeadError`, `ShutdownTimeout`, `RunError`, `CancelError`, `DbServerError`).
 - Avoid `unwrap()`/`expect()` outside tests — the workspace lints for this.
 

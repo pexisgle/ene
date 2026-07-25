@@ -22,7 +22,7 @@ Adopt proactive companion speech with the following fixed contracts.
 
 ### Dependency rules
 
-- `ene-mind` does **not** depend on `ene-runtime`, `ene-tool-host`, or OS observation crates.
+- `ene-mind` does **not** depend on `ene-runtime`, `ene-plugin-host`, or OS observation crates.
 - `ene-ai` embeds llama-cpp-2 for local decision (and local embedding); it does not spawn `llama-server` or implement Candle graphs for chat/embedding. All llama-cpp inference is serialized behind a process-wide lock.
 - Desktop observation stays in `ene-desktop` (or a desktop-local platform module). Raw screenshots never enter `ene-mind` / `ene-store`.
 

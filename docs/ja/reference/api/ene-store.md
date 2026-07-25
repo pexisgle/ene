@@ -70,7 +70,7 @@ impl MemoryStore {
 
 ## ツール埋め込み
 
-`ene-tool-host` のTool RAGパイプラインを支えます。各ツール仕様は**複数の行**として埋め込まれます — フィールドごと（`summary`、`description`、`capability`、`example`、`negative`）に1行ずつ — これによりフィールド単位の重み付けとクエリ時のmaxプール集約が可能になります。
+`ene-plugin-host` のTool RAGパイプラインを支えます。各ツール仕様は**複数の行**として埋め込まれます — フィールドごと（`summary`、`description`、`capability`、`example`、`negative`）に1行ずつ — これによりフィールド単位の重み付けとクエリ時のmaxプール集約が可能になります。
 
 ```rust
 /// `(tool_name, field, field_key, version_hash, model_name, embedding_vec, source_text)`

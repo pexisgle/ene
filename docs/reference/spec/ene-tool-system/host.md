@@ -1,6 +1,6 @@
-# Tool Host Supervision & MCP Client Specifications (`ene-tool-host`)
+# Tool Host Supervision & MCP Client Specifications (`ene-plugin-host`)
 
-The `ene-tool-host` crate supervises tool child processes, establishes socket communication channels, enforces name checks, manages crash retries, and integrates external MCP (Model Context Protocol) servers.
+The `ene-plugin-host` crate supervises tool child processes, establishes socket communication channels, enforces name checks, manages crash retries, and integrates external MCP (Model Context Protocol) servers.
 
 ---
 
@@ -11,7 +11,7 @@ The `ene-tool-host` crate supervises tool child processes, establishes socket co
 *   **Description**: Helper method that deserializes custom JSON configuration blocks into structured configurations.
 
 #### `compute_tool_version_hash`
-*   **Signature**: `pub fn compute_tool_version_hash(tool: &ene_tool_proto::ToolSpec) -> String`
+*   **Signature**: `pub fn compute_tool_version_hash(tool: &ene_plugin_proto::ToolSpec) -> String`
 *   **Description**: Computes a stable Blake3 hash from a tool's specifications (input properties, version numbers, keywords) to track changes and refresh registries.
 
 ---
@@ -37,7 +37,7 @@ The `ToolHostManager` orchestrates subprocess lifetimes based on entries in `con
 *   **Description**: Returns the unified `CompositeToolRegistry` handle.
 
 #### `start_tool`
-*   **Signature**: `async fn start_tool(name: &str, sandbox: &ene_tool_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64, db_token: Option<String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>`
+*   **Signature**: `async fn start_tool(name: &str, sandbox: &ene_plugin_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, timeout_ms: u64, db_token: Option<String>) -> Result<Arc<dyn ToolRegistry>, ToolHostError>`
 *   **Process**:
     1.  Locates the executable binary via `find_tool_binary`.
     2.  Creates temporary IPC paths and binds listener sockets.
@@ -73,7 +73,7 @@ Manages communication with active subprocesses.
 *   **Description**: Constructs a registry link monitoring a child socket.
 
 #### `connect_with_retry`
-*   **Signature**: `pub(crate) async fn connect_with_retry(socket_path: &Path, sandbox: &ene_tool_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, max_retries: u32, delay_ms: u64, timeout_ms: u64) -> Result<IpcToolRegistry, ToolError>` (and `connect_with_retry` at line 99)
+*   **Signature**: `pub(crate) async fn connect_with_retry(socket_path: &Path, sandbox: &ene_plugin_proto::SandboxConfigData, tool_config: Option<serde_json::Value>, max_retries: u32, delay_ms: u64, timeout_ms: u64) -> Result<IpcToolRegistry, ToolError>` (and `connect_with_retry` at line 99)
 *   **Description**: Attempts to connect to the target socket, retrying with exponential backoff on transient errors.
 
 #### `do_request`

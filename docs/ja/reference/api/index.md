@@ -19,10 +19,10 @@
 | [`ene-store`](ene-store.md) | SQLite ベクターメモリストア（サマリー、ファクト、ツールインデックス）。 | [→](ene-store.md) |
 | [`ene-config`](ene-config.md) | 設定の読み込み、キャラクターカード、CBS マクロ、`Truncate`。 | [→](ene-config.md) |
 | [`ene-vrm`](ene-vrm.md) | `ene-desktop` 向けのVRM 1.0モデルローダー + MToonレンダラー（wgpu）。mind/runtime 依存なし。 | [→](ene-vrm.md) |
-| [`ene-tool`](ene-tool.md) | ツール ABI ファサード（proto + common + derive の再エクスポート）。新ツールの推奨 import。 | [→](ene-tool.md) |
-| [`ene-tool-host`](ene-tool-host.md) | ツールプロセスのライフサイクル管理、IPC クライアント、MCP サーバー接続。 | [→](ene-tool-host.md) |
+| [`ene-plugin`](ene-plugin.md) | ツール ABI ファサード（proto + common + derive の再エクスポート）。新ツールの推奨 import。 | [→](ene-plugin.md) |
+| [`ene-plugin-host`](ene-plugin-host.md) | ツールプロセスのライフサイクル管理、IPC クライアント、MCP サーバー接続。 | [→](ene-plugin-host.md) |
 | [`ene-tool-rag`](ene-tool-rag.md) | Tool RAG パイプライン — 多ベクトル埋め込み、HyDE、LLMリランク、重み付きフィールド類似度。 | [→](ene-tool-rag.md) |
-| [`ene-tool-proto`](ene-tool-proto.md) | IPC ワイヤープロトコル — `ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`。 | [→](ene-tool-proto.md) |
+| [`ene-plugin-proto`](ene-plugin-proto.md) | IPC ワイヤープロトコル — `ToolSpec`、`IpcRequest`/`IpcResponse`、`ToolError`。 | [→](ene-plugin-proto.md) |
 | [`ene-tool-common`](ene-tool-common.md) | ツールバイナリ向けの `ToolAction` トレイトとヘルパー。 | [→](ene-tool-common.md) |
 | [`ene-tool-derive`](ene-tool-derive.md) | プロシージャルマクロ: `#[derive(ToolSpec)]`、`#[derive(ToolAction)]`。 | [→](ene-tool-derive.md) |
 | [`ene-tool-db`](ene-tool-db.md) | ツールバイナリ向けの型付き CRUD データベースクライアント（IPC 経由）。 | [→](ene-tool-db.md) |
@@ -53,7 +53,7 @@ flowchart TD
   Runtime --> Mind[ene-mind]
   Runtime --> Store[ene-store]
   Runtime --> Ai[ene-ai]
-  Runtime --> ToolHost[ene-tool-host]
+  Runtime --> ToolHost[ene-plugin-host]
   Runtime --> ToolRag[ene-tool-rag]
   Runtime --> Config[ene-config]
   Runtime -.optional.-> ToolDb[ene-tool-db]
@@ -62,15 +62,15 @@ flowchart TD
   Mind --> Config
   Mind --> Ai
 
-  ToolHost --> Tool[ene-tool]
+  ToolHost --> Tool[ene-plugin]
   ToolRag --> Ai
   ToolRag --> Store
-  ToolRag --> ToolProto[ene-tool-proto]
+  ToolRag --> ToolProto[ene-plugin-proto]
   Ai --> Config
   Ai --> ToolProto
   Store --> Config
 
-  Tool --> Proto[ene-tool-proto]
+  Tool --> Proto[ene-plugin-proto]
   Tool --> CommonTool[ene-tool-common]
   Tool --> Derive[ene-tool-derive]
 
@@ -84,17 +84,17 @@ flowchart TD
 **依存ルール（強制）:**
 
 - `ene-store` ↛ `ene-ai` / `ene-mind`
-- `ene-mind` ↛ `ene-runtime` / `ene-tool-host`
+- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime`
-- `ene-tool` ↛ `ene-runtime` / `ene-mind` / `ene-store`
+- `ene-plugin` ↛ `ene-runtime` / `ene-mind` / `ene-store`
 
 `ene-runtime` が `ene-tool-db` をリンクしているのは、共有のツール別DB IPCサーバーソケットを開くためだけです（[`ene-runtime` の `db_server`](./ene-runtime.md#db_server)を参照）。
 
 新しいツールバイナリは次を推奨します:
 
 ```
-ene-tool  (ファサード)
-  → ene-tool-proto / ene-tool-common / ene-tool-derive
+ene-plugin  (ファサード)
+  → ene-plugin-proto / ene-tool-common / ene-tool-derive
   ↘ ene-tool-db  (永続状態が必要な場合)
 ```
 
@@ -105,9 +105,9 @@ ene-tool  (ファサード)
 あるクレートが同一ワークスペース内の別クレートのアイテムを公開 API として再エクスポートする場合、`#[doc(no_inline)]` を付与する必要があります。
 
 ```rust
-// ene-tool/src/lib.rs（ファサード）の例
+// ene-plugin/src/lib.rs（ファサード）の例
 #[doc(no_inline)]
-pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
+pub use ene_plugin_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 ```
 
 ---
@@ -126,7 +126,7 @@ pub use ene_tool_proto::{ToolSpec, ToolError, IpcRequest, IpcResponse};
 ### エラー
 
 - ライブラリの境界は `Result<T, E>` を返し、`E` は `thiserror` 由来の列挙型です（`anyhow::Error`、`String`、`Box<dyn Error>` ではない）。`anyhow` はdev依存のみです。
-- クレート名に対応する公開エラー名を1つ持ちます（例: `EneRuntimeError`、`EneMemoryError`（`ene-store`）、`CognitionError` / `EneSessionError`（`ene-mind`）、`EneToolHostError`、`ToolError`、`EneConfigError`、`AiError`（`ene-ai`；入れ子の `LlmProviderError` / `EmbeddingError`））。
+- クレート名に対応する公開エラー名を1つ持ちます（例: `EneRuntimeError`、`EneMemoryError`（`ene-store`）、`CognitionError` / `EneSessionError`（`ene-mind`）、`PluginHostError`、`ToolError`、`EneConfigError`、`AiError`（`ene-ai`；入れ子の `LlmProviderError` / `EmbeddingError`））。
 - より狭い目的のエラー型も許容されます（`ActorDeadError`、`ShutdownTimeout`、`RunError`、`CancelError`、`DbServerError`）。
 - テスト以外での `unwrap()`/`expect()` は避けてください。
 

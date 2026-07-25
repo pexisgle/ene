@@ -2,7 +2,7 @@
 
 Tool RAG (Retrieval-Augmented Generation) pipeline for dynamic tool selection. When the number of available tools exceeds the LLM's context budget, `ToolRag` runs a retrieval-augmented selection step: embed → weighted multi-field similarity → embedding cosine rerank → top-N.
 
-**Dependencies**: `ene-ai` (embedding providers), `ene-store` (persistent tool embedding storage), `ene-tool-proto` (wire types), `ene-config`.
+**Dependencies**: `ene-ai` (embedding providers), `ene-store` (persistent tool embedding storage), `ene-plugin-proto` (wire types), `ene-config`.
 
 ---
 
@@ -161,9 +161,9 @@ let tools = match &tool_rag {
 
 ## See Also
 
-- [`ene-tool-host`](./ene-tool-host.md) — Tool process lifecycle manager (RAG consumer)
+- [`ene-plugin-host`](./ene-plugin-host.md) — Tool process lifecycle manager (RAG consumer)
 - [`ene-ai`](./ene-ai.md) — Embedding providers used by the pipeline
 - [`ene-store`](./ene-store.md) — Persistent embedding storage (`tool_embedding_index` table)
-- [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`, `ToolName`, `EmbeddingField` types
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — `ToolSpec`, `ToolName`, `EmbeddingField` types
 - [`ene-config`](./ene-config.md) — Configuration loading
 - [Tool System Overview](../tools/overview.md)

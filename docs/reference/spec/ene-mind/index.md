@@ -9,7 +9,7 @@ The `ene-mind` crate implements the core "Cognitive Mind" runtime of the Ene AI 
 ### Physical Dependencies (`Cargo.toml`)
 - **External Dependencies**: `tokio`, `serde`, `serde_json`, `chrono`, `tracing`, `async-trait`, `regex`, `parking_lot`
 - **Workspace Dependencies**: `ene-ai`, `ene-config`, `ene-store`
-- **Dependency Isolation**: `ene-mind` must not depend on `ene-runtime` or `ene-tool-host`. To prevent circular references and preserve domains, it stays unaware of actor-thread loops or subprocess spawning details, exposing only a deterministic state machine interface.
+- **Dependency Isolation**: `ene-mind` must not depend on `ene-runtime` or `ene-plugin-host`. To prevent circular references and preserve domains, it stays unaware of actor-thread loops or subprocess spawning details, exposing only a deterministic state machine interface.
 
 ### Store Isolation
 - **Database Access**: `ene-mind` calls the persistence store (`ene-store`'s `MemoryStore`) only via its public API methods. It never issues raw SQL queries or references `sea-orm` structures directly.

@@ -2,7 +2,7 @@
 
 利用可能なツール数が LLM のコンテキスト予算を超える場合、`ToolRag` が retrieval-augmented 選択を実行します: 埋め込み → 重み付きマルチフィールド類似度 → embedding cosine rerank → 上位 N 件。
 
-**依存**: `ene-ai`（埋め込みプロバイダ）、`ene-store`（永続ツール埋め込みストレージ）、`ene-tool-proto`（ワイヤ型）、`ene-config`。
+**依存**: `ene-ai`（埋め込みプロバイダ）、`ene-store`（永続ツール埋め込みストレージ）、`ene-plugin-proto`（ワイヤ型）、`ene-config`。
 
 ---
 
@@ -161,9 +161,9 @@ let tools = match &tool_rag {
 
 ## 関連
 
-- [`ene-tool-host`](./ene-tool-host.md) — ツールプロセスライフサイクル管理（RAG 利用側）
+- [`ene-plugin-host`](./ene-plugin-host.md) — ツールプロセスライフサイクル管理（RAG 利用側）
 - [`ene-ai`](./ene-ai.md) — パイプラインで使う埋め込みプロバイダ
 - [`ene-store`](./ene-store.md) — 永続埋め込みストレージ（`tool_embedding_index` テーブル）
-- [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`, `ToolName`, `EmbeddingField` 型
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — `ToolSpec`, `ToolName`, `EmbeddingField` 型
 - [`ene-config`](./ene-config.md) — 設定読み込み
 - [ツールシステム概要](../tools/overview.md)

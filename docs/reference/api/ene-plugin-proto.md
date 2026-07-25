@@ -1,13 +1,13 @@
-# `ene-tool-proto` — API Reference
+# `ene-plugin-proto` — API Reference
 
-> **Crate:** `ene-tool-proto`
+> **Crate:** `ene-plugin-proto`
 > **Role:** IPC wire protocol for the Ene tool system — `ToolProvider`, `ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`, and transport helpers.
 
 ---
 
 ## Overview
 
-`ene-tool-proto` defines every type and helper that crosses the process boundary between the host runtime (`ene-runtime` / `ene-tool-host`) and the standalone tool binaries. Both sides of the IPC channel depend on this crate. It has no dependency on `ene-runtime`, so tool binaries can link it without pulling in the full runtime.
+`ene-plugin-proto` defines every type and helper that crosses the process boundary between the host runtime (`ene-runtime` / `ene-plugin-host`) and the standalone tool binaries. Both sides of the IPC channel depend on this crate. It has no dependency on `ene-runtime`, so tool binaries can link it without pulling in the full runtime.
 
 The crate has three responsibilities:
 
@@ -15,7 +15,7 @@ The crate has three responsibilities:
 2. **The wire protocol** — `IpcRequest` / `IpcResponse`, framed length-prefixed JSON over a Unix Domain Socket (Unix) or Named Pipe (Windows), plus the [`run_tool_server`](#run_tool_server) helper that turns a `ToolProvider` into a running IPC server.
 3. **Shared metadata types** — `ToolSpec` (LLM-facing), `ToolRagProfile` (host/RAG, #137), `ToolName`, `ToolVersion`, `ToolCategory`, `KeywordSet`, `SideEffects`, and `ToolError`.
 
-See also: [`ene-tool-host`](./ene-tool-host.md) for the host-side connection management, [`ene-tool-common`](./ene-tool-common.md) for the tool-side `ToolAction`/`ToolSpecArgs` traits, and [`ene-tool-derive`](./ene-tool-derive.md) for the proc-macros that generate `ToolSpec`s.
+See also: [`ene-plugin-host`](./ene-plugin-host.md) for the host-side connection management, [`ene-tool-common`](./ene-tool-common.md) for the tool-side `ToolAction`/`ToolSpecArgs` traits, and [`ene-tool-derive`](./ene-tool-derive.md) for the proc-macros that generate `ToolSpec`s.
 
 ---
 
@@ -31,7 +31,7 @@ Both parties send their version in the `Handshake` / `HandshakeAck` messages. Th
 
 ## `ToolProvider` Trait
 
-The interface each tool binary implements. The host-side `IpcToolRegistry` (in `ene-tool-host`) talks to a `ToolProvider` purely through IPC — this trait is the contract for what runs *inside* the tool process.
+The interface each tool binary implements. The host-side `IpcToolRegistry` (in `ene-plugin-host`) talks to a `ToolProvider` purely through IPC — this trait is the contract for what runs *inside* the tool process.
 
 ```rust
 #[async_trait]
@@ -85,6 +85,8 @@ pub trait ToolProvider: Send + Sync {
 
 ## `run_tool_server`
 
+> **Moved to `ene-plugin`** (#249). This helper now lives in [`ene-plugin::tool_server`](./ene-plugin.md) and is re-exported as `ene_plugin::run_tool_server`. The signature and behavior are unchanged.
+
 ```rust
 pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), ToolError>;
 ```
@@ -101,6 +103,8 @@ Behavior:
 ---
 
 ## `HostRegistry`
+
+> **Moved to `ene-plugin`** (#249). This type now lives in [`ene-plugin::host_registry`](./ene-plugin.md) and is re-exported as `ene_plugin::HostRegistry`. The API is unchanged.
 
 ```rust
 #[derive(Default)]
@@ -255,7 +259,7 @@ pub struct KeywordSet {
 }
 ```
 
-Structured keyword bag used by Tool RAG scoring. Each tier carries a different weight (`FieldWeights` in `ene-tool-host::rag`): `primary` ≈ `1.0`, `secondary` ≈ `0.6`, `domain` ≈ `0.3`, `negative` ≈ `-0.5` (soft penalty when query terms overlap).
+Structured keyword bag used by Tool RAG scoring. Each tier carries a different weight (`FieldWeights` in `ene-plugin-host::rag`): `primary` ≈ `1.0`, `secondary` ≈ `0.6`, `domain` ≈ `0.3`, `negative` ≈ `-0.5` (soft penalty when query terms overlap).
 
 | Method | Signature | Description |
 |---|---|---|
@@ -366,7 +370,7 @@ A shared, `RwLock`-guarded holder for a tool's live JSON configuration, useful a
 
 ## `ToolError`
 
-All tool failures are expressed as variants of `ToolError` (a type alias for `EneToolProtoError`). It is `Serialize`/`Deserialize` and crosses the IPC boundary inside `IpcResponse::CallResult`.
+All tool failures are expressed as variants of `ToolError`. It is `Serialize`/`Deserialize` and crosses the IPC boundary inside `IpcResponse::CallResult`.
 
 ```rust
 pub enum ToolError {
@@ -469,7 +473,7 @@ Returned as a `Vec<MultiAnswer>`, one entry per `QuestionItem`, in the same orde
 
 ## `IpcRequest`
 
-Messages sent from the **core** (`ene-runtime` / `ene-tool-host`) **to** the tool binary.
+Messages sent from the **core** (`ene-runtime` / `ene-plugin-host`) **to** the tool binary.
 
 ```rust
 pub enum IpcRequest {
@@ -511,7 +515,7 @@ pub enum IpcRequest {
 
 ## `IpcResponse`
 
-Messages sent from the **tool binary** back to the **core** (`ene-runtime` / `ene-tool-host`).
+Messages sent from the **tool binary** back to the **core** (`ene-runtime` / `ene-plugin-host`).
 
 ```rust
 pub enum IpcResponse {
@@ -625,13 +629,13 @@ pub async fn write_ipc_response<W: AsyncWriteExt + Unpin>(
 ) -> Result<(), ToolError>;
 ```
 
-Framing format: `[u32 little-endian length][JSON payload]`. Maximum message size is 64 MB (`MAX_MESSAGE_SIZE`, private to `ene_tool_proto::ipc`); requests/responses larger than that are rejected with `ToolError::IpcTransport`.
+Framing format: `[u32 little-endian length][JSON payload]`. Maximum message size is 64 MB (`MAX_MESSAGE_SIZE`, private to `ene_plugin_proto::ipc`); requests/responses larger than that are rejected with `ToolError::IpcTransport`.
 
 ---
 
 ## Errors
 
-All fallible operations in this crate report through [`ToolError`](#toolerror) (alias `EneToolProtoError`). There is no separate "transport error" type — I/O failures on the wire helpers are converted into `ToolError::IoError` via `From<std::io::Error>`, and malformed JSON is reported as `ToolError::InvalidArguments`.
+All fallible operations in this crate report through [`ToolError`](#toolerror). There is no separate "transport error" type — I/O failures on the wire helpers are converted into `ToolError::IoError` via `From<std::io::Error>`, and malformed JSON is reported as `ToolError::InvalidArguments`.
 
 ---
 
@@ -641,7 +645,7 @@ All fallible operations in this crate report through [`ToolError`](#toolerror) (
 
 ```rust,no_run
 use async_trait::async_trait;
-use ene_tool_proto::{
+use ene_plugin_proto::{
     KeywordSet, SideEffects, ToolCategory, ToolError, ToolName, ToolProvider, ToolSpec,
     ToolVersion, run_tool_server,
 };
@@ -694,7 +698,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ### Bundling multiple providers with `HostRegistry`
 
 ```rust,no_run
-use ene_tool_proto::{HostRegistry, ToolProvider, run_tool_server};
+use ene_plugin_proto::{HostRegistry, ToolProvider, run_tool_server};
 
 fn build_registry(a: Box<dyn ToolProvider>, b: Box<dyn ToolProvider>) -> Result<HostRegistry, ToolError> {
     let mut registry = HostRegistry::new();
@@ -716,7 +720,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 ### Validating an untrusted tool name
 
 ```rust,no_run
-use ene_tool_proto::{ToolError, ToolName};
+use ene_plugin_proto::{ToolError, ToolName};
 
 fn handle_ipc_call_tool(raw_name: &str) -> Result<ToolName, ToolError> {
     // Untrusted input (came off the wire) — use try_new, not new.
@@ -727,7 +731,7 @@ fn handle_ipc_call_tool(raw_name: &str) -> Result<ToolName, ToolError> {
 ### Building a `ToolRagProfile` from a slim `ToolSpec`
 
 ```rust,no_run
-use ene_tool_proto::{ToolName, ToolRagProfile, ToolSpec};
+use ene_plugin_proto::{ToolName, ToolRagProfile, ToolSpec};
 
 let spec = ToolSpec::new(ToolName::new("mcp.hello"), "Say hello", serde_json::json!({}));
 let profile = ToolRagProfile::from_tool_spec(&spec);
@@ -737,8 +741,8 @@ assert_eq!(profile.summary, "Say hello");
 ### Computing RAG embedding text
 
 ```rust,no_run
-use ene_tool_proto::types::EmbeddingField;
-use ene_tool_proto::ToolRagProfile;
+use ene_plugin_proto::types::EmbeddingField;
+use ene_plugin_proto::ToolRagProfile;
 
 fn summary_embedding(profile: &ToolRagProfile) -> String {
     profile.embedding_text(EmbeddingField::Summary, None, None)
@@ -749,7 +753,7 @@ fn summary_embedding(profile: &ToolRagProfile) -> String {
 
 ## Related Pages
 
-- [`ene-tool-host`](./ene-tool-host.md) — Host-side lifecycle and registry
+- [`ene-plugin-host`](./ene-plugin-host.md) — Host-side lifecycle and registry
 - [`ene-tool-common`](./ene-tool-common.md) — Tool-side `ToolAction`/`ToolSpecArgs` traits
 - [`ene-tool-derive`](./ene-tool-derive.md) — Proc-macros for generating `ToolSpec`
 - [`ene-tool-db`](./ene-tool-db.md) — Per-tool database IPC that rides on `SandboxConfigData::db_socket`

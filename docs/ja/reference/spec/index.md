@@ -22,7 +22,7 @@ flowchart TD
     Runtime --> Mind[ene-mind]
     Runtime --> Store[ene-store]
     Runtime --> Ai[ene-ai]
-    Runtime --> ToolHost[ene-tool-host]
+    Runtime --> ToolHost[ene-plugin-host]
     Runtime --> ToolRag[ene-tool-rag]
     Runtime --> Config[ene-config]
     Runtime -.->|IPC db socket| ToolDb[ene-tool-db]
@@ -33,16 +33,16 @@ flowchart TD
     Mind --> Ai
 
     %% ツール・RAG層
-    ToolHost --> Tool[ene-tool]
+    ToolHost --> Tool[ene-plugin]
     ToolRag --> Ai
     ToolRag --> Store
-    ToolRag --> ToolProto[ene-tool-proto]
+    ToolRag --> ToolProto[ene-plugin-proto]
     Ai --> Config
     Ai --> ToolProto
     Store --> Config
 
     %% ツールインフラ層
-    Tool --> Proto[ene-tool-proto]
+    Tool --> Proto[ene-plugin-proto]
     Tool --> CommonTool[ene-tool-common]
     Tool --> Derive[ene-tool-derive]
 
@@ -63,10 +63,10 @@ flowchart TD
 | `ene-store` | `crates/ene-store` | SQLite（sqlite-vec）による永続化。アセット・メモリテーブルの排他管理。AI/Mind への依存は禁止。 |
 | `ene-ai` | `crates/ene-ai` | LLM（OpenAI/Llama.cpp）および埋め込みベクトルのプロバイダー抽象化と具象実装。 |
 | `ene-config` | `crates/ene-config` | `EneConfig` 構造体定義、CBSマクロ展開（`define_config!` / `define_tool_config!`）、キャラクターカードV3のロード。 |
-| `ene-tool` | `crates/ene-tool` | ツール開発者向けのファサードクレート（proto/common/derive の再エクスポート）。 |
-| `ene-tool-host` | `crates/ene-tool-host` | ツールプロセスの生存期間管理、環境変数によるIPCトークン伝播、MCP（Model Context Protocol）の仲介。 |
+| `ene-plugin` | `crates/ene-plugin` | ツール開発者向けのファサードクレート（proto/common/derive の再エクスポート）。 |
+| `ene-plugin-host` | `crates/ene-plugin-host` | ツールプロセスの生存期間管理、環境変数によるIPCトークン伝播、MCP（Model Context Protocol）の仲介。 |
 | `ene-tool-rag` | `crates/ene-tool-rag` | ツール RAG の実行。文脈に対応したツールの埋め込み類似度検索とLLMリランク。 |
-| `ene-tool-proto` | `crates/ene-tool-proto` | IPC メッセージ（`IpcRequest` / `IpcResponse`）および `ToolSpec` 等のバイナリ境界データ構造定義。 |
+| `ene-plugin-proto` | `crates/ene-plugin-proto` | IPC メッセージ（`IpcRequest` / `IpcResponse`）および `ToolSpec` 等のバイナリ境界データ構造定義。 |
 | `ene-tool-common`| `crates/ene-tool-common`| `ToolAction` トレイト、HTMLパース（htmd）等のツール共通ユーティリティ。 |
 | `ene-tool-derive`| `crates/ene-tool-derive`| `#[derive(ToolSpec)]` および `#[derive(ToolAction)]` プロシージャルマクロ。 |
 | `ene-tool-db` | `crates/ene-tool-db` | ツールプロセスがホスト経由でSQLiteにCRUDアクセスするためのIPCクライアントライブラリ。 |
@@ -80,9 +80,9 @@ flowchart TD
 
 1. **`ene-store` ↛ `ene-ai` / `ene-mind`**
    - 永続データベース（`ene-store`）は、AI側のプロバイダー設定や認知ロジックに一切関与してはなりません。記憶をロード・セーブする「純粋な入れ物」である必要があります。
-2. **`ene-mind` ↛ `ene-runtime` / `ene-tool-host`**
-   - 認知の脳（`ene-mind`）はアクターチャネルの多重化やOSのスレッド、ツールのプロセス起動方法（`ene-runtime` や `ene-tool-host`）を知ってはなりません。純粋な状態遷移マシンとして動作します。
-3. **`ene-tool` ↛ `ene-runtime` / `ene-mind` / `ene-store`**
+2. **`ene-mind` ↛ `ene-runtime` / `ene-plugin-host`**
+   - 認知の脳（`ene-mind`）はアクターチャネルの多重化やOSのスレッド、ツールのプロセス起動方法（`ene-runtime` や `ene-plugin-host`）を知ってはなりません。純粋な状態遷移マシンとして動作します。
+3. **`ene-plugin` ↛ `ene-runtime` / `ene-mind` / `ene-store`**
    - ツールインターフェースはそれ自体で完結したABI（アプリケーション・バイナリ・インターフェース）である必要があります。ホストのランタイムや記憶ストアの具象型を参照してはなりません。
 4. **`ene-vrm` ↛ `ene-mind` / `ene-runtime`**
    - 3Dモデル描画ライブラリである `ene-vrm` は、会話や感情の状態管理と完全に切り離され、純粋なモーションと表情、テクスチャの描画に専念しなければなりません。
@@ -101,7 +101,7 @@ sequenceDiagram
     participant M as ene-mind
     participant A as ene-ai
     participant S as ene-store
-    participant TH as ene-tool-host
+    participant TH as ene-plugin-host
     participant TR as ene-tool-rag
 
     User->>R: EneHandle::run(input)
@@ -151,7 +151,7 @@ sequenceDiagram
 
 ワークスペース内のプロセス境界と通信路について整理します。
 
-### 1. ツールプロセス IPC (`ene-tool-proto`)
+### 1. ツールプロセス IPC (`ene-plugin-proto`)
 - **トランスポート**: Unixドメインソケット（Mac/Linux） / 名前付きパイプ（Windows）。
 - **シリアライズ**: 行区切り JSON (JSON Lines)、長さプレフィックス付きメッセージパッシング。
 - **認可制御**: ホスト側がツール起動時に環境変数経由で一時的なトークンを渡し、接続開始時のハンドシェイクで検証。

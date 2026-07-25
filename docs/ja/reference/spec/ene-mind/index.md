@@ -9,7 +9,7 @@
 ### 物理的依存関係 (`Cargo.toml`)
 - **依存先**: `tokio`, `serde`, `serde_json`, `chrono`, `tracing`, `async-trait`, `regex`, `parking_lot`
 - **内部クレート依存先**: `ene-ai`, `ene-config`, `ene-store`
-- **禁止されている依存**: `ene-runtime` および `ene-tool-host` への依存は禁止されています。脳（`ene-mind`）は自身がどのような非同期スレッドアクター（`ene-runtime`）やツール実行プロセス（`ene-tool-host`）で動作しているかを知ってはならず、純粋なステートマシンとしてのインターフェースのみを提供します。
+- **禁止されている依存**: `ene-runtime` および `ene-plugin-host` への依存は禁止されています。脳（`ene-mind`）は自身がどのような非同期スレッドアクター（`ene-runtime`）やツール実行プロセス（`ene-plugin-host`）で動作しているかを知ってはならず、純粋なステートマシンとしてのインターフェースのみを提供します。
 
 ### 論理的境界
 - **`ene-store` との通信**: 長期記憶や感情、コミットメントをロード・セーブする際、`ene-store` の `MemoryStore` トレイト（または具象型）の公開メソッドのみを経由し、自身で生の SQL や `sea-orm` クエリを発行することはありません。

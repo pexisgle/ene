@@ -16,7 +16,7 @@
 
 `ToolAction` is deliberately **not** a supertrait of `ToolSpecArgs` — see [`ToolAction` Trait](#toolaction-trait) for why — so a tool binary's dispatch table can hold a plain `Vec<Box<dyn ToolAction>>`.
 
-See also: [`ene-tool-derive`](./ene-tool-derive.md) for the proc-macros that implement these traits automatically, and [`ene-tool-proto`](./ene-tool-proto.md) for the underlying wire types (`ToolSpec`, `ToolError`, `ToolProvider`, `run_tool_server`).
+See also: [`ene-tool-derive`](./ene-tool-derive.md) for the proc-macros that implement these traits automatically, and [`ene-plugin-proto`](./ene-plugin-proto.md) for the underlying wire types (`ToolSpec`, `ToolError`, `ToolProvider`, `run_tool_server`).
 
 ---
 
@@ -93,7 +93,7 @@ This re-exports:
 | `async_trait` | `async-trait` crate (attribute macro) |
 | `ToolAction` (trait, brought into scope unqualified via `as _`) | This crate |
 | `ToolSpec`, `tool_action`, `ToolSpec` (derive macro), `ToolAction` (derive macro) | `ene-tool-derive` |
-| `ToolError` | `ene-tool-proto` |
+| `ToolError` | `ene-plugin-proto` |
 | `JsonSchema` | `schemars` derive macro |
 | `Deserialize` | `serde` derive macro |
 
@@ -162,7 +162,7 @@ async fn fetch_article(url: &str) -> Result<String, Box<dyn std::error::Error>> 
 
 ## Errors
 
-`ene-tool-common` does not define its own error type. All fallible operations that cross the tool boundary use [`ToolError`](./ene-tool-proto.md#toolerror) from `ene-tool-proto`; see that crate's docs for the full variant list. `ToolAction::execute` returns `Result<String, ToolError>`, and the `#[derive(ToolAction)]`-generated `execute` reports JSON deserialization failures as `ToolError::InvalidArguments`.
+`ene-tool-common` does not define its own error type. All fallible operations that cross the tool boundary use [`ToolError`](./ene-plugin-proto.md#toolerror) from `ene-plugin-proto`; see that crate's docs for the full variant list. `ToolAction::execute` returns `Result<String, ToolError>`, and the `#[derive(ToolAction)]`-generated `execute` reports JSON deserialization failures as `ToolError::InvalidArguments`.
 
 ---
 
@@ -207,13 +207,13 @@ impl ToolAction for EchoAction {
 
 ### Wiring a tool binary
 
-After implementing one or more `ToolAction`s, aggregate them behind a `ToolProvider` and hand that provider to `run_tool_server` from `ene-tool-proto`. `run_tool_server` is **not generic** — it takes a boxed trait object, not `run_tool_server::<T>()`:
+After implementing one or more `ToolAction`s, aggregate them behind a `ToolProvider` and hand that provider to `run_tool_server` from `ene-plugin-proto`. `run_tool_server` is **not generic** — it takes a boxed trait object, not `run_tool_server::<T>()`:
 
 ```rust,no_run
 // tools/my_tool/src/main.rs
 use async_trait::async_trait;
 use ene_tool_common::ToolAction;
-use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
+use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
 
 mod actions;
 use actions::MyAction;
@@ -249,14 +249,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 ```
 
-`run_tool_server` handles the full IPC lifecycle: handshake, list-tools, and dispatch loop. See [`ene-tool-proto`](./ene-tool-proto.md) for details.
+`run_tool_server` handles the full IPC lifecycle: handshake, list-tools, and dispatch loop. See [`ene-plugin-proto`](./ene-plugin-proto.md) for details.
 
 ---
 
 ## Related Pages
 
 - [`ene-tool-derive`](./ene-tool-derive.md) — Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action(args = T)]`
-- [`ene-tool-proto`](./ene-tool-proto.md) — `ToolSpec`, `ToolError`, `ToolProvider`, `run_tool_server`, `IpcRequest`/`IpcResponse`
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — `ToolSpec`, `ToolError`, `ToolProvider`, `run_tool_server`, `IpcRequest`/`IpcResponse`
 - [`ene-config`](./ene-config.md) — owns `Truncate`/`TruncateResult`
-- [`ene-tool-host`](./ene-tool-host.md) — Host-side process management and `ToolRegistry`
+- [`ene-plugin-host`](./ene-plugin-host.md) — Host-side process management and `ToolRegistry`
 - [Writing a Tool](../tools/sdk.md)

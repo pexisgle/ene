@@ -1,5 +1,3 @@
-#[cfg(any(unix, windows))]
-use crate::db_server::DbIpcServer;
 use crate::diagnostics::{DiagnosticEvent, MemoryQueryHandle, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
@@ -17,6 +15,8 @@ use ene_mind::{
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
 use ene_plugin_host::{CompositeToolRegistry, PluginHealthEvent, PluginHostError, ToolRegistry};
 use ene_plugin_proto::ToolSpec;
+#[cfg(any(unix, windows))]
+use ene_store::db_server::DbIpcServer;
 use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 use std::collections::HashMap;
 /// Global monotonic counter used to generate unique DB IPC auth tokens.

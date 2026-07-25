@@ -1,9 +1,7 @@
-use crate::ToolProvider;
-use crate::tool_error::ToolError;
-use crate::tool_ipc::{
-    IPC_PROTOCOL_VERSION, IpcRequest, IpcResponse, read_ipc_request, write_ipc_response,
+use ene_plugin_proto::{
+    DeferredOutcome, IPC_PROTOCOL_VERSION, IpcListener, IpcRequest, IpcResponse, ToolError,
+    ToolProvider, cleanup_path, read_ipc_request, write_ipc_response,
 };
-use crate::transport::{IpcListener, cleanup_path};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +25,7 @@ use std::time::Duration;
 /// #[tokio::main]
 /// async fn main() {
 ///     let provider = MyToolProvider::new();
-///     ene_plugin_proto::run_tool_server(Box::new(provider)).await;
+///     ene_plugin::run_tool_server(Box::new(provider)).await;
 /// }
 /// ```
 pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), ToolError> {
@@ -176,12 +174,8 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             arguments,
             deferred: true,
         } => match provider.call_tool_deferred(name, arguments).await {
-            Ok(crate::tool_provider::DeferredOutcome::Sync(result)) => {
-                IpcResponse::CallResult { result: Ok(result) }
-            }
-            Ok(crate::tool_provider::DeferredOutcome::Deferred { task_id }) => {
-                IpcResponse::DeferredAccepted { task_id }
-            }
+            Ok(DeferredOutcome::Sync(result)) => IpcResponse::CallResult { result: Ok(result) },
+            Ok(DeferredOutcome::Deferred { task_id }) => IpcResponse::DeferredAccepted { task_id },
             Err(e) => IpcResponse::CallResult { result: Err(e) },
         },
         IpcRequest::CallTool {
@@ -196,7 +190,7 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             conversation_id,
             turn_id,
         } => {
-            provider.set_call_context(&crate::tool_ipc::CallContext {
+            provider.set_call_context(&ene_plugin_proto::CallContext {
                 conversation_id: conversation_id.clone(),
                 turn_id: turn_id.clone(),
             });

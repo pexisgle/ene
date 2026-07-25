@@ -161,7 +161,7 @@ impl DoThingAction {
 // tools/my_tool/src/main.rs
 use async_trait::async_trait;
 use ene_tool_common::ToolAction;
-use ene_tool_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
+use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec, run_tool_server};
 
 mod actions;
 use actions::DoThingAction;
@@ -231,5 +231,5 @@ The macro reads `DoThingAction::TOOL_NAME` and `DoThingAction::spec()` (from `To
 ## Related Pages
 
 - [`ene-tool-common`](ene-tool-common.md) — `ToolAction` and `ToolSpecArgs` trait definitions
-- [`ene-tool-proto`](ene-tool-proto.md) — `ToolSpec` structure
+- [`ene-plugin-proto`](ene-plugin-proto.md) — `ToolSpec` structure
 - [Writing a Tool](../tools/sdk.md) — End-to-end tutorial

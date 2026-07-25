@@ -73,14 +73,14 @@ pub struct StreamContext {
 *   **Description**: Thread-safe helper that sets the status to idle, clears turn flags, and broadcasts exactly one `EneEvent::Terminal` payload.
 
 #### `select_relevant_tools`
-*   **Signature**: `pub(crate) async fn select_relevant_tools(registry: &dyn ene_tool_host::ToolRegistry, tool_rag: Option<&ToolRag>, user_input: &str, query_embedding: Option<&[f32]>, tool_calling_enabled: bool) -> Vec<ene_tool_proto::ToolSpec>`
+*   **Signature**: `pub(crate) async fn select_relevant_tools(registry: &dyn ene_plugin_host::ToolRegistry, tool_rag: Option<&ToolRag>, user_input: &str, query_embedding: Option<&[f32]>, tool_calling_enabled: bool) -> Vec<ene_plugin_proto::ToolSpec>`
 *   **Description**: Filters tools to fit model contexts. Uses RAG vector similarity rankings on embedding models if enabled, otherwise returns the default toolset.
 
 #### `perform_tool_executions`
 *   **Signature**:
     ```rust
     pub(crate) async fn perform_tool_executions(
-        registry: &dyn ene_tool_host::ToolRegistry,
+        registry: &dyn ene_plugin_host::ToolRegistry,
         session_id: &str,
         tool_calls: Vec<LlmToolCall>,
         assistant_content: &str,

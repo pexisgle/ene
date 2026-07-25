@@ -11,7 +11,7 @@ Tool binaries must **not** link `ene-store` directly. Instead, `ene-tool-db` pro
 
 All connection state (the underlying socket, plus the socket path and auth token needed to [`reconnect`](#reconnect)) lives behind `&mut self`: every CRUD method takes `&mut DbClient` because each call is a synchronous request/response round-trip over a single stream, and `reconnect` needs exclusive access to replace that stream after the server restarts.
 
-See also: [Memory System Rules in AGENTS.md §7.3](../../../AGENTS.md) and [`ene-tool-host`](./ene-tool-host.md).
+See also: [Memory System Rules in AGENTS.md §7.3](../../../AGENTS.md) and [`ene-plugin-host`](./ene-plugin-host.md).
 
 ---
 
@@ -30,7 +30,7 @@ pub struct DbClient { /* opaque */ }
 | `connect` | `async fn connect(socket_path: &Path) -> Result<Self, DbError>` | Connects to the `DbIpcServer` at `socket_path` without authenticating. The server closes the connection on the first non-`Handshake` request it receives from an unauthenticated client, so this is only useful when the server is configured without an auth token. Prefer `connect_with_token` when a token is available. |
 | `connect_with_token` | `async fn connect_with_token(socket_path: &Path, token: &str) -> Result<Self, DbError>` | Connects and immediately sends a `Handshake` request with `token`. Returns `Err(DbError::Auth { .. })` if the server rejects the token. The socket path and token are captured on the client so `reconnect` can later re-authenticate transparently. |
 
-The socket path is provided to tool binaries via an environment variable set by `ene-tool-host` when the process is spawned; the auth token is provided via `ENE_DB_AUTH_TOKEN`.
+The socket path is provided to tool binaries via an environment variable set by `ene-plugin-host` when the process is spawned; the auth token is provided via `ENE_DB_AUTH_TOKEN`.
 
 ### Connection Management
 
@@ -408,6 +408,6 @@ This isolation is intentional: tools are separate, untrusted processes and must 
 
 ## See Also
 
-- [`ene-tool-host`](./ene-tool-host.md) — Spawns tool binaries and provides the socket path / auth token used by `DbClient::connect_with_token`
-- [`ene-tool-proto`](./ene-tool-proto.md) — Underlying `IpcStream` transport used by `DbClient`
+- [`ene-plugin-host`](./ene-plugin-host.md) — Spawns tool binaries and provides the socket path / auth token used by `DbClient::connect_with_token`
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — Underlying `IpcStream` transport used by `DbClient`
 - [`ene-tool-common`](./ene-tool-common.md) — Shared utilities available to tool binaries alongside `ene-tool-db`

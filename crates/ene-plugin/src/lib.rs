@@ -45,14 +45,20 @@
 
 /// Compatibility adapter for wrapping `ToolProvider` as a `Plugin`.
 pub mod compat;
+/// Composite registry that aggregates multiple `ToolProvider` instances.
+pub mod host_registry;
 /// Plugin trait and streaming chunk types.
 pub mod plugin;
 /// Plugin IPC server and dispatch loop.
 pub mod server;
+/// Server helper for running a tool provider over IPC.
+pub mod tool_server;
 
 pub use compat::ToolPluginAdapter;
+pub use host_registry::HostRegistry;
 pub use plugin::{Plugin, PluginStream, PluginStreamChunk};
 pub use server::run_plugin_server;
+pub use tool_server::run_tool_server;
 
 // Re-export key types from ene-plugin-proto so plugin authors only need
 // to depend on `ene-plugin` for the full authoring surface.

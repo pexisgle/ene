@@ -22,7 +22,7 @@ Companion / AITuber 体験では、ユーザーが明示的に話しかけたと
 
 ### 依存ルール
 
-- `ene-mind` は `ene-runtime` / `ene-tool-host` / OS 観測クレートに依存しない。
+- `ene-mind` は `ene-runtime` / `ene-plugin-host` / OS 観測クレートに依存しない。
 - `ene-ai` は判定（およびローカル embedding）に llama-cpp-2 を埋め込む。`llama-server` を起動せず、Candle グラフも持たない。llama-cpp 推論はプロセス全体のロックで直列化する。
 - Desktop 観測は `ene-desktop`（または desktop 内 platform module）に閉じる。raw screenshot は `ene-mind` / `ene-store` に入らない。
 

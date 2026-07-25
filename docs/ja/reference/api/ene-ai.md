@@ -82,5 +82,5 @@ pub enum Role { System, User, Assistant }
 ## 関連
 
 - [`ene-mind`](./ene-mind.md) — `HistoryEntry`、recall / compression
-- [`ene-tool-host`](./ene-tool-host.md)
+- [`ene-plugin-host`](./ene-plugin-host.md)
 - [API v1 ADR](../architecture/api-v1.md)

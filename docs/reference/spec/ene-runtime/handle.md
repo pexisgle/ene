@@ -43,7 +43,7 @@ An opaque settings bundle. Each field is `Option<_>`; `None` fields are left unc
 pub struct FeatureSettingsUpdate {
     pub mind: Option<ene_mind::MindConfig>,
     pub store: Option<ene_store::StoreConfig>,
-    pub tools: Option<ene_tool_host::ToolConfig>,
+    pub tools: Option<ene_plugin_host::ToolConfig>,
     pub rag: Option<ToolRagConfig>,
 }
 ```
@@ -255,7 +255,7 @@ The main entry point for host applications, cheap to clone, and thread-safe.
 *   **Description**: Syncs lorebook entries to the database and populates vector caches at startup.
 
 #### `tool_enable_set_changed`
-*   **Signature**: `fn tool_enable_set_changed(prev: &ene_tool_host::ToolConfig, next: &ene_tool_host::ToolConfig) -> bool`
+*   **Signature**: `fn tool_enable_set_changed(prev: &ene_plugin_host::ToolConfig, next: &ene_plugin_host::ToolConfig) -> bool`
 *   **Description**: Helper tracking configuration edits to sandbox directories or active tool list overrides.
 
 #### `build_tool_registry`

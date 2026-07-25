@@ -15,8 +15,7 @@ schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "signal"] }
-tracing = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
 
 [dev-dependencies]
 ene-tool-derive = { workspace = true }

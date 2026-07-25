@@ -16,7 +16,6 @@
 //! - [`ToolProvider`] — trait implemented by each tool binary.
 //! - [`IpcRequest`] / [`IpcResponse`] — tool IPC v2 wire messages.
 //! - [`SandboxConfigData`] — sandbox configuration shared across tool processes.
-//! - [`run_tool_server`] — helper to start an IPC server for a [`ToolProvider`].
 //! - [`IpcStream`] / [`IpcListener`] / [`cleanup_path`] — cross-platform
 //!   transport layer (UDS / Named Pipe).
 //!
@@ -48,8 +47,6 @@
 pub mod capabilities;
 /// Plugin error types.
 pub mod error;
-/// Composite registry that aggregates multiple `ToolProvider` instances.
-pub mod host_registry;
 /// Plugin IPC wire protocol (request / response / framing).
 pub mod ipc;
 /// Sandbox configuration types.
@@ -60,8 +57,6 @@ pub mod tool_error;
 pub mod tool_ipc;
 /// Tool provider trait and deferred outcome types.
 pub mod tool_provider;
-/// Server helper for running a tool provider.
-pub mod tool_server;
 /// Shared tool types (`ToolCategory`, `ToolSpec`, etc.).
 pub mod tool_types;
 /// UDS / Named Pipe transport layer.
@@ -71,8 +66,6 @@ pub mod transport;
 pub use capabilities::{LlmProviderSpec, PluginCapabilities, SttProviderSpec, TtsProviderSpec};
 /// Plugin error type.
 pub use error::PluginError;
-/// Composite registry that aggregates multiple `ToolProvider` instances.
-pub use host_registry::HostRegistry;
 /// Plugin IPC message types, protocol version, and framing helpers.
 pub use ipc::{
     PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest, PluginIpcResponse, read_plugin_request,
@@ -95,8 +88,6 @@ pub use tool_ipc::{
 pub use tool_provider::DeferredOutcome;
 /// Tool provider trait.
 pub use tool_provider::ToolProvider;
-/// Starts an IPC server for a `ToolProvider`.
-pub use tool_server::run_tool_server;
 /// Shared tool types.
 pub use tool_types::{
     EmbeddingField, KeywordSet, Reversibility, SideEffects, ToolCategory, ToolExample, ToolName,

@@ -11,12 +11,20 @@
 //! - Table names must start with the tool's prefix (e.g. `fs_`, `utility_`).
 //! - DDL (CREATE/ALTER/DROP) is **not** exposed to tools.
 //! - `sqlite_master` and other internal tables are blocked.
+#![expect(
+    clippy::indexing_slicing,
+    reason = "DB IPC helpers index into validated identifiers and request-owned maps"
+)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "DB IPC byte-length and capacity math operates on bounded message buffers"
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ene_store::entities::tool_schemas;
+use crate::entities::tool_schemas;
 use ene_tool_db::{
     DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable, DbValue, Row,
 };

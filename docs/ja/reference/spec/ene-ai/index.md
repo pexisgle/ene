@@ -76,7 +76,7 @@
 *   **説明**: クラウド接続用の LLM プロバイダインスタンスを初期化します。
 
 #### `OpenAiProvider::create_chat_stream`
-*   **シグネチャ**: `async fn create_chat_stream(&self, messages: &[LlmMessage], tools: &[ene_tool_proto::ToolSpec]) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>, LlmProviderError>`
+*   **シグネチャ**: `async fn create_chat_stream(&self, messages: &[LlmMessage], tools: &[ene_plugin_proto::ToolSpec]) -> Result<Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>, LlmProviderError>`
 *   **説明**: チャット要求を送信し、トークンが生成されるたびに非同期ストリームとして随時受け取るチャネルストリームオブジェクトを返します。
 
 #### `OpenAiProvider::chat_completion`
@@ -180,7 +180,7 @@
 *   **説明**: 仮説的回答作成モデル (HyDE) を使用して、ユーザーの短い質問から「予測回答テキスト」を仮構築し、ベクトル検索の一致効率を高めます。
 
 #### `HybridRerankProvider::rerank`
-*   **シグネチャ**: `pub async fn rerank(&self, query: &str, candidates: &[ene_tool_proto::ToolSpec]) -> Result<Vec<f32>, EmbeddingError>`
+*   **シグネチャ**: `pub async fn rerank(&self, query: &str, candidates: &[ene_plugin_proto::ToolSpec]) -> Result<Vec<f32>, EmbeddingError>`
 *   **説明**: 抽出された候補について、交差注意（Cross-attention）モデル等の重み付けを使用してクエリとの関連度を再順位付け（Rerank）し、上位のみを残すフィルタを適用します。
 
 #### `hyde_document`
@@ -188,5 +188,5 @@
 *   **Description**: LLM プロバイダを用いて仮説的回答テキストの生成をリクエストします。
 
 #### `rerank_tool_specs`
-*   **Signature**: `pub async fn rerank_tool_specs(embedder: &dyn EmbeddingProvider, rerank_llm: Option<&dyn LlmProvider>, query: &str, candidates: &[ene_tool_proto::ToolSpec]) -> Result<Vec<f32>, EmbeddingError>`
+*   **Signature**: `pub async fn rerank_tool_specs(embedder: &dyn EmbeddingProvider, rerank_llm: Option<&dyn LlmProvider>, query: &str, candidates: &[ene_plugin_proto::ToolSpec]) -> Result<Vec<f32>, EmbeddingError>`
 *   **Description**: 抽出されたツール定義仕様のクエリへの適合度を再計算してスコア付けします。

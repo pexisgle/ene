@@ -19,7 +19,7 @@ flowchart TD
     Events -->|subscribe| App
     Actor --> Memory[ene-store]
     Actor --> Provider[ene-ai]
-    Actor --> ToolHost[ene-tool-host]
+    Actor --> ToolHost[ene-plugin-host]
     Actor --> Cognition[ene-mind]
 ```
 
@@ -286,7 +286,7 @@ pub enum UserInputResponse {
 }
 ```
 
-`MultiAnswer`（`ene_tool_proto` から `#[doc(no_inline)]` で再エクスポート）は `Selected { option: String }`、`Answer { text: String }`、`Skip` のいずれかで、`UserInputPrompt` 内の単一サブ質問へのユーザー応答を表します。
+`MultiAnswer`（`ene_plugin_proto` から `#[doc(no_inline)]` で再エクスポート）は `Selected { option: String }`、`Answer { text: String }`、`Skip` のいずれかで、`UserInputPrompt` 内の単一サブ質問へのユーザー応答を表します。
 
 ---
 
@@ -392,7 +392,7 @@ pub enum DbServerError {
 | `ene_ai` | `LlmMessage`、`LlmProvider`、`ProviderConfig`、`Role` |
 | `ene_store` | `StoreConfig` |
 | `ene_mind` | `CardName`、`SessionId`、`HistoryEntry`、`CueSource`、`PerformanceCue` |
-| `ene_tool_proto` | `ToolSpec` |
+| `ene_plugin_proto` | `ToolSpec` |
 
 Mind 設定型は `ene-mind` が所有するため、そこから直接インポートします。
 `ene-runtime` は `ene-mind` に通常依存しているため、リンカー専用の互換モジュールなしで
@@ -408,7 +408,7 @@ Mind 設定型は `ene-mind` が所有するため、そこから直接インポ
 | `diagnostics` | `DiagnosticEvent`、`DiagnosticEventReceiver`、`EneDiagnostics`、`MemoryQueryHandle` |
 | `public_api` | `API_VERSION`、`PublicChatEvent`、`PublicPerfCue`、redaction ヘルパー |
 | `error` | `EneRuntimeError` |
-| `streaming` | `MultiAnswer`（*`ene_tool_proto` から再エクスポート、`#[doc(no_inline)]`*）、`PermissionDecision`、`GrantType`、`PermissionScope`、`UserInputResponse` |
+| `streaming` | `MultiAnswer`（*`ene_plugin_proto` から再エクスポート、`#[doc(no_inline)]`*）、`PermissionDecision`、`GrantType`、`PermissionScope`、`UserInputResponse` |
 | `undo` | `UndoReport`、`UndoStack`、`UndoEntry` |
 | `message_builder` | `MessageBuildContext`、`build_messages` |
 | `types` | `RequestId`、`TurnId`、`RunError`、`CancelError` |
@@ -431,7 +431,7 @@ Mind 設定型は `ene-mind` が所有するため、そこから直接インポ
 | `EneStatus` | [上記参照](#enestatus)。 | |
 | `PermissionDecision` | [上記参照](#permissiondecision--userinputresponse--multianswer)。 | |
 | `UserInputResponse` | [上記参照](#permissiondecision--userinputresponse--multianswer)。 | |
-| `MultiAnswer` | `ene_tool_proto` から再エクスポート | [上記参照](#permissiondecision--userinputresponse--multianswer)。 |
+| `MultiAnswer` | `ene_plugin_proto` から再エクスポート | [上記参照](#permissiondecision--userinputresponse--multianswer)。 |
 | `RequestId` | `Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize` newtype（`String`） | `PermissionRequired`/`UserInputRequired` イベントと、後続の `decide_permission`/`submit_user_input` 呼び出しを関連付ける不透明な識別子。`RequestId::new`、`From<String>`、`From<&str>` で構築できる。 |
 | `EneRuntimeError` | `thiserror` enum | このクレートのエラー型 — 下記参照。 |
 
@@ -444,7 +444,7 @@ pub enum EneRuntimeError {
     Config(#[from] ene_config::EneConfigError),
     Memory(#[from] ene_store::EneMemoryError),
     Session(#[from] ene_mind::EneSessionError),
-    Tool(#[from] ene_tool_host::EneToolHostError),
+    Tool(#[from] ene_plugin_host::PluginHostError),
     Embedding(#[from] ene_ai::EmbeddingError),
     ChannelClosed,
     MindPrerequisite(&'static str),
@@ -550,5 +550,5 @@ async fn main() -> anyhow::Result<()> {
 - [API v1](../architecture/api-v1.md) — ホスト / イベント契約
 - [`ene-ai`](./ene-ai.md) — LLMと埋め込みプロバイダーのトレイト
 - [`ene-store`](./ene-store.md) — 永続メモリストア
-- [`ene-tool-host`](./ene-tool-host.md) — ツールプロセスのライフサイクルとTool RAG
+- [`ene-plugin-host`](./ene-plugin-host.md) — ツールプロセスのライフサイクルとTool RAG
 - [`ene-config`](./ene-config.md) — 設定の読み込みとスキーマ登録

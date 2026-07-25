@@ -22,7 +22,7 @@ flowchart TD
     Runtime --> Mind[ene-mind]
     Runtime --> Store[ene-store]
     Runtime --> Ai[ene-ai]
-    Runtime --> ToolHost[ene-tool-host]
+    Runtime --> ToolHost[ene-plugin-host]
     Runtime --> ToolRag[ene-tool-rag]
     Runtime --> Config[ene-config]
     Runtime -.->|IPC db socket| ToolDb[ene-tool-db]
@@ -33,16 +33,16 @@ flowchart TD
     Mind --> Ai
 
     %% Tool & Retrieval Layer
-    ToolHost --> Tool[ene-tool]
+    ToolHost --> Tool[ene-plugin]
     ToolRag --> Ai
     ToolRag --> Store
-    ToolRag --> ToolProto[ene-tool-proto]
+    ToolRag --> ToolProto[ene-plugin-proto]
     Ai --> Config
     Ai --> ToolProto
     Store --> Config
 
     %% Tool SDK Infrastructure
-    Tool --> Proto[ene-tool-proto]
+    Tool --> Proto[ene-plugin-proto]
     Tool --> CommonTool[ene-tool-common]
     Tool --> Derive[ene-tool-derive]
 
@@ -63,10 +63,10 @@ flowchart TD
 | `ene-store` | `crates/ene-store` | Database storage (SQLite + sqlite-vec). Isolates DB operations. Crucially: must not import AI or mind logic. |
 | `ene-ai` | `crates/ene-ai` | LLM and embedding provider abstraction layer (OpenAI & local llama.cpp). |
 | `ene-config` | `crates/ene-config` | Configuration structures, CBS macro definitions (`define_config!`), and Character Card V3 deserialization. |
-| `ene-tool` | `crates/ene-tool` | SDK facade crate for tool developers. |
-| `ene-tool-host` | `crates/ene-tool-host` | External tool process supervisor. Spawns sandbox environments, provisions IPC security tokens, and maps MCP servers. |
+| `ene-plugin` | `crates/ene-plugin` | SDK facade crate for tool developers. |
+| `ene-plugin-host` | `crates/ene-plugin-host` | External tool process supervisor. Spawns sandbox environments, provisions IPC security tokens, and maps MCP servers. |
 | `ene-tool-rag` | `crates/ene-tool-rag` | Embedding-based tool RAG. Indexes tool specs and reranks candidate lists via LLMs (e.g. `HybridRerankProvider`). |
-| `ene-tool-proto` | `crates/ene-tool-proto` | IPC protocol serialization models (`IpcRequest` / `IpcResponse`) and `ToolSpec`. |
+| `ene-plugin-proto` | `crates/ene-plugin-proto` | IPC protocol serialization models (`IpcRequest` / `IpcResponse`) and `ToolSpec`. |
 | `ene-tool-common`| `crates/ene-tool-common`| Common tool utilities (e.g. `ToolAction` trait, HTML-to-markdown translation). |
 | `ene-tool-derive`| `crates/ene-tool-derive`| Procedural macros for automatic spec generation: `#[derive(ToolSpec)]` and `#[derive(ToolAction)]`. |
 | `ene-tool-db` | `crates/ene-tool-db` | IPC client wrapper giving tools safe CRUD operations through the host socket. |
@@ -80,9 +80,9 @@ Refactoring must maintain these strict boundary constraints:
 
 1. **`ene-store` ↛ `ene-ai` / `ene-mind`**
    - The persistence layer must be isolated from the AI providers and cognitive pipeline. It should serve only as a repository.
-2. **`ene-mind` ↛ `ene-runtime` / `ene-tool-host`**
+2. **`ene-mind` ↛ `ene-runtime` / `ene-plugin-host`**
    - The cognitive core should not depend on UI messaging channels, OS thread pools, or tool subprocess orchestration. It runs as a pure state machine.
-3. **`ene-tool` ↛ `ene-runtime` / `ene-mind` / `ene-store`**
+3. **`ene-plugin` ↛ `ene-runtime` / `ene-mind` / `ene-store`**
    - Tool interface types must compile independently. They must never depend on core host runtime details or specific database/memory schemas.
 4. **`ene-vrm` ↛ `ene-mind` / `ene-runtime`**
    - 3D rendering and motion simulation must remain decoupled from the active conversation/emotion states.
@@ -101,7 +101,7 @@ sequenceDiagram
     participant M as ene-mind
     participant A as ene-ai
     participant S as ene-store
-    participant TH as ene-tool-host
+    participant TH as ene-plugin-host
     participant TR as ene-tool-rag
 
     User->>R: EneHandle::run(input)
@@ -149,7 +149,7 @@ sequenceDiagram
 
 ## 4. Protocols & IPC Security Boundaries
 
-### 1. Tool Subprocess IPC (`ene-tool-proto`)
+### 1. Tool Subprocess IPC (`ene-plugin-proto`)
 - **Transport**: Unix Domain Sockets (Linux/macOS) / Named Pipes (Windows).
 - **Serialization**: Line-delimited JSON (JSON Lines) with length prefixes.
 - **Authorization**: The host generates an ephemeral 128-bit security token at spawn time, verified via a handshake at socket connection.

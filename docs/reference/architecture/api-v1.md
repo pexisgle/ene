@@ -34,16 +34,16 @@ ene exposes a minimal host contract with clear crate ownership: a ready `EneHand
 | `ene-mind` | Cognitive engine + session |
 | `ene-store` | Persistence |
 | `ene-ai` | LLM + embedding providers |
-| `ene-tool` | Tool ABI facade (`ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`) |
-| `ene-tool-db` | IPC CRUD client for tool binaries → `ene-runtime`'s `DbIpcServer`; depends only on `ene-tool-proto` |
-| `ene-tool-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | Tool orchestration, Tool RAG, configuration, VRM rendering |
+| `ene-plugin` | Tool ABI facade (`ene-plugin-proto` + `ene-tool-common` + `ene-tool-derive`) |
+| `ene-tool-db` | IPC CRUD client for tool binaries → `ene-runtime`'s `DbIpcServer`; depends only on `ene-plugin-proto` |
+| `ene-plugin-host` / `ene-tool-rag` / `ene-config` / `ene-vrm` | Tool orchestration, Tool RAG, configuration, VRM rendering |
 
 ### Dependency rules
 
-- `ene-mind` ↛ `ene-runtime` / `ene-tool-host`
+- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
 - `ene-store` ↛ `ene-ai` / `ene-mind` (no LLM, no embedding provider handle)
-- `ene-tool` ↛ runtime / mind / store
-- `ene-tool-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG lives in `ene-tool-rag`
+- `ene-plugin` ↛ runtime / mind / store
+- `ene-plugin-host` ↛ `ene-ai` / `ene-store` / `ene-mind` — Tool RAG lives in `ene-tool-rag`
 - `ene-tool-rag` depends on `ene-ai` (embedding, HyDE, rerank) + `ene-store` (persistent tool embeddings)
 - **`PerformanceCue` lives in `ene-mind`**; runtime re-exports; **`ene-vrm` does not depend on mind/runtime**
 
@@ -70,12 +70,12 @@ flowchart TD
   runtime --> mind["ene-mind"]
   runtime --> store["ene-store"]
   runtime --> ai["ene-ai"]
-  runtime --> toolHost["ene-tool-host"]
+  runtime --> toolHost["ene-plugin-host"]
   runtime --> toolRag["ene-tool-rag"]
   mind --> store
   mind --> ai
-  ai --> toolProto["ene-tool-proto"]
-  toolHost --> tool["ene-tool"]
+  ai --> toolProto["ene-plugin-proto"]
+  toolHost --> tool["ene-plugin"]
   toolRag --> ai
   toolRag --> store
   toolRag --> toolProto

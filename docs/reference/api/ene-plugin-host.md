@@ -1,13 +1,13 @@
-# `ene-tool-host` — API Reference
+# `ene-plugin-host` — API Reference
 
-> **Crate:** `ene-tool-host`
+> **Crate:** `ene-plugin-host`
 > **Role:** Tool process lifecycle, IPC client management, MCP server connections, and the Tool RAG selection pipeline.
 
 ---
 
 ## Overview
 
-`ene-tool-host` is the bridge between `ene-runtime` and the standalone tool binaries. It is responsible for:
+`ene-plugin-host` is the bridge between `ene-runtime` and the standalone tool binaries. It is responsible for:
 
 1. **Spawning and supervising** tool child processes, with automatic reconnect and restart on crash.
 2. **Negotiating** the IPC handshake and maintaining persistent Unix-socket connections.
@@ -15,7 +15,7 @@
 4. **Connecting to MCP servers** (stdio transport) and exposing their tools through the same `ToolRegistry` interface.
 5. **Running the Tool RAG pipeline** to select a relevant subset of tools for each turn when the full tool list would exceed the LLM's context budget.
 
-See also: [`ene-tool-proto`](./ene-tool-proto.md) for the wire types (`ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`), and [`ene-tool-common`](./ene-tool-common.md) for the tool-side API.
+See also: [`ene-plugin-proto`](./ene-plugin-proto.md) for the wire types (`ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`), and [`ene-tool-common`](./ene-tool-common.md) for the tool-side API.
 
 ---
 
@@ -51,7 +51,7 @@ pub trait ToolRegistry: Send + Sync {
 | `allow_pattern` | `async fn allow_pattern(&self, action: &str, target_pattern: &str)` | Default no-op. Adds a glob pattern to the sandbox allow-list for an action class. |
 | `config_schema` | `async fn config_schema(&self) -> Option<serde_json::Value>` | Default `None`. Returns the JSON Schema for this registry's configuration. |
 
-> **Note:** `call_tool` returns `Result<String, ToolHostError>` — this crate's own error type, *not* `ene_tool_proto::ToolError`. `ToolHostError` wraps the protocol-level `ToolError` (see [Errors](#errors-toolhosterror--eneToolhosterror) below).
+> **Note:** `call_tool` returns `Result<String, ToolHostError>` — this crate's own error type, *not* `ene_plugin_proto::ToolError`. `ToolHostError` wraps the protocol-level `ToolError` (see [Errors](#errors-toolhosterror--eneToolhosterror) below).
 
 ---
 
@@ -80,7 +80,7 @@ pub struct ToolHostManager { /* private */ }
 ### Example
 
 ```rust,no_run
-use ene_tool_host::ToolHostManager;
+use ene_plugin_host::ToolHostManager;
 use std::collections::HashMap;
 
 # async fn run(config: &ene_config::EneConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -277,14 +277,14 @@ Computes a stable BLAKE3 hash used to invalidate cached tool embeddings whenever
 
 ---
 
-## Errors: `ToolHostError` / `EneToolHostError`
+## Errors: `ToolHostError` / `PluginHostError`
 
 ```rust
 #[derive(Debug, Error)]
-pub enum EneToolHostError {
+pub enum PluginHostError {
     /// Error originating from the underlying tool protocol (IPC).
     #[error(transparent)]
-    Protocol(#[from] ene_tool_proto::ToolError),
+    Protocol(#[from] ene_plugin_proto::ToolError),
     /// Configuration error (e.g. invalid RAG config).
     #[error("Configuration error: {0}")]
     Config(String),
@@ -296,20 +296,20 @@ pub enum EneToolHostError {
     ExecutionFailed { message: String },
 }
 
-impl EneToolHostError {
+impl PluginHostError {
     /// Creates a `Protocol(ToolError::IpcClient { .. })` error with the given message.
     pub fn ipc(message: impl Into<String>) -> Self;
 }
 
 /// Alias used throughout the crate's public API.
-pub type ToolHostError = EneToolHostError;
+pub type ToolHostError = PluginHostError;
 ```
 
 ---
 
 ## See Also
 
-- [`ene-tool-proto`](./ene-tool-proto.md) — IPC wire types (`ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`)
+- [`ene-plugin-proto`](./ene-plugin-proto.md) — IPC wire types (`ToolSpec`, `IpcRequest`/`IpcResponse`, `ToolError`)
 - [`ene-tool-rag`](./ene-tool-rag.md) — Tool RAG pipeline (multi-vector embedding, HyDE, LLM rerank)
 - [`ene-tool-common`](./ene-tool-common.md) — Tool-side `ToolAction` trait and helpers for tool binaries
 - [`ene-tool-derive`](./ene-tool-derive.md) — Proc-macros for tool authors (`#[derive(ToolSpec)]`)
