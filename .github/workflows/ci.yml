@@ -22,25 +22,21 @@ jobs:
   clippy:
     name: Clippy lint
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target"
       - name: Run clippy
         run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target"
       - name: Run tests
         run: nix develop --command cargo test --workspace
