@@ -1,7 +1,7 @@
 use crate::action;
 use async_trait::async_trait;
 use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
-use ene_tool_common::{ActionSetProvider, ToolAction};
+use ene_tool_sdk::{ActionSetProvider, ToolAction};
 use std::sync::Arc;
 
 /// Browser automation tool provider.

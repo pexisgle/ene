@@ -1,8 +1,8 @@
 [package]
-name = "ene-tool-common"
+name = "ene-tool-sdk"
 version.workspace = true
 edition.workspace = true
-description = "Shared utilities for tool crates — HTML-to-Markdown conversion and content truncation"
+description = "Tool plugin authoring SDK — ToolAction trait, providers, HTML-to-Markdown, and truncation helpers"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
@@ -20,7 +20,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-plugin = { workspace = true }
-ene-tool-derive = { workspace = true }
+ene-tool-macros = { workspace = true }
 ene-config = { workspace = true }
 
 [dev-dependencies]

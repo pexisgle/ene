@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use ene_tool_common::prelude::*;
+use ene_tool_sdk::prelude::*;
 
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -327,7 +327,7 @@ impl WebFetchAction {
         match format {
             "html" => Ok(body.to_string()),
             "text" => Ok(html_to_plain_text(&body)),
-            _ => Ok(ene_tool_common::html::html_to_markdown(&body)),
+            _ => Ok(ene_tool_sdk::html::html_to_markdown(&body)),
         }
     }
 }

@@ -1,6 +1,6 @@
 //! Integration tests for HTML-to-Markdown conversion and extraction utilities.
 
-use ene_tool_common::html::{extract_html, extract_markdown, html_to_markdown};
+use ene_tool_sdk::html::{extract_html, extract_markdown, html_to_markdown};
 
 #[test]
 fn extract_html_full_no_trim_preserves_script() {

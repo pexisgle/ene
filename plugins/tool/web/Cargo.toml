@@ -12,8 +12,7 @@ ene-plugin = { workspace = true }
 ene-plugin-proto = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
-ene-tool-common = { workspace = true }
-ene-tool-derive = { workspace = true }
+ene-tool-sdk = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }

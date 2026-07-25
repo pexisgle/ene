@@ -17,9 +17,5 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net"] }
 
-[dev-dependencies]
-ene-tool-derive = { workspace = true }
-ene-tool-common = { workspace = true }
-
 [lints]
 workspace = true

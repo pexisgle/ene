@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use ene_plugin_proto::{MultiAnswer, QuestionItem, UserInputPrompt};
-use ene_tool_common::prelude::*;
+use ene_tool_sdk::prelude::*;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]

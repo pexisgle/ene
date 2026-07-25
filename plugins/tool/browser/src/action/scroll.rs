@@ -1,4 +1,4 @@
-use ene_tool_common::prelude::*;
+use ene_tool_sdk::prelude::*;
 use std::sync::Arc;
 
 #[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]

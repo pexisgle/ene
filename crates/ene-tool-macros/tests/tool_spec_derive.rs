@@ -5,7 +5,7 @@
 )]
 
 use ene_plugin_proto::{ToolCategory, ToolName, tool_types::EmbeddingField};
-use ene_tool_derive::ToolSpec;
+use ene_tool_macros::ToolSpec;
 use schemars::JsonSchema;
 use serde::Deserialize;
 

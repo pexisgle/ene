@@ -58,8 +58,8 @@ flowchart TD
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
-  CommonTool[crates/ene-tool-common] --> Tool
-  CommonTool --> Derive[crates/ene-tool-derive]
+  ToolSdk[crates/ene-tool-sdk] --> Tool
+  ToolSdk --> Macros[crates/ene-tool-macros]
 
   ToolHost -.spawns IPC.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.spawns IPC.-> ToolApp[plugins/tool/app]
@@ -106,7 +106,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 - **Handshake Negotiation**: Version negotiation via `VersionRange { min: 4, max: 4 }`. The host sends supported range; plugin responds with negotiated version in `HandshakeAck`.
 - **Request Correlation**: All non-streaming and streaming IPC messages carry a mandatory `request_id` (`Uuid`).
 - **Capabilities Declaration**: `PluginCapabilities` advertises available `tools`, `llm_providers`, `stt_providers`, `tts_providers`.
-- **Stateful Tool DB Proxy**: Stateful tools connect to host's UDS socket via `ene-tool-db` for isolated `todo.db` and `undo.db` storage.
+- **Stateful Tool DB Proxy**: Stateful tools connect to host's UDS socket via `ene-plugin-db` for isolated `todo.db` and `undo.db` storage.
 
 ---
 
@@ -124,9 +124,9 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-plugin-host` | Plugin process supervision, MCP server discovery, health checks, circuit breaker |
 | `ene-plugin-proto` | IPC Protocol v4 wire messages, versioning, framing, tool types |
 | `ene-plugin` | Plugin authoring SDK & `ToolPluginAdapter` facade |
-| `ene-tool-common` | Shared action traits (`ActionSetProvider`, prelude) for tool developers |
+| `ene-tool-sdk` | Tool plugin authoring SDK (`ToolAction`, `ActionSetProvider`, prelude) |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
-| `ene-tool-derive` | Proc-macro `#[derive(ToolAction)]` |
+| `ene-tool-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
 | `ene-tool-rag` | Retrieval-augmented tool selection and reranking |
 | `ene-vrm` | VRM 1.0 avatar loading and wgpu renderer |
 | `ene-config` | Configuration loading, settings schema, character card definitions |

@@ -58,8 +58,8 @@ flowchart TD
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
-  CommonTool[crates/ene-tool-common] --> Tool
-  CommonTool --> Derive[crates/ene-tool-derive]
+  ToolSdk[crates/ene-tool-sdk] --> Tool
+  ToolSdk --> Macros[crates/ene-tool-macros]
 
   ToolHost -.IPC生成.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.IPC生成.-> ToolApp[plugins/tool/app]
@@ -106,7 +106,7 @@ flowchart TD
 - **ハンドシェイクネゴシエーション**: `VersionRange { min: 4, max: 4 }` によるバージョンネゴシエーション。ホストがサポート範囲を送信し、プラグインが合意したバージョンを `HandshakeAck` で報告します。
 - **リクエスト相関**: 非ストリーミングおよびストリーミングの全 IPC メッセージは必須の `request_id` (`Uuid`) を保持します。
 - **ケーパビリティ宣言**: `PluginCapabilities` により利用可能な `tools`, `llm_providers`, `stt_providers`, `tts_providers` を宣伝します。
-- **ステートフルツール DB プロキシ**: 状態を保持するツールは `ene-tool-db` を介してホストの UDS ソケットに接続し、孤立した `todo.db` / `undo.db` ストレージにアクセスします。
+- **ステートフルツール DB プロキシ**: 状態を保持するツールは `ene-plugin-db` を介してホストの UDS ソケットに接続し、孤立した `todo.db` / `undo.db` ストレージにアクセスします。
 
 ---
 
@@ -124,9 +124,9 @@ flowchart TD
 | `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
 | `ene-plugin-proto` | IPC Protocol v4 ワイヤーメッセージ、バージョン定義、フレーミング |
 | `ene-plugin` | プラグイン開発 SDK & `ToolPluginAdapter` ファサード |
-| `ene-tool-common` | ツール開発者向け共通アクション定義 (`ActionSetProvider`, prelude) |
+| `ene-tool-sdk` | ツールプラグイン開発 SDK (`ToolAction`, `ActionSetProvider`, prelude) |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
-| `ene-tool-derive` | Proc-macro `#[derive(ToolAction)]` |
+| `ene-tool-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
 | `ene-tool-rag` | ツール仕様の検索拡張生成 (RAG) と再ランク |
 | `ene-vrm` | VRM 1.0 アバター読み込みおよび wgpu レンダラー |
 | `ene-config` | 設定読み込み、設定スキーマ、キャラクターカード定義 |

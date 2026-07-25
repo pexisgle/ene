@@ -2671,8 +2671,7 @@ dependencies = [
  "base64",
  "ene-plugin",
  "ene-plugin-proto",
- "ene-tool-common",
- "ene-tool-derive",
+ "ene-tool-sdk",
  "enigo",
  "image",
  "pipewire",
@@ -2694,8 +2693,7 @@ dependencies = [
  "dashmap",
  "ene-plugin",
  "ene-plugin-proto",
- "ene-tool-common",
- "ene-tool-derive",
+ "ene-tool-sdk",
  "regex",
  "schemars",
  "serde",
@@ -2728,8 +2726,7 @@ dependencies = [
  "ene-plugin",
  "ene-plugin-db",
  "ene-plugin-proto",
- "ene-tool-common",
- "ene-tool-derive",
+ "ene-tool-sdk",
  "flate2",
  "glob",
  "regex",
@@ -2779,8 +2776,6 @@ dependencies = [
  "async-trait",
  "ctor",
  "ene-config",
- "ene-tool-common",
- "ene-tool-derive",
  "schemars",
  "serde",
  "serde_json",
@@ -2797,8 +2792,7 @@ dependencies = [
  "ene-plugin",
  "ene-plugin-db",
  "ene-plugin-proto",
- "ene-tool-common",
- "ene-tool-derive",
+ "ene-tool-sdk",
  "parking_lot",
  "schemars",
  "serde",
@@ -2816,8 +2810,7 @@ dependencies = [
  "async-trait",
  "ene-plugin",
  "ene-plugin-proto",
- "ene-tool-common",
- "ene-tool-derive",
+ "ene-tool-sdk",
  "quick-xml 0.31.0",
  "reqwest",
  "schemars",
@@ -2887,33 +2880,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "ene-tool-common"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ego-tree",
- "ene-config",
- "ene-plugin",
- "ene-plugin-proto",
- "ene-tool-derive",
- "htmd",
- "regex",
- "schemars",
- "scraper",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ene-tool-derive"
+name = "ene-tool-macros"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "darling 0.23.0",
  "ene-plugin-proto",
- "ene-tool-common",
+ "ene-tool-sdk",
  "proc-macro2",
  "quote",
  "schemars",
@@ -2938,6 +2911,26 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ene-tool-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ego-tree",
+ "ene-config",
+ "ene-plugin",
+ "ene-plugin-proto",
+ "ene-tool-macros",
+ "htmd",
+ "regex",
+ "schemars",
+ "scraper",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

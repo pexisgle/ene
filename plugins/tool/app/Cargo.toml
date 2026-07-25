@@ -10,8 +10,7 @@ publish.workspace = true
 [dependencies]
 ene-plugin = { workspace = true }
 ene-plugin-proto = { workspace = true }
-ene-tool-common = { workspace = true }
-ene-tool-derive = { workspace = true }
+ene-tool-sdk = { workspace = true }
 enigo = "0.6"
 xcap = "0.9.6"
 active-win-pos-rs = "0.11.0"

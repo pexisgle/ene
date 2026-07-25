@@ -64,7 +64,7 @@ failing package/target and root cause; do not hide failures by relaxing lints.
 
 ## Plugins, Tools, IPC, and localization
 
-- New tools are plugins: `cargo new --bin plugins/tool/<name>`; derive `ToolAction`; prefer `ene_tool_common::ActionSetProvider`/`prelude`; wrap with `ene_plugin::ToolPluginAdapter` and serve with `run_plugin_server(Box::new(ToolPluginAdapter(provider))).await`; use `ene-plugin-db` for state; use namespaced `<namespace>.<action>` names; declare side effects/sandbox needs.
+- New tools are plugins: `cargo new --bin plugins/tool/<name>`; derive `ToolAction`; prefer `ene_tool_sdk::ActionSetProvider`/`prelude`; wrap with `ene_plugin::ToolPluginAdapter` and serve with `run_plugin_server(Box::new(ToolPluginAdapter(provider))).await`; use `ene-plugin-db` for state; use namespaced `<namespace>.<action>` names; declare side effects/sandbox needs.
 - Verify tool binaries with `/tool list` and update both `docs/concepts/plugins-and-mcp.md` and `docs/ja/concepts/plugins-and-mcp.md`.
 - IPC work starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4). Preserve length-prefixed JSON, update host/plugins/tests, and bump `PLUGIN_IPC_PROTOCOL_VERSION` only for intentional wire incompatibility.
 - Backend events/statuses stay stable English contracts. UI strings belong in `apps/ene-desktop/i18n/{en-US,ja}/ene_desktop.ftl` and `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`; keep EN/JA user docs synchronized.

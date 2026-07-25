@@ -29,7 +29,7 @@ pub trait ToolSpecArgs: DeserializeOwned + Send + Sync + 'static {
 /// one-line forwarders. This makes the spec name and the dispatch
 /// name the same `&'static str` by construction.
 ///
-/// The `#[tool_action]` proc-macro from `ene-tool-derive` auto-fills
+/// The `#[tool_action]` proc-macro from `ene-tool-macros` auto-fills
 /// `name`, `definition`, and `rag_profile` when given an
 /// `impl` block with a `run` method, leaving only the `run` body
 /// to write.

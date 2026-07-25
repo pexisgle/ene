@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
-use ene_tool_common::{ActionSetProvider, ToolAction};
+use ene_tool_sdk::{ActionSetProvider, ToolAction};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};

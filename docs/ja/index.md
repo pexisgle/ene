@@ -44,9 +44,9 @@ Ene ワークスペース
 │   ├── ene-plugin-proto   (IPC ワイヤープロトコル v4 定義)
 │   ├── ene-plugin         (プラグイン開発 SDK & アダプタファサード)
 │   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
-│   ├── ene-tool-common    (ツールプラグイン向け共通アクション定義)
+│   ├── ene-tool-sdk       (ツールプラグイン開発 SDK: ToolAction、プロバイダ、ヘルパー)
 │   ├── ene-plugin-db      (プラグイン用状態保持 DB IPC クライアント)
-│   ├── ene-tool-derive    (ツールアクション用 Proc-macro derive)
+│   ├── ene-tool-macros    (ツールアクション用 Proc-macro)
 │   └── ene-tool-rag       (ツール仕様の検索拡張生成 RAG)
 └── プロセス外プラグイン
     ├── plugins/provider/* (プロバイダプラグイン: anthropic)

@@ -119,9 +119,9 @@ ene-plugin-host = { path = "crates/ene-plugin-host" }
 ene-plugin-proto = { path = "crates/ene-plugin-proto" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-store = { path = "crates/ene-store" }
-ene-tool-common = { path = "crates/ene-tool-common" }
-ene-tool-derive = { path = "crates/ene-tool-derive" }
+ene-tool-macros = { path = "crates/ene-tool-macros" }
 ene-tool-rag = { path = "crates/ene-tool-rag" }
+ene-tool-sdk = { path = "crates/ene-tool-sdk" }
 ene-voice = { path = "crates/ene-voice" }
 ene-vrm = { path = "crates/ene-vrm" }
 

@@ -1,14 +1,14 @@
 # Tool SDK Crates — API Reference
 
-> **Crates**: `ene-tool-common` | `ene-tool-db` | `ene-tool-derive` | `ene-tool-rag`
+> **Crates**: `ene-tool-sdk` | `ene-plugin-db` | `ene-tool-macros` | `ene-tool-rag`
 
 Helper library crates designed to support tool plugin creation, stateful storage access, proc-macro derives, and retrieval-augmented tool discovery.
 
 ---
 
-## 1. `ene-tool-common` (Common Action Traits & Providers)
+## 1. `ene-tool-sdk` (Tool Plugin Authoring SDK)
 
-Shared traits (`ActionSetProvider`), prelude types, and reflection helpers used by plugins to implement tool actions.
+Shared traits (`ToolAction`, `ActionSetProvider`), prelude types, and helpers (HTML-to-Markdown, truncation) used by plugins to implement tool actions.
 
 ---
 
@@ -20,10 +20,12 @@ Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) use `ene-plugin-db
 
 ---
 
-## 3. `ene-tool-derive` (Proc-Macro Derives)
+## 3. `ene-tool-macros` (Proc-Macros)
 
 Provides procedural macros simplifying tool definition:
 - `#[derive(ToolAction)]`: Generates `ToolSpec` metadata, JSON argument deserialization, and `execute()` glue code automatically.
+- `#[derive(ToolSpec)]`: Generates `ToolSpec`/`ToolRagProfile` construction from `#[tool(...)]`/`#[arg(...)]` attributes.
+- `#[tool_action(args = ...)]`: Attribute macro that fills in `name()`/`definition()`/`rag_profile()` forwarders on a hand-written `ToolAction` impl.
 
 ---
 

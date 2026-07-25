@@ -3,8 +3,8 @@ mod shell_platform;
 use self::shell_platform::execute_shell_command;
 use crate::utils::sandbox::SandboxConfig;
 use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
-use ene_tool_common::prelude::*;
-use ene_tool_common::truncate::Truncate;
+use ene_tool_sdk::prelude::*;
+use ene_tool_sdk::truncate::Truncate;
 use std::fmt::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -159,7 +159,7 @@ impl ShellAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_tool_common::ToolAction;
+    use ene_tool_sdk::ToolAction;
 
     #[test]
     fn schema_does_not_require_description() {

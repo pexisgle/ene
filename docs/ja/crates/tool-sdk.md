@@ -1,16 +1,17 @@
 # ツール SDK 関連クレート — API リファレンス
 
-> **クレート**: `ene-tool-common` | `ene-plugin-db` | `ene-tool-derive` | `ene-tool-rag`
+> **クレート**: `ene-tool-sdk` | `ene-plugin-db` | `ene-tool-macros` | `ene-tool-rag`
 
-ツールプラグインの開発、ステートフルなストレージ操作、Proc-macro derive、および RAG によるツール探索を支援するライブラリクレート群です。
+ツールプラグインの開発、ステートフルなストレージ操作、Proc-macro、および RAG によるツール探索を支援するライブラリクレート群です。
 
 ---
 
-## 1. `ene-tool-common` (共通アクション定義 & プロバイダ)
+## 1. `ene-tool-sdk` (ツールプラグイン開発 SDK)
 
 ツールバイナリ向けの標準アクション定義およびプロバイダを提供します：
 - `ToolAction`: 個々のツールアクションを非同期実行するためのトレイト。
 - `ActionSetProvider`: 単一のプラグインバイナリ内で複数の `ToolAction` 型を登録・保持するコンテナ。
+- ヘルパー: HTML-to-Markdown 変換、コンテンツ切り詰め。
 
 ---
 
@@ -22,10 +23,12 @@
 
 ---
 
-## 3. `ene-tool-derive` (Proc-Macro Derives)
+## 3. `ene-tool-macros` (Proc-Macros)
 
 ツール定義を簡略化するプロシージャルマクロを提供します：
 - `#[derive(ToolAction)]`: `ToolSpec` メタデータ、JSON 引数のデシリアライズ、および `execute()` のボイラープレートコードを自動生成します。
+- `#[derive(ToolSpec)]`: `#[tool(...)]`/`#[arg(...)]` 属性から `ToolSpec`/`ToolRagProfile` の構築を生成します。
+- `#[tool_action(args = ...)]`: 手書きの `ToolAction` impl に `name()`/`definition()`/`rag_profile()` の転送メソッドを追加する属性マクロ。
 
 ---
 

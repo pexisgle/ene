@@ -1,8 +1,8 @@
 [package]
-name = "ene-tool-derive"
+name = "ene-tool-macros"
 version.workspace = true
 edition.workspace = true
-description = "Proc-macro derive crate for ene-plugin-proto's ToolSpec and ActionSpec"
+description = "Proc-macro crate for tool plugins — #[derive(ToolAction)], #[derive(ToolSpec)], and #[tool_action]"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
@@ -20,7 +20,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 ene-plugin-proto = { workspace = true }
-ene-tool-common = { workspace = true }
+ene-tool-sdk = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
 async-trait = { workspace = true }
