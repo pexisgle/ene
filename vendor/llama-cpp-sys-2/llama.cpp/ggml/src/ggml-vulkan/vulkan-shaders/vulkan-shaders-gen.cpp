@@ -378,7 +378,7 @@ void string_to_spv_func(std::string name, std::string in_path, std::string out_p
                 std::cerr << part << " ";
             }
             std::cerr << "\n\n" << stderr_str << std::endl;
-            return;
+            throw std::runtime_error("Shader compilation failed for " + name);
         }
 
         if (dep_file) {
@@ -397,6 +397,7 @@ void string_to_spv_func(std::string name, std::string in_path, std::string out_p
         shader_fnames.push_back(std::make_pair(name, out_path));
     } catch (const std::exception& e) {
         std::cerr << "Error executing command for " << name << ": " << e.what() << std::endl;
+        throw;
     }
 }
 

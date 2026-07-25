@@ -51,8 +51,9 @@ function(test_shader_extension_support EXTENSION_NAME TEST_SHADER_FILE RESULT_VA
         add_compile_definitions(${RESULT_VARIABLE})
 
         # Ensure the extension support is forwarded to vulkan-shaders-gen
-        list(APPEND VULKAN_SHADER_GEN_CMAKE_ARGS -D${RESULT_VARIABLE}=ON)
-        set(VULKAN_SHADER_GEN_CMAKE_ARGS "${VULKAN_SHADER_GEN_CMAKE_ARGS}" PARENT_SCOPE)
+        set(tmp_args "${VULKAN_SHADER_GEN_CMAKE_ARGS}")
+        list(APPEND tmp_args -D${RESULT_VARIABLE}=ON)
+        set(VULKAN_SHADER_GEN_CMAKE_ARGS "${tmp_args}" PARENT_SCOPE)
     endif()
 endfunction()
 
