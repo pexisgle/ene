@@ -2,6 +2,7 @@ use ene_plugin_proto::{
     DeferredOutcome, IPC_PROTOCOL_VERSION, IpcListener, IpcRequest, IpcResponse, ToolError,
     ToolProvider, cleanup_path, read_ipc_request, write_ipc_response,
 };
+use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,6 +56,7 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
     tracing::info!(component = "ToolServer", socket = %socket_path.display(), "Listening");
 
     let provider: Arc<dyn ToolProvider> = provider.into();
+    let call_mutex: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let tasks: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
         Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -72,6 +74,7 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
             result = listener.accept() => {
                 let mut stream = result?;
                 let provider = Arc::clone(&provider);
+                let call_mutex = Arc::clone(&call_mutex);
                 let shutdown = Arc::clone(&shutdown);
                 let tasks = Arc::clone(&tasks);
                 let handle = tokio::spawn(async move {
@@ -80,7 +83,7 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
                             Ok(None) => break,
                             Ok(Some(req)) => {
                                 let is_shutdown = matches!(req, IpcRequest::Shutdown);
-                                let resp = dispatch(provider.as_ref(), &req).await;
+                                let resp = dispatch(provider.as_ref(), &call_mutex, &req).await;
                                 if let Err(e) = write_ipc_response(&mut stream, &resp).await {
                                     tracing::error!(component = "ToolServer", error = %e, "Failed to write response");
                                     break;
@@ -135,7 +138,15 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
     Ok(())
 }
 
-async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse {
+#[expect(
+    clippy::await_holding_lock,
+    reason = "Intentionally held across await to serialize set_call_context + tool call; parking_lot::Mutex with send_guard feature is Send-safe across await"
+)]
+async fn dispatch(
+    provider: &dyn ToolProvider,
+    call_mutex: &Mutex<()>,
+    req: &IpcRequest,
+) -> IpcResponse {
     match req {
         IpcRequest::Handshake {
             version,
@@ -175,6 +186,7 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             deferred: true,
             context,
         } => {
+            let _lock = call_mutex.lock();
             if let Some(ctx) = context {
                 provider.set_call_context(ctx);
             }
@@ -194,6 +206,7 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             deferred: false,
             context,
         } => {
+            let _lock = call_mutex.lock();
             if let Some(ctx) = context {
                 provider.set_call_context(ctx);
             }
