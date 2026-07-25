@@ -16,9 +16,6 @@ models/
 **/todo.db*
 .env
 
-# Vendored native dependencies (too large to commit)
-vendor/
-
 # Generated settings schemas
 assets/schema/settings.schema.json
 assets/schema/character_settings.schema.json
