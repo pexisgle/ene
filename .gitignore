@@ -23,3 +23,6 @@ vendor/
 assets/schema/settings.schema.json
 assets/schema/character_settings.schema.json
 assets/schema/character.schema.json
+
+# mdBook generated output
+**/book/

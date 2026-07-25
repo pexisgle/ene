@@ -1,0 +1,21 @@
+[book]
+authors = ["Ene Team"]
+language = "en"
+src = "."
+title = "Ene Documentation"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/pexisgle/Ene"
+
+[output.html.search]
+enable = true
+limit-results = 30
+teaser-word-count = 30
+use-boolean-and = true
+boost-title = 2
+boost-hierarchy = 1
+boost-paragraph = 1
+expand = true
+heading-split-level = 3
