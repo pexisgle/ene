@@ -10,7 +10,7 @@
 //! ## Relationship to other crates
 //!
 //! - [`ene-plugin-proto`](ene_plugin_proto) — wire protocol definitions
-//!   (protocol v3), framing helpers, and transport layer.
+//!   (protocol v4), framing helpers, and transport layer.
 //! - `ene-plugin-host` — host-side process supervision and capability
 //!   routing (consumes plugins, does not author them).
 //!

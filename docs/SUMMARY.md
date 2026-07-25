@@ -20,7 +20,7 @@
 - [AI (`ene-ai`)](crates/ai.md)
 - [Voice (`ene-voice`)](crates/voice.md)
 - [Connector (`ene-connector`)](crates/connector.md)
-- [Plugin System (`ene-plugin-system`)](crates/plugin-system.md)
+- [Plugin System (`ene-plugin-*`)](crates/plugin-system.md)
 - [Tool SDK (`ene-tool-common`)](crates/tool-sdk.md)
 - [VRM (`ene-vrm`)](crates/vrm.md)
 
