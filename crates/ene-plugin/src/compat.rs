@@ -17,7 +17,8 @@ use crate::plugin::{ToolPlugin, ToolPluginCapabilities};
 /// Wraps any [`ToolProvider`] into a [`ToolPlugin`].
 ///
 /// Serializes `set_call_context` + tool call to prevent interleaved context
-/// from concurrent connections through the legacy `run_tool_server` path.
+/// from concurrent connections through the legacy [`ToolProvider`] shared-`&self`
+/// surface.
 ///
 /// # Example
 ///
