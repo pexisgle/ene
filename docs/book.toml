@@ -8,6 +8,7 @@ title = "Ene Documentation"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/pexisgle/Ene"
+additional-js = ["mermaid.js"]
 
 [output.html.search]
 enable = true
