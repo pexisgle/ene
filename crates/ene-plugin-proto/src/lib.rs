@@ -90,8 +90,8 @@ pub use tool_provider::DeferredOutcome;
 pub use tool_provider::ToolProvider;
 /// Shared tool types.
 pub use tool_types::{
-    EmbeddingField, KeywordSet, Reversibility, SideEffects, ToolCategory, ToolExample, ToolName,
-    ToolRagProfile, ToolSpec, ToolVersion, UndoMetadata,
+    EmbeddingField, KeywordSet, Reversibility, SideEffects, ToolCategory, ToolContent, ToolExample,
+    ToolName, ToolRagProfile, ToolResult, ToolSpec, ToolVersion, UndoMetadata,
 };
 
 // Re-export the transport layer so downstream plugin crates only need to

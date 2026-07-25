@@ -55,23 +55,31 @@ pub struct LlmProviderSpec {
 /// Specification of a TTS provider (reserved for future use).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TtsProviderSpec {
-    /// Provider kind identifier (e.g. `"openai_tts"`).
+    /// Provider kind identifier (e.g. `"openai_tts"`, `"voicevox"`).
     pub kind: String,
 
-    /// Voice identifiers this provider supports.
+    /// Supported voice names.
     #[serde(default)]
-    pub supported_voices: Vec<String>,
+    pub voices: Vec<String>,
+
+    /// Supported audio formats (e.g. `"wav"`, `"mp3"`, `"ogg"`).
+    #[serde(default)]
+    pub formats: Vec<String>,
 }
 
 /// Specification of an STT provider (reserved for future use).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SttProviderSpec {
-    /// Provider kind identifier (e.g. `"whisper"`).
+    /// Provider kind identifier (e.g. `"whisper"`, `"openai_stt"`).
     pub kind: String,
 
-    /// Language codes this provider supports (empty = auto-detect).
+    /// Supported model identifiers.
     #[serde(default)]
-    pub supported_languages: Vec<String>,
+    pub models: Vec<String>,
+
+    /// Supported audio formats (e.g. `"wav"`, `"mp3"`, `"ogg"`).
+    #[serde(default)]
+    pub formats: Vec<String>,
 }
 
 #[cfg(test)]
@@ -129,7 +137,8 @@ mod tests {
     fn tts_provider_spec_serde_roundtrip() {
         let spec = TtsProviderSpec {
             kind: "openai_tts".into(),
-            supported_voices: vec!["alloy".into(), "nova".into()],
+            voices: vec!["alloy".into(), "nova".into()],
+            formats: vec!["wav".into(), "mp3".into()],
         };
         let json = serde_json::to_string(&spec).unwrap();
         let deser: TtsProviderSpec = serde_json::from_str(&json).unwrap();
@@ -140,7 +149,8 @@ mod tests {
     fn stt_provider_spec_serde_roundtrip() {
         let spec = SttProviderSpec {
             kind: "whisper".into(),
-            supported_languages: vec!["en".into(), "ja".into()],
+            models: vec!["whisper-1".into(), "large-v3".into()],
+            formats: vec!["wav".into(), "ogg".into()],
         };
         let json = serde_json::to_string(&spec).unwrap();
         let deser: SttProviderSpec = serde_json::from_str(&json).unwrap();

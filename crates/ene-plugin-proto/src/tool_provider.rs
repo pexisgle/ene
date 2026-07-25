@@ -3,7 +3,7 @@
 use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
 use crate::tool_ipc::{CallContext, DeferredStatus};
-use crate::tool_types::{ToolRagProfile, ToolSpec};
+use crate::tool_types::{ToolRagProfile, ToolResult, ToolSpec};
 use async_trait::async_trait;
 
 /// Outcome of a deferred (background) tool call (#196).
@@ -15,7 +15,7 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeferredOutcome {
     /// The call ran synchronously and produced its final result now.
-    Sync(String),
+    Sync(ToolResult),
     /// The call was accepted for background execution under `task_id`.
     Deferred {
         /// Unique identifier for the queued background task.
@@ -72,9 +72,9 @@ pub trait ToolProvider: Send + Sync {
         name: &str,
         arguments: &str,
     ) -> Result<DeferredOutcome, ToolError> {
-        Ok(DeferredOutcome::Sync(
+        Ok(DeferredOutcome::Sync(ToolResult::from_string(
             self.call_tool(name, arguments).await?,
-        ))
+        )))
     }
 
     /// Polls the status of a deferred (background) task by id (#196).

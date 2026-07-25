@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, VersionRange,
-    read_plugin_response, write_plugin_request,
+    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolResult,
+    VersionRange, read_plugin_response, write_plugin_request,
 };
 
 use crate::error::PluginHostError;
@@ -157,7 +157,7 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Calls a tool exposed by the plugin and returns the result string.
+    /// Calls a tool exposed by the plugin and returns the result.
     ///
     /// Tool-level failures are propagated as
     /// [`PluginHostError::Protocol`] so callers (e.g. the runtime's
@@ -173,7 +173,7 @@ impl IpcPluginConnection {
         name: &str,
         arguments: &str,
         context: Option<CallContext>,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<ToolResult, PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::CallTool {
                 request_id: String::new(),
@@ -325,6 +325,17 @@ impl IpcPluginConnection {
             })
             .await?;
         Self::expect_ack(resp, "CancelDeferred")
+    }
+
+    /// Cancels an in-progress chat stream by its `request_id`.
+    pub async fn cancel_stream(&mut self, request_id: &str) -> Result<(), PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::CancelStream {
+                request_id: String::new(),
+                stream_request_id: request_id.to_string(),
+            })
+            .await?;
+        Self::expect_ack(resp, "CancelStream")
     }
 
     /// Sends a `CreateChatStream` request (does not read responses).
@@ -517,6 +528,9 @@ impl IpcPluginConnection {
             | PluginIpcRequest::CancelDeferred {
                 request_id: rid, ..
             }
+            | PluginIpcRequest::CancelStream {
+                request_id: rid, ..
+            }
             | PluginIpcRequest::CreateChatStream {
                 request_id: rid, ..
             }
@@ -535,7 +549,9 @@ impl IpcPluginConnection {
     /// Verifies that a response's `request_id` matches the expected value.
     fn verify_request_id(resp: &PluginIpcResponse, expected: &str) -> Result<(), PluginHostError> {
         let actual = match resp {
-            PluginIpcResponse::HandshakeAck { .. } | PluginIpcResponse::Pong => return Ok(()),
+            PluginIpcResponse::HandshakeAck { .. }
+            | PluginIpcResponse::Pong
+            | PluginIpcResponse::DeferredCompleted { .. } => return Ok(()),
             PluginIpcResponse::Ack { request_id }
             | PluginIpcResponse::ConfigSchema { request_id, .. }
             | PluginIpcResponse::Error { request_id, .. }
@@ -547,7 +563,9 @@ impl IpcPluginConnection {
             | PluginIpcResponse::StreamEnd { request_id, .. }
             | PluginIpcResponse::StreamError { request_id, .. }
             | PluginIpcResponse::ChatCompletionResult { request_id, .. }
-            | PluginIpcResponse::EmbedBatchResult { request_id, .. } => request_id,
+            | PluginIpcResponse::EmbedBatchResult { request_id, .. }
+            | PluginIpcResponse::SpeechResult { request_id, .. }
+            | PluginIpcResponse::TranscriptionResult { request_id, .. } => request_id,
         };
         if !actual.is_empty() && actual != expected {
             return Err(PluginHostError::execution(format!(
@@ -600,9 +618,12 @@ impl IpcPluginConnection {
             | PluginIpcRequest::RevokePattern { request_id, .. }
             | PluginIpcRequest::PollDeferred { request_id, .. }
             | PluginIpcRequest::CancelDeferred { request_id, .. }
+            | PluginIpcRequest::CancelStream { request_id, .. }
             | PluginIpcRequest::CreateChatStream { request_id, .. }
             | PluginIpcRequest::ChatCompletion { request_id, .. }
-            | PluginIpcRequest::EmbedBatch { request_id, .. } => Some(request_id.as_str()),
+            | PluginIpcRequest::EmbedBatch { request_id, .. }
+            | PluginIpcRequest::SynthesizeSpeech { request_id, .. }
+            | PluginIpcRequest::TranscribeAudio { request_id, .. } => Some(request_id.as_str()),
             PluginIpcRequest::Handshake { .. }
             | PluginIpcRequest::Shutdown
             | PluginIpcRequest::Ping => None,

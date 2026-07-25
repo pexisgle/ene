@@ -40,6 +40,8 @@ async fn main() {
         Some(Arc::new(ToolProviderPlugin::new(provider))),
         None,
         None,
+        None,
+        None,
     ))
     .await
     {

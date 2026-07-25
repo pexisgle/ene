@@ -353,7 +353,7 @@ pub(crate) async fn perform_tool_executions(
                         "Task queued for background execution with task_id: {task_id}"
                     ))
                 }
-                Ok(Ok(ene_plugin_host::DeferredCallResult::Sync(res))) => Ok(res),
+                Ok(Ok(ene_plugin_host::DeferredCallResult::Sync(res))) => Ok(res.text_for_llm()),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(PluginHostError::ExecutionFailed {
                     message: format!(
@@ -371,7 +371,7 @@ pub(crate) async fn perform_tool_executions(
             )
             .await
             {
-                Ok(Ok(res)) => Ok(res),
+                Ok(Ok(res)) => Ok(res.text_for_llm()),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(PluginHostError::ExecutionFailed {
                     message: format!(
@@ -433,11 +433,15 @@ pub(crate) async fn perform_tool_executions(
                         Ok(PermissionDecision::AllowOnce) => {
                             audit_decision = ene_store::AuditDecision::AllowOnce;
                             ctx.registry.approve_permission(req_id.as_str()).await;
-                            result = ctx.registry.call_tool(&name, &args, Some(&call_ctx)).await;
+                            result = ctx
+                                .registry
+                                .call_tool(&name, &args, Some(&call_ctx))
+                                .await
+                                .map(|r| r.text_for_llm());
                         }
                         Ok(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
-                            ctx.registry.allow_pattern(action, target).await;
+                            ctx.registry.allow_pattern(&action, &target).await;
                             ctx.registry.approve_permission(req_id.as_str()).await;
                             {
                                 let mut guard = ctx.permission_scopes.lock().await;
@@ -465,7 +469,11 @@ pub(crate) async fn perform_tool_executions(
                                     });
                                 }
                             }
-                            result = ctx.registry.call_tool(&name, &args, Some(&call_ctx)).await;
+                            result = ctx
+                                .registry
+                                .call_tool(&name, &args, Some(&call_ctx))
+                                .await
+                                .map(|r| r.text_for_llm());
                         }
                         _ => {
                             audit_decision = ene_store::AuditDecision::Denied;
@@ -507,7 +515,8 @@ pub(crate) async fn perform_tool_executions(
                             result = ctx
                                 .registry
                                 .call_tool(&name, &new_args, Some(&call_ctx))
-                                .await;
+                                .await
+                                .map(|r| r.text_for_llm());
                         }
                         Ok(UserInputResponse::Cancel) | Err(_) => {
                             result = Err(PluginHostError::ExecutionFailed {
@@ -777,6 +786,7 @@ pub(crate) async fn execute_system_search_tool(
 mod tests {
     use super::*;
     use crate::types::TurnOrigin;
+    use ene_plugin_proto::ToolResult;
 
     #[tokio::test]
     async fn select_relevant_tools_includes_system_search_tool() {
@@ -791,8 +801,8 @@ mod tests {
                 _name: &str,
                 _arguments: &str,
                 _context: Option<&ene_plugin_proto::CallContext>,
-            ) -> Result<String, ene_plugin_host::PluginHostError> {
-                Ok(String::new())
+            ) -> Result<ToolResult, ene_plugin_host::PluginHostError> {
+                Ok(ToolResult::text(""))
             }
         }
         let registry = DummyRegistry;
@@ -824,8 +834,8 @@ mod tests {
                 _name: &str,
                 _arguments: &str,
                 _context: Option<&ene_plugin_proto::CallContext>,
-            ) -> Result<String, ene_plugin_host::PluginHostError> {
-                Ok("fail".to_string())
+            ) -> Result<ToolResult, ene_plugin_host::PluginHostError> {
+                Ok(ToolResult::text("fail"))
             }
         }
         let registry = DummyRegistry;
@@ -943,8 +953,8 @@ mod tests {
                 _name: &str,
                 _arguments: &str,
                 _context: Option<&ene_plugin_proto::CallContext>,
-            ) -> Result<String, PluginHostError> {
-                Ok(self.output.clone())
+            ) -> Result<ToolResult, PluginHostError> {
+                Ok(ToolResult::text(self.output.clone()))
             }
 
             async fn approve_permission(&self, _request_id: &str) {}
@@ -1031,7 +1041,7 @@ mod tests {
                 _name: &str,
                 _arguments: &str,
                 _context: Option<&ene_plugin_proto::CallContext>,
-            ) -> Result<String, PluginHostError> {
+            ) -> Result<ToolResult, PluginHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
                     Err(PluginHostError::Protocol(ToolError::PermissionRequired {
@@ -1041,7 +1051,7 @@ mod tests {
                         description: "delete file".to_string(),
                     }))
                 } else {
-                    Ok("ok".to_string())
+                    Ok(ToolResult::text("ok"))
                 }
             }
             async fn approve_permission(&self, _request_id: &str) {}
@@ -1154,7 +1164,7 @@ mod tests {
                 _name: &str,
                 _arguments: &str,
                 _context: Option<&ene_plugin_proto::CallContext>,
-            ) -> Result<String, PluginHostError> {
+            ) -> Result<ToolResult, PluginHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 match n {
                     0 => Err(PluginHostError::Protocol(ToolError::PermissionRequired {
@@ -1174,7 +1184,7 @@ mod tests {
                         ])
                         .unwrap(),
                     })),
-                    _ => Ok("ok".to_string()),
+                    _ => Ok(ToolResult::text("ok")),
                 }
             }
             async fn approve_permission(&self, _request_id: &str) {}

@@ -17,13 +17,13 @@ use ene_plugin_proto::{
 use tokio::io::AsyncWriteExt;
 use tokio_stream::StreamExt;
 
-use crate::plugin::{EmbedPlugin, LlmPlugin, ToolPlugin};
+use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
 
-/// Dispatch table holding up to three focused trait implementations.
+/// Dispatch table holding up to five focused trait implementations.
 ///
 /// A plugin struct implements any subset of [`ToolPlugin`], [`LlmPlugin`],
-/// and [`EmbedPlugin`]; the server routes incoming IPC requests to the
-/// corresponding trait object.
+/// [`EmbedPlugin`], [`TtsPlugin`], and [`SttPlugin`]; the server routes
+/// incoming IPC requests to the corresponding trait object.
 pub struct PluginDispatch {
     /// Optional tool plugin implementation.
     pub tool: Option<Arc<dyn ToolPlugin>>,
@@ -31,6 +31,10 @@ pub struct PluginDispatch {
     pub llm: Option<Arc<dyn LlmPlugin>>,
     /// Optional embedding plugin implementation.
     pub embed: Option<Arc<dyn EmbedPlugin>>,
+    /// Optional TTS plugin implementation.
+    pub tts: Option<Arc<dyn TtsPlugin>>,
+    /// Optional STT plugin implementation.
+    pub stt: Option<Arc<dyn SttPlugin>>,
 }
 
 impl PluginDispatch {
@@ -39,8 +43,16 @@ impl PluginDispatch {
         tool: Option<Arc<dyn ToolPlugin>>,
         llm: Option<Arc<dyn LlmPlugin>>,
         embed: Option<Arc<dyn EmbedPlugin>>,
+        tts: Option<Arc<dyn TtsPlugin>>,
+        stt: Option<Arc<dyn SttPlugin>>,
     ) -> Self {
-        Self { tool, llm, embed }
+        Self {
+            tool,
+            llm,
+            embed,
+            tts,
+            stt,
+        }
     }
 }
 
@@ -66,6 +78,8 @@ impl PluginDispatch {
 /// async fn main() -> Result<(), ene_plugin::PluginError> {
 ///     ene_plugin::run_plugin_server(PluginDispatch::new(
 ///         Some(std::sync::Arc::new(MyTool)),
+///         None,
+///         None,
 ///         None,
 ///         None,
 ///     )).await
@@ -191,6 +205,16 @@ async fn handle_connection(
                 "Failed to handle request"
             );
             break;
+        }
+
+        // Drain any pending deferred task completions and push them to the host.
+        if let Some(tool) = &dispatch.tool {
+            for (task_id, result) in tool.drain_deferred_completions() {
+                let resp = PluginIpcResponse::DeferredCompleted { task_id, result };
+                if write_plugin_response(&mut stream, &resp).await.is_err() {
+                    return;
+                }
+            }
         }
 
         if is_shutdown {
@@ -501,6 +525,13 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 },
             }
         }
+        PluginIpcRequest::CancelStream { request_id, .. } => {
+            // CancelStream is handled by the connection handler via a cancel map,
+            // not dispatched to the plugin trait. Return an Ack for protocol compliance.
+            PluginIpcResponse::Ack {
+                request_id: request_id.clone(),
+            }
+        }
         PluginIpcRequest::CancelDeferred {
             request_id,
             task_id,
@@ -524,6 +555,82 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 },
             }
         }
+        PluginIpcRequest::SynthesizeSpeech {
+            request_id,
+            provider_kind,
+            provider_config,
+            text,
+            voice,
+            format,
+        } => {
+            let Some(tts) = &dispatch.tts else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no TTS plugin registered".to_string(),
+                };
+            };
+            match tts
+                .synthesize(
+                    provider_kind,
+                    provider_config.clone(),
+                    text.clone(),
+                    voice.clone(),
+                    format.clone(),
+                )
+                .await
+            {
+                Ok(audio_data) => PluginIpcResponse::SpeechResult {
+                    request_id: request_id.clone(),
+                    audio_base64: base64_encode(&audio_data),
+                    format: format.clone(),
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::TranscribeAudio {
+            request_id,
+            provider_kind,
+            provider_config,
+            audio_base64,
+            format,
+        } => {
+            let Some(stt) = &dispatch.stt else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no STT plugin registered".to_string(),
+                };
+            };
+            let audio_data = match base64_decode(audio_base64) {
+                Ok(data) => data,
+                Err(e) => {
+                    return PluginIpcResponse::Error {
+                        request_id: request_id.clone(),
+                        message: format!("invalid base64 audio: {e}"),
+                    };
+                }
+            };
+            match stt
+                .transcribe(
+                    provider_kind,
+                    provider_config.clone(),
+                    audio_data,
+                    format.clone(),
+                )
+                .await
+            {
+                Ok(text) => PluginIpcResponse::TranscriptionResult {
+                    request_id: request_id.clone(),
+                    text,
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
         PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
             request_id: String::new(),
         },
@@ -533,6 +640,20 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             message: "CreateChatStream must be handled by the streaming path".to_string(),
         },
     }
+}
+
+/// Base64-encode bytes to a string.
+fn base64_encode(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+/// Base64-decode a string to bytes.
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|e| e.to_string())
 }
 
 /// Collects capabilities from all registered dispatch components.
@@ -546,7 +667,14 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
             .llm
             .as_ref()
             .map_or(Vec::new(), |l| l.llm_capabilities()),
-        ..Default::default()
+        tts_providers: dispatch
+            .tts
+            .as_ref()
+            .map_or(Vec::new(), |t| t.tts_capabilities()),
+        stt_providers: dispatch
+            .stt
+            .as_ref()
+            .map_or(Vec::new(), |s| s.stt_capabilities()),
     }
 }
 
@@ -665,7 +793,9 @@ mod tests {
     use crate::plugin::{PluginStreamChunk, ToolPluginCapabilities};
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
-    use ene_plugin_proto::{DeferredStatus, LlmProviderSpec, ToolSpec, VersionRange};
+    use ene_plugin_proto::{
+        DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec, TtsProviderSpec, VersionRange,
+    };
 
     /// A mock tool plugin for testing dispatch logic.
     struct MockToolPlugin;
@@ -689,9 +819,9 @@ mod tests {
             name: &str,
             args: &str,
             _context: Option<&ene_plugin_proto::CallContext>,
-        ) -> Result<String, ene_plugin_proto::ToolError> {
+        ) -> Result<ene_plugin_proto::ToolResult, ene_plugin_proto::ToolError> {
             if name == "test.echo" {
-                Ok(args.to_string())
+                Ok(ene_plugin_proto::ToolResult::from_string(args.to_string()))
             } else {
                 Err(ene_plugin_proto::ToolError::NotFound {
                     tool_name: name.to_string(),
@@ -753,6 +883,55 @@ mod tests {
         }
     }
 
+    /// A mock TTS plugin for testing dispatch logic.
+    struct MockTtsPlugin;
+
+    #[async_trait]
+    impl TtsPlugin for MockTtsPlugin {
+        fn tts_capabilities(&self) -> Vec<TtsProviderSpec> {
+            vec![TtsProviderSpec {
+                kind: "mock_tts".into(),
+                voices: vec!["default".into()],
+                formats: vec!["wav".into()],
+            }]
+        }
+
+        async fn synthesize(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            text: String,
+            _voice: String,
+            _format: String,
+        ) -> Result<Vec<u8>, PluginError> {
+            Ok(text.into_bytes())
+        }
+    }
+
+    /// A mock STT plugin for testing dispatch logic.
+    struct MockSttPlugin;
+
+    #[async_trait]
+    impl SttPlugin for MockSttPlugin {
+        fn stt_capabilities(&self) -> Vec<SttProviderSpec> {
+            vec![SttProviderSpec {
+                kind: "mock_stt".into(),
+                models: vec!["mock-model".into()],
+                formats: vec!["wav".into()],
+            }]
+        }
+
+        async fn transcribe(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _audio_data: Vec<u8>,
+            _format: String,
+        ) -> Result<String, PluginError> {
+            Ok("Mock transcription".into())
+        }
+    }
+
     /// A mock embed plugin for testing dispatch logic.
     struct MockEmbedPlugin;
 
@@ -775,6 +954,28 @@ mod tests {
             tool: tool.then(|| Arc::new(MockToolPlugin) as Arc<dyn ToolPlugin>),
             llm: llm.then(|| Arc::new(MockLlmPlugin) as Arc<dyn LlmPlugin>),
             embed: embed.then(|| Arc::new(MockEmbedPlugin) as Arc<dyn EmbedPlugin>),
+            tts: None,
+            stt: None,
+        }
+    }
+
+    fn make_tts_dispatch() -> PluginDispatch {
+        PluginDispatch {
+            tool: None,
+            llm: None,
+            embed: None,
+            tts: Some(Arc::new(MockTtsPlugin) as Arc<dyn TtsPlugin>),
+            stt: None,
+        }
+    }
+
+    fn make_stt_dispatch() -> PluginDispatch {
+        PluginDispatch {
+            tool: None,
+            llm: None,
+            embed: None,
+            tts: None,
+            stt: Some(Arc::new(MockSttPlugin) as Arc<dyn SttPlugin>),
         }
     }
 
@@ -912,7 +1113,7 @@ mod tests {
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
-                assert_eq!(result.unwrap(), r#"{"msg":"hi"}"#);
+                assert_eq!(result.unwrap().text_for_llm(), r#"{"msg":"hi"}"#);
             }
             other => panic!("expected CallResult, got {other:?}"),
         }
@@ -966,7 +1167,7 @@ mod tests {
         match resp {
             PluginIpcResponse::CallResult { request_id, result } => {
                 assert_eq!(request_id, "req-1");
-                assert_eq!(result.unwrap(), r#"{"msg":"hi"}"#);
+                assert_eq!(result.unwrap().text_for_llm(), r#"{"msg":"hi"}"#);
             }
             other => panic!("expected CallResult (sync fallback), got {other:?}"),
         }
@@ -1176,8 +1377,99 @@ mod tests {
             PluginIpcResponse::HandshakeAck { capabilities, .. } => {
                 assert_eq!(capabilities.tools, 0);
                 assert!(capabilities.llm_providers.is_empty());
+                assert!(capabilities.tts_providers.is_empty());
+                assert!(capabilities.stt_providers.is_empty());
             }
             other => panic!("expected HandshakeAck, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dispatch_synthesize_speech_ok() {
+        let dispatch = make_tts_dispatch();
+        let req = PluginIpcRequest::SynthesizeSpeech {
+            request_id: "req-tts-1".into(),
+            provider_kind: "mock_tts".into(),
+            provider_config: serde_json::json!({}),
+            text: "Hello world".into(),
+            voice: "default".into(),
+            format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        match resp {
+            PluginIpcResponse::SpeechResult {
+                request_id,
+                audio_base64,
+                format,
+            } => {
+                assert_eq!(request_id, "req-tts-1");
+                assert!(!audio_base64.is_empty());
+                assert_eq!(format, "wav");
+            }
+            other => panic!("expected SpeechResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_synthesize_speech_no_tts_returns_error() {
+        let dispatch = make_dispatch(false, false, false);
+        let req = PluginIpcRequest::SynthesizeSpeech {
+            request_id: "req-tts-1".into(),
+            provider_kind: "mock_tts".into(),
+            provider_config: serde_json::json!({}),
+            text: "Hello".into(),
+            voice: "default".into(),
+            format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_transcribe_audio_ok() {
+        let dispatch = make_stt_dispatch();
+        let req = PluginIpcRequest::TranscribeAudio {
+            request_id: "req-stt-1".into(),
+            provider_kind: "mock_stt".into(),
+            provider_config: serde_json::json!({}),
+            audio_base64: base64_encode(b"fake audio"),
+            format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        match resp {
+            PluginIpcResponse::TranscriptionResult { request_id, text } => {
+                assert_eq!(request_id, "req-stt-1");
+                assert_eq!(text, "Mock transcription");
+            }
+            other => panic!("expected TranscriptionResult, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_transcribe_audio_no_stt_returns_error() {
+        let dispatch = make_dispatch(false, false, false);
+        let req = PluginIpcRequest::TranscribeAudio {
+            request_id: "req-stt-1".into(),
+            provider_kind: "mock_stt".into(),
+            provider_config: serde_json::json!({}),
+            audio_base64: "AAAA".into(),
+            format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn dispatch_transcribe_audio_invalid_base64_returns_error() {
+        let dispatch = make_stt_dispatch();
+        let req = PluginIpcRequest::TranscribeAudio {
+            request_id: "req-stt-1".into(),
+            provider_kind: "mock_stt".into(),
+            provider_config: serde_json::json!({}),
+            audio_base64: "!!!invalid base64!!!".into(),
+            format: "wav".into(),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 }

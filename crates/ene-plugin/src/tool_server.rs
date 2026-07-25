@@ -179,7 +179,9 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
                 provider.set_call_context(ctx);
             }
             match provider.call_tool_deferred(name, arguments).await {
-                Ok(DeferredOutcome::Sync(result)) => IpcResponse::CallResult { result: Ok(result) },
+                Ok(DeferredOutcome::Sync(result)) => IpcResponse::CallResult {
+                    result: Ok(result.text_for_llm()),
+                },
                 Ok(DeferredOutcome::Deferred { task_id }) => {
                     IpcResponse::DeferredAccepted { task_id }
                 }

@@ -12,6 +12,8 @@ crate-type = ["lib"]
 
 [dependencies]
 blake3 = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
 ene-plugin-proto = { workspace = true }
 ene-ai = { workspace = true }
 ene-config = { workspace = true }

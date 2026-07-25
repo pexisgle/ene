@@ -305,11 +305,13 @@ impl ToolPlugin for ActionSetProvider {
         name: &str,
         arguments: &str,
         context: Option<&ene_plugin_proto::CallContext>,
-    ) -> Result<String, ToolError> {
+    ) -> Result<ene_plugin_proto::ToolResult, ToolError> {
         if let Some(ctx) = context {
             ProviderHooks::call_set_call_context(&self.hooks, ctx);
         }
-        ToolProvider::call_tool(self, name, arguments).await
+        ToolProvider::call_tool(self, name, arguments)
+            .await
+            .map(ene_plugin_proto::ToolResult::from_string)
     }
 
     async fn call_tool_deferred(
@@ -508,7 +510,7 @@ impl ToolPlugin for SingleActionProvider {
         name: &str,
         arguments: &str,
         context: Option<&ene_plugin_proto::CallContext>,
-    ) -> Result<String, ToolError> {
+    ) -> Result<ene_plugin_proto::ToolResult, ToolError> {
         ToolPlugin::call_tool(&self.inner, name, arguments, context).await
     }
 

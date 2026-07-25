@@ -25,6 +25,8 @@ async fn main() {
         None,
         Some(std::sync::Arc::new(AnthropicPlugin)),
         None,
+        None,
+        None,
     ))
     .await
     {

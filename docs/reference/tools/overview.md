@@ -13,7 +13,7 @@ PluginHostManager (binary discovery, spawning, supervision)
   ├── McpToolRegistry × N (MCP servers)
   ├── ToolRegistry adapter (capabilities.tools → ToolRegistry)
   └── CompositeToolRegistry
-       └── First-wins dedup
+       └── Hard-error dedup (DuplicateToolName)
 
 ToolRag (separate from registry, owned by EneActor)
   ├── EmbeddingProvider (query + HyDE + rerank)
@@ -174,7 +174,7 @@ Tool RAG is handled separately by the `ToolRag` struct (owned by `EneActor`), no
 
 Aggregates multiple `ToolRegistry` instances:
 
-- **First-wins** — duplicate tool names resolve to the first registration
+- **Duplicate tool names are a hard error** — registering a duplicate returns `DuplicateToolName`. This aligns with API v1 (#135): all tools must have unique public names.
 - Dispatches `call_tool`, `set_session_id`, `approve_permission`, `allow_pattern`, `revoke_pattern` to the correct sub-registry
 
 ## MCP Support

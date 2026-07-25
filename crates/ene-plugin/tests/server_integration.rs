@@ -23,8 +23,8 @@ use ene_plugin_proto::PluginCapabilities;
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, IpcListener, IpcStream,
     PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
-    ToolName, ToolSpec, VersionRange, cleanup_path, read_plugin_request, read_plugin_response,
-    write_plugin_request, write_plugin_response,
+    ToolName, ToolResult, ToolSpec, VersionRange, cleanup_path, read_plugin_request,
+    read_plugin_response, write_plugin_request, write_plugin_response,
 };
 use tokio::sync::Mutex;
 
@@ -75,13 +75,13 @@ impl ToolPlugin for TestPlugin {
         name: &str,
         args: &str,
         context: Option<&CallContext>,
-    ) -> Result<String, ToolError> {
+    ) -> Result<ToolResult, ToolError> {
         if let Some(ctx) = context {
             let mut guard = self.state.call_context.lock().await;
             *guard = Some(ctx.clone());
         }
         match name {
-            "test.echo" => Ok(args.to_string()),
+            "test.echo" => Ok(ToolResult::from_string(args.to_string())),
             "test.permission" => Err(ToolError::PermissionRequired {
                 request_id: "req-perm-1".to_string(),
                 action: "shell_exec".to_string(),
@@ -105,9 +105,8 @@ impl ToolPlugin for TestPlugin {
                 task_id: "bg-task-1".to_string(),
             })
         } else {
-            Ok(DeferredOutcome::Sync(
-                self.call_tool(name, arguments, context).await?,
-            ))
+            let result = self.call_tool(name, arguments, context).await?;
+            Ok(DeferredOutcome::Sync(result))
         }
     }
 
@@ -432,6 +431,8 @@ async fn spawn_and_connect(name: &str) -> (IpcStream, Arc<TestPluginState>, Path
         })),
         None,
         None,
+        None,
+        None,
     );
 
     let server_path = socket_path.clone();
@@ -529,7 +530,7 @@ async fn server_call_tool_echo() {
     match resp {
         PluginIpcResponse::CallResult { request_id, result } => {
             assert_eq!(request_id, "req-1");
-            assert_eq!(result.unwrap(), r#"{"data":"value"}"#);
+            assert_eq!(result.unwrap().text_for_llm(), r#"{"data":"value"}"#);
         }
         other => panic!("expected CallResult, got: {other:?}"),
     }
@@ -791,7 +792,7 @@ async fn server_deferred_sync_fallback() {
     match resp {
         PluginIpcResponse::CallResult { request_id, result } => {
             assert_eq!(request_id, "req-1");
-            assert_eq!(result.unwrap(), r#"{"sync":true}"#);
+            assert_eq!(result.unwrap().text_for_llm(), r#"{"sync":true}"#);
         }
         other => panic!("expected CallResult (sync fallback), got: {other:?}"),
     }

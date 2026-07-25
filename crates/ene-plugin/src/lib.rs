@@ -33,7 +33,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), PluginError> {
 //!     ene_plugin::run_plugin_server(
-//!         PluginDispatch::new(Some(Arc::new(MyTool)), None, None),
+//!         PluginDispatch::new(Some(Arc::new(MyTool)), None, None, None, None),
 //!     ).await
 //! }
 //! ```
@@ -57,7 +57,8 @@ pub mod tool_server;
 pub use compat::ToolProviderPlugin;
 pub use host_registry::HostRegistry;
 pub use plugin::{
-    EmbedPlugin, LlmPlugin, PluginStream, PluginStreamChunk, ToolPlugin, ToolPluginCapabilities,
+    EmbedPlugin, LlmPlugin, PluginStream, PluginStreamChunk, SttPlugin, ToolPlugin,
+    ToolPluginCapabilities, TtsPlugin,
 };
 pub use server::{PluginDispatch, run_plugin_server};
 
@@ -70,7 +71,7 @@ pub use ene_plugin_proto::{
     PluginIpcRequest, PluginIpcResponse, SttProviderSpec, TtsProviderSpec, VersionRange,
 };
 /// Shared tool types (re-exported from `ene-plugin-proto`).
-pub use ene_plugin_proto::{ToolError, ToolSpec};
+pub use ene_plugin_proto::{ToolError, ToolResult, ToolSpec};
 
 // Re-export additional tool-proto types used by the server.
 pub use ene_plugin_proto::{DeferredStatus, SandboxConfigData};

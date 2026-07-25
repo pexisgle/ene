@@ -8,7 +8,7 @@
 use async_trait::async_trait;
 use ene_plugin_proto::SandboxConfigData;
 use ene_plugin_proto::{
-    CallContext, DeferredOutcome, DeferredStatus, ToolError, ToolProvider, ToolSpec,
+    CallContext, DeferredOutcome, DeferredStatus, ToolError, ToolProvider, ToolResult, ToolSpec,
 };
 use parking_lot::Mutex;
 
@@ -36,6 +36,8 @@ use crate::plugin::{ToolPlugin, ToolPluginCapabilities};
 ///     let provider = MyProvider;
 ///     let _ = run_plugin_server(PluginDispatch::new(
 ///         Some(std::sync::Arc::new(ToolProviderPlugin::new(provider))),
+///         None,
+///         None,
 ///         None,
 ///         None,
 ///     )).await;
@@ -82,14 +84,17 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         name: &str,
         args: &str,
         context: Option<&CallContext>,
-    ) -> Result<String, ToolError> {
+    ) -> Result<ToolResult, ToolError> {
         let _lock = self.call_mutex.lock();
         if let Some(ctx) = context {
             self.provider.set_call_context(ctx);
         }
         // Lock is intentionally held through the await to prevent interleaving.
         // parking_lot::Mutex with send_guard is Send-safe across await points.
-        self.provider.call_tool(name, args).await
+        self.provider
+            .call_tool(name, args)
+            .await
+            .map(ToolResult::from_string)
     }
 
     #[expect(
@@ -107,7 +112,11 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
             self.provider.set_call_context(ctx);
         }
         // Lock is intentionally held through the await to prevent interleaving.
-        self.provider.call_tool_deferred(name, arguments).await
+        let outcome = self.provider.call_tool_deferred(name, arguments).await?;
+        Ok(match outcome {
+            DeferredOutcome::Sync(result) => DeferredOutcome::Sync(result),
+            DeferredOutcome::Deferred { task_id } => DeferredOutcome::Deferred { task_id },
+        })
     }
 
     fn poll_deferred(&self, task_id: &str) -> Result<DeferredStatus, ToolError> {

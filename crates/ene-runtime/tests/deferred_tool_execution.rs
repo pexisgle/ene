@@ -20,6 +20,7 @@ use ene_ai::{
 };
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_plugin_host::{DeferredCallResult, PluginHostError, ToolRegistry};
+use ene_plugin_proto::ToolResult;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{DeferredToolTask, EneEvent, TerminalReason};
 use ene_store::MemoryStore;
@@ -136,7 +137,7 @@ impl ToolRegistry for BackgroundRegistry {
         _name: &str,
         _arguments: &str,
         _context: Option<&ene_plugin_proto::CallContext>,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<ToolResult, PluginHostError> {
         Err(PluginHostError::ExecutionFailed {
             message: "should use call_tool_deferred".into(),
         })

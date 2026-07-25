@@ -629,6 +629,67 @@ impl EmbeddingField {
     }
 }
 
+/// Structured result of a tool execution.
+///
+/// Replaces the opaque `String` return value with typed content that the
+/// host can route appropriately (text to LLM, images to vision models, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ToolResult {
+    /// Result content items (text, JSON, images, etc.).
+    pub content: Vec<ToolContent>,
+    /// Optional metadata (execution time, cache TTL, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// A single piece of content in a [`ToolResult`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolContent {
+    /// Plain text content.
+    Text {
+        /// The text content.
+        text: String,
+    },
+    /// Structured JSON content.
+    Json(serde_json::Value),
+    /// Base64-encoded image data with MIME type.
+    Image {
+        /// MIME type of the image (e.g. `"image/png"`, `"image/jpeg"`).
+        mime_type: String,
+        /// Base64-encoded image data.
+        data_base64: String,
+    },
+}
+
+impl ToolResult {
+    /// Create a `ToolResult` with a single text content item.
+    pub fn text(s: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolContent::Text { text: s.into() }],
+            metadata: None,
+        }
+    }
+
+    /// Create a `ToolResult` from a legacy String (backward compatibility).
+    pub fn from_string(s: String) -> Self {
+        Self::text(s)
+    }
+
+    /// Extract text content suitable for passing to an LLM.
+    pub fn text_for_llm(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|c| match c {
+                ToolContent::Text { text } => Some(text.clone()),
+                ToolContent::Json(v) => Some(v.to_string()),
+                ToolContent::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

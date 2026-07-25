@@ -18,6 +18,7 @@
 use crate::error::PluginHostError;
 use crate::tool_registry::ToolRegistry;
 use async_trait::async_trait;
+use ene_plugin_proto::ToolResult;
 use ene_plugin_proto::{CallContext, ToolName, ToolSpec};
 use rmcp::serve_client;
 use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
@@ -110,6 +111,23 @@ impl McpToolRegistry {
         Ok(())
     }
 
+    /// Connects to an MCP server via HTTP (SSE) transport.
+    pub fn connect_http(
+        &self,
+        name: &str,
+        url: &str,
+        _auth_header: Option<&str>,
+    ) -> Result<(), PluginHostError> {
+        // TODO: When rmcp adds HTTP/SSE transport support, implement here.
+        // For now, return a clear error indicating the feature is not yet available.
+        Err(PluginHostError::ExecutionFailed {
+            message: format!(
+                "MCP HTTP transport is not yet implemented (server: {name}, url: {url}). \
+                 Use stdio transport instead, or wait for rmcp HTTP/SSE support."
+            ),
+        })
+    }
+
     /// Removes servers whose process has died, logging a warning for each.
     ///
     /// This is the on-access circuit breaker: dead servers stop advertising
@@ -181,7 +199,7 @@ impl ToolRegistry for McpToolRegistry {
         name: &str,
         arguments: &str,
         _context: Option<&CallContext>,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<ToolResult, PluginHostError> {
         let client_opt = {
             let servers = self
                 .servers
@@ -221,9 +239,13 @@ impl ToolRegistry for McpToolRegistry {
             .await
             .map_err(|e| PluginHostError::McpRpc(e.to_string()))?;
 
-        serde_json::to_string(&result.content).map_err(|e| PluginHostError::ExecutionFailed {
-            message: e.to_string(),
-        })
+        let content_text = serde_json::to_string(&result.content).map_err(|e| {
+            PluginHostError::ExecutionFailed {
+                message: e.to_string(),
+            }
+        })?;
+
+        Ok(ToolResult::from_string(content_text))
     }
 }
 

@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use ene_plugin_host::{IpcPluginConnection, PluginHostError};
 use ene_plugin_proto::{
     CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities,
-    PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError, ToolName, ToolSpec,
-    VersionRange, cleanup_path, read_plugin_request, write_plugin_response,
+    PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError, ToolName, ToolResult,
+    ToolSpec, VersionRange, cleanup_path, read_plugin_request, write_plugin_response,
 };
 use tokio::sync::Mutex;
 
@@ -136,7 +136,7 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
             match name.as_str() {
                 "mock.echo" => PluginIpcResponse::CallResult {
                     request_id,
-                    result: Ok(arguments),
+                    result: Ok(ToolResult::from_string(arguments)),
                 },
                 "mock.permission" => PluginIpcResponse::CallResult {
                     request_id,
@@ -298,7 +298,7 @@ async fn call_tool_round_trip() {
         .call_tool("mock.echo", r#"{"msg":"hello"}"#, None)
         .await
         .expect("call_tool should succeed");
-    assert_eq!(result, r#"{"msg":"hello"}"#);
+    assert_eq!(result.text_for_llm(), r#"{"msg":"hello"}"#);
 
     cleanup_path(&socket_path);
 }
@@ -387,7 +387,7 @@ async fn call_tool_forwards_context() {
         .call_tool("mock.echo", r#"{"x":1}"#, Some(ctx))
         .await
         .expect("call_tool should succeed");
-    assert_eq!(result, r#"{"x":1}"#);
+    assert_eq!(result.text_for_llm(), r#"{"x":1}"#);
 
     let s = state.lock().await;
     let recorded = s.call_context.as_ref().expect("context should be recorded");
@@ -483,7 +483,7 @@ async fn deferred_call_sync_fallback() {
 
     match outcome {
         ene_plugin_proto::DeferredOutcome::Sync(result) => {
-            assert_eq!(result, r#"{"x":1}"#);
+            assert_eq!(result.text_for_llm(), r#"{"x":1}"#);
         }
         other => panic!("expected Sync, got: {other:?}"),
     }
@@ -542,7 +542,7 @@ async fn transparent_reconnection_after_transport_failure() {
         .call_tool("mock.echo", "phase1", None)
         .await
         .expect("first call should succeed");
-    assert_eq!(result, "phase1");
+    assert_eq!(result.text_for_llm(), "phase1");
 
     // Phase 2: kill the server to simulate transport failure.
     server_handle.abort();
@@ -562,7 +562,7 @@ async fn transparent_reconnection_after_transport_failure() {
         .call_tool("mock.echo", "phase2", None)
         .await
         .expect("call after reconnect should succeed");
-    assert_eq!(result, "phase2");
+    assert_eq!(result.text_for_llm(), "phase2");
 
     cleanup_path(&socket_path);
 }

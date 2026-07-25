@@ -13,6 +13,7 @@ use ene_ai::{
 };
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_plugin_host::{PluginHostError, ToolRegistry};
+use ene_plugin_proto::ToolResult;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{EneEvent, TerminalReason};
 use ene_store::MemoryStore;
@@ -97,7 +98,7 @@ impl ToolRegistry for EmptyRegistry {
         _name: &str,
         _arguments: &str,
         _context: Option<&ene_plugin_proto::CallContext>,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<ToolResult, PluginHostError> {
         Err(PluginHostError::ExecutionFailed {
             message: "not used".into(),
         })

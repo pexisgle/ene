@@ -8,14 +8,16 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-vulkan = ["llama-cpp-2/vulkan"]
-cuda = ["llama-cpp-2/cuda"]
+default = ["local"]
+local = ["dep:llama-cpp-2", "llama-cpp-2/common", "llama-cpp-2/mtmd"]
+vulkan = ["dep:llama-cpp-2", "llama-cpp-2/vulkan"]
+cuda = ["dep:llama-cpp-2", "llama-cpp-2/cuda"]
 
 [dependencies]
 ene-ai = { workspace = true }
 ene-config = { workspace = true }
 ene-plugin-proto = { workspace = true }
-llama-cpp-2 = { workspace = true, features = ["common", "mtmd"] }
+llama-cpp-2 = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }

@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use ene_ai::{LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_mind::MindConfig;
+use ene_plugin_proto::ToolResult;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{TerminalReason, TurnId, TurnOrigin};
 use ene_store::MemoryStore;
@@ -68,7 +69,7 @@ impl ene_plugin_host::ToolRegistry for EmptyRegistry {
         _name: &str,
         _arguments: &str,
         _context: Option<&ene_plugin_proto::CallContext>,
-    ) -> Result<String, ene_plugin_host::PluginHostError> {
+    ) -> Result<ToolResult, ene_plugin_host::PluginHostError> {
         Err(ene_plugin_host::PluginHostError::ExecutionFailed {
             message: "not used".into(),
         })

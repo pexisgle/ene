@@ -24,9 +24,12 @@ pub enum McpTransport {
         /// Arguments for the command.
         args: Vec<String>,
     },
-    /// Connect via HTTP.
+    /// Connect via HTTP (SSE).
     Http {
         /// Server URL.
         url: String,
+        /// Optional HTTP header for authentication (e.g., "Bearer <token>").
+        #[serde(default)]
+        auth_header: Option<String>,
     },
 }

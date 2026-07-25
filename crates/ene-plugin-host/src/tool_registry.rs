@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::PluginHostError;
-use ene_plugin_proto::{CallContext, DeferredStatus, ToolRagProfile, ToolSpec};
+use ene_plugin_proto::{CallContext, DeferredStatus, ToolRagProfile, ToolResult, ToolSpec};
 
 /// Result of a deferred (background) tool call (#196).
 ///
@@ -19,7 +19,7 @@ use ene_plugin_proto::{CallContext, DeferredStatus, ToolRagProfile, ToolSpec};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeferredCallResult {
     /// The call ran synchronously and produced its final result now.
-    Sync(String),
+    Sync(ToolResult),
     /// The call was accepted for background execution under `task_id`.
     Deferred {
         /// Unique identifier for the queued background task.
@@ -61,7 +61,7 @@ pub trait ToolRegistry: Send + Sync {
         name: &str,
         arguments: &str,
         context: Option<&CallContext>,
-    ) -> Result<String, PluginHostError>;
+    ) -> Result<ToolResult, PluginHostError>;
 
     /// Executes a tool in deferred (background) mode (#196).
     ///
@@ -273,7 +273,7 @@ impl ToolRegistry for CompositeToolRegistry {
         name: &str,
         arguments: &str,
         context: Option<&CallContext>,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<ToolResult, PluginHostError> {
         let registry = self.registry_for(name)?;
         registry.call_tool(name, arguments, context).await
     }
@@ -389,12 +389,14 @@ mod tests {
             name: &str,
             arguments: &str,
             _context: Option<&ene_plugin_proto::CallContext>,
-        ) -> Result<String, PluginHostError> {
+        ) -> Result<ene_plugin_proto::ToolResult, PluginHostError> {
             self.call_log
                 .lock()
                 .unwrap()
                 .push((name.to_string(), arguments.to_string()));
-            Ok(format!("{name} executed"))
+            Ok(ene_plugin_proto::ToolResult::from_string(format!(
+                "{name} executed"
+            )))
         }
 
         async fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
@@ -484,7 +486,7 @@ mod tests {
         let result = composite
             .call_tool("find", r#"{"pattern":"*.rs"}"#, None)
             .await;
-        assert_eq!(result.unwrap(), "find executed");
+        assert_eq!(result.unwrap().text_for_llm(), "find executed");
         let log = call_log.lock().unwrap();
         assert_eq!(log.len(), 1);
         assert_eq!(log[0].0, "find");

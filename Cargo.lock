@@ -2423,11 +2423,9 @@ version = "0.1.0"
 dependencies = [
  "async-openai",
  "async-trait",
- "base64",
  "ctor",
  "ene-config",
  "ene-plugin-proto",
- "image",
  "parking_lot",
  "rand 0.10.2",
  "reqwest",
@@ -2603,6 +2601,7 @@ name = "ene-plugin"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "ene-plugin-proto",
  "parking_lot",
  "serde",
@@ -2711,11 +2710,13 @@ dependencies = [
  "ene-ai",
  "ene-config",
  "ene-plugin-proto",
+ "hex",
  "parking_lot",
  "rmcp",
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
  "tokio",
  "tokio-stream",

@@ -117,6 +117,17 @@ pub enum PluginHostError {
     /// MCP server advertised an invalid tool name.
     #[error("MCP Invalid tool name: {0}")]
     McpInvalidName(String),
+
+    /// Plugin binary checksum verification failed.
+    #[error("checksum mismatch for plugin '{name}': expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        /// The plugin name.
+        name: String,
+        /// Expected checksum.
+        expected: String,
+        /// Actual checksum.
+        actual: String,
+    },
 }
 
 impl PluginHostError {

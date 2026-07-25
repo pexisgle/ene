@@ -9,7 +9,7 @@ use crate::error::PluginError;
 use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
 use crate::tool_ipc::{CallContext, DeferredStatus};
-use crate::tool_types::ToolSpec;
+use crate::tool_types::{ToolResult, ToolSpec};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -32,13 +32,23 @@ pub struct VersionRange {
 
 /// Plugin IPC protocol version.
 ///
+/// v4 extends v3 with:
+/// - `CancelStream` for explicit stream cancellation (from host to plugin)
+/// - `DeferredCompleted` for push-based deferred task notification
+/// - `ToolResult` structured return type (replaces opaque `String`)
+///
 /// v3 extends the tool IPC v2 with:
 /// - `Handshake` gains `plugin_config` (replaces `tool_config` for plugins)
 /// - `HandshakeAck` gains `capabilities: PluginCapabilities`
 /// - Streaming LLM messages (`CreateChatStream`, `StreamChunk`, `StreamEnd`,
 ///   `StreamError`)
 /// - `ChatCompletion` / `EmbedBatch` for non-streaming provider calls
-pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 3;
+pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 4;
+
+/// Default audio format used when none is specified.
+fn default_audio_format() -> String {
+    "wav".to_string()
+}
 
 /// Plugin IPC request — host → plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -109,6 +119,14 @@ pub enum PluginIpcRequest {
         request_id: String,
         /// The `task_id` returned by a prior [`PluginIpcResponse::DeferredAccepted`].
         task_id: String,
+    },
+    /// Cancel an in-progress chat stream.
+    CancelStream {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
+        /// The `request_id` of the `CreateChatStream` to cancel.
+        stream_request_id: String,
     },
     /// Cancel a deferred (background) task by id.
     CancelDeferred {
@@ -188,6 +206,39 @@ pub enum PluginIpcRequest {
         /// Optional JSON Schema for structured output.
         json_schema: Option<serde_json::Value>,
     },
+    /// Synthesize speech from text.
+    ///
+    /// The plugin responds with [`PluginIpcResponse::SpeechResult`].
+    SynthesizeSpeech {
+        /// Unique request identifier.
+        request_id: String,
+        /// Provider kind (e.g. `"voicevox"`).
+        provider_kind: String,
+        /// Provider-specific configuration JSON.
+        provider_config: serde_json::Value,
+        /// Text to synthesize.
+        text: String,
+        /// Voice name.
+        voice: String,
+        /// Output audio format (e.g. `"wav"`).
+        #[serde(default = "default_audio_format")]
+        format: String,
+    },
+    /// Transcribe speech to text.
+    ///
+    /// The plugin responds with [`PluginIpcResponse::TranscriptionResult`].
+    TranscribeAudio {
+        /// Unique request identifier.
+        request_id: String,
+        /// Provider kind (e.g. `"whisper"`).
+        provider_kind: String,
+        /// Provider-specific configuration JSON.
+        provider_config: serde_json::Value,
+        /// Base64-encoded audio data.
+        audio_base64: String,
+        /// Input audio format (e.g. `"wav"`).
+        format: String,
+    },
     /// Batch embedding request.
     ///
     /// The plugin responds with [`PluginIpcResponse::EmbedBatchResult`].
@@ -254,8 +305,8 @@ pub enum PluginIpcResponse {
         /// Request identifier correlating this response to the originating request.
         #[serde(default)]
         request_id: String,
-        /// The result, or an error.
-        result: Result<String, ToolError>,
+        /// The structured result, or an error.
+        result: Result<ToolResult, ToolError>,
     },
     /// Acknowledgment of a deferred (background) tool call.
     DeferredAccepted {
@@ -274,6 +325,13 @@ pub enum PluginIpcResponse {
         task_id: String,
         /// Current status of the task.
         status: DeferredStatus,
+    },
+    /// Push notification: a deferred background task has completed.
+    DeferredCompleted {
+        /// The `task_id` from the original `DeferredAccepted`.
+        task_id: String,
+        /// Result of the deferred execution.
+        result: Result<ToolResult, ToolError>,
     },
     /// A streaming chunk for an in-progress chat stream.
     ///
@@ -308,6 +366,24 @@ pub enum PluginIpcResponse {
         request_id: String,
         /// The generated content.
         content: String,
+    },
+    /// Result of speech synthesis.
+    SpeechResult {
+        /// Request identifier correlating this response to the originating
+        /// [`PluginIpcRequest::SynthesizeSpeech`].
+        request_id: String,
+        /// Base64-encoded audio data.
+        audio_base64: String,
+        /// Audio format (matches request format).
+        format: String,
+    },
+    /// Result of speech transcription.
+    TranscriptionResult {
+        /// Request identifier correlating this response to the originating
+        /// [`PluginIpcRequest::TranscribeAudio`].
+        request_id: String,
+        /// Transcribed text.
+        text: String,
     },
     /// Result of a batch embedding request.
     EmbedBatchResult {
@@ -709,7 +785,7 @@ mod tests {
     async fn response_call_result_ok_roundtrip() {
         let resp = PluginIpcResponse::CallResult {
             request_id: "req-1".into(),
-            result: Ok("success".into()),
+            result: Ok(ToolResult::text("success")),
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
@@ -808,6 +884,54 @@ mod tests {
         let resp = PluginIpcResponse::EmbedBatchResult {
             request_id: "req-uuid-3".into(),
             embeddings: vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]],
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn request_synthesize_speech_roundtrip() {
+        let req = PluginIpcRequest::SynthesizeSpeech {
+            request_id: "req-tts-1".into(),
+            provider_kind: "voicevox".into(),
+            provider_config: serde_json::json!({"speaker": 1}),
+            text: "Hello world".into(),
+            voice: "default".into(),
+            format: "wav".into(),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn request_transcribe_audio_roundtrip() {
+        let req = PluginIpcRequest::TranscribeAudio {
+            request_id: "req-stt-1".into(),
+            provider_kind: "whisper".into(),
+            provider_config: serde_json::json!({"model": "whisper-1"}),
+            audio_base64: "AAAA".into(),
+            format: "wav".into(),
+        };
+        let got = send_recv_request(&req).await;
+        assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn response_speech_result_roundtrip() {
+        let resp = PluginIpcResponse::SpeechResult {
+            request_id: "req-tts-1".into(),
+            audio_base64: "AAAA".into(),
+            format: "wav".into(),
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_transcription_result_roundtrip() {
+        let resp = PluginIpcResponse::TranscriptionResult {
+            request_id: "req-stt-1".into(),
+            text: "Hello world".into(),
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);

@@ -13,7 +13,7 @@ PluginHostManager (バイナリ発見、起動、監視)
   ├── McpToolRegistry × N (MCP サーバー)
   ├── ToolRegistry アダプタ (capabilities.tools → ToolRegistry)
   └── CompositeToolRegistry
-       └── 先勝ち重複排除
+       └── 重複はハードエラー (DuplicateToolName)
 
 ToolRag (レジストリとは別、EneActor が所有)
   ├── EmbeddingProvider (クエリ + HyDE + リランキング)

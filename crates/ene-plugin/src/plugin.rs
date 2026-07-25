@@ -10,7 +10,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, LlmProviderSpec, PluginError, SandboxConfigData,
-    ToolError, ToolSpec,
+    SttProviderSpec, ToolError, ToolResult, ToolSpec, TtsProviderSpec,
 };
 use tokio_stream::Stream;
 
@@ -59,7 +59,7 @@ pub trait ToolPlugin: Send + Sync {
         name: &str,
         _args: &str,
         _context: Option<&CallContext>,
-    ) -> Result<String, ToolError> {
+    ) -> Result<ToolResult, ToolError> {
         Err(ToolError::NotFound {
             tool_name: name.to_string(),
         })
@@ -74,9 +74,8 @@ pub trait ToolPlugin: Send + Sync {
         arguments: &str,
         context: Option<&CallContext>,
     ) -> Result<DeferredOutcome, ToolError> {
-        Ok(DeferredOutcome::Sync(
-            self.call_tool(name, arguments, context).await?,
-        ))
+        let result = self.call_tool(name, arguments, context).await?;
+        Ok(DeferredOutcome::Sync(result))
     }
 
     /// Polls the status of a deferred (background) task by id.
@@ -118,6 +117,14 @@ pub trait ToolPlugin: Send + Sync {
     /// Returns the JSON Schema for the configuration this plugin accepts.
     fn config_schema(&self) -> Option<serde_json::Value> {
         None
+    }
+
+    /// Drain any pending deferred completion notifications.
+    ///
+    /// Returns a list of `(task_id, result)` pairs. The server calls this
+    /// after each request to push completions to the host.
+    fn drain_deferred_completions(&self) -> Vec<(String, Result<ToolResult, ToolError>)> {
+        Vec::new()
     }
 }
 
@@ -181,5 +188,52 @@ pub trait EmbedPlugin: Send + Sync {
         _items: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, PluginError> {
         Err(PluginError::not_supported("embed_batch"))
+    }
+}
+
+// ── TtsPlugin ───────────────────────────────────────────────────────────
+
+/// Plugin trait for Text-to-Speech synthesis.
+#[async_trait]
+pub trait TtsPlugin: Send + Sync {
+    /// Returns TTS capabilities advertised during the handshake.
+    fn tts_capabilities(&self) -> Vec<TtsProviderSpec>;
+
+    /// Synthesizes speech from text.
+    ///
+    /// The default returns [`PluginError::NotSupported`] for plugins that
+    /// do not provide TTS.
+    async fn synthesize(
+        &self,
+        _kind: &str,
+        _config: serde_json::Value,
+        _text: String,
+        _voice: String,
+        _format: String,
+    ) -> Result<Vec<u8>, PluginError> {
+        Err(PluginError::not_supported("synthesize"))
+    }
+}
+
+// ── SttPlugin ───────────────────────────────────────────────────────────
+
+/// Plugin trait for Speech-to-Text transcription.
+#[async_trait]
+pub trait SttPlugin: Send + Sync {
+    /// Returns STT capabilities advertised during the handshake.
+    fn stt_capabilities(&self) -> Vec<SttProviderSpec>;
+
+    /// Transcribes speech audio to text.
+    ///
+    /// The default returns [`PluginError::NotSupported`] for plugins that
+    /// do not provide STT.
+    async fn transcribe(
+        &self,
+        _kind: &str,
+        _config: serde_json::Value,
+        _audio_data: Vec<u8>,
+        _format: String,
+    ) -> Result<String, PluginError> {
+        Err(PluginError::not_supported("transcribe"))
     }
 }

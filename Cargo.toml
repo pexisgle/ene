@@ -91,6 +91,8 @@ unicode-normalization = "0.1"
 # ── Utility ──
 blake3 = "1.8"
 directories = "6"
+hex = "0.4"
+sha2 = "0.10"
 rand = "0.10"
 rayon = "1.12"
 regex = "1"

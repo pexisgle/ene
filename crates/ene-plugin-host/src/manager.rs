@@ -15,6 +15,8 @@ use async_trait::async_trait;
 use ene_config::EneConfig;
 use tokio::sync::{Mutex, mpsc};
 
+use sha2::Digest;
+
 use crate::circuit_breaker::CircuitBreaker;
 use crate::error::PluginHostError;
 use crate::factory::IpcLlmProviderFactory;
@@ -142,7 +144,7 @@ impl ToolRegistry for PluginToolRegistry {
         name: &str,
         arguments: &str,
         context: Option<&ene_plugin_proto::CallContext>,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<ene_plugin_proto::ToolResult, PluginHostError> {
         {
             let mut breaker = self.breaker.lock();
             if breaker.is_open() {
@@ -208,7 +210,7 @@ impl ToolRegistry for PluginToolRegistry {
                 .await?
         };
         Ok(match outcome {
-            ene_plugin_proto::DeferredOutcome::Sync(value) => DeferredCallResult::Sync(value),
+            ene_plugin_proto::DeferredOutcome::Sync(result) => DeferredCallResult::Sync(result),
             ene_plugin_proto::DeferredOutcome::Deferred { task_id } => {
                 DeferredCallResult::Deferred { task_id }
             }
@@ -319,14 +321,26 @@ pub struct PluginHostManager {
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     health_task: Option<tokio::task::JoinHandle<()>>,
     health_rx: Option<mpsc::UnboundedReceiver<PluginHealthEvent>>,
+    /// When true (default), Drop will attempt a best-effort graceful shutdown
+    /// by killing child processes with a brief wait for reaping.
+    shutdown_on_drop: bool,
 }
 
 impl Drop for PluginHostManager {
     fn drop(&mut self) {
-        // Ensure the health probe loop does not outlive the manager (and the
-        // plugins it supervises) even when `shutdown` was not called.
         if let Some(task) = self.health_task.take() {
             task.abort();
+        }
+        // Best-effort graceful shutdown: kill child processes and wait.
+        // async shutdown() was not called, so we cannot send Shutdown IPC
+        // messages, but each SupervisedPlugin::drop handles process cleanup.
+        // The caller should prefer calling shutdown().await before drop.
+        if self.shutdown_on_drop {
+            tracing::warn!(
+                component = "PluginHostManager",
+                "PluginHostManager dropped without explicit shutdown(); \
+                 child processes will be killed without graceful IPC shutdown"
+            );
         }
     }
 }
@@ -362,6 +376,7 @@ impl PluginHostManager {
                 llm_factories: HashMap::new(),
                 health_task: None,
                 health_rx: None,
+                shutdown_on_drop: true,
             });
         }
 
@@ -484,13 +499,24 @@ impl PluginHostManager {
                             );
                         }
                     }
-                    McpTransport::Http { url } => {
-                        tracing::warn!(
+                    McpTransport::Http { url, auth_header } => {
+                        tracing::info!(
                             component = "PluginHostManager",
                             server = %server.name,
                             url = %url,
-                            "MCP HTTP transport not supported yet"
+                            "Connecting to MCP server via HTTP"
                         );
+                        if let Err(err) =
+                            mcp.connect_http(&server.name, url, auth_header.as_deref())
+                        {
+                            tracing::warn!(
+                                component = "PluginHostManager",
+                                server = %server.name,
+                                url = %url,
+                                error = %err,
+                                "MCP HTTP connection failed"
+                            );
+                        }
                     }
                 }
             }
@@ -525,6 +551,7 @@ impl PluginHostManager {
             llm_factories,
             health_task,
             health_rx: Some(health_rx),
+            shutdown_on_drop: true,
         })
     }
 
@@ -546,6 +573,12 @@ impl PluginHostManager {
     /// calls.
     pub fn take_health_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<PluginHealthEvent>> {
         self.health_rx.take()
+    }
+
+    /// Controls whether Drop attempts best-effort shutdown.
+    /// Set to false if the caller will handle shutdown explicitly.
+    pub fn set_shutdown_on_drop(&mut self, value: bool) {
+        self.shutdown_on_drop = value;
     }
 
     /// Sends a graceful `Shutdown` to all plugins and kills the processes.
@@ -582,6 +615,20 @@ impl PluginHostManager {
             name: name.to_string(),
             reason: "binary not found".to_string(),
         })?;
+
+        // Verify binary checksum if configured.
+        if let Some(expected_checksum) = plugin_config
+            .as_ref()
+            .and_then(|c| c.get("checksum"))
+            .and_then(|v| v.as_str())
+        {
+            verify_plugin_checksum(&binary_path, expected_checksum).map_err(|e| {
+                PluginHostError::SpawnFailed {
+                    name: name.to_string(),
+                    reason: format!("checksum verification failed: {e}"),
+                }
+            })?;
+        }
 
         let socket_path: PathBuf = {
             #[cfg(unix)]
@@ -851,6 +898,24 @@ async fn health_probe_loop(
             }
         }
     }
+}
+
+/// Verifies that the plugin binary at `path` matches the expected SHA-256 checksum.
+fn verify_plugin_checksum(path: &PathBuf, expected: &str) -> Result<(), String> {
+    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot open binary: {e}"))?;
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(|e| format!("cannot read binary: {e}"))?;
+    let hash = hex::encode(hasher.finalize());
+    if hash != expected {
+        return Err(format!(
+            "checksum mismatch: expected {expected}, got {hash}"
+        ));
+    }
+    tracing::info!(
+        component = "PluginHostManager",
+        "Plugin binary checksum verified"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

@@ -2545,7 +2545,7 @@ impl EneActor {
                         conversation_id: session_id,
                         turn_id: turn.to_string(),
                     });
-                    let result = if name == "system.search_tools" {
+                    let result: Result<String, EneRuntimeError> = if name == "system.search_tools" {
                         let query = serde_json::from_str::<serde_json::Value>(&arguments)
                             .ok()
                             .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
@@ -2561,6 +2561,7 @@ impl EneActor {
                         registry
                             .call_tool(&name, &arguments, context.as_ref())
                             .await
+                            .map(|r| r.text_for_llm())
                             .map_err(EneRuntimeError::from)
                     };
                     let _ = reply.send(result);
@@ -2805,7 +2806,7 @@ impl EneActor {
         match self.registry.call_tool("utility.undo", "{}", None).await {
             Ok(output) => UndoReport::Reverted {
                 metadata: entry.metadata,
-                output,
+                output: output.text_for_llm(),
             },
             Err(e) => UndoReport::Failed {
                 metadata: entry.metadata,

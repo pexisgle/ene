@@ -23,7 +23,6 @@
     )
 )]
 
-pub mod audio;
 /// Configuration types for AI providers, tasks, and retry policies.
 pub mod config;
 /// Error types for the AI provider layer.
@@ -43,10 +42,6 @@ pub mod role;
 /// Provider trait definitions (`LlmProvider`, `EmbeddingProvider`, etc.).
 pub mod traits;
 
-pub use audio::{
-    AudioProviderError, AudioProviderRegistry, SttProvider, SttProviderFactory, SttResult,
-    TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
-};
 pub use config::{
     AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, BUILTIN_PROVIDER_KINDS, FallbackConfig,
     LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
@@ -70,6 +65,8 @@ pub use resolve::{
 pub use retry::RetryPolicy;
 pub use role::Role;
 pub use traits::{
-    EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
-    LlmProviderRegistry, cosine_similarity, embed, embed_query,
+    AudioProviderError, AudioProviderRegistry, EmbeddingError, EmbeddingKind, EmbeddingProvider,
+    LlmProvider, LlmProviderFactory, LlmProviderRegistry, SttProvider, SttProviderFactory,
+    SttResult, TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
+    cosine_similarity, embed, embed_query,
 };

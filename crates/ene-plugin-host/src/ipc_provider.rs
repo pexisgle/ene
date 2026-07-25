@@ -222,8 +222,17 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                             },
                             tool_calls_delta: tool_calls,
                         };
-                        if tx.send(Ok(chunk)).await.is_err() {
-                            break;
+                        match tx.try_send(Ok(chunk)) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                tracing::warn!(
+                                    component = "IpcLlmProvider",
+                                    "Stream chunk dropped due to full channel (backpressure)"
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                break;
+                            }
                         }
                     }
                     Ok(Some(PluginIpcResponse::StreamEnd {

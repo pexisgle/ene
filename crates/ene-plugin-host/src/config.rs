@@ -28,6 +28,11 @@ fn default_plugin_list() -> HashMap<String, PluginEntry> {
 pub struct PluginEntry {
     /// Whether this plugin is enabled.
     pub enable: bool,
+    /// Expected SHA-256 checksum of the plugin binary (hex-encoded).
+    /// When set, the binary is verified before launch.
+    /// When absent, a one-time warning is logged on first launch.
+    #[serde(default)]
+    pub checksum: Option<String>,
     /// Plugin-specific configuration (flattened into the parent).
     #[serde(flatten)]
     pub config: serde_json::Value,
@@ -37,6 +42,7 @@ impl Default for PluginEntry {
     fn default() -> Self {
         Self {
             enable: true,
+            checksum: None,
             config: serde_json::Value::Object(serde_json::Map::default()),
         }
     }
