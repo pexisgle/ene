@@ -17,6 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+parking_lot = { workspace = true }
 
 ene-config = { workspace = true }
 ene-store = { workspace = true }

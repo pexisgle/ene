@@ -78,6 +78,10 @@ pub struct Runtime {
     emotion_clock: Option<Instant>,
     device_state: device_query::DeviceState,
     char_surface_fatal: bool,
+    /// Whether an Alt modifier key is currently held. Tracked from
+    /// `WindowEvent::ModifiersChanged` so the Alt+Space spotlight
+    /// hotkey can be detected on `Space` key presses (#218).
+    alt_held: bool,
     /// Previous frame's `tts_playing` value, used to detect the
     /// true→false transition and reset the viseme mouth shape (L11).
     #[cfg(feature = "voice")]
@@ -125,6 +129,7 @@ impl Runtime {
             emotion_clock: None,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
+            alt_held: false,
             #[cfg(feature = "voice")]
             prev_tts_playing: false,
         }
@@ -430,6 +435,12 @@ impl ApplicationHandler for Runtime {
             .chat_egui_window
             .as_ref()
             .is_some_and(|w| w.window.id() == window_id);
+
+        // Track the Alt modifier across all windows so the Alt+Space
+        // spotlight hotkey works no matter which window is focused (#218).
+        if let WindowEvent::ModifiersChanged(modifiers) = &event {
+            self.alt_held = modifiers.state().alt_key();
+        }
 
         if is_ui {
             self.handle_ui_window_event(event_loop, event);
@@ -868,7 +879,25 @@ impl Runtime {
             }
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(named) = key_pressed(&event) {
-                    if matches!(named, NamedKey::Space) {
+                    if matches!(named, NamedKey::Space) && self.alt_held {
+                        // Alt+Space toggles the spotlight quick launcher (#218).
+                        let next = {
+                            let mut ui_state = self.state.ui_bevy_state_mut();
+                            ui_state.0.spotlight_visible = !ui_state.0.spotlight_visible;
+                            if ui_state.0.spotlight_visible {
+                                ui_state.0.spotlight_input.clear();
+                                ui_state.0.spotlight_selection = 0;
+                                ui_state.0.settings_window_visible = true;
+                            }
+                            ui_state.0.spotlight_visible
+                        };
+                        if next && self.ui_window.is_none() {
+                            self.create_ui_window(event_loop);
+                        }
+                        if let Some(uw) = self.ui_window.as_ref() {
+                            uw.window.request_redraw();
+                        }
+                    } else if matches!(named, NamedKey::Space) {
                         self.transparent = !self.transparent;
                         cw.window.set_decorations(!self.transparent);
                         cw.window.set_transparent(self.transparent);
@@ -1507,7 +1536,9 @@ impl Runtime {
         // because `CharacterSettings` is not a bevy
         // `Resource` yet.
         app.world_mut()
-            .write_message(crate::event::ui_action::SettingsActionEvent { action });
+            .write_message(crate::event::ui_action::SettingsActionEvent {
+                action: action.clone(),
+            });
         let bevy_world = app.world_mut();
         let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
         crate::settings_ui::widgets::apply_action(
@@ -1932,6 +1963,11 @@ impl UiWindow {
             self.settings_ui
                 .render(ui, settings, ai, world, ui_entity, now_secs);
         });
+
+        // Spotlight quick launcher + floating caption overlays (#218).
+        // Rendered as top-level egui windows inside the settings context.
+        crate::spotlight::render_spotlight_overlay(&self.egui_ctx, ai, world, ui_entity);
+        crate::spotlight::render_caption_overlay(&self.egui_ctx, world, ui_entity);
 
         let full_output = self.egui_ctx.end_pass();
         let platform_output = full_output.platform_output;

@@ -22,7 +22,7 @@ pub use sync::{CharacterMemorySyncReport, compute_card_memory_hash, sync_charact
 use std::sync::Arc;
 
 use ene_ai::EmbeddingProvider;
-use ene_config::CharacterCardV3;
+use ene_config::{CharacterCardV3, UserPersona};
 use ene_store::MemoryStore;
 
 use crate::config::CharacterMemoryConfig;
@@ -35,17 +35,21 @@ pub struct CharacterProcessor;
 
 impl CharacterProcessor {
     /// Compile the identity kernel for a character card.
+    ///
+    /// `user_persona`, when provided, expands the `{{user_persona}}` CBS macro
+    /// in card-derived fields (#H-3).
     pub fn compile_kernel(
         card: &CharacterCardV3,
         user_name: &str,
+        user_persona: Option<&UserPersona>,
         max_tokens: usize,
     ) -> IdentityKernel {
-        CharacterCompiler::compile(card, user_name, max_tokens)
+        CharacterCompiler::compile(card, user_name, user_persona, max_tokens)
     }
 
     /// Compile the identity kernel using default token budget.
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
-        Self::compile_kernel(card, user_name, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
+        Self::compile_kernel(card, user_name, None, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
     }
 
     /// Synchronize `CCv3` lorebook and style indices into typed memory.

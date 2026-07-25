@@ -441,7 +441,7 @@ pub(crate) async fn perform_tool_executions(
                         }
                         Ok(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
-                            ctx.registry.allow_pattern(&action, &target).await;
+                            ctx.registry.allow_pattern(action, target).await;
                             ctx.registry.approve_permission(req_id.as_str()).await;
                             {
                                 let mut guard = ctx.permission_scopes.lock().await;

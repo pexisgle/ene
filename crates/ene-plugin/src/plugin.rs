@@ -35,6 +35,7 @@ pub struct PluginStreamChunk {
 pub type PluginStream = Pin<Box<dyn Stream<Item = Result<PluginStreamChunk, PluginError>> + Send>>;
 
 /// Capabilities advertised by a tool plugin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolPluginCapabilities {
     /// Number of tools this plugin provides.
     pub tool_count: usize,
@@ -179,6 +180,16 @@ pub trait EmbedPlugin: Send + Sync {
     ///
     /// The default returns [`PluginError::NotSupported`] for plugins that
     /// do not provide embeddings.
+    ///
+    /// # Item identity
+    ///
+    /// Items are passed as plain text (`Vec<String>`) rather than `(id, text)`
+    /// pairs: any caller-side identifiers (e.g. `EmbeddingKind` or row ids) are
+    /// intentionally dropped at the IPC boundary. Correlation is **positional**
+    /// — the returned `Vec<Vec<f32>>` has exactly one vector per input item, in
+    /// the same order. Callers must therefore keep their own id→index mapping
+    /// and re-associate results by index. This keeps the wire format minimal;
+    /// restore `(id, text)` only if a future provider needs per-item metadata.
     async fn embed_batch(
         &self,
         _kind: &str,

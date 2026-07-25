@@ -70,6 +70,25 @@ impl CredentialStore {
     pub fn from_api_key(key: impl Into<String>) -> Self {
         Self::ApiKey(SecretString::new(key.into().into_boxed_str()))
     }
+
+    /// Exposes the raw credential for the audited persistence path only.
+    ///
+    /// This is the **only** sanctioned way to obtain secret material for
+    /// secure storage (e.g. an OS keychain). The returned [`CredentialData`]
+    /// serializes raw tokens; callers must route it to a secure store and must
+    /// never log it or place it in ordinary state. Ordinary [`Serialize`]
+    /// always redacts instead.
+    pub fn expose_for_persistence(&self) -> CredentialData {
+        CredentialData::from(self)
+    }
+
+    /// Restores a credential from a previously exported [`CredentialData`].
+    ///
+    /// Inverse of [`expose_for_persistence`](Self::expose_for_persistence);
+    /// used when loading secrets back out of secure storage.
+    pub fn from_exported(data: CredentialData) -> Self {
+        CredentialStore::from(data)
+    }
 }
 
 impl fmt::Debug for CredentialStore {
@@ -87,20 +106,82 @@ impl fmt::Debug for CredentialStore {
     }
 }
 
+/// Secret-bearing export form for the audited persistence path only.
+///
+/// Unlike the blanket [`Serialize`] impl on [`CredentialStore`] — which always
+/// redacts — this type intentionally carries raw tokens. Obtain it exclusively
+/// through [`CredentialStore::expose_for_persistence`] and route the serialized
+/// output through a secure, audited store (e.g. an OS keychain). Never log it
+/// or embed it in ordinary state dumps.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
-enum CredentialData {
+pub enum CredentialData {
+    /// `OAuth2` token set (raw).
     OAuth2 {
+        /// Raw access token.
         access_token: String,
+        /// Raw refresh token, if any.
         #[serde(skip_serializing_if = "Option::is_none")]
         refresh_token: Option<String>,
+        /// Expiry timestamp (not secret).
         #[serde(skip_serializing_if = "Option::is_none")]
         expires_at: Option<DateTime<Utc>>,
     },
+    /// Raw API key.
     ApiKey {
+        /// Raw API key.
         key: String,
     },
+    /// No credential.
     None,
+}
+
+/// Redacted serialization form used by the blanket [`Serialize`]/[`Deserialize`]
+/// impls on [`CredentialStore`].
+///
+/// This deliberately omits every secret so that accidental serialization
+/// (diagnostics, state snapshots, derived impls on containing structs) can never
+/// leak a token. Only the credential variant — and, for `OAuth2`, the non-secret
+/// expiry — survives a redacted round-trip.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+enum RedactedCredential {
+    OAuth2 {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_at: Option<DateTime<Utc>>,
+    },
+    ApiKey,
+    None,
+}
+
+impl From<&CredentialStore> for RedactedCredential {
+    fn from(store: &CredentialStore) -> Self {
+        match store {
+            CredentialStore::OAuth2 { expires_at, .. } => RedactedCredential::OAuth2 {
+                expires_at: *expires_at,
+            },
+            CredentialStore::ApiKey(_) => RedactedCredential::ApiKey,
+            CredentialStore::None => RedactedCredential::None,
+        }
+    }
+}
+
+impl From<RedactedCredential> for CredentialStore {
+    fn from(data: RedactedCredential) -> Self {
+        // The redacted form carries no secret; rebuild a placeholder of the
+        // same variant so type information survives without exposing tokens.
+        match data {
+            RedactedCredential::OAuth2 { expires_at } => CredentialStore::OAuth2 {
+                access_token: SecretString::new(String::new().into_boxed_str()),
+                refresh_token: None,
+                expires_at,
+            },
+            RedactedCredential::ApiKey => {
+                CredentialStore::ApiKey(SecretString::new(String::new().into_boxed_str()))
+            }
+            RedactedCredential::None => CredentialStore::None,
+        }
+    }
 }
 
 impl From<&CredentialStore> for CredentialData {
@@ -146,16 +227,27 @@ impl From<CredentialData> for CredentialStore {
     }
 }
 
+/// Serializes **without** secrets.
+///
+/// The blanket impl deliberately redacts: any code path that serializes a
+/// [`CredentialStore`] (diagnostics, derived impls on containing structs, state
+/// snapshots) receives only the credential variant and non-secret metadata.
+/// Raw tokens are reachable only through the explicit, audited
+/// [`expose_for_persistence`](CredentialStore::expose_for_persistence) path.
 impl Serialize for CredentialStore {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let data = CredentialData::from(self);
-        data.serialize(serializer)
+        RedactedCredential::from(self).serialize(serializer)
     }
 }
 
+/// Deserializes the redacted form (no secrets are recovered).
+///
+/// To restore a real credential from secure storage, deserialize a
+/// [`CredentialData`] and convert it via
+/// [`from_exported`](CredentialStore::from_exported).
 impl<'de> serde::Deserialize<'de> for CredentialStore {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let data = CredentialData::deserialize(deserializer)?;
+        let data = RedactedCredential::deserialize(deserializer)?;
         Ok(CredentialStore::from(data))
     }
 }
@@ -172,5 +264,79 @@ impl AccountCredentials {
             account_label: account_label.into(),
             credential,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_secrets() {
+        let cred = CredentialStore::from_api_key("super-secret-key");
+        let debug_output = format!("{cred:?}");
+        assert!(!debug_output.contains("super-secret-key"));
+        assert!(debug_output.contains("<redacted>"));
+
+        let oauth = CredentialStore::oauth2("access-token", Some("refresh-token"), None);
+        let debug_output = format!("{oauth:?}");
+        assert!(!debug_output.contains("access-token"));
+        assert!(!debug_output.contains("refresh-token"));
+        assert!(debug_output.contains("<redacted>"));
+    }
+
+    #[test]
+    fn serialize_does_not_leak_secrets() {
+        let cred = CredentialStore::from_api_key("super-secret-key");
+        let json = serde_json::to_string(&cred).unwrap();
+        assert!(!json.contains("super-secret-key"));
+        assert!(json.contains("api_key"));
+
+        let oauth = CredentialStore::oauth2("access-token", Some("refresh-token"), None);
+        let json = serde_json::to_string(&oauth).unwrap();
+        assert!(!json.contains("access-token"));
+        assert!(!json.contains("refresh-token"));
+        assert!(json.contains("o_auth2"));
+    }
+
+    #[test]
+    fn expose_for_persistence_returns_raw_secrets() {
+        let cred = CredentialStore::from_api_key("super-secret-key");
+        let data = cred.expose_for_persistence();
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(json.contains("super-secret-key"));
+    }
+
+    #[test]
+    fn roundtrip_via_exported_preserves_secrets() {
+        let original = CredentialStore::from_api_key("super-secret-key");
+        let exported = original.expose_for_persistence();
+        let restored = CredentialStore::from_exported(exported);
+        assert_eq!(restored.api_key(), Some("super-secret-key"));
+
+        let oauth_original = CredentialStore::oauth2("access-token", Some("refresh-token"), None);
+        let oauth_exported = oauth_original.expose_for_persistence();
+        let oauth_restored = CredentialStore::from_exported(oauth_exported);
+        assert_eq!(oauth_restored.access_token(), Some("access-token"));
+        assert_eq!(oauth_restored.refresh_token(), Some("refresh-token"));
+    }
+
+    #[test]
+    fn is_expired_works() {
+        use chrono::Duration;
+
+        let past = Utc::now() - Duration::hours(1);
+        let expired = CredentialStore::oauth2("token", None::<&str>, Some(past));
+        assert!(expired.is_expired());
+
+        let future = Utc::now() + Duration::hours(1);
+        let valid = CredentialStore::oauth2("token", None::<&str>, Some(future));
+        assert!(!valid.is_expired());
+
+        let no_expiry = CredentialStore::oauth2("token", None::<&str>, None);
+        assert!(!no_expiry.is_expired());
+
+        let api_key = CredentialStore::from_api_key("key");
+        assert!(!api_key.is_expired());
     }
 }

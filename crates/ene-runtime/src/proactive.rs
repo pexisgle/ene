@@ -27,6 +27,7 @@ pub(crate) struct ProactiveScheduler {
     /// Bumped whenever a user turn starts so in-flight decisions are discarded.
     pub epoch: u64,
     /// Tick counter for periodic world state memory writes (#209).
+    #[expect(dead_code, reason = "planned for #209 world-state persistence")]
     pub world_state_tick: usize,
 }
 
@@ -74,19 +75,6 @@ impl ProactiveScheduler {
 
     /// Build suppression state for mind gates.
     #[must_use]
-    /// Increment the world-state tick counter and return `true` every
-    /// `interval` ticks, signalling that a world-state memory should be
-    /// persisted.
-    #[must_use]
-    pub fn bump_world_state_tick(&mut self, interval: usize) -> bool {
-        if interval == 0 {
-            return false;
-        }
-        let should_write = self.world_state_tick == 0;
-        self.world_state_tick = (self.world_state_tick + 1) % interval;
-        should_write
-    }
-
     pub fn suppression(&self, user_turn_busy: bool) -> ProactiveSuppressionState {
         let seconds_since_user_input = self.last_user_input_at.elapsed().as_secs();
         let seconds_since_proactive = self
@@ -132,6 +120,7 @@ pub(crate) struct ProactiveDecisionResult {
     /// Epoch captured when the decision started.
     pub epoch: u64,
     /// Tick counter for periodic world state memory writes (#209).
+    #[expect(dead_code, reason = "planned for #209 world-state persistence")]
     pub world_state_tick: usize,
     /// Whether generation should start.
     pub should_generate: bool,

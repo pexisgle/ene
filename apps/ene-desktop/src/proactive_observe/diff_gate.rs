@@ -6,7 +6,7 @@
 //! threshold the gate returns the cached summary instead of triggering a new
 //! inference call.
 
-use image::{DynamicImage, GenericImageView};
+use image::DynamicImage;
 
 /// Perceptual hash gate that caches the last screen hash and summary.
 ///
@@ -105,24 +105,34 @@ mod tests {
 
     #[test]
     fn different_images_have_different_hashes() {
-        let white = DynamicImage::new_rgba8(100, 100); // all zero (black in RGBA)
-        let mut red = DynamicImage::new_rgba8(100, 100);
-        // Fill with red pixels
-        for pixel in red.as_mut_rgba8().unwrap().pixels_mut() {
-            pixel[0] = 255;
-            pixel[3] = 255;
+        // A uniform image always hashes to 0 (no pixel exceeds the mean), so
+        // we use images with spatial variation to exercise the hash properly.
+        let mut dark = DynamicImage::new_rgba8(100, 100);
+        let mut bright = DynamicImage::new_rgba8(100, 100);
+        // Dark: left half black, right half mid-grey.
+        // Bright: left half white, right half mid-grey.
+        for y in 0..100u32 {
+            for x in 0..100u32 {
+                let px = dark.as_mut_rgba8().unwrap().get_pixel_mut(x, y);
+                let v = if x < 50 { 0 } else { 128 };
+                *px = image::Rgba([v, v, v, 255]);
+
+                let px2 = bright.as_mut_rgba8().unwrap().get_pixel_mut(x, y);
+                let v2 = if x < 50 { 255 } else { 128 };
+                *px2 = image::Rgba([v2, v2, v2, 255]);
+            }
         }
-        let h1 = average_hash(&white);
-        let h2 = average_hash(&red);
+        let h1 = average_hash(&dark);
+        let h2 = average_hash(&bright);
         assert_ne!(
             h1, h2,
-            "black and red images should produce different hashes"
+            "spatially different images should produce different hashes"
         );
     }
 
     #[test]
     fn gate_returns_none_when_empty() {
-        let mut gate = ScreenDiffGate::new();
+        let gate = ScreenDiffGate::new();
         assert!(gate.check(42).is_none());
     }
 

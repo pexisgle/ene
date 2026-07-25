@@ -100,6 +100,13 @@ pub trait ToolRegistry: Send + Sync {
     async fn cancel_deferred(&self, _tool_name: &str, _task_id: &str) {}
 
     /// Sets the call context (conversation + turn identifiers).
+    ///
+    /// **Deprecated dead path.** Per-call context is now passed directly to
+    /// [`call_tool`](Self::call_tool) / [`call_tool_deferred`](Self::call_tool_deferred)
+    /// via their `context` argument, which scopes it to a single call instead
+    /// of mutating shared connection state. This setter is retained only for
+    /// backward compatibility with legacy callers and is a no-op by default;
+    /// new code should not invoke it.
     async fn set_call_context(&self, _ctx: &ene_plugin_proto::CallContext) {}
 
     /// Approves a pending destructive-operation permission request by ID.
@@ -184,20 +191,35 @@ impl CompositeToolRegistry {
         }
     }
 
-    /// Read-locks state and calls `f` with a filtered Vec of alive registries.
+    /// Read-locks state and calls `f` with the live registries as a slice.
+    ///
+    /// In the common case (no unregistered external sources) the registries are
+    /// handed to `f` directly as a slice with **no per-call allocation**; `f`
+    /// clones only the handles it needs. When tombstones exist (an external
+    /// source was unregistered), the live registries are collected into a
+    /// temporary `Vec` first so dead slots are skipped.
+    ///
+    /// The read guard is held only for the duration of the (synchronous) `f`
+    /// call. Callers that need to `.await` must clone the handles out (e.g. via
+    /// `to_vec`) so the guard is dropped before awaiting — holding a synchronous
+    /// lock guard across `.await` would deadlock and is not `Send`.
     fn with_registries<R>(&self, f: impl FnOnce(&[Arc<dyn ToolRegistry>]) -> R) -> R {
         let guard = self
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let alive: Vec<Arc<dyn ToolRegistry>> = guard
-            .registries
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !guard.dead_indices.contains(i))
-            .map(|(_, r)| Arc::clone(r))
-            .collect();
-        f(&alive)
+        if guard.dead_indices.is_empty() {
+            f(&guard.registries)
+        } else {
+            let alive: Vec<Arc<dyn ToolRegistry>> = guard
+                .registries
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !guard.dead_indices.contains(i))
+                .map(|(_, r)| Arc::clone(r))
+                .collect();
+            f(&alive)
+        }
     }
 
     /// Write-locks state and calls `f` with a mutable reference to `CompositeState`.
@@ -268,32 +290,58 @@ impl CompositeToolRegistry {
     /// implementation). Tools are namespaced internally so they can be
     /// removed together via [`unregister_external`](Self::unregister_external).
     ///
+    /// Re-registering an existing `source` atomically replaces its previous
+    /// registration: the old tools are validated against, then swapped out,
+    /// only after the new tool set is confirmed collision-free. On any
+    /// collision the previous registration is left fully intact (no partial
+    /// tombstoning).
+    ///
     /// # Errors
     /// Returns [`PluginHostError::DuplicateToolName`] when a tool name collides
-    /// with an already-registered tool.
+    /// with an already-registered tool from a *different* source.
     pub fn register_external(
         &self,
         source: String,
         tool_registry: Arc<dyn ToolRegistry>,
     ) -> Result<(), PluginHostError> {
         self.with_state_mut(|state| {
-            // If source already registered, remove old entry first
-            if state.external_sources.contains_key(&source) {
-                let old_idx = state.external_sources[&source];
-                state.dead_indices.insert(old_idx);
-                // Remove tools from index
-                if let Some(registry) = state.registries.get(old_idx) {
-                    for tool in registry.list_tools() {
-                        state.tool_index.remove(tool.name.as_str());
-                    }
+            // Snapshot the tools owned by the previous registration of this
+            // source (if any). These names are allowed to be "replaced" and
+            // must not be treated as collisions with the new registration.
+            let old_idx = state.external_sources.get(&source).copied();
+            let old_tool_names: HashSet<String> = old_idx
+                .and_then(|idx| state.registries.get(idx))
+                .map(|registry| {
+                    registry
+                        .list_tools()
+                        .into_iter()
+                        .map(|tool| tool.name.as_str().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Validate the new tool set against the live index, ignoring the
+            // source's own previous tools. Nothing is mutated until this
+            // passes, so a collision leaves the old registration intact.
+            for tool in tool_registry.list_tools() {
+                let name = tool.name.as_str().to_string();
+                if state.tool_index.contains_key(&name) && !old_tool_names.contains(&name) {
+                    return Err(PluginHostError::DuplicateToolName { tool_name: name });
                 }
             }
+
+            // Commit: tombstone the old registration and drop its tools from
+            // the index, then install the new one.
+            if let Some(old_idx) = old_idx {
+                state.dead_indices.insert(old_idx);
+                for name in &old_tool_names {
+                    state.tool_index.remove(name);
+                }
+            }
+
             let idx = state.registries.len();
             for tool in tool_registry.list_tools() {
                 let name = tool.name.as_str().to_string();
-                if state.tool_index.contains_key(&name) {
-                    return Err(PluginHostError::DuplicateToolName { tool_name: name });
-                }
                 state.tool_index.insert(name, idx);
             }
             state.registries.push(tool_registry);
@@ -318,7 +366,7 @@ impl CompositeToolRegistry {
                 }
                 state.external_sources.remove(source);
             }
-        })
+        });
     }
 }
 
@@ -482,7 +530,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((name.to_string(), arguments.to_string()));
-            Ok(ene_plugin_proto::ToolResult::from_string(format!(
+            Ok(ene_plugin_proto::ToolResult::text(format!(
                 "{name} executed"
             )))
         }
@@ -551,6 +599,80 @@ mod tests {
             result,
             Err(PluginHostError::DuplicateToolName { .. })
         ));
+    }
+
+    #[test]
+    fn composite_triple_duplicate_is_hard_error() {
+        let r0 = MockRegistry::new(vec![make_tool("dup")]);
+        let r1 = MockRegistry::new(vec![make_tool("dup")]);
+        let r2 = MockRegistry::new(vec![make_tool("dup")]);
+        let result = CompositeToolRegistry::try_new(vec![Arc::new(r0), Arc::new(r1), Arc::new(r2)]);
+        assert!(matches!(
+            result,
+            Err(PluginHostError::DuplicateToolName { .. })
+        ));
+    }
+
+    #[test]
+    fn register_external_replaces_same_source_atomically() {
+        let composite = CompositeToolRegistry::try_new(vec![]).unwrap();
+
+        // First registration of source "mcp.a".
+        let v1 = MockRegistry::new(vec![make_tool("a.tool1"), make_tool("a.tool2")]);
+        composite
+            .register_external("mcp.a".to_string(), Arc::new(v1))
+            .unwrap();
+        let tools = composite.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"a.tool1"));
+        assert!(names.contains(&"a.tool2"));
+
+        // Re-registering the same source replaces its tools (no collision with
+        // its own previous tools), and the old tools disappear.
+        let v2 = MockRegistry::new(vec![make_tool("a.tool1"), make_tool("a.tool3")]);
+        composite
+            .register_external("mcp.a".to_string(), Arc::new(v2))
+            .unwrap();
+        let tools = composite.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"a.tool1"));
+        assert!(names.contains(&"a.tool3"));
+        assert!(!names.contains(&"a.tool2"));
+    }
+
+    #[test]
+    fn register_external_collision_keeps_old_registration() {
+        let composite = CompositeToolRegistry::try_new(vec![]).unwrap();
+
+        // A baseline source owns "shared".
+        let base = MockRegistry::new(vec![make_tool("shared")]);
+        composite
+            .register_external("base".to_string(), Arc::new(base))
+            .unwrap();
+
+        // A second source also owns "unique".
+        let other = MockRegistry::new(vec![make_tool("unique")]);
+        composite
+            .register_external("other".to_string(), Arc::new(other))
+            .unwrap();
+
+        // Re-registering "other" with a tool that collides with "base" must
+        // fail, and — critically — must leave "other"'s previous tools intact
+        // (the old bug tombstoned them before detecting the collision).
+        let colliding = MockRegistry::new(vec![make_tool("shared"), make_tool("unique2")]);
+        let result = composite.register_external("other".to_string(), Arc::new(colliding));
+        assert!(matches!(
+            result,
+            Err(PluginHostError::DuplicateToolName { .. })
+        ));
+
+        let tools = composite.list_tools();
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // Old "other" registration survived.
+        assert!(names.contains(&"unique"));
+        // The colliding new tools were not installed.
+        assert!(!names.contains(&"unique2"));
+        assert_eq!(names.iter().filter(|n| **n == "shared").count(), 1);
     }
 
     #[tokio::test]

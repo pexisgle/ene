@@ -425,6 +425,7 @@ mod tests {
                 ..ArbiterOptions::default()
             },
             semantic_matches: Default::default(),
+            affect_valence: 0.0,
         };
         let candidate = commitment_candidate(0.9);
 

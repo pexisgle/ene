@@ -10,6 +10,7 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::manual_let_else,
     reason = "integration tests use unwrap/expect/panic for assertions"
 )]
 
@@ -81,7 +82,7 @@ impl ToolPlugin for TestPlugin {
             *guard = Some(ctx.clone());
         }
         match name {
-            "test.echo" => Ok(ToolResult::from_string(args.to_string())),
+            "test.echo" => Ok(ToolResult::text(args.to_string())),
             "test.permission" => Err(ToolError::PermissionRequired {
                 request_id: "req-perm-1".to_string(),
                 action: "shell_exec".to_string(),
@@ -113,7 +114,7 @@ impl ToolPlugin for TestPlugin {
     fn poll_deferred(&self, task_id: &str) -> Result<DeferredStatus, ToolError> {
         if task_id == "bg-task-1" {
             Ok(DeferredStatus::Completed {
-                result: "background done".to_string(),
+                result: ToolResult::text("background done"),
             })
         } else {
             Ok(DeferredStatus::Unknown)
@@ -178,7 +179,7 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
                     ),
                 };
             }
-            let negotiated = host_range.min.max(our_range.min);
+            let negotiated = host_range.max.min(our_range.max);
             if let Some(tool) = &dispatch.tool {
                 tool.set_sandbox(sandbox);
                 if let Some(config) = plugin_config {
@@ -196,7 +197,9 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
                 },
             }
         }
-        PluginIpcRequest::Ping => PluginIpcResponse::Pong,
+        PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong {
+            request_id: request_id.clone(),
+        },
         PluginIpcRequest::GetConfigSchema { request_id } => {
             let tool = match &dispatch.tool {
                 Some(t) => t,
@@ -763,7 +766,7 @@ async fn server_deferred_call_and_poll() {
             assert_eq!(
                 status,
                 DeferredStatus::Completed {
-                    result: "background done".to_string()
+                    result: ToolResult::text("background done")
                 }
             );
         }
@@ -831,8 +834,19 @@ async fn server_ping_pong() {
     let (mut stream, _state, socket_path) = spawn_and_connect("ping").await;
     do_handshake(&mut stream).await;
 
-    let resp = round_trip(&mut stream, &PluginIpcRequest::Ping).await;
-    assert_eq!(resp, PluginIpcResponse::Pong);
+    let resp = round_trip(
+        &mut stream,
+        &PluginIpcRequest::Ping {
+            request_id: "ping-1".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        resp,
+        PluginIpcResponse::Pong {
+            request_id: "ping-1".into()
+        }
+    );
 
     cleanup_path(&socket_path);
 }

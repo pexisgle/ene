@@ -24,21 +24,28 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// Creates a retry policy, validating the backoff multiplier.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorError::Policy`](crate::error::ConnectorError::Policy)
+    /// when `multiplier` is not a finite positive number.
     pub fn new(
         max_retries: u32,
         initial_backoff: Duration,
         max_backoff: Duration,
         multiplier: f64,
-    ) -> Self {
-        assert!(
-            multiplier.is_finite() && multiplier > 0.0,
-            "multiplier must be a finite positive number"
-        );
-        Self {
-            max_retries,
-            initial_backoff,
-            max_backoff,
-            multiplier,
+    ) -> Result<Self, crate::error::ConnectorError> {
+        if multiplier.is_finite() && multiplier > 0.0 {
+            Ok(Self {
+                max_retries,
+                initial_backoff,
+                max_backoff,
+                multiplier,
+            })
+        } else {
+            Err(crate::error::ConnectorError::Policy(
+                "multiplier must be a finite positive number".to_string(),
+            ))
         }
     }
     pub fn backoff_for_attempt(&self, attempt: u32) -> Duration {
@@ -55,12 +62,14 @@ impl RetryPolicy {
         F: Fn(u32) -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
     {
-        let mut last_error: Option<E> = None;
-        for attempt in 0..=self.max_retries {
+        // Attempts `0..max_retries` may sleep-and-retry on a retryable error;
+        // the final attempt (`max_retries`) always returns its outcome, so the
+        // loop has no fall-through and no panic path.
+        for attempt in 0..self.max_retries {
             match operation(attempt).await {
                 Ok(value) => return Ok(value),
                 Err(e) => {
-                    if attempt < self.max_retries && should_retry(&e) {
+                    if should_retry(&e) {
                         let backoff = self.backoff_for_attempt(attempt);
                         warn!(
                             attempt,
@@ -69,14 +78,13 @@ impl RetryPolicy {
                             "retrying operation after error"
                         );
                         tokio::time::sleep(backoff).await;
-                        last_error = Some(e);
                     } else {
                         return Err(e);
                     }
                 }
             }
         }
-        Err(last_error.expect("retry loop exhausted without a last error"))
+        operation(self.max_retries).await
     }
 }
 
@@ -93,16 +101,25 @@ struct RateLimiterState {
 }
 
 impl RateLimiter {
-    pub fn new(capacity: f64, rate: f64) -> Self {
-        assert!(capacity > 0.0, "capacity must be positive");
-        assert!(rate > 0.0, "rate must be positive");
-        Self {
-            state: Arc::new(Mutex::new(RateLimiterState {
-                capacity,
-                tokens: capacity,
-                rate,
-                last_refill: Instant::now(),
-            })),
+    /// Creates a token-bucket rate limiter.
+    ///
+    /// # Errors
+    /// Returns [`ConnectorError::Policy`](crate::error::ConnectorError::Policy)
+    /// when `capacity` or `rate` is not positive.
+    pub fn new(capacity: f64, rate: f64) -> Result<Self, crate::error::ConnectorError> {
+        if capacity > 0.0 && rate > 0.0 {
+            Ok(Self {
+                state: Arc::new(Mutex::new(RateLimiterState {
+                    capacity,
+                    tokens: capacity,
+                    rate,
+                    last_refill: Instant::now(),
+                })),
+            })
+        } else {
+            Err(crate::error::ConnectorError::Policy(
+                "capacity and rate must be positive".to_string(),
+            ))
         }
     }
     pub fn capacity(&self) -> f64 {
@@ -197,6 +214,10 @@ pub struct RequestTimeout {
     deadline: Instant,
 }
 impl RequestTimeout {
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "Instant + Duration is the canonical API; overflow is not reachable in practice"
+    )]
     pub fn new(policy: &TimeoutPolicy) -> Self {
         let deadline = Instant::now() + policy.request_timeout;
         Self { deadline }
@@ -227,8 +248,17 @@ impl RateLimitCounter {
             limit,
         }
     }
+    /// Decrements the remaining counter, saturating at zero.
+    ///
+    /// Uses a compare-exchange loop so the counter can never underflow to
+    /// `u64::MAX` (which would make [`is_exhausted`](Self::is_exhausted)
+    /// permanently false).
     pub fn decrement(&self) {
-        self.remaining.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current > 0).then_some(current.saturating_sub(1))
+            });
     }
     pub fn remaining(&self) -> u64 {
         self.remaining.load(Ordering::Relaxed)

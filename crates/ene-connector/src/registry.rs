@@ -4,10 +4,14 @@ use crate::error::ConnectorError;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
+/// A shared, mutex-guarded connector handle stored in the registry.
+type ConnectorHandle = Arc<tokio::sync::Mutex<Box<dyn Connector>>>;
+
 pub struct ConnectorRegistry {
-    connectors: RwLock<HashMap<ConnectorId, Box<dyn Connector>>>,
+    connectors: RwLock<HashMap<ConnectorId, ConnectorHandle>>,
 }
 
 impl fmt::Debug for ConnectorRegistry {
@@ -36,7 +40,7 @@ impl ConnectorRegistry {
             )));
         }
         debug!(connector_id = %id, "registered connector");
-        guard.insert(id, connector);
+        guard.insert(id, Arc::new(tokio::sync::Mutex::new(connector)));
         Ok(())
     }
     pub fn unregister(&self, id: &ConnectorId) -> Option<Box<dyn Connector>> {
@@ -45,7 +49,14 @@ impl ConnectorRegistry {
         if removed.is_some() {
             debug!(connector_id = %id, "unregistered connector");
         }
-        removed
+        // Best-effort: try to extract the inner connector without blocking.
+        // If the connector is currently in use (locked), we drop the Arc and
+        // the connector is lost — acceptable for an explicit unregister.
+        removed.and_then(|arc| {
+            Arc::try_unwrap(arc)
+                .ok()
+                .map(tokio::sync::Mutex::into_inner)
+        })
     }
     pub fn is_registered(&self, id: &ConnectorId) -> bool {
         self.connectors.read().contains_key(id)
@@ -59,50 +70,61 @@ impl ConnectorRegistry {
     pub fn connector_ids(&self) -> Vec<ConnectorId> {
         self.connectors.read().keys().cloned().collect()
     }
-    #[expect(clippy::await_holding_lock)]
     pub async fn connect(
         &self,
         id: &ConnectorId,
         credentials: &CredentialStore,
     ) -> Result<(), ConnectorError> {
-        let mut guard = self.connectors.write();
-        let connector = guard
-            .get_mut(id)
-            .ok_or_else(|| ConnectorError::not_found(format!("connector not registered: {id}")))?;
+        let connector = {
+            let guard = self.connectors.read();
+            guard.get(id).cloned().ok_or_else(|| {
+                ConnectorError::not_found(format!("connector not registered: {id}"))
+            })?
+        };
         info!(connector_id = %id, "connecting connector");
-        connector.connect(credentials).await.map_err(|e| {
-            error!(connector_id = %id, error = %e, "failed to connect connector");
-            e
-        })?;
+        connector
+            .lock()
+            .await
+            .connect(credentials)
+            .await
+            .map_err(|e| {
+                error!(connector_id = %id, error = %e, "failed to connect connector");
+                e
+            })?;
         debug!(connector_id = %id, "connector connected successfully");
         Ok(())
     }
-    #[expect(clippy::await_holding_lock)]
     pub async fn disconnect(&self, id: &ConnectorId) -> Result<(), ConnectorError> {
-        let mut guard = self.connectors.write();
-        let connector = guard
-            .get_mut(id)
-            .ok_or_else(|| ConnectorError::not_found(format!("connector not registered: {id}")))?;
+        let connector = {
+            let guard = self.connectors.read();
+            guard.get(id).cloned().ok_or_else(|| {
+                ConnectorError::not_found(format!("connector not registered: {id}"))
+            })?
+        };
         info!(connector_id = %id, "disconnecting connector");
-        connector.disconnect().await.map_err(|e| {
+        connector.lock().await.disconnect().await.map_err(|e| {
             warn!(connector_id = %id, error = %e, "error during connector disconnect");
             e
         })?;
         debug!(connector_id = %id, "connector disconnected");
         Ok(())
     }
-    #[expect(clippy::await_holding_lock)]
     pub async fn health_check(&self, id: &ConnectorId) -> Result<ConnectorStatus, ConnectorError> {
-        let guard = self.connectors.read();
-        let connector = guard
-            .get(id)
-            .ok_or_else(|| ConnectorError::not_found(format!("connector not registered: {id}")))?;
-        connector.health_check().await
+        let connector = {
+            let guard = self.connectors.read();
+            guard.get(id).cloned().ok_or_else(|| {
+                ConnectorError::not_found(format!("connector not registered: {id}"))
+            })?
+        };
+        connector.lock().await.health_check().await
     }
     pub fn get(&self, id: &ConnectorId) -> Option<ConnectorRef<'_>> {
         let guard = self.connectors.read();
         if guard.contains_key(id) {
-            Some(ConnectorRef { _guard: guard })
+            Some(ConnectorRef {
+                guard,
+                id: id.clone(),
+            })
         } else {
             None
         }
@@ -126,7 +148,16 @@ impl ConnectorRegistry {
         let guard = self.connectors.read();
         guard
             .iter()
-            .map(|(id, c)| (id.clone(), c.name().to_owned(), c.status().clone()))
+            .map(|(id, c)| {
+                let connector = c.try_lock().ok();
+                let name = connector
+                    .as_ref()
+                    .map_or_else(|| "<locked>".to_owned(), |c| c.name().to_owned());
+                let status = connector
+                    .as_ref()
+                    .map_or(ConnectorStatus::Disconnected, |c| c.status().clone());
+                (id.clone(), name, status)
+            })
             .collect()
     }
 }
@@ -137,11 +168,28 @@ impl Default for ConnectorRegistry {
     }
 }
 
+/// A read-locked reference into the [`ConnectorRegistry`].
+///
+/// Provides access to the underlying connector handle while the registry read
+/// lock is held. The connector itself is behind a `tokio::sync::Mutex`, so
+/// callers must `.lock().await` to invoke connector methods.
 pub struct ConnectorRef<'a> {
-    _guard: parking_lot::RwLockReadGuard<'a, HashMap<ConnectorId, Box<dyn Connector>>>,
+    guard: parking_lot::RwLockReadGuard<'a, HashMap<ConnectorId, ConnectorHandle>>,
+    id: ConnectorId,
 }
+
+impl ConnectorRef<'_> {
+    /// Returns a handle to the connector, which can be locked to invoke
+    /// connector methods.
+    pub fn connector(&self) -> Option<ConnectorHandle> {
+        self.guard.get(&self.id).cloned()
+    }
+}
+
 impl fmt::Debug for ConnectorRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectorRef").finish()
+        f.debug_struct("ConnectorRef")
+            .field("id", &self.id)
+            .finish()
     }
 }

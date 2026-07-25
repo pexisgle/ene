@@ -32,7 +32,6 @@ blake3 = { workspace = true }
 encoding_rs = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
-ctor = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

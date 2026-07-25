@@ -18,7 +18,7 @@ ene-plugin-proto = { workspace = true }
 ene-ai = { workspace = true }
 ene-config = { workspace = true }
 ene-connector = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "time", "process"] }
+tokio = { workspace = true, features = ["io-util", "net", "time", "process", "sync", "rt", "macros"] }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

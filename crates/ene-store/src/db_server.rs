@@ -11,14 +11,6 @@
 //! - Table names must start with the tool's prefix (e.g. `fs_`, `utility_`).
 //! - DDL (CREATE/ALTER/DROP) is **not** exposed to tools.
 //! - `sqlite_master` and other internal tables are blocked.
-#![expect(
-    clippy::indexing_slicing,
-    reason = "DB IPC helpers index into validated identifiers and request-owned maps"
-)]
-#![expect(
-    clippy::arithmetic_side_effects,
-    reason = "DB IPC byte-length and capacity math operates on bounded message buffers"
-)]
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -712,6 +704,10 @@ impl DbIpcServer {
     /// character outside `[A-Za-z0-9_]` with the first character in
     /// `[A-Za-z_]`. This prevents SQL injection through identifier
     /// interpolation in DDL construction.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes into validated identifier bytes after length check"
+    )]
     fn validate_identifier(name: &str) -> Result<(), DbServerError> {
         if name.is_empty() {
             return Err(DbServerError::PermissionDenied(
@@ -784,6 +780,10 @@ impl DbIpcServer {
         sql
     }
 
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "blob hex capacity math operates on bounded message buffers"
+    )]
     fn db_value_to_sql(value: &DbValue) -> String {
         match value {
             DbValue::Null => "NULL".to_string(),
@@ -824,6 +824,10 @@ impl DbIpcServer {
         }
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes into request-owned row map with validated column keys"
+    )]
     async fn handle_insert(
         db: &DatabaseConnection,
         table: &str,
@@ -855,6 +859,10 @@ impl DbIpcServer {
         Ok(exec_res.last_insert_id() as i64)
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes into request-owned row map with validated column keys"
+    )]
     async fn handle_upsert(
         db: &DatabaseConnection,
         table: &str,
@@ -1023,6 +1031,10 @@ impl DbIpcServer {
         Ok(rows)
     }
 
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes into request-owned set map with validated column keys"
+    )]
     async fn handle_update(
         db: &DatabaseConnection,
         table: &str,

@@ -1,6 +1,6 @@
 use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
-use crate::tool_types::{ToolRagProfile, ToolSpec};
+use crate::tool_types::{ToolRagProfile, ToolResult, ToolSpec};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -182,8 +182,8 @@ pub enum DeferredStatus {
     Pending,
     /// The task finished successfully with `result`.
     Completed {
-        /// The tool's output string.
-        result: String,
+        /// The tool's structured output.
+        result: ToolResult,
     },
     /// The task failed with `error`.
     Failed {
@@ -470,7 +470,7 @@ mod tests {
         let resp = IpcResponse::DeferredStatus {
             task_id: "task-abc".into(),
             status: DeferredStatus::Completed {
-                result: "done".into(),
+                result: ToolResult::text("done"),
             },
         };
         let got = send_recv_response(&resp).await;

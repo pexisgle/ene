@@ -117,7 +117,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             EneEvent::TurnStarted { .. }
             | EneEvent::ToolBackgroundCompleted { .. }
-            | EneEvent::AudioChunk { .. } => {}
+            | EneEvent::AudioChunk { .. }
+            | EneEvent::PendingCandidateAvailable { .. } => {}
             EneEvent::Terminal {
                 turn: t,
                 origin: _,

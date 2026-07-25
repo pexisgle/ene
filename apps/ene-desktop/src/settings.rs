@@ -375,6 +375,48 @@ pub struct UiState {
     pub reconnect_requested: bool,
     /// Dismiss the fatal startup dialog until the next failure (#242).
     pub fatal_startup_dismissed: bool,
+
+    // ── Spotlight quick launcher (#218) ──
+    /// Whether the spotlight (Alt+Space) command palette is visible.
+    pub spotlight_visible: bool,
+    /// Current search text typed into the spotlight input.
+    pub spotlight_input: String,
+    /// Index of the currently highlighted spotlight action.
+    pub spotlight_selection: usize,
+
+    // ── Floating caption overlay (#218) ──
+    /// Whether the floating caption overlay is visible.
+    pub caption_visible: bool,
+    /// Text shown inside the caption overlay.
+    pub caption_text: String,
+    /// Top-left position (logical points) of the caption window; the
+    /// overlay persists the user's drag position here.
+    pub caption_position: (f32, f32),
+
+    // ── Character card editor (#218) ──
+    /// Whether the editor has loaded the on-disk card into the buffers
+    /// at least once since the page was opened.
+    pub character_editor_loaded: bool,
+    /// Whether the in-memory buffers differ from the on-disk card.
+    pub character_editor_modified: bool,
+    /// Validation errors from the last `ValidateCharacterCard` action.
+    pub character_editor_validation_errors: Vec<String>,
+    /// Editable `data.name` buffer.
+    pub character_editor_name: String,
+    /// Editable `data.description` buffer.
+    pub character_editor_description: String,
+    /// Editable `data.personality` buffer.
+    pub character_editor_personality: String,
+    /// Editable `data.scenario` buffer.
+    pub character_editor_scenario: String,
+    /// Editable `data.system_prompt` buffer.
+    pub character_editor_system_prompt: String,
+    /// Editable `data.mes_example` buffer.
+    pub character_editor_mes_example: String,
+    /// Editable `data.first_mes` buffer.
+    pub character_editor_first_mes: String,
+    /// Editable `data.post_history_instructions` buffer.
+    pub character_editor_post_history: String,
 }
 
 /// A single session message search hit shown on the sessions page (#176).

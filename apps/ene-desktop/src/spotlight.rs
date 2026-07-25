@@ -18,7 +18,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub enum SpotlightAction {
     /// Generic labelled action.
-    RunCommand { label: String, tooltip: String },
+    RunCommand { label: String },
     /// Open a settings page.
     OpenSettings { label: String, page: PageKind },
     /// Open the dedicated chat window.
@@ -33,10 +33,10 @@ impl SpotlightAction {
     /// Human-readable label displayed in the spotlight list.
     pub fn label(&self) -> &str {
         match self {
-            Self::RunCommand { label, .. }
+            Self::RunCommand { label }
             | Self::OpenSettings { label, .. }
-            | Self::OpenChat { label, .. }
-            | Self::QuickChat { label, .. }
+            | Self::OpenChat { label }
+            | Self::QuickChat { label }
             | Self::ToggleFeature { label, .. } => label,
         }
     }
@@ -58,6 +58,9 @@ pub fn default_actions() -> Vec<SpotlightAction> {
         },
         SpotlightAction::QuickChat {
             label: i18n_embed_fl::fl!(crate::i18n::loader(), "spotlight-action-quick-chat"),
+        },
+        SpotlightAction::RunCommand {
+            label: i18n_embed_fl::fl!(crate::i18n::loader(), "spotlight-action-toggle-caption"),
         },
     ]
 }
@@ -85,7 +88,7 @@ pub fn filter_actions<'a>(query: &str, actions: &'a [SpotlightAction]) -> Vec<&'
 pub fn render_spotlight_overlay(
     ctx: &egui::Context,
     _ai: Option<&Arc<AiBridge>>,
-    world: &World,
+    world: &mut World,
     ui_entity: Entity,
 ) {
     // Snapshot current state (drop borrow before Window::show).
@@ -168,26 +171,30 @@ pub fn render_spotlight_overlay(
         });
 
     // ── Post-render: sync back to world ──
+    // Resolve the action to execute (if any) before borrowing the world
+    // mutably, so the immutable borrow of `actions` is dropped first.
+    let action_to_execute = if execute {
+        let filtered_now = filter_actions(&input_buf, &actions);
+        filtered_now.get(selected_idx).map(|a| (*a).clone())
+    } else {
+        None
+    };
+
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        state.0.spotlight_input = input_buf.clone();
+        state.0.spotlight_input.clone_from(&input_buf);
         state.0.spotlight_selection = selected_idx;
-
-        if execute {
-            let filtered_now = filter_actions(&input_buf, &actions);
-            if let Some(action) = filtered_now.get(selected_idx) {
-                execute_spotlight_action(action, world, ui_entity);
-            }
+        if execute || close {
             state.0.spotlight_visible = false;
         }
+    }
 
-        if close {
-            state.0.spotlight_visible = false;
-        }
+    if let Some(action) = action_to_execute {
+        execute_spotlight_action(&action, world, ui_entity);
     }
 }
 
 /// Dispatch a selected spotlight action via ECS messages.
-fn execute_spotlight_action(action: &SpotlightAction, world: &World, ui_entity: Entity) {
+fn execute_spotlight_action(action: &SpotlightAction, world: &mut World, ui_entity: Entity) {
     match action {
         SpotlightAction::OpenSettings { page, .. } => {
             if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
@@ -204,14 +211,20 @@ fn execute_spotlight_action(action: &SpotlightAction, world: &World, ui_entity: 
                 // TODO(#218): wire mic toggle from spotlight via EventChannels.
             }
         }
-        SpotlightAction::RunCommand { .. } => {}
+        SpotlightAction::RunCommand { .. } => {
+            // The built-in command toggles the floating caption overlay,
+            // giving the caption window (#218) a launch path.
+            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+                state.0.caption_visible = !state.0.caption_visible;
+            }
+        }
     }
 }
 
 // ── Caption overlay render ──
 
 /// Render the floating caption overlay as a semi-transparent egui `Window`.
-pub fn render_caption_overlay(ctx: &egui::Context, world: &World, ui_entity: Entity) {
+pub fn render_caption_overlay(ctx: &egui::Context, world: &mut World, ui_entity: Entity) {
     let snapshot = {
         let Some(state) = world.get::<UiStateComponent>(ui_entity) else {
             return;

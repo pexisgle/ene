@@ -72,7 +72,7 @@ pub trait ToolProvider: Send + Sync {
         name: &str,
         arguments: &str,
     ) -> Result<DeferredOutcome, ToolError> {
-        Ok(DeferredOutcome::Sync(ToolResult::from_string(
+        Ok(DeferredOutcome::Sync(ToolResult::text(
             self.call_tool(name, arguments).await?,
         )))
     }

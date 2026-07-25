@@ -25,9 +25,9 @@ pub enum MemoryKind {
     Preference,
     /// How-to knowledge and procedural instructions.
     Procedure,
-    /// Self-reflections by the companion about past interactions.
     /// Observation of the user's environment/activity at a point in time.
     WorldState,
+    /// Self-reflections by the companion about past interactions.
     Reflection,
 }
 
@@ -518,9 +518,9 @@ pub struct Query<'a> {
     pub min_score: f32,
     /// Boost applied when a candidate is surfaced via an active commitment.
     pub commitment_boost: f32,
-    /// Maximum number of pure-recent fallback candidates to gather.
     /// Filter by time range (for world state queries like "what was I doing yesterday?"?).
     pub time_range: Option<TimeRange>,
+    /// Limit on pure-recent fallback candidates.
     pub recent_fallback_limit: usize,
 }
 

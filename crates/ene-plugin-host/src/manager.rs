@@ -17,7 +17,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use sha2::Digest;
 
-use ene_connector::{Connector, CredentialStore};
+use ene_connector::ConnectorRegistry;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::error::PluginHostError;
@@ -26,7 +26,6 @@ use crate::health::PluginHealthEvent;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
 use crate::mcp_connector::McpConnector;
-use crate::mcp_registry::McpToolRegistry;
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 
 /// Maximum number of restart attempts before a plugin is disabled.
@@ -327,6 +326,8 @@ pub struct PluginHostManager {
     /// When true (default), Drop will attempt a best-effort graceful shutdown
     /// by killing child processes with a brief wait for reaping.
     shutdown_on_drop: bool,
+    /// Connector registry for MCP servers (`WS7`: wire `McpConnector` into lifecycle).
+    connector_registry: Arc<ConnectorRegistry>,
 }
 
 impl Drop for PluginHostManager {
@@ -380,6 +381,7 @@ impl PluginHostManager {
                 health_task: None,
                 health_rx: None,
                 shutdown_on_drop: true,
+                connector_registry: Arc::new(ConnectorRegistry::new()),
             });
         }
 
@@ -400,8 +402,10 @@ impl PluginHostManager {
         let plugin_names = discover_plugins();
 
         for name in &plugin_names {
+            let entry = plugin_config.list.get(name);
+
             // Skip plugins explicitly disabled in configuration.
-            if let Some(entry) = plugin_config.list.get(name)
+            if let Some(entry) = entry
                 && !entry.enable
             {
                 tracing::info!(
@@ -412,36 +416,68 @@ impl PluginHostManager {
                 continue;
             }
 
-            let entry_config = plugin_config
-                .list
-                .get(name)
+            let entry_config = entry
                 .map(|e| e.config.clone())
                 .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()));
 
-            match Self::start_plugin(name, entry_config, db_tokens.get(name).cloned()).await {
+            // The expected checksum is a *typed* field on the plugin entry
+            // (`PluginEntry::checksum`), not part of the flattened `config`
+            // JSON. Pass it explicitly so verification actually runs.
+            let expected_checksum = entry.and_then(|e| e.checksum.clone());
+
+            match Self::start_plugin(
+                name,
+                entry_config,
+                expected_checksum,
+                db_tokens.get(name).cloned(),
+            )
+            .await
+            {
                 Ok((plugin, conn)) => {
                     let caps = conn.lock().await.capabilities().clone();
 
                     // Route tool capabilities — fetch actual specs via ListTools.
                     if caps.tools > 0 {
-                        let tools = conn.lock().await.list_tools().await.unwrap_or_else(|e| {
-                            tracing::error!(
-                                component = "PluginHostManager",
-                                plugin = %name,
-                                error = %e,
-                                "Failed to list tools for plugin"
-                            );
-                            Vec::new()
-                        });
-                        let registry = PluginToolRegistry {
-                            plugin_name: name.clone(),
-                            conn: Arc::clone(&conn),
-                            supervised: Arc::clone(&plugin),
-                            tools,
-                            breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
-                            health_tx: Some(health_tx.clone()),
+                        // Retry once on failure; if it still fails, skip
+                        // registering the tool registry (don't silently
+                        // register empty tools). The plugin process itself is
+                        // still supervised so any LLM providers it offers keep
+                        // working.
+                        let tools = match conn.lock().await.list_tools().await {
+                            Ok(tools) => Some(tools),
+                            Err(e) => {
+                                tracing::warn!(
+                                    component = "PluginHostManager",
+                                    plugin = %name,
+                                    error = %e,
+                                    "Failed to list tools for plugin; retrying once"
+                                );
+                                match conn.lock().await.list_tools().await {
+                                    Ok(tools) => Some(tools),
+                                    Err(e) => {
+                                        tracing::error!(
+                                            component = "PluginHostManager",
+                                            plugin = %name,
+                                            error = %e,
+                                            "Failed to list tools for plugin after retry; \
+                                             skipping tool registry registration"
+                                        );
+                                        None
+                                    }
+                                }
+                            }
                         };
-                        tool_registries.push(Arc::new(registry));
+                        if let Some(tools) = tools {
+                            let registry = PluginToolRegistry {
+                                plugin_name: name.clone(),
+                                conn: Arc::clone(&conn),
+                                supervised: Arc::clone(&plugin),
+                                tools,
+                                breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
+                                health_tx: Some(health_tx.clone()),
+                            };
+                            tool_registries.push(Arc::new(registry));
+                        }
                     }
 
                     // Route LLM provider capabilities.
@@ -481,18 +517,36 @@ impl PluginHostManager {
             }
         }
 
-        // Connect to configured MCP servers.
+        // Connect to configured MCP servers via McpConnector (WS7: wire into lifecycle).
+        let connector_registry = Arc::new(ConnectorRegistry::new());
         if !plugin_config.mcp_servers.is_empty() {
-            let mcp = McpToolRegistry::new();
             for server in &plugin_config.mcp_servers {
                 if !server.enabled {
                     continue;
                 }
+
+                let connector = McpConnector::new(server.clone());
+                let registry = connector.registry();
+
+                // Register the connector for lifecycle management
+                if let Err(err) = connector_registry.register(Box::new(connector)) {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        server = %server.name,
+                        error = %err,
+                        "Failed to register MCP connector"
+                    );
+                    continue;
+                }
+
+                // Connect the MCP server
                 match &server.transport {
                     McpTransport::Stdio { command, args } => {
                         let args_ref: Vec<&str> =
                             args.iter().map(std::string::String::as_str).collect();
-                        if let Err(err) = mcp.connect_stdio(&server.name, command, &args_ref).await
+                        if let Err(err) = registry
+                            .connect_stdio(&server.name, command, &args_ref)
+                            .await
                         {
                             tracing::warn!(
                                 component = "PluginHostManager",
@@ -503,13 +557,14 @@ impl PluginHostManager {
                         }
                     }
                     McpTransport::Http { url, auth_header } => {
-                        tracing::info!(
+                        tracing::warn!(
                             component = "PluginHostManager",
                             server = %server.name,
                             url = %url,
-                            "Connecting to MCP server via HTTP"
+                            "Attempting MCP server connection via HTTP (streamable HTTP transport); \
+                             this path may fail if the server is unreachable or incompatible"
                         );
-                        if let Err(err) = mcp
+                        if let Err(err) = registry
                             .connect_http(&server.name, url, auth_header.as_deref())
                             .await
                         {
@@ -523,8 +578,10 @@ impl PluginHostManager {
                         }
                     }
                 }
+
+                // Add the registry to tool registries
+                tool_registries.push(registry);
             }
-            tool_registries.push(Arc::new(mcp));
         }
 
         // Spawn the periodic health probe loop (disabled when the interval is 0).
@@ -556,6 +613,7 @@ impl PluginHostManager {
             health_task,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
+            connector_registry,
         })
     }
 
@@ -568,6 +626,11 @@ impl PluginHostManager {
     /// provider kind.
     pub fn llm_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> {
         &self.llm_factories
+    }
+
+    /// Returns the connector registry managing MCP server connectors (WS7).
+    pub fn connector_registry(&self) -> &Arc<ConnectorRegistry> {
+        &self.connector_registry
     }
 
     /// Takes ownership of the health-event receiver.
@@ -607,6 +670,7 @@ impl PluginHostManager {
     async fn start_plugin(
         name: &str,
         plugin_config: Option<serde_json::Value>,
+        expected_checksum: Option<String>,
         db_token: Option<String>,
     ) -> Result<
         (
@@ -620,19 +684,10 @@ impl PluginHostManager {
             reason: "binary not found".to_string(),
         })?;
 
-        // Verify binary checksum if configured.
-        if let Some(expected_checksum) = plugin_config
-            .as_ref()
-            .and_then(|c| c.get("checksum"))
-            .and_then(|v| v.as_str())
-        {
-            verify_plugin_checksum(&binary_path, expected_checksum).map_err(|e| {
-                PluginHostError::SpawnFailed {
-                    name: name.to_string(),
-                    reason: format!("checksum verification failed: {e}"),
-                }
-            })?;
-        }
+        // Verify binary checksum if configured. When no checksum is
+        // configured, log a one-time warning on first launch (the documented
+        // trust-on-first-use behavior).
+        verify_plugin_checksum(name, &binary_path, expected_checksum.as_deref())?;
 
         let socket_path: PathBuf = {
             #[cfg(unix)]
@@ -904,25 +959,58 @@ async fn health_probe_loop(
     }
 }
 
-/// Verifies that the plugin binary at `path` matches the expected SHA-256 checksum.
-fn verify_plugin_checksum(path: &PathBuf, expected: &str) -> Result<(), String> {
-    let mut file = std::fs::File::open(path).map_err(|e| format!("cannot open binary: {e}"))?;
+/// Verifies that the plugin binary at `path` matches the expected SHA-256
+/// checksum.
+///
+/// When `expected` is `None`, logs a one-time warning that the binary is being
+/// launched without integrity verification (trust-on-first-use) and returns
+/// `Ok`. When `expected` is `Some`, computes the SHA-256 hash of the binary and
+/// returns [`PluginHostError::ChecksumMismatch`] if it doesn't match.
+fn verify_plugin_checksum(
+    plugin_name: &str,
+    path: &PathBuf,
+    expected: Option<&str>,
+) -> Result<(), PluginHostError> {
+    let Some(expected) = expected else {
+        tracing::warn!(
+            component = "PluginHostManager",
+            plugin = %plugin_name,
+            "Plugin binary launched without checksum verification (trust-on-first-use); \
+             set plugins.list.{plugin_name}.checksum to enable integrity checks"
+        );
+        return Ok(());
+    };
+
+    let mut file = std::fs::File::open(path).map_err(|e| PluginHostError::SpawnFailed {
+        name: plugin_name.to_string(),
+        reason: format!("cannot open binary for checksum verification: {e}"),
+    })?;
     let mut hasher = sha2::Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(|e| format!("cannot read binary: {e}"))?;
-    let hash = hex::encode(hasher.finalize());
-    if hash != expected {
-        return Err(format!(
-            "checksum mismatch: expected {expected}, got {hash}"
-        ));
+    std::io::copy(&mut file, &mut hasher).map_err(|e| PluginHostError::SpawnFailed {
+        name: plugin_name.to_string(),
+        reason: format!("cannot read binary for checksum verification: {e}"),
+    })?;
+    let actual = hex::encode(hasher.finalize());
+    if actual != expected {
+        return Err(PluginHostError::ChecksumMismatch {
+            name: plugin_name.to_string(),
+            expected: expected.to_string(),
+            actual,
+        });
     }
     tracing::info!(
         component = "PluginHostManager",
+        plugin = %plugin_name,
         "Plugin binary checksum verified"
     );
     Ok(())
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "tests use unwrap for concise failure messages"
+)]
 mod tests {
     use super::*;
 
@@ -948,5 +1036,38 @@ mod tests {
     #[test]
     fn find_plugin_binary_nonexistent() {
         assert!(find_plugin_binary("nonexistent-plugin-xyz").is_none());
+    }
+
+    #[test]
+    fn checksum_mismatch_blocks_verification() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!("ene-checksum-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("ene-plugin-fake");
+        {
+            let mut f = std::fs::File::create(&bin_path).unwrap();
+            f.write_all(b"fake plugin binary contents").unwrap();
+        }
+
+        // Compute the real checksum of the file.
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"fake plugin binary contents");
+        let real = hex::encode(hasher.finalize());
+
+        // Matching checksum passes.
+        assert!(verify_plugin_checksum("fake", &bin_path, Some(&real)).is_ok());
+
+        // Mismatched checksum is rejected with ChecksumMismatch.
+        let result = verify_plugin_checksum("fake", &bin_path, Some("deadbeef"));
+        assert!(matches!(
+            result,
+            Err(PluginHostError::ChecksumMismatch { .. })
+        ));
+
+        // No checksum configured → trust-on-first-use, passes.
+        assert!(verify_plugin_checksum("fake", &bin_path, None).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

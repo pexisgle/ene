@@ -89,6 +89,9 @@ pub struct ArbiterContext<'a> {
     pub options: ArbiterOptions,
     /// Pre-computed semantic matches per candidate index (optional).
     pub semantic_matches: HashMap<usize, Vec<SemanticMatch>>,
+    /// Affect valence of the turn the candidates were extracted from
+    /// (-1.0 ..= 1.0). Used to derive `outcome_rating` for self-reflection (#210).
+    pub affect_valence: f32,
 }
 
 /// Machine-readable reason for an arbiter decision (for tracing and tests).
@@ -260,7 +263,7 @@ impl MemoryArbiter {
             .collect();
 
         let decisions = Self::evaluate_all(candidates, &active_existing, ctx);
-        Self::apply_decisions(store, &decisions).await
+        Self::apply_decisions(store, &decisions, ctx).await
     }
 
     /// Apply a slice of decisions to the memory store.
@@ -269,14 +272,19 @@ impl MemoryArbiter {
     /// fails mid-batch, previously applied decisions are already committed and
     /// will not be rolled back. Callers that need all-or-nothing semantics
     /// should wrap the store connection in a transaction before calling this.
+    ///
+    /// `ctx.affect_valence` (-1.0 ..= 1.0) is recorded as the `outcome_rating`
+    /// of each persisted decision so the self-reflection pipeline (#210) can
+    /// score interaction outcomes by user sentiment.
     pub async fn apply_decisions(
         store: &MemoryStore,
         decisions: &[CandidateDecision],
+        ctx: &ArbiterContext<'_>,
     ) -> Result<Vec<AppliedDecision>, CognitionError> {
         let mut applied = Vec::with_capacity(decisions.len());
 
         for decision in decisions {
-            let result = Self::apply_one(store, decision).await?;
+            let result = Self::apply_one(store, decision, ctx).await?;
             applied.push(result);
         }
 
@@ -554,7 +562,9 @@ impl MemoryArbiter {
     async fn apply_one(
         store: &MemoryStore,
         decision: &CandidateDecision,
+        ctx: &ArbiterContext<'_>,
     ) -> Result<AppliedDecision, CognitionError> {
+        let affect_valence = ctx.affect_valence;
         match &decision.action {
             ArbiterAction::Persist(item) => {
                 let id = store
@@ -565,7 +575,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: false,
-                    outcome_rating: None,
+                    outcome_rating: Some(affect_valence),
                 })
             }
             ArbiterAction::Supersede {
@@ -580,7 +590,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: true,
-                    outcome_rating: None,
+                    outcome_rating: Some(affect_valence),
                 })
             }
             ArbiterAction::MarkUserDeleted { memory_id } => {
@@ -592,7 +602,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: None,
                     updated_existing: updated,
-                    outcome_rating: None,
+                    outcome_rating: Some(affect_valence),
                 })
             }
             ArbiterAction::MarkDisputed { memory_id } => {
@@ -604,14 +614,47 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: None,
                     updated_existing: updated,
-                    outcome_rating: None,
+                    outcome_rating: Some(affect_valence),
                 })
             }
-            ArbiterAction::Ignore | ArbiterAction::AskConfirmationLater => Ok(AppliedDecision {
+            ArbiterAction::AskConfirmationLater => {
+                // Defer the candidate to the user-approval queue (#174) so it
+                // can be reviewed and persisted later instead of being dropped.
+                let pending = ene_store::PendingCandidate {
+                    id: 0,
+                    character_id: ctx.character_id.to_string(),
+                    user_id: ctx.user_id.to_string(),
+                    title: decision.candidate.title.clone(),
+                    content: decision.candidate.content.clone(),
+                    kind: decision.candidate.kind,
+                    confidence: decision.candidate.confidence,
+                    reason_detail: decision.reason.detail.clone(),
+                    existing_memory_title: None,
+                    source_quote: decision.candidate.source_quote.clone(),
+                    status: ene_store::PendingCandidateStatus::Pending,
+                };
+                let inserted_id = store
+                    .insert_pending_candidate(pending)
+                    .map_err(CognitionError::Memory)?;
+                tracing::debug!(
+                    component = "MemoryArbiter",
+                    character_id = %ctx.character_id,
+                    candidate_id = inserted_id,
+                    title = %decision.candidate.title,
+                    "Deferred memory candidate to user-approval queue"
+                );
+                Ok(AppliedDecision {
+                    decision: decision.clone(),
+                    inserted_id: None,
+                    updated_existing: false,
+                    outcome_rating: Some(affect_valence),
+                })
+            }
+            ArbiterAction::Ignore => Ok(AppliedDecision {
                 decision: decision.clone(),
                 inserted_id: None,
                 updated_existing: false,
-                outcome_rating: None,
+                outcome_rating: Some(affect_valence),
             }),
         }
     }
@@ -855,6 +898,7 @@ mod tests {
             provenance: CandidateProvenance::Deterministic,
             options: ArbiterOptions::default(),
             semantic_matches: HashMap::new(),
+            affect_valence: 0.0,
         }
     }
 
@@ -1166,7 +1210,7 @@ mod tests {
         };
         let arbiter_ctx = ctx(turn);
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
-        let applied = MemoryArbiter::apply_decisions(&store, &decisions)
+        let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)
             .await
             .unwrap();
         assert_eq!(applied.len(), 1);
@@ -1253,7 +1297,13 @@ mod tests {
             },
         ];
 
-        let result = MemoryArbiter::apply_decisions(&store, &decisions).await;
+        let turn = TurnInput {
+            user_message: "I am working on project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ctx(turn);
+        let result = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx).await;
         assert!(
             result.is_err(),
             "the batch must surface the second decision's failure"
@@ -1643,6 +1693,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_records_outcome_rating_from_affect_valence() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ArbiterContext {
+            affect_valence: 0.75,
+            ..ctx(turn)
+        };
+        let applied =
+            MemoryArbiter::arbitrate_and_apply(&store, &[sample_candidate(0.9)], &arbiter_ctx)
+                .await
+                .unwrap();
+
+        assert_eq!(applied.len(), 1);
+        assert_eq!(
+            applied[0].outcome_rating,
+            Some(0.75),
+            "outcome_rating must mirror the turn affect valence"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_confirmation_later_defers_to_pending_candidates() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let turn = TurnInput {
+            user_message: "I might have switched to tea",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // Existing memory with a close-but-not-dominant confidence gap so the
+        // arbiter defers to user confirmation instead of superseding.
+        let existing_item = NewMemoryItem {
+            scope: MemoryScope::User,
+            character_id: "ene".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes coffee".to_string(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.85),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let existing = store.insert_typed_memory(&existing_item).await.unwrap();
+        let existing = store.get_typed_memory(existing).await.unwrap().unwrap();
+
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes tea".to_string(),
+            source_quote: "I might have switched to tea".to_string(),
+            // Much weaker than the existing memory (delta < -dispute_gap) but
+            // still above min_confidence, so the arbiter defers to the user.
+            confidence: 0.66,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let arbiter_ctx = ctx(turn);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::AskConfirmationLater
+        ));
+
+        let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)
+            .await
+            .unwrap();
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].inserted_id.is_none());
+
+        // The candidate was deferred to the user-approval queue.
+        let pending = store
+            .list_pending_candidates("ene", Some(ene_store::PendingCandidateStatus::Pending))
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title, "drink");
+    }
+
+    #[tokio::test]
     async fn arbitrate_and_apply_marks_user_deleted() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let existing_item = NewMemoryItem {
@@ -1742,13 +1885,14 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
+        let arbiter_ctx = ctx(turn);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::MarkDisputed { memory_id } if memory_id == &id
         ));
 
-        let applied = MemoryArbiter::apply_decisions(&store, &decisions)
+        let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)
             .await
             .unwrap();
         assert!(applied[0].updated_existing);

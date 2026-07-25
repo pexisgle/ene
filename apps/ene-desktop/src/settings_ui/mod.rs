@@ -7,6 +7,7 @@
 pub mod input;
 pub mod page_ai;
 pub mod page_character;
+pub mod page_character_editor;
 pub mod page_debug;
 pub mod page_features;
 pub mod page_graphics;
@@ -30,6 +31,8 @@ use bevy_ecs::world::World;
 pub enum PageKind {
     #[default]
     Character,
+    /// Character Card (`CCv3`) editor (#218).
+    CharacterEditor,
     Graphics,
     Ai,
     Features,
@@ -253,6 +256,7 @@ impl SettingsUi {
         ui.horizontal(|ui| {
             for page in [
                 PageKind::Character,
+                PageKind::CharacterEditor,
                 PageKind::Graphics,
                 PageKind::Ai,
                 PageKind::Features,
@@ -264,6 +268,9 @@ impl SettingsUi {
                 let label = match page {
                     PageKind::Character => {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "character")
+                    }
+                    PageKind::CharacterEditor => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "character-card")
                     }
                     PageKind::Graphics => {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "graphics")
@@ -300,6 +307,9 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
+            PageKind::CharacterEditor => {
+                page_character_editor::render(ui, settings, ai, world, ui_entity);
+            }
             PageKind::Graphics => {
                 page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity);
             }

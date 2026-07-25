@@ -1,4 +1,4 @@
-//! Plugin IPC wire protocol (protocol version 3).
+//! Plugin IPC wire protocol (protocol version 4).
 //!
 //! Extends the tool IPC (v2) with streaming LLM messages and a richer
 //! handshake that carries [`PluginCapabilities`]. The framing is identical:
@@ -28,6 +28,26 @@ pub struct VersionRange {
     pub min: u32,
     /// Maximum supported protocol version (inclusive).
     pub max: u32,
+}
+
+impl VersionRange {
+    /// Returns the highest protocol version supported by both `self` and
+    /// `other` (i.e. `min(max_a, max_b)`), or `None` when the ranges do not
+    /// overlap.
+    ///
+    /// Choosing the highest common version lets a newer peer take advantage of
+    /// its latest features whenever the other side also supports them, while
+    /// still agreeing on a lower version for partial overlap.
+    pub fn negotiate(&self, other: &VersionRange) -> Option<u32> {
+        let highest_common = self.max.min(other.max);
+        let lowest_common = self.min.max(other.min);
+        (highest_common >= lowest_common).then_some(highest_common)
+    }
+
+    /// Returns whether `version` falls within this range (inclusive).
+    pub const fn contains(&self, version: u32) -> bool {
+        version >= self.min && version <= self.max
+    }
 }
 
 /// Plugin IPC protocol version.
@@ -69,7 +89,15 @@ pub enum PluginIpcRequest {
     /// Graceful shutdown.
     Shutdown,
     /// Liveness probe. The plugin must reply with [`PluginIpcResponse::Pong`].
-    Ping,
+    ///
+    /// Carries a `request_id` so the host's single reader task can correlate
+    /// the `Pong` with the originating probe (H-12). Older plugins that omit
+    /// the field still interoperate because it is `#[serde(default)]`.
+    Ping {
+        /// Unique request identifier for correlating the `Pong`.
+        #[serde(default)]
+        request_id: String,
+    },
     /// Request the plugin's config JSON Schema.
     GetConfigSchema {
         /// Unique request identifier for correlating the response.
@@ -237,6 +265,7 @@ pub enum PluginIpcRequest {
         /// Base64-encoded audio data.
         audio_base64: String,
         /// Input audio format (e.g. `"wav"`).
+        #[serde(default = "default_audio_format")]
         format: String,
     },
     /// Batch embedding request.
@@ -275,7 +304,15 @@ pub enum PluginIpcResponse {
         request_id: String,
     },
     /// Reply to a [`PluginIpcRequest::Ping`] liveness probe.
-    Pong,
+    ///
+    /// Echoes the originating probe's `request_id` so the host's single reader
+    /// task can correlate it (H-12). Older plugins that emit a bare `Pong`
+    /// still interoperate because the field is `#[serde(default)]`.
+    Pong {
+        /// Request identifier correlating this pong to the originating `Ping`.
+        #[serde(default)]
+        request_id: String,
+    },
     /// The plugin's config JSON Schema.
     ConfigSchema {
         /// Request identifier correlating this response to the originating request.
@@ -555,7 +592,9 @@ mod tests {
 
     #[tokio::test]
     async fn request_ping_roundtrip() {
-        let req = PluginIpcRequest::Ping;
+        let req = PluginIpcRequest::Ping {
+            request_id: "ping-1".into(),
+        };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
     }
@@ -742,7 +781,9 @@ mod tests {
 
     #[tokio::test]
     async fn response_pong_roundtrip() {
-        let resp = PluginIpcResponse::Pong;
+        let resp = PluginIpcResponse::Pong {
+            request_id: "ping-1".into(),
+        };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
     }
@@ -819,8 +860,30 @@ mod tests {
             request_id: "req-1".into(),
             task_id: "task-abc".into(),
             status: DeferredStatus::Completed {
-                result: "done".into(),
+                result: ToolResult::text("done"),
             },
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_deferred_completed_roundtrip() {
+        // `DeferredCompleted` is a push message: it carries a `task_id` and a
+        // structured `ToolResult` but no `request_id` (Cr-5).
+        let resp = PluginIpcResponse::DeferredCompleted {
+            task_id: "task-xyz".into(),
+            result: Ok(ToolResult::text("background done")),
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_deferred_completed_error_roundtrip() {
+        let resp = PluginIpcResponse::DeferredCompleted {
+            task_id: "task-err".into(),
+            result: Err(ToolError::ipc_client("boom")),
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
@@ -942,6 +1005,47 @@ mod tests {
         let mut buf: &[u8] = &[];
         let result = read_plugin_request(&mut buf).await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn version_range_negotiate_exact_overlap() {
+        let a = VersionRange { min: 4, max: 4 };
+        let b = VersionRange { min: 4, max: 4 };
+        assert_eq!(a.negotiate(&b), Some(4));
+    }
+
+    #[test]
+    fn version_range_negotiate_partial_overlap_picks_highest_common() {
+        // host {3,4} ∩ plugin {4,4} → highest common version is 4.
+        let host = VersionRange { min: 3, max: 4 };
+        let plugin = VersionRange { min: 4, max: 4 };
+        assert_eq!(host.negotiate(&plugin), Some(4));
+        assert_eq!(plugin.negotiate(&host), Some(4));
+    }
+
+    #[test]
+    fn version_range_negotiate_wide_overlap_picks_highest_common() {
+        // {2,5} ∩ {3,4} → highest common is min(5,4) = 4.
+        let a = VersionRange { min: 2, max: 5 };
+        let b = VersionRange { min: 3, max: 4 };
+        assert_eq!(a.negotiate(&b), Some(4));
+    }
+
+    #[test]
+    fn version_range_negotiate_no_overlap_is_none() {
+        let a = VersionRange { min: 1, max: 2 };
+        let b = VersionRange { min: 4, max: 4 };
+        assert_eq!(a.negotiate(&b), None);
+        assert_eq!(b.negotiate(&a), None);
+    }
+
+    #[test]
+    fn version_range_contains() {
+        let r = VersionRange { min: 3, max: 4 };
+        assert!(!r.contains(2));
+        assert!(r.contains(3));
+        assert!(r.contains(4));
+        assert!(!r.contains(5));
     }
 
     #[tokio::test]

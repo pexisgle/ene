@@ -5,6 +5,7 @@ pub mod candidate;
 pub mod deterministic;
 pub mod forgetting;
 pub mod llm;
+pub mod reflection;
 pub mod tool_grounding;
 
 pub use arbiter::{
@@ -13,6 +14,9 @@ pub use arbiter::{
 };
 pub use candidate::ToolResultSummary;
 pub use forgetting::{ForgettingContext, ForgettingLifecycle, ForgettingReport};
+pub use reflection::{
+    SelfReflectionPipeline, apply_reflection_adjustment, load_reflection_memories,
+};
 
 use std::collections::HashMap;
 
@@ -59,12 +63,15 @@ impl MemoryWriter {
     /// applied as a safety net, even when the LLM owns the turn. On LLM failure,
     /// empty result, or when disabled, remember patterns and configured
     /// tool-grounding fallbacks reach the arbiter.
+    ///
+    /// Returns the number of memory candidates deferred to the user-approval
+    /// queue (#174) during this turn, so callers can notify the UI.
     pub async fn write_memories(
         store: &MemoryStore,
         config: &MindConfig,
         input: &PostTurnInput<'_>,
         providers: MemoryWriteProviders<'_>,
-    ) -> Result<(), CognitionError> {
+    ) -> Result<usize, CognitionError> {
         let locale = locale_from_classifier_language(&config.emotion.classifier_language);
         let turn = candidate::TurnInput {
             user_message: input.turn.user_message,
@@ -217,7 +224,7 @@ impl MemoryWriter {
         }
 
         if batches.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         // Tag every candidate from an interrupted (barge-in / cancelled) turn so
@@ -242,6 +249,11 @@ impl MemoryWriter {
             user_id: input.user_id,
         };
         let mut outcome_summary = ArbiterOutcomeSummary::default();
+        let reflection = config
+            .memory
+            .reflection
+            .enabled
+            .then(|| reflection::SelfReflectionPipeline::new(config.memory.reflection.clone()));
 
         for (candidates, provenance) in batches {
             let semantic_matches = build_semantic_matches(
@@ -272,6 +284,7 @@ impl MemoryWriter {
                 provenance,
                 options: options.clone(),
                 semantic_matches,
+                affect_valence: input.affect.valence,
             };
 
             let mut regular = Vec::new();
@@ -292,7 +305,12 @@ impl MemoryWriter {
                             &sync_ctx,
                         )
                         .await?;
-                    record_arbiter_outcomes(input, &applied, &mut outcome_summary);
+                    record_arbiter_outcomes(
+                        input,
+                        &applied,
+                        &mut outcome_summary,
+                        reflection.as_ref(),
+                    );
                 } else {
                     regular.push(candidate);
                 }
@@ -303,7 +321,7 @@ impl MemoryWriter {
                     store, &regular, &base_ctx, &sync_ctx,
                 )
                 .await?;
-                record_arbiter_outcomes(input, &applied, &mut outcome_summary);
+                record_arbiter_outcomes(input, &applied, &mut outcome_summary, reflection.as_ref());
             }
         }
 
@@ -313,11 +331,33 @@ impl MemoryWriter {
             user_id = %input.user_id,
             persisted = outcome_summary.persisted,
             skipped = outcome_summary.skipped,
+            deferred = outcome_summary.deferred,
             other = outcome_summary.other,
             "Post-turn memory arbitration complete"
         );
 
-        Ok(())
+        if let Some(pipeline) = reflection
+            && pipeline.should_reflect()
+        {
+            let reflections = pipeline
+                .generate_reflection(
+                    store,
+                    input.character_id,
+                    input.character_id,
+                    input.user_id,
+                    config.memory.reflection.success_boost,
+                    config.memory.reflection.failure_penalty,
+                )
+                .await;
+            tracing::info!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                reflection_count = reflections.len(),
+                "Self-reflection memories generated"
+            );
+        }
+
+        Ok(outcome_summary.deferred)
     }
 
     /// Persist affect state only (forgetting runs on the deferred path).
@@ -467,6 +507,7 @@ const fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
 struct ArbiterOutcomeSummary {
     persisted: usize,
     skipped: usize,
+    deferred: usize,
     other: usize,
 }
 
@@ -474,8 +515,12 @@ fn record_arbiter_outcomes(
     input: &PostTurnInput<'_>,
     applied: &[crate::memory_writer::AppliedDecision],
     summary: &mut ArbiterOutcomeSummary,
+    reflection: Option<&reflection::SelfReflectionPipeline>,
 ) {
     for outcome in applied {
+        if let Some(pipeline) = reflection {
+            pipeline.record_outcome(outcome);
+        }
         match &outcome.decision.action {
             crate::memory_writer::ArbiterAction::Persist(_)
             | crate::memory_writer::ArbiterAction::Supersede { .. } => {
@@ -491,8 +536,20 @@ fn record_arbiter_outcomes(
                     "Memory candidate persisted"
                 );
             }
-            crate::memory_writer::ArbiterAction::Ignore
-            | crate::memory_writer::ArbiterAction::AskConfirmationLater => {
+            crate::memory_writer::ArbiterAction::AskConfirmationLater => {
+                summary.deferred = summary.deferred.saturating_add(1);
+                tracing::debug!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    user_id = %input.user_id,
+                    kind = ?outcome.decision.candidate.kind,
+                    title = %outcome.decision.candidate.title,
+                    reason_code = ?outcome.decision.reason.code,
+                    reason_detail = %outcome.decision.reason.detail,
+                    "Memory candidate deferred to user-approval queue"
+                );
+            }
+            crate::memory_writer::ArbiterAction::Ignore => {
                 summary.skipped = summary.skipped.saturating_add(1);
                 tracing::debug!(
                     component = "MemoryWriter",

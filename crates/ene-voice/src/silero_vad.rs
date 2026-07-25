@@ -101,11 +101,9 @@ impl SileroVadEngine {
                 model_path.display()
             )));
         }
-        let model_bytes = std::fs::read(model_path)
-            .map_err(|e| AudioProviderError::Init(format!("failed to read ONNX model: {e}")))?;
         let session = ort::session::Session::builder()
             .map_err(|e| AudioProviderError::Init(format!("ONNX session builder failed: {e}")))?
-            .commit_from_memory(&model_bytes)
+            .commit_from_file(model_path)
             .map_err(|e| AudioProviderError::Init(format!("ONNX session load failed: {e}")))?;
         tracing::info!(
             component = "SileroVad",

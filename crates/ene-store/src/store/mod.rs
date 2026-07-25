@@ -188,6 +188,29 @@ pub(crate) fn validate_embedding(
     Ok(())
 }
 
+/// Workflow status of a pending memory candidate (#174).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingCandidateStatus {
+    /// Awaiting user review.
+    Pending,
+    /// Approved by the user (persisted to typed memory).
+    Approved,
+    /// Rejected by the user.
+    Rejected,
+}
+
+impl PendingCandidateStatus {
+    /// Returns the `snake_case` string representation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 /// A pending memory candidate awaiting user approval (#174).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingCandidate {
@@ -195,12 +218,14 @@ pub struct PendingCandidate {
     pub id: i64,
     /// Character identifier.
     pub character_id: String,
+    /// User identifier (may be empty).
+    pub user_id: String,
     /// Short title or label.
     pub title: String,
     /// Full candidate content.
     pub content: String,
-    /// Memory kind as string (e.g. "episodic", "semantic").
-    pub kind: String,
+    /// Memory kind.
+    pub kind: crate::MemoryKind,
     /// Confidence score (0.0 .. 1.0).
     pub confidence: f32,
     /// Human-readable reason for the extraction.
@@ -209,21 +234,8 @@ pub struct PendingCandidate {
     pub existing_memory_title: Option<String>,
     /// Source quote from the conversation that triggered this candidate.
     pub source_quote: String,
-    /// Workflow status: "pending", "approved", "rejected".
-    pub status: String,
-}
-
-/// In-memory store for pending candidates (users that need approval).
-///
-/// The actual DB-backed implementation will migrate to a dedicated
-/// `pending_candidates` table in a future migration. For now the static
-/// storage is ephemeral (lost on restart) which is acceptable while the
-/// feature is new (#174).
-static PENDING_CANDIDATES: std::sync::OnceLock<std::sync::Mutex<Vec<PendingCandidate>>> =
-    std::sync::OnceLock::new();
-
-fn pending_candidates_store() -> &'static std::sync::Mutex<Vec<PendingCandidate>> {
-    PENDING_CANDIDATES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+    /// Workflow status.
+    pub status: PendingCandidateStatus,
 }
 
 /// A key-value fact about the user.
@@ -243,6 +255,11 @@ pub struct MemoryStore {
     embedding_dim: usize,
     /// On-disk path when opened from a file (`None` for `:memory:`).
     path: Option<std::path::PathBuf>,
+    /// In-memory pending memory candidates awaiting user approval (#174).
+    ///
+    /// Ephemeral (lost on restart) while the feature is new; a dedicated
+    /// `pending_candidates` table will back this in a future migration.
+    pending_candidates: parking_lot::Mutex<Vec<PendingCandidate>>,
 }
 
 /// Result of a natural-decay batch run (#76).
@@ -314,7 +331,7 @@ async fn applied_migration_names(db: &DatabaseConnection) -> Result<Vec<String>,
 }
 
 impl MemoryStore {
-    const fn init(
+    fn init(
         db: DatabaseConnection,
         embedding_dim: usize,
         path: Option<std::path::PathBuf>,
@@ -323,6 +340,7 @@ impl MemoryStore {
             db,
             embedding_dim,
             path,
+            pending_candidates: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -488,70 +506,122 @@ impl MemoryStore {
 
     // ── Pending candidate CRUD (#174) ──
 
+    /// Insert a new pending candidate and return its assigned id.
+    ///
+    /// The candidate starts in [`PendingCandidateStatus::Pending`]. Ids are
+    /// assigned monotonically within this store instance.
+    pub fn insert_pending_candidate(
+        &self,
+        candidate: PendingCandidate,
+    ) -> Result<i64, MemoryError> {
+        let mut guard = self.pending_candidates.lock();
+        let next_id = guard
+            .iter()
+            .map(|c| c.id)
+            .max()
+            .map_or(1, |m| m.saturating_add(1));
+        let mut stored = candidate;
+        stored.id = next_id;
+        stored.status = PendingCandidateStatus::Pending;
+        guard.push(stored);
+        Ok(next_id)
+    }
+
     /// List pending candidates for a character, optionally filtered by status.
-    pub async fn list_pending_candidates(
+    ///
+    /// When `status_filter` is `None`, candidates of every status are returned.
+    pub fn list_pending_candidates(
         &self,
         character_id: &str,
-        status_filter: &str,
+        status_filter: Option<PendingCandidateStatus>,
     ) -> Result<Vec<PendingCandidate>, MemoryError> {
-        let store = pending_candidates_store();
-        let guard = store
-            .lock()
-            .map_err(|e| MemoryError::Other(format!("pending candidates lock poisoned: {e}")))?;
+        let guard = self.pending_candidates.lock();
         Ok(guard
             .iter()
-            .filter(|c| c.character_id == character_id && c.status == status_filter)
+            .filter(|c| {
+                c.character_id == character_id
+                    && status_filter.is_none_or(|status| c.status == status)
+            })
             .cloned()
             .collect())
     }
 
-    /// Approve a pending candidate, moving it to typed memory as active.
+    /// Approve a pending candidate, persisting it to typed memory as active.
     ///
-    /// Returns an error when the candidate is not found or has already
-    /// been resolved.
-    pub async fn approve_pending_candidate(&self, id: i64) -> Result<(), MemoryError> {
-        let store = pending_candidates_store();
-        let mut guard = store
-            .lock()
-            .map_err(|e| MemoryError::Other(format!("pending candidates lock poisoned: {e}")))?;
-        let candidate = guard
-            .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or_else(|| MemoryError::Other(format!("pending candidate {id} not found")))?;
-        if candidate.status != "pending" {
+    /// The candidate is inserted via [`Self::insert_typed_memory`] and its
+    /// status flipped to [`PendingCandidateStatus::Approved`]. Returns an
+    /// error when the candidate is not found or has already been resolved.
+    pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, MemoryError> {
+        let candidate =
+            {
+                let guard = self.pending_candidates.lock();
+                guard.iter().find(|c| c.id == id).cloned().ok_or_else(|| {
+                    MemoryError::Other(format!("pending candidate {id} not found"))
+                })?
+            };
+        if candidate.status != PendingCandidateStatus::Pending {
             return Err(MemoryError::Other(format!(
                 "pending candidate {id} is already {}",
-                candidate.status
+                candidate.status.as_str()
             )));
         }
-        candidate.status = "approved".to_string();
-        Ok(())
+
+        let item = crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: candidate.character_id.clone(),
+            user_id: candidate.user_id.clone(),
+            kind: candidate.kind,
+            title: candidate.title.clone(),
+            content: candidate.content.clone(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(candidate.confidence),
+            salience: crate::MemorySalience::new(candidate.confidence),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let memory_id = self.insert_typed_memory(&item).await?;
+
+        let mut guard = self.pending_candidates.lock();
+        if let Some(stored) = guard.iter_mut().find(|c| c.id == id) {
+            stored.status = PendingCandidateStatus::Approved;
+        }
+        Ok(memory_id)
     }
 
     /// Resolve (approve or reject) a pending candidate by id.
     ///
-    /// When `approved` is `true`, the candidate status is set to `"approved"`;
-    /// when `false`, the candidate status is set to `"rejected"`.
+    /// When `approved` is `true`, the candidate is persisted to typed memory
+    /// (see [`Self::approve_pending_candidate`]); when `false`, its status is
+    /// set to [`PendingCandidateStatus::Rejected`].
     pub async fn resolve_pending_candidate(
         &self,
         id: i64,
         approved: bool,
     ) -> Result<(), MemoryError> {
-        let store = pending_candidates_store();
-        let mut guard = store
-            .lock()
-            .map_err(|e| MemoryError::Other(format!("pending candidates lock poisoned: {e}")))?;
+        if approved {
+            self.approve_pending_candidate(id).await?;
+            return Ok(());
+        }
+        let mut guard = self.pending_candidates.lock();
         let candidate = guard
             .iter_mut()
             .find(|c| c.id == id)
             .ok_or_else(|| MemoryError::Other(format!("pending candidate {id} not found")))?;
-        if candidate.status != "pending" {
+        if candidate.status != PendingCandidateStatus::Pending {
             return Err(MemoryError::Other(format!(
                 "pending candidate {id} is already {}",
-                candidate.status
+                candidate.status.as_str()
             )));
         }
-        candidate.status = if approved { "approved" } else { "rejected" }.to_string();
+        candidate.status = PendingCandidateStatus::Rejected;
         Ok(())
     }
 }

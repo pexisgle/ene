@@ -24,7 +24,7 @@ use image::DynamicImage;
 /// assert!(!is_code_window("Firefox", "firefox"));
 /// ```
 pub fn is_code_window(window_title: &str, window_class: &str) -> bool {
-    let lower = format!("{} {}", window_title, window_class).to_lowercase();
+    let lower = format!("{window_title} {window_class}").to_lowercase();
     let code_indicators = [
         "code",
         "editor",

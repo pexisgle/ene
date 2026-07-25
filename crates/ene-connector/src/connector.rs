@@ -109,18 +109,22 @@ impl ConnectorIdentity {
             description: None,
         }
     }
+    #[must_use]
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
     }
+    #[must_use]
     pub fn with_vendor(mut self, vendor: impl Into<String>) -> Self {
         self.vendor = Some(vendor.into());
         self
     }
+    #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = Some(url.into());
         self
     }
+    #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self

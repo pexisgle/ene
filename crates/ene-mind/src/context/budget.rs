@@ -287,28 +287,7 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
 
         // Add structured user persona as a block at the top of the UserProfile section
         if let Some(ref persona) = input.user_persona {
-            let mut persona_lines = vec![format!("- Name: {}", persona.name)];
-            if let Some(ref desc) = persona.description {
-                if !desc.trim().is_empty() {
-                    persona_lines.push(format!("- Description: {}", desc));
-                }
-            }
-            if let Some(ref rel) = persona.relationship {
-                if !rel.trim().is_empty() {
-                    persona_lines.push(format!("- Relationship: {}", rel));
-                }
-            }
-            if let Some(ref pron) = persona.pronouns {
-                if !pron.trim().is_empty() {
-                    persona_lines.push(format!("- Pronouns: {}", pron));
-                }
-            }
-            if let Some(ref notes) = persona.notes {
-                if !notes.trim().is_empty() {
-                    persona_lines.push(format!("- Notes: {}", notes));
-                }
-            }
-            body_parts.push(persona_lines.join("\n"));
+            body_parts.push(persona.render_lines("- "));
         }
 
         // Append recalled profile/preference/relationship memories

@@ -1692,3 +1692,106 @@ fn strip_tags_footer_multiline_content() {
     let content = "Line one.\nLine two.\n\n<!-- ene:tags {\"tags\":[\"a\",\"b\"]} -->";
     assert_eq!(strip_tags_footer(content), "Line one.\nLine two.");
 }
+
+fn sample_pending_candidate(character_id: &str, title: &str) -> PendingCandidate {
+    PendingCandidate {
+        id: 0,
+        character_id: character_id.to_string(),
+        user_id: "user1".to_string(),
+        title: title.to_string(),
+        content: format!("{title} content"),
+        kind: crate::MemoryKind::Preference,
+        confidence: 0.8,
+        reason_detail: "extracted from conversation".to_string(),
+        existing_memory_title: None,
+        source_quote: "I like tea".to_string(),
+        status: PendingCandidateStatus::Pending,
+    }
+}
+
+#[tokio::test]
+async fn pending_candidate_insert_list_approve_persists_typed_memory() {
+    let store = setup_store().await;
+
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "likes tea"))
+        .expect("insert");
+    assert_eq!(id, 1);
+
+    let listed = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].title, "likes tea");
+    assert_eq!(listed[0].status, PendingCandidateStatus::Pending);
+
+    // Approving persists the candidate to typed memory.
+    let memory_id = store.approve_pending_candidate(id).await.expect("approve");
+    let memory = store
+        .get_typed_memory(memory_id)
+        .await
+        .expect("get memory")
+        .expect("memory exists");
+    assert_eq!(memory.title, "likes tea");
+    assert_eq!(memory.kind, crate::MemoryKind::Preference);
+    assert_eq!(memory.status, crate::MemoryStatus::Active);
+
+    // The candidate is now approved and no longer pending.
+    let pending = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .expect("list pending");
+    assert!(pending.is_empty());
+    let approved = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Approved))
+        .expect("list approved");
+    assert_eq!(approved.len(), 1);
+
+    // Approving again fails because it is already resolved.
+    assert!(store.approve_pending_candidate(id).await.is_err());
+}
+
+#[tokio::test]
+async fn pending_candidate_reject_does_not_persist() {
+    let store = setup_store().await;
+
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "rejected fact"))
+        .expect("insert");
+    store
+        .resolve_pending_candidate(id, false)
+        .await
+        .expect("reject");
+
+    let rejected = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Rejected))
+        .expect("list rejected");
+    assert_eq!(rejected.len(), 1);
+
+    // No typed memory was created for a rejected candidate.
+    let count = store
+        .count_typed_memories("ene", None)
+        .await
+        .expect("count");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn pending_candidates_are_isolated_per_store_instance() {
+    let store_a = setup_store().await;
+    let store_b = setup_store().await;
+
+    store_a
+        .insert_pending_candidate(sample_pending_candidate("ene", "only in A"))
+        .expect("insert A");
+
+    let in_a = store_a
+        .list_pending_candidates("ene", None)
+        .expect("list A");
+    assert_eq!(in_a.len(), 1);
+
+    // The second store instance must not see store A's candidates.
+    let in_b = store_b
+        .list_pending_candidates("ene", None)
+        .expect("list B");
+    assert!(in_b.is_empty());
+}

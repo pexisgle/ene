@@ -16,7 +16,11 @@ use std::sync::Arc;
 
 /// Single action enum shared by every page widget. Hotkeys and
 /// buttons both translate into one of these before mutating state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The character-card editor variants carry a `String` path, so the
+/// enum is `Clone` but not `Copy`; call sites that need to reuse an
+/// action (e.g. the runtime hotkey dispatcher) clone it explicitly.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
     PrevCharacter,
     NextCharacter,
@@ -49,6 +53,19 @@ pub enum SettingsAction {
     ToggleInputRegionDebug,
     LanguageDown,
     LanguageUp,
+    /// Load the character card at `path` into the editor buffers
+    /// (Character Card editor page, #218).
+    LoadCharacterCard {
+        path: String,
+    },
+    /// Write the editor buffers back to the character card at `path`
+    /// (Character Card editor page, #218).
+    SaveCharacterCard {
+        path: String,
+    },
+    /// Validate the editor buffers without writing to disk
+    /// (Character Card editor page, #218).
+    ValidateCharacterCard,
 }
 
 pub fn apply_action(
@@ -176,10 +193,153 @@ pub fn apply_action(
             settings.sync_classifier_language_from_ui();
             settings.mark_dirty();
         }
+        SettingsAction::LoadCharacterCard { path } => {
+            load_character_card(&path, world, ui_entity);
+        }
+        SettingsAction::SaveCharacterCard { path } => {
+            save_character_card(&path, world, ui_entity);
+        }
+        SettingsAction::ValidateCharacterCard => {
+            validate_character_card(world, ui_entity);
+        }
     }
 
     settings.clamp_runtime_values();
     settings.mark_dirty();
+}
+
+/// Load the character card at `path` into the editor buffers on
+/// [`UiState`]. On read/parse failure the error is surfaced through
+/// `character_editor_validation_errors` and the loaded flag stays
+/// `false` so the page can retry.
+fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![format!("Failed to read card: {error}")],
+            );
+            return;
+        }
+    };
+    let card: ene_config::CharacterCardV3 = match serde_json::from_str(&content) {
+        Ok(card) => card,
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![format!("Failed to parse card: {error}")],
+            );
+            return;
+        }
+    };
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        let data = &card.data;
+        state.0.character_editor_name.clone_from(&data.name);
+        state
+            .0
+            .character_editor_description
+            .clone_from(&data.description);
+        state
+            .0
+            .character_editor_personality
+            .clone_from(&data.personality);
+        state.0.character_editor_scenario.clone_from(&data.scenario);
+        state
+            .0
+            .character_editor_system_prompt
+            .clone_from(&data.system_prompt);
+        state
+            .0
+            .character_editor_mes_example
+            .clone_from(&data.mes_example);
+        state
+            .0
+            .character_editor_first_mes
+            .clone_from(&data.first_mes);
+        state
+            .0
+            .character_editor_post_history
+            .clone_from(&data.post_history_instructions);
+        state.0.character_editor_loaded = true;
+        state.0.character_editor_modified = false;
+        state.0.character_editor_validation_errors.clear();
+    }
+}
+
+/// Write the editor buffers back to the character card at `path`.
+/// The existing on-disk card is read first (when present) so that
+/// extensions, assets, and other fields the editor does not expose
+/// are preserved; a missing/unreadable file starts from a default
+/// card.
+fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
+    let Some(snapshot) = world
+        .get::<UiStateComponent>(ui_entity)
+        .map(|s| s.0.clone())
+    else {
+        return;
+    };
+    let mut card = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<ene_config::CharacterCardV3>(&content).ok())
+        .unwrap_or_default();
+    card.data.name = snapshot.character_editor_name;
+    card.data.description = snapshot.character_editor_description;
+    card.data.personality = snapshot.character_editor_personality;
+    card.data.scenario = snapshot.character_editor_scenario;
+    card.data.system_prompt = snapshot.character_editor_system_prompt;
+    card.data.mes_example = snapshot.character_editor_mes_example;
+    card.data.first_mes = snapshot.character_editor_first_mes;
+    card.data.post_history_instructions = snapshot.character_editor_post_history;
+    let serialized = match serde_json::to_string_pretty(&card) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![format!("Failed to serialize card: {error}")],
+            );
+            return;
+        }
+    };
+    if let Err(error) = std::fs::write(path, serialized) {
+        set_editor_errors(
+            world,
+            ui_entity,
+            vec![format!("Failed to write card: {error}")],
+        );
+        return;
+    }
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.character_editor_modified = false;
+        state.0.character_editor_validation_errors.clear();
+    }
+}
+
+/// Validate the editor buffers without touching disk, populating
+/// `character_editor_validation_errors`.
+fn validate_character_card(world: &mut World, ui_entity: Entity) {
+    let Some(snapshot) = world
+        .get::<UiStateComponent>(ui_entity)
+        .map(|s| s.0.clone())
+    else {
+        return;
+    };
+    let mut errors = Vec::new();
+    if snapshot.character_editor_name.trim().is_empty() {
+        errors.push("Name must not be empty".to_string());
+    }
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.character_editor_validation_errors = errors;
+    }
+}
+
+fn set_editor_errors(world: &mut World, ui_entity: Entity, errors: Vec<String>) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.character_editor_validation_errors = errors;
+    }
 }
 
 const fn cycle_index(index: usize, len: usize, step: isize) -> usize {

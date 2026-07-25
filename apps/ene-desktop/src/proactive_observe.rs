@@ -6,6 +6,9 @@
 //! Screen pixels are summarized in-process by the local Gemma + mmproj model.
 
 mod capture;
+mod diff_gate;
+mod ocr;
+mod roi;
 mod screen_summary;
 
 use std::sync::Arc;
@@ -114,8 +117,9 @@ async fn collect_observation(
     };
 
     let (screen_summary, screen_summary_status) = if cfg.screen_summary {
+        let cursor = current_cursor_position();
         match screen_provider
-            .summarize(cfg.max_screen_summary_chars)
+            .summarize(cfg.max_screen_summary_chars, cursor)
             .await
         {
             Some(text) => (Some(text), ScreenSummaryStatus::Available),
@@ -172,6 +176,16 @@ fn active_app_label() -> Option<String> {
         }
         Err(()) => None,
     }
+}
+
+/// Read the current global cursor position (screen coordinates) for
+/// ROI cropping. Returns `None` when the device state cannot be
+/// queried, in which case the observer skips ROI cropping.
+fn current_cursor_position() -> Option<(i32, i32)> {
+    use device_query::{DeviceQuery, DeviceState};
+    let state = DeviceState::new();
+    let mouse = state.get_mouse();
+    Some(mouse.coords)
 }
 
 pub(crate) fn redact_paths(input: &str) -> String {

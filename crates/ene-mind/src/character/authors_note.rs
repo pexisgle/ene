@@ -37,10 +37,14 @@ impl AuthorsNote {
     }
 
     /// Create an empty (inactive) author's note.
+    ///
+    /// Uses `depth: 0` (most recent position) as a neutral default. When
+    /// activated, the caller should set an appropriate depth (typically 3–5
+    /// turns back from the end).
     pub fn inactive() -> Self {
         Self {
             content: String::new(),
-            depth: 3,
+            depth: 0,
             active: false,
         }
     }
@@ -52,13 +56,17 @@ impl Default for AuthorsNote {
     }
 }
 
-/// Apply an author's note to the history by inserting it as a system-role
+/// Apply an author's note to the history by inserting it as a user-role
 /// message between history turns at the specified depth.
 ///
 /// The note is inserted at `history.len() - depth - 1` positions from the end,
 /// so a depth of 0 places it just before the most recent message, depth of 1
 /// places it before the second-to-last, etc. If the depth exceeds the history
 /// length, the note is inserted at the beginning of history.
+///
+/// The note uses `Role::User` (not `Role::System`) because some providers
+/// (e.g., Anthropic) reject system messages in the middle of history. The
+/// `[Author's Note]` prefix makes the instructional intent clear.
 pub fn apply_authors_note(history: &mut Vec<HistoryEntry>, note: &AuthorsNote) {
     if !note.active || note.content.trim().is_empty() {
         return;
@@ -72,7 +80,7 @@ pub fn apply_authors_note(history: &mut Vec<HistoryEntry>, note: &AuthorsNote) {
     };
 
     let note_entry = HistoryEntry {
-        role: Role::System,
+        role: Role::User,
         content: format!("[Author's Note]\n{}", note.content.trim()),
     };
 
@@ -130,7 +138,7 @@ mod tests {
         apply_authors_note(&mut history, &note);
         assert_eq!(history.len(), 5);
         // The note should be at index 2 (before msg2)
-        assert_eq!(history[2].role, Role::System);
+        assert_eq!(history[2].role, Role::User);
         assert!(history[2].content.contains("Stay in character."));
         // Verify the ordering is preserved for the rest
         assert_eq!(history[3].content, "msg2");
@@ -153,7 +161,7 @@ mod tests {
         // Depth exceeds history, should insert at beginning
         apply_authors_note(&mut history, &note);
         assert_eq!(history.len(), 3);
-        assert_eq!(history[0].role, Role::System);
+        assert_eq!(history[0].role, Role::User);
         assert!(history[0].content.contains("Important note."));
         assert_eq!(history[1].content, "hello");
         assert_eq!(history[2].content, "hi");

@@ -415,12 +415,17 @@ pub fn generate_schema_json() -> Result<String, serde_json::Error> {
                 continue;
             }
             let entry_val = serde_json::to_value(&entry.schema)?;
+            let def_key = if root_obj.contains_key("$defs") {
+                "$defs"
+            } else {
+                "definitions"
+            };
             if let Some(definitions) = entry_val
-                .get("definitions")
-                .or_else(|| entry_val.get("$defs"))
+                .get("$defs")
+                .or_else(|| entry_val.get("definitions"))
                 .and_then(|v| v.as_object())
                 && let Some(root_defs) = root_obj
-                    .entry("definitions".to_string())
+                    .entry(def_key.to_string())
                     .or_insert_with(|| serde_json::json!({}))
                     .as_object_mut()
             {
@@ -547,12 +552,17 @@ pub fn generate_character_schema_json() -> Result<String, serde_json::Error> {
                 continue;
             }
             let entry_val = serde_json::to_value(&entry.schema)?;
+            let def_key = if root_obj.contains_key("$defs") {
+                "$defs"
+            } else {
+                "definitions"
+            };
             if let Some(definitions) = entry_val
-                .get("definitions")
-                .or_else(|| entry_val.get("$defs"))
+                .get("$defs")
+                .or_else(|| entry_val.get("definitions"))
                 .and_then(|v| v.as_object())
                 && let Some(root_defs) = root_obj
-                    .entry("definitions".to_string())
+                    .entry(def_key.to_string())
                     .or_insert_with(|| serde_json::json!({}))
                     .as_object_mut()
             {

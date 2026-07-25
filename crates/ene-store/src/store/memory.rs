@@ -39,6 +39,10 @@ fn user_visibility_condition(user_id: &str) -> sea_orm::Condition {
 /// write time. This footer is internal metadata and must not leak into
 /// LLM prompts or recall scoring. Stripping at the model-to-item
 /// conversion layer covers all readers with a single choke point.
+///
+/// Visibility is `pub(super)` (not `pub(crate)`) so that the sibling
+/// `store::tests` module can exercise this function directly while keeping
+/// it hidden from external callers.
 pub(super) fn strip_tags_footer(content: &str) -> &str {
     match content.find("\n\n<!-- ene:tags ") {
         #[expect(
@@ -710,6 +714,12 @@ impl MemoryStore {
 
         let mut scored: Vec<crate::ScoredMemory> = gathered
             .into_values()
+            .filter(|candidate| {
+                crate::search::within_time_range(
+                    query.time_range.as_ref(),
+                    candidate.item.created_at,
+                )
+            })
             .map(|candidate| {
                 let breakdown = score_candidate(query, &candidate);
                 crate::ScoredMemory {

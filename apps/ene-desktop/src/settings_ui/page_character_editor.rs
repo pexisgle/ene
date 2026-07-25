@@ -1,6 +1,6 @@
 //! Character card editor page.
 //!
-//! Allows viewing and editing the local `character.json` (CCv3 format)
+//! Allows viewing and editing the local `character.json` (`CCv3` format)
 //! in a dedicated settings tab. Supports validate, save, and reload.
 
 use super::widgets::{SettingsAction, apply_action};
@@ -215,14 +215,14 @@ fn text_field(
             let Some(state) = world.get::<UiStateComponent>(ui_entity) else {
                 return;
             };
-            accessor(&mut (*state).0.clone()).clone()
+            accessor(&mut state.0.clone()).clone()
         };
         let response = ui.add(egui::TextEdit::singleline(&mut value).desired_width(300.0));
-        if response.changed() {
-            if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-                *accessor(&mut state.0) = value;
-                state.0.character_editor_modified = true;
-            }
+        if response.changed()
+            && let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
+        {
+            *accessor(&mut state.0) = value;
+            state.0.character_editor_modified = true;
         }
     });
 }
@@ -245,18 +245,18 @@ fn text_area(
                     let Some(state) = world.get::<UiStateComponent>(ui_entity) else {
                         return;
                     };
-                    accessor(&mut (*state).0.clone()).clone()
+                    accessor(&mut state.0.clone()).clone()
                 };
                 let response = ui.add(
                     egui::TextEdit::multiline(&mut value)
                         .desired_rows(4)
                         .desired_width(300.0),
                 );
-                if response.changed() {
-                    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-                        *accessor(&mut state.0) = value;
-                        state.0.character_editor_modified = true;
-                    }
+                if response.changed()
+                    && let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
+                {
+                    *accessor(&mut state.0) = value;
+                    state.0.character_editor_modified = true;
                 }
             },
         );

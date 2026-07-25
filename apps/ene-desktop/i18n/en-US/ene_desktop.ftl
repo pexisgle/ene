@@ -145,6 +145,33 @@ character-pos-z = Character Pos Z
 reset-position = Reset Position
 manual-expressions = Manual Expressions (Test)
 
+# Character Card Editor (#218)
+character-editor-modified = Unsaved changes
+character-editor-name = Name
+character-editor-description = Description
+character-editor-personality = Personality
+character-editor-scenario = Scenario
+character-editor-system-prompt = System Prompt
+character-editor-mes-example = Example Dialogue
+character-editor-first-mes = First Message
+character-editor-post-history = Post-history Instructions
+character-editor-validate = Validate
+character-editor-save = Save
+character-editor-reload = Reload
+
+# Spotlight quick launcher (#218)
+spotlight-title = Spotlight
+spotlight-placeholder = Type a command…
+spotlight-action-open-settings = Open Settings
+spotlight-action-open-chat = Open Chat
+spotlight-action-toggle-mic = Toggle Microphone
+spotlight-action-quick-chat = Quick Chat
+spotlight-action-toggle-caption = Toggle Caption Overlay
+
+# Floating caption overlay (#218)
+caption-title = Caption
+close = Close
+
 # AI
 ai = AI
 memory = Memory

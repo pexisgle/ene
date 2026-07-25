@@ -248,33 +248,33 @@ pub fn entry_keys_match_with_cache(
     }
 
     // Secondary keys mode: at least one primary AND at least one secondary must match
-    if let Some(ref secondary_keys) = entry.secondary_keys {
-        if !secondary_keys.is_empty() {
-            let primary_match = entry.keys.iter().any(|key| {
-                key_matches(
-                    key,
-                    scan_text,
-                    case_sensitive,
-                    entry.use_regex,
-                    regex_cache,
-                    &entry_id,
-                )
-            });
-            if !primary_match {
-                return false;
-            }
-            let secondary_match = secondary_keys.iter().any(|key| {
-                key_matches(
-                    key,
-                    scan_text,
-                    case_sensitive,
-                    entry.use_regex,
-                    regex_cache,
-                    &entry_id,
-                )
-            });
-            return secondary_match;
+    if let Some(ref secondary_keys) = entry.secondary_keys
+        && !secondary_keys.is_empty()
+    {
+        let primary_match = entry.keys.iter().any(|key| {
+            key_matches(
+                key,
+                scan_text,
+                case_sensitive,
+                entry.use_regex,
+                regex_cache,
+                &entry_id,
+            )
+        });
+        if !primary_match {
+            return false;
         }
+        let secondary_match = secondary_keys.iter().any(|key| {
+            key_matches(
+                key,
+                scan_text,
+                case_sensitive,
+                entry.use_regex,
+                regex_cache,
+                &entry_id,
+            )
+        });
+        return secondary_match;
     }
 
     // Default: any key matches (OR logic)

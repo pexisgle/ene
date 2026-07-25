@@ -270,10 +270,15 @@ impl Default for ToolGroundingConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ReflectionConfig {
+    /// Enable the self-reflection pipeline (#210).
     pub enabled: bool,
+    /// Minimum number of turns between reflection generation passes.
     pub interval_turns: usize,
+    /// Minimum number of recorded outcomes required to trigger reflection.
     pub min_outcomes: usize,
+    /// Score multiplier applied to memories matching successful strategies.
     pub success_boost: f32,
+    /// Score multiplier applied to memories matching strategies to avoid.
     pub failure_penalty: f32,
 }
 

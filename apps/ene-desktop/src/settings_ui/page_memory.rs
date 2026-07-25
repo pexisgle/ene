@@ -89,23 +89,23 @@ pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entit
     });
 
     // ── Filter row (browse mode only) ────────────────────────────────────────
-    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
-        if state.0.memory_journal_mode == MemoryPageMode::Browse {
-            ui.horizontal(|ui| {
-                ui.checkbox(
-                    &mut state.0.memory_journal_show_deleted,
-                    fl!(crate::i18n::loader(), "memory-journal-show-deleted"),
-                );
-                ui.checkbox(
-                    &mut state.0.memory_journal_show_archived,
-                    fl!(crate::i18n::loader(), "memory-journal-show-archived"),
-                );
-                ui.checkbox(
-                    &mut state.0.memory_journal_show_superseded,
-                    fl!(crate::i18n::loader(), "memory-journal-show-superseded"),
-                );
-            });
-        }
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity)
+        && state.0.memory_journal_mode == MemoryPageMode::Browse
+    {
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut state.0.memory_journal_show_deleted,
+                fl!(crate::i18n::loader(), "memory-journal-show-deleted"),
+            );
+            ui.checkbox(
+                &mut state.0.memory_journal_show_archived,
+                fl!(crate::i18n::loader(), "memory-journal-show-archived"),
+            );
+            ui.checkbox(
+                &mut state.0.memory_journal_show_superseded,
+                fl!(crate::i18n::loader(), "memory-journal-show-superseded"),
+            );
+        });
     }
 
     // ── Execute deferred actions ──────────────────────────────────────────────
@@ -245,13 +245,10 @@ fn render_pending_approval(
         return;
     }
 
-    ui.label(format!(
-        "{}",
-        fl!(
-            crate::i18n::loader(),
-            "memory-pending-count",
-            count = candidates.len()
-        )
+    ui.label(fl!(
+        crate::i18n::loader(),
+        "memory-pending-count",
+        count = candidates.len()
     ));
 
     egui::ScrollArea::vertical()
@@ -319,7 +316,7 @@ fn render_pending_approval(
                             set_action_message(
                                 world,
                                 ui_entity,
-                                result.map(|_| true),
+                                result.map(|()| true),
                                 "memory-approve",
                             );
                             fetch_pending_candidates(ai, world, ui_entity);
@@ -332,7 +329,7 @@ fn render_pending_approval(
                             set_action_message(
                                 world,
                                 ui_entity,
-                                result.map(|_| true),
+                                result.map(|()| true),
                                 "memory-reject",
                             );
                             fetch_pending_candidates(ai, world, ui_entity);
@@ -431,7 +428,7 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
                             }
                             _ => "unknown".to_string(),
                         };
-                        ui.label(format!("[{}]", status_label));
+                        ui.label(format!("[{status_label}]"));
                     });
 
                     // Description
@@ -461,40 +458,37 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
                     }
 
                     // Action buttons (only for active commitments)
-                    if commitment.status == ene_store::CommitmentStatus::Active {
-                        if let Some(c_id) = commitment.id {
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .button(fl!(
-                                        crate::i18n::loader(),
-                                        "memory-commitment-complete"
-                                    ))
-                                    .clicked()
-                                {
-                                    let result = ai.complete_commitment(c_id);
-                                    set_action_message(
-                                        world,
-                                        ui_entity,
-                                        result,
-                                        "memory-commitment-complete",
-                                    );
-                                    refresh_journal(ai, world, ui_entity);
-                                }
-                                if ui
-                                    .button(fl!(crate::i18n::loader(), "memory-commitment-cancel"))
-                                    .clicked()
-                                {
-                                    let result = ai.cancel_commitment(c_id);
-                                    set_action_message(
-                                        world,
-                                        ui_entity,
-                                        result,
-                                        "memory-commitment-cancel",
-                                    );
-                                    refresh_journal(ai, world, ui_entity);
-                                }
-                            });
-                        }
+                    if commitment.status == ene_store::CommitmentStatus::Active
+                        && let Some(c_id) = commitment.id
+                    {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(fl!(crate::i18n::loader(), "memory-commitment-complete"))
+                                .clicked()
+                            {
+                                let result = ai.complete_commitment(c_id);
+                                set_action_message(
+                                    world,
+                                    ui_entity,
+                                    result,
+                                    "memory-commitment-complete",
+                                );
+                                refresh_journal(ai, world, ui_entity);
+                            }
+                            if ui
+                                .button(fl!(crate::i18n::loader(), "memory-commitment-cancel"))
+                                .clicked()
+                            {
+                                let result = ai.cancel_commitment(c_id);
+                                set_action_message(
+                                    world,
+                                    ui_entity,
+                                    result,
+                                    "memory-commitment-cancel",
+                                );
+                                refresh_journal(ai, world, ui_entity);
+                            }
+                        });
                     }
                 });
                 ui.add_space(4.0);
@@ -721,7 +715,10 @@ fn refresh_journal(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
                     affinity: payload.affect.affinity,
                     trust: payload.affect.trust,
                 };
-                state.0.memory_journal_commitments_cache = payload.commitments.clone();
+                state
+                    .0
+                    .memory_journal_commitments_cache
+                    .clone_from(&payload.commitments);
                 state.0.memory_journal_commitments = payload
                     .commitments
                     .into_iter()

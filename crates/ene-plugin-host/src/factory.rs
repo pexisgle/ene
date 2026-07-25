@@ -161,6 +161,10 @@ fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Valu
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests use expect for concise failure messages"
+)]
 mod tests {
     use super::*;
     use ene_ai::ApiKeyConfig;

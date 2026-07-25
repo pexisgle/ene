@@ -6,12 +6,14 @@
 //!
 //! ## Concurrency
 //!
-//! The connection `Mutex` is held only for the duration of individual IPC
-//! operations (a single write or a single read), never for the lifetime of an
-//! entire stream. This allows tool calls and other requests to proceed between
-//! stream chunk reads instead of being serialized behind a long-running LLM
-//! stream (#D2). The stream reader task's [`JoinHandle`] is tracked and
-//! aborted when the stream is dropped, ensuring prompt cleanup on cancellation.
+//! A single reader task per connection demultiplexes every incoming response
+//! by `request_id`/variant into per-request waiters and stream channels (H-12).
+//! The connection `Mutex` is therefore held only for the duration of individual
+//! IPC writes, never for the lifetime of an entire stream: stream chunks arrive
+//! on a dedicated channel routed by the reader, so tool calls and other
+//! requests are never serialized behind a long-running LLM stream (#D2). The
+//! stream's translation task [`JoinHandle`] is tracked and aborted when the
+//! stream is dropped, ensuring prompt cleanup on cancellation.
 //!
 //! ## Retry
 //!
@@ -86,9 +88,18 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
 /// Wraps the per-request [`ReceiverStream`] and the reader's [`JoinHandle`].
 /// Dropping the stream (e.g. user cancellation) aborts the reader, releasing
 /// the connection for other requests (#D2).
+///
+/// When the stream is dropped *before* it reached a natural terminal message
+/// (`completed == false`), the drop handler also sends a best-effort
+/// `CancelStream` IPC request so the plugin stops generating the abandoned
+/// stream server-side (Cr-4). Natural completion sets `completed` to avoid a
+/// pointless cancel round-trip after `StreamEnd`/`StreamError`.
 struct IpcChatStream {
     rx: ReceiverStream<Result<LlmResponseChunk, LlmProviderError>>,
     reader: Option<JoinHandle<()>>,
+    conn: Arc<Mutex<IpcPluginConnection>>,
+    request_id: String,
+    completed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drop for IpcChatStream {
@@ -96,6 +107,30 @@ impl Drop for IpcChatStream {
         if let Some(handle) = self.reader.take() {
             handle.abort();
         }
+        let conn = Arc::clone(&self.conn);
+        let request_id = self.request_id.clone();
+        let completed = self.completed.load(std::sync::atomic::Ordering::Acquire);
+        // `Drop` is synchronous, so cleanup is dispatched on a detached task.
+        // It unregisters the per-request stream channel from the router and,
+        // when the stream did not finish naturally, sends a best-effort
+        // `CancelStream` so the plugin stops generating the abandoned stream
+        // server-side (Cr-4). Natural completion sets `completed` to avoid a
+        // pointless cancel round-trip after `StreamEnd`/`StreamError`.
+        tokio::spawn(async move {
+            let mut guard = conn.lock().await;
+            guard.close_chat_stream(&request_id);
+            if completed {
+                return;
+            }
+            if let Err(e) = guard.cancel_stream(&request_id).await {
+                tracing::debug!(
+                    component = "IpcLlmProvider",
+                    error = %e,
+                    request_id = %request_id,
+                    "best-effort CancelStream on drop failed"
+                );
+            }
+        });
     }
 }
 
@@ -135,7 +170,8 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         // Establish the stream with retry on transient (transport) failures,
         // matching the OpenAI provider's `establish_sse_connection` (#C2).
         // The connection Mutex is held only for the duration of the write.
-        self.retry_policy
+        let mut stream_rx = self
+            .retry_policy
             .run_with_retry_after(
                 LlmProviderError::is_retryable,
                 LlmProviderError::retry_after_secs,
@@ -162,7 +198,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                             )
                             .await
                         {
-                            Ok(()) => Ok(()),
+                            Ok(rx) => Ok(rx),
                             Err(e @ PluginHostError::TransportFailed { .. }) => {
                                 // The stream is likely broken; reconnect so the
                                 // next retry attempt starts from a clean
@@ -185,24 +221,22 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<LlmResponseChunk, LlmProviderError>>(32);
 
-        // Spawn a reader task that acquires the connection lock only for the
-        // duration of each individual read, releasing it between reads so
-        // tool calls and other requests aren't serialized behind the entire
-        // stream (#D2).
-        let conn = Arc::clone(&self.conn);
+        // Spawn a translation task that reads from the router-provided receiver
+        // and converts `PluginIpcResponse` stream messages into
+        // `LlmResponseChunk`. The single reader task (H-12) routes all
+        // `StreamChunk` / `StreamEnd` / `StreamError` for this `request_id`
+        // into `stream_rx`, so no separate connection lock is needed here.
         let rid = request_id.clone();
+        let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completed_clone = Arc::clone(&completed);
         let reader = tokio::spawn(async move {
-            loop {
-                let response = {
-                    let mut conn = conn.lock().await;
-                    conn.read_response().await
-                };
+            while let Some(response) = stream_rx.recv().await {
                 match response {
-                    Ok(Some(PluginIpcResponse::StreamChunk {
+                    PluginIpcResponse::StreamChunk {
                         request_id: chunk_rid,
                         text_delta,
                         tool_calls_delta,
-                    })) if chunk_rid == rid => {
+                    } if chunk_rid == rid => {
                         let tool_calls = if tool_calls_delta.is_empty() {
                             None
                         } else {
@@ -235,38 +269,27 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                             }
                         }
                     }
-                    Ok(Some(PluginIpcResponse::StreamEnd {
+                    PluginIpcResponse::StreamEnd {
                         request_id: end_rid,
-                    })) if end_rid == rid => {
+                    } if end_rid == rid => {
+                        completed_clone.store(true, std::sync::atomic::Ordering::Release);
                         break;
                     }
-                    Ok(Some(PluginIpcResponse::StreamError {
+                    PluginIpcResponse::StreamError {
                         request_id: err_rid,
                         message,
-                    })) if err_rid == rid => {
+                    } if err_rid == rid => {
+                        completed_clone.store(true, std::sync::atomic::Ordering::Release);
                         let _ = tx.send(Err(LlmProviderError::Provider(message))).await;
                         break;
                     }
-                    Ok(Some(PluginIpcResponse::Error { message, .. })) => {
+                    PluginIpcResponse::Error { message, .. } => {
+                        completed_clone.store(true, std::sync::atomic::Ordering::Release);
                         let _ = tx.send(Err(LlmProviderError::Provider(message))).await;
                         break;
                     }
-                    Ok(Some(_)) => {
+                    _ => {
                         // Unrelated response; skip.
-                    }
-                    Ok(None) => {
-                        let _ = tx
-                            .send(Err(LlmProviderError::Provider(
-                                "connection closed during stream".to_string(),
-                            )))
-                            .await;
-                        break;
-                    }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Err(LlmProviderError::Provider(e.to_string())))
-                            .await;
-                        break;
                     }
                 }
             }
@@ -275,6 +298,9 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         Ok(Box::pin(IpcChatStream {
             rx: ReceiverStream::new(rx),
             reader: Some(reader),
+            conn: Arc::clone(&self.conn),
+            request_id: request_id.clone(),
+            completed,
         }))
     }
 

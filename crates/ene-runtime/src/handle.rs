@@ -74,7 +74,7 @@ impl From<&PendingCandidate> for PendingCandidateSummary {
             id: c.id,
             title: c.title.clone(),
             content: c.content.clone(),
-            kind: c.kind.clone(),
+            kind: c.kind.as_str().to_string(),
             confidence: c.confidence,
             reason_detail: c.reason_detail.clone(),
             existing_memory_title: c.existing_memory_title.clone(),
@@ -1622,10 +1622,19 @@ impl EneActor {
             // Drain deferred memory-writer JoinHandles sent from the stream.
             while let Ok(handle) = self.memory_writer_rx.try_recv() {
                 let diag_tx = self.diag_tx.clone();
+                let event_tx = self.event_tx.clone();
                 let store = self.session.memory.memory_store.clone();
                 self.memory_writer_tasks.spawn(async move {
                     match handle.await {
-                        Ok(ene_mind::MemoryWriteOutcome::Ok) => {}
+                        Ok(ene_mind::MemoryWriteOutcome::Ok {
+                            deferred_candidates,
+                        }) => {
+                            if deferred_candidates > 0 {
+                                let _ = event_tx.send(EneEvent::PendingCandidateAvailable {
+                                    count: deferred_candidates,
+                                });
+                            }
+                        }
                         Ok(ene_mind::MemoryWriteOutcome::Failed {
                             message,
                             pending_id,
@@ -2681,64 +2690,42 @@ impl EneActor {
                 true
             }
             EneCommand::ListPendingCandidates { respond } => {
-                let result = self
-                    .session
-                    .memory
-                    .memory_store
-                    .as_ref()
-                    .ok_or_else(|| "memory store not available".to_string())
-                    .and_then(|store| {
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => {
                         let character_id = self.session.card_name().to_string();
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async {
-                                let list = store
-                                    .list_pending_candidates(&character_id, "pending")
-                                    .await
-                                    .map_err(|e| e.to_string())?;
-                                Ok(list.iter().map(PendingCandidateSummary::from).collect())
-                            })
-                        })
-                    });
+                        store
+                            .list_pending_candidates(
+                                &character_id,
+                                Some(ene_store::PendingCandidateStatus::Pending),
+                            )
+                            .map(|list| list.iter().map(PendingCandidateSummary::from).collect())
+                            .map_err(|e| e.to_string())
+                    }
+                    None => Err("memory store not available".to_string()),
+                };
                 let _ = respond.send(result);
                 true
             }
             EneCommand::ApproveCandidate { id, respond } => {
-                let result = self
-                    .session
-                    .memory
-                    .memory_store
-                    .as_ref()
-                    .ok_or_else(|| "memory store not available".to_string())
-                    .and_then(|store| {
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async {
-                                store
-                                    .approve_pending_candidate(id)
-                                    .await
-                                    .map_err(|e| e.to_string())
-                            })
-                        })
-                    });
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => store
+                        .approve_pending_candidate(id)
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| e.to_string()),
+                    None => Err("memory store not available".to_string()),
+                };
                 let _ = respond.send(result);
                 true
             }
             EneCommand::RejectCandidate { id, respond } => {
-                let result = self
-                    .session
-                    .memory
-                    .memory_store
-                    .as_ref()
-                    .ok_or_else(|| "memory store not available".to_string())
-                    .and_then(|store| {
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async {
-                                store
-                                    .resolve_pending_candidate(id, false)
-                                    .await
-                                    .map_err(|e| e.to_string())
-                            })
-                        })
-                    });
+                let result = match self.session.memory.memory_store.as_ref() {
+                    Some(store) => store
+                        .resolve_pending_candidate(id, false)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    None => Err("memory store not available".to_string()),
+                };
                 let _ = respond.send(result);
                 true
             }

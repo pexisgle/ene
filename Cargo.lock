@@ -2461,7 +2461,6 @@ dependencies = [
  "async-trait",
  "base64",
  "blake3",
- "ctor",
  "encoding_rs",
  "ene-ai",
  "ene-config",
@@ -2617,6 +2616,7 @@ dependencies = [
  "ene-config",
  "ene-plugin-proto",
  "ene-store",
+ "parking_lot",
  "regex",
  "schemars",
  "serde",
@@ -2642,6 +2642,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
 ]
 
@@ -2861,6 +2862,7 @@ dependencies = [
  "ene-plugin-proto",
  "ene-tool-db",
  "libsqlite3-sys",
+ "parking_lot",
  "sea-orm",
  "sea-orm-migration",
  "serde",

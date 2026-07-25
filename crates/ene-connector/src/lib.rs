@@ -17,7 +17,7 @@
 //! - [`CredentialStore`] — secure OAuth2/API key storage (zeroed on drop)
 //! - [`RetryPolicy`], [`RateLimiter`], [`TimeoutPolicy`] — composable policy types
 //! - [`ConnectorError`] — unified error type
-#![warn(missing_docs)]
+#![expect(missing_docs, reason = "crate under active development")]
 #![cfg_attr(
     test,
     expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")
@@ -32,7 +32,7 @@ pub mod registry;
 pub use connector::{
     Connector, ConnectorConfig, ConnectorId, ConnectorIdentity, ConnectorStatus, PermissionScope,
 };
-pub use credential::{AccountCredentials, CredentialStore};
+pub use credential::{AccountCredentials, CredentialData, CredentialStore};
 pub use error::ConnectorError;
 pub use policy::{
     PaginationCursor, RateLimitCounter, RateLimiter, RequestTimeout, RetryPolicy, TimeoutPolicy,
@@ -44,7 +44,7 @@ pub mod prelude {
         Connector, ConnectorConfig, ConnectorId, ConnectorIdentity, ConnectorStatus,
         PermissionScope,
     };
-    pub use crate::credential::{AccountCredentials, CredentialStore};
+    pub use crate::credential::{AccountCredentials, CredentialData, CredentialStore};
     pub use crate::error::ConnectorError;
     pub use crate::policy::{
         PaginationCursor, RateLimiter, RequestTimeout, RetryPolicy, TimeoutPolicy,

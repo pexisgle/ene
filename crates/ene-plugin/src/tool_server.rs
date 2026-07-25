@@ -163,9 +163,18 @@ async fn dispatch(
                     ),
                 };
             }
-            provider.set_sandbox(sandbox);
-            if let Some(config) = tool_config {
-                provider.set_config(config);
+            // Serialize sandbox/config application under the same lock that
+            // guards `set_call_context` + `call_tool`, so a handshake on one
+            // connection cannot interleave its setter writes with a tool call
+            // already in flight on another connection sharing this provider.
+            // These setters are synchronous, so the (parking_lot) guard is
+            // never held across an `.await`.
+            {
+                let _lock = call_mutex.lock();
+                provider.set_sandbox(sandbox);
+                if let Some(config) = tool_config {
+                    provider.set_config(config);
+                }
             }
             IpcResponse::HandshakeAck {
                 version: IPC_PROTOCOL_VERSION,

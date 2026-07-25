@@ -172,7 +172,7 @@ impl ToolRegistry for BackgroundRegistry {
                 ene_plugin_proto::DeferredStatus::Pending
             } else {
                 ene_plugin_proto::DeferredStatus::Completed {
-                    result: "Slept for 1 second".into(),
+                    result: ToolResult::text("Slept for 1 second"),
                 }
             }
         } else {

@@ -311,7 +311,7 @@ impl ToolPlugin for ActionSetProvider {
         }
         ToolProvider::call_tool(self, name, arguments)
             .await
-            .map(ene_plugin_proto::ToolResult::from_string)
+            .map(ene_plugin_proto::ToolResult::text)
     }
 
     async fn call_tool_deferred(

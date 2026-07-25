@@ -3,14 +3,19 @@
 //! [`IpcPluginConnection`] manages the lifecycle of one connection to a
 //! plugin process: handshake, request/response, and reconnection on failure.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolResult,
-    VersionRange, read_plugin_response, write_plugin_request,
+    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
+    ToolResult, VersionRange, read_plugin_response, write_plugin_request,
 };
+use tokio::io::{ReadHalf, WriteHalf};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::error::PluginHostError;
 
@@ -28,23 +33,180 @@ fn next_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// The oldest plugin IPC protocol version this host can still interoperate
+/// with. The host advertises the range `[HOST_PROTOCOL_VERSION_MIN,
+/// PLUGIN_IPC_PROTOCOL_VERSION]` during the handshake and accepts any
+/// negotiated version within it, so a plugin that only speaks an older (but
+/// still supported) version can connect at the highest mutually-supported
+/// version rather than being rejected outright.
+const HOST_PROTOCOL_VERSION_MIN: u32 = 3;
+
+/// The range of plugin IPC protocol versions this host supports.
+fn host_version_range() -> VersionRange {
+    VersionRange {
+        min: HOST_PROTOCOL_VERSION_MIN,
+        max: PLUGIN_IPC_PROTOCOL_VERSION,
+    }
+}
+
+/// Shared routing state for the single reader task (H-12).
+///
+/// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
+/// *before* any request/response correlation, so push messages
+/// ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted)) and stream
+/// messages can never be stolen by an unrelated in-flight request (Cr-5).
+///
+/// All internal locks are `parking_lot::Mutex` because they are held only for
+/// the duration of a map lookup/insert — never across an `.await`.
+struct Router {
+    /// Per-request oneshot waiters for request/response correlation.
+    waiters: parking_lot::Mutex<HashMap<String, oneshot::Sender<PluginIpcResponse>>>,
+    /// Per-request stream channels for chat streams, keyed by `request_id`.
+    streams: parking_lot::Mutex<HashMap<String, mpsc::Sender<PluginIpcResponse>>>,
+    /// Push cache for deferred task completions, keyed by `task_id`.
+    ///
+    /// Populated by the reader task when a `DeferredCompleted` push arrives;
+    /// drained by [`IpcPluginConnection::poll_deferred`] so a completion that
+    /// arrived while the connection was idle is still delivered (Cr-5).
+    deferred: parking_lot::Mutex<HashMap<String, Result<ToolResult, ToolError>>>,
+}
+
+impl Router {
+    fn new() -> Self {
+        Self {
+            waiters: parking_lot::Mutex::new(HashMap::new()),
+            streams: parking_lot::Mutex::new(HashMap::new()),
+            deferred: parking_lot::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Routes a single response to its destination.
+    ///
+    /// Push and stream messages are matched by variant *first*, so they can
+    /// never fall through to request/response correlation (Cr-5).
+    fn dispatch(&self, resp: PluginIpcResponse) {
+        match &resp {
+            // Push: cache the deferred completion for later retrieval.
+            PluginIpcResponse::DeferredCompleted { task_id, result } => {
+                self.deferred.lock().insert(task_id.clone(), result.clone());
+            }
+            // Stream: forward to the per-request stream channel.
+            PluginIpcResponse::StreamChunk { request_id, .. }
+            | PluginIpcResponse::StreamEnd { request_id }
+            | PluginIpcResponse::StreamError { request_id, .. } => {
+                if let Some(tx) = self.streams.lock().get(request_id) {
+                    let _ = tx.try_send(resp);
+                }
+            }
+            // Request/response: correlate by `request_id`.
+            _ => {
+                let rid = response_request_id(&resp).unwrap_or_default();
+                if let Some(tx) = self.waiters.lock().remove(rid) {
+                    let _ = tx.send(resp);
+                }
+            }
+        }
+    }
+
+    /// Fails all pending waiters and closes all stream channels.
+    ///
+    /// Called when the reader task exits (EOF, read error, or reconnect) so
+    /// that every in-flight `do_request` / stream reader observes the failure
+    /// promptly instead of hanging until its own timeout.
+    fn fail_all(&self) {
+        self.waiters.lock().clear();
+        self.streams.lock().clear();
+    }
+}
+
+/// Extracts the `request_id` from a response variant, if it carries one.
+///
+/// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted))
+/// and [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no
+/// `request_id` and return `None`.
+fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
+    match resp {
+        PluginIpcResponse::HandshakeAck { .. } | PluginIpcResponse::DeferredCompleted { .. } => {
+            None
+        }
+        PluginIpcResponse::Ack { request_id }
+        | PluginIpcResponse::Pong { request_id }
+        | PluginIpcResponse::ConfigSchema { request_id, .. }
+        | PluginIpcResponse::Error { request_id, .. }
+        | PluginIpcResponse::Tools { request_id, .. }
+        | PluginIpcResponse::CallResult { request_id, .. }
+        | PluginIpcResponse::DeferredAccepted { request_id, .. }
+        | PluginIpcResponse::DeferredStatus { request_id, .. }
+        | PluginIpcResponse::StreamChunk { request_id, .. }
+        | PluginIpcResponse::StreamEnd { request_id }
+        | PluginIpcResponse::StreamError { request_id, .. }
+        | PluginIpcResponse::ChatCompletionResult { request_id, .. }
+        | PluginIpcResponse::EmbedBatchResult { request_id, .. }
+        | PluginIpcResponse::SpeechResult { request_id, .. }
+        | PluginIpcResponse::TranscriptionResult { request_id, .. } => Some(request_id.as_str()),
+    }
+}
+
+/// The single reader task for a connection (H-12).
+///
+/// Reads responses from the socket in a loop and dispatches each one through
+/// the [`Router`]. Exits on EOF or read error, then fails all pending waiters
+/// so in-flight callers observe the transport failure promptly.
+async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>) {
+    loop {
+        match read_plugin_response(&mut reader).await {
+            Ok(Some(resp)) => router.dispatch(resp),
+            Ok(None) => {
+                tracing::debug!(
+                    component = "IpcPluginConnection",
+                    "reader: connection closed (EOF)"
+                );
+                break;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    component = "IpcPluginConnection",
+                    error = %e,
+                    "reader: read error"
+                );
+                break;
+            }
+        }
+    }
+    router.fail_all();
+}
+
 /// An IPC connection to a single plugin binary.
 ///
 /// Handles the handshake, request/response round-trips, and transparent
 /// reconnection on transport failure. All methods are async; the caller
 /// is expected to serialize access (e.g. via `tokio::sync::Mutex`).
+///
+/// ## Single reader task (H-12)
+///
+/// A dedicated reader task reads all responses from the socket and dispatches
+/// them through a [`Router`] that routes by `request_id`/variant *before*
+/// request/response correlation. This eliminates the "between-reads lock
+/// release" pattern and ensures push messages (`DeferredCompleted`) and stream
+/// messages are never stolen by an unrelated in-flight request.
 pub struct IpcPluginConnection {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
     plugin_config: Option<serde_json::Value>,
-    stream: Option<IpcStream>,
+    /// Write half of the IPC stream. The read half is owned by the reader task.
+    writer: Option<WriteHalf<IpcStream>>,
     capabilities: PluginCapabilities,
     timeout: Duration,
+    /// Shared routing state for the reader task.
+    router: Arc<Router>,
+    /// Handle to the reader task. Aborted on reconnect/shutdown.
+    reader_task: Option<JoinHandle<()>>,
 }
 
 impl IpcPluginConnection {
-    /// Connects to a plugin binary at `socket_path`, performs the v3
-    /// handshake, and stores the advertised capabilities.
+    /// Connects to a plugin binary at `socket_path`, performs the protocol
+    /// handshake (advertising the host's supported version range), and stores
+    /// the advertised capabilities.
     ///
     /// Retries the connect up to [`CONNECT_MAX_RETRIES`] times with a
     /// fixed delay, giving the child process time to bind its listener.
@@ -63,10 +225,7 @@ impl IpcPluginConnection {
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
-                version: VersionRange {
-                    min: PLUGIN_IPC_PROTOCOL_VERSION,
-                    max: PLUGIN_IPC_PROTOCOL_VERSION,
-                },
+                version: host_version_range(),
                 sandbox: sandbox.clone(),
                 plugin_config: plugin_config.clone(),
             },
@@ -89,7 +248,10 @@ impl IpcPluginConnection {
                 version,
                 capabilities,
             }) => {
-                if version != PLUGIN_IPC_PROTOCOL_VERSION {
+                // The plugin picks the highest mutually-supported version, so
+                // accept any negotiated version inside our advertised range
+                // rather than requiring an exact match.
+                if !host_version_range().contains(version) {
                     return Err(PluginHostError::ProtocolMismatch {
                         name,
                         expected: PLUGIN_IPC_PROTOCOL_VERSION,
@@ -112,13 +274,19 @@ impl IpcPluginConnection {
             }
         };
 
+        let router = Arc::new(Router::new());
+        let (reader, writer) = tokio::io::split(stream);
+        let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&router)));
+
         Ok(Self {
             socket_path: socket_path.to_path_buf(),
             sandbox,
             plugin_config,
-            stream: Some(stream),
+            writer: Some(writer),
             capabilities,
             timeout: DEFAULT_TIMEOUT,
+            router,
+            reader_task: Some(reader_task),
         })
     }
 
@@ -146,10 +314,15 @@ impl IpcPluginConnection {
     /// Sends a `Ping` and waits for `Pong` within [`PING_TIMEOUT`].
     pub async fn ping(&mut self) -> Result<(), PluginHostError> {
         let resp = self
-            .do_request_with_timeout(PluginIpcRequest::Ping, PING_TIMEOUT)
+            .do_request_with_timeout(
+                PluginIpcRequest::Ping {
+                    request_id: String::new(),
+                },
+                PING_TIMEOUT,
+            )
             .await?;
         match resp {
-            PluginIpcResponse::Pong => Ok(()),
+            PluginIpcResponse::Pong { .. } => Ok(()),
             PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to Ping: {other:?}"
@@ -297,10 +470,25 @@ impl IpcPluginConnection {
     }
 
     /// Polls the status of a deferred (background) task by its identifier.
+    ///
+    /// Checks the local completion cache first (populated by the reader task
+    /// when a `DeferredCompleted` push arrives) before issuing a `PollDeferred`
+    /// request. This ensures a completion that arrived while the connection
+    /// was idle is delivered promptly (Cr-5).
     pub async fn poll_deferred(
         &mut self,
         task_id: &str,
     ) -> Result<DeferredStatus, PluginHostError> {
+        // Check the push cache first (Cr-5 idle delivery).
+        if let Some(result) = self.router.deferred.lock().remove(task_id) {
+            return Ok(match result {
+                Ok(value) => DeferredStatus::Completed { result: value },
+                Err(e) => DeferredStatus::Failed {
+                    error: e.to_string(),
+                },
+            });
+        }
+
         let resp = self
             .do_request(PluginIpcRequest::PollDeferred {
                 request_id: String::new(),
@@ -338,10 +526,15 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "CancelStream")
     }
 
-    /// Sends a `CreateChatStream` request (does not read responses).
+    /// Sends a `CreateChatStream` request and returns a receiver for the
+    /// stream's responses.
     ///
-    /// After calling this, use [`read_response`](Self::read_response) in a
-    /// loop until a terminal `StreamEnd` or `StreamError` is observed.
+    /// A per-request channel is registered with the [`Router`] *before* the
+    /// request is written, so the single reader task routes every
+    /// `StreamChunk` / `StreamEnd` / `StreamError` for this `request_id` into
+    /// the returned receiver (H-12). The receiver yields responses until a
+    /// terminal `StreamEnd`/`StreamError` is observed or the channel closes
+    /// (connection failure or stream cancellation).
     pub async fn send_create_chat_stream(
         &mut self,
         request_id: String,
@@ -351,17 +544,36 @@ impl IpcPluginConnection {
         max_tokens: Option<u32>,
         messages: Vec<serde_json::Value>,
         tools: Vec<serde_json::Value>,
-    ) -> Result<(), PluginHostError> {
-        self.send_request(&PluginIpcRequest::CreateChatStream {
-            request_id,
-            provider_kind,
-            provider_config,
-            model,
-            max_tokens,
-            messages,
-            tools,
-        })
-        .await
+    ) -> Result<mpsc::Receiver<PluginIpcResponse>, PluginHostError> {
+        let (tx, rx) = mpsc::channel::<PluginIpcResponse>(32);
+        self.router.streams.lock().insert(request_id.clone(), tx);
+
+        if let Err(e) = self
+            .send_request(&PluginIpcRequest::CreateChatStream {
+                request_id: request_id.clone(),
+                provider_kind,
+                provider_config,
+                model,
+                max_tokens,
+                messages,
+                tools,
+            })
+            .await
+        {
+            // Unregister the channel so a failed send does not leak it.
+            self.router.streams.lock().remove(&request_id);
+            return Err(e);
+        }
+
+        Ok(rx)
+    }
+
+    /// Unregisters a chat stream's channel with the router.
+    ///
+    /// Called when a stream completes or is dropped, releasing the per-request
+    /// routing entry.
+    pub fn close_chat_stream(&mut self, request_id: &str) {
+        self.router.streams.lock().remove(request_id);
     }
 
     /// Sends a `ChatCompletion` request and awaits the result.
@@ -395,25 +607,6 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Reads the next response from the stream (used for streaming reads).
-    ///
-    /// Returns `Ok(None)` on EOF (connection closed).
-    pub async fn read_response(&mut self) -> Result<Option<PluginIpcResponse>, PluginHostError> {
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| PluginHostError::execution("not connected to plugin"))?;
-        let fut = read_plugin_response(stream);
-        match tokio::time::timeout(self.timeout, fut).await {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(e)) => Err(PluginHostError::execution(format!("read failed: {e}"))),
-            Err(_elapsed) => Err(PluginHostError::execution(format!(
-                "read timed out after {} ms",
-                self.timeout.as_millis()
-            ))),
-        }
-    }
-
     /// Sends a graceful `Shutdown` request (best-effort; ignores errors).
     pub async fn shutdown(&mut self) {
         let _ = self.send_request(&PluginIpcRequest::Shutdown).await;
@@ -424,21 +617,27 @@ impl IpcPluginConnection {
     /// Uses the stored socket path, sandbox, and plugin config captured at
     /// the original [`connect`](Self::connect) call. Useful after a transport
     /// failure or a supervised process restart.
+    ///
+    /// Aborts the old reader task and spawns a new one on the fresh stream.
+    /// All pending waiters are failed by the old reader task's exit.
     pub async fn reconnect(&mut self) -> Result<(), PluginHostError> {
         let name = self.socket_path.file_name().map_or_else(
             || "unknown".to_string(),
             |n| n.to_string_lossy().to_string(),
         );
 
+        // Abort the old reader task so it stops reading from the stale stream.
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+        }
+        self.writer = None;
+
         let mut stream = Self::connect_with_retry(&self.socket_path, &name).await?;
 
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
-                version: VersionRange {
-                    min: PLUGIN_IPC_PROTOCOL_VERSION,
-                    max: PLUGIN_IPC_PROTOCOL_VERSION,
-                },
+                version: host_version_range(),
                 sandbox: self.sandbox.clone(),
                 plugin_config: self.plugin_config.clone(),
             },
@@ -461,7 +660,9 @@ impl IpcPluginConnection {
                 version,
                 capabilities,
             }) => {
-                if version != PLUGIN_IPC_PROTOCOL_VERSION {
+                // Accept any negotiated version inside our advertised range
+                // (the plugin picks the highest mutually-supported version).
+                if !host_version_range().contains(version) {
                     return Err(PluginHostError::ProtocolMismatch {
                         name,
                         expected: PLUGIN_IPC_PROTOCOL_VERSION,
@@ -484,7 +685,12 @@ impl IpcPluginConnection {
             }
         }
 
-        self.stream = Some(stream);
+        // Spawn a new reader task on the fresh stream.
+        let (reader, writer) = tokio::io::split(stream);
+        let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&self.router)));
+        self.writer = Some(writer);
+        self.reader_task = Some(reader_task);
+
         Ok(())
     }
 
@@ -503,6 +709,13 @@ impl IpcPluginConnection {
     }
 
     /// Injects a `request_id` into a [`PluginIpcRequest`] in-place.
+    ///
+    /// This match is deliberately exhaustive (no `_` catch-all) so that adding
+    /// a new request variant that carries a `request_id` produces a compile
+    /// error here, forcing the author to keep this in sync with
+    /// [`request_request_id`](Self::request_request_id). The two functions must
+    /// always agree on which variants carry a `request_id`; the
+    /// `inject_and_request_id_arm_sets_agree` test enforces this at runtime.
     fn inject_request_id(req: &mut PluginIpcRequest, request_id: &str) {
         match req {
             PluginIpcRequest::GetConfigSchema { request_id: rid }
@@ -539,33 +752,31 @@ impl IpcPluginConnection {
             }
             | PluginIpcRequest::EmbedBatch {
                 request_id: rid, ..
-            } => {
+            }
+            | PluginIpcRequest::SynthesizeSpeech {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::TranscribeAudio {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::Ping { request_id: rid } => {
                 *rid = request_id.to_string();
             }
-            _ => {}
+            // Variants without a `request_id` field; nothing to inject.
+            PluginIpcRequest::Handshake { .. } | PluginIpcRequest::Shutdown => {}
         }
     }
 
     /// Verifies that a response's `request_id` matches the expected value.
+    ///
+    /// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted))
+    /// and [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no
+    /// `request_id`; they are routed separately by the single reader task and
+    /// never reach request/response correlation, so they are accepted here
+    /// without a match (Cr-5).
     fn verify_request_id(resp: &PluginIpcResponse, expected: &str) -> Result<(), PluginHostError> {
-        let actual = match resp {
-            PluginIpcResponse::HandshakeAck { .. }
-            | PluginIpcResponse::Pong
-            | PluginIpcResponse::DeferredCompleted { .. } => return Ok(()),
-            PluginIpcResponse::Ack { request_id }
-            | PluginIpcResponse::ConfigSchema { request_id, .. }
-            | PluginIpcResponse::Error { request_id, .. }
-            | PluginIpcResponse::Tools { request_id, .. }
-            | PluginIpcResponse::CallResult { request_id, .. }
-            | PluginIpcResponse::DeferredAccepted { request_id, .. }
-            | PluginIpcResponse::DeferredStatus { request_id, .. }
-            | PluginIpcResponse::StreamChunk { request_id, .. }
-            | PluginIpcResponse::StreamEnd { request_id, .. }
-            | PluginIpcResponse::StreamError { request_id, .. }
-            | PluginIpcResponse::ChatCompletionResult { request_id, .. }
-            | PluginIpcResponse::EmbedBatchResult { request_id, .. }
-            | PluginIpcResponse::SpeechResult { request_id, .. }
-            | PluginIpcResponse::TranscriptionResult { request_id, .. } => request_id,
+        let Some(actual) = response_request_id(resp) else {
+            return Ok(());
         };
         if !actual.is_empty() && actual != expected {
             return Err(PluginHostError::execution(format!(
@@ -623,10 +834,9 @@ impl IpcPluginConnection {
             | PluginIpcRequest::ChatCompletion { request_id, .. }
             | PluginIpcRequest::EmbedBatch { request_id, .. }
             | PluginIpcRequest::SynthesizeSpeech { request_id, .. }
-            | PluginIpcRequest::TranscribeAudio { request_id, .. } => Some(request_id.as_str()),
-            PluginIpcRequest::Handshake { .. }
-            | PluginIpcRequest::Shutdown
-            | PluginIpcRequest::Ping => None,
+            | PluginIpcRequest::TranscribeAudio { request_id, .. }
+            | PluginIpcRequest::Ping { request_id } => Some(request_id.as_str()),
+            PluginIpcRequest::Handshake { .. } | PluginIpcRequest::Shutdown => None,
         }
     }
 
@@ -643,8 +853,7 @@ impl IpcPluginConnection {
     /// means the request never reached (or was never answered by) the plugin,
     /// so replaying it cannot double-execute a call. Timeouts are deliberately
     /// **not** retried — a timed-out plugin may still be processing a
-    /// non-idempotent call. Streaming reads
-    /// ([`read_response`](Self::read_response)) bypass this path entirely and
+    /// non-idempotent call. Streaming reads bypass this path entirely and
     /// never trigger reconnection mid-stream.
     async fn do_request_with_timeout(
         &mut self,
@@ -664,7 +873,7 @@ impl IpcPluginConnection {
             Self::inject_request_id(&mut req, &rid);
             rid
         };
-        match self.request_once(&req, timeout).await {
+        match self.request_once(&req, &request_id, timeout).await {
             Ok(resp) => {
                 Self::verify_request_id(&resp, &request_id)?;
                 Ok(resp)
@@ -675,10 +884,8 @@ impl IpcPluginConnection {
                     error = %e,
                     "Transport failure; reconnecting and retrying request once"
                 );
-                // Drop the stale stream so reconnect starts from a clean slate.
-                self.stream = None;
                 self.reconnect().await?;
-                let resp = self.request_once(&req, timeout).await?;
+                let resp = self.request_once(&req, &request_id, timeout).await?;
                 Self::verify_request_id(&resp, &request_id)?;
                 Ok(resp)
             }
@@ -686,28 +893,44 @@ impl IpcPluginConnection {
         }
     }
 
-    /// Performs a single request/response round-trip, classifying transport
-    /// failures as [`PluginHostError::TransportFailed`] so the caller can
-    /// decide whether a reconnect-and-retry is warranted.
+    /// Performs a single request/response round-trip using the router's
+    /// oneshot waiters.
+    ///
+    /// Registers a oneshot waiter with the router *before* sending the request,
+    /// then sends the request and awaits the waiter with a timeout. The single
+    /// reader task routes the response to the waiter by `request_id`.
+    ///
+    /// Classifies transport failures as [`PluginHostError::TransportFailed`]
+    /// so the caller can decide whether a reconnect-and-retry is warranted.
     async fn request_once(
         &mut self,
         req: &PluginIpcRequest,
+        request_id: &str,
         timeout: Duration,
     ) -> Result<PluginIpcResponse, PluginHostError> {
-        self.send_request(req).await?;
-        let stream = self
-            .stream
-            .as_mut()
-            .ok_or_else(|| PluginHostError::transport("not connected to plugin"))?;
-        let fut = read_plugin_response(stream);
-        match tokio::time::timeout(timeout, fut).await {
-            Ok(Ok(Some(resp))) => Ok(resp),
-            Ok(Ok(None)) => Err(PluginHostError::transport("connection closed by plugin")),
-            Ok(Err(e)) => Err(PluginHostError::transport(format!("read failed: {e}"))),
-            Err(_elapsed) => Err(PluginHostError::execution(format!(
-                "timed out after {} ms",
-                timeout.as_millis()
-            ))),
+        let (tx, rx) = oneshot::channel();
+        self.router
+            .waiters
+            .lock()
+            .insert(request_id.to_string(), tx);
+
+        if let Err(e) = self.send_request(req).await {
+            self.router.waiters.lock().remove(request_id);
+            return Err(e);
+        }
+
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => Err(PluginHostError::transport(
+                "reader task exited (connection closed)",
+            )),
+            Err(_elapsed) => {
+                self.router.waiters.lock().remove(request_id);
+                Err(PluginHostError::execution(format!(
+                    "timed out after {} ms",
+                    timeout.as_millis()
+                )))
+            }
         }
     }
 
@@ -717,12 +940,143 @@ impl IpcPluginConnection {
     /// [`PluginHostError::TransportFailed`], which the request path treats as
     /// reconnectable.
     async fn send_request(&mut self, req: &PluginIpcRequest) -> Result<(), PluginHostError> {
-        let stream = self
-            .stream
+        let writer = self
+            .writer
             .as_mut()
             .ok_or_else(|| PluginHostError::transport("not connected to plugin"))?;
-        write_plugin_request(stream, req)
+        write_plugin_request(writer, req)
             .await
             .map_err(|e| PluginHostError::transport(format!("write failed: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns one sample of every [`PluginIpcRequest`] variant.
+    ///
+    /// Because this constructs each variant explicitly, adding a new variant
+    /// produces a compile error here, forcing the author to extend the sample
+    /// (and, transitively, the `inject_request_id` / `request_request_id`
+    /// arm-set agreement test below).
+    fn all_request_variants() -> Vec<PluginIpcRequest> {
+        vec![
+            PluginIpcRequest::Handshake {
+                version: VersionRange { min: 4, max: 4 },
+                sandbox: SandboxConfigData::default(),
+                plugin_config: None,
+            },
+            PluginIpcRequest::Shutdown,
+            PluginIpcRequest::Ping {
+                request_id: String::new(),
+            },
+            PluginIpcRequest::GetConfigSchema {
+                request_id: String::new(),
+            },
+            PluginIpcRequest::ListTools {
+                request_id: String::new(),
+            },
+            PluginIpcRequest::CallTool {
+                request_id: String::new(),
+                name: "t".into(),
+                arguments: "{}".into(),
+                deferred: false,
+                context: None,
+            },
+            PluginIpcRequest::SetCallContext {
+                request_id: String::new(),
+                conversation_id: "c".into(),
+                turn_id: "t".into(),
+            },
+            PluginIpcRequest::PollDeferred {
+                request_id: String::new(),
+                task_id: "task".into(),
+            },
+            PluginIpcRequest::CancelStream {
+                request_id: String::new(),
+                stream_request_id: "s".into(),
+            },
+            PluginIpcRequest::CancelDeferred {
+                request_id: String::new(),
+                task_id: "task".into(),
+            },
+            PluginIpcRequest::ApprovePermission {
+                request_id: String::new(),
+                permission_request_id: "p".into(),
+            },
+            PluginIpcRequest::AllowPattern {
+                request_id: String::new(),
+                action: "a".into(),
+                target_pattern: "t".into(),
+            },
+            PluginIpcRequest::RevokePattern {
+                request_id: String::new(),
+                action: "a".into(),
+                target_pattern: "t".into(),
+            },
+            PluginIpcRequest::CreateChatStream {
+                request_id: String::new(),
+                provider_kind: "k".into(),
+                provider_config: serde_json::Value::Null,
+                model: "m".into(),
+                max_tokens: None,
+                messages: Vec::new(),
+                tools: Vec::new(),
+            },
+            PluginIpcRequest::ChatCompletion {
+                request_id: String::new(),
+                provider_kind: "k".into(),
+                provider_config: serde_json::Value::Null,
+                model: "m".into(),
+                max_tokens: None,
+                messages: Vec::new(),
+                json_schema: None,
+            },
+            PluginIpcRequest::SynthesizeSpeech {
+                request_id: String::new(),
+                provider_kind: "k".into(),
+                provider_config: serde_json::Value::Null,
+                text: "hi".into(),
+                voice: "v".into(),
+                format: "wav".into(),
+            },
+            PluginIpcRequest::TranscribeAudio {
+                request_id: String::new(),
+                provider_kind: "k".into(),
+                provider_config: serde_json::Value::Null,
+                audio_base64: "AAAA".into(),
+                format: "wav".into(),
+            },
+            PluginIpcRequest::EmbedBatch {
+                request_id: String::new(),
+                provider_kind: "k".into(),
+                provider_config: serde_json::Value::Null,
+                model: "m".into(),
+                dimensions: None,
+                items: Vec::new(),
+            },
+        ]
+    }
+
+    /// `inject_request_id` must write a `request_id` for exactly the variants
+    /// that `request_request_id` reports as carrying one. If a future variant
+    /// is added to one function but not the other, request/response correlation
+    /// silently breaks (H-9 regression); this test fails in that case.
+    #[test]
+    fn inject_and_request_id_arm_sets_agree() {
+        const SENTINEL: &str = "injected-id";
+        for mut req in all_request_variants() {
+            let carries = IpcPluginConnection::request_request_id(&req).is_some();
+
+            IpcPluginConnection::inject_request_id(&mut req, SENTINEL);
+            let injected =
+                IpcPluginConnection::request_request_id(&req).is_some_and(|rid| rid == SENTINEL);
+
+            assert_eq!(
+                carries, injected,
+                "inject_request_id and request_request_id disagree for variant: {req:?}"
+            );
+        }
     }
 }

@@ -56,7 +56,10 @@ impl Default for CognitionEngine {
 #[derive(Debug, Clone)]
 pub enum MemoryWriteOutcome {
     /// Write and forgetting completed successfully.
-    Ok,
+    Ok {
+        /// Number of memory candidates deferred to the user-approval queue (#174).
+        deferred_candidates: usize,
+    },
     /// Write failed; a retry row was enqueued (or marked permanent).
     Failed {
         /// Human-readable error.
@@ -77,7 +80,7 @@ impl CognitionEngine {
         Self {
             pre_turn: crate::pre_turn::PreTurnAnalyzer,
             context: ContextManager::default(),
-            memory_writer: MemoryWriter::default(),
+            memory_writer: MemoryWriter,
             recall: crate::recall::RecallPlanner,
             emotion: crate::emotion::EmotionEngine,
             character: CharacterProcessor,
@@ -391,7 +394,15 @@ impl CognitionEngine {
         } = pre;
 
         let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
-        let kernel = CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens);
+        // Load user persona from global config so the identity kernel can expand
+        // the `{{user_persona}}` CBS macro at compile time (#H-3).
+        let user_persona = ene_config::get_global_config().user_persona;
+        let kernel = CharacterProcessor::compile_kernel(
+            ctx.card,
+            ctx.user_name,
+            user_persona.as_ref(),
+            max_kernel_tokens,
+        );
 
         let style_examples = if let Some(examples) = prefetch.style_examples {
             examples
@@ -450,9 +461,6 @@ impl CognitionEngine {
             .data
             .get_authors_note()
             .map(|(content, depth)| crate::character::AuthorsNote::new(content, depth));
-
-        // Load user persona from global config if available
-        let user_persona = ene_config::get_global_config().user_persona;
 
         let pack_input = PackInput {
             platform_contract,
@@ -549,19 +557,24 @@ impl CognitionEngine {
                     llm: Some(llm.as_ref()),
                     embedder: embedder.as_ref().map(std::convert::AsRef::as_ref),
                 };
-                let result = async {
-                    MemoryWriter::write_memories(store.as_ref(), &config, &borrowed, providers)
-                        .await?;
-                    MemoryWriter::apply_forgetting(store.as_ref(), &config, &borrowed).await
+                let result: Result<usize, CognitionError> = async {
+                    let deferred =
+                        MemoryWriter::write_memories(store.as_ref(), &config, &borrowed, providers)
+                            .await?;
+                    MemoryWriter::apply_forgetting(store.as_ref(), &config, &borrowed).await?;
+                    Ok(deferred)
                 }
                 .await;
                 match result {
-                    Ok(()) => {
+                    Ok(deferred_candidates) => {
                         tracing::info!(
                             component = "MemoryWriter",
+                            deferred_candidates,
                             "Post-turn memory extraction and forgetting completed"
                         );
-                        MemoryWriteOutcome::Ok
+                        MemoryWriteOutcome::Ok {
+                            deferred_candidates,
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(

@@ -146,6 +146,11 @@ pub enum PublicChatEvent {
         /// `idle`, `running`, or `error`.
         status: String,
     },
+    /// One or more pending memory candidates became available for review (#174).
+    PendingCandidatesAvailable {
+        /// Number of pending candidates currently awaiting review.
+        count: usize,
+    },
     /// A chunk of synthesized PCM audio from the TTS pipeline.
     AudioChunk {
         /// Turn id.
@@ -303,9 +308,9 @@ impl PublicChatEvent {
                 sample_rate: *sample_rate,
                 is_final: *is_final,
             },
-            EneEvent::PendingCandidateAvailable { count } => Self::StatusChanged {
-                status: format!("pending_candidates_{count}"),
-            },
+            EneEvent::PendingCandidateAvailable { count } => {
+                Self::PendingCandidatesAvailable { count: *count }
+            }
         }
     }
 }
@@ -403,5 +408,20 @@ mod tests {
         assert_eq!(reason, "failed");
         let msg = message.expect("message");
         assert!(!msg.contains("abc.def-ghi"));
+    }
+
+    #[test]
+    fn pending_candidate_available_maps_to_dedicated_event() {
+        let event = EneEvent::PendingCandidateAvailable { count: 3 };
+        let public = PublicChatEvent::from_ene_event(&event);
+        let PublicChatEvent::PendingCandidatesAvailable { count } = public else {
+            panic!("expected PendingCandidatesAvailable");
+        };
+        assert_eq!(count, 3);
+
+        // The stable status contract must not be overloaded with a count string.
+        let value = serde_json::to_value(&public).expect("serializable");
+        assert_eq!(value["type"], "pending_candidates_available");
+        assert_eq!(value["count"], 3);
     }
 }

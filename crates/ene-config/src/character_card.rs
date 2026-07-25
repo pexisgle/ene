@@ -264,6 +264,39 @@ impl Default for UserPersona {
     }
 }
 
+impl UserPersona {
+    /// Render the persona as labeled lines, each prefixed with `line_prefix`.
+    ///
+    /// Single canonical field rendering shared by CBS `{{user_persona}}` macro
+    /// expansion (empty prefix) and prompt-budget injection (`"- "` bullets) so
+    /// the two never diverge. Empty optional fields are omitted.
+    #[must_use]
+    pub fn render_lines(&self, line_prefix: &str) -> String {
+        let mut parts = vec![format!("{line_prefix}Name: {}", self.name)];
+        if let Some(ref desc) = self.description
+            && !desc.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Description: {desc}"));
+        }
+        if let Some(ref rel) = self.relationship
+            && !rel.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Relationship: {rel}"));
+        }
+        if let Some(ref pron) = self.pronouns
+            && !pron.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Pronouns: {pron}"));
+        }
+        if let Some(ref notes) = self.notes
+            && !notes.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Notes: {notes}"));
+        }
+        parts.join("\n")
+    }
+}
+
 const fn default_enabled() -> bool {
     true
 }
@@ -510,28 +543,7 @@ pub fn expand_cbs_macros_with(
 
     // Expand {{user_persona}} if persona data is available
     if let Some(persona) = user_persona {
-        let mut parts = vec![format!("Name: {}", persona.name)];
-        if let Some(ref desc) = persona.description {
-            if !desc.trim().is_empty() {
-                parts.push(format!("Description: {}", desc));
-            }
-        }
-        if let Some(ref rel) = persona.relationship {
-            if !rel.trim().is_empty() {
-                parts.push(format!("Relationship: {}", rel));
-            }
-        }
-        if let Some(ref pron) = persona.pronouns {
-            if !pron.trim().is_empty() {
-                parts.push(format!("Pronouns: {}", pron));
-            }
-        }
-        if let Some(ref notes) = persona.notes {
-            if !notes.trim().is_empty() {
-                parts.push(notes.clone());
-            }
-        }
-        let rendered = parts.join("\n");
+        let rendered = persona.render_lines("");
         result = result.replace("{{user_persona}}", &rendered);
     } else {
         result = result.replace("{{user_persona}}", "");
@@ -587,4 +599,66 @@ pub fn expand_cbs_macros_with(
     });
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn persona() -> UserPersona {
+        UserPersona {
+            name: "Alice".to_string(),
+            description: Some("A software engineer".to_string()),
+            relationship: Some("Close friend".to_string()),
+            pronouns: Some("she/her".to_string()),
+            notes: Some("Prefers concise answers".to_string()),
+        }
+    }
+
+    #[test]
+    fn expand_user_persona_macro_with_persona() {
+        let text = "The user is {{user_persona}}.";
+        let out = expand_cbs_macros_with(text, "Ene", "Alice", Some(&persona()));
+        assert!(out.contains("Name: Alice"));
+        assert!(out.contains("Description: A software engineer"));
+        assert!(out.contains("Relationship: Close friend"));
+        assert!(out.contains("Pronouns: she/her"));
+        assert!(out.contains("Notes: Prefers concise answers"));
+        assert!(!out.contains("{{user_persona}}"));
+    }
+
+    #[test]
+    fn expand_user_persona_macro_without_persona_is_removed() {
+        let text = "The user is {{user_persona}}.";
+        let out = expand_cbs_macros_with(text, "Ene", "Alice", None);
+        assert!(!out.contains("{{user_persona}}"));
+        assert!(!out.contains("Name:"));
+    }
+
+    #[test]
+    fn expand_user_and_char_macros() {
+        let text = "{{char}} greets {{user}}.";
+        let out = expand_cbs_macros_with(text, "Ene", "Alice", None);
+        assert_eq!(out, "Ene greets Alice.");
+    }
+
+    #[test]
+    fn render_lines_omits_empty_optional_fields() {
+        let p = UserPersona {
+            name: "Bob".to_string(),
+            description: Some("  ".to_string()),
+            relationship: None,
+            pronouns: Some("he/him".to_string()),
+            notes: None,
+        };
+        let out = p.render_lines("");
+        assert_eq!(out, "Name: Bob\nPronouns: he/him");
+    }
+
+    #[test]
+    fn render_lines_applies_prefix_consistently() {
+        let out = persona().render_lines("- ");
+        assert!(out.contains("- Name: Alice"));
+        assert!(out.contains("- Notes: Prefers concise answers"));
+    }
 }

@@ -145,6 +145,33 @@ character-pos-z = キャラクター位置 Z
 reset-position = 位置をリセット
 manual-expressions = 手動表情テスト
 
+# Character Card Editor (#218)
+character-editor-modified = 未保存の変更があります
+character-editor-name = 名前
+character-editor-description = 説明
+character-editor-personality = 性格
+character-editor-scenario = シナリオ
+character-editor-system-prompt = システムプロンプト
+character-editor-mes-example = 会話例
+character-editor-first-mes = 最初のメッセージ
+character-editor-post-history = 履歴後の指示
+character-editor-validate = 検証
+character-editor-save = 保存
+character-editor-reload = 再読み込み
+
+# Spotlight quick launcher (#218)
+spotlight-title = スポットライト
+spotlight-placeholder = コマンドを入力…
+spotlight-action-open-settings = 設定を開く
+spotlight-action-open-chat = チャットを開く
+spotlight-action-toggle-mic = マイクを切り替え
+spotlight-action-quick-chat = クイックチャット
+spotlight-action-toggle-caption = キャプションオーバーレイを切り替え
+
+# Floating caption overlay (#218)
+caption-title = キャプション
+close = 閉じる
+
 # AI
 ai = AI
 memory = メモリ

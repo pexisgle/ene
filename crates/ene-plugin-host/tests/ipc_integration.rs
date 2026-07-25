@@ -44,6 +44,9 @@ struct MockState {
     allowed: Vec<(String, String)>,
     revoked: Vec<(String, String)>,
     cancelled: Vec<String>,
+    /// Set once the mock has emitted a `DeferredCompleted` push, so the push
+    /// is only emitted a single time (Cr-5 test).
+    pushed: bool,
 }
 
 /// Runs a mock plugin server that handles all v3 request types.
@@ -65,7 +68,29 @@ async fn run_mock_server(socket_path: PathBuf, state: Arc<Mutex<MockState>>) {
                 break;
             };
 
+            // Cr-5: a `mock.push` tool call triggers a `DeferredCompleted`
+            // push frame ahead of the normal response, exercising the host's
+            // single-reader push routing (the push must be cached, not
+            // swallowed by request/response correlation).
+            let emit_push =
+                matches!(&req, PluginIpcRequest::CallTool { name, .. } if name == "mock.push");
+
             let resp = dispatch_mock(&state, req).await;
+
+            if emit_push {
+                let mut s = state.lock().await;
+                if !s.pushed {
+                    s.pushed = true;
+                    let push = PluginIpcResponse::DeferredCompleted {
+                        task_id: "task-push".to_string(),
+                        result: Ok(ToolResult::text("pushed result")),
+                    };
+                    if write_plugin_response(&mut stream, &push).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
             if write_plugin_response(&mut stream, &resp).await.is_err() {
                 break;
             }
@@ -94,7 +119,7 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                     ),
                 };
             }
-            let negotiated = host_range.min.max(our_range.min);
+            let negotiated = host_range.max.min(our_range.max);
             PluginIpcResponse::HandshakeAck {
                 version: negotiated,
                 capabilities: PluginCapabilities {
@@ -113,7 +138,9 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                 serde_json::json!({}),
             )],
         },
-        PluginIpcRequest::Ping => PluginIpcResponse::Pong,
+        PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong {
+            request_id: request_id.clone(),
+        },
         PluginIpcRequest::CallTool {
             request_id,
             name,
@@ -134,9 +161,9 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                 };
             }
             match name.as_str() {
-                "mock.echo" => PluginIpcResponse::CallResult {
+                "mock.echo" | "mock.push" => PluginIpcResponse::CallResult {
                     request_id,
-                    result: Ok(ToolResult::from_string(arguments)),
+                    result: Ok(ToolResult::text(arguments)),
                 },
                 "mock.permission" => PluginIpcResponse::CallResult {
                     request_id,
@@ -213,7 +240,7 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                     request_id,
                     task_id,
                     status: DeferredStatus::Completed {
-                        result: "deferred result".to_string(),
+                        result: ToolResult::text("deferred result"),
                     },
                 }
             } else {
@@ -454,7 +481,9 @@ async fn deferred_call_returns_accepted_then_poll_completes() {
         ene_plugin_proto::DeferredOutcome::Deferred { task_id } => {
             assert_eq!(task_id, "task-42");
         }
-        other => panic!("expected Deferred, got: {other:?}"),
+        ene_plugin_proto::DeferredOutcome::Sync(other) => {
+            panic!("expected Deferred, got Sync: {other:?}")
+        }
     }
 
     let status = conn
@@ -464,7 +493,7 @@ async fn deferred_call_returns_accepted_then_poll_completes() {
     assert_eq!(
         status,
         DeferredStatus::Completed {
-            result: "deferred result".to_string()
+            result: ToolResult::text("deferred result")
         }
     );
 
@@ -485,8 +514,45 @@ async fn deferred_call_sync_fallback() {
         ene_plugin_proto::DeferredOutcome::Sync(result) => {
             assert_eq!(result.text_for_llm(), r#"{"x":1}"#);
         }
-        other => panic!("expected Sync, got: {other:?}"),
+        ene_plugin_proto::DeferredOutcome::Deferred { task_id } => {
+            panic!("expected Sync, got Deferred: {task_id:?}")
+        }
     }
+
+    cleanup_path(&socket_path);
+}
+
+// ── Test: DeferredCompleted push routing (Cr-5 / H-12) ───────────────────
+
+#[tokio::test]
+async fn deferred_completed_push_is_routed_without_breaking_correlation() {
+    let (mut conn, state, socket_path) = spawn_and_connect("deferred-push").await;
+
+    // `mock.push` makes the server emit a `DeferredCompleted` push frame
+    // *ahead* of the normal `CallResult`. The single reader task must route
+    // the push into the completion cache and still correlate the `CallResult`
+    // with this request (Cr-5 / H-12).
+    let result = conn
+        .call_tool("mock.push", r#"{"x":1}"#, None)
+        .await
+        .expect("call_tool should still correlate its CallResult");
+    assert_eq!(result.text_for_llm(), r#"{"x":1}"#);
+
+    // The push was cached; polling the pushed task returns the pushed result
+    // without any further round-trip to the plugin.
+    let status = conn
+        .poll_deferred("task-push")
+        .await
+        .expect("poll_deferred should return the cached push");
+    assert_eq!(
+        status,
+        DeferredStatus::Completed {
+            result: ToolResult::text("pushed result")
+        }
+    );
+
+    // The push was emitted exactly once.
+    assert!(state.lock().await.pushed);
 
     cleanup_path(&socket_path);
 }

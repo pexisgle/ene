@@ -8,6 +8,8 @@
 //! - **Vector similarity search**: Cosine-similarity-based recall of semantically relevant memories
 //! - **Tool RAG**: Embedding-based tool selection (stored in `tool_embedding_index` table, multi-vector per tool)
 //! - **Conversation logging**: Full conversation history in `conversation_logs` for audit and replay
+//! - **Tool DB IPC server**: Per-tool database access over Unix sockets / named pipes
+//!   (`db_server` module), enforcing schema declarations and prefix-based table isolation
 //!
 //! ## Crate Boundaries
 //!
@@ -52,7 +54,9 @@
     expect(
         clippy::unwrap_used,
         clippy::expect_used,
-        reason = "unit/integration tests use unwrap/expect for assertions",
+        clippy::panic,
+        clippy::indexing_slicing,
+        reason = "unit/integration tests use unwrap/expect/panic/indexing for assertions",
     )
 )]
 
@@ -116,7 +120,7 @@ pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{
     ActiveSceneSummaryRow, ConversationLogEntry, KeyFact, MemoryStore, NaturalDecayReport,
-    NewMemorySpan, PendingCandidate,
+    NewMemorySpan, PendingCandidate, PendingCandidateStatus,
 };
 /// Typed memory domain types.
 pub use typed_memory::{

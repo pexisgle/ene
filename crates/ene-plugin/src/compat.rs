@@ -10,7 +10,7 @@ use ene_plugin_proto::SandboxConfigData;
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, ToolError, ToolProvider, ToolResult, ToolSpec,
 };
-use parking_lot::Mutex;
+use tokio::sync::Mutex;
 
 use crate::plugin::{ToolPlugin, ToolPluginCapabilities};
 
@@ -49,8 +49,11 @@ pub struct ToolProviderPlugin<T: ToolProvider> {
     pub(crate) provider: T,
     /// Serializes `set_call_context` + tool call pairs so that concurrent
     /// connections through the shared-`&self` legacy path cannot interleave
-    /// their context writes.  Held across async `.await` boundaries; this is
-    /// safe because `parking_lot::Mutex` is `Send`.
+    /// their context writes. This is a `tokio::sync::Mutex` because the guard
+    /// is intentionally held across `.await` boundaries while the tool call
+    /// runs; unlike `parking_lot::Mutex`, its `lock().await` yields the worker
+    /// thread instead of blocking it, so a suspended call cannot deadlock a
+    /// runtime thread that another task needs to acquire the same lock.
     call_mutex: Mutex<()>,
 }
 
@@ -76,43 +79,35 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         self.provider.list_specs()
     }
 
-    #[expect(
-        clippy::await_holding_lock,
-        reason = "Intentionally held across await to serialize set_call_context + tool call; parking_lot::Mutex with send_guard feature is Send-safe across await"
-    )]
     async fn call_tool(
         &self,
         name: &str,
         args: &str,
         context: Option<&CallContext>,
     ) -> Result<ToolResult, ToolError> {
-        let _lock = self.call_mutex.lock();
+        // Guard held across the await: `tokio::sync::Mutex` yields rather than
+        // blocking the worker thread, so serialization is deadlock-free.
+        let _lock = self.call_mutex.lock().await;
         if let Some(ctx) = context {
             self.provider.set_call_context(ctx);
         }
-        // Lock is intentionally held through the await to prevent interleaving.
-        // parking_lot::Mutex with send_guard is Send-safe across await points.
         self.provider
             .call_tool(name, args)
             .await
-            .map(ToolResult::from_string)
+            .map(ToolResult::text)
     }
 
-    #[expect(
-        clippy::await_holding_lock,
-        reason = "Intentionally held across await to serialize set_call_context + tool call; parking_lot::Mutex with send_guard feature is Send-safe across await"
-    )]
     async fn call_tool_deferred(
         &self,
         name: &str,
         arguments: &str,
         context: Option<&CallContext>,
     ) -> Result<DeferredOutcome, ToolError> {
-        let _lock = self.call_mutex.lock();
+        // Guard held across the await (see `call_tool`).
+        let _lock = self.call_mutex.lock().await;
         if let Some(ctx) = context {
             self.provider.set_call_context(ctx);
         }
-        // Lock is intentionally held through the await to prevent interleaving.
         let outcome = self.provider.call_tool_deferred(name, arguments).await?;
         Ok(match outcome {
             DeferredOutcome::Sync(result) => DeferredOutcome::Sync(result),
@@ -144,6 +139,13 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
         Ok(())
     }
 
+    // `set_sandbox`/`set_config` are synchronous trait methods invoked exactly
+    // once during the handshake, before any tool call on the connection. They
+    // cannot await the async `call_mutex`, so they are not serialized under it.
+    // Last-writer-wins is acceptable here: the wrapped [`ToolProvider`]
+    // contractually requires interior mutability (e.g. `RwLock`) for any state
+    // these setters write, and handshakes do not overlap with tool calls on the
+    // same connection.
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         self.provider.set_sandbox(sandbox);
     }

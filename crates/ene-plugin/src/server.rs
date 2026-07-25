@@ -5,6 +5,7 @@
 //! [`PluginIpcRequest`](ene_plugin_proto::PluginIpcRequest) messages to the
 //! appropriate trait implementation via [`PluginDispatch`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,10 +15,17 @@ use ene_plugin_proto::{
     IpcListener, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
     PluginIpcRequest, PluginIpcResponse, cleanup_path, read_plugin_request, write_plugin_response,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
+
+/// How often an idle connection polls the tool plugin for deferred task
+/// completions to push to the host (Cr-5). Completions are delivered on this
+/// cadence even when no request is in flight, rather than only piggybacking on
+/// the next request/response cycle.
+const DEFERRED_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Dispatch table holding up to five focused trait implementations.
 ///
@@ -171,74 +179,161 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
     Ok(())
 }
 
-/// Handles a single IPC connection: reads requests in a loop, dispatches
-/// them, and writes responses back. Exits on EOF, `Shutdown`, or I/O error.
+/// Handles a single IPC connection.
+///
+/// The connection is split into a read half and a write half. A dedicated
+/// writer task serializes every outgoing frame received over an internal
+/// channel, so any number of producer tasks (request handlers, chat-stream
+/// tasks, the deferred-completion drainer) can emit responses concurrently
+/// without contending for the socket (Cr-4 / H-12).
+///
+/// Each `CreateChatStream` request is run in its own spawned task keyed by its
+/// `request_id` and guarded by a [`CancellationToken`]; a `CancelStream`
+/// request looks up that token and cancels the stream mid-flight (Cr-4). The
+/// read loop stays responsive to further requests — including cancellation —
+/// while streams are in progress.
+///
+/// A periodic drainer pushes [`PluginIpcResponse::DeferredCompleted`] messages
+/// on a timer, so background task completions reach the host even while the
+/// connection is idle instead of piggybacking on the next request (Cr-5).
 async fn handle_connection(
     dispatch: Arc<PluginDispatch>,
-    mut stream: IpcStream,
+    stream: IpcStream,
     shutdown: Arc<tokio::sync::Notify>,
 ) {
-    loop {
-        let req = match read_plugin_request(&mut stream).await {
-            Ok(None) => break,
-            Ok(Some(req)) => req,
-            Err(e) => {
-                tracing::error!(component = "PluginServer", error = %e, "IPC read error");
-                let _ = write_plugin_response(
-                    &mut stream,
-                    &PluginIpcResponse::Error {
-                        request_id: String::new(),
-                        message: e.to_string(),
-                    },
-                )
-                .await;
-                break;
-            }
-        };
+    let (read_half, write_half) = tokio::io::split(stream);
+    let (tx, rx) = mpsc::channel::<PluginIpcResponse>(64);
 
-        let is_shutdown = matches!(req, PluginIpcRequest::Shutdown);
+    let writer_task = tokio::spawn(write_loop(write_half, rx));
 
-        if let Err(e) = handle_request(&dispatch, &req, &mut stream).await {
-            tracing::error!(
-                component = "PluginServer",
-                error = %e,
-                "Failed to handle request"
-            );
-            break;
-        }
+    // In-flight chat streams keyed by request_id, for cancellation (Cr-4).
+    let streams: Arc<parking_lot::Mutex<HashMap<String, CancellationToken>>> =
+        Arc::new(parking_lot::Mutex::new(HashMap::new()));
 
-        // Drain any pending deferred task completions and push them to the host.
-        if let Some(tool) = &dispatch.tool {
-            for (task_id, result) in tool.drain_deferred_completions() {
-                let resp = PluginIpcResponse::DeferredCompleted { task_id, result };
-                if write_plugin_response(&mut stream, &resp).await.is_err() {
-                    return;
-                }
-            }
-        }
+    // Periodic deferred-completion drainer (Cr-5 idle delivery).
+    let drain_task = spawn_deferred_drain(Arc::clone(&dispatch), tx.clone());
 
-        if is_shutdown {
-            shutdown.notify_one();
+    let read_result = connection_read_loop(&dispatch, read_half, &tx, &streams, &shutdown).await;
+
+    // Tear down: cancel any in-flight streams, stop the drainer, then let the
+    // writer flush remaining frames and finish once all senders are dropped.
+    for (_, token) in streams.lock().drain() {
+        token.cancel();
+    }
+    drain_task.abort();
+    drop(tx);
+    let _ = writer_task.await;
+
+    if let Err(e) = read_result {
+        tracing::error!(component = "PluginServer", error = %e, "Connection read loop ended");
+    }
+}
+
+/// Serializes outgoing frames: writes each response received on `rx` to the
+/// socket in order. Exits when the channel closes or a write fails.
+async fn write_loop<W: tokio::io::AsyncWrite + Unpin>(
+    mut writer: W,
+    mut rx: mpsc::Receiver<PluginIpcResponse>,
+) {
+    while let Some(resp) = rx.recv().await {
+        if write_plugin_response(&mut writer, &resp).await.is_err() {
             break;
         }
     }
 }
 
-/// Dispatches a single request, writing one or more responses to `writer`.
+/// Spawns a task that periodically drains deferred task completions from the
+/// tool plugin and pushes them to the host over `tx` (Cr-5).
+fn spawn_deferred_drain(
+    dispatch: Arc<PluginDispatch>,
+    tx: mpsc::Sender<PluginIpcResponse>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(DEFERRED_DRAIN_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let Some(tool) = &dispatch.tool else {
+                continue;
+            };
+            for (task_id, result) in tool.drain_deferred_completions() {
+                let resp = PluginIpcResponse::DeferredCompleted { task_id, result };
+                if tx.send(resp).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+}
+
+/// Reads requests in a loop and dispatches them.
 ///
-/// Non-streaming requests produce exactly one response via [`dispatch`].
-/// `CreateChatStream` produces N × `StreamChunk` followed by a terminal
-/// `StreamEnd` or `StreamError` via [`handle_chat_stream`].
-async fn handle_request<W: AsyncWriteExt + Unpin>(
-    dispatch: &PluginDispatch,
-    req: &PluginIpcRequest,
-    writer: &mut W,
+/// `CreateChatStream` requests are spawned as independent, cancellable tasks;
+/// `CancelStream` cancels the matching stream; `Shutdown` notifies the server
+/// and ends the loop; all other requests are dispatched inline and their single
+/// response sent over `tx`. Returns `Ok(())` on EOF or graceful shutdown.
+async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
+    dispatch: &Arc<PluginDispatch>,
+    mut reader: R,
+    tx: &mpsc::Sender<PluginIpcResponse>,
+    streams: &Arc<parking_lot::Mutex<HashMap<String, CancellationToken>>>,
+    shutdown: &Arc<tokio::sync::Notify>,
 ) -> Result<(), PluginError> {
-    if matches!(req, PluginIpcRequest::CreateChatStream { .. }) {
-        handle_chat_stream(dispatch, req, writer).await
-    } else {
-        let resp = dispatch_request(dispatch, req).await;
-        write_plugin_response(writer, &resp).await
+    loop {
+        let req = match read_plugin_request(&mut reader).await {
+            Ok(None) => return Ok(()),
+            Ok(Some(req)) => req,
+            Err(e) => {
+                tracing::error!(component = "PluginServer", error = %e, "IPC read error");
+                let _ = tx
+                    .send(PluginIpcResponse::Error {
+                        request_id: String::new(),
+                        message: e.to_string(),
+                    })
+                    .await;
+                return Err(e);
+            }
+        };
+
+        match req {
+            PluginIpcRequest::CreateChatStream { ref request_id, .. } => {
+                let token = CancellationToken::new();
+                streams.lock().insert(request_id.clone(), token.clone());
+                let dispatch = Arc::clone(dispatch);
+                let req = req.clone();
+                let tx = tx.clone();
+                let streams = Arc::clone(streams);
+                let stream_id = request_id.clone();
+                tokio::spawn(async move {
+                    run_chat_stream(&dispatch, &req, tx, token).await;
+                    streams.lock().remove(&stream_id);
+                });
+            }
+            PluginIpcRequest::CancelStream {
+                request_id,
+                stream_request_id,
+            } => {
+                if let Some(token) = streams.lock().remove(&stream_request_id) {
+                    token.cancel();
+                }
+                let _ = tx.send(PluginIpcResponse::Ack { request_id }).await;
+            }
+            PluginIpcRequest::Shutdown => {
+                let _ = tx
+                    .send(PluginIpcResponse::Ack {
+                        request_id: String::new(),
+                    })
+                    .await;
+                shutdown.notify_one();
+                return Ok(());
+            }
+            _ => {
+                let resp = dispatch_request(dispatch, &req).await;
+                if tx.send(resp).await.is_err() {
+                    return Ok(());
+                }
+            }
+        }
     }
 }
 
@@ -258,7 +353,9 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 min: PLUGIN_IPC_PROTOCOL_VERSION,
                 max: PLUGIN_IPC_PROTOCOL_VERSION,
             };
-            if host_range.max < our_range.min || host_range.min > our_range.max {
+            // Negotiate the highest protocol version supported by both sides.
+            // `negotiate` returns `None` when the ranges do not overlap.
+            let Some(negotiated) = our_range.negotiate(host_range) else {
                 tracing::error!(
                     component = "PluginServer",
                     host_min = host_range.min,
@@ -275,8 +372,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                         host_range.min, host_range.max, our_range.min, our_range.max
                     ),
                 };
-            }
-            let negotiated = host_range.min.max(our_range.min);
+            };
             if let Some(tool) = &dispatch.tool {
                 tool.set_sandbox(sandbox);
                 if let Some(config) = plugin_config {
@@ -288,7 +384,9 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 capabilities: collect_capabilities(dispatch),
             }
         }
-        PluginIpcRequest::Ping => PluginIpcResponse::Pong,
+        PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong {
+            request_id: request_id.clone(),
+        },
         PluginIpcRequest::GetConfigSchema { request_id } => PluginIpcResponse::ConfigSchema {
             request_id: request_id.clone(),
             schema: dispatch.tool.as_ref().and_then(|t| t.config_schema()),
@@ -525,13 +623,6 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 },
             }
         }
-        PluginIpcRequest::CancelStream { request_id, .. } => {
-            // CancelStream is handled by the connection handler via a cancel map,
-            // not dispatched to the plugin trait. Return an Ack for protocol compliance.
-            PluginIpcResponse::Ack {
-                request_id: request_id.clone(),
-            }
-        }
         PluginIpcRequest::CancelDeferred {
             request_id,
             task_id,
@@ -634,10 +725,15 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
         PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
             request_id: String::new(),
         },
-        // CreateChatStream is handled by handle_chat_stream, not here.
+        // CreateChatStream and CancelStream are handled by the connection read
+        // loop (spawned stream task / cancellation map), never dispatched here.
         PluginIpcRequest::CreateChatStream { .. } => PluginIpcResponse::Error {
             request_id: String::new(),
             message: "CreateChatStream must be handled by the streaming path".to_string(),
+        },
+        PluginIpcRequest::CancelStream { request_id, .. } => PluginIpcResponse::Error {
+            request_id: request_id.clone(),
+            message: "CancelStream must be handled by the connection read loop".to_string(),
         },
     }
 }
@@ -678,18 +774,19 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
     }
 }
 
-/// Handles a `CreateChatStream` request by iterating the plugin's stream
-/// and writing `StreamChunk` / `StreamEnd` / `StreamError` responses.
-#[expect(
-    clippy::manual_let_else,
-    clippy::single_match_else,
-    reason = "match-based return is clearer for early-exit patterns"
-)]
-async fn handle_chat_stream<W: AsyncWriteExt + Unpin>(
+/// Runs a `CreateChatStream` request to completion, sending `StreamChunk` /
+/// `StreamEnd` / `StreamError` responses over `tx`.
+///
+/// The stream is aborted as soon as `cancel` fires (Cr-4): the chunk loop
+/// selects between the next stream item and the cancellation token, so a
+/// `CancelStream` request stops the underlying LLM stream promptly rather than
+/// waiting for it to drain.
+async fn run_chat_stream(
     dispatch: &PluginDispatch,
     req: &PluginIpcRequest,
-    writer: &mut W,
-) -> Result<(), PluginError> {
+    tx: mpsc::Sender<PluginIpcResponse>,
+    cancel: CancellationToken,
+) {
     let PluginIpcRequest::CreateChatStream {
         request_id,
         provider_kind,
@@ -700,27 +797,24 @@ async fn handle_chat_stream<W: AsyncWriteExt + Unpin>(
         tools,
     } = req
     else {
-        return Err(PluginError::protocol(
-            "expected CreateChatStream request in streaming handler",
-        ));
+        tracing::error!(
+            component = "PluginServer",
+            "expected CreateChatStream request in streaming handler"
+        );
+        return;
     };
 
-    let llm = match &dispatch.llm {
-        Some(l) => l,
-        None => {
-            let _ = write_plugin_response(
-                writer,
-                &PluginIpcResponse::StreamError {
-                    request_id: request_id.clone(),
-                    message: "no LLM plugin registered".to_string(),
-                },
-            )
+    let Some(llm) = &dispatch.llm else {
+        let _ = tx
+            .send(PluginIpcResponse::StreamError {
+                request_id: request_id.clone(),
+                message: "no LLM plugin registered".to_string(),
+            })
             .await;
-            return Ok(());
-        }
+        return;
     };
 
-    match llm
+    let stream = match llm
         .create_chat_stream(
             provider_kind,
             provider_config.clone(),
@@ -731,50 +825,69 @@ async fn handle_chat_stream<W: AsyncWriteExt + Unpin>(
         )
         .await
     {
-        Ok(mut stream) => {
-            while let Some(chunk_result) = stream.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
+        Ok(stream) => stream,
+        Err(e) => {
+            let _ = tx
+                .send(PluginIpcResponse::StreamError {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                })
+                .await;
+            return;
+        }
+    };
+
+    let mut stream = stream;
+    loop {
+        tokio::select! {
+            // `biased` checks cancellation first so a cancel that races with a
+            // ready stream item wins deterministically (Cr-4).
+            biased;
+            () = cancel.cancelled() => {
+                tracing::info!(
+                    component = "PluginServer",
+                    request_id = %request_id,
+                    "Chat stream cancelled by host"
+                );
+                let _ = tx
+                    .send(PluginIpcResponse::StreamError {
+                        request_id: request_id.clone(),
+                        message: "stream cancelled".to_string(),
+                    })
+                    .await;
+                return;
+            }
+            next = stream.next() => {
+                match next {
+                    Some(Ok(chunk)) => {
                         let resp = PluginIpcResponse::StreamChunk {
                             request_id: request_id.clone(),
                             text_delta: chunk.text_delta.unwrap_or_default(),
                             tool_calls_delta: chunk.tool_calls_delta.unwrap_or_default(),
                         };
-                        if write_plugin_response(writer, &resp).await.is_err() {
-                            return Ok(());
+                        if tx.send(resp).await.is_err() {
+                            return;
                         }
                     }
-                    Err(e) => {
-                        let _ = write_plugin_response(
-                            writer,
-                            &PluginIpcResponse::StreamError {
+                    Some(Err(e)) => {
+                        let _ = tx
+                            .send(PluginIpcResponse::StreamError {
                                 request_id: request_id.clone(),
                                 message: e.to_string(),
-                            },
-                        )
-                        .await;
-                        return Ok(());
+                            })
+                            .await;
+                        return;
+                    }
+                    None => {
+                        let _ = tx
+                            .send(PluginIpcResponse::StreamEnd {
+                                request_id: request_id.clone(),
+                            })
+                            .await;
+                        return;
                     }
                 }
             }
-            write_plugin_response(
-                writer,
-                &PluginIpcResponse::StreamEnd {
-                    request_id: request_id.clone(),
-                },
-            )
-            .await
-        }
-        Err(e) => {
-            let _ = write_plugin_response(
-                writer,
-                &PluginIpcResponse::StreamError {
-                    request_id: request_id.clone(),
-                    message: e.to_string(),
-                },
-            )
-            .await;
-            Ok(())
         }
     }
 }
@@ -787,6 +900,10 @@ async fn handle_chat_stream<W: AsyncWriteExt + Unpin>(
 #[expect(
     clippy::indexing_slicing,
     reason = "test assertions index into known-length vectors"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests use expect for concise failure messages"
 )]
 mod tests {
     use super::*;
@@ -821,7 +938,7 @@ mod tests {
             _context: Option<&ene_plugin_proto::CallContext>,
         ) -> Result<ene_plugin_proto::ToolResult, ene_plugin_proto::ToolError> {
             if name == "test.echo" {
-                Ok(ene_plugin_proto::ToolResult::from_string(args.to_string()))
+                Ok(ene_plugin_proto::ToolResult::text(args.to_string()))
             } else {
                 Err(ene_plugin_proto::ToolError::NotFound {
                     tool_name: name.to_string(),
@@ -880,6 +997,41 @@ mod tests {
             _json_schema: Option<serde_json::Value>,
         ) -> Result<String, PluginError> {
             Ok("Mock completion response".into())
+        }
+    }
+
+    /// A mock LLM plugin whose stream emits one chunk and then blocks until
+    /// cancelled, used to exercise `CancelStream` (Cr-4).
+    struct SlowMockLlmPlugin;
+
+    #[async_trait]
+    impl LlmPlugin for SlowMockLlmPlugin {
+        fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+            vec![LlmProviderSpec {
+                kind: "mock".into(),
+                supported_models: vec!["mock-model".into()],
+                supports_streaming: true,
+                supports_vision: false,
+            }]
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _kind: &str,
+            _config: serde_json::Value,
+            _model: String,
+            _max_tokens: Option<u32>,
+            _messages: Vec<serde_json::Value>,
+            _tools: Vec<serde_json::Value>,
+        ) -> Result<crate::plugin::PluginStream, PluginError> {
+            // Emit one chunk, then block "forever" so the only way to end the
+            // stream is cancellation.
+            let first = tokio_stream::iter(vec![Ok(PluginStreamChunk {
+                text_delta: Some("partial".into()),
+                tool_calls_delta: None,
+            })]);
+            let pending = tokio_stream::pending::<Result<PluginStreamChunk, PluginError>>();
+            Ok(Box::pin(first.chain(pending)))
         }
     }
 
@@ -1017,10 +1169,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_handshake_partial_overlap_negotiates_highest_common() {
+        // Host advertises {3,4}, plugin supports {4,4}; the negotiated version
+        // must be the highest common version (4), not the lowest (H-11).
+        let dispatch = make_dispatch(true, false, false);
+        let req = PluginIpcRequest::Handshake {
+            version: VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION - 1,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            },
+            sandbox: ene_plugin_proto::SandboxConfigData::default(),
+            plugin_config: None,
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        match resp {
+            PluginIpcResponse::HandshakeAck { version, .. } => {
+                assert_eq!(version, PLUGIN_IPC_PROTOCOL_VERSION);
+            }
+            other => panic!("expected HandshakeAck, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn dispatch_ping() {
         let dispatch = make_dispatch(false, false, false);
-        let resp = dispatch_request(&dispatch, &PluginIpcRequest::Ping).await;
-        assert_eq!(resp, PluginIpcResponse::Pong);
+        let resp = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::Ping {
+                request_id: "ping-1".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            resp,
+            PluginIpcResponse::Pong {
+                request_id: "ping-1".into()
+            }
+        );
     }
 
     #[tokio::test]
@@ -1329,16 +1514,12 @@ mod tests {
             tools: vec![],
         };
 
-        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
-        handle_request(&dispatch, &req, &mut server).await.unwrap();
-        drop(server);
+        let (tx, mut rx) = mpsc::channel::<PluginIpcResponse>(64);
+        let token = CancellationToken::new();
+        run_chat_stream(&dispatch, &req, tx, token).await;
 
         let mut responses = Vec::new();
-        loop {
-            let resp = ene_plugin_proto::read_plugin_response(&mut client)
-                .await
-                .unwrap()
-                .unwrap();
+        while let Ok(resp) = rx.try_recv() {
             let is_terminal = matches!(
                 resp,
                 PluginIpcResponse::StreamEnd { .. } | PluginIpcResponse::StreamError { .. }
@@ -1359,6 +1540,35 @@ mod tests {
         assert!(
             matches!(&responses[2], PluginIpcResponse::StreamEnd { request_id } if request_id == "stream-1")
         );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_cancel_aborts_mid_stream() {
+        // A pre-cancelled token must stop the stream before any chunk is
+        // emitted and produce a terminal StreamError (Cr-4).
+        let dispatch = make_dispatch(false, true, false);
+        let req = PluginIpcRequest::CreateChatStream {
+            request_id: "stream-cancel".into(),
+            provider_kind: "mock".into(),
+            provider_config: serde_json::json!({}),
+            model: "mock-model".into(),
+            max_tokens: None,
+            messages: vec![serde_json::json!({"role": "user", "content": "Hi"})],
+            tools: vec![],
+        };
+
+        let (tx, mut rx) = mpsc::channel::<PluginIpcResponse>(64);
+        let token = CancellationToken::new();
+        token.cancel();
+        run_chat_stream(&dispatch, &req, tx, token).await;
+
+        let resp = rx.try_recv().unwrap();
+        assert!(
+            matches!(resp, PluginIpcResponse::StreamError { ref message, .. } if message == "stream cancelled"),
+            "expected cancellation StreamError, got {resp:?}"
+        );
+        // No chunks should follow the cancellation.
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1471,5 +1681,105 @@ mod tests {
         };
         let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
+    }
+
+    /// Full `CancelStream` round-trip through `handle_connection` (Cr-4).
+    ///
+    /// A slow stream emits one chunk and then blocks; a `CancelStream` request
+    /// must abort it and produce a terminal `StreamError`, while the read loop
+    /// stays responsive enough to acknowledge the cancel.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancel_stream_round_trip() {
+        use ene_plugin_proto::{read_plugin_response, write_plugin_request};
+
+        let dispatch = Arc::new(PluginDispatch::new(
+            None,
+            Some(Arc::new(SlowMockLlmPlugin) as Arc<dyn LlmPlugin>),
+            None,
+            None,
+            None,
+        ));
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        let server_stream = IpcStream::Unix(server);
+        tokio::spawn(handle_connection(
+            Arc::clone(&dispatch),
+            server_stream,
+            Arc::clone(&shutdown),
+        ));
+
+        let mut client = client;
+
+        // Start a chat stream that will block after the first chunk.
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::CreateChatStream {
+                request_id: "stream-1".into(),
+                provider_kind: "mock".into(),
+                provider_config: serde_json::json!({}),
+                model: "mock-model".into(),
+                max_tokens: None,
+                messages: vec![serde_json::json!({"role": "user", "content": "Hi"})],
+                tools: vec![],
+            },
+        )
+        .await
+        .expect("write create stream");
+
+        // Read the first (and only) chunk before cancelling.
+        let first = read_plugin_response(&mut client)
+            .await
+            .expect("read")
+            .expect("non-EOF");
+        assert!(
+            matches!(&first, PluginIpcResponse::StreamChunk { text_delta, .. } if text_delta == "partial"),
+            "expected partial chunk, got {first:?}"
+        );
+
+        // Cancel the in-flight stream.
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::CancelStream {
+                request_id: "cancel-1".into(),
+                stream_request_id: "stream-1".into(),
+            },
+        )
+        .await
+        .expect("write cancel");
+
+        // Collect responses until the terminal StreamError arrives. The cancel
+        // Ack and the StreamError may arrive in either order.
+        let mut saw_ack = false;
+        let mut saw_cancel_error = false;
+        for _ in 0..5 {
+            let Ok(Some(resp)) =
+                tokio::time::timeout(Duration::from_secs(2), read_plugin_response(&mut client))
+                    .await
+                    .expect("no timeout")
+            else {
+                break;
+            };
+            match resp {
+                PluginIpcResponse::Ack { request_id } if request_id == "cancel-1" => {
+                    saw_ack = true;
+                }
+                PluginIpcResponse::StreamError {
+                    request_id,
+                    message,
+                } if request_id == "stream-1" && message == "stream cancelled" => {
+                    saw_cancel_error = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_ack, "expected CancelStream Ack");
+        assert!(
+            saw_cancel_error,
+            "expected terminal StreamError after cancel"
+        );
     }
 }

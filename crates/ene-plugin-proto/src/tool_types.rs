@@ -671,19 +671,20 @@ impl ToolResult {
         }
     }
 
-    /// Create a `ToolResult` from a legacy String (backward compatibility).
-    pub fn from_string(s: String) -> Self {
-        Self::text(s)
-    }
-
     /// Extract text content suitable for passing to an LLM.
+    ///
+    /// Image content cannot be flattened into text, but silently dropping it
+    /// would make the model believe a tool returned nothing. A visible
+    /// placeholder preserves the fact that an image was produced so callers
+    /// can route the structured [`ToolContent::Image`] to a vision model
+    /// separately while the text projection stays coherent.
     pub fn text_for_llm(&self) -> String {
         self.content
             .iter()
-            .filter_map(|c| match c {
-                ToolContent::Text { text } => Some(text.clone()),
-                ToolContent::Json(v) => Some(v.to_string()),
-                ToolContent::Image { .. } => None,
+            .map(|c| match c {
+                ToolContent::Text { text } => text.clone(),
+                ToolContent::Json(v) => v.to_string(),
+                ToolContent::Image { .. } => "[image omitted]".to_string(),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -847,6 +848,60 @@ mod tests {
         assert_eq!(p.name.as_str(), "mcp.hello");
         assert_eq!(p.summary, "Say hello");
         assert_eq!(p.category, ToolCategory::Utility);
+    }
+
+    #[test]
+    fn tool_result_text_for_llm_text_and_json() {
+        let result = ToolResult {
+            content: vec![
+                ToolContent::Text {
+                    text: "hello".into(),
+                },
+                ToolContent::Json(serde_json::json!({"k": "v"})),
+            ],
+            metadata: None,
+        };
+        assert_eq!(result.text_for_llm(), "hello\n{\"k\":\"v\"}");
+    }
+
+    #[test]
+    fn tool_result_text_for_llm_image_not_dropped() {
+        // Image content must surface as a visible placeholder rather than
+        // being silently flattened to an empty string (WS9).
+        let result = ToolResult {
+            content: vec![
+                ToolContent::Text {
+                    text: "before".into(),
+                },
+                ToolContent::Image {
+                    mime_type: "image/png".into(),
+                    data_base64: "AAAA".into(),
+                },
+                ToolContent::Text {
+                    text: "after".into(),
+                },
+            ],
+            metadata: None,
+        };
+        let text = result.text_for_llm();
+        assert!(
+            text.contains("[image omitted]"),
+            "image must not be dropped: {text}"
+        );
+        assert!(text.contains("before"));
+        assert!(text.contains("after"));
+    }
+
+    #[test]
+    fn tool_result_text_for_llm_image_only_not_empty() {
+        let result = ToolResult {
+            content: vec![ToolContent::Image {
+                mime_type: "image/jpeg".into(),
+                data_base64: "AAAA".into(),
+            }],
+            metadata: None,
+        };
+        assert!(!result.text_for_llm().is_empty());
     }
 
     #[test]

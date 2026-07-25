@@ -472,19 +472,19 @@ impl AiBridge {
     /// List pending memory candidates awaiting user approval.
     pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, String> {
         self.block_on_timeout(self.handle.list_pending_candidates())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(std::convert::identity)
     }
 
     /// Approve a pending memory candidate, persisting it as a typed memory.
     pub fn approve_candidate(&self, id: i64) -> Result<(), String> {
         self.block_on_timeout(self.handle.approve_candidate(id))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(std::convert::identity)
     }
 
     /// Reject a pending memory candidate.
     pub fn reject_candidate(&self, id: i64) -> Result<(), String> {
         self.block_on_timeout(self.handle.reject_candidate(id))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+            .and_then(std::convert::identity)
     }
 
     // ── Commitment management (#223) ──
