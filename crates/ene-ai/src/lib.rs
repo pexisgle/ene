@@ -1,11 +1,13 @@
 //! # ene-ai
 //!
-//! Unified LLM and embedding provider layer for the ene AI character platform.
+//! Core LLM and embedding provider layer for the ene AI character platform.
 //!
 //! Defines generic message and streaming types (`LlmMessage`, `LlmResponseChunk`),
 //! provider traits (`LlmProvider`, `EmbeddingProvider`, `LlmProviderFactory`),
-//! a global provider registry, the built-in OpenAI-compatible implementation,
-//! and local GGUF embedding / decision inference via llama-cpp-2.
+//! a global provider registry, and the built-in OpenAI-compatible implementation.
+//!
+//! Local providers are in [`ene-ai-local`] (GGUF/llama.cpp) and
+//! [`ene-voice`] (STT/TTS/VAD).
 #![warn(missing_docs)]
 #![expect(
     clippy::option_if_let_else,
@@ -21,47 +23,25 @@
     )
 )]
 
-/// Audio provider traits, types, and registry (TTS, STT, VAD).
 pub mod audio;
-/// Configuration types for providers and embedding.
+/// Configuration types for AI providers, tasks, and retry policies.
 pub mod config;
-/// Local GGUF quantized embedding provider.
-pub mod embedding;
-/// Typed `LlmProviderError` enum returned at the library boundary.
+/// Error types for the AI provider layer.
 pub mod error;
-/// Grapheme-to-phoneme conversion and Kokoro phoneme tokenization (feature `local-tts`).
-#[cfg(feature = "local-tts")]
-pub(crate) mod g2p;
-/// GGUF download and path resolution (#171).
-pub mod gguf;
-/// Provider health checks and failover monitoring (#175).
+/// Provider health monitoring and failover routing.
 pub mod health;
-/// Shared llama-cpp-2 adapter (decision + embedding).
-pub(crate) mod llama_cpp;
-/// In-process llama.cpp decision provider (#165 / #171).
-pub mod local_llm;
-/// Local whisper.cpp speech-to-text provider (feature `local-stt`).
-pub mod local_stt;
-/// Local Kokoro ONNX text-to-speech provider (feature `local-tts`).
-pub mod local_tts;
-/// Unified chat message and streaming types.
+/// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
-/// Built-in OpenAI-compatible provider and cloud embedding provider.
+/// OpenAI-compatible provider implementation.
 pub mod openai;
-/// Shared ONNX Runtime one-time initialization (features `local-tts`/`silero-vad`).
-#[cfg(any(feature = "local-tts", feature = "silero-vad"))]
-pub(crate) mod ort_init;
-/// Resolved settings from [`config::AiConfig`] task routing.
+/// Provider resolution from configuration.
 pub mod resolve;
-/// Retry policy with exponential backoff for transient provider failures.
+/// Retry policy for transient provider errors.
 pub mod retry;
-/// Local Silero VAD voice activity detection engine (feature `silero-vad`).
-pub mod silero_vad;
-/// Provider traits and registry.
-pub mod traits;
-
-/// Conversation entry author roles.
+/// Conversation role enum (User, Assistant, System, Tool).
 pub mod role;
+/// Provider trait definitions (`LlmProvider`, `EmbeddingProvider`, etc.).
+pub mod traits;
 
 pub use audio::{
     AudioProviderError, AudioProviderRegistry, SttProvider, SttProviderFactory, SttResult,
@@ -72,27 +52,11 @@ pub use config::{
     LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
     TtsConfig, VadConfig, is_builtin_kind, kind_typo_suggestion,
 };
-pub use embedding::{EneEmbeddingError, GgufEmbeddingProvider, create_local_provider};
 pub use error::{AiError, LlmProviderError};
-pub use gguf::{
-    ensure_gguf_available, ensure_mmproj_available, prefetch_configured_gguf,
-    prefetch_decision_gguf, prefetch_embedding_gguf, resolve_decision_gguf_path,
-    resolve_embedding_gguf_path, resolve_local_gguf_path,
-};
 pub use health::{
     FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
     ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
-pub use local_llm::{
-    DecisionProviderKind, DisabledDecisionProvider, LocalGgufLoadParams, LocalLlamaCppProvider,
-    ProactiveLlmHandles, build_proactive_llm_handles,
-};
-#[cfg(feature = "local-stt")]
-pub use local_stt::LocalSttProvider;
-pub use local_stt::LocalSttProviderFactory;
-#[cfg(feature = "local-tts")]
-pub use local_tts::LocalTtsProvider;
-pub use local_tts::LocalTtsProviderFactory;
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{
     AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
@@ -105,9 +69,6 @@ pub use resolve::{
 };
 pub use retry::RetryPolicy;
 pub use role::Role;
-#[cfg(feature = "silero-vad")]
-pub use silero_vad::SileroVadEngine;
-pub use silero_vad::SileroVadFactory;
 pub use traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
     LlmProviderRegistry, cosine_similarity, embed, embed_query,

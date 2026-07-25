@@ -8,13 +8,19 @@ mod action;
 mod provider;
 mod utils;
 
-use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
     let provider = provider::BrowserToolProvider::new();
     let store = provider.store.clone();
-    let result = run_plugin_server(Box::new(ToolPluginAdapter(provider))).await;
+    let result = run_plugin_server(PluginDispatch::new(
+        Some(Arc::new(ToolProviderPlugin(provider))),
+        None,
+        None,
+    ))
+    .await;
     store.shutdown().await;
     if let Err(e) = result {
         tracing::error!("[ene-plugin-browser] Fatal error: {e}");

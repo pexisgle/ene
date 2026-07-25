@@ -104,6 +104,7 @@ zip = { version = "8", default-features = false }
 
 # ── Internal crates ──
 ene-ai = { path = "crates/ene-ai" }
+ene-ai-local = { path = "crates/ene-ai-local" }
 ene-config = { path = "crates/ene-config" }
 ene-mind = { path = "crates/ene-mind" }
 ene-plugin = { path = "crates/ene-plugin" }
@@ -115,6 +116,7 @@ ene-tool-common = { path = "crates/ene-tool-common" }
 ene-tool-db = { path = "crates/ene-tool-db" }
 ene-tool-derive = { path = "crates/ene-tool-derive" }
 ene-tool-rag = { path = "crates/ene-tool-rag" }
+ene-voice = { path = "crates/ene-voice" }
 ene-vrm = { path = "crates/ene-vrm" }
 
 [patch.crates-io]

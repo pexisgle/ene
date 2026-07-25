@@ -19,6 +19,7 @@ schemars = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 ene-plugin-proto = { workspace = true }
+ene-plugin = { workspace = true }
 ene-tool-derive = { workspace = true }
 ene-config = { workspace = true }
 

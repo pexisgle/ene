@@ -38,6 +38,8 @@ pub enum DeferredOutcome {
 /// reads. Implementors may assume that after `set_sandbox`/`set_config`
 /// return, subsequent `call_tool` calls on the *same* connection will observe
 /// the values written by those setters.
+///
+/// ⚠️ **Deprecated** — implement [`ene_plugin::ToolPlugin`] directly instead.
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
     /// Returns the list of tool specs this provider exposes.

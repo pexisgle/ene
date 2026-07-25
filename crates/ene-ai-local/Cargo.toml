@@ -1,0 +1,39 @@
+[package]
+name = "ene-ai-local"
+version.workspace = true
+edition.workspace = true
+description = "Local GGUF model providers (llama.cpp) for the ene AI character platform"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+vulkan = ["llama-cpp-2/vulkan"]
+cuda = ["llama-cpp-2/cuda"]
+
+[dependencies]
+ene-ai = { workspace = true }
+ene-config = { workspace = true }
+ene-plugin-proto = { workspace = true }
+llama-cpp-2 = { workspace = true, features = ["common", "mtmd"] }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+image = { workspace = true, features = ["png", "jpeg"] }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+encoding_rs = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true, features = ["rustls"] }
+ctor = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

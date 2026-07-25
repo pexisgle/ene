@@ -2,11 +2,10 @@
 //!
 //! Plugin authoring facade for the ene unified plugin system.
 //!
-//! This crate provides the [`Plugin`] trait and [`run_plugin_server`] entry
-//! point for building plugin binaries. A plugin can expose tools, LLM
-//! providers (streaming and non-streaming), and embedding providers
-//! simultaneously — the [`PluginCapabilities`] advertised during the IPC
-//! handshake tells the host which registries to populate.
+//! This crate provides the [`ToolPlugin`], [`LlmPlugin`], and [`EmbedPlugin`]
+//! traits and the [`run_plugin_server`] entry point for building plugin
+//! binaries. A plugin can implement any subset of these traits; the server
+//! dispatches requests to the appropriate trait via [`PluginDispatch`].
 //!
 //! ## Relationship to other crates
 //!
@@ -14,27 +13,28 @@
 //!   (protocol v3), framing helpers, and transport layer.
 //! - `ene-plugin-host` — host-side process supervision and capability
 //!   routing (consumes plugins, does not author them).
-//! - [`ene-tool-proto`](ene_plugin_proto) — the underlying tool IPC (v2) that
-//!   the plugin protocol extends.
 //!
 //! ## Quick start
 //!
 //! ```rust,no_run
 //! use async_trait::async_trait;
-//! use ene_plugin::{Plugin, PluginCapabilities, PluginError};
+//! use std::sync::Arc;
+//! use ene_plugin::{ToolPlugin, ToolPluginCapabilities, PluginDispatch, PluginError};
 //!
-//! struct MyPlugin;
+//! struct MyTool;
 //!
 //! #[async_trait]
-//! impl Plugin for MyPlugin {
-//!     fn capabilities(&self) -> PluginCapabilities {
-//!         PluginCapabilities::default()
+//! impl ToolPlugin for MyTool {
+//!     fn tool_capabilities(&self) -> ToolPluginCapabilities {
+//!         ToolPluginCapabilities { tool_count: 0 }
 //!     }
 //! }
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), PluginError> {
-//!     ene_plugin::run_plugin_server(Box::new(MyPlugin)).await
+//!     ene_plugin::run_plugin_server(
+//!         PluginDispatch::new(Some(Arc::new(MyTool)), None, None),
+//!     ).await
 //! }
 //! ```
 #![warn(missing_docs)]
@@ -43,7 +43,7 @@
     expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")
 )]
 
-/// Compatibility adapter for wrapping `ToolProvider` as a `Plugin`.
+/// Compatibility adapter for wrapping legacy [`ToolProvider`] as [`ToolPlugin`].
 pub mod compat;
 /// Composite registry that aggregates multiple `ToolProvider` instances.
 pub mod host_registry;
@@ -54,11 +54,13 @@ pub mod server;
 /// Server helper for running a tool provider over IPC.
 pub mod tool_server;
 
-pub use compat::ToolPluginAdapter;
+pub use compat::ToolProviderPlugin;
 pub use host_registry::HostRegistry;
-pub use plugin::{Plugin, PluginStream, PluginStreamChunk};
-pub use server::run_plugin_server;
-pub use tool_server::run_tool_server;
+pub use plugin::{
+    EmbedPlugin, EmbedPluginCapabilities, LlmPlugin, PluginStream, PluginStreamChunk, ToolPlugin,
+    ToolPluginCapabilities,
+};
+pub use server::{PluginDispatch, run_plugin_server};
 
 // Re-export key types from ene-plugin-proto so plugin authors only need
 // to depend on `ene-plugin` for the full authoring surface.
@@ -66,10 +68,10 @@ pub use tool_server::run_tool_server;
 pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};
 pub use ene_plugin_proto::{
     LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
-    PluginIpcRequest, PluginIpcResponse, SttProviderSpec, TtsProviderSpec,
+    PluginIpcRequest, PluginIpcResponse, SttProviderSpec, TtsProviderSpec, VersionRange,
 };
 /// Shared tool types (re-exported from `ene-plugin-proto`).
 pub use ene_plugin_proto::{ToolError, ToolSpec};
 
-// Re-export additional tool-proto types used by the Plugin trait and server.
+// Re-export additional tool-proto types used by the server.
 pub use ene_plugin_proto::{DeferredStatus, SandboxConfigData};

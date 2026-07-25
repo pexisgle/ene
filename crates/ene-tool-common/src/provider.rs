@@ -22,6 +22,7 @@
 
 use crate::ToolAction;
 use async_trait::async_trait;
+use ene_plugin::{ToolPlugin, ToolPluginCapabilities};
 use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolRagProfile, ToolSpec};
 
 type SetCallContextHook = Box<dyn Fn(&str, Option<&str>) + Send + Sync>;
@@ -287,6 +288,79 @@ impl ToolProvider for ActionSetProvider {
     }
 }
 
+#[async_trait]
+impl ToolPlugin for ActionSetProvider {
+    fn tool_capabilities(&self) -> ToolPluginCapabilities {
+        ToolPluginCapabilities {
+            tool_count: self.list_specs().len(),
+        }
+    }
+
+    fn list_tool_specs(&self) -> Vec<ToolSpec> {
+        self.list_specs()
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<String, ToolError> {
+        if let Some(ctx) = context {
+            ProviderHooks::call_set_call_context(&self.hooks, ctx);
+        }
+        ToolProvider::call_tool(self, name, arguments).await
+    }
+
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<ene_plugin_proto::DeferredOutcome, ToolError> {
+        if let Some(ctx) = context {
+            ProviderHooks::call_set_call_context(&self.hooks, ctx);
+        }
+        ToolProvider::call_tool_deferred(self, name, arguments).await
+    }
+
+    fn poll_deferred(&self, task_id: &str) -> Result<ene_plugin_proto::DeferredStatus, ToolError> {
+        Ok(ToolProvider::poll_deferred(self, task_id))
+    }
+
+    fn cancel_deferred(&self, task_id: &str) -> Result<(), ToolError> {
+        ToolProvider::cancel_deferred(self, task_id);
+        Ok(())
+    }
+
+    fn approve_permission(&self, request_id: &str) -> Result<(), ToolError> {
+        ProviderHooks::call_approve_permission(&self.hooks, request_id);
+        Ok(())
+    }
+
+    fn allow_pattern(&self, action: &str, target_pattern: &str) -> Result<(), ToolError> {
+        ProviderHooks::call_allow_pattern(&self.hooks, action, target_pattern);
+        Ok(())
+    }
+
+    fn revoke_pattern(&self, action: &str, target_pattern: &str) -> Result<(), ToolError> {
+        ProviderHooks::call_revoke_pattern(&self.hooks, action, target_pattern);
+        Ok(())
+    }
+
+    fn set_config(&self, config: &serde_json::Value) {
+        ProviderHooks::call_set_config(&self.hooks, config);
+    }
+
+    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        ProviderHooks::call_set_sandbox(&self.hooks, sandbox);
+    }
+
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        ProviderHooks::call_config_schema(&self.hooks)
+    }
+}
+
 /// Adapts a single [`ToolAction`] into a [`ToolProvider`].
 ///
 /// Thin wrapper over [`ActionSetProvider`] for tools that expose exactly
@@ -379,43 +453,104 @@ impl SingleActionProvider {
 #[async_trait]
 impl ToolProvider for SingleActionProvider {
     fn list_specs(&self) -> Vec<ToolSpec> {
-        self.inner.list_specs()
+        ToolProvider::list_specs(&self.inner)
     }
 
     fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
-        self.inner.list_rag_profiles()
+        ToolProvider::list_rag_profiles(&self.inner)
     }
 
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError> {
-        self.inner.call_tool(name, arguments).await
+        ToolProvider::call_tool(&self.inner, name, arguments).await
     }
 
     fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
-        self.inner.set_call_context(ctx);
+        ToolProvider::set_call_context(&self.inner, ctx);
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        self.inner.set_sandbox(sandbox);
+        ToolProvider::set_sandbox(&self.inner, sandbox);
     }
 
     fn approve_permission(&self, request_id: &str) {
-        self.inner.approve_permission(request_id);
+        ToolProvider::approve_permission(&self.inner, request_id);
     }
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        self.inner.allow_pattern(action, target_pattern);
+        ToolProvider::allow_pattern(&self.inner, action, target_pattern);
     }
 
     fn revoke_pattern(&self, action: &str, target_pattern: &str) {
-        self.inner.revoke_pattern(action, target_pattern);
+        ToolProvider::revoke_pattern(&self.inner, action, target_pattern);
     }
 
     fn set_config(&self, config: &serde_json::Value) {
-        self.inner.set_config(config);
+        ToolProvider::set_config(&self.inner, config);
     }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
-        self.inner.config_schema()
+        ToolProvider::config_schema(&self.inner)
+    }
+}
+
+#[async_trait]
+impl ToolPlugin for SingleActionProvider {
+    fn tool_capabilities(&self) -> ToolPluginCapabilities {
+        ToolPlugin::tool_capabilities(&self.inner)
+    }
+
+    fn list_tool_specs(&self) -> Vec<ToolSpec> {
+        ToolPlugin::list_tool_specs(&self.inner)
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<String, ToolError> {
+        ToolPlugin::call_tool(&self.inner, name, arguments, context).await
+    }
+
+    async fn call_tool_deferred(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<ene_plugin_proto::DeferredOutcome, ToolError> {
+        ToolPlugin::call_tool_deferred(&self.inner, name, arguments, context).await
+    }
+
+    fn poll_deferred(&self, task_id: &str) -> Result<ene_plugin_proto::DeferredStatus, ToolError> {
+        ToolPlugin::poll_deferred(&self.inner, task_id)
+    }
+
+    fn cancel_deferred(&self, task_id: &str) -> Result<(), ToolError> {
+        ToolPlugin::cancel_deferred(&self.inner, task_id)
+    }
+
+    fn approve_permission(&self, request_id: &str) -> Result<(), ToolError> {
+        ToolPlugin::approve_permission(&self.inner, request_id)
+    }
+
+    fn allow_pattern(&self, action: &str, target_pattern: &str) -> Result<(), ToolError> {
+        ToolPlugin::allow_pattern(&self.inner, action, target_pattern)
+    }
+
+    fn revoke_pattern(&self, action: &str, target_pattern: &str) -> Result<(), ToolError> {
+        ToolPlugin::revoke_pattern(&self.inner, action, target_pattern)
+    }
+
+    fn set_config(&self, config: &serde_json::Value) {
+        ToolPlugin::set_config(&self.inner, config);
+    }
+
+    fn set_sandbox(&self, sandbox: &SandboxConfigData) {
+        ToolPlugin::set_sandbox(&self.inner, sandbox);
+    }
+
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        ToolPlugin::config_schema(&self.inner)
     }
 }
 
@@ -426,7 +561,7 @@ impl ToolProvider for SingleActionProvider {
 )]
 mod tests {
     use super::*;
-    use ene_plugin_proto::{ToolName, ToolRagProfile, ToolSpec};
+    use ene_plugin_proto::{ToolName, ToolProvider, ToolRagProfile, ToolSpec};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -458,14 +593,18 @@ mod tests {
     #[tokio::test]
     async fn action_set_provider_dispatches_by_name() {
         let provider = ActionSetProvider::new(vec![Box::new(EchoAction)]);
-        let result = provider.call_tool("echo", "hi").await.unwrap();
+        let result = ToolProvider::call_tool(&provider, "echo", "hi")
+            .await
+            .unwrap();
         assert_eq!(result, "hi");
     }
 
     #[tokio::test]
     async fn action_set_provider_not_found_for_unknown_name() {
         let provider = ActionSetProvider::new(vec![Box::new(EchoAction)]);
-        let err = provider.call_tool("missing", "hi").await.unwrap_err();
+        let err = ToolProvider::call_tool(&provider, "missing", "hi")
+            .await
+            .unwrap_err();
         assert!(matches!(err, ToolError::NotFound { .. }));
     }
 
@@ -477,10 +616,13 @@ mod tests {
             .with_set_call_context_hook(move |_conv_id, _turn_id| {
                 seen2.store(true, Ordering::SeqCst);
             });
-        provider.set_call_context(&ene_plugin_proto::CallContext {
-            conversation_id: "abc".to_string(),
-            turn_id: String::new(),
-        });
+        ToolProvider::set_call_context(
+            &provider,
+            &ene_plugin_proto::CallContext {
+                conversation_id: "abc".to_string(),
+                turn_id: String::new(),
+            },
+        );
         assert!(seen.load(Ordering::SeqCst));
     }
 
@@ -490,7 +632,7 @@ mod tests {
             .with_config_schema_hook(|| {
                 Some(serde_json::json!({"type": "object", "properties": {"threshold": {"type": "number"}}}))
             });
-        let schema = provider.config_schema();
+        let schema = ToolProvider::config_schema(&provider);
         assert!(schema.is_some());
         let s = schema.unwrap();
         assert!(
@@ -505,21 +647,25 @@ mod tests {
     #[tokio::test]
     async fn single_action_provider_dispatches_by_name() {
         let provider = SingleActionProvider::new(Box::new(EchoAction));
-        let result = provider.call_tool("echo", "hi").await.unwrap();
+        let result = ToolProvider::call_tool(&provider, "echo", "hi")
+            .await
+            .unwrap();
         assert_eq!(result, "hi");
     }
 
     #[tokio::test]
     async fn single_action_provider_not_found_for_unknown_name() {
         let provider = SingleActionProvider::new(Box::new(EchoAction));
-        let err = provider.call_tool("missing", "hi").await.unwrap_err();
+        let err = ToolProvider::call_tool(&provider, "missing", "hi")
+            .await
+            .unwrap_err();
         assert!(matches!(err, ToolError::NotFound { .. }));
     }
 
     #[test]
     fn single_action_provider_lists_spec() {
         let provider = SingleActionProvider::new(Box::new(EchoAction));
-        let specs = provider.list_specs();
+        let specs = ToolProvider::list_specs(&provider);
         assert_eq!(specs.len(), 1);
         assert_eq!(specs.first().map(|spec| spec.name.as_str()), Some("echo"));
     }
@@ -531,10 +677,13 @@ mod tests {
         let provider = SingleActionProvider::new(Box::new(EchoAction)).with_set_call_context_hook(
             move |_conv_id, _turn_id| seen2.store(true, Ordering::SeqCst),
         );
-        provider.set_call_context(&ene_plugin_proto::CallContext {
-            conversation_id: "abc".to_string(),
-            turn_id: String::new(),
-        });
+        ToolProvider::set_call_context(
+            &provider,
+            &ene_plugin_proto::CallContext {
+                conversation_id: "abc".to_string(),
+                turn_id: String::new(),
+            },
+        );
         assert!(seen.load(Ordering::SeqCst));
     }
 
@@ -544,7 +693,7 @@ mod tests {
             SingleActionProvider::new(Box::new(EchoAction)).with_config_schema_hook(|| {
                 Some(serde_json::json!({"type": "object", "properties": {"x": {"type": "number"}}}))
             });
-        let schema = provider.config_schema();
+        let schema = ToolProvider::config_schema(&provider);
         assert!(schema.is_some());
         let s = schema.unwrap();
         assert!(s.get("properties").and_then(|p| p.get("x")).is_some());

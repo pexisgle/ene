@@ -18,7 +18,7 @@
 use crate::error::PluginHostError;
 use crate::tool_registry::ToolRegistry;
 use async_trait::async_trait;
-use ene_plugin_proto::{ToolName, ToolSpec};
+use ene_plugin_proto::{CallContext, ToolName, ToolSpec};
 use rmcp::serve_client;
 use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
 use std::sync::{Arc, RwLock};
@@ -176,7 +176,12 @@ impl ToolRegistry for McpToolRegistry {
         tools
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, PluginHostError> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        _context: Option<&CallContext>,
+    ) -> Result<String, PluginHostError> {
         let client_opt = {
             let servers = self
                 .servers
@@ -235,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn empty_registry_call_tool_not_found() {
         let registry = McpToolRegistry::new();
-        let result = registry.call_tool("nonexistent", "{}").await;
+        let result = registry.call_tool("nonexistent", "{}", None).await;
         assert!(result.is_err());
     }
 }

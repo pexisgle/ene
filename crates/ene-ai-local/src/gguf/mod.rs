@@ -2,10 +2,10 @@
 
 mod download;
 
-use crate::config::{AiConfig, LOCAL_PROVIDER};
-use crate::error::LlmProviderError;
-use crate::resolve::ResolvedLocalModel;
 use download::{download_gguf, file_has_gguf_magic};
+use ene_ai::config::{AiConfig, LOCAL_PROVIDER};
+use ene_ai::error::LlmProviderError;
+use ene_ai::resolve::ResolvedLocalModel;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use tokio::task::JoinSet;
@@ -218,7 +218,7 @@ fn collect_prefetch_targets(
     let mut keys = BTreeSet::new();
     let mut out = Vec::new();
 
-    let mut push_task = |task: &crate::config::TaskRef| {
+    let mut push_task = |task: &ene_ai::config::TaskRef| {
         if task.provider != LOCAL_PROVIDER {
             return;
         }
@@ -337,7 +337,7 @@ pub async fn resolve_decision_gguf_path(
         mmproj_url: String::new(),
         mmproj_path: String::new(),
         quantization: String::new(),
-        acceleration: crate::config::ProactiveAcceleration::Auto,
+        acceleration: ene_ai::config::ProactiveAcceleration::Auto,
         gpu_layers: "auto".to_string(),
         context_size: 2048,
     };

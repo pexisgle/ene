@@ -1,17 +1,16 @@
-//! Plugin trait and streaming chunk types.
+//! Plugin trait definitions and streaming chunk types.
 //!
-//! The [`Plugin`] trait is the authoring interface for plugin binaries. A
-//! plugin can expose tools, LLM providers (streaming and non-streaming),
-//! and embedding providers simultaneously — the [`PluginCapabilities`]
-//! advertised during the handshake tells the host which registries to
-//! populate.
+//! Three independent traits replace the old monolithic [`Plugin`] (now removed):
+//! [`ToolPlugin`], [`LlmPlugin`], and [`EmbedPlugin`]. A plugin struct can
+//! implement any subset; the server dispatches requests to the appropriate
+//! trait based on the `PluginDispatch` routing table.
 
 use std::pin::Pin;
 
 use async_trait::async_trait;
 use ene_plugin_proto::{
-    CallContext, DeferredOutcome, DeferredStatus, PluginCapabilities, PluginError,
-    SandboxConfigData, ToolError, ToolSpec,
+    CallContext, DeferredOutcome, DeferredStatus, LlmProviderSpec, PluginError, SandboxConfigData,
+    ToolError, ToolSpec,
 };
 use tokio_stream::Stream;
 
@@ -30,58 +29,44 @@ pub struct PluginStreamChunk {
 
 /// A boxed, sendable stream of [`PluginStreamChunk`] results.
 ///
-/// Returned by [`Plugin::create_chat_stream`]. The plugin server iterates
+/// Returned by [`LlmPlugin::create_chat_stream`]. The plugin server iterates
 /// this stream and writes one `StreamChunk` IPC response per item, followed
 /// by a terminal `StreamEnd` or `StreamError`.
 pub type PluginStream = Pin<Box<dyn Stream<Item = Result<PluginStreamChunk, PluginError>> + Send>>;
 
-/// The plugin authoring trait.
+/// Capabilities advertised by a tool plugin.
+pub struct ToolPluginCapabilities {
+    /// Number of tools this plugin provides.
+    pub tool_count: usize,
+}
+
+/// Capabilities advertised by an embedding plugin.
+#[derive(Default)]
+pub struct EmbedPluginCapabilities {
+    /// Provider kinds this plugin supports (e.g. `"openai_compatible"`).
+    pub provider_kinds: Vec<String>,
+}
+
+// ── ToolPlugin ──────────────────────────────────────────────────────────
+
+/// Plugin trait for tool execution.
 ///
-/// Implement this trait to create a plugin binary. Only [`capabilities`](Self::capabilities)
-/// is required; every other method has a sensible default (returning
-/// "not supported" or "not found") so a plugin can opt into exactly the
-/// capabilities it provides.
-///
-/// # Setter-call ordering contract
-///
-/// During the IPC handshake the server calls [`set_sandbox`](Self::set_sandbox)
-/// and [`set_config`](Self::set_config) **once**, synchronously, before the
-/// first provider or tool call on the same connection. Because each
-/// connection is spawned as a separate Tokio task, interior mutability
-/// (e.g. `RwLock`) is required for any state these setters write.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use async_trait::async_trait;
-/// use ene_plugin::{Plugin, PluginCapabilities, PluginError, PluginStream};
-///
-/// struct MyPlugin;
-///
-/// #[async_trait]
-/// impl Plugin for MyPlugin {
-///     fn capabilities(&self) -> PluginCapabilities {
-///         PluginCapabilities::default()
-///     }
-/// }
-///
-/// #[tokio::main]
-/// async fn main() -> Result<(), PluginError> {
-///     ene_plugin::run_plugin_server(Box::new(MyPlugin)).await
-/// }
-/// ```
+/// Implement this trait to expose tools, deferred execution, permission
+/// gating, and configuration. Every method has a sensible default so a
+/// plugin can opt into exactly the capabilities it needs.
 #[async_trait]
-pub trait Plugin: Send + Sync {
-    /// Returns the capabilities this plugin advertises during the handshake.
-    fn capabilities(&self) -> PluginCapabilities;
+pub trait ToolPlugin: Send + Sync {
+    /// Returns the tool capabilities advertised during the handshake.
+    fn tool_capabilities(&self) -> ToolPluginCapabilities;
 
-    // ── Tool support (optional) ──
-
-    /// Executes a tool by name with JSON-encoded arguments.
-    ///
-    /// The default returns [`ToolError::NotFound`] for plugins that do not
-    /// expose tools.
-    async fn call_tool(&self, name: &str, _args: &str) -> Result<String, ToolError> {
+    /// Executes a tool by name with JSON-encoded arguments and an optional
+    /// per-call context.
+    async fn call_tool(
+        &self,
+        name: &str,
+        _args: &str,
+        _context: Option<&CallContext>,
+    ) -> Result<String, ToolError> {
         Err(ToolError::NotFound {
             tool_name: name.to_string(),
         })
@@ -89,80 +74,73 @@ pub trait Plugin: Send + Sync {
 
     /// Executes a tool in deferred (background) mode.
     ///
-    /// A background-capable plugin should start the work asynchronously and
-    /// return [`DeferredOutcome::Deferred`] with a unique `task_id`; the
-    /// completion is delivered later out-of-band. Plugins that do not support
-    /// deferral keep the default implementation, which runs the call
-    /// synchronously via [`call_tool`](Self::call_tool) and returns
-    /// [`DeferredOutcome::Sync`].
+    /// The default implementation runs synchronously via [`call_tool`](Self::call_tool).
     async fn call_tool_deferred(
         &self,
         name: &str,
         arguments: &str,
+        context: Option<&CallContext>,
     ) -> Result<DeferredOutcome, ToolError> {
         Ok(DeferredOutcome::Sync(
-            self.call_tool(name, arguments).await?,
+            self.call_tool(name, arguments, context).await?,
         ))
     }
 
     /// Polls the status of a deferred (background) task by id.
-    ///
-    /// The default returns [`DeferredStatus::Unknown`] for plugins that do
-    /// not support deferral.
     fn poll_deferred(&self, _task_id: &str) -> Result<DeferredStatus, ToolError> {
         Ok(DeferredStatus::Unknown)
     }
 
     /// Cancels a deferred (background) task by id.
-    ///
-    /// The default is a no-op for plugins that do not support deferral.
     fn cancel_deferred(&self, _task_id: &str) -> Result<(), ToolError> {
         Ok(())
     }
 
-    /// Sets the call context (conversation + turn identifiers).
-    ///
-    /// Plugins that want session-scoped state (e.g. undo checkpoints)
-    /// should override this method. The default is a no-op.
-    fn set_call_context(&self, _ctx: &CallContext) -> Result<(), ToolError> {
-        Ok(())
+    /// Returns the tool specs this plugin exposes.
+    fn list_tool_specs(&self) -> Vec<ToolSpec> {
+        Vec::new()
     }
 
     /// Approves a pending destructive-operation permission request by ID.
-    ///
-    /// The default is a no-op for plugins that do not gate on permissions.
     fn approve_permission(&self, _request_id: &str) -> Result<(), ToolError> {
         Ok(())
     }
 
     /// Adds a session-wide permission allow pattern (action + target glob).
-    ///
-    /// The default is a no-op for plugins that do not gate on permissions.
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) -> Result<(), ToolError> {
         Ok(())
     }
 
     /// Revokes a previously granted session-wide permission allow pattern.
-    ///
-    /// The default is a no-op for plugins that do not gate on permissions.
     fn revoke_pattern(&self, _action: &str, _target_pattern: &str) -> Result<(), ToolError> {
         Ok(())
     }
 
-    /// Returns the tool specs this plugin exposes.
-    ///
-    /// The default delegates to [`capabilities`](Self::capabilities).
-    /// Override if constructing the full capabilities struct is expensive.
-    fn list_tool_specs(&self) -> Vec<ToolSpec> {
-        self.capabilities().tools
-    }
+    /// Receives plugin-specific configuration (called once during Handshake).
+    fn set_config(&self, _config: &serde_json::Value) {}
 
-    // ── LLM streaming (optional) ──
+    /// Receives sandbox configuration (called once during Handshake).
+    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
+
+    /// Returns the JSON Schema for the configuration this plugin accepts.
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+}
+
+// ── LlmPlugin ──────────────────────────────────────────────────────────
+
+/// Plugin trait for LLM chat completions (streaming and non-streaming).
+#[async_trait]
+pub trait LlmPlugin: Send + Sync {
+    /// Returns the LLM provider capabilities advertised during the handshake.
+    fn llm_capabilities(&self) -> Vec<LlmProviderSpec>;
 
     /// Creates a streaming chat completion.
     ///
-    /// The default returns [`PluginError::NotSupported`] for plugins that
-    /// do not provide LLM streaming.
+    /// Returns a stream of [`PluginStreamChunk`] items. The default returns
+    /// [`PluginError::NotSupported`] for plugins that do not provide LLM
+    /// streaming.
     async fn create_chat_stream(
         &self,
         _kind: &str,
@@ -174,8 +152,6 @@ pub trait Plugin: Send + Sync {
     ) -> Result<PluginStream, PluginError> {
         Err(PluginError::not_supported("create_chat_stream"))
     }
-
-    // ── LLM completion (optional) ──
 
     /// Performs a non-streaming chat completion.
     ///
@@ -192,35 +168,28 @@ pub trait Plugin: Send + Sync {
     ) -> Result<String, PluginError> {
         Err(PluginError::not_supported("chat_completion"))
     }
+}
 
-    // ── Embedding (optional) ──
+// ── EmbedPlugin ─────────────────────────────────────────────────────────
 
-    /// Computes embeddings for a batch of items.
+/// Plugin trait for batch embedding computation.
+#[async_trait]
+pub trait EmbedPlugin: Send + Sync {
+    /// Returns the embedding capabilities advertised during the handshake.
+    fn embed_capabilities(&self) -> EmbedPluginCapabilities;
+
+    /// Computes embeddings for a batch of text items.
     ///
-    /// Each item is a `(id, text)` pair. The default returns
-    /// [`PluginError::NotSupported`] for plugins that do not provide
-    /// embeddings.
+    /// The default returns [`PluginError::NotSupported`] for plugins that
+    /// do not provide embeddings.
     async fn embed_batch(
         &self,
         _kind: &str,
         _config: serde_json::Value,
         _model: String,
-        _dimensions: Option<usize>,
-        _items: Vec<(String, String)>,
+        _dimensions: Option<u32>,
+        _items: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, PluginError> {
         Err(PluginError::not_supported("embed_batch"))
-    }
-
-    // ── Configuration ──
-
-    /// Receives plugin-specific configuration (called once during Handshake).
-    fn set_config(&self, _config: &serde_json::Value) {}
-
-    /// Receives sandbox configuration (called once during Handshake).
-    fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
-
-    /// Returns the JSON Schema for the configuration this plugin accepts.
-    fn config_schema(&self) -> Option<serde_json::Value> {
-        None
     }
 }

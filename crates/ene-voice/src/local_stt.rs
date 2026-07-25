@@ -14,10 +14,10 @@
 )]
 
 #[cfg(feature = "local-stt")]
-use crate::audio::SttResult;
-use crate::audio::{AudioProviderError, AudioProviderRegistry, SttProvider, SttProviderFactory};
-#[cfg(feature = "local-stt")]
 use async_trait::async_trait;
+#[cfg(feature = "local-stt")]
+use ene_ai::SttResult;
+use ene_ai::{AudioProviderError, AudioProviderRegistry, SttProvider, SttProviderFactory};
 
 /// Provider name used in `ai.stt.provider` configuration.
 pub const PROVIDER_NAME: &str = "whisper";
@@ -36,7 +36,7 @@ const FIR_TAPS: usize = 16;
 /// when non-empty, then a default cache location. Environment overrides are
 /// handled by the config system (`ENE_AI__STT__MODEL_PATH`).
 #[cfg(feature = "local-stt")]
-fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
+fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
     if let Some(path) = ai
         .stt
         .model_path
@@ -49,12 +49,12 @@ fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
     if !ai.stt.model.trim().is_empty() {
         return std::path::PathBuf::from(ai.stt.model.trim());
     }
-    crate::gguf::gguf_cache_dir().join("whisper.gguf")
+    ene_config::models_dir().join("gguf").join("whisper.gguf")
 }
 
 /// Resolve the optional language hint from configuration.
 #[cfg(feature = "local-stt")]
-fn resolve_language(ai: &crate::config::AiConfig) -> Option<String> {
+fn resolve_language(ai: &ene_ai::AiConfig) -> Option<String> {
     (!ai.stt.language.trim().is_empty()).then(|| ai.stt.language.clone())
 }
 
@@ -271,7 +271,7 @@ pub struct LocalSttProviderFactory;
 impl LocalSttProviderFactory {
     fn build(config: &ene_config::EneConfig) -> Result<Box<dyn SttProvider>, AudioProviderError> {
         let ai = config
-            .get_section::<crate::config::AiConfig>()
+            .get_section::<ene_ai::AiConfig>()
             .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
         let path = resolve_model_path(&ai);
         let language = resolve_language(&ai);

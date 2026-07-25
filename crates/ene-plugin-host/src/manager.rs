@@ -137,7 +137,12 @@ impl ToolRegistry for PluginToolRegistry {
         self.tools.clone()
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, PluginHostError> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<String, PluginHostError> {
         {
             let mut breaker = self.breaker.lock();
             if breaker.is_open() {
@@ -150,7 +155,7 @@ impl ToolRegistry for PluginToolRegistry {
 
         let result = {
             let mut conn = self.conn.lock().await;
-            conn.call_tool(name, arguments).await
+            conn.call_tool(name, arguments, context.cloned()).await
         };
 
         if result.is_ok() {
@@ -195,10 +200,12 @@ impl ToolRegistry for PluginToolRegistry {
         &self,
         name: &str,
         arguments: &str,
+        context: Option<&ene_plugin_proto::CallContext>,
     ) -> Result<DeferredCallResult, PluginHostError> {
         let outcome = {
             let mut conn = self.conn.lock().await;
-            conn.call_tool_deferred(name, arguments).await?
+            conn.call_tool_deferred(name, arguments, context.cloned())
+                .await?
         };
         Ok(match outcome {
             ene_plugin_proto::DeferredOutcome::Sync(value) => DeferredCallResult::Sync(value),
@@ -300,7 +307,7 @@ impl ToolRegistry for PluginToolRegistry {
 /// and [`user_plugins_dir`](ene_config::user_plugins_dir), spawns each as a
 /// child process, performs the v3 handshake, and routes capabilities:
 ///
-/// - `capabilities.tools` → wrapped in a [`ToolRegistry`] adapter
+/// - `capabilities.tools` (count) → wrapped in a [`ToolRegistry`] adapter (specs fetched via `ListTools`)
 /// - `capabilities.llm_providers` → registered as [`IpcLlmProviderFactory`] entries
 ///
 /// Additionally connects to any MCP servers declared in `plugins.mcp_servers`
@@ -397,13 +404,22 @@ impl PluginHostManager {
                 Ok((plugin, conn)) => {
                     let caps = conn.lock().await.capabilities().clone();
 
-                    // Route tool capabilities.
-                    if !caps.tools.is_empty() {
+                    // Route tool capabilities — fetch actual specs via ListTools.
+                    if caps.tools > 0 {
+                        let tools = conn.lock().await.list_tools().await.unwrap_or_else(|e| {
+                            tracing::error!(
+                                component = "PluginHostManager",
+                                plugin = %name,
+                                error = %e,
+                                "Failed to list tools for plugin"
+                            );
+                            Vec::new()
+                        });
                         let registry = PluginToolRegistry {
                             plugin_name: name.clone(),
                             conn: Arc::clone(&conn),
                             supervised: Arc::clone(&plugin),
-                            tools: caps.tools.clone(),
+                            tools,
                             breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
                             health_tx: Some(health_tx.clone()),
                         };

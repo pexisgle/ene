@@ -3,7 +3,7 @@
 use super::backend::with_backend;
 use super::load::LoadedModel;
 use super::map_llama_err;
-use crate::error::LlmProviderError;
+use ene_ai::error::LlmProviderError;
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::AddBos;

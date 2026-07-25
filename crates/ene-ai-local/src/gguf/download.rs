@@ -1,6 +1,6 @@
 //! Streaming GGUF download with in-place terminal progress (TTY) or throttled logs.
 
-use crate::error::LlmProviderError;
+use ene_ai::error::LlmProviderError;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};

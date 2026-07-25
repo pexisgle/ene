@@ -14,8 +14,8 @@
 )]
 
 #[cfg(feature = "silero-vad")]
-use crate::audio::VadEvent;
-use crate::audio::{AudioProviderError, AudioProviderRegistry, VadEngine, VadFactory};
+use ene_ai::VadEvent;
+use ene_ai::{AudioProviderError, AudioProviderRegistry, VadEngine, VadFactory};
 
 /// Engine name used in `ai.vad.provider` configuration.
 pub const PROVIDER_NAME: &str = "silero";
@@ -43,7 +43,7 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 /// when non-empty, then a default cache location. Environment overrides are
 /// handled by the config system (`ENE_AI__VAD__MODEL_PATH`).
 #[cfg(feature = "silero-vad")]
-fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
+fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
     if let Some(path) = ai
         .vad
         .model_path
@@ -56,7 +56,9 @@ fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
     if !ai.vad.model.trim().is_empty() {
         return std::path::PathBuf::from(ai.vad.model.trim());
     }
-    crate::gguf::gguf_cache_dir().join("silero_vad.onnx")
+    ene_config::models_dir()
+        .join("gguf")
+        .join("silero_vad.onnx")
 }
 
 /// Local Silero VAD voice activity detection engine.
@@ -99,9 +101,11 @@ impl SileroVadEngine {
                 model_path.display()
             )));
         }
+        let model_bytes = std::fs::read(model_path)
+            .map_err(|e| AudioProviderError::Init(format!("failed to read ONNX model: {e}")))?;
         let session = ort::session::Session::builder()
             .map_err(|e| AudioProviderError::Init(format!("ONNX session builder failed: {e}")))?
-            .commit_from_file(model_path)
+            .commit_from_memory(&model_bytes)
             .map_err(|e| AudioProviderError::Init(format!("ONNX session load failed: {e}")))?;
         tracing::info!(
             component = "SileroVad",
@@ -252,7 +256,7 @@ pub struct SileroVadFactory;
 impl SileroVadFactory {
     fn build(config: &ene_config::EneConfig) -> Result<Box<dyn VadEngine>, AudioProviderError> {
         let ai = config
-            .get_section::<crate::config::AiConfig>()
+            .get_section::<ene_ai::AiConfig>()
             .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
         let resolved = ai.resolve_vad().ok_or_else(|| {
             AudioProviderError::Init(

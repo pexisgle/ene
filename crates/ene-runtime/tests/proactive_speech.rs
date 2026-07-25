@@ -67,6 +67,7 @@ impl ene_plugin_host::ToolRegistry for EmptyRegistry {
         &self,
         _name: &str,
         _arguments: &str,
+        _context: Option<&ene_plugin_proto::CallContext>,
     ) -> Result<String, ene_plugin_host::PluginHostError> {
         Err(ene_plugin_host::PluginHostError::ExecutionFailed {
             message: "not used".into(),

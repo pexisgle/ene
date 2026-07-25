@@ -131,7 +131,12 @@ impl ToolRegistry for BackgroundRegistry {
         }]
     }
 
-    async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, PluginHostError> {
+    async fn call_tool(
+        &self,
+        _name: &str,
+        _arguments: &str,
+        _context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<String, PluginHostError> {
         Err(PluginHostError::ExecutionFailed {
             message: "should use call_tool_deferred".into(),
         })
@@ -141,6 +146,7 @@ impl ToolRegistry for BackgroundRegistry {
         &self,
         name: &str,
         _arguments: &str,
+        _context: Option<&ene_plugin_proto::CallContext>,
     ) -> Result<DeferredCallResult, PluginHostError> {
         if name == "background.sleep" {
             self.deferred_calls.fetch_add(1, Ordering::SeqCst);

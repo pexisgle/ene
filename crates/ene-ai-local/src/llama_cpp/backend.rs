@@ -1,6 +1,6 @@
 //! Process-wide `LlamaBackend` initialization.
 
-use crate::error::LlmProviderError;
+use ene_ai::error::LlmProviderError;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::{LogOptions, send_logs_to_tracing};
 use parking_lot::Mutex;

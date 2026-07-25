@@ -4,7 +4,6 @@
 //! can route tool registrations, LLM provider factories, and future
 //! TTS/STT providers appropriately.
 
-use crate::tool_types::ToolSpec;
 use serde::{Deserialize, Serialize};
 
 /// Capabilities advertised by a plugin during the handshake.
@@ -17,9 +16,9 @@ use serde::{Deserialize, Serialize};
 /// - `tts_providers` / `stt_providers` → reserved for future use
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginCapabilities {
-    /// Tool specs exposed by this plugin (re-uses `ene-tool-proto::ToolSpec`).
+    /// Number of tools this plugin provides (call `ListTools` for specs).
     #[serde(default)]
-    pub tools: Vec<ToolSpec>,
+    pub tools: usize,
 
     /// LLM providers exposed by this plugin.
     #[serde(default)]
@@ -82,7 +81,7 @@ mod tests {
     #[test]
     fn capabilities_default_is_empty() {
         let caps = PluginCapabilities::default();
-        assert!(caps.tools.is_empty());
+        assert_eq!(caps.tools, 0);
         assert!(caps.llm_providers.is_empty());
         assert!(caps.tts_providers.is_empty());
         assert!(caps.stt_providers.is_empty());
@@ -91,7 +90,7 @@ mod tests {
     #[test]
     fn capabilities_serde_roundtrip() {
         let caps = PluginCapabilities {
-            tools: vec![],
+            tools: 0,
             llm_providers: vec![LlmProviderSpec {
                 kind: "anthropic".into(),
                 supported_models: vec!["claude-sonnet-4-20250514".into()],

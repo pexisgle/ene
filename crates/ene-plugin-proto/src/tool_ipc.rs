@@ -50,6 +50,13 @@ pub enum IpcRequest {
         /// [`IpcResponse::CallResult`].
         #[serde(default)]
         deferred: bool,
+        /// Per-call context (conversation + turn identifiers).
+        ///
+        /// Supersedes the deprecated `SetCallContext` message. When present,
+        /// the context applies to this single tool call only and does not
+        /// persist for subsequent calls.
+        #[serde(default)]
+        context: Option<CallContext>,
     },
     /// Set the call context (conversation + turn identifiers).
     ///
@@ -194,7 +201,7 @@ pub enum DeferredStatus {
 /// via [`crate::ToolProvider::set_call_context`] so tool-side logic
 /// can implement per-turn scoping (e.g. undo checkpoints, ephemeral
 /// scratch directories, per-turn access counters).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct CallContext {
     /// Conversation-level identifier (session ID).
     pub conversation_id: String,
@@ -395,6 +402,7 @@ mod tests {
             name: "read".into(),
             arguments: r#"{"path":"/tmp/test.txt"}"#.into(),
             deferred: false,
+            context: None,
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
@@ -406,6 +414,7 @@ mod tests {
             name: "timer.set".into(),
             arguments: r#"{"seconds":5}"#.into(),
             deferred: true,
+            context: None,
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
@@ -423,6 +432,7 @@ mod tests {
                 name: "read".into(),
                 arguments: "{}".into(),
                 deferred: false,
+                context: None,
             }
         );
     }

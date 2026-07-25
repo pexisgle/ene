@@ -311,7 +311,7 @@ pub fn toggle_mic_capture(
         .resolve_stt()
         .ok_or_else(|| "STT is disabled (set ai.stt.provider)".to_string())?;
     let vad_provider = if ai_cfg.vad.provider == "none" {
-        ene_ai::silero_vad::PROVIDER_NAME.to_string()
+        ene_voice::silero_vad::PROVIDER_NAME.to_string()
     } else {
         ai_cfg.vad.provider.clone()
     };

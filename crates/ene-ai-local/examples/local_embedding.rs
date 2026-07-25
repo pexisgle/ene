@@ -1,12 +1,12 @@
-//! Local embedding example using ene-ai (llama-cpp-2).
+//! Local embedding example using ene-ai-local (llama-cpp-2).
 //!
 //! Set `ENE_EMBEDDING_MODEL_URL` to an HTTPS `.gguf` URL, or pass one as the first CLI arg.
 //!
 //! Requires a multi-thread tokio runtime (`block_in_place`).
 
 use ene_ai::cosine_similarity;
-use ene_ai::create_local_provider;
 use ene_ai::{ProactiveAcceleration, ResolvedLocalModel};
+use ene_ai_local::{create_local_provider, ensure_gguf_available};
 
 const DEFAULT_URL: &str = "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf";
 
@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         context_size: 2048,
     };
 
-    ene_ai::ensure_gguf_available(&local).await?;
+    ensure_gguf_available(&local).await?;
     let provider = create_local_provider(&local)?;
     println!("Loading model: {}", local.name);
     println!("Model dimensions: {}", provider.dimensions());

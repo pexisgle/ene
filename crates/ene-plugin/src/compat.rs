@@ -1,31 +1,24 @@
-//! Compatibility adapter for wrapping `ToolProvider` implementations as plugins.
+//! Compatibility adapter for wrapping legacy [`ToolProvider`] implementations
+//! as [`ToolPlugin`](crate::ToolPlugin).
 //!
-//! [`ToolPluginAdapter`] bridges the legacy tool IPC surface (`ToolProvider`
-//! from `ene-tool-proto`) into the unified [`Plugin`](crate::Plugin) trait so
-//! existing tool binaries can be served via [`run_plugin_server`](crate::run_plugin_server)
-//! without rewriting their internal dispatch logic.
+//! [`ToolProviderPlugin`] bridges the deprecated `ToolProvider` surface
+//! (from `ene-plugin-proto`) into the new `ToolPlugin` trait so that existing
+//! tool binaries can be migrated incrementally.
 
 use async_trait::async_trait;
+use ene_plugin_proto::SandboxConfigData;
 use ene_plugin_proto::{
-    CallContext, DeferredOutcome, DeferredStatus, PluginCapabilities, ToolError, ToolSpec,
+    CallContext, DeferredOutcome, DeferredStatus, ToolError, ToolProvider, ToolSpec,
 };
-use ene_plugin_proto::{SandboxConfigData, ToolProvider};
 
-use crate::plugin::Plugin;
+use crate::plugin::{ToolPlugin, ToolPluginCapabilities};
 
-/// Wraps any [`ToolProvider`] into a [`Plugin`].
-///
-/// The adapter forwards `capabilities` (tool specs), `call_tool`, the
-/// interactive/deferred tool hooks (`set_call_context`, `approve_permission`,
-/// `allow_pattern`, `revoke_pattern`, `call_tool_deferred`, `poll_deferred`,
-/// `cancel_deferred`), `set_sandbox`, `set_config`, and `config_schema` to the
-/// inner provider. All LLM/embedding methods use the default "not supported"
-/// implementations.
+/// Wraps any [`ToolProvider`] into a [`ToolPlugin`].
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+/// use ene_plugin::{ToolProviderPlugin, PluginDispatch, run_plugin_server};
 /// # use ene_plugin_proto::ToolProvider;
 ///
 /// # struct MyProvider;
@@ -37,17 +30,20 @@ use crate::plugin::Plugin;
 /// #[tokio::main]
 /// async fn main() {
 ///     let provider = MyProvider;
-///     let _ = run_plugin_server(Box::new(ToolPluginAdapter(provider))).await;
+///     let _ = run_plugin_server(PluginDispatch::new(
+///         Some(std::sync::Arc::new(ToolProviderPlugin(provider))),
+///         None,
+///         None,
+///     )).await;
 /// }
 /// ```
-pub struct ToolPluginAdapter<T: ToolProvider>(pub T);
+pub struct ToolProviderPlugin<T: ToolProvider>(pub T);
 
 #[async_trait]
-impl<T: ToolProvider> Plugin for ToolPluginAdapter<T> {
-    fn capabilities(&self) -> PluginCapabilities {
-        PluginCapabilities {
-            tools: self.0.list_specs(),
-            ..Default::default()
+impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
+    fn tool_capabilities(&self) -> ToolPluginCapabilities {
+        ToolPluginCapabilities {
+            tool_count: self.0.list_specs().len(),
         }
     }
 
@@ -55,7 +51,15 @@ impl<T: ToolProvider> Plugin for ToolPluginAdapter<T> {
         self.0.list_specs()
     }
 
-    async fn call_tool(&self, name: &str, args: &str) -> Result<String, ToolError> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: &str,
+        context: Option<&CallContext>,
+    ) -> Result<String, ToolError> {
+        if let Some(ctx) = context {
+            self.0.set_call_context(ctx);
+        }
         self.0.call_tool(name, args).await
     }
 
@@ -63,7 +67,11 @@ impl<T: ToolProvider> Plugin for ToolPluginAdapter<T> {
         &self,
         name: &str,
         arguments: &str,
+        context: Option<&CallContext>,
     ) -> Result<DeferredOutcome, ToolError> {
+        if let Some(ctx) = context {
+            self.0.set_call_context(ctx);
+        }
         self.0.call_tool_deferred(name, arguments).await
     }
 
@@ -73,11 +81,6 @@ impl<T: ToolProvider> Plugin for ToolPluginAdapter<T> {
 
     fn cancel_deferred(&self, task_id: &str) -> Result<(), ToolError> {
         self.0.cancel_deferred(task_id);
-        Ok(())
-    }
-
-    fn set_call_context(&self, ctx: &CallContext) -> Result<(), ToolError> {
-        self.0.set_call_context(ctx);
         Ok(())
     }
 

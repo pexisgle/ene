@@ -40,12 +40,19 @@ mod schema;
 mod undo;
 mod utils;
 
-use ene_plugin::{ToolPluginAdapter, run_plugin_server};
+use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
     let provider = provider::FsToolProvider::new();
-    if let Err(e) = run_plugin_server(Box::new(ToolPluginAdapter(provider))).await {
+    if let Err(e) = run_plugin_server(PluginDispatch::new(
+        Some(Arc::new(ToolProviderPlugin(provider))),
+        None,
+        None,
+    ))
+    .await
+    {
         eprintln!("[ene-plugin-fs] Fatal error: {e}");
         std::process::exit(1);
     }

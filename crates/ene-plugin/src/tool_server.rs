@@ -173,27 +173,42 @@ async fn dispatch(provider: &dyn ToolProvider, req: &IpcRequest) -> IpcResponse 
             name,
             arguments,
             deferred: true,
-        } => match provider.call_tool_deferred(name, arguments).await {
-            Ok(DeferredOutcome::Sync(result)) => IpcResponse::CallResult { result: Ok(result) },
-            Ok(DeferredOutcome::Deferred { task_id }) => IpcResponse::DeferredAccepted { task_id },
-            Err(e) => IpcResponse::CallResult { result: Err(e) },
-        },
+            context,
+        } => {
+            if let Some(ctx) = context {
+                provider.set_call_context(ctx);
+            }
+            match provider.call_tool_deferred(name, arguments).await {
+                Ok(DeferredOutcome::Sync(result)) => IpcResponse::CallResult { result: Ok(result) },
+                Ok(DeferredOutcome::Deferred { task_id }) => {
+                    IpcResponse::DeferredAccepted { task_id }
+                }
+                Err(e) => IpcResponse::CallResult { result: Err(e) },
+            }
+        }
         IpcRequest::CallTool {
             name,
             arguments,
             deferred: false,
-        } => match provider.call_tool(name, arguments).await {
-            Ok(result) => IpcResponse::CallResult { result: Ok(result) },
-            Err(e) => IpcResponse::CallResult { result: Err(e) },
-        },
-        IpcRequest::SetCallContext {
-            conversation_id,
-            turn_id,
+            context,
         } => {
-            provider.set_call_context(&ene_plugin_proto::CallContext {
-                conversation_id: conversation_id.clone(),
-                turn_id: turn_id.clone(),
-            });
+            if let Some(ctx) = context {
+                provider.set_call_context(ctx);
+            }
+            match provider.call_tool(name, arguments).await {
+                Ok(result) => IpcResponse::CallResult { result: Ok(result) },
+                Err(e) => IpcResponse::CallResult { result: Err(e) },
+            }
+        }
+        IpcRequest::SetCallContext {
+            conversation_id: _,
+            turn_id: _,
+        } => {
+            tracing::warn!(
+                component = "ToolServer",
+                "SetCallContext is deprecated; per-call context is now passed directly \
+                 in CallTool requests"
+            );
             IpcResponse::Ack
         }
         IpcRequest::ApprovePermission { request_id } => {

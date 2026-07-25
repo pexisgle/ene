@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::PluginHostError;
-use ene_plugin_proto::{DeferredStatus, ToolRagProfile, ToolSpec};
+use ene_plugin_proto::{CallContext, DeferredStatus, ToolRagProfile, ToolSpec};
 
 /// Result of a deferred (background) tool call (#196).
 ///
@@ -50,8 +50,18 @@ pub trait ToolRegistry: Send + Sync {
             .collect()
     }
 
-    /// Executes a tool by name with the given JSON arguments from the LLM.
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, PluginHostError>;
+    /// Executes a tool by name with the given JSON arguments from the LLM
+    /// and an optional per-call context.
+    ///
+    /// When `context` is `Some`, it should be applied to this single call
+    /// and does not persist for subsequent calls. Registries that do not
+    /// support per-call context simply ignore it.
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&CallContext>,
+    ) -> Result<String, PluginHostError>;
 
     /// Executes a tool in deferred (background) mode (#196).
     ///
@@ -64,9 +74,10 @@ pub trait ToolRegistry: Send + Sync {
         &self,
         name: &str,
         arguments: &str,
+        context: Option<&CallContext>,
     ) -> Result<DeferredCallResult, PluginHostError> {
         Ok(DeferredCallResult::Sync(
-            self.call_tool(name, arguments).await?,
+            self.call_tool(name, arguments, context).await?,
         ))
     }
 
@@ -257,18 +268,24 @@ impl ToolRegistry for CompositeToolRegistry {
         profiles
     }
 
-    async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, PluginHostError> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &str,
+        context: Option<&CallContext>,
+    ) -> Result<String, PluginHostError> {
         let registry = self.registry_for(name)?;
-        registry.call_tool(name, arguments).await
+        registry.call_tool(name, arguments, context).await
     }
 
     async fn call_tool_deferred(
         &self,
         name: &str,
         arguments: &str,
+        context: Option<&CallContext>,
     ) -> Result<DeferredCallResult, PluginHostError> {
         let registry = self.registry_for(name)?;
-        registry.call_tool_deferred(name, arguments).await
+        registry.call_tool_deferred(name, arguments, context).await
     }
 
     async fn poll_deferred(&self, tool_name: &str, task_id: &str) -> DeferredStatus {
@@ -367,7 +384,12 @@ mod tests {
             self.tools.clone()
         }
 
-        async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, PluginHostError> {
+        async fn call_tool(
+            &self,
+            name: &str,
+            arguments: &str,
+            _context: Option<&ene_plugin_proto::CallContext>,
+        ) -> Result<String, PluginHostError> {
             self.call_log
                 .lock()
                 .unwrap()
@@ -459,7 +481,9 @@ mod tests {
         let mock = MockRegistry::new(vec![make_tool("find")]);
         let call_log = Arc::clone(&mock.call_log);
         let composite = CompositeToolRegistry::try_new(vec![Arc::new(mock)]).unwrap();
-        let result = composite.call_tool("find", r#"{"pattern":"*.rs"}"#).await;
+        let result = composite
+            .call_tool("find", r#"{"pattern":"*.rs"}"#, None)
+            .await;
         assert_eq!(result.unwrap(), "find executed");
         let log = call_log.lock().unwrap();
         assert_eq!(log.len(), 1);
@@ -472,7 +496,7 @@ mod tests {
     async fn composite_call_tool_not_found() {
         let mock = MockRegistry::new(vec![make_tool("exists")]);
         let composite = CompositeToolRegistry::try_new(vec![Arc::new(mock)]).unwrap();
-        let result = composite.call_tool("nonexistent", "").await;
+        let result = composite.call_tool("nonexistent", "", None).await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

@@ -3,8 +3,8 @@
 use super::backend::with_backend;
 use super::load::LoadedModel;
 use super::map_llama_err;
-use crate::error::LlmProviderError;
-use crate::message::{LlmMessage, UserMessagePart};
+use ene_ai::error::LlmProviderError;
+use ene_ai::message::{LlmMessage, UserMessagePart};
 use llama_cpp_2::json_schema_to_grammar;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};

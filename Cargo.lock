@@ -2424,14 +2424,10 @@ dependencies = [
  "async-openai",
  "async-trait",
  "base64",
- "blake3",
  "ctor",
- "encoding_rs",
  "ene-config",
  "ene-plugin-proto",
  "image",
- "llama-cpp-2",
- "ort",
  "parking_lot",
  "rand 0.10.2",
  "reqwest",
@@ -2443,7 +2439,32 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
- "whisper-rs",
+]
+
+[[package]]
+name = "ene-ai-local"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64",
+ "blake3",
+ "ctor",
+ "encoding_rs",
+ "ene-ai",
+ "ene-config",
+ "ene-plugin-proto",
+ "image",
+ "llama-cpp-2",
+ "parking_lot",
+ "rand 0.10.2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -2456,6 +2477,7 @@ dependencies = [
  "crossterm",
  "dialoguer",
  "ene-ai",
+ "ene-ai-local",
  "ene-config",
  "ene-mind",
  "ene-plugin-host",
@@ -2512,6 +2534,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "ene-ai",
+ "ene-ai-local",
  "ene-config",
  "ene-mind",
  "ene-plugin-host",
@@ -2519,6 +2542,7 @@ dependencies = [
  "ene-runtime",
  "ene-store",
  "ene-tool-rag",
+ "ene-voice",
  "ene-vrm",
  "fluent-bundle",
  "glam 0.33.2",
@@ -2766,6 +2790,7 @@ dependencies = [
  "cargo-husky",
  "chrono",
  "ene-ai",
+ "ene-ai-local",
  "ene-config",
  "ene-mind",
  "ene-plugin-host",
@@ -2817,6 +2842,7 @@ dependencies = [
  "async-trait",
  "ego-tree",
  "ene-config",
+ "ene-plugin",
  "ene-plugin-proto",
  "ene-tool-derive",
  "htmd",
@@ -2874,6 +2900,27 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ene-voice"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ctor",
+ "ene-ai",
+ "ene-config",
+ "ort",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "whisper-rs",
 ]
 
 [[package]]

@@ -11,9 +11,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ene_plugin::{
-    LlmProviderSpec, Plugin, PluginCapabilities, PluginError, PluginStream, PluginStreamChunk,
-};
+use ene_plugin::{LlmPlugin, LlmProviderSpec, PluginError, PluginStream, PluginStreamChunk};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -220,21 +218,18 @@ fn extract_tool_input(body: &Value) -> Result<String, PluginError> {
 }
 
 #[async_trait]
-impl Plugin for AnthropicPlugin {
-    fn capabilities(&self) -> PluginCapabilities {
-        PluginCapabilities {
-            llm_providers: vec![LlmProviderSpec {
-                kind: "anthropic".to_string(),
-                supported_models: vec![
-                    "claude-sonnet-4-20250514".to_string(),
-                    "claude-haiku-4-20250514".to_string(),
-                    "claude-3-5-sonnet-20241022".to_string(),
-                ],
-                supports_streaming: true,
-                supports_vision: true,
-            }],
-            ..Default::default()
-        }
+impl LlmPlugin for AnthropicPlugin {
+    fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+        vec![LlmProviderSpec {
+            kind: "anthropic".to_string(),
+            supported_models: vec![
+                "claude-sonnet-4-20250514".to_string(),
+                "claude-haiku-4-20250514".to_string(),
+                "claude-3-5-sonnet-20241022".to_string(),
+            ],
+            supports_streaming: true,
+            supports_vision: true,
+        }]
     }
 
     async fn create_chat_stream(
@@ -902,13 +897,12 @@ mod tests {
     #[test]
     fn capabilities_advertises_anthropic() {
         let plugin = AnthropicPlugin;
-        let caps = plugin.capabilities();
-        assert_eq!(caps.llm_providers.len(), 1);
-        let provider = &caps.llm_providers[0];
+        let caps = plugin.llm_capabilities();
+        assert_eq!(caps.len(), 1);
+        let provider = &caps[0];
         assert_eq!(provider.kind, "anthropic");
         assert!(provider.supports_streaming);
         assert!(provider.supports_vision);
         assert_eq!(provider.supported_models.len(), 3);
-        assert!(caps.tools.is_empty());
     }
 }

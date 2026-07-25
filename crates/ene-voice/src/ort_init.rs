@@ -8,7 +8,7 @@
 
 use std::sync::OnceLock;
 
-use crate::audio::AudioProviderError;
+use ene_ai::AudioProviderError;
 
 /// Result of the one-time ORT initialization, cached process-wide.
 static ORT_INIT: OnceLock<Result<(), String>> = OnceLock::new();

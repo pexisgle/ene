@@ -238,7 +238,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                         let _ = tx.send(Err(LlmProviderError::Provider(message))).await;
                         break;
                     }
-                    Ok(Some(PluginIpcResponse::Error { message })) => {
+                    Ok(Some(PluginIpcResponse::Error { message, .. })) => {
                         let _ = tx.send(Err(LlmProviderError::Provider(message))).await;
                         break;
                     }

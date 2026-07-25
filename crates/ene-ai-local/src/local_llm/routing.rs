@@ -1,14 +1,14 @@
 //! Decision provider routing for proactive speech (#165 / #171).
 
 use super::{LocalGgufLoadParams, LocalLlamaCppProvider};
-use crate::config::{AiConfig, AiProviderDef};
-use crate::error::LlmProviderError;
 use crate::gguf::{ensure_gguf_available, ensure_mmproj_available};
-use crate::message::{LlmMessage, LlmResponseChunk};
-use crate::openai::OpenAiProvider;
-use crate::resolve::ResolvedChat;
-use crate::traits::LlmProvider;
 use async_trait::async_trait;
+use ene_ai::config::{AiConfig, AiProviderDef};
+use ene_ai::error::LlmProviderError;
+use ene_ai::message::{LlmMessage, LlmResponseChunk};
+use ene_ai::openai::OpenAiProvider;
+use ene_ai::resolve::ResolvedChat;
+use ene_ai::traits::LlmProvider;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -224,7 +224,7 @@ fn cloud_decision_from_resolved(chat: &ResolvedChat) -> OpenAiProvider {
 #[cfg(test)]
 mod smoke {
     use super::*;
-    use crate::config::{AiConfig, LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, TaskRef};
+    use ene_ai::config::{AiConfig, LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, TaskRef};
 
     fn env_smoke_enabled() -> Option<(String, ProactiveAcceleration)> {
         let model = std::env::var("ENE_LOCAL_LLM_MODEL").ok()?;
@@ -278,7 +278,7 @@ mod smoke {
                         .into(),
             },
             LlmMessage::User {
-                parts: vec![crate::message::UserMessagePart::Text {
+                parts: vec![ene_ai::message::UserMessagePart::Text {
                     text: "seconds_since_user_input: 400\nactivity: idle".into(),
                 }],
             },

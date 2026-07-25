@@ -639,9 +639,12 @@ impl EneHandle {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
             let needs_decision = mind.proactive.enabled;
             if (needs_embedder || needs_decision)
-                && let Err(e) =
-                    ene_ai::prefetch_configured_gguf(&ai_config, needs_embedder, needs_decision)
-                        .await
+                && let Err(e) = ene_ai_local::prefetch_configured_gguf(
+                    &ai_config,
+                    needs_embedder,
+                    needs_decision,
+                )
+                .await
             {
                 tracing::warn!(
                     component = "GgufPrefetch",
@@ -1317,7 +1320,7 @@ struct EneActor {
     /// Join handle for the in-flight decision task (aborted on user turn / shutdown).
     proactive_decision_handle: Option<tokio::task::JoinHandle<()>>,
     /// Local / cloud decision provider handles (lazy).
-    proactive_llm: Option<ene_ai::ProactiveLlmHandles>,
+    proactive_llm: Option<ene_ai_local::ProactiveLlmHandles>,
     /// Origin of the active stream turn (for cancel Terminal).
     active_origin: crate::types::TurnOrigin,
     /// Provider health monitor for failover routing (#175).
@@ -1874,7 +1877,7 @@ impl EneActor {
             .config
             .get_section::<ene_ai::AiConfig>()
             .map_err(|e| format!("AI config unavailable: {e}"))?;
-        match ene_ai::build_proactive_llm_handles(&ai_cfg).await {
+        match ene_ai_local::build_proactive_llm_handles(&ai_cfg).await {
             Ok(handles) => {
                 tracing::info!(
                     component = "Proactive",
@@ -2538,13 +2541,10 @@ impl EneActor {
                 let tool_rag = self.tool_rag.clone();
                 let session_id = self.session.memory.session_id.to_string();
                 self.call_tool_tasks.spawn(async move {
-                    if let Some(ref turn) = turn {
-                        let call_ctx = ene_plugin_proto::CallContext {
-                            conversation_id: session_id,
-                            turn_id: turn.to_string(),
-                        };
-                        registry.set_call_context(&call_ctx).await;
-                    }
+                    let context = turn.as_ref().map(|turn| ene_plugin_proto::CallContext {
+                        conversation_id: session_id,
+                        turn_id: turn.to_string(),
+                    });
                     let result = if name == "system.search_tools" {
                         let query = serde_json::from_str::<serde_json::Value>(&arguments)
                             .ok()
@@ -2559,7 +2559,7 @@ impl EneActor {
                         .map_err(EneRuntimeError::from)
                     } else {
                         registry
-                            .call_tool(&name, &arguments)
+                            .call_tool(&name, &arguments, context.as_ref())
                             .await
                             .map_err(EneRuntimeError::from)
                     };
@@ -2802,7 +2802,7 @@ impl EneActor {
             return UndoReport::NothingToUndo;
         };
 
-        match self.registry.call_tool("utility.undo", "{}").await {
+        match self.registry.call_tool("utility.undo", "{}", None).await {
             Ok(output) => UndoReport::Reverted {
                 metadata: entry.metadata,
                 output,
@@ -3267,7 +3267,7 @@ fn init_embedding(
         .map_err(|e| ene_ai::EmbeddingError::Init(e.to_string()))?
     {
         ResolvedEmbedding::Local(local) => {
-            let provider = ene_ai::create_local_provider(&local)?;
+            let provider = ene_ai_local::create_local_provider(&local)?;
             Ok(Arc::from(provider))
         }
         ResolvedEmbedding::Cloud {

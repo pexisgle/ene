@@ -14,10 +14,10 @@
 )]
 
 #[cfg(feature = "local-tts")]
-use crate::audio::TtsChunk;
-use crate::audio::{AudioProviderError, AudioProviderRegistry, TtsProvider, TtsProviderFactory};
-#[cfg(feature = "local-tts")]
 use async_trait::async_trait;
+#[cfg(feature = "local-tts")]
+use ene_ai::TtsChunk;
+use ene_ai::{AudioProviderError, AudioProviderRegistry, TtsProvider, TtsProviderFactory};
 #[cfg(feature = "local-tts")]
 use std::pin::Pin;
 #[cfg(feature = "local-tts")]
@@ -106,7 +106,7 @@ const KOKORO_VOICES: &[(&str, usize)] = &[
 /// when non-empty, then a default cache location. Environment overrides are
 /// handled by the config system (`ENE_AI__TTS__MODEL_PATH`).
 #[cfg(feature = "local-tts")]
-fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
+fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
     if let Some(path) = ai
         .tts
         .model_path
@@ -119,7 +119,7 @@ fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
     if !ai.tts.model.trim().is_empty() {
         return std::path::PathBuf::from(ai.tts.model.trim());
     }
-    crate::gguf::gguf_cache_dir().join("kokoro.onnx")
+    ene_config::models_dir().join("gguf").join("kokoro.onnx")
 }
 
 /// Resolve the Kokoro `voices.bin` path from configuration.
@@ -128,7 +128,7 @@ fn resolve_model_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
 /// location. Environment overrides are handled by the config system
 /// (`ENE_AI__TTS__VOICES_PATH`).
 #[cfg(feature = "local-tts")]
-fn resolve_voices_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
+fn resolve_voices_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
     if let Some(path) = ai
         .tts
         .voices_path
@@ -138,7 +138,7 @@ fn resolve_voices_path(ai: &crate::config::AiConfig) -> std::path::PathBuf {
     {
         return std::path::PathBuf::from(path);
     }
-    crate::gguf::gguf_cache_dir().join("voices.bin")
+    ene_config::models_dir().join("gguf").join("voices.bin")
 }
 
 /// Local Kokoro ONNX text-to-speech provider.
@@ -180,9 +180,11 @@ impl LocalTtsProvider {
                 model_path.display()
             )));
         }
+        let model_bytes = std::fs::read(model_path)
+            .map_err(|e| AudioProviderError::Init(format!("failed to read ONNX model: {e}")))?;
         let session = ort::session::Session::builder()
             .map_err(|e| AudioProviderError::Init(format!("ONNX session builder failed: {e}")))?
-            .commit_from_file(model_path)
+            .commit_from_memory(&model_bytes)
             .map_err(|e| AudioProviderError::Init(format!("ONNX session load failed: {e}")))?;
 
         let voice = load_voice_embedding(voices_path, voice_name)?;
@@ -391,7 +393,7 @@ pub struct LocalTtsProviderFactory;
 impl LocalTtsProviderFactory {
     fn build(config: &ene_config::EneConfig) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
         let ai = config
-            .get_section::<crate::config::AiConfig>()
+            .get_section::<ene_ai::AiConfig>()
             .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
         let resolved = ai.resolve_tts().ok_or_else(|| {
             AudioProviderError::Init(

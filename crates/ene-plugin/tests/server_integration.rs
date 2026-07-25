@@ -18,11 +18,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use async_trait::async_trait;
-use ene_plugin::{Plugin, PluginCapabilities};
+use ene_plugin::{PluginDispatch, ToolPlugin, ToolPluginCapabilities};
+use ene_plugin_proto::PluginCapabilities;
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, IpcListener, IpcStream,
     PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
-    ToolName, ToolSpec, cleanup_path, read_plugin_request, read_plugin_response,
+    ToolName, ToolSpec, VersionRange, cleanup_path, read_plugin_request, read_plugin_response,
     write_plugin_request, write_plugin_response,
 };
 use tokio::sync::Mutex;
@@ -56,21 +57,29 @@ struct TestPlugin {
 }
 
 #[async_trait]
-impl Plugin for TestPlugin {
-    fn capabilities(&self) -> PluginCapabilities {
-        PluginCapabilities {
-            tools: vec![ToolSpec::new(
-                ToolName::new("test.echo"),
-                "Echoes input.",
-                serde_json::json!({}),
-            )],
-            llm_providers: vec![],
-            tts_providers: vec![],
-            stt_providers: vec![],
-        }
+impl ToolPlugin for TestPlugin {
+    fn tool_capabilities(&self) -> ToolPluginCapabilities {
+        ToolPluginCapabilities { tool_count: 1 }
     }
 
-    async fn call_tool(&self, name: &str, args: &str) -> Result<String, ToolError> {
+    fn list_tool_specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec::new(
+            ToolName::new("test.echo"),
+            "Echoes input.",
+            serde_json::json!({}),
+        )]
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: &str,
+        context: Option<&CallContext>,
+    ) -> Result<String, ToolError> {
+        if let Some(ctx) = context {
+            let mut guard = self.state.call_context.lock().await;
+            *guard = Some(ctx.clone());
+        }
         match name {
             "test.echo" => Ok(args.to_string()),
             "test.permission" => Err(ToolError::PermissionRequired {
@@ -89,6 +98,7 @@ impl Plugin for TestPlugin {
         &self,
         name: &str,
         arguments: &str,
+        context: Option<&CallContext>,
     ) -> Result<DeferredOutcome, ToolError> {
         if name == "test.background" {
             Ok(DeferredOutcome::Deferred {
@@ -96,7 +106,7 @@ impl Plugin for TestPlugin {
             })
         } else {
             Ok(DeferredOutcome::Sync(
-                self.call_tool(name, arguments).await?,
+                self.call_tool(name, arguments, context).await?,
             ))
         }
     }
@@ -114,12 +124,6 @@ impl Plugin for TestPlugin {
     fn cancel_deferred(&self, task_id: &str) -> Result<(), ToolError> {
         let mut cancelled = self.state.cancelled.try_lock().unwrap();
         cancelled.push(task_id.to_string());
-        Ok(())
-    }
-
-    fn set_call_context(&self, ctx: &CallContext) -> Result<(), ToolError> {
-        let mut guard = self.state.call_context.try_lock().unwrap();
-        *guard = Some(ctx.clone());
         Ok(())
     }
 
@@ -154,120 +158,248 @@ impl Plugin for TestPlugin {
     }
 }
 
-/// Dispatches a request to the plugin, mirroring `ene_plugin::server::dispatch`.
-async fn dispatch(plugin: &dyn Plugin, req: &PluginIpcRequest) -> PluginIpcResponse {
+/// Dispatches a request to the plugin, mirroring `ene_plugin::server::dispatch_request`.
+async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> PluginIpcResponse {
     match req {
         PluginIpcRequest::Handshake {
-            version,
+            version: host_range,
             sandbox,
             plugin_config,
         } => {
-            if *version != PLUGIN_IPC_PROTOCOL_VERSION {
+            let our_range = VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            };
+            if host_range.max < our_range.min || host_range.min > our_range.max {
                 return PluginIpcResponse::Error {
-                    message: format!("version mismatch: got {version}"),
+                    request_id: String::new(),
+                    message: format!(
+                        "version mismatch: host supports {}-{}, plugin supports {}-{}",
+                        host_range.min, host_range.max, our_range.min, our_range.max
+                    ),
                 };
             }
-            plugin.set_sandbox(sandbox);
-            if let Some(config) = plugin_config {
-                plugin.set_config(config);
+            let negotiated = host_range.min.max(our_range.min);
+            if let Some(tool) = &dispatch.tool {
+                tool.set_sandbox(sandbox);
+                if let Some(config) = plugin_config {
+                    tool.set_config(config);
+                }
             }
             PluginIpcResponse::HandshakeAck {
-                version: PLUGIN_IPC_PROTOCOL_VERSION,
-                capabilities: plugin.capabilities(),
-            }
-        }
-        PluginIpcRequest::Ping => PluginIpcResponse::Pong,
-        PluginIpcRequest::GetConfigSchema => PluginIpcResponse::ConfigSchema {
-            schema: plugin.config_schema(),
-        },
-        PluginIpcRequest::ListTools => PluginIpcResponse::Tools {
-            tools: plugin.list_tool_specs(),
-        },
-        PluginIpcRequest::CallTool {
-            name,
-            arguments,
-            deferred,
-        } => {
-            if *deferred {
-                match plugin.call_tool_deferred(name, arguments).await {
-                    Ok(DeferredOutcome::Sync(result)) => {
-                        PluginIpcResponse::CallResult { result: Ok(result) }
-                    }
-                    Ok(DeferredOutcome::Deferred { task_id }) => {
-                        PluginIpcResponse::DeferredAccepted { task_id }
-                    }
-                    Err(e) => PluginIpcResponse::CallResult { result: Err(e) },
-                }
-            } else {
-                let result = plugin.call_tool(name, arguments).await;
-                PluginIpcResponse::CallResult { result }
-            }
-        }
-        PluginIpcRequest::SetCallContext {
-            conversation_id,
-            turn_id,
-        } => {
-            let ctx = CallContext {
-                conversation_id: conversation_id.clone(),
-                turn_id: turn_id.clone(),
-            };
-            match plugin.set_call_context(&ctx) {
-                Ok(()) => PluginIpcResponse::Ack,
-                Err(e) => PluginIpcResponse::Error {
-                    message: e.to_string(),
+                version: negotiated,
+                capabilities: ene_plugin::PluginCapabilities {
+                    tools: dispatch
+                        .tool
+                        .as_ref()
+                        .map_or(0, |t| t.tool_capabilities().tool_count),
+                    ..Default::default()
                 },
             }
         }
-        PluginIpcRequest::ApprovePermission { request_id } => {
-            match plugin.approve_permission(request_id) {
-                Ok(()) => PluginIpcResponse::Ack,
+        PluginIpcRequest::Ping => PluginIpcResponse::Pong,
+        PluginIpcRequest::GetConfigSchema { request_id } => {
+            let tool = match &dispatch.tool {
+                Some(t) => t,
+                None => {
+                    return PluginIpcResponse::ConfigSchema {
+                        request_id: request_id.clone(),
+                        schema: None,
+                    };
+                }
+            };
+            PluginIpcResponse::ConfigSchema {
+                request_id: request_id.clone(),
+                schema: tool.config_schema(),
+            }
+        }
+        PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
+            request_id: request_id.clone(),
+            tools: dispatch
+                .tool
+                .as_ref()
+                .map_or(Vec::new(), |t| t.list_tool_specs()),
+        },
+        PluginIpcRequest::CallTool {
+            request_id,
+            name,
+            arguments,
+            deferred,
+            context,
+        } => {
+            let tool = match &dispatch.tool {
+                Some(t) => t,
+                None => {
+                    return PluginIpcResponse::Error {
+                        request_id: request_id.clone(),
+                        message: "no tool plugin".to_string(),
+                    };
+                }
+            };
+            let ctx_ref = context.as_ref();
+            if *deferred {
+                match tool.call_tool_deferred(name, arguments, ctx_ref).await {
+                    Ok(DeferredOutcome::Sync(result)) => PluginIpcResponse::CallResult {
+                        request_id: request_id.clone(),
+                        result: Ok(result),
+                    },
+                    Ok(DeferredOutcome::Deferred { task_id }) => {
+                        PluginIpcResponse::DeferredAccepted {
+                            request_id: request_id.clone(),
+                            task_id,
+                        }
+                    }
+                    Err(e) => PluginIpcResponse::CallResult {
+                        request_id: request_id.clone(),
+                        result: Err(e),
+                    },
+                }
+            } else {
+                let result = tool.call_tool(name, arguments, ctx_ref).await;
+                PluginIpcResponse::CallResult {
+                    request_id: request_id.clone(),
+                    result,
+                }
+            }
+        }
+        PluginIpcRequest::SetCallContext {
+            request_id,
+            conversation_id: _,
+            turn_id: _,
+        } => PluginIpcResponse::Ack {
+            request_id: request_id.clone(),
+        },
+        PluginIpcRequest::ApprovePermission {
+            request_id,
+            permission_request_id,
+        } => {
+            let tool = match &dispatch.tool {
+                Some(t) => t,
+                None => {
+                    return PluginIpcResponse::Error {
+                        request_id: request_id.clone(),
+                        message: "no tool plugin".to_string(),
+                    };
+                }
+            };
+            match tool.approve_permission(permission_request_id) {
+                Ok(()) => PluginIpcResponse::Ack {
+                    request_id: request_id.clone(),
+                },
                 Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
                     message: e.to_string(),
                 },
             }
         }
         PluginIpcRequest::AllowPattern {
+            request_id,
             action,
             target_pattern,
-        } => match plugin.allow_pattern(action, target_pattern) {
-            Ok(()) => PluginIpcResponse::Ack,
-            Err(e) => PluginIpcResponse::Error {
-                message: e.to_string(),
-            },
-        },
+        } => {
+            let tool = match &dispatch.tool {
+                Some(t) => t,
+                None => {
+                    return PluginIpcResponse::Error {
+                        request_id: request_id.clone(),
+                        message: "no tool plugin".to_string(),
+                    };
+                }
+            };
+            match tool.allow_pattern(action, target_pattern) {
+                Ok(()) => PluginIpcResponse::Ack {
+                    request_id: request_id.clone(),
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
         PluginIpcRequest::RevokePattern {
+            request_id,
             action,
             target_pattern,
-        } => match plugin.revoke_pattern(action, target_pattern) {
-            Ok(()) => PluginIpcResponse::Ack,
-            Err(e) => PluginIpcResponse::Error {
-                message: e.to_string(),
-            },
+        } => {
+            let tool = match &dispatch.tool {
+                Some(t) => t,
+                None => {
+                    return PluginIpcResponse::Error {
+                        request_id: request_id.clone(),
+                        message: "no tool plugin".to_string(),
+                    };
+                }
+            };
+            match tool.revoke_pattern(action, target_pattern) {
+                Ok(()) => PluginIpcResponse::Ack {
+                    request_id: request_id.clone(),
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::PollDeferred {
+            request_id,
+            task_id,
+        } => {
+            let tool = match &dispatch.tool {
+                Some(t) => t,
+                None => {
+                    return PluginIpcResponse::Error {
+                        request_id: request_id.clone(),
+                        message: "no tool plugin".to_string(),
+                    };
+                }
+            };
+            match tool.poll_deferred(task_id) {
+                Ok(status) => PluginIpcResponse::DeferredStatus {
+                    request_id: request_id.clone(),
+                    task_id: task_id.clone(),
+                    status,
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::CancelDeferred {
+            request_id,
+            task_id,
+        } => {
+            let tool = match &dispatch.tool {
+                Some(t) => t,
+                None => {
+                    return PluginIpcResponse::Error {
+                        request_id: request_id.clone(),
+                        message: "no tool plugin".to_string(),
+                    };
+                }
+            };
+            match tool.cancel_deferred(task_id) {
+                Ok(()) => PluginIpcResponse::Ack {
+                    request_id: request_id.clone(),
+                },
+                Err(e) => PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: e.to_string(),
+                },
+            }
+        }
+        PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
+            request_id: String::new(),
         },
-        PluginIpcRequest::PollDeferred { task_id } => match plugin.poll_deferred(task_id) {
-            Ok(status) => PluginIpcResponse::DeferredStatus {
-                task_id: task_id.clone(),
-                status,
-            },
-            Err(e) => PluginIpcResponse::Error {
-                message: e.to_string(),
-            },
-        },
-        PluginIpcRequest::CancelDeferred { task_id } => match plugin.cancel_deferred(task_id) {
-            Ok(()) => PluginIpcResponse::Ack,
-            Err(e) => PluginIpcResponse::Error {
-                message: e.to_string(),
-            },
-        },
-        PluginIpcRequest::Shutdown => PluginIpcResponse::Ack,
         _ => PluginIpcResponse::Error {
+            request_id: String::new(),
             message: "unsupported request in test dispatch".to_string(),
         },
     }
 }
 
 /// Runs a minimal plugin server loop on the given socket path.
-async fn run_test_server(socket_path: PathBuf, plugin: Arc<dyn Plugin>) {
+async fn run_test_server(socket_path: PathBuf, dispatch: Arc<PluginDispatch>) {
     cleanup_path(&socket_path);
     let mut listener = IpcListener::bind(&socket_path).expect("failed to bind test server");
 
@@ -275,13 +407,13 @@ async fn run_test_server(socket_path: PathBuf, plugin: Arc<dyn Plugin>) {
         let Ok(mut stream) = listener.accept().await else {
             break;
         };
-        let plugin = Arc::clone(&plugin);
+        let dispatch_clone = Arc::clone(&dispatch);
 
         loop {
             let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
                 break;
             };
-            let resp = dispatch(plugin.as_ref(), &req).await;
+            let resp = dispatch_fn(dispatch_clone.as_ref(), &req).await;
             if write_plugin_response(&mut stream, &resp).await.is_err() {
                 break;
             }
@@ -294,13 +426,17 @@ async fn spawn_and_connect(name: &str) -> (IpcStream, Arc<TestPluginState>, Path
     let socket_path = test_socket_path(name);
     let state = Arc::new(TestPluginState::default());
 
-    let plugin: Arc<dyn Plugin> = Arc::new(TestPlugin {
-        state: Arc::clone(&state),
-    });
+    let dispatch = PluginDispatch::new(
+        Some(Arc::new(TestPlugin {
+            state: Arc::clone(&state),
+        })),
+        None,
+        None,
+    );
 
     let server_path = socket_path.clone();
     tokio::spawn(async move {
-        run_test_server(server_path, plugin).await;
+        run_test_server(server_path, Arc::new(dispatch)).await;
     });
 
     // Wait for the server to bind.
@@ -318,7 +454,10 @@ async fn do_handshake(stream: &mut IpcStream) -> PluginCapabilities {
     write_plugin_request(
         stream,
         &PluginIpcRequest::Handshake {
-            version: PLUGIN_IPC_PROTOCOL_VERSION,
+            version: VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            },
             sandbox: SandboxConfigData::default(),
             plugin_config: Some(serde_json::json!({"test_key": "test_value"})),
         },
@@ -361,8 +500,7 @@ async fn server_handshake_advertises_capabilities() {
     let (mut stream, state, socket_path) = spawn_and_connect("hs").await;
 
     let caps = do_handshake(&mut stream).await;
-    assert_eq!(caps.tools.len(), 1);
-    assert_eq!(caps.tools[0].name.as_str(), "test.echo");
+    assert_eq!(caps.tools, 1);
 
     // Verify sandbox and config were received during handshake.
     assert!(state.sandbox_received.load(Ordering::SeqCst));
@@ -379,15 +517,18 @@ async fn server_call_tool_echo() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::CallTool {
+            request_id: "req-1".to_string(),
             name: "test.echo".to_string(),
             arguments: r#"{"data":"value"}"#.to_string(),
             deferred: false,
+            context: None,
         },
     )
     .await;
 
     match resp {
-        PluginIpcResponse::CallResult { result } => {
+        PluginIpcResponse::CallResult { request_id, result } => {
+            assert_eq!(request_id, "req-1");
             assert_eq!(result.unwrap(), r#"{"data":"value"}"#);
         }
         other => panic!("expected CallResult, got: {other:?}"),
@@ -404,15 +545,17 @@ async fn server_call_tool_structured_error() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::CallTool {
+            request_id: "req-1".to_string(),
             name: "test.permission".to_string(),
             arguments: "{}".to_string(),
             deferred: false,
+            context: None,
         },
     )
     .await;
 
     match resp {
-        PluginIpcResponse::CallResult { result } => {
+        PluginIpcResponse::CallResult { result, .. } => {
             let err = result.expect_err("should be Err");
             match err {
                 ToolError::PermissionRequired {
@@ -431,24 +574,67 @@ async fn server_call_tool_structured_error() {
 }
 
 #[tokio::test]
-async fn server_set_call_context_forwarded() {
+async fn server_set_call_context_deprecated_noop() {
     let (mut stream, state, socket_path) = spawn_and_connect("ctx").await;
     do_handshake(&mut stream).await;
 
+    // SetCallContext is deprecated — it returns Ack but does NOT
+    // forward the context to the plugin. Per-call context is now
+    // passed directly via the `CallTool` request.
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::SetCallContext {
+            request_id: "req-1".to_string(),
             conversation_id: "conv-xyz".to_string(),
             turn_id: "turn-3".to_string(),
         },
     )
     .await;
-    assert_eq!(resp, PluginIpcResponse::Ack);
+    assert_eq!(
+        resp,
+        PluginIpcResponse::Ack {
+            request_id: "req-1".to_string()
+        }
+    );
 
     let ctx = state.call_context.lock().await;
-    let ctx = ctx.as_ref().expect("context should be set");
-    assert_eq!(ctx.conversation_id, "conv-xyz");
-    assert_eq!(ctx.turn_id, "turn-3");
+    assert!(ctx.is_none(), "SetCallContext must be a no-op");
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn server_call_tool_receives_per_call_context() {
+    let (mut stream, state, socket_path) = spawn_and_connect("per-call-ctx").await;
+    do_handshake(&mut stream).await;
+
+    let resp = round_trip(
+        &mut stream,
+        &PluginIpcRequest::CallTool {
+            request_id: "req-1".to_string(),
+            name: "test.echo".to_string(),
+            arguments: r#"{"hello":"world"}"#.to_string(),
+            deferred: false,
+            context: Some(CallContext {
+                conversation_id: "conv-abc".to_string(),
+                turn_id: "turn-7".to_string(),
+            }),
+        },
+    )
+    .await;
+
+    match resp {
+        PluginIpcResponse::CallResult { request_id, result } => {
+            assert_eq!(request_id, "req-1");
+            assert!(result.is_ok());
+        }
+        other => panic!("expected CallResult, got: {other:?}"),
+    }
+
+    let ctx = state.call_context.lock().await;
+    let ctx = ctx.as_ref().expect("context should be set via CallTool");
+    assert_eq!(ctx.conversation_id, "conv-abc");
+    assert_eq!(ctx.turn_id, "turn-7");
 
     cleanup_path(&socket_path);
 }
@@ -461,11 +647,17 @@ async fn server_approve_permission_forwarded() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::ApprovePermission {
-            request_id: "req-abc".to_string(),
+            request_id: "req-1".to_string(),
+            permission_request_id: "req-abc".to_string(),
         },
     )
     .await;
-    assert_eq!(resp, PluginIpcResponse::Ack);
+    assert_eq!(
+        resp,
+        PluginIpcResponse::Ack {
+            request_id: "req-1".to_string()
+        }
+    );
 
     let approved = state.approved.lock().await;
     assert_eq!(*approved, vec!["req-abc"]);
@@ -481,22 +673,34 @@ async fn server_allow_and_revoke_pattern_forwarded() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::AllowPattern {
+            request_id: "req-1".to_string(),
             action: "net_access".to_string(),
             target_pattern: "*.example.com".to_string(),
         },
     )
     .await;
-    assert_eq!(resp, PluginIpcResponse::Ack);
+    assert_eq!(
+        resp,
+        PluginIpcResponse::Ack {
+            request_id: "req-1".to_string()
+        }
+    );
 
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::RevokePattern {
+            request_id: "req-2".to_string(),
             action: "net_access".to_string(),
             target_pattern: "*.example.com".to_string(),
         },
     )
     .await;
-    assert_eq!(resp, PluginIpcResponse::Ack);
+    assert_eq!(
+        resp,
+        PluginIpcResponse::Ack {
+            request_id: "req-2".to_string()
+        }
+    );
 
     let allowed = state.allowed.lock().await;
     assert_eq!(
@@ -520,14 +724,20 @@ async fn server_deferred_call_and_poll() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::CallTool {
+            request_id: "req-1".to_string(),
             name: "test.background".to_string(),
             arguments: "{}".to_string(),
             deferred: true,
+            context: None,
         },
     )
     .await;
     match resp {
-        PluginIpcResponse::DeferredAccepted { task_id } => {
+        PluginIpcResponse::DeferredAccepted {
+            request_id,
+            task_id,
+        } => {
+            assert_eq!(request_id, "req-1");
             assert_eq!(task_id, "bg-task-1");
         }
         other => panic!("expected DeferredAccepted, got: {other:?}"),
@@ -536,12 +746,18 @@ async fn server_deferred_call_and_poll() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::PollDeferred {
+            request_id: "req-2".to_string(),
             task_id: "bg-task-1".to_string(),
         },
     )
     .await;
     match resp {
-        PluginIpcResponse::DeferredStatus { task_id, status } => {
+        PluginIpcResponse::DeferredStatus {
+            request_id,
+            task_id,
+            status,
+        } => {
+            assert_eq!(request_id, "req-2");
             assert_eq!(task_id, "bg-task-1");
             assert_eq!(
                 status,
@@ -564,14 +780,17 @@ async fn server_deferred_sync_fallback() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::CallTool {
+            request_id: "req-1".to_string(),
             name: "test.echo".to_string(),
             arguments: r#"{"sync":true}"#.to_string(),
             deferred: true,
+            context: None,
         },
     )
     .await;
     match resp {
-        PluginIpcResponse::CallResult { result } => {
+        PluginIpcResponse::CallResult { request_id, result } => {
+            assert_eq!(request_id, "req-1");
             assert_eq!(result.unwrap(), r#"{"sync":true}"#);
         }
         other => panic!("expected CallResult (sync fallback), got: {other:?}"),
@@ -588,11 +807,17 @@ async fn server_cancel_deferred_forwarded() {
     let resp = round_trip(
         &mut stream,
         &PluginIpcRequest::CancelDeferred {
+            request_id: "req-1".to_string(),
             task_id: "bg-task-1".to_string(),
         },
     )
     .await;
-    assert_eq!(resp, PluginIpcResponse::Ack);
+    assert_eq!(
+        resp,
+        PluginIpcResponse::Ack {
+            request_id: "req-1".to_string()
+        }
+    );
 
     let cancelled = state.cancelled.lock().await;
     assert_eq!(*cancelled, vec!["bg-task-1"]);
@@ -616,9 +841,16 @@ async fn server_config_schema() {
     let (mut stream, _state, socket_path) = spawn_and_connect("schema").await;
     do_handshake(&mut stream).await;
 
-    let resp = round_trip(&mut stream, &PluginIpcRequest::GetConfigSchema).await;
+    let resp = round_trip(
+        &mut stream,
+        &PluginIpcRequest::GetConfigSchema {
+            request_id: "req-1".to_string(),
+        },
+    )
+    .await;
     match resp {
-        PluginIpcResponse::ConfigSchema { schema } => {
+        PluginIpcResponse::ConfigSchema { request_id, schema } => {
+            assert_eq!(request_id, "req-1");
             let schema = schema.expect("schema should be present");
             assert_eq!(schema["type"], "object");
         }
@@ -633,9 +865,16 @@ async fn server_list_tools() {
     let (mut stream, _state, socket_path) = spawn_and_connect("list").await;
     do_handshake(&mut stream).await;
 
-    let resp = round_trip(&mut stream, &PluginIpcRequest::ListTools).await;
+    let resp = round_trip(
+        &mut stream,
+        &PluginIpcRequest::ListTools {
+            request_id: "req-1".to_string(),
+        },
+    )
+    .await;
     match resp {
-        PluginIpcResponse::Tools { tools } => {
+        PluginIpcResponse::Tools { request_id, tools } => {
+            assert_eq!(request_id, "req-1");
             assert_eq!(tools.len(), 1);
             assert_eq!(tools[0].name.as_str(), "test.echo");
         }

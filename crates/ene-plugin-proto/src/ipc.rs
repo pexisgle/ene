@@ -8,13 +8,27 @@ use crate::capabilities::PluginCapabilities;
 use crate::error::PluginError;
 use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
-use crate::tool_ipc::DeferredStatus;
+use crate::tool_ipc::{CallContext, DeferredStatus};
 use crate::tool_types::ToolSpec;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Maximum allowed IPC message size in bytes (64 MB).
 const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
+/// Negotiated IPC protocol version range.
+///
+/// The host sends the range it supports; the plugin responds with the range
+/// it supports. The negotiated version is the highest number that falls within
+/// both ranges, chosen by the plugin and reported in the ack. If the ranges do
+/// not overlap, the handshake must fail.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VersionRange {
+    /// Minimum supported protocol version (inclusive).
+    pub min: u32,
+    /// Maximum supported protocol version (inclusive).
+    pub max: u32,
+}
 
 /// Plugin IPC protocol version.
 ///
@@ -30,10 +44,12 @@ pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PluginIpcRequest {
     /// Handshake to negotiate protocol version, exchange sandbox config,
-    /// and push plugin-specific configuration.
+    /// and push plugin-specific configuration. The host sends the version
+    /// range it supports; the plugin negotiates and reports the chosen version
+    /// in the ack.
     Handshake {
-        /// Client's supported protocol version.
-        version: u32,
+        /// Host's supported protocol version range.
+        version: VersionRange,
         /// Sandbox configuration to apply.
         #[serde(default)]
         sandbox: SandboxConfigData,
@@ -45,11 +61,22 @@ pub enum PluginIpcRequest {
     /// Liveness probe. The plugin must reply with [`PluginIpcResponse::Pong`].
     Ping,
     /// Request the plugin's config JSON Schema.
-    GetConfigSchema,
+    GetConfigSchema {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
+    },
     /// List all available tool specs.
-    ListTools,
+    ListTools {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
+    },
     /// Execute a tool by name with JSON arguments.
     CallTool {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
         /// Tool name to call.
         name: String,
         /// JSON-encoded arguments.
@@ -57,9 +84,19 @@ pub enum PluginIpcRequest {
         /// When `true`, request deferred (background) execution.
         #[serde(default)]
         deferred: bool,
+        /// Per-call context (conversation + turn identifiers).
+        ///
+        /// Supersedes the deprecated `SetCallContext` message. When present,
+        /// the context applies to this single tool call only and does not
+        /// persist for subsequent calls.
+        #[serde(default)]
+        context: Option<CallContext>,
     },
     /// Set the call context (conversation + turn identifiers).
     SetCallContext {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
         /// Conversation-level identifier.
         conversation_id: String,
         /// Turn-level identifier within the conversation.
@@ -67,21 +104,34 @@ pub enum PluginIpcRequest {
     },
     /// Poll the status of a deferred (background) task by id.
     PollDeferred {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
         /// The `task_id` returned by a prior [`PluginIpcResponse::DeferredAccepted`].
         task_id: String,
     },
     /// Cancel a deferred (background) task by id.
     CancelDeferred {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
         /// The `task_id` of the background task to cancel.
         task_id: String,
     },
     /// Approve a pending permission request.
     ApprovePermission {
-        /// ID of the request to approve.
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
         request_id: String,
+        /// ID of the permission request to approve.
+        #[serde(default)]
+        permission_request_id: String,
     },
     /// Register a session-wide permission allow pattern.
     AllowPattern {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
         /// Action pattern (e.g. `"filesystem_write"`).
         action: String,
         /// Target glob pattern.
@@ -89,6 +139,9 @@ pub enum PluginIpcRequest {
     },
     /// Revoke a previously granted session-wide permission allow pattern.
     RevokePattern {
+        /// Unique request identifier for correlating the response.
+        #[serde(default)]
+        request_id: String,
         /// Action pattern to revoke.
         action: String,
         /// Target glob pattern to revoke.
@@ -165,36 +218,58 @@ pub enum PluginIpcResponse {
         capabilities: PluginCapabilities,
     },
     /// Acknowledgment (for `ApprovePermission`, `AllowPattern`, etc.).
-    Ack,
+    Ack {
+        /// Request identifier correlating this ack to the originating request.
+        #[serde(default)]
+        request_id: String,
+    },
     /// Reply to a [`PluginIpcRequest::Ping`] liveness probe.
     Pong,
     /// The plugin's config JSON Schema.
     ConfigSchema {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
         /// The schema, or `None` if not provided.
         schema: Option<serde_json::Value>,
     },
     /// Error response.
     Error {
+        /// Request identifier correlating this error to the originating request.
+        #[serde(default)]
+        request_id: String,
         /// Error description.
         message: String,
     },
     /// List of tool specs.
     Tools {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
         /// The structured tool specs.
         tools: Vec<ToolSpec>,
     },
     /// Result of a tool call.
     CallResult {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
         /// The result, or an error.
         result: Result<String, ToolError>,
     },
     /// Acknowledgment of a deferred (background) tool call.
     DeferredAccepted {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
         /// Unique identifier for the queued background task.
         task_id: String,
     },
     /// Status of a deferred (background) task.
     DeferredStatus {
+        /// Request identifier correlating this response to the originating request.
+        #[serde(default)]
+        request_id: String,
         /// The polled task id.
         task_id: String,
         /// Current status of the task.
@@ -302,16 +377,13 @@ pub async fn write_plugin_request<W: AsyncWriteExt + Unpin>(
 ///
 /// Returns `Ok(None)` on `UnexpectedEof`, indicating connection closed.
 ///
-/// # Correlation invariant
+/// # Correlation
 ///
-/// Non-streaming responses (`Ack`, `Pong`, `ConfigSchema`, `CallResult`,
-/// `DeferredAccepted`, `DeferredStatus`, `ChatCompletionResult`,
-/// `EmbedBatchResult`, `Error`) carry **no `request_id`**, so the reader
-/// cannot correlate a response to a specific request. Callers must therefore
-/// ensure that **at most one non-streaming request is in-flight per
-/// connection** at any time. Streaming responses (`StreamChunk`, `StreamEnd`,
-/// `StreamError`) do carry a `request_id` and are not subject to this
-/// constraint.
+/// All non-streaming responses carry a `request_id` field that correlates
+/// the response to the originating [`PluginIpcRequest`]. Callers should
+/// verify that the returned `request_id` matches the expected value.
+/// Streaming responses (`StreamChunk`, `StreamEnd`, `StreamError`) also
+/// carry a `request_id` for correlation.
 pub async fn read_plugin_response<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<Option<PluginIpcResponse>, PluginError> {
@@ -387,7 +459,10 @@ mod tests {
     #[tokio::test]
     async fn request_handshake_roundtrip() {
         let req = PluginIpcRequest::Handshake {
-            version: PLUGIN_IPC_PROTOCOL_VERSION,
+            version: VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            },
             sandbox: SandboxConfigData::default(),
             plugin_config: Some(serde_json::json!({"api_key": "sk-test"})),
         };
@@ -411,14 +486,18 @@ mod tests {
 
     #[tokio::test]
     async fn request_get_config_schema_roundtrip() {
-        let req = PluginIpcRequest::GetConfigSchema;
+        let req = PluginIpcRequest::GetConfigSchema {
+            request_id: "req-1".into(),
+        };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
     }
 
     #[tokio::test]
     async fn request_list_tools_roundtrip() {
-        let req = PluginIpcRequest::ListTools;
+        let req = PluginIpcRequest::ListTools {
+            request_id: "req-1".into(),
+        };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
     }
@@ -426,9 +505,11 @@ mod tests {
     #[tokio::test]
     async fn request_call_tool_roundtrip() {
         let req = PluginIpcRequest::CallTool {
+            request_id: "req-1".into(),
             name: "filesystem.read".into(),
             arguments: r#"{"path":"/tmp/test.txt"}"#.into(),
             deferred: false,
+            context: None,
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
@@ -437,9 +518,11 @@ mod tests {
     #[tokio::test]
     async fn request_call_tool_deferred_roundtrip() {
         let req = PluginIpcRequest::CallTool {
+            request_id: "req-1".into(),
             name: "timer.set".into(),
             arguments: r#"{"seconds":5}"#.into(),
             deferred: true,
+            context: None,
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
@@ -448,6 +531,7 @@ mod tests {
     #[tokio::test]
     async fn request_set_call_context_roundtrip() {
         let req = PluginIpcRequest::SetCallContext {
+            request_id: "req-1".into(),
             conversation_id: "conv-1".into(),
             turn_id: "turn-42".into(),
         };
@@ -458,6 +542,7 @@ mod tests {
     #[tokio::test]
     async fn request_poll_deferred_roundtrip() {
         let req = PluginIpcRequest::PollDeferred {
+            request_id: "req-1".into(),
             task_id: "task-123".into(),
         };
         let got = send_recv_request(&req).await;
@@ -467,6 +552,7 @@ mod tests {
     #[tokio::test]
     async fn request_cancel_deferred_roundtrip() {
         let req = PluginIpcRequest::CancelDeferred {
+            request_id: "req-1".into(),
             task_id: "task-456".into(),
         };
         let got = send_recv_request(&req).await;
@@ -476,7 +562,8 @@ mod tests {
     #[tokio::test]
     async fn request_approve_permission_roundtrip() {
         let req = PluginIpcRequest::ApprovePermission {
-            request_id: "perm-1".into(),
+            request_id: "req-1".into(),
+            permission_request_id: "perm-1".into(),
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
@@ -485,6 +572,7 @@ mod tests {
     #[tokio::test]
     async fn request_allow_pattern_roundtrip() {
         let req = PluginIpcRequest::AllowPattern {
+            request_id: "req-1".into(),
             action: "filesystem_write".into(),
             target_pattern: "/tmp/**".into(),
         };
@@ -495,6 +583,7 @@ mod tests {
     #[tokio::test]
     async fn request_revoke_pattern_roundtrip() {
         let req = PluginIpcRequest::RevokePattern {
+            request_id: "req-1".into(),
             action: "filesystem_write".into(),
             target_pattern: "/tmp/**".into(),
         };
@@ -551,7 +640,7 @@ mod tests {
         let resp = PluginIpcResponse::HandshakeAck {
             version: PLUGIN_IPC_PROTOCOL_VERSION,
             capabilities: PluginCapabilities {
-                tools: vec![],
+                tools: 0,
                 llm_providers: vec![LlmProviderSpec {
                     kind: "anthropic".into(),
                     supported_models: vec!["claude-sonnet-4-20250514".into()],
@@ -568,7 +657,9 @@ mod tests {
 
     #[tokio::test]
     async fn response_ack_roundtrip() {
-        let resp = PluginIpcResponse::Ack;
+        let resp = PluginIpcResponse::Ack {
+            request_id: "req-1".into(),
+        };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
     }
@@ -583,6 +674,7 @@ mod tests {
     #[tokio::test]
     async fn response_config_schema_roundtrip() {
         let resp = PluginIpcResponse::ConfigSchema {
+            request_id: "req-1".into(),
             schema: Some(serde_json::json!({"type": "object", "properties": {}})),
         };
         let got = send_recv_response(&resp).await;
@@ -592,6 +684,7 @@ mod tests {
     #[tokio::test]
     async fn response_error_roundtrip() {
         let resp = PluginIpcResponse::Error {
+            request_id: "req-1".into(),
             message: "something went wrong".into(),
         };
         let got = send_recv_response(&resp).await;
@@ -601,6 +694,7 @@ mod tests {
     #[tokio::test]
     async fn response_tools_roundtrip() {
         let resp = PluginIpcResponse::Tools {
+            request_id: "req-1".into(),
             tools: vec![ToolSpec::new(
                 crate::ToolName::new("test"),
                 "desc",
@@ -614,6 +708,7 @@ mod tests {
     #[tokio::test]
     async fn response_call_result_ok_roundtrip() {
         let resp = PluginIpcResponse::CallResult {
+            request_id: "req-1".into(),
             result: Ok("success".into()),
         };
         let got = send_recv_response(&resp).await;
@@ -623,6 +718,7 @@ mod tests {
     #[tokio::test]
     async fn response_call_result_err_roundtrip() {
         let resp = PluginIpcResponse::CallResult {
+            request_id: "req-1".into(),
             result: Err(ToolError::NotFound {
                 tool_name: "foo".into(),
             }),
@@ -634,6 +730,7 @@ mod tests {
     #[tokio::test]
     async fn response_deferred_accepted_roundtrip() {
         let resp = PluginIpcResponse::DeferredAccepted {
+            request_id: "req-1".into(),
             task_id: "task-789".into(),
         };
         let got = send_recv_response(&resp).await;
@@ -643,6 +740,7 @@ mod tests {
     #[tokio::test]
     async fn response_deferred_status_roundtrip() {
         let resp = PluginIpcResponse::DeferredStatus {
+            request_id: "req-1".into(),
             task_id: "task-abc".into(),
             status: DeferredStatus::Completed {
                 result: "done".into(),
@@ -795,15 +893,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_tool_defaults_to_sync() {
+    async fn call_tool_defaults_to_sync_and_no_request_id() {
         let json = r#"{"CallTool":{"name":"read","arguments":"{}"}}"#;
         let req: PluginIpcRequest = serde_json::from_str(json).unwrap();
+        // Without request_id field, it defaults to empty string via serde default.
         assert_eq!(
             req,
             PluginIpcRequest::CallTool {
+                request_id: String::new(),
                 name: "read".into(),
                 arguments: "{}".into(),
                 deferred: false,
+                context: None,
             }
         );
     }
@@ -836,9 +937,11 @@ mod tests {
     async fn write_request_rejects_oversized_message() {
         let big_arguments = "x".repeat(MAX_MESSAGE_SIZE + 1);
         let req = PluginIpcRequest::CallTool {
+            request_id: String::new(),
             name: "test".into(),
             arguments: big_arguments,
             deferred: false,
+            context: None,
         };
         let mut buf = Vec::new();
         let result = write_plugin_request(&mut buf, &req).await;

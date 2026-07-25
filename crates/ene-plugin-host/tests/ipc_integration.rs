@@ -20,7 +20,7 @@ use ene_plugin_host::{IpcPluginConnection, PluginHostError};
 use ene_plugin_proto::{
     CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities,
     PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError, ToolName, ToolSpec,
-    cleanup_path, read_plugin_request, write_plugin_response,
+    VersionRange, cleanup_path, read_plugin_request, write_plugin_response,
 };
 use tokio::sync::Mutex;
 
@@ -77,45 +77,69 @@ async fn run_mock_server(socket_path: PathBuf, state: Arc<Mutex<MockState>>) {
 async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> PluginIpcResponse {
     match req {
         PluginIpcRequest::Handshake {
-            version,
+            version: host_range,
             sandbox: _,
             plugin_config: _,
         } => {
-            if version != PLUGIN_IPC_PROTOCOL_VERSION {
+            let our_range = VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            };
+            if host_range.max < our_range.min || host_range.min > our_range.max {
                 return PluginIpcResponse::Error {
-                    message: format!("version mismatch: got {version}"),
+                    request_id: String::new(),
+                    message: format!(
+                        "version mismatch: host supports {}-{}, mock supports {}-{}",
+                        host_range.min, host_range.max, our_range.min, our_range.max
+                    ),
                 };
             }
+            let negotiated = host_range.min.max(our_range.min);
             PluginIpcResponse::HandshakeAck {
-                version: PLUGIN_IPC_PROTOCOL_VERSION,
+                version: negotiated,
                 capabilities: PluginCapabilities {
-                    tools: vec![ToolSpec::new(
-                        ToolName::new("mock.echo"),
-                        "Echoes arguments back.",
-                        serde_json::json!({}),
-                    )],
+                    tools: 1,
                     llm_providers: vec![],
                     tts_providers: vec![],
                     stt_providers: vec![],
                 },
             }
         }
+        PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
+            request_id,
+            tools: vec![ToolSpec::new(
+                ToolName::new("mock.echo"),
+                "Echoes arguments back.",
+                serde_json::json!({}),
+            )],
+        },
         PluginIpcRequest::Ping => PluginIpcResponse::Pong,
         PluginIpcRequest::CallTool {
+            request_id,
             name,
             arguments,
             deferred,
+            context,
         } => {
+            // When context is provided, record it on the mock state so tests
+            // can verify the per-call context is forwarded correctly.
+            if let Some(ctx) = context {
+                let mut s = state.lock().await;
+                s.call_context = Some(ctx);
+            }
             if deferred && name == "mock.deferred" {
                 return PluginIpcResponse::DeferredAccepted {
+                    request_id,
                     task_id: "task-42".to_string(),
                 };
             }
             match name.as_str() {
                 "mock.echo" => PluginIpcResponse::CallResult {
+                    request_id,
                     result: Ok(arguments),
                 },
                 "mock.permission" => PluginIpcResponse::CallResult {
+                    request_id,
                     result: Err(ToolError::PermissionRequired {
                         request_id: "perm-1".to_string(),
                         action: "filesystem_write".to_string(),
@@ -124,6 +148,7 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                     }),
                 },
                 "mock.user_input" => PluginIpcResponse::CallResult {
+                    request_id,
                     result: Err(ToolError::UserInputRequired {
                         request_id: "input-1".to_string(),
                         prompt: ene_plugin_proto::UserInputPrompt::new(vec![
@@ -137,45 +162,55 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                     }),
                 },
                 _ => PluginIpcResponse::CallResult {
+                    request_id,
                     result: Err(ToolError::NotFound { tool_name: name }),
                 },
             }
         }
         PluginIpcRequest::SetCallContext {
-            conversation_id,
-            turn_id,
+            request_id,
+            conversation_id: _,
+            turn_id: _,
+        } => {
+            tracing::warn!(
+                component = "IpcIntegrationMock",
+                "SetCallContext is deprecated and handled as a no-op in the mock server"
+            );
+            PluginIpcResponse::Ack { request_id }
+        }
+        PluginIpcRequest::ApprovePermission {
+            request_id,
+            permission_request_id,
         } => {
             let mut s = state.lock().await;
-            s.call_context = Some(CallContext {
-                conversation_id,
-                turn_id,
-            });
-            PluginIpcResponse::Ack
-        }
-        PluginIpcRequest::ApprovePermission { request_id } => {
-            let mut s = state.lock().await;
-            s.approved.push(request_id);
-            PluginIpcResponse::Ack
+            s.approved.push(permission_request_id);
+            PluginIpcResponse::Ack { request_id }
         }
         PluginIpcRequest::AllowPattern {
+            request_id,
             action,
             target_pattern,
         } => {
             let mut s = state.lock().await;
             s.allowed.push((action, target_pattern));
-            PluginIpcResponse::Ack
+            PluginIpcResponse::Ack { request_id }
         }
         PluginIpcRequest::RevokePattern {
+            request_id,
             action,
             target_pattern,
         } => {
             let mut s = state.lock().await;
             s.revoked.push((action, target_pattern));
-            PluginIpcResponse::Ack
+            PluginIpcResponse::Ack { request_id }
         }
-        PluginIpcRequest::PollDeferred { task_id } => {
+        PluginIpcRequest::PollDeferred {
+            request_id,
+            task_id,
+        } => {
             if task_id == "task-42" {
                 PluginIpcResponse::DeferredStatus {
+                    request_id,
                     task_id,
                     status: DeferredStatus::Completed {
                         result: "deferred result".to_string(),
@@ -183,18 +218,25 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                 }
             } else {
                 PluginIpcResponse::DeferredStatus {
+                    request_id,
                     task_id,
                     status: DeferredStatus::Unknown,
                 }
             }
         }
-        PluginIpcRequest::CancelDeferred { task_id } => {
+        PluginIpcRequest::CancelDeferred {
+            request_id,
+            task_id,
+        } => {
             let mut s = state.lock().await;
             s.cancelled.push(task_id);
-            PluginIpcResponse::Ack
+            PluginIpcResponse::Ack { request_id }
         }
-        PluginIpcRequest::Shutdown => PluginIpcResponse::Ack,
+        PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
+            request_id: String::new(),
+        },
         _ => PluginIpcResponse::Error {
+            request_id: String::new(),
             message: "unsupported request in mock".to_string(),
         },
     }
@@ -232,12 +274,16 @@ async fn spawn_and_connect(name: &str) -> (IpcPluginConnection, Arc<Mutex<MockSt
 
 #[tokio::test]
 async fn handshake_succeeds_and_returns_capabilities() {
-    let (conn, _state, socket_path) = spawn_and_connect("handshake").await;
+    let (mut conn, _state, socket_path) = spawn_and_connect("handshake").await;
 
     let caps = conn.capabilities();
-    assert_eq!(caps.tools.len(), 1);
-    assert_eq!(caps.tools[0].name.as_str(), "mock.echo");
+    assert_eq!(caps.tools, 1);
     assert!(caps.llm_providers.is_empty());
+
+    // Verify ListTools returns the actual spec.
+    let tools = conn.list_tools().await.expect("list_tools should succeed");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name.as_str(), "mock.echo");
 
     cleanup_path(&socket_path);
 }
@@ -249,7 +295,7 @@ async fn call_tool_round_trip() {
     let (mut conn, _state, socket_path) = spawn_and_connect("call-tool").await;
 
     let result = conn
-        .call_tool("mock.echo", r#"{"msg":"hello"}"#)
+        .call_tool("mock.echo", r#"{"msg":"hello"}"#, None)
         .await
         .expect("call_tool should succeed");
     assert_eq!(result, r#"{"msg":"hello"}"#);
@@ -262,7 +308,7 @@ async fn call_tool_not_found() {
     let (mut conn, _state, socket_path) = spawn_and_connect("call-tool-nf").await;
 
     let err = conn
-        .call_tool("nonexistent.tool", "{}")
+        .call_tool("nonexistent.tool", "{}", None)
         .await
         .expect_err("should fail for unknown tool");
 
@@ -283,7 +329,7 @@ async fn call_tool_permission_required_preserves_structure() {
     let (mut conn, _state, socket_path) = spawn_and_connect("perm-required").await;
 
     let err = conn
-        .call_tool("mock.permission", "{}")
+        .call_tool("mock.permission", "{}", None)
         .await
         .expect_err("should return PermissionRequired");
 
@@ -310,7 +356,7 @@ async fn call_tool_user_input_required_preserves_structure() {
     let (mut conn, _state, socket_path) = spawn_and_connect("user-input").await;
 
     let err = conn
-        .call_tool("mock.user_input", "{}")
+        .call_tool("mock.user_input", "{}", None)
         .await
         .expect_err("should return UserInputRequired");
 
@@ -327,19 +373,21 @@ async fn call_tool_user_input_required_preserves_structure() {
     cleanup_path(&socket_path);
 }
 
-// ── Test: set_call_context ───────────────────────────────────────────────
+// ── Test: per-call context via call_tool ─────────────────────────────────
 
 #[tokio::test]
-async fn set_call_context_reaches_plugin() {
-    let (mut conn, state, socket_path) = spawn_and_connect("set-ctx").await;
+async fn call_tool_forwards_context() {
+    let (mut conn, state, socket_path) = spawn_and_connect("call-ctx").await;
 
     let ctx = CallContext {
         conversation_id: "conv-abc".to_string(),
         turn_id: "turn-7".to_string(),
     };
-    conn.set_call_context(&ctx)
+    let result = conn
+        .call_tool("mock.echo", r#"{"x":1}"#, Some(ctx))
         .await
-        .expect("set_call_context should succeed");
+        .expect("call_tool should succeed");
+    assert_eq!(result, r#"{"x":1}"#);
 
     let s = state.lock().await;
     let recorded = s.call_context.as_ref().expect("context should be recorded");
@@ -398,7 +446,7 @@ async fn deferred_call_returns_accepted_then_poll_completes() {
     let (mut conn, _state, socket_path) = spawn_and_connect("deferred").await;
 
     let outcome = conn
-        .call_tool_deferred("mock.deferred", "{}")
+        .call_tool_deferred("mock.deferred", "{}", None)
         .await
         .expect("call_tool_deferred should succeed");
 
@@ -429,7 +477,7 @@ async fn deferred_call_sync_fallback() {
 
     // mock.echo does not support deferred, so the server falls back to sync.
     let outcome = conn
-        .call_tool_deferred("mock.echo", r#"{"x":1}"#)
+        .call_tool_deferred("mock.echo", r#"{"x":1}"#, None)
         .await
         .expect("call_tool_deferred should succeed with sync fallback");
 
@@ -491,7 +539,7 @@ async fn transparent_reconnection_after_transport_failure() {
         .expect("initial handshake should succeed");
 
     let result = conn
-        .call_tool("mock.echo", "phase1")
+        .call_tool("mock.echo", "phase1", None)
         .await
         .expect("first call should succeed");
     assert_eq!(result, "phase1");
@@ -511,7 +559,7 @@ async fn transparent_reconnection_after_transport_failure() {
 
     // Phase 4: the next call should transparently reconnect and succeed.
     let result = conn
-        .call_tool("mock.echo", "phase2")
+        .call_tool("mock.echo", "phase2", None)
         .await
         .expect("call after reconnect should succeed");
     assert_eq!(result, "phase2");

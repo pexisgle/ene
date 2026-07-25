@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData,
+    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, VersionRange,
     read_plugin_response, write_plugin_request,
 };
 
@@ -22,6 +22,11 @@ const CONNECT_DELAY: Duration = Duration::from_millis(50);
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(2);
 /// Timeout for a `Ping` liveness probe.
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Generates a unique request identifier for IPC request/response correlation.
+fn next_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
 
 /// An IPC connection to a single plugin binary.
 ///
@@ -58,7 +63,10 @@ impl IpcPluginConnection {
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
-                version: PLUGIN_IPC_PROTOCOL_VERSION,
+                version: VersionRange {
+                    min: PLUGIN_IPC_PROTOCOL_VERSION,
+                    max: PLUGIN_IPC_PROTOCOL_VERSION,
+                },
                 sandbox: sandbox.clone(),
                 plugin_config: plugin_config.clone(),
             },
@@ -90,7 +98,7 @@ impl IpcPluginConnection {
                 }
                 capabilities
             }
-            Some(PluginIpcResponse::Error { message }) => {
+            Some(PluginIpcResponse::Error { message, .. }) => {
                 return Err(PluginHostError::HandshakeFailed {
                     name,
                     reason: message,
@@ -119,6 +127,22 @@ impl IpcPluginConnection {
         &self.capabilities
     }
 
+    /// Sends a `ListTools` request and returns the actual tool specs.
+    pub async fn list_tools(&mut self) -> Result<Vec<ene_plugin_proto::ToolSpec>, PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::ListTools {
+                request_id: String::new(),
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::Tools { tools, .. } => Ok(tools),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to ListTools: {other:?}"
+            ))),
+        }
+    }
+
     /// Sends a `Ping` and waits for `Pong` within [`PING_TIMEOUT`].
     pub async fn ping(&mut self) -> Result<(), PluginHostError> {
         let resp = self
@@ -126,7 +150,7 @@ impl IpcPluginConnection {
             .await?;
         match resp {
             PluginIpcResponse::Pong => Ok(()),
-            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to Ping: {other:?}"
             ))),
@@ -141,21 +165,29 @@ impl IpcPluginConnection {
     /// `PermissionRequired` and `UserInputRequired`. Flattening the
     /// [`ene_plugin_proto::ToolError`] into a string here would silently
     /// disable the interactive permission / user-input contract.
+    ///
+    /// When `context` is `Some`, it is included in the `CallTool` IPC
+    /// request so the plugin receives it scoped to this single call.
     pub async fn call_tool(
         &mut self,
         name: &str,
         arguments: &str,
+        context: Option<CallContext>,
     ) -> Result<String, PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::CallTool {
+                request_id: String::new(),
                 name: name.to_string(),
                 arguments: arguments.to_string(),
                 deferred: false,
+                context,
             })
             .await?;
         match resp {
-            PluginIpcResponse::CallResult { result } => result.map_err(PluginHostError::Protocol),
-            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            PluginIpcResponse::CallResult { result, .. } => {
+                result.map_err(PluginHostError::Protocol)
+            }
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to CallTool: {other:?}"
             ))),
@@ -164,13 +196,15 @@ impl IpcPluginConnection {
 
     /// Sets the call context (conversation + turn identifiers) on the plugin.
     ///
-    /// The context applies to every subsequent tool call on this connection;
-    /// the wire protocol carries only the identifiers, so no tool name is
-    /// needed at the connection level (tool routing happens in the composite
-    /// registry above).
+    /// Deprecated: pass context directly via [`call_tool`](Self::call_tool)
+    /// instead. The context applies to every subsequent tool call on this
+    /// connection; the wire protocol carries only the identifiers, so no
+    /// tool name is needed at the connection level (tool routing happens in
+    /// the composite registry above).
     pub async fn set_call_context(&mut self, ctx: &CallContext) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::SetCallContext {
+                request_id: String::new(),
                 conversation_id: ctx.conversation_id.clone(),
                 turn_id: ctx.turn_id.clone(),
             })
@@ -179,10 +213,14 @@ impl IpcPluginConnection {
     }
 
     /// Approves (or denies) a pending permission request by its identifier.
-    pub async fn approve_permission(&mut self, request_id: &str) -> Result<(), PluginHostError> {
+    pub async fn approve_permission(
+        &mut self,
+        permission_request_id: &str,
+    ) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::ApprovePermission {
-                request_id: request_id.to_string(),
+                request_id: String::new(),
+                permission_request_id: permission_request_id.to_string(),
             })
             .await?;
         Self::expect_ack(resp, "ApprovePermission")
@@ -196,6 +234,7 @@ impl IpcPluginConnection {
     ) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::AllowPattern {
+                request_id: String::new(),
                 action: action.to_string(),
                 target_pattern: target_pattern.to_string(),
             })
@@ -211,6 +250,7 @@ impl IpcPluginConnection {
     ) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::RevokePattern {
+                request_id: String::new(),
                 action: action.to_string(),
                 target_pattern: target_pattern.to_string(),
             })
@@ -223,27 +263,33 @@ impl IpcPluginConnection {
     /// A background-capable tool responds with [`DeferredOutcome::Deferred`]
     /// carrying a `task_id`; any other tool falls back to
     /// [`DeferredOutcome::Sync`] with the ordinary synchronous result.
+    ///
+    /// When `context` is `Some`, it is included in the `CallTool` IPC
+    /// request so the plugin receives it scoped to this single call.
     pub async fn call_tool_deferred(
         &mut self,
         name: &str,
         arguments: &str,
+        context: Option<CallContext>,
     ) -> Result<DeferredOutcome, PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::CallTool {
+                request_id: String::new(),
                 name: name.to_string(),
                 arguments: arguments.to_string(),
                 deferred: true,
+                context,
             })
             .await?;
         match resp {
-            PluginIpcResponse::CallResult { result } => match result {
+            PluginIpcResponse::CallResult { result, .. } => match result {
                 Ok(value) => Ok(DeferredOutcome::Sync(value)),
                 Err(e) => Err(PluginHostError::Protocol(e)),
             },
-            PluginIpcResponse::DeferredAccepted { task_id } => {
+            PluginIpcResponse::DeferredAccepted { task_id, .. } => {
                 Ok(DeferredOutcome::Deferred { task_id })
             }
-            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to deferred CallTool: {other:?}"
             ))),
@@ -257,12 +303,13 @@ impl IpcPluginConnection {
     ) -> Result<DeferredStatus, PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::PollDeferred {
+                request_id: String::new(),
                 task_id: task_id.to_string(),
             })
             .await?;
         match resp {
             PluginIpcResponse::DeferredStatus { status, .. } => Ok(status),
-            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to PollDeferred: {other:?}"
             ))),
@@ -273,6 +320,7 @@ impl IpcPluginConnection {
     pub async fn cancel_deferred(&mut self, task_id: &str) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::CancelDeferred {
+                request_id: String::new(),
                 task_id: task_id.to_string(),
             })
             .await?;
@@ -329,7 +377,7 @@ impl IpcPluginConnection {
             .await?;
         match resp {
             PluginIpcResponse::ChatCompletionResult { content, .. } => Ok(content),
-            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to ChatCompletion: {other:?}"
             ))),
@@ -376,7 +424,10 @@ impl IpcPluginConnection {
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
-                version: PLUGIN_IPC_PROTOCOL_VERSION,
+                version: VersionRange {
+                    min: PLUGIN_IPC_PROTOCOL_VERSION,
+                    max: PLUGIN_IPC_PROTOCOL_VERSION,
+                },
                 sandbox: self.sandbox.clone(),
                 plugin_config: self.plugin_config.clone(),
             },
@@ -408,7 +459,7 @@ impl IpcPluginConnection {
                 }
                 self.capabilities = capabilities;
             }
-            Some(PluginIpcResponse::Error { message }) => {
+            Some(PluginIpcResponse::Error { message, .. }) => {
                 return Err(PluginHostError::HandshakeFailed {
                     name,
                     reason: message,
@@ -432,12 +483,69 @@ impl IpcPluginConnection {
     /// mapping anything else to an execution error.
     fn expect_ack(resp: PluginIpcResponse, what: &str) -> Result<(), PluginHostError> {
         match resp {
-            PluginIpcResponse::Ack => Ok(()),
-            PluginIpcResponse::Error { message } => Err(PluginHostError::execution(message)),
+            PluginIpcResponse::Ack { .. } => Ok(()),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to {what}: {other:?}"
             ))),
         }
+    }
+
+    /// Injects a `request_id` into a [`PluginIpcRequest`] in-place.
+    fn inject_request_id(req: &mut PluginIpcRequest, request_id: &str) {
+        match req {
+            PluginIpcRequest::GetConfigSchema { request_id: rid }
+            | PluginIpcRequest::ListTools { request_id: rid }
+            | PluginIpcRequest::CallTool {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::SetCallContext {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::ApprovePermission {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::AllowPattern {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::RevokePattern {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::PollDeferred {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::CancelDeferred {
+                request_id: rid, ..
+            } => {
+                *rid = request_id.to_string();
+            }
+            _ => {}
+        }
+    }
+
+    /// Verifies that a response's `request_id` matches the expected value.
+    fn verify_request_id(resp: &PluginIpcResponse, expected: &str) -> Result<(), PluginHostError> {
+        let actual = match resp {
+            PluginIpcResponse::HandshakeAck { .. } | PluginIpcResponse::Pong => return Ok(()),
+            PluginIpcResponse::Ack { request_id }
+            | PluginIpcResponse::ConfigSchema { request_id, .. }
+            | PluginIpcResponse::Error { request_id, .. }
+            | PluginIpcResponse::Tools { request_id, .. }
+            | PluginIpcResponse::CallResult { request_id, .. }
+            | PluginIpcResponse::DeferredAccepted { request_id, .. }
+            | PluginIpcResponse::DeferredStatus { request_id, .. }
+            | PluginIpcResponse::StreamChunk { request_id, .. }
+            | PluginIpcResponse::StreamEnd { request_id, .. }
+            | PluginIpcResponse::StreamError { request_id, .. }
+            | PluginIpcResponse::ChatCompletionResult { request_id, .. }
+            | PluginIpcResponse::EmbedBatchResult { request_id, .. } => request_id,
+        };
+        if !actual.is_empty() && actual != expected {
+            return Err(PluginHostError::execution(format!(
+                "request_id mismatch: expected {expected}, got {actual}"
+            )));
+        }
+        Ok(())
     }
 
     async fn connect_with_retry(
@@ -470,7 +578,33 @@ impl IpcPluginConnection {
         self.do_request_with_timeout(req, self.timeout).await
     }
 
+    /// Returns the `request_id` from a request variant, or `None` if the
+    /// variant does not carry a `request_id` field.
+    fn request_request_id(req: &PluginIpcRequest) -> Option<&str> {
+        match req {
+            PluginIpcRequest::GetConfigSchema { request_id }
+            | PluginIpcRequest::ListTools { request_id }
+            | PluginIpcRequest::CallTool { request_id, .. }
+            | PluginIpcRequest::SetCallContext { request_id, .. }
+            | PluginIpcRequest::ApprovePermission { request_id, .. }
+            | PluginIpcRequest::AllowPattern { request_id, .. }
+            | PluginIpcRequest::RevokePattern { request_id, .. }
+            | PluginIpcRequest::PollDeferred { request_id, .. }
+            | PluginIpcRequest::CancelDeferred { request_id, .. }
+            | PluginIpcRequest::CreateChatStream { request_id, .. }
+            | PluginIpcRequest::ChatCompletion { request_id, .. }
+            | PluginIpcRequest::EmbedBatch { request_id, .. } => Some(request_id.as_str()),
+            PluginIpcRequest::Handshake { .. }
+            | PluginIpcRequest::Shutdown
+            | PluginIpcRequest::Ping => None,
+        }
+    }
+
     /// Sends a request and reads a single response with an explicit timeout.
+    ///
+    /// Generates a UUID for non-streaming requests that don't already carry a
+    /// `request_id` and verifies the response's `request_id` matches, enabling
+    /// concurrent in-flight requests.
     ///
     /// On a transport failure (broken pipe, connection reset, EOF) the stale
     /// stream is dropped, the connection is re-established via
@@ -484,11 +618,27 @@ impl IpcPluginConnection {
     /// never trigger reconnection mid-stream.
     async fn do_request_with_timeout(
         &mut self,
-        req: PluginIpcRequest,
+        mut req: PluginIpcRequest,
         timeout: Duration,
     ) -> Result<PluginIpcResponse, PluginHostError> {
+        let request_id = if let Some(rid) = Self::request_request_id(&req) {
+            if rid.is_empty() {
+                let rid = next_request_id();
+                Self::inject_request_id(&mut req, &rid);
+                rid
+            } else {
+                rid.to_string()
+            }
+        } else {
+            let rid = next_request_id();
+            Self::inject_request_id(&mut req, &rid);
+            rid
+        };
         match self.request_once(&req, timeout).await {
-            Ok(resp) => Ok(resp),
+            Ok(resp) => {
+                Self::verify_request_id(&resp, &request_id)?;
+                Ok(resp)
+            }
             Err(e @ PluginHostError::TransportFailed { .. }) => {
                 tracing::warn!(
                     component = "IpcPluginConnection",
@@ -498,7 +648,9 @@ impl IpcPluginConnection {
                 // Drop the stale stream so reconnect starts from a clean slate.
                 self.stream = None;
                 self.reconnect().await?;
-                self.request_once(&req, timeout).await
+                let resp = self.request_once(&req, timeout).await?;
+                Self::verify_request_id(&resp, &request_id)?;
+                Ok(resp)
             }
             Err(e) => Err(e),
         }

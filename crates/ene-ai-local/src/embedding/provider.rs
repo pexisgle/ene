@@ -1,10 +1,10 @@
 //! `GgufEmbeddingProvider` backed by llama-cpp-2.
 
 use super::EneEmbeddingError;
-use crate::config::ProactiveAcceleration;
 use crate::llama_cpp::{LoadSpec, LoadedModel, embed_text};
-use crate::{EmbeddingKind, EmbeddingProvider};
 use async_trait::async_trait;
+use ene_ai::config::ProactiveAcceleration;
+use ene_ai::{EmbeddingKind, EmbeddingProvider};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Instant;
@@ -80,7 +80,7 @@ impl GgufEmbeddingProvider {
         let emb = embed_text(&guard, &prefixed)?;
         if emb.is_empty() {
             return Err(EneEmbeddingError::Provider(
-                crate::EmbeddingError::EmptyInput,
+                ene_ai::EmbeddingError::EmptyInput,
             ));
         }
         Ok(emb)
@@ -92,7 +92,7 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
     async fn embed_batch(
         &self,
         items: &[(&str, EmbeddingKind)],
-    ) -> Result<Vec<Vec<f32>>, crate::EmbeddingError> {
+    ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
         if items.is_empty() {
             return Ok(Vec::new());
         }
@@ -102,13 +102,13 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
             let mut out = Vec::with_capacity(items.len());
             for &(text, kind) in items {
                 if text.trim().is_empty() {
-                    return Err(crate::EmbeddingError::EmptyInput);
+                    return Err(ene_ai::EmbeddingError::EmptyInput);
                 }
                 let emb = self
                     .embed_internal(text, kind)
-                    .map_err(crate::EmbeddingError::from)?;
+                    .map_err(ene_ai::EmbeddingError::from)?;
                 if emb.len() != self.dims {
-                    return Err(crate::EmbeddingError::DimensionMismatch(format!(
+                    return Err(ene_ai::EmbeddingError::DimensionMismatch(format!(
                         "expected {} dims, got {}",
                         self.dims,
                         emb.len()

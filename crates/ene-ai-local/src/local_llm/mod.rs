@@ -7,12 +7,12 @@ pub use routing::{
     build_proactive_llm_handles,
 };
 
-use crate::config::ProactiveAcceleration;
-use crate::error::LlmProviderError;
 use crate::llama_cpp::{LoadSpec, LoadedModel, generate_chat};
-use crate::message::{LlmMessage, LlmResponseChunk};
-use crate::traits::LlmProvider;
 use async_trait::async_trait;
+use ene_ai::config::ProactiveAcceleration;
+use ene_ai::error::LlmProviderError;
+use ene_ai::message::{LlmMessage, LlmResponseChunk};
+use ene_ai::traits::LlmProvider;
 use parking_lot::Mutex;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -154,8 +154,8 @@ impl LlmProvider for LocalLlamaCppProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AiConfig, LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, TaskRef};
     use crate::local_llm::routing::build_proactive_llm_handles;
+    use ene_ai::config::{AiConfig, LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, TaskRef};
 
     fn test_config() -> AiConfig {
         let mut cfg = AiConfig::default();

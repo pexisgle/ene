@@ -21,7 +21,13 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    if let Err(e) = ene_plugin::run_plugin_server(Box::new(AnthropicPlugin)).await {
+    if let Err(e) = ene_plugin::run_plugin_server(ene_plugin::PluginDispatch::new(
+        None,
+        Some(std::sync::Arc::new(AnthropicPlugin)),
+        None,
+    ))
+    .await
+    {
         tracing::error!(component = "ene-plugin-anthropic", error = %e, "Fatal error");
         std::process::exit(1);
     }

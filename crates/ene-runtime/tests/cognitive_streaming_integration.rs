@@ -92,7 +92,12 @@ impl ToolRegistry for EmptyRegistry {
         vec![]
     }
 
-    async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, PluginHostError> {
+    async fn call_tool(
+        &self,
+        _name: &str,
+        _arguments: &str,
+        _context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<String, PluginHostError> {
         Err(PluginHostError::ExecutionFailed {
             message: "not used".into(),
         })

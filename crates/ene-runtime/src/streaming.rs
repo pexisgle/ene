@@ -298,12 +298,10 @@ pub(crate) async fn perform_tool_executions(
         tool_calls: Some(tool_calls.clone()),
     });
 
-    ctx.registry
-        .set_call_context(&ene_plugin_proto::CallContext {
-            conversation_id: ctx.session_id.to_string(),
-            turn_id: ctx.turn.to_string(),
-        })
-        .await;
+    let call_ctx = ene_plugin_proto::CallContext {
+        conversation_id: ctx.session_id.to_string(),
+        turn_id: ctx.turn.to_string(),
+    };
 
     for call in tool_calls {
         let name = call.name.clone();
@@ -336,8 +334,12 @@ pub(crate) async fn perform_tool_executions(
         } else if background_capable.contains(&name) {
             // Try deferred execution for background-capable tools (#196).
             let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-            match tokio::time::timeout(tool_timeout, ctx.registry.call_tool_deferred(&name, &args))
-                .await
+            match tokio::time::timeout(
+                tool_timeout,
+                ctx.registry
+                    .call_tool_deferred(&name, &args, Some(&call_ctx)),
+            )
+            .await
             {
                 Ok(Ok(ene_plugin_host::DeferredCallResult::Deferred { task_id })) => {
                     // Task accepted for background execution.
@@ -363,7 +365,12 @@ pub(crate) async fn perform_tool_executions(
             }
         } else {
             let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-            match tokio::time::timeout(tool_timeout, ctx.registry.call_tool(&name, &args)).await {
+            match tokio::time::timeout(
+                tool_timeout,
+                ctx.registry.call_tool(&name, &args, Some(&call_ctx)),
+            )
+            .await
+            {
                 Ok(Ok(res)) => Ok(res),
                 Ok(Err(e)) => Err(e),
                 Err(_) => Err(PluginHostError::ExecutionFailed {
@@ -426,7 +433,7 @@ pub(crate) async fn perform_tool_executions(
                         Ok(PermissionDecision::AllowOnce) => {
                             audit_decision = ene_store::AuditDecision::AllowOnce;
                             ctx.registry.approve_permission(req_id.as_str()).await;
-                            result = ctx.registry.call_tool(&name, &args).await;
+                            result = ctx.registry.call_tool(&name, &args, Some(&call_ctx)).await;
                         }
                         Ok(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
@@ -458,7 +465,7 @@ pub(crate) async fn perform_tool_executions(
                                     });
                                 }
                             }
-                            result = ctx.registry.call_tool(&name, &args).await;
+                            result = ctx.registry.call_tool(&name, &args, Some(&call_ctx)).await;
                         }
                         _ => {
                             audit_decision = ene_store::AuditDecision::Denied;
@@ -497,7 +504,10 @@ pub(crate) async fn perform_tool_executions(
                     match resp_rx.await {
                         Ok(UserInputResponse::Multi(answers)) => {
                             let new_args = inject_user_answers(&args, &answers);
-                            result = ctx.registry.call_tool(&name, &new_args).await;
+                            result = ctx
+                                .registry
+                                .call_tool(&name, &new_args, Some(&call_ctx))
+                                .await;
                         }
                         Ok(UserInputResponse::Cancel) | Err(_) => {
                             result = Err(PluginHostError::ExecutionFailed {
@@ -780,6 +790,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
             ) -> Result<String, ene_plugin_host::PluginHostError> {
                 Ok(String::new())
             }
@@ -812,6 +823,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
             ) -> Result<String, ene_plugin_host::PluginHostError> {
                 Ok("fail".to_string())
             }
@@ -930,6 +942,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
             ) -> Result<String, PluginHostError> {
                 Ok(self.output.clone())
             }
@@ -1017,6 +1030,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
             ) -> Result<String, PluginHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
@@ -1139,6 +1153,7 @@ mod tests {
                 &self,
                 _name: &str,
                 _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
             ) -> Result<String, PluginHostError> {
                 let n = self.calls.fetch_add(1, Ordering::SeqCst);
                 match n {

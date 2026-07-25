@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 ene-ai = { workspace = true }
+ene-ai-local = { workspace = true }
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
 ene-config = { workspace = true }
@@ -33,7 +34,7 @@ i18n-embed-fl = "0.10"
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ene-ai = { workspace = true, features = ["vulkan"] }
+ene-ai-local = { workspace = true, features = ["vulkan"] }
 
 [lints]
 workspace = true

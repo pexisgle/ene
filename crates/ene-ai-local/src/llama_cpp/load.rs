@@ -2,8 +2,8 @@
 
 use super::backend::with_backend;
 use super::map_llama_err;
-use crate::config::ProactiveAcceleration;
-use crate::error::LlmProviderError;
+use ene_ai::config::ProactiveAcceleration;
+use ene_ai::error::LlmProviderError;
 use llama_cpp_2::LlamaBackendDeviceType;
 use llama_cpp_2::list_llama_ggml_backend_devices;
 use llama_cpp_2::llama_backend::LlamaBackend;
