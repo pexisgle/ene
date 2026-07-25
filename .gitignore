@@ -8,7 +8,7 @@
 assets/models/
 
 # Local GGUF model directory (used by the local_embedding example)
-models/
+/models/
 
 # Runtime database files
 **/memory.db*
