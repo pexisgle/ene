@@ -1217,6 +1217,10 @@ int main(int argc, char** argv) {
 
     process_shaders();
 
+    for (auto& f : compiles) {
+        f.get();
+    }
+
     write_output_files();
 
     return EXIT_SUCCESS;
