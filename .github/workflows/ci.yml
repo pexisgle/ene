@@ -34,6 +34,9 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: "nix develop --command {0}"
+          cache-directories: ~/.cache/sccache
       - name: Run clippy
         run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 
@@ -46,6 +49,9 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: "nix develop --command {0}"
+          cache-directories: ~/.cache/sccache
       - name: Run tests
         run: nix develop --command cargo test --workspace
 
