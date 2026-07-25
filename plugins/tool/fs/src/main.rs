@@ -47,7 +47,7 @@ use std::sync::Arc;
 async fn main() {
     let provider = provider::FsToolProvider::new();
     if let Err(e) = run_plugin_server(PluginDispatch::new(
-        Some(Arc::new(ToolProviderPlugin(provider))),
+        Some(Arc::new(ToolProviderPlugin::new(provider))),
         None,
         None,
     ))

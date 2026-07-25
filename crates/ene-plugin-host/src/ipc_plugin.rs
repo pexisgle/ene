@@ -516,6 +516,15 @@ impl IpcPluginConnection {
             }
             | PluginIpcRequest::CancelDeferred {
                 request_id: rid, ..
+            }
+            | PluginIpcRequest::CreateChatStream {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::ChatCompletion {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::EmbedBatch {
+                request_id: rid, ..
             } => {
                 *rid = request_id.to_string();
             }

@@ -40,13 +40,6 @@ pub struct ToolPluginCapabilities {
     pub tool_count: usize,
 }
 
-/// Capabilities advertised by an embedding plugin.
-#[derive(Default)]
-pub struct EmbedPluginCapabilities {
-    /// Provider kinds this plugin supports (e.g. `"openai_compatible"`).
-    pub provider_kinds: Vec<String>,
-}
-
 // ── ToolPlugin ──────────────────────────────────────────────────────────
 
 /// Plugin trait for tool execution.
@@ -175,9 +168,6 @@ pub trait LlmPlugin: Send + Sync {
 /// Plugin trait for batch embedding computation.
 #[async_trait]
 pub trait EmbedPlugin: Send + Sync {
-    /// Returns the embedding capabilities advertised during the handshake.
-    fn embed_capabilities(&self) -> EmbedPluginCapabilities;
-
     /// Computes embeddings for a batch of text items.
     ///
     /// The default returns [`PluginError::NotSupported`] for plugins that

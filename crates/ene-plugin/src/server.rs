@@ -662,7 +662,7 @@ async fn handle_chat_stream<W: AsyncWriteExt + Unpin>(
 )]
 mod tests {
     use super::*;
-    use crate::plugin::{EmbedPluginCapabilities, PluginStreamChunk, ToolPluginCapabilities};
+    use crate::plugin::{PluginStreamChunk, ToolPluginCapabilities};
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{DeferredStatus, LlmProviderSpec, ToolSpec, VersionRange};
@@ -758,10 +758,6 @@ mod tests {
 
     #[async_trait]
     impl EmbedPlugin for MockEmbedPlugin {
-        fn embed_capabilities(&self) -> EmbedPluginCapabilities {
-            EmbedPluginCapabilities::default()
-        }
-
         async fn embed_batch(
             &self,
             _kind: &str,

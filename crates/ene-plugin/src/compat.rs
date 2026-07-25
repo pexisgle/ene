@@ -10,10 +10,14 @@ use ene_plugin_proto::SandboxConfigData;
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, ToolError, ToolProvider, ToolSpec,
 };
+use parking_lot::Mutex;
 
 use crate::plugin::{ToolPlugin, ToolPluginCapabilities};
 
 /// Wraps any [`ToolProvider`] into a [`ToolPlugin`].
+///
+/// Serializes `set_call_context` + tool call to prevent interleaved context
+/// from concurrent connections through the legacy `run_tool_server` path.
 ///
 /// # Example
 ///
@@ -31,83 +35,114 @@ use crate::plugin::{ToolPlugin, ToolPluginCapabilities};
 /// async fn main() {
 ///     let provider = MyProvider;
 ///     let _ = run_plugin_server(PluginDispatch::new(
-///         Some(std::sync::Arc::new(ToolProviderPlugin(provider))),
+///         Some(std::sync::Arc::new(ToolProviderPlugin::new(provider))),
 ///         None,
 ///         None,
 ///     )).await;
 /// }
 /// ```
-pub struct ToolProviderPlugin<T: ToolProvider>(pub T);
+pub struct ToolProviderPlugin<T: ToolProvider> {
+    /// The wrapped legacy tool provider.
+    pub provider: T,
+    /// Serializes `set_call_context` + tool call pairs so that concurrent
+    /// connections through the shared-`&self` legacy path cannot interleave
+    /// their context writes.  Held across async `.await` boundaries; this is
+    /// safe because `parking_lot::Mutex` is `Send`.
+    call_mutex: Mutex<()>,
+}
+
+impl<T: ToolProvider> ToolProviderPlugin<T> {
+    /// Wraps a [`ToolProvider`] into a [`ToolProviderPlugin`].
+    pub fn new(provider: T) -> Self {
+        Self {
+            provider,
+            call_mutex: Mutex::new(()),
+        }
+    }
+}
 
 #[async_trait]
 impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
     fn tool_capabilities(&self) -> ToolPluginCapabilities {
         ToolPluginCapabilities {
-            tool_count: self.0.list_specs().len(),
+            tool_count: self.provider.list_specs().len(),
         }
     }
 
     fn list_tool_specs(&self) -> Vec<ToolSpec> {
-        self.0.list_specs()
+        self.provider.list_specs()
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "Intentionally held across await to serialize set_call_context + tool call; parking_lot::Mutex with send_guard feature is Send-safe across await"
+    )]
     async fn call_tool(
         &self,
         name: &str,
         args: &str,
         context: Option<&CallContext>,
     ) -> Result<String, ToolError> {
+        let _lock = self.call_mutex.lock();
         if let Some(ctx) = context {
-            self.0.set_call_context(ctx);
+            self.provider.set_call_context(ctx);
         }
-        self.0.call_tool(name, args).await
+        // Lock is intentionally held through the await to prevent interleaving.
+        // parking_lot::Mutex with send_guard is Send-safe across await points.
+        self.provider.call_tool(name, args).await
     }
 
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "Intentionally held across await to serialize set_call_context + tool call; parking_lot::Mutex with send_guard feature is Send-safe across await"
+    )]
     async fn call_tool_deferred(
         &self,
         name: &str,
         arguments: &str,
         context: Option<&CallContext>,
     ) -> Result<DeferredOutcome, ToolError> {
+        let _lock = self.call_mutex.lock();
         if let Some(ctx) = context {
-            self.0.set_call_context(ctx);
+            self.provider.set_call_context(ctx);
         }
-        self.0.call_tool_deferred(name, arguments).await
+        // Lock is intentionally held through the await to prevent interleaving.
+        self.provider.call_tool_deferred(name, arguments).await
     }
 
     fn poll_deferred(&self, task_id: &str) -> Result<DeferredStatus, ToolError> {
-        Ok(self.0.poll_deferred(task_id))
+        Ok(self.provider.poll_deferred(task_id))
     }
 
     fn cancel_deferred(&self, task_id: &str) -> Result<(), ToolError> {
-        self.0.cancel_deferred(task_id);
+        self.provider.cancel_deferred(task_id);
         Ok(())
     }
 
     fn approve_permission(&self, request_id: &str) -> Result<(), ToolError> {
-        self.0.approve_permission(request_id);
+        self.provider.approve_permission(request_id);
         Ok(())
     }
 
     fn allow_pattern(&self, action: &str, target_pattern: &str) -> Result<(), ToolError> {
-        self.0.allow_pattern(action, target_pattern);
+        self.provider.allow_pattern(action, target_pattern);
         Ok(())
     }
 
     fn revoke_pattern(&self, action: &str, target_pattern: &str) -> Result<(), ToolError> {
-        self.0.revoke_pattern(action, target_pattern);
+        self.provider.revoke_pattern(action, target_pattern);
         Ok(())
     }
 
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
-        self.0.set_sandbox(sandbox);
+        self.provider.set_sandbox(sandbox);
     }
 
     fn set_config(&self, config: &serde_json::Value) {
-        self.0.set_config(config);
+        self.provider.set_config(config);
     }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
-        self.0.config_schema()
+        self.provider.config_schema()
     }
 }

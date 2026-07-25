@@ -57,8 +57,7 @@ pub mod tool_server;
 pub use compat::ToolProviderPlugin;
 pub use host_registry::HostRegistry;
 pub use plugin::{
-    EmbedPlugin, EmbedPluginCapabilities, LlmPlugin, PluginStream, PluginStreamChunk, ToolPlugin,
-    ToolPluginCapabilities,
+    EmbedPlugin, LlmPlugin, PluginStream, PluginStreamChunk, ToolPlugin, ToolPluginCapabilities,
 };
 pub use server::{PluginDispatch, run_plugin_server};
 

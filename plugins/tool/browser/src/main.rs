@@ -16,7 +16,7 @@ async fn main() {
     let provider = provider::BrowserToolProvider::new();
     let store = provider.store.clone();
     let result = run_plugin_server(PluginDispatch::new(
-        Some(Arc::new(ToolProviderPlugin(provider))),
+        Some(Arc::new(ToolProviderPlugin::new(provider))),
         None,
         None,
     ))
