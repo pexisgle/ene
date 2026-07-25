@@ -8,15 +8,13 @@ Helper library crates designed to support tool plugin creation, stateful storage
 
 ## 1. `ene-tool-common` (Common Action Traits & Providers)
 
-Provides standard action traits and providers for tool binaries:
-- `ToolAction`: Trait for async execution of individual tool actions.
-- `ActionSetProvider`: Container for registering multiple `ToolAction` types in a single plugin binary.
+Shared traits (`ActionSetProvider`), prelude types, and reflection helpers used by plugins to implement tool actions.
 
 ---
 
-## 2. `ene-tool-db` (Stateful Tool Database IPC Client)
+## 2. `ene-plugin-db` (Stateful Plugin Database IPC Client)
 
-Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) use `ene-tool-db` to communicate with the host's `DbServer` socket:
+Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) use `ene-plugin-db` to communicate with the host's `DbServer` socket:
 - `UndoManager`: Manages file modification undo stacks for `ene-plugin-fs`.
 - `TodoStore`: Manages active todo item CRUD operations for `ene-plugin-utility`.
 

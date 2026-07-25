@@ -1,5 +1,5 @@
 use crate::schema::utility_db_schema;
-use ene_tool_db::{DbClient, DbError, DbFilter, DbOrderBy, DbValue, Row};
+use ene_plugin_db::{DbClient, DbError, DbFilter, DbOrderBy, DbValue, Row};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -502,8 +502,8 @@ impl TodoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_plugin_db::{DbRequest, DbResponse};
     use ene_plugin_proto::transport::{IpcListener, IpcStream, cleanup_path};
-    use ene_tool_db::{DbRequest, DbResponse};
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -554,8 +554,8 @@ mod tests {
                             let bv = b.get(&ob.column);
                             let cmp = compare_values(av, bv);
                             match ob.direction {
-                                ene_tool_db::DbOrderDirection::Desc => cmp.reverse(),
-                                ene_tool_db::DbOrderDirection::Asc => cmp,
+                                ene_plugin_db::DbOrderDirection::Desc => cmp.reverse(),
+                                ene_plugin_db::DbOrderDirection::Asc => cmp,
                             }
                         });
                     }
@@ -578,7 +578,7 @@ mod tests {
                 }
                 DbRequest::Ping => DbResponse::Pong,
                 _ => DbResponse::Error {
-                    code: ene_tool_db::DbErrorCode::Internal,
+                    code: ene_plugin_db::DbErrorCode::Internal,
                     message: "unsupported request in mock".to_string(),
                 },
             }

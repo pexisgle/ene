@@ -9,10 +9,10 @@ publish.workspace = true
 
 [dependencies]
 ene-plugin = { workspace = true }
+ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
-ene-tool-db = { workspace = true }
 schemars = { workspace = true }
 chrono = { workspace = true }
 tokio = { workspace = true }

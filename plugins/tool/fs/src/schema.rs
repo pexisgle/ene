@@ -1,4 +1,4 @@
-use ene_tool_db::{DbColumn, DbIndex, DbSchema, DbTable, DbType};
+use ene_plugin_db::{DbColumn, DbIndex, DbSchema, DbTable, DbType};
 
 pub fn fs_db_schema() -> DbSchema {
     DbSchema {

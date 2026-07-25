@@ -25,8 +25,8 @@ blake3 = { workspace = true }
 parking_lot = { workspace = true }
 
 ene-config = { workspace = true }
+ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
-ene-tool-db = { workspace = true }
 serde = { workspace = true }
 ctor = { workspace = true }
 

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::entities::tool_schemas;
-use ene_tool_db::{
+use ene_plugin_db::{
     DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable, DbValue, Row,
 };
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
@@ -748,10 +748,10 @@ impl DbIpcServer {
             sql.push_str(&col.name);
             sql.push(' ');
             sql.push_str(match col.ty {
-                ene_tool_db::DbType::Integer | ene_tool_db::DbType::Boolean => "INTEGER",
-                ene_tool_db::DbType::Real => "REAL",
-                ene_tool_db::DbType::Text => "TEXT",
-                ene_tool_db::DbType::Blob => "BLOB",
+                ene_plugin_db::DbType::Integer | ene_plugin_db::DbType::Boolean => "INTEGER",
+                ene_plugin_db::DbType::Real => "REAL",
+                ene_plugin_db::DbType::Text => "TEXT",
+                ene_plugin_db::DbType::Blob => "BLOB",
             });
 
             if !col.nullable {
@@ -804,7 +804,7 @@ impl DbIpcServer {
         }
     }
 
-    fn build_create_index_sql(index: &ene_tool_db::DbIndex) -> String {
+    fn build_create_index_sql(index: &ene_plugin_db::DbIndex) -> String {
         let columns = index.columns.join(", ");
         let unique = if index.unique { "UNIQUE " } else { "" };
         format!(
@@ -939,7 +939,7 @@ impl DbIpcServer {
         select.cond_where(cond);
 
         for o in &order_by {
-            let order = if matches!(o.direction, ene_tool_db::DbOrderDirection::Desc) {
+            let order = if matches!(o.direction, ene_plugin_db::DbOrderDirection::Desc) {
                 sea_orm::sea_query::Order::Desc
             } else {
                 sea_orm::sea_query::Order::Asc
@@ -969,7 +969,7 @@ impl DbIpcServer {
             .get(table)
             .ok_or_else(|| DbServerError::UnknownTable(table.to_string()))?;
 
-        let col_def_map: HashMap<&str, &ene_tool_db::DbColumn> = table_def
+        let col_def_map: HashMap<&str, &ene_plugin_db::DbColumn> = table_def
             .columns
             .iter()
             .map(|c| (c.name.as_str(), c))
@@ -982,35 +982,35 @@ impl DbIpcServer {
                 let col_def = col_def_map.get(col.as_str());
                 let val = if let Some(def) = col_def {
                     match def.ty {
-                        ene_tool_db::DbType::Integer => {
+                        ene_plugin_db::DbType::Integer => {
                             if let Ok(Some(v)) = result.try_get::<Option<i64>>("", col) {
                                 DbValue::Int(v)
                             } else {
                                 DbValue::Null
                             }
                         }
-                        ene_tool_db::DbType::Real => {
+                        ene_plugin_db::DbType::Real => {
                             if let Ok(Some(v)) = result.try_get::<Option<f64>>("", col) {
                                 DbValue::Float(v)
                             } else {
                                 DbValue::Null
                             }
                         }
-                        ene_tool_db::DbType::Text => {
+                        ene_plugin_db::DbType::Text => {
                             if let Ok(Some(v)) = result.try_get::<Option<String>>("", col) {
                                 DbValue::Text(v)
                             } else {
                                 DbValue::Null
                             }
                         }
-                        ene_tool_db::DbType::Blob => {
+                        ene_plugin_db::DbType::Blob => {
                             if let Ok(Some(v)) = result.try_get::<Option<Vec<u8>>>("", col) {
                                 DbValue::Blob(v)
                             } else {
                                 DbValue::Null
                             }
                         }
-                        ene_tool_db::DbType::Boolean => {
+                        ene_plugin_db::DbType::Boolean => {
                             if let Ok(Some(v)) = result.try_get::<Option<bool>>("", col) {
                                 DbValue::Bool(v)
                             } else if let Ok(Some(v)) = result.try_get::<Option<i64>>("", col) {
@@ -1223,21 +1223,21 @@ mod tests {
 
     #[test]
     fn build_create_table_sql_emits_valid_ddl() {
-        let table = ene_tool_db::DbTable {
+        let table = ene_plugin_db::DbTable {
             name: "fs_notes".to_string(),
             columns: vec![
-                ene_tool_db::DbColumn {
+                ene_plugin_db::DbColumn {
                     name: "id".to_string(),
-                    ty: ene_tool_db::DbType::Integer,
+                    ty: ene_plugin_db::DbType::Integer,
                     nullable: false,
                     primary_key: true,
                     auto_increment: true,
                     unique: false,
                     default: None,
                 },
-                ene_tool_db::DbColumn {
+                ene_plugin_db::DbColumn {
                     name: "body".to_string(),
-                    ty: ene_tool_db::DbType::Text,
+                    ty: ene_plugin_db::DbType::Text,
                     nullable: true,
                     primary_key: false,
                     auto_increment: false,
@@ -1271,14 +1271,14 @@ mod tests {
         .await
         .unwrap();
 
-        let mut declared_tables: HashMap<String, ene_tool_db::DbTable> = HashMap::new();
+        let mut declared_tables: HashMap<String, ene_plugin_db::DbTable> = HashMap::new();
         declared_tables.insert(
             "fs_test".to_string(),
-            ene_tool_db::DbTable {
+            ene_plugin_db::DbTable {
                 name: "fs_test".to_string(),
-                columns: vec![ene_tool_db::DbColumn {
+                columns: vec![ene_plugin_db::DbColumn {
                     name: "name".to_string(),
-                    ty: ene_tool_db::DbType::Text,
+                    ty: ene_plugin_db::DbType::Text,
                     nullable: false,
                     primary_key: false,
                     auto_increment: false,
@@ -1303,17 +1303,17 @@ mod tests {
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            ene_tool_db::DbRequest::Insert {
+            ene_plugin_db::DbRequest::Insert {
                 table: "fs_test".to_string(),
                 row: std::collections::BTreeMap::from([(
                     "name".to_string(),
-                    ene_tool_db::DbValue::Text("first".to_string()),
+                    ene_plugin_db::DbValue::Text("first".to_string()),
                 )]),
             },
         )
         .await;
         let first_id = match insert_resp {
-            ene_tool_db::DbResponse::Insert { rowid } => rowid,
+            ene_plugin_db::DbResponse::Insert { rowid } => rowid,
             other => panic!("expected Insert, got {other:?}"),
         };
         assert!(first_id > 0);
@@ -1326,11 +1326,11 @@ mod tests {
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            ene_tool_db::DbRequest::LastInsertRowId,
+            ene_plugin_db::DbRequest::LastInsertRowId,
         )
         .await;
         let lookup_id = match lookup {
-            ene_tool_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            ene_plugin_db::DbResponse::LastInsertRowId { rowid } => rowid,
             other => panic!("expected LastInsertRowId, got {other:?}"),
         };
         assert_eq!(lookup_id, first_id);
@@ -1344,17 +1344,17 @@ mod tests {
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            ene_tool_db::DbRequest::Insert {
+            ene_plugin_db::DbRequest::Insert {
                 table: "fs_test".to_string(),
                 row: std::collections::BTreeMap::from([(
                     "name".to_string(),
-                    ene_tool_db::DbValue::Text("second".to_string()),
+                    ene_plugin_db::DbValue::Text("second".to_string()),
                 )]),
             },
         )
         .await;
         let second_id = match insert_resp2 {
-            ene_tool_db::DbResponse::Insert { rowid } => rowid,
+            ene_plugin_db::DbResponse::Insert { rowid } => rowid,
             other => panic!("expected Insert, got {other:?}"),
         };
         assert!(second_id > first_id);
@@ -1366,11 +1366,11 @@ mod tests {
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            ene_tool_db::DbRequest::LastInsertRowId,
+            ene_plugin_db::DbRequest::LastInsertRowId,
         )
         .await;
         let lookup2_id = match lookup2 {
-            ene_tool_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            ene_plugin_db::DbResponse::LastInsertRowId { rowid } => rowid,
             other => panic!("expected LastInsertRowId, got {other:?}"),
         };
         assert_eq!(lookup2_id, second_id);

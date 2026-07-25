@@ -45,11 +45,11 @@ Ene ワークスペース
 │   ├── ene-plugin         (プラグイン開発 SDK & アダプタファサード)
 │   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
 │   ├── ene-tool-common    (ツールプラグイン向け共通アクション定義)
-│   ├── ene-tool-db        (ツール用状態保持 DB IPC クライアント)
+│   ├── ene-plugin-db      (プラグイン用状態保持 DB IPC クライアント)
 │   ├── ene-tool-derive    (ツールアクション用 Proc-macro derive)
 │   └── ene-tool-rag       (ツール仕様の検索拡張生成 RAG)
 └── プロセス外プラグイン
-    ├── ene-plugin-anthropic (Anthropic IPC プロバイダプラグイン)
+    ├── plugins/provider/* (プロバイダプラグイン: anthropic)
     └── plugins/tool/*     (ツールプラグイン: app, browser, fs, utility, web)
 ```
 

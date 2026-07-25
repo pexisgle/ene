@@ -53,7 +53,7 @@ pub enum EneEvent {
 
 ## DB IPC Server (`DbServer`)
 
-`ene-runtime` opens a local Unix Domain Socket (UDS) server that allows stateful tool sub-processes (`ene-plugin-fs`, `ene-plugin-utility`) to execute scoped CRUD operations on `undo.db` and `todo.db` via `ene-tool-db`.
+`ene-runtime` opens a local Unix Domain Socket (UDS) server that allows stateful tool sub-processes (`ene-plugin-fs`, `ene-plugin-utility`) to execute scoped CRUD operations on `undo.db` and `todo.db` via `ene-plugin-db`.
 
 ---
 

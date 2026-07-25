@@ -55,13 +55,13 @@ flowchart TD
   ToolRag --> Proto
 
   Store --> Config
-  Store --> ToolDb[crates/ene-tool-db]
+  Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
   CommonTool[crates/ene-tool-common] --> Tool
   CommonTool --> Derive[crates/ene-tool-derive]
 
-  ToolHost -.spawns IPC.-> Anthropic[plugins/ene-plugin-anthropic]
+  ToolHost -.spawns IPC.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.spawns IPC.-> ToolApp[plugins/tool/app]
   ToolHost -.spawns IPC.-> ToolBrowser[plugins/tool/browser]
   ToolHost -.spawns IPC.-> ToolFs[plugins/tool/fs]
@@ -125,7 +125,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-plugin-proto` | IPC Protocol v4 wire messages, versioning, framing, tool types |
 | `ene-plugin` | Plugin authoring SDK & `ToolPluginAdapter` facade |
 | `ene-tool-common` | Shared action traits (`ActionSetProvider`, prelude) for tool developers |
-| `ene-tool-db` | Typed IPC client for stateful tool database operations |
+| `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
 | `ene-tool-derive` | Proc-macro `#[derive(ToolAction)]` |
 | `ene-tool-rag` | Retrieval-augmented tool selection and reranking |
 | `ene-vrm` | VRM 1.0 avatar loading and wgpu renderer |

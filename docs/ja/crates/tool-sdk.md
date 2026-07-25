@@ -1,6 +1,6 @@
 # ツール SDK 関連クレート — API リファレンス
 
-> **クレート**: `ene-tool-common` | `ene-tool-db` | `ene-tool-derive` | `ene-tool-rag`
+> **クレート**: `ene-tool-common` | `ene-plugin-db` | `ene-tool-derive` | `ene-tool-rag`
 
 ツールプラグインの開発、ステートフルなストレージ操作、Proc-macro derive、および RAG によるツール探索を支援するライブラリクレート群です。
 
@@ -14,9 +14,9 @@
 
 ---
 
-## 2. `ene-tool-db` (ステートフルツール用 DB IPC クライアント)
+## 2. `ene-plugin-db` (ステートフルツール用 DB IPC クライアント)
 
-状態を保持するツールプラグイン (`ene-plugin-fs`, `ene-plugin-utility`) は `ene-tool-db` を使用してホストの `DbServer` ソケットと通信します：
+状態を保持するツールプラグイン (`ene-plugin-fs`, `ene-plugin-utility`) は `ene-plugin-db` を使用してホストの `DbServer` ソケットと通信します：
 - `UndoManager`: `ene-plugin-fs` 向けにファイルの変更・元戻しスタックを管理します。
 - `TodoStore`: `ene-plugin-utility` 向けにアクティブな TODO 項目の CRUD 操作を管理します。
 

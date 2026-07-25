@@ -53,7 +53,7 @@ pub enum EneEvent {
 
 ## DB IPC サーバー (`DbServer`)
 
-`ene-runtime` はローカル Unix ドメインソケット (UDS) サーバーを起動し、状態を保持するツールサブプロセス (`ene-plugin-fs`, `ene-plugin-utility`) が `ene-tool-db` を介して `undo.db` / `todo.db` に対するスコープ付き CRUD 操作を実行できるようにします。
+`ene-runtime` はローカル Unix ドメインソケット (UDS) サーバーを起動し、状態を保持するツールサブプロセス (`ene-plugin-fs`, `ene-plugin-utility`) が `ene-plugin-db` を介して `undo.db` / `todo.db` に対するスコープ付き CRUD 操作を実行できるようにします。
 
 ---
 

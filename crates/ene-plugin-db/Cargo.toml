@@ -1,8 +1,8 @@
 [package]
-name = "ene-tool-db"
+name = "ene-plugin-db"
 version.workspace = true
 edition.workspace = true
-description = "Feature-agnostic typed CRUD database API for tool binaries, communicating with the core DB server over IPC"
+description = "Feature-agnostic typed CRUD database API for plugin binaries, communicating with the core DB server over IPC"
 license.workspace = true
 repository.workspace = true
 publish.workspace = true

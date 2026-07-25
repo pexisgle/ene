@@ -1,4 +1,4 @@
-use ene_tool_db::{DbColumn, DbIndex, DbSchema, DbTable, DbType, DbValue};
+use ene_plugin_db::{DbColumn, DbIndex, DbSchema, DbTable, DbType, DbValue};
 
 /// Returns the DB schema for the utility tool's todo tables.
 pub fn utility_db_schema() -> DbSchema {

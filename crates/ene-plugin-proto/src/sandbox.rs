@@ -51,13 +51,13 @@ ene_config::define_tool_config!(
         pub max_shell_output_bytes: usize = default_max_shell_output_bytes(),
         /// Maximum lines in shell output.
         pub max_shell_output_lines: usize = default_max_shell_output_lines(),
-        /// Path to the per-tool DB socket. Tool binaries connect to this
+        /// Path to the per-plugin DB socket. Plugin binaries connect to this
         /// Unix socket to access the core DB server for typed CRUD operations.
         pub db_socket: Option<String> = None,
-        /// Pre-shared auth token for the per-tool DB IPC server. The
-        /// tool binary must present this token in a [`ene_tool_db::DbRequest::Handshake`]
+        /// Pre-shared auth token for the per-plugin DB IPC server. The
+        /// plugin binary must present this token in a [`ene_plugin_db::DbRequest::Handshake`]
         /// before any other request. `None` disables DB access for
-        /// this tool.
+        /// this plugin.
         pub db_auth_token: Option<String> = None,
     }
 );

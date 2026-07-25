@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Utc;
-use ene_tool_db::{DbClient, DbFilter, DbOrderBy, DbValue, Row};
+use ene_plugin_db::{DbClient, DbFilter, DbOrderBy, DbValue, Row};
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
@@ -14,7 +14,7 @@ use crate::schema::fs_db_schema;
 #[derive(Debug, thiserror::Error)]
 pub enum UndoError {
     #[error("database error: {0}")]
-    Db(#[from] ene_tool_db::DbError),
+    Db(#[from] ene_plugin_db::DbError),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

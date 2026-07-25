@@ -55,13 +55,13 @@ flowchart TD
   ToolRag --> Proto
 
   Store --> Config
-  Store --> ToolDb[crates/ene-tool-db]
+  Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
   CommonTool[crates/ene-tool-common] --> Tool
   CommonTool --> Derive[crates/ene-tool-derive]
 
-  ToolHost -.IPC生成.-> Anthropic[plugins/ene-plugin-anthropic]
+  ToolHost -.IPC生成.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.IPC生成.-> ToolApp[plugins/tool/app]
   ToolHost -.IPC生成.-> ToolBrowser[plugins/tool/browser]
   ToolHost -.IPC生成.-> ToolFs[plugins/tool/fs]
@@ -122,10 +122,10 @@ flowchart TD
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
 | `ene-connector` | プラットフォーム連携 (Discord, Telegram, Slack, Webhook) および MCP クライアント/サーバーブリッジ |
 | `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
-| `ene-plugin-proto` | IPC Protocol v4 ワイヤーメッセージ、パケットフレーミング、ツール型 |
-| `ene-plugin` | プラグイン開発 SDK および `ToolPluginAdapter` ファサード |
+| `ene-plugin-proto` | IPC Protocol v4 ワイヤーメッセージ、バージョン定義、フレーミング |
+| `ene-plugin` | プラグイン開発 SDK & `ToolPluginAdapter` ファサード |
 | `ene-tool-common` | ツール開発者向け共通アクション定義 (`ActionSetProvider`, prelude) |
-| `ene-tool-db` | ステートフルツールの DB 操作用型付き IPC クライアント |
+| `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
 | `ene-tool-derive` | Proc-macro `#[derive(ToolAction)]` |
 | `ene-tool-rag` | ツール仕様の検索拡張生成 (RAG) と再ランク |
 | `ene-vrm` | VRM 1.0 アバター読み込みおよび wgpu レンダラー |

@@ -25,7 +25,7 @@ pub type Row = BTreeMap<String, DbValue>;
 /// # Examples
 ///
 /// ```
-/// use ene_tool_db::{row, DbValue};
+/// use ene_plugin_db::{row, DbValue};
 ///
 /// let row = row! {
 ///     "name" => DbValue::Text("Alice".into()),

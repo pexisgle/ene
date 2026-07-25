@@ -503,8 +503,10 @@ mod tests {
 
         #[tokio::test]
         async fn connect_with_token_captures_token_for_reconnect() {
-            let socket_path: PathBuf = std::env::temp_dir()
-                .join(format!("ene-tool-db-reconnect-{}.sock", std::process::id()));
+            let socket_path: PathBuf = std::env::temp_dir().join(format!(
+                "ene-plugin-db-reconnect-{}.sock",
+                std::process::id()
+            ));
             cleanup_path(&socket_path);
 
             let expected_token = "test-token-secret";

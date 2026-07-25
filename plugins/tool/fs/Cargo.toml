@@ -13,10 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 ene-plugin = { workspace = true }
+ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-tool-common = { workspace = true }
 ene-tool-derive = { workspace = true }
-ene-tool-db = { workspace = true }
 tokio = { workspace = true, features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

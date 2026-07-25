@@ -19,8 +19,8 @@
 //! - `ene-store` is the **sole owner** of the `SQLite` / `sea-orm` connection and schema
 //!   for the entire workspace. No other crate (`ene-mind`, `ene-runtime`, tool
 //!   binaries) opens its own database connection or issues raw SQL against
-//!   `memory.db`; they call into `MemoryStore` (or, for tool binaries, the IPC-based
-//!   `ene-tool-db` client backed by `ene-store`'s `db_server`) instead.
+//!   `memory.db`; they call into `MemoryStore` (or, for plugin binaries, the IPC-based
+//!   `ene-plugin-db` client backed by `ene-store`'s `db_server`) instead.
 //! - Depends on: `ene-config`. The store has no LLM, embedding
 //!   provider, or prompt-assembly dependency; callers supply vectors and the mind
 //!   runtime owns summarization and prompt formatting.

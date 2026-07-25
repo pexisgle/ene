@@ -2708,6 +2708,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-plugin-db"
+version = "0.1.0"
+dependencies = [
+ "ene-plugin-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "ene-plugin-fs"
 version = "0.1.0"
 dependencies = [
@@ -2715,9 +2726,9 @@ dependencies = [
  "chrono",
  "dashmap",
  "ene-plugin",
+ "ene-plugin-db",
  "ene-plugin-proto",
  "ene-tool-common",
- "ene-tool-db",
  "ene-tool-derive",
  "flate2",
  "glob",
@@ -2784,9 +2795,9 @@ dependencies = [
  "async-trait",
  "chrono",
  "ene-plugin",
+ "ene-plugin-db",
  "ene-plugin-proto",
  "ene-tool-common",
- "ene-tool-db",
  "ene-tool-derive",
  "parking_lot",
  "schemars",
@@ -2859,8 +2870,8 @@ dependencies = [
  "chrono",
  "ctor",
  "ene-config",
+ "ene-plugin-db",
  "ene-plugin-proto",
- "ene-tool-db",
  "libsqlite3-sys",
  "parking_lot",
  "sea-orm",
@@ -2893,17 +2904,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "ene-tool-db"
-version = "0.1.0"
-dependencies = [
- "ene-plugin-proto",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]
