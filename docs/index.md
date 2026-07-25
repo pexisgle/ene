@@ -1,15 +1,68 @@
-# ene Documentation
+# Ene Documentation
 
-ene is a local AI character platform implemented as a Rust workspace: LLM chat, optional tools, long-term memory, and animated VRM characters on desktop.
+**Ene** is a local AI character platform implemented in Rust 2024: featuring LLM chat, rich tool plugins, long-term memory recall, local voice processing, and animated VRM avatars on desktop.
 
-[日本語](ja/index.md)
+[日本語ドキュメント (Japanese)](ja/index.md)
 
-## Choose a path
+---
 
-| Path | Audience | Start here |
-|------|----------|------------|
-| **[Developer Guide](guide/index.md)** | Humans building or running ene | [Getting started](guide/getting-started.md) |
-| **[Reference](reference/index.md)** | AI agents and deep implementation work | [API v1](reference/architecture/api-v1.md) |
+## Documentation Structure
 
-- **Guide** — concepts, how to configure/run apps, tool catalog, practical recipes.
-- **Reference** — locked design (ADRs), crate APIs, runtime internals, IPC, full settings schema.
+The documentation is organized into four clear sections:
+
+| Section | Target Audience | Description |
+|---|---|---|
+| **[Getting Started](getting-started.md)** | Users & Developers | Installation, dependencies, building, and running CLI & Desktop apps. |
+| **[Architecture](architecture.md)** | System Architects & Contributors | Workspace design, API v1 host contract, turn pipeline, IPC protocol v4. |
+| **[Configuration](configuration.md)** | Operators & Developers | Full settings reference (`ENE_*` env vars, config files, character cards). |
+| **[Concepts](concepts/turn-and-session.md)** | Developers | Deep-dives into turns, memory, voice/avatar, plugins, and MCP integration. |
+| **[Crates Reference](crates/runtime.md)** | Developers & Contributors | Public API and internal architecture of the 16 workspace crates. |
+| **[Applications](apps/cli.md)** | End Users | Guides for using `ene-cli` and `ene-desktop`. |
+
+---
+
+## Workspace Map
+
+Ene is structured as a modular Cargo workspace composed of **16 crates**, **6 plugin binaries**, and **2 host applications**:
+
+```text
+Ene Workspace
+├── Apps
+│   ├── ene-cli            (CLI REPL application)
+│   └── ene-desktop        (GUI desktop app with 3D VRM avatar & voice)
+├── Core Engine
+│   ├── ene-runtime        (Actor-based host facade & system turn engine)
+│   ├── ene-mind           (Cognitive engine: session, prompt, affect, proactive, memory writer)
+│   ├── ene-store          (SQLite + SeaORM + sqlite-vec memory & vector store)
+│   ├── ene-config         (Settings, character cards, schema definition)
+│   ├── ene-ai             (Core AI provider traits, OpenAI, Anthropic adapter)
+│   ├── ene-ai-local       (Local LLM inference via llama-cpp-2)
+│   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
+│   ├── ene-connector      (Shared connector framework & MCP bridge)
+│   └── ene-vrm            (3D VRM 1.0 loader & wgpu renderer)
+├── Plugin Architecture
+│   ├── ene-plugin-proto   (IPC wire protocol v4 definitions)
+│   ├── ene-plugin         (Plugin authoring SDK & adapter facade)
+│   ├── ene-plugin-host    (Plugin process manager & supervisor)
+│   ├── ene-tool-common    (Common action traits & helpers for tool plugins)
+│   ├── ene-tool-db        (Tool stateful DB IPC client)
+│   ├── ene-tool-derive    (Proc-macro derive for tool actions)
+│   └── ene-tool-rag       (Retrieval-augmented tool specification search)
+└── Out-of-Process Plugins
+    ├── ene-plugin-anthropic (Anthropic IPC provider plugin)
+    └── plugins/tool/*     (Tool plugins: app, browser, fs, utility, web)
+```
+
+---
+
+## Navigation Quick Links
+
+- [Setup & Running](getting-started.md)
+- [System Architecture & Design](architecture.md)
+- [Settings & Configuration](configuration.md)
+- [Turns & Sessions](concepts/turn-and-session.md)
+- [Memory & Recall](concepts/memory-system.md)
+- [Voice & Avatar](concepts/voice-and-avatar.md)
+- [Plugins & MCP System](concepts/plugins-and-mcp.md)
+- [CLI User Guide](apps/cli.md)
+- [Desktop User Guide](apps/desktop.md)

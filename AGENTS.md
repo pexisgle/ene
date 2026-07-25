@@ -14,12 +14,12 @@ without `--workspace` do not cover the whole repository.
 
 | Need | Start here |
 |---|---|
-| Setup | `README.md`, `docs/guide/getting-started.md` |
-| Config/paths | `docs/guide/configure.md`, `docs/reference/configuration/settings.md`, `crates/ene-config/src/` |
-| Architecture/API | `docs/reference/architecture/overview.md`, `docs/reference/architecture/api-v1.md` |
-| Runtime/events | `docs/reference/runtime/streaming-events.md`, `docs/reference/runtime/streaming.md` |
-| Plugins/Tools/IPC | `docs/reference/tools/overview.md`, `docs/reference/tools/sdk.md`, `docs/guide/tools/write-a-tool.md` |
-| Apps | `docs/guide/apps/cli.md`, `docs/guide/apps/desktop.md` |
+| Setup | `README.md`, `docs/getting-started.md` |
+| Config/paths | `docs/configuration.md`, `crates/ene-config/src/` |
+| Architecture/API | `docs/architecture.md`, `docs/crates/` |
+| Runtime/events | `docs/concepts/turn-and-session.md`, `docs/crates/runtime.md` |
+| Plugins/Tools/IPC | `docs/concepts/plugins-and-mcp.md`, `docs/crates/plugin-system.md`, `docs/crates/tool-sdk.md` |
+| Apps | `docs/apps/cli.md`, `docs/apps/desktop.md` |
 | Japanese user docs | Matching files under `docs/ja/` |
 
 Read relevant docs, the affected crate's `Cargo.toml`, public API, tests, and call
@@ -65,8 +65,8 @@ failing package/target and root cause; do not hide failures by relaxing lints.
 ## Plugins, Tools, IPC, and localization
 
 - New tools are plugins: `cargo new --bin plugins/tool/<name>`; derive `ToolAction`; prefer `ene_tool_common::ActionSetProvider`/`prelude`; wrap with `ene_plugin::ToolPluginAdapter` and serve with `run_plugin_server(Box::new(ToolPluginAdapter(provider))).await`; use `ene-tool-db` for state; use namespaced `<namespace>.<action>` names; declare side effects/sandbox needs.
-- Verify tool binaries with `/tool list` and update both `docs/guide/tools/` and `docs/ja/guide/tools/`.
-- IPC work starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v3). Preserve length-prefixed JSON, update host/plugins/tests, and bump `PLUGIN_IPC_PROTOCOL_VERSION` only for intentional wire incompatibility.
+- Verify tool binaries with `/tool list` and update both `docs/concepts/plugins-and-mcp.md` and `docs/ja/concepts/plugins-and-mcp.md`.
+- IPC work starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4). Preserve length-prefixed JSON, update host/plugins/tests, and bump `PLUGIN_IPC_PROTOCOL_VERSION` only for intentional wire incompatibility.
 - Backend events/statuses stay stable English contracts. UI strings belong in `apps/ene-desktop/i18n/{en-US,ja}/ene_desktop.ftl` and `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`; keep EN/JA user docs synchronized.
 
 ## Completion
