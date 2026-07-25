@@ -98,6 +98,7 @@ impl MemoryJournal {
             min_score: mind_memory.journal_min_score.clamp(0.0, 1.0),
             commitment_boost: mind_memory.commitment_boost,
             recent_fallback_limit: mind_memory.recent_fallback_limit,
+            time_range: None,
         }
     }
 }

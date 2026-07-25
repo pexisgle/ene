@@ -12,7 +12,7 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
 use crate::event::lifecycle::TickGtk;
@@ -45,6 +45,7 @@ pub fn pump_legacy_events(
     mut open_chat: MessageWriter<OpenChat>,
     #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
     mut runtime_disconnected: MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
+    mut pending_candidates: MessageWriter<PendingCandidatesCount>,
 ) {
     while let Ok(event) = channels.rx.try_recv() {
         translate_event(
@@ -62,6 +63,7 @@ pub fn pump_legacy_events(
             &mut open_settings,
             &mut open_chat,
             &mut runtime_disconnected,
+            &mut pending_candidates,
         );
     }
     // Phase 7.5: publish a `TickGtk` every frame on Linux so the
@@ -87,6 +89,7 @@ fn translate_event(
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
     runtime_disconnected: &mut MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
+    pending_candidates: &mut MessageWriter<PendingCandidatesCount>,
 ) {
     match event {
         AppEvent::Quit | AppEvent::Tray(crate::events::TrayAction::Quit) => {
@@ -177,6 +180,9 @@ fn translate_event(
                 "microphone capture state changed"
             );
         }
+        AppEvent::PendingCandidatesCount(count) => {
+            pending_candidates.write(PendingCandidatesCount(count));
+        }
     }
 }
 
@@ -219,6 +225,7 @@ mod tests {
         world.init_resource::<Messages<OpenSettings>>();
         world.init_resource::<Messages<OpenChat>>();
         world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
+        world.init_resource::<Messages<PendingCandidatesCount>>();
         #[cfg(target_os = "linux")]
         world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
         (world, tx)

@@ -17,6 +17,7 @@ hex = "0.4"
 ene-plugin-proto = { workspace = true }
 ene-ai = { workspace = true }
 ene-config = { workspace = true }
+ene-connector = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "time", "process"] }
 tokio-stream = { workspace = true }
 serde = { workspace = true }
@@ -30,6 +31,8 @@ dashmap = { workspace = true }
 ctor = { workspace = true }
 schemars = { workspace = true }
 rmcp = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true, default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "net", "time", "process", "macros", "rt", "rt-multi-thread"] }

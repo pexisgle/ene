@@ -24,6 +24,7 @@ use crate::events::{AiStreamUpdate, AppEvent, AppEventSender};
 use crate::memory_journal::{MemoryJournalAction, MemoryJournalPresenter};
 use crate::proactive_observe::{ProactiveObserveControl, spawn_proactive_observer};
 use crate::settings::MemoryJournalRecallRow;
+use ene_runtime::handle::PendingCandidateSummary;
 
 /// Payload returned by [`AiBridge::refresh_memory_journal`].
 pub struct MemoryJournalPayload {
@@ -465,6 +466,53 @@ impl AiBridge {
         self.block_on_timeout(memory.pin_typed_memory(id, true))
             .and_then(|r| r.map_err(|e| e.to_string()))
     }
+
+    // ── Pending candidate approval (#174 / #223) ──
+
+    /// List pending memory candidates awaiting user approval.
+    pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, String> {
+        self.block_on_timeout(self.handle.list_pending_candidates())
+            .and_then(|r| r.map_err(|e| e.to_string()))
+    }
+
+    /// Approve a pending memory candidate, persisting it as a typed memory.
+    pub fn approve_candidate(&self, id: i64) -> Result<(), String> {
+        self.block_on_timeout(self.handle.approve_candidate(id))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+    }
+
+    /// Reject a pending memory candidate.
+    pub fn reject_candidate(&self, id: i64) -> Result<(), String> {
+        self.block_on_timeout(self.handle.reject_candidate(id))
+            .and_then(|r| r.map_err(|e| e.to_string()))
+    }
+
+    // ── Commitment management (#223) ──
+
+    /// Mark a commitment as done.
+    pub fn complete_commitment(&self, id: i64) -> Result<bool, String> {
+        let memory = self.handle.diagnostics().memory().clone();
+        self.block_on_timeout(async {
+            let store = memory
+                .store()
+                .ok_or_else(|| "Memory store is not available".to_string())?;
+            store
+                .complete_commitment(id)
+                .await
+                .map_err(|e| e.to_string())
+        })?
+    }
+
+    /// Mark a commitment as cancelled.
+    pub fn cancel_commitment(&self, id: i64) -> Result<bool, String> {
+        let memory = self.handle.diagnostics().memory().clone();
+        self.block_on_timeout(async {
+            let store = memory
+                .store()
+                .ok_or_else(|| "Memory store is not available".to_string())?;
+            store.cancel_commitment(id).await.map_err(|e| e.to_string())
+        })?
+    }
 }
 
 fn recall_reason_key(reason: ene_mind::RecallReason) -> String {
@@ -674,6 +722,9 @@ async fn pump_events(
                     let _sample_rate = sample_rate;
                     let _is_final = is_final;
                 }
+            }
+            Ok(EneEvent::PendingCandidateAvailable { count }) => {
+                let _ = event_tx.send(AppEvent::PendingCandidatesCount(count));
             }
             Ok(EneEvent::StatusChanged { .. } | EneEvent::ToolBackgroundCompleted { .. }) => {}
             Ok(EneEvent::TurnStarted { turn, origin: _ }) => {

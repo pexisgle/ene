@@ -41,7 +41,8 @@ pub use truncate::{Truncate, TruncateResult};
 
 pub use character_card::{
     CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension, ExpressionDefinition,
-    Lorebook, LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
+    Lorebook, LorebookEntry, ResolvedExpression, UserPersona, expand_cbs_macros,
+    expand_cbs_macros_with, resolve_expressions,
 };
 
 pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};

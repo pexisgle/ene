@@ -50,6 +50,8 @@ pub mod ipc_provider;
 pub mod manager;
 /// MCP server configuration types.
 pub mod mcp_config;
+/// MCP connector implementation for the connector framework.
+pub mod mcp_connector;
 /// MCP client for external server connections.
 pub mod mcp_registry;
 /// Tool registry trait, composite registry, and deferred call types.
@@ -75,6 +77,8 @@ pub use ipc_provider::IpcLlmProvider;
 pub use manager::PluginHostManager;
 /// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};
+/// MCP connector for the connector framework.
+pub use mcp_connector::McpConnector;
 /// MCP client for external servers.
 pub use mcp_registry::McpToolRegistry;
 /// Tool registry trait, composite registry, and deferred call types.

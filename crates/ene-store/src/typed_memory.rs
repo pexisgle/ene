@@ -26,6 +26,8 @@ pub enum MemoryKind {
     /// How-to knowledge and procedural instructions.
     Procedure,
     /// Self-reflections by the companion about past interactions.
+    /// Observation of the user's environment/activity at a point in time.
+    WorldState,
     Reflection,
 }
 
@@ -41,6 +43,7 @@ impl MemoryKind {
             Self::Commitment => "commitment",
             Self::Preference => "preference",
             Self::Procedure => "procedure",
+            Self::WorldState => "world_state",
             Self::Reflection => "reflection",
         }
     }
@@ -56,6 +59,7 @@ impl MemoryKind {
             "commitment" => Self::Commitment,
             "preference" => Self::Preference,
             "procedure" => Self::Procedure,
+            "world_state" => Self::WorldState,
             "reflection" => Self::Reflection,
             other => {
                 tracing::error!(
@@ -466,6 +470,19 @@ impl Default for HybridSearchWeights {
     }
 }
 
+/// A time range filter for memory queries.
+///
+/// Used to filter memories by their `created_at` timestamp, enabling
+/// queries like "what was I doing yesterday?" or "show me memories
+/// from last week".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeRange {
+    /// Start of the time range (inclusive).
+    pub start: Option<DateTime<Utc>>,
+    /// End of the time range (inclusive).
+    pub end: Option<DateTime<Utc>>,
+}
+
 /// Typed-memory search query (#123).
 ///
 /// Callers (mind) pre-compute `embedding` when vector search is desired.
@@ -502,6 +519,8 @@ pub struct Query<'a> {
     /// Boost applied when a candidate is surfaced via an active commitment.
     pub commitment_boost: f32,
     /// Maximum number of pure-recent fallback candidates to gather.
+    /// Filter by time range (for world state queries like "what was I doing yesterday?"?).
+    pub time_range: Option<TimeRange>,
     pub recent_fallback_limit: usize,
 }
 
@@ -584,6 +603,7 @@ mod tests {
             MemoryKind::Commitment,
             MemoryKind::Preference,
             MemoryKind::Procedure,
+            MemoryKind::WorldState,
             MemoryKind::Reflection,
         ];
         for kind in kinds {

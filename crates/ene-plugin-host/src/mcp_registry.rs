@@ -22,6 +22,10 @@ use ene_plugin_proto::ToolResult;
 use ene_plugin_proto::{CallContext, ToolName, ToolSpec};
 use rmcp::serve_client;
 use rmcp::transport::child_process::{ConfigureCommandExt, TokioChildProcess};
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::process::Command;
 
@@ -112,20 +116,126 @@ impl McpToolRegistry {
     }
 
     /// Connects to an MCP server via HTTP (SSE) transport.
-    pub fn connect_http(
+    pub async fn connect_http(
         &self,
         name: &str,
         url: &str,
-        _auth_header: Option<&str>,
+        auth_header: Option<&str>,
     ) -> Result<(), PluginHostError> {
-        // TODO: When rmcp adds HTTP/SSE transport support, implement here.
-        // For now, return a clear error indicating the feature is not yet available.
-        Err(PluginHostError::ExecutionFailed {
-            message: format!(
-                "MCP HTTP transport is not yet implemented (server: {name}, url: {url}). \
-                 Use stdio transport instead, or wait for rmcp HTTP/SSE support."
+        let mut config = StreamableHttpClientTransportConfig::with_uri(url);
+
+        // Convert the auth_header from config into a custom Authorization header.
+        if let Some(auth) = auth_header {
+            if let Ok(value) = http::HeaderValue::from_str(auth) {
+                let mut custom_headers = HashMap::new();
+                custom_headers.insert(http::HeaderName::from_static("authorization"), value);
+                config = config.custom_headers(custom_headers);
+            } else {
+                tracing::warn!(
+                    component = "McpToolRegistry",
+                    server = %name,
+                    "MCP HTTP auth header contains invalid characters; skipping"
+                );
+            }
+        }
+
+        let transport = StreamableHttpClientTransport::from_config(config);
+
+        let client = serve_client((), transport).await.map_err(|e| {
+            PluginHostError::McpHandshake(format!(
+                "MCP HTTP transport handshake failed for '{}': {}",
+                name, e
+            ))
+        })?;
+
+        let mcp_tools_resp = client.peer().list_tools(None).await.map_err(|e| {
+            PluginHostError::McpRpc(format!("MCP HTTP list_tools failed for '{}': {}", name, e))
+        })?;
+
+        let mut tools = Vec::new();
+        for t in mcp_tools_resp.tools {
+            let desc = t.description.map(|d| d.to_string()).unwrap_or_default();
+            let tool_name = ToolName::try_new(t.name.to_string()).map_err(|e| {
+                PluginHostError::McpInvalidName(format!(
+                    "MCP server '{}' advertised an invalid tool name: {e}",
+                    name
+                ))
+            })?;
+            tools.push(ToolSpec::new(
+                tool_name,
+                desc,
+                serde_json::Value::Object(t.input_schema.as_ref().clone()),
+            ));
+        }
+
+        self.servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(McpServerConnection {
+                name: name.to_string(),
+                client: Arc::new(client.peer().clone()),
+                tools,
+            });
+
+        Ok(())
+    }
+
+    /// Discover available tools from the MCP server.
+    pub async fn discover_tools(&self) -> Result<Vec<ToolSpec>, PluginHostError> {
+        let tools = self
+            .servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .flat_map(|s| s.tools.clone())
+            .collect();
+        Ok(tools)
+    }
+
+    /// Map an MCP tool to an Ene ToolSpec.
+    pub fn mcp_tool_to_spec(server_name: &str, mcp_tool: &rmcp::model::Tool) -> ToolSpec {
+        ToolSpec::new(
+            ToolName::try_new(format!("mcp.{}.{}", server_name, mcp_tool.name)).unwrap_or_else(
+                |_| ToolName::new(&format!("mcp.{}.{}", server_name, mcp_tool.name)),
             ),
-        })
+            mcp_tool.description.clone().unwrap_or_default().to_string(),
+            serde_json::to_value(&mcp_tool.input_schema).unwrap_or_default(),
+        )
+    }
+
+    /// Disconnect from all MCP servers.
+    pub async fn disconnect(&self) -> Result<(), PluginHostError> {
+        let mut servers = self
+            .servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        servers.clear();
+        Ok(())
+    }
+
+    /// Ping each connected server for liveness.
+    ///
+    /// Checks transport liveness via the underlying rmcp peer. A closed
+    /// transport indicates the server process has exited or the connection
+    /// was terminated.
+    pub async fn ping(&self) -> Result<(), PluginHostError> {
+        let servers = self
+            .servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if servers.is_empty() {
+            return Err(PluginHostError::ExecutionFailed {
+                message: "No MCP servers connected".to_string(),
+            });
+        }
+        for s in servers.iter() {
+            if !s.is_alive() {
+                return Err(PluginHostError::ExecutionFailed {
+                    message: format!("MCP server '{}' is not alive", s.name),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Removes servers whose process has died, logging a warning for each.

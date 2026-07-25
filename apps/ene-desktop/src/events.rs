@@ -64,6 +64,8 @@ pub enum AppEvent {
     Quit,
     /// The runtime actor broadcast channel closed (#242).
     RuntimeDisconnected,
+    /// Pending memory candidates available for user approval (#223).
+    PendingCandidatesCount(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

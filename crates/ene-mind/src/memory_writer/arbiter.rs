@@ -188,6 +188,9 @@ pub struct AppliedDecision {
     pub inserted_id: Option<i64>,
     /// Whether a status update was applied to an existing memory.
     pub updated_existing: bool,
+    /// Outcome rating derived from user response sentiment (#210).
+    /// Range: -1.0 (negative) to 1.0 (positive). `None` when not yet evaluated.
+    pub outcome_rating: Option<f32>,
 }
 
 /// Validates, deduplicates, and resolves contradictions for memory candidates.
@@ -562,6 +565,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: false,
+                    outcome_rating: None,
                 })
             }
             ArbiterAction::Supersede {
@@ -576,6 +580,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: true,
+                    outcome_rating: None,
                 })
             }
             ArbiterAction::MarkUserDeleted { memory_id } => {
@@ -587,6 +592,7 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: None,
                     updated_existing: updated,
+                    outcome_rating: None,
                 })
             }
             ArbiterAction::MarkDisputed { memory_id } => {
@@ -598,12 +604,14 @@ impl MemoryArbiter {
                     decision: decision.clone(),
                     inserted_id: None,
                     updated_existing: updated,
+                    outcome_rating: None,
                 })
             }
             ArbiterAction::Ignore | ArbiterAction::AskConfirmationLater => Ok(AppliedDecision {
                 decision: decision.clone(),
                 inserted_id: None,
                 updated_existing: false,
+                outcome_rating: None,
             }),
         }
     }

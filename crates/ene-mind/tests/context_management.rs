@@ -93,6 +93,8 @@ fn pack_prompt_counts_history_toward_total_budget() {
             ],
             output_contract: None,
             interruption_note: None,
+            authors_note: None,
+            user_persona: None,
             user_input: "hi".into(),
         },
         &budget,

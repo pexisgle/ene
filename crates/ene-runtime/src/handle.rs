@@ -15,9 +15,11 @@ use ene_mind::{
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
 use ene_plugin_host::{CompositeToolRegistry, PluginHealthEvent, PluginHostError, ToolRegistry};
 use ene_plugin_proto::ToolSpec;
+use ene_store::PendingCandidate;
 #[cfg(any(unix, windows))]
 use ene_store::db_server::DbIpcServer;
 use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 /// Global monotonic counter used to generate unique DB IPC auth tokens.
 /// Intentionally process-global: each `EneHandle::open` call increments
@@ -43,6 +45,42 @@ pub struct DeferredToolTask {
     pub arguments: String,
     /// When the task was accepted for background execution.
     pub started_at: DateTime<Utc>,
+}
+
+/// Summary of a pending memory candidate for the UI (#174 / #223).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCandidateSummary {
+    /// Database primary key.
+    pub id: i64,
+    /// Short title or label.
+    pub title: String,
+    /// Full candidate content.
+    pub content: String,
+    /// Memory kind as string (e.g. "episodic", "semantic").
+    pub kind: String,
+    /// Confidence score (0.0 .. 1.0).
+    pub confidence: f32,
+    /// Human-readable reason for the extraction.
+    pub reason_detail: String,
+    /// Title of an existing memory this candidate would supersede, if any.
+    pub existing_memory_title: Option<String>,
+    /// Source quote from the conversation that triggered this candidate.
+    pub source_quote: String,
+}
+
+impl From<&PendingCandidate> for PendingCandidateSummary {
+    fn from(c: &PendingCandidate) -> Self {
+        Self {
+            id: c.id,
+            title: c.title.clone(),
+            content: c.content.clone(),
+            kind: c.kind.clone(),
+            confidence: c.confidence,
+            reason_detail: c.reason_detail.clone(),
+            existing_memory_title: c.existing_memory_title.clone(),
+            source_quote: c.source_quote.clone(),
+        }
+    }
 }
 
 /// Commands sent to the actor from consumers (UI/CLI).
@@ -236,6 +274,25 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// List pending memory candidates awaiting user approval (#174).
+    ListPendingCandidates {
+        /// Reply channel for the candidate list.
+        respond: oneshot::Sender<Result<Vec<PendingCandidateSummary>, String>>,
+    },
+    /// Approve a pending memory candidate (#174).
+    ApproveCandidate {
+        /// Candidate id to approve.
+        id: i64,
+        /// Reply channel.
+        respond: oneshot::Sender<Result<(), String>>,
+    },
+    /// Reject a pending memory candidate (#174).
+    RejectCandidate {
+        /// Candidate id to reject.
+        id: i64,
+        /// Reply channel.
+        respond: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// Payload for [`EneCommand::UpdateFeatureSettings`].
@@ -390,6 +447,11 @@ pub enum EneEvent {
         /// Whether this is the final audio chunk for the turn.
         is_final: bool,
     },
+    /// New pending memory candidates are available for review (#174).
+    PendingCandidateAvailable {
+        /// Number of pending candidates.
+        count: usize,
+    },
 }
 
 /// Reason a single run terminated.
@@ -510,51 +572,39 @@ impl EneEventReceiver {
 }
 
 /// Shared single-flight turn gate between handle and actor.
+///
+/// Uses a single `parking_lot::Mutex<Option<TurnId>>` for both the
+/// busy flag and active turn ID, eliminating the split atomic/mutex
+/// design and the ordering window it created.
 struct TurnGate {
-    busy: AtomicBool,
-    active: std::sync::Mutex<Option<TurnId>>,
+    active: parking_lot::Mutex<Option<TurnId>>,
 }
 
 impl TurnGate {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
-            busy: AtomicBool::new(false),
-            active: std::sync::Mutex::new(None),
+            active: parking_lot::Mutex::new(None),
         }
     }
 
     fn try_begin(&self, turn: &TurnId) -> bool {
-        if self
-            .busy
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_err()
-        {
+        let mut guard = self.active.lock();
+        if guard.is_some() {
             return false;
         }
-        if let Ok(mut guard) = self.active.lock() {
-            *guard = Some(turn.clone());
-        }
+        *guard = Some(turn.clone());
         true
     }
 
     fn end(&self) {
-        if let Ok(mut guard) = self.active.lock() {
-            *guard = None;
-        }
-        self.busy.store(false, std::sync::atomic::Ordering::Release);
+        *self.active.lock() = None;
     }
 
     fn matches(&self, turn: &TurnId) -> bool {
         self.active
             .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .is_some_and(|active| active == *turn)
+            .as_ref()
+            .is_some_and(|active| active.as_str() == turn.as_str())
     }
 }
 
@@ -1206,6 +1256,35 @@ impl EneHandle {
                 app_label,
                 reply: tx,
             })
+            .map_err(|_| "actor dead".to_string())?;
+        rx.await.map_err(|_| "actor dropped reply".to_string())?
+    }
+
+    // ── Pending candidate approval (#174 / #223) ──
+
+    /// List pending memory candidates awaiting user approval (#174).
+    pub async fn list_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ListPendingCandidates { respond: tx })
+            .map_err(|_| "actor dead".to_string())?;
+        rx.await.map_err(|_| "actor dropped reply".to_string())?
+    }
+
+    /// Approve a pending memory candidate (#174).
+    pub async fn approve_candidate(&self, id: i64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ApproveCandidate { id, respond: tx })
+            .map_err(|_| "actor dead".to_string())?;
+        rx.await.map_err(|_| "actor dropped reply".to_string())?
+    }
+
+    /// Reject a pending memory candidate (#174).
+    pub async fn reject_candidate(&self, id: i64) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::RejectCandidate { id, respond: tx })
             .map_err(|_| "actor dead".to_string())?;
         rx.await.map_err(|_| "actor dropped reply".to_string())?
     }
@@ -2217,6 +2296,15 @@ impl EneActor {
                         () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
                             handle.as_mut().abort();
                             let _ = handle.await;
+                            // Try to recover the session even on hard abort:
+                            // if the stream had already reached a terminal state
+                            // and called session_tx.send() before being killed,
+                            // the value is still available in the oneshot.
+                            if let Some(rx) = self.stream_session_rx.as_mut()
+                                && let Ok(outcome) = rx.try_recv()
+                            {
+                                self.session = outcome.session;
+                            }
                         }
                     }
                 }
@@ -2590,6 +2678,68 @@ impl EneActor {
             EneCommand::SetCcv3MemoryHash { hash, reply } => {
                 self.session.memory.ccv3_memory_hash = Some(hash);
                 let _ = reply.send(());
+                true
+            }
+            EneCommand::ListPendingCandidates { respond } => {
+                let result = self
+                    .session
+                    .memory
+                    .memory_store
+                    .as_ref()
+                    .ok_or_else(|| "memory store not available".to_string())
+                    .and_then(|store| {
+                        let character_id = self.session.card_name().to_string();
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                let list = store
+                                    .list_pending_candidates(&character_id, "pending")
+                                    .await
+                                    .map_err(|e| e.to_string())?;
+                                Ok(list.iter().map(PendingCandidateSummary::from).collect())
+                            })
+                        })
+                    });
+                let _ = respond.send(result);
+                true
+            }
+            EneCommand::ApproveCandidate { id, respond } => {
+                let result = self
+                    .session
+                    .memory
+                    .memory_store
+                    .as_ref()
+                    .ok_or_else(|| "memory store not available".to_string())
+                    .and_then(|store| {
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                store
+                                    .approve_pending_candidate(id)
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            })
+                        })
+                    });
+                let _ = respond.send(result);
+                true
+            }
+            EneCommand::RejectCandidate { id, respond } => {
+                let result = self
+                    .session
+                    .memory
+                    .memory_store
+                    .as_ref()
+                    .ok_or_else(|| "memory store not available".to_string())
+                    .and_then(|store| {
+                        tokio::task::block_in_place(|| {
+                            tokio::runtime::Handle::current().block_on(async {
+                                store
+                                    .resolve_pending_candidate(id, false)
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            })
+                        })
+                    });
+                let _ = respond.send(result);
                 true
             }
         }

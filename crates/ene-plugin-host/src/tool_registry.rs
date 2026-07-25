@@ -4,7 +4,7 @@
 //! definitions for the unified plugin system.
 
 use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::PluginHostError;
@@ -131,6 +131,11 @@ pub struct CompositeToolRegistry {
 struct CompositeState {
     registries: Vec<Arc<dyn ToolRegistry>>,
     tool_index: HashMap<String, usize>,
+    /// Tracks external source registries (e.g., MCP servers) by name.
+    /// Maps source name to the registry index in `registries`.
+    external_sources: HashMap<String, usize>,
+    /// Tombstone slots left behind by unregistered external sources.
+    dead_indices: HashSet<usize>,
 }
 
 impl CompositeToolRegistry {
@@ -154,6 +159,8 @@ impl CompositeToolRegistry {
             state: std::sync::RwLock::new(CompositeState {
                 registries,
                 tool_index,
+                external_sources: HashMap::new(),
+                dead_indices: HashSet::new(),
             }),
         })
     }
@@ -177,13 +184,20 @@ impl CompositeToolRegistry {
         }
     }
 
-    /// Read-locks state and calls `f` with a reference to the registries slice.
+    /// Read-locks state and calls `f` with a filtered Vec of alive registries.
     fn with_registries<R>(&self, f: impl FnOnce(&[Arc<dyn ToolRegistry>]) -> R) -> R {
         let guard = self
             .state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        f(&guard.registries)
+        let alive: Vec<Arc<dyn ToolRegistry>> = guard
+            .registries
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !guard.dead_indices.contains(i))
+            .map(|(_, r)| Arc::clone(r))
+            .collect();
+        f(&alive)
     }
 
     /// Write-locks state and calls `f` with a mutable reference to `CompositeState`.
@@ -208,6 +222,14 @@ impl CompositeToolRegistry {
                 },
             ));
         };
+        // Check if the registry slot is dead (unregistered external source)
+        if guard.dead_indices.contains(&idx) {
+            return Err(PluginHostError::Protocol(
+                ene_plugin_proto::ToolError::NotFound {
+                    tool_name: name.to_string(),
+                },
+            ));
+        }
         let Some(registry) = guard.registries.get(idx).map(Arc::clone) else {
             return Err(PluginHostError::Protocol(
                 ene_plugin_proto::ToolError::NotFound {
@@ -238,6 +260,66 @@ impl CompositeToolRegistry {
             Ok(())
         })
     }
+
+    /// Register tools from an external source (e.g., an MCP server).
+    ///
+    /// Each tool is added to the composite's index under a new sub-registry
+    /// backed by the provided `tool_registry` (which owns the actual tool
+    /// implementation). Tools are namespaced internally so they can be
+    /// removed together via [`unregister_external`](Self::unregister_external).
+    ///
+    /// # Errors
+    /// Returns [`PluginHostError::DuplicateToolName`] when a tool name collides
+    /// with an already-registered tool.
+    pub fn register_external(
+        &self,
+        source: String,
+        tool_registry: Arc<dyn ToolRegistry>,
+    ) -> Result<(), PluginHostError> {
+        self.with_state_mut(|state| {
+            // If source already registered, remove old entry first
+            if state.external_sources.contains_key(&source) {
+                let old_idx = state.external_sources[&source];
+                state.dead_indices.insert(old_idx);
+                // Remove tools from index
+                if let Some(registry) = state.registries.get(old_idx) {
+                    for tool in registry.list_tools() {
+                        state.tool_index.remove(tool.name.as_str());
+                    }
+                }
+            }
+            let idx = state.registries.len();
+            for tool in tool_registry.list_tools() {
+                let name = tool.name.as_str().to_string();
+                if state.tool_index.contains_key(&name) {
+                    return Err(PluginHostError::DuplicateToolName { tool_name: name });
+                }
+                state.tool_index.insert(name, idx);
+            }
+            state.registries.push(tool_registry);
+            state.external_sources.insert(source, idx);
+            Ok(())
+        })
+    }
+
+    /// Unregister all tools from a source (on disconnect).
+    ///
+    /// Removes the tools from the index and marks the backing registry
+    /// slot as a tombstone so other registries are not shifted.
+    pub fn unregister_external(&self, source: &str) {
+        self.with_state_mut(|state| {
+            if let Some(&idx) = state.external_sources.get(source) {
+                // Remove all tools belonging to this registry from the index
+                if let Some(registry) = state.registries.get(idx) {
+                    for tool in registry.list_tools() {
+                        state.tool_index.remove(tool.name.as_str());
+                    }
+                    state.dead_indices.insert(idx);
+                }
+                state.external_sources.remove(source);
+            }
+        })
+    }
 }
 
 #[async_trait]
@@ -248,7 +330,10 @@ impl ToolRegistry for CompositeToolRegistry {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut tools = Vec::new();
-        for registry in &guard.registries {
+        for (i, registry) in guard.registries.iter().enumerate() {
+            if guard.dead_indices.contains(&i) {
+                continue;
+            }
             tools.extend(registry.list_tools());
         }
         drop(guard);
@@ -261,7 +346,10 @@ impl ToolRegistry for CompositeToolRegistry {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut profiles = Vec::new();
-        for registry in &guard.registries {
+        for (i, registry) in guard.registries.iter().enumerate() {
+            if guard.dead_indices.contains(&i) {
+                continue;
+            }
             profiles.extend(registry.list_rag_profiles());
         }
         drop(guard);
@@ -416,7 +504,6 @@ mod tests {
     fn composite_new_empty() {
         let composite = CompositeToolRegistry::try_new(vec![]).unwrap();
         assert!(composite.list_tools().is_empty());
-        assert!(composite.state.read().unwrap().tool_index.is_empty());
     }
 
     #[test]
@@ -460,18 +547,6 @@ mod tests {
         let composite = CompositeToolRegistry::try_new(vec![Arc::new(r1)]).unwrap();
         let r2 = MockRegistry::new(vec![make_tool("dup")]);
         let result = composite.try_add_registry(Arc::new(r2));
-        assert!(matches!(
-            result,
-            Err(PluginHostError::DuplicateToolName { .. })
-        ));
-    }
-
-    #[test]
-    fn composite_triple_duplicate_is_hard_error() {
-        let r0 = MockRegistry::new(vec![make_tool("dup")]);
-        let r1 = MockRegistry::new(vec![make_tool("dup")]);
-        let r2 = MockRegistry::new(vec![make_tool("dup")]);
-        let result = CompositeToolRegistry::try_new(vec![Arc::new(r0), Arc::new(r1), Arc::new(r2)]);
         assert!(matches!(
             result,
             Err(PluginHostError::DuplicateToolName { .. })

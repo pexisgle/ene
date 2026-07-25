@@ -83,6 +83,10 @@ memory-journal-status = ステータス
 memory-journal-confidence = 信頼度
 memory-journal-salience = 重要度
 memory-journal-last-accessed = 最終参照
+memory-page-tab-browse = 閲覧
+memory-page-tab-recall = 想起
+memory-page-tab-pending = 承認待ち
+memory-page-tab-commitments = コミットメント
 memory-journal-why-recalled = 想起理由
 memory-journal-mood = ムード
 memory-journal-expression = 表情
@@ -97,6 +101,35 @@ memory-journal-action-restore = 復元
 memory-journal-action-ok = 完了
 memory-journal-action-no-change = 変更なし
 memory-journal-action-error = 失敗
+
+# Memory Journal v2 (#223)
+memory-pending-approval = 承認待ち
+memory-pending-empty = 保留中の候補はありません。
+memory-pending-count = { $count } 件保留中
+memory-pending-refresh-ok = 保留中の候補を更新しました
+memory-pending-refresh-error = 保留中の候補の更新に失敗しました
+memory-pending-conflict = 既存のメモリと競合
+memory-journal-content = 内容
+memory-journal-reason = 理由
+memory-journal-source-quote = 引用
+memory-journal-created = 作成日
+memory-commitments-title = コミットメント
+memory-commitments-empty = コミットメントが見つかりません。
+memory-commitment-complete = 完了
+memory-commitment-cancel = キャンセル
+memory-commitment-filter-active = アクティブ
+memory-commitment-filter-all = すべて
+memory-commitment-filter-done = 完了済み
+memory-commitment-filter-cancelled = キャンセル済み
+memory-commitment-status-active = アクティブ
+memory-commitment-status-done = 完了
+memory-commitment-status-cancelled = キャンセル済み
+memory-commitment-status-stale = 期限切れ
+memory-commitment-due = 期限
+memory-commitment-due-label = 期限（ラベル）
+memory-approve = 承認
+memory-reject = 拒否
+memory-salience = 重要度
 
 # Character
 character = キャラクター

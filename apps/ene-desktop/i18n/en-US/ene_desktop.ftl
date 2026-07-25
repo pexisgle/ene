@@ -83,6 +83,10 @@ memory-journal-status = Status
 memory-journal-confidence = Confidence
 memory-journal-salience = Salience
 memory-journal-last-accessed = Last accessed
+memory-page-tab-browse = Browse
+memory-page-tab-recall = Recall
+memory-page-tab-pending = Pending
+memory-page-tab-commitments = Commitments
 memory-journal-why-recalled = Why recalled
 memory-journal-mood = Mood
 memory-journal-expression = Expression
@@ -97,6 +101,35 @@ memory-journal-action-restore = Restore
 memory-journal-action-ok = completed
 memory-journal-action-no-change = no change
 memory-journal-action-error = failed
+
+# Memory Journal v2 (#223)
+memory-pending-approval = Pending Approval
+memory-pending-empty = No pending candidates.
+memory-pending-count = { $count } pending
+memory-pending-refresh-ok = Pending candidates refreshed
+memory-pending-refresh-error = Failed to refresh pending candidates
+memory-pending-conflict = Conflicts with existing memory
+memory-journal-content = Content
+memory-journal-reason = Reason
+memory-journal-source-quote = Source
+memory-journal-created = Created
+memory-commitments-title = Commitments
+memory-commitments-empty = No commitments found.
+memory-commitment-complete = Complete
+memory-commitment-cancel = Cancel
+memory-commitment-filter-active = Active
+memory-commitment-filter-all = All
+memory-commitment-filter-done = Done
+memory-commitment-filter-cancelled = Cancelled
+memory-commitment-status-active = Active
+memory-commitment-status-done = Complete
+memory-commitment-status-cancelled = Cancelled
+memory-commitment-status-stale = Stale
+memory-commitment-due = Due
+memory-commitment-due-label = Due (label)
+memory-approve = Approve
+memory-reject = Reject
+memory-salience = Importance
 
 # Character
 character = Character

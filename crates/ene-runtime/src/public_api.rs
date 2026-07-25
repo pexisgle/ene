@@ -303,6 +303,9 @@ impl PublicChatEvent {
                 sample_rate: *sample_rate,
                 is_final: *is_final,
             },
+            EneEvent::PendingCandidateAvailable { count } => Self::StatusChanged {
+                status: format!("pending_candidates_{count}"),
+            },
         }
     }
 }

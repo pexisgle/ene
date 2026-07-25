@@ -134,6 +134,7 @@ impl RecallPlanner {
             min_score: plan.search.min_score,
             commitment_boost: memory.commitment_boost,
             recent_fallback_limit: memory.recent_fallback_limit,
+            time_range: None,
         }
     }
 

@@ -9,7 +9,7 @@ use crate::component::chat::{ChatStateComponent, ChatWindow};
 use crate::component::ui::{UiStateComponent, UiWindow};
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
@@ -290,6 +290,21 @@ pub fn apply_motion_commands_system(
         };
         state.accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration, repeat);
     }
+}
+
+/// Updates the pending-candidates badge in `UiState` when new candidates
+/// are available (#223).
+pub fn apply_pending_candidates_count_system(
+    mut events: MessageReader<PendingCandidatesCount>,
+    mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,
+) {
+    let Some(last) = events.read().last() else {
+        return;
+    };
+    let Some(mut ui) = ui_query.iter_mut().next() else {
+        return;
+    };
+    ui.0.memory_journal_pending_count = last.0;
 }
 
 #[cfg(test)]

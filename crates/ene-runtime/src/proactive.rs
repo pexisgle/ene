@@ -26,6 +26,8 @@ pub(crate) struct ProactiveScheduler {
     pub proactive_turns: usize,
     /// Bumped whenever a user turn starts so in-flight decisions are discarded.
     pub epoch: u64,
+    /// Tick counter for periodic world state memory writes (#209).
+    pub world_state_tick: usize,
 }
 
 impl Default for ProactiveScheduler {
@@ -37,6 +39,7 @@ impl Default for ProactiveScheduler {
             last_proactive_at: None,
             proactive_turns: 0,
             epoch: 0,
+            world_state_tick: 0,
         }
     }
 }
@@ -71,6 +74,19 @@ impl ProactiveScheduler {
 
     /// Build suppression state for mind gates.
     #[must_use]
+    /// Increment the world-state tick counter and return `true` every
+    /// `interval` ticks, signalling that a world-state memory should be
+    /// persisted.
+    #[must_use]
+    pub fn bump_world_state_tick(&mut self, interval: usize) -> bool {
+        if interval == 0 {
+            return false;
+        }
+        let should_write = self.world_state_tick == 0;
+        self.world_state_tick = (self.world_state_tick + 1) % interval;
+        should_write
+    }
+
     pub fn suppression(&self, user_turn_busy: bool) -> ProactiveSuppressionState {
         let seconds_since_user_input = self.last_user_input_at.elapsed().as_secs();
         let seconds_since_proactive = self
@@ -115,6 +131,8 @@ pub(crate) fn rgb_to_jpeg_data_uri(width: u32, height: u32, rgb: &[u8]) -> Resul
 pub(crate) struct ProactiveDecisionResult {
     /// Epoch captured when the decision started.
     pub epoch: u64,
+    /// Tick counter for periodic world state memory writes (#209).
+    pub world_state_tick: usize,
     /// Whether generation should start.
     pub should_generate: bool,
     /// Model `should_speak` flag (before confidence gate).
@@ -204,6 +222,7 @@ pub(crate) async fn run_decision_task(
     };
     ProactiveDecisionResult {
         epoch,
+        world_state_tick: 0,
         should_generate,
         should_speak: outcome.decision.should_speak,
         confidence: outcome.decision.confidence,

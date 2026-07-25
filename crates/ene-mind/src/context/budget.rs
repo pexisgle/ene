@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use ene_store::ActiveCommitmentPrompt;
 
-use crate::character::{IdentityKernel, StyleExample};
+use ene_config::UserPersona;
+
+use crate::character::{AuthorsNote, IdentityKernel, StyleExample, apply_authors_note};
 use crate::config::ContextConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::HistoryEntry;
@@ -106,6 +108,10 @@ pub struct PackInput {
     pub output_contract: Option<String>,
     /// Note about a previously interrupted response (#206).
     pub interruption_note: Option<String>,
+    /// Author's note: depth-based instruction injection (roleplay enhancement).
+    pub authors_note: Option<AuthorsNote>,
+    /// Optional structured user persona for `{{user_persona}}` macro expansion.
+    pub user_persona: Option<UserPersona>,
     /// Current user input.
     pub user_input: String,
 }
@@ -272,12 +278,48 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         ));
     }
 
-    if !profile.is_empty() {
+    if !profile.is_empty() || input.user_persona.is_some() {
         let mut profile_owned: Vec<RecalledMemory> = profile.iter().map(|m| (*m).clone()).collect();
         sort_memories_for_drop(&mut profile_owned);
+
+        // Build the section body: prepend user_persona info then append recalled profile memories
+        let mut body_parts = Vec::new();
+
+        // Add structured user persona as a block at the top of the UserProfile section
+        if let Some(ref persona) = input.user_persona {
+            let mut persona_lines = vec![format!("- Name: {}", persona.name)];
+            if let Some(ref desc) = persona.description {
+                if !desc.trim().is_empty() {
+                    persona_lines.push(format!("- Description: {}", desc));
+                }
+            }
+            if let Some(ref rel) = persona.relationship {
+                if !rel.trim().is_empty() {
+                    persona_lines.push(format!("- Relationship: {}", rel));
+                }
+            }
+            if let Some(ref pron) = persona.pronouns {
+                if !pron.trim().is_empty() {
+                    persona_lines.push(format!("- Pronouns: {}", pron));
+                }
+            }
+            if let Some(ref notes) = persona.notes {
+                if !notes.trim().is_empty() {
+                    persona_lines.push(format!("- Notes: {}", notes));
+                }
+            }
+            body_parts.push(persona_lines.join("\n"));
+        }
+
+        // Append recalled profile/preference/relationship memories
+        if !profile_owned.is_empty() {
+            body_parts.push(memory_section_body(&profile_owned));
+        }
+
+        let body = body_parts.join("\n");
         sections.push(PromptSection::new(
             PromptSectionKind::UserProfile,
-            memory_section_body(&profile_owned),
+            body,
             budget.budget_for(PromptSectionKind::UserProfile),
         ));
     }
@@ -426,6 +468,13 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         total = section_tokens.saturating_add(estimate_history_tokens(&history));
     }
 
+    // Apply author's note after history trimming so the depth is relative to
+    // the post-trim history length. This is done after trimming to ensure the
+    // note is injected at the correct position in the final history.
+    if let Some(ref note) = input.authors_note {
+        apply_authors_note(&mut history, note);
+    }
+
     let packed_tokens = total;
 
     let packet = PromptPacket { sections, history };
@@ -550,6 +599,8 @@ mod tests {
             history: vec![],
             output_contract: Some("PHI".into()),
             interruption_note: None,
+            authors_note: None,
+            user_persona: None,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -647,6 +698,8 @@ mod tests {
             ],
             output_contract: None,
             interruption_note: None,
+            authors_note: None,
+            user_persona: None,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -705,6 +758,8 @@ mod tests {
             history: vec![],
             output_contract: None,
             interruption_note: Some("your previous reply was cut off mid-sentence".repeat(4)),
+            authors_note: None,
+            user_persona: None,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);

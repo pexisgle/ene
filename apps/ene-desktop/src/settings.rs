@@ -305,6 +305,10 @@ pub struct UiState {
     pub memory_journal_rows: Vec<MemoryJournalRow>,
     /// Cached active commitments for desktop debug UX (#93).
     pub memory_journal_commitments: Vec<String>,
+    /// Cached structured commitment data for the commitments tab (#223).
+    pub memory_journal_commitments_cache: Vec<ene_store::Commitment>,
+    /// Cached pending memory candidates for the approval tab (#223).
+    pub memory_journal_pending_candidates: Vec<ene_runtime::handle::PendingCandidateSummary>,
     /// Cached affect-state snapshot for memory journal UX (#93).
     pub memory_journal_affect: MemoryJournalAffect,
     /// Last journal operation status/error message.
@@ -317,6 +321,12 @@ pub struct UiState {
     pub memory_journal_show_superseded: bool,
     /// Browse vs recall-debug mode for the memory journal.
     pub memory_journal_recall_debug: bool,
+    /// Tab mode for the memory journal page (#223).
+    pub memory_journal_mode: MemoryPageMode,
+    /// Number of pending candidates awaiting user approval (#223).
+    pub memory_journal_pending_count: usize,
+    /// Commitment list filter (#223).
+    pub memory_journal_commitment_filter: CommitmentFilter,
     /// Recall-debug query text.
     pub memory_journal_recall_query: String,
     /// Cached recall-debug rows.
@@ -431,6 +441,34 @@ pub struct MemoryJournalAffect {
     pub expression: String,
     pub affinity: f32,
     pub trust: f32,
+}
+
+/// Tab mode for the memory journal page (#223).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryPageMode {
+    /// Browse cached memories.
+    #[default]
+    Browse,
+    /// Recall-debug search mode.
+    RecallSearch,
+    /// Pending memory candidate approval.
+    PendingApproval,
+    /// Active commitment management.
+    Commitments,
+}
+
+/// Filter for commitment list display (#223).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommitmentFilter {
+    /// Only active commitments.
+    #[default]
+    Active,
+    /// All commitments regardless of status.
+    All,
+    /// Only completed commitments.
+    Completed,
+    /// Only cancelled commitments.
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Default)]

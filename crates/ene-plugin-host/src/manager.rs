@@ -17,12 +17,15 @@ use tokio::sync::{Mutex, mpsc};
 
 use sha2::Digest;
 
+use ene_connector::{Connector, CredentialStore};
+
 use crate::circuit_breaker::CircuitBreaker;
 use crate::error::PluginHostError;
 use crate::factory::IpcLlmProviderFactory;
 use crate::health::PluginHealthEvent;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
+use crate::mcp_connector::McpConnector;
 use crate::mcp_registry::McpToolRegistry;
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 
@@ -506,8 +509,9 @@ impl PluginHostManager {
                             url = %url,
                             "Connecting to MCP server via HTTP"
                         );
-                        if let Err(err) =
-                            mcp.connect_http(&server.name, url, auth_header.as_deref())
+                        if let Err(err) = mcp
+                            .connect_http(&server.name, url, auth_header.as_deref())
+                            .await
                         {
                             tracing::warn!(
                                 component = "PluginHostManager",

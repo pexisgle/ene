@@ -68,3 +68,7 @@ pub struct ExpressionCommand {
 /// is [`PerfKind::Cancel`] (#132).
 #[derive(Message, Debug, Clone)]
 pub struct CancelCommand(pub String);
+
+/// Pending memory candidates count update (#223).
+#[derive(Message, Debug, Clone, Copy)]
+pub struct PendingCandidatesCount(pub usize);

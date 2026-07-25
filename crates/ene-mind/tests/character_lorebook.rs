@@ -59,6 +59,9 @@ fn lorebook_card() -> CharacterCardV3 {
                 selective: None,
                 secondary_keys: None,
                 position: None,
+                not_keys: Vec::new(),
+                sticky_turns: None,
+                turns_since_match: None,
             },
             LorebookEntry {
                 keys: vec![],
@@ -76,6 +79,9 @@ fn lorebook_card() -> CharacterCardV3 {
                 selective: None,
                 secondary_keys: None,
                 position: None,
+                not_keys: Vec::new(),
+                sticky_turns: None,
+                turns_since_match: None,
             },
         ],
         ..Default::default()

@@ -167,6 +167,9 @@ pub struct MindMemoryConfig {
     /// (0.10 vs 0.20 for recall) so user-facing search returns broader results
     /// while the cognitive recall path applies a stricter quality cutoff.
     pub journal_min_score: f32,
+    /// Self-reflection pipeline configuration (#210).
+    #[serde(default)]
+    pub reflection: ReflectionConfig,
 }
 
 /// Tool-result grounding and guardrail settings.
@@ -242,6 +245,7 @@ impl Default for MindMemoryConfig {
             journal_candidate_pool_size: 64,
             journal_similarity_threshold: 0.45,
             journal_min_score: 0.10,
+            reflection: ReflectionConfig::default(),
         }
     }
 }
@@ -257,6 +261,30 @@ impl Default for ToolGroundingConfig {
             persist_failure_reflection: true,
             persist_user_visible_episodic: false,
             min_confidence: 0.60,
+        }
+    }
+}
+
+/// Self-reflection pipeline configuration (#210).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct ReflectionConfig {
+    pub enabled: bool,
+    pub interval_turns: usize,
+    pub min_outcomes: usize,
+    pub success_boost: f32,
+    pub failure_penalty: f32,
+}
+
+impl Default for ReflectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_turns: 10,
+            min_outcomes: 3,
+            success_boost: 1.2,
+            failure_penalty: 0.8,
         }
     }
 }

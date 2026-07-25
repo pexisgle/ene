@@ -1,3 +1,4 @@
+use crate::character_card::UserPersona;
 use crate::error::EneConfigError;
 use schemars::JsonSchema;
 use std::collections::{BTreeMap, HashMap};
@@ -154,6 +155,11 @@ pub struct EneConfig {
     #[serde(default, skip_serializing_if = "runtime_rules_is_default")]
     pub runtime_rules: String,
 
+    /// Optional structured user persona for roleplay context.
+    /// When set, the `{{user_persona}}` CBS macro expands to this persona's fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_persona: Option<UserPersona>,
+
     #[serde(flatten)]
     #[schemars(skip)]
     /// Catch-all for provider, tool, and other sub-configurations.
@@ -167,6 +173,7 @@ impl Default for EneConfig {
             character: "Alicia".to_string(),
             user_name: "User".to_string(),
             runtime_rules: DEFAULT_RUNTIME_RULES.to_string(),
+            user_persona: None,
             extra: BTreeMap::new(),
         }
     }

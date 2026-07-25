@@ -116,11 +116,11 @@ pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{
     ActiveSceneSummaryRow, ConversationLogEntry, KeyFact, MemoryStore, NaturalDecayReport,
-    NewMemorySpan,
+    NewMemorySpan, PendingCandidate,
 };
 /// Typed memory domain types.
 pub use typed_memory::{
     AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
     MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
-    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory,
+    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
 };

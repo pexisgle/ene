@@ -19,7 +19,17 @@ impl CharacterCompiler {
         let char_name = data.get_character_name();
         let max_chars = max_tokens.saturating_mul(4).max(256);
 
-        let post_history = optional_expanded(&data.post_history_instructions, char_name, user_name);
+        let post_history = optional_expanded(&data.post_history_instructions, char_name, user_name)
+            .map(|phi| {
+                // Use `{{{{user}}}}` so format! yields literal `{{user}}` for CBS macro expansion
+                let reinforcement = format!(
+                    "\n\nImportant: You are {char_name}. {{{{user}}}} is a separate person. \
+                     Do not put words in {{{{user}}}}'s mouth, do not describe {{{{user}}}}'s actions, \
+                     and do not speak for {{{{user}}}}. If the conversation requires {{{{user}}}}'s input, \
+                     wait for it."
+                );
+                format!("{phi}{reinforcement}")
+            });
 
         let core_personality = if !data.personality.trim().is_empty() {
             expand_field(&data.personality, char_name, user_name)
@@ -31,13 +41,20 @@ impl CharacterCompiler {
 
         let speech_style = derive_speech_style(&data.system_prompt, char_name, user_name);
 
+        let anti_impersonation = format!(
+            "\n- NEVER speak, act, think, or write for {{{{user}}}}. {{{{user}}}} controls their own actions.\n\
+             - When {{{{user}}}} asks you to do something, you may describe YOUR response, not theirs.\n\
+             - If {{{{user}}}} says something, respond as {char_name}, not as {{{{user}}}}."
+        );
         let core_lines = [
             "[Identity Kernel]".to_string(),
             format!("Name: {char_name}"),
             format!("Role: desktop companion living on {user_name}'s screen"),
             format!("Core personality: {core_personality}"),
             format!("Speech style: {speech_style}"),
-            format!("Hard instruction: remain {char_name} even in long conversations"),
+            format!(
+                "Hard instruction: remain {char_name} even in long conversations{anti_impersonation}"
+            ),
         ];
         let core_block = core_lines.join("\n");
 
@@ -189,19 +206,32 @@ mod tests {
         card.data.personality = "Friends with {{user}}.".into();
         let kernel = CharacterCompiler::compile(&card, "Alice", 400);
         assert!(kernel.text.contains("Friends with Alice."));
-        assert!(!kernel.text.contains("{{user}}"));
+        // The kernel now contains `{{user}}` from the anti-impersonation guard,
+        // which is intentional — those are CBS templates that are expanded at
+        // rendering time when the kernel is injected into the prompt.
+        // Only card-derived content should have `{{user}}` expanded.
+        let card_part_start = kernel.text.find("## Core Instructions");
+        let card_part = card_part_start.map(|i| &kernel.text[i..]).unwrap_or("");
+        assert!(!card_part.contains("{{user}}"));
     }
 
     #[test]
     fn post_history_instructions_stored_separately() {
         let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
         card.data.post_history_instructions = "Stay in character.".into();
         let kernel = CharacterCompiler::compile(&card, "User", 400);
         assert!(!kernel.text.contains("Stay in character."));
-        assert_eq!(
-            kernel.post_history_instructions.as_deref(),
-            Some("Stay in character.")
+        let phi = kernel
+            .post_history_instructions
+            .expect("post_history present");
+        assert!(phi.contains("Stay in character."));
+        // Anti-impersonation reinforcement is appended
+        assert!(
+            phi.contains("Important: You are Ene"),
+            "phi should contain 'Important: You are Ene' but was: {phi}"
         );
+        assert!(phi.contains("Do not put words in {{user}}'s mouth"));
     }
 
     #[test]
@@ -219,7 +249,8 @@ mod tests {
         card.data.name = "Ene".into();
         card.data.system_prompt = "x".repeat(2_000);
         card.data.description = "y".repeat(2_000);
-        let kernel = CharacterCompiler::compile(&card, "User", 50);
+        // Use enough budget for the core block (which now includes anti-impersonation guard)
+        let kernel = CharacterCompiler::compile(&card, "User", 120);
         assert!(kernel.text.contains("[Identity Kernel]"));
         assert!(kernel.text.contains("Hard instruction: remain Ene"));
     }

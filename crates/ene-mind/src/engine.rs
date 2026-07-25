@@ -77,7 +77,7 @@ impl CognitionEngine {
         Self {
             pre_turn: crate::pre_turn::PreTurnAnalyzer,
             context: ContextManager::default(),
-            memory_writer: MemoryWriter,
+            memory_writer: MemoryWriter::default(),
             recall: crate::recall::RecallPlanner,
             emotion: crate::emotion::EmotionEngine,
             character: CharacterProcessor,
@@ -444,6 +444,16 @@ impl CognitionEngine {
             ctx.history.to_vec()
         };
 
+        // Build author's note from character card data if present
+        let authors_note = ctx
+            .card
+            .data
+            .get_authors_note()
+            .map(|(content, depth)| crate::character::AuthorsNote::new(content, depth));
+
+        // Load user persona from global config if available
+        let user_persona = ene_config::get_global_config().user_persona;
+
         let pack_input = PackInput {
             platform_contract,
             identity_kernel: kernel,
@@ -456,6 +466,8 @@ impl CognitionEngine {
             history,
             output_contract: ctx.post_history_block.map(str::to_string),
             interruption_note,
+            authors_note,
+            user_persona,
             user_input: ctx.user_input.to_string(),
         };
 

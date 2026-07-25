@@ -85,6 +85,15 @@ pub struct CharacterCardData {
     /// Unix timestamp of the last modification.
     #[serde(default)]
     pub modification_date: Option<u64>,
+    /// Author's note: persistent instruction injected at a specific depth in the conversation.
+    /// Unlike the system prompt, this sits within the history at depth N from the end,
+    /// keeping the main system prompt clean while enforcing late-session behavior.
+    #[serde(default)]
+    pub authors_note: Option<String>,
+    /// Depth at which to insert the author's note from the end of history.
+    /// 0 = most recent assistant turn.
+    #[serde(default)]
+    pub authors_note_depth: Option<usize>,
 }
 
 /// Typed extension store for character cards.
@@ -211,6 +220,48 @@ pub struct LorebookEntry {
     /// Where the content is inserted (`"before_char"` or `"after_char"`).
     #[serde(default)]
     pub position: Option<String>,
+    /// NOT keys: entry is suppressed if any of these match the scan text.
+    #[serde(default)]
+    pub not_keys: Vec<String>,
+    /// Sticky: keep entry active for N turns (user messages) after last key match.
+    #[serde(default)]
+    pub sticky_turns: Option<usize>,
+    /// Turns since last key match (runtime state, not serialized).
+    #[serde(skip)]
+    pub turns_since_match: Option<usize>,
+}
+
+/// Structured user persona for roleplay context.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct UserPersona {
+    /// User's display name.
+    pub name: String,
+    /// Physical description of the user.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Relationship to the character.
+    #[serde(default)]
+    pub relationship: Option<String>,
+    /// Preferred pronouns.
+    #[serde(default)]
+    pub pronouns: Option<String>,
+    /// Custom notes/additional context about the user.
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl Default for UserPersona {
+    fn default() -> Self {
+        Self {
+            name: String::from("User"),
+            description: None,
+            relationship: None,
+            pronouns: None,
+            notes: None,
+        }
+    }
 }
 
 const fn default_enabled() -> bool {
@@ -354,6 +405,16 @@ impl CharacterCardData {
         };
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
+
+    /// Returns the author's note configuration, or `None` if no note is set.
+    pub fn get_authors_note(&self) -> Option<(&str, usize)> {
+        let note = self.authors_note.as_deref()?;
+        if note.trim().is_empty() {
+            return None;
+        }
+        let depth = self.authors_note_depth.unwrap_or(3);
+        Some((note, depth))
+    }
 }
 
 /// Default expressions for the schema.
@@ -425,6 +486,20 @@ pub struct EneExtension {
 /// - `{{//...}}`, `{{comment:...}}` → removed
 /// - `{{reverse:text}}` → reversed string
 pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String {
+    expand_cbs_macros_with(text, char_name, user_name, None)
+}
+
+/// Expands CBS macros with optional `{{user_persona}}` support.
+///
+/// In addition to the macros supported by [`expand_cbs_macros`], this variant
+/// also expands `{{user_persona}}` into a structured text block describing the
+/// user persona (name, description, relationship, pronouns, notes).
+pub fn expand_cbs_macros_with(
+    text: &str,
+    char_name: &str,
+    user_name: &str,
+    user_persona: Option<&UserPersona>,
+) -> String {
     let mut result = text.to_string();
 
     result = result.replace("{{char}}", char_name);
@@ -432,6 +507,35 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
     result = result.replace("<bot>", char_name);
 
     result = result.replace("{{user}}", user_name);
+
+    // Expand {{user_persona}} if persona data is available
+    if let Some(persona) = user_persona {
+        let mut parts = vec![format!("Name: {}", persona.name)];
+        if let Some(ref desc) = persona.description {
+            if !desc.trim().is_empty() {
+                parts.push(format!("Description: {}", desc));
+            }
+        }
+        if let Some(ref rel) = persona.relationship {
+            if !rel.trim().is_empty() {
+                parts.push(format!("Relationship: {}", rel));
+            }
+        }
+        if let Some(ref pron) = persona.pronouns {
+            if !pron.trim().is_empty() {
+                parts.push(format!("Pronouns: {}", pron));
+            }
+        }
+        if let Some(ref notes) = persona.notes {
+            if !notes.trim().is_empty() {
+                parts.push(notes.clone());
+            }
+        }
+        let rendered = parts.join("\n");
+        result = result.replace("{{user_persona}}", &rendered);
+    } else {
+        result = result.replace("{{user_persona}}", "");
+    }
 
     fn expand_template_macro(result: &mut String, prefix: &str, handler: impl Fn(&str) -> String) {
         while let Some(start) = result.find(prefix) {

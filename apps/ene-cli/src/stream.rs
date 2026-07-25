@@ -251,7 +251,8 @@ pub async fn process_stream(
             Ok(
                 EneEvent::ToolBackgroundCompleted { .. }
                 | EneEvent::StatusChanged { .. }
-                | EneEvent::AudioChunk { .. },
+                | EneEvent::AudioChunk { .. }
+                | EneEvent::PendingCandidateAvailable { .. },
             ) => {}
             Err(e) => {
                 tracing::warn!(error = ?e, "Event receive error");

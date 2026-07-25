@@ -64,8 +64,14 @@ impl LorebookIndexer {
         for (index, entry) in book.entries.iter().enumerate().filter(|(_, e)| e.enabled) {
             stable_entry_id(entry, index).hash(&mut StableHasher(&mut buf));
             entry.keys.hash(&mut StableHasher(&mut buf));
+            entry.not_keys.hash(&mut StableHasher(&mut buf));
             entry.content.hash(&mut StableHasher(&mut buf));
             entry.constant.hash(&mut StableHasher(&mut buf));
+            entry.selective.hash(&mut StableHasher(&mut buf));
+            if let Some(ref sk) = entry.secondary_keys {
+                sk.hash(&mut StableHasher(&mut buf));
+            }
+            entry.sticky_turns.hash(&mut StableHasher(&mut buf));
         }
         stable_hash_u64(&buf)
     }
@@ -138,12 +144,53 @@ pub fn stable_entry_id(entry: &LorebookEntry, index: usize) -> String {
     format!("{}:{:x}", entry.insertion_order, stable_hash_u64(&buf))
 }
 
+/// Internal helper: check if a single key matches the scan text.
+fn key_matches(
+    key: &str,
+    scan_text: &str,
+    case_sensitive: bool,
+    use_regex: bool,
+    regex_cache: Option<&std::collections::HashMap<String, regex::Regex>>,
+    entry_id: &str,
+) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    if use_regex {
+        let cache_key = format!("{entry_id}:{key}");
+        if let Some(cache) = regex_cache
+            && let Some(re) = cache.get(&cache_key)
+        {
+            return re.is_match(scan_text);
+        }
+        regex::RegexBuilder::new(key)
+            .case_insensitive(!case_sensitive)
+            .build()
+            .is_ok_and(|re| re.is_match(scan_text))
+    } else if case_sensitive {
+        scan_text.contains(key)
+    } else {
+        let haystack = scan_text.to_lowercase();
+        haystack.contains(&key.to_lowercase())
+    }
+}
+
 /// Match lorebook trigger keys against scan text (case-insensitive by default).
 pub fn entry_keys_match(entry: &LorebookEntry, scan_text: &str) -> bool {
     entry_keys_match_with_cache(entry, 0, scan_text, None)
 }
 
 /// Match lorebook trigger keys, optionally using a precompiled regex cache.
+///
+/// Supports:
+/// - **Constant entries** always match.
+/// - **NOT keys** — if any NOT key matches, the entry is suppressed.
+/// - **Selective mode** (`entry.selective == true`) — ALL keys must match (AND logic).
+/// - **Secondary keys** — at least one primary AND at least one secondary must match.
+/// - **Default** — any key match (OR logic).
+///
+/// When `entry.use_regex` is `true`, keys are treated as regular expressions
+/// and the optional `regex_cache` is checked first for precompiled patterns.
 #[expect(
     clippy::implicit_hasher,
     reason = "HashMap key type is fixed to String in lorebook API"
@@ -154,39 +201,92 @@ pub fn entry_keys_match_with_cache(
     scan_text: &str,
     regex_cache: Option<&std::collections::HashMap<String, regex::Regex>>,
 ) -> bool {
+    // Constant entries always match regardless of keys
     if entry.constant.unwrap_or(false) {
         return true;
     }
-    if entry.keys.is_empty() {
+
+    // An entry with no keys and no constant flag cannot match
+    if entry.keys.is_empty() && entry.not_keys.is_empty() {
         return false;
     }
+
     let case_sensitive = entry.case_sensitive.unwrap_or(false);
-    let haystack = if case_sensitive {
-        scan_text.to_string()
-    } else {
-        scan_text.to_lowercase()
-    };
     let entry_id = stable_entry_id(entry, entry_index);
-    entry.keys.iter().any(|key| {
-        if key.is_empty() {
-            return false;
+
+    // Check NOT keys first: if any NOT key matches, suppress entry
+    for not_key in &entry.not_keys {
+        if key_matches(
+            not_key,
+            scan_text,
+            case_sensitive,
+            entry.use_regex,
+            regex_cache,
+            &entry_id,
+        ) {
+            return false; // Suppressed by NOT key
         }
-        if entry.use_regex {
-            let cache_key = format!("{entry_id}:{key}");
-            if let Some(cache) = regex_cache
-                && let Some(re) = cache.get(&cache_key)
-            {
-                return re.is_match(scan_text);
+    }
+
+    // If there are no positive keys to match, the entry passes (no NOT keys matched)
+    if entry.keys.is_empty() {
+        return true;
+    }
+
+    // Selective mode: ALL keys must match (AND logic)
+    if entry.selective.unwrap_or(false) && !entry.keys.is_empty() {
+        return entry.keys.iter().all(|key| {
+            key_matches(
+                key,
+                scan_text,
+                case_sensitive,
+                entry.use_regex,
+                regex_cache,
+                &entry_id,
+            )
+        });
+    }
+
+    // Secondary keys mode: at least one primary AND at least one secondary must match
+    if let Some(ref secondary_keys) = entry.secondary_keys {
+        if !secondary_keys.is_empty() {
+            let primary_match = entry.keys.iter().any(|key| {
+                key_matches(
+                    key,
+                    scan_text,
+                    case_sensitive,
+                    entry.use_regex,
+                    regex_cache,
+                    &entry_id,
+                )
+            });
+            if !primary_match {
+                return false;
             }
-            regex::RegexBuilder::new(key)
-                .case_insensitive(!case_sensitive)
-                .build()
-                .is_ok_and(|re| re.is_match(scan_text))
-        } else if case_sensitive {
-            haystack.contains(key)
-        } else {
-            haystack.contains(&key.to_lowercase())
+            let secondary_match = secondary_keys.iter().any(|key| {
+                key_matches(
+                    key,
+                    scan_text,
+                    case_sensitive,
+                    entry.use_regex,
+                    regex_cache,
+                    &entry_id,
+                )
+            });
+            return secondary_match;
         }
+    }
+
+    // Default: any key matches (OR logic)
+    entry.keys.iter().any(|key| {
+        key_matches(
+            key,
+            scan_text,
+            case_sensitive,
+            entry.use_regex,
+            regex_cache,
+            &entry_id,
+        )
     })
 }
 
@@ -203,7 +303,23 @@ pub fn compile_lorebook_regex_cache(
         }
         let entry_id = stable_entry_id(entry, index);
         let case_sensitive = entry.case_sensitive.unwrap_or(false);
-        for key in &entry.keys {
+
+        // Compile regexes for all key types: keys, not_keys, and secondary_keys
+        let all_keys: Vec<&String> = entry
+            .keys
+            .iter()
+            .chain(entry.not_keys.iter())
+            .chain(
+                entry
+                    .secondary_keys
+                    .as_ref()
+                    .map(|v| v.iter())
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect();
+
+        for key in all_keys {
             if key.is_empty() {
                 continue;
             }
@@ -276,6 +392,9 @@ mod tests {
             selective: None,
             secondary_keys: None,
             position: None,
+            not_keys: Vec::new(),
+            sticky_turns: None,
+            turns_since_match: None,
         }
     }
 
@@ -300,6 +419,9 @@ mod tests {
                 selective: None,
                 secondary_keys: None,
                 position: None,
+                not_keys: Vec::new(),
+                sticky_turns: None,
+                turns_since_match: None,
             }],
             ..Default::default()
         });
@@ -330,5 +452,49 @@ mod tests {
     fn key_match_is_case_insensitive_by_default() {
         let entry = sample_entry(&["Dragon"], "A dragon appears.", false);
         assert!(entry_keys_match(&entry, "I saw a dragon yesterday"));
+    }
+
+    #[test]
+    fn not_key_suppresses_entry() {
+        let mut entry = sample_entry(&["sword"], "A shiny sword.", false);
+        entry.not_keys = vec!["rusty".to_string()];
+        // NOT key "rusty" matches the scan text, so the entry is suppressed
+        assert!(!entry_keys_match(&entry, "There is a rusty sword here"));
+        // Without the NOT key, it would match
+        assert!(entry_keys_match(&entry, "There is a shiny sword here"));
+    }
+
+    #[test]
+    fn selective_and_logic() {
+        let mut entry = sample_entry(&["forest", "dark"], "You enter a dark forest.", false);
+        entry.selective = Some(true);
+        // Both keys must match
+        assert!(entry_keys_match(&entry, "The dark forest is ahead"));
+        // Only one key matches
+        assert!(!entry_keys_match(&entry, "The forest is bright"));
+        assert!(!entry_keys_match(&entry, "It is dark outside"));
+    }
+
+    #[test]
+    fn secondary_keys_require_primary_and_secondary() {
+        let mut entry = sample_entry(&["castle"], "Castle lore.", false);
+        entry.secondary_keys = Some(vec!["king".to_string(), "queen".to_string()]);
+        // Primary + secondary match
+        assert!(entry_keys_match(&entry, "The king lives in the castle"));
+        // Only primary matches
+        assert!(!entry_keys_match(&entry, "The castle is empty"));
+        // Only secondary matches
+        assert!(!entry_keys_match(&entry, "The king is away"));
+    }
+
+    #[test]
+    fn not_keys_checked_before_positive_match() {
+        let mut entry = sample_entry(&["magic"], "Magic lore.", false);
+        entry.not_keys = vec!["anti-magic".to_string()];
+        // The scan text contains both "magic" and "anti-magic" - NOT key wins
+        assert!(!entry_keys_match(
+            &entry,
+            "anti-magic field suppresses magic"
+        ));
     }
 }

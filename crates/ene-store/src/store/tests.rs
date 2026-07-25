@@ -805,6 +805,7 @@ fn hybrid_search_options<'a>(
         weights: crate::HybridSearchWeights::default(),
         decay_half_life_days: 30.0,
         now,
+        time_range: None,
         min_score: 0.0,
         commitment_boost: 0.25,
         recent_fallback_limit: 5,

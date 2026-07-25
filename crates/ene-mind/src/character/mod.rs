@@ -1,11 +1,13 @@
 //! Character processing: CCv3 compilation, Identity Kernel, lorebook indexing (#82–#84).
 
+mod authors_note;
 mod compiler;
 mod kernel;
 mod lorebook;
 mod style;
 mod sync;
 
+pub use authors_note::{AuthorsNote, apply_authors_note};
 pub use compiler::{CharacterCompiler, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS};
 pub use kernel::IdentityKernel;
 pub use lorebook::{

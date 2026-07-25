@@ -413,6 +413,7 @@ async fn build_semantic_matches(
             min_score: 0.0,
             commitment_boost: 0.0,
             recent_fallback_limit: 0,
+            time_range: None,
         };
 
         let scored = store

@@ -188,6 +188,44 @@ pub(crate) fn validate_embedding(
     Ok(())
 }
 
+/// A pending memory candidate awaiting user approval (#174).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCandidate {
+    /// Primary key.
+    pub id: i64,
+    /// Character identifier.
+    pub character_id: String,
+    /// Short title or label.
+    pub title: String,
+    /// Full candidate content.
+    pub content: String,
+    /// Memory kind as string (e.g. "episodic", "semantic").
+    pub kind: String,
+    /// Confidence score (0.0 .. 1.0).
+    pub confidence: f32,
+    /// Human-readable reason for the extraction.
+    pub reason_detail: String,
+    /// Title of the existing memory this candidate would supersede, if any.
+    pub existing_memory_title: Option<String>,
+    /// Source quote from the conversation that triggered this candidate.
+    pub source_quote: String,
+    /// Workflow status: "pending", "approved", "rejected".
+    pub status: String,
+}
+
+/// In-memory store for pending candidates (users that need approval).
+///
+/// The actual DB-backed implementation will migrate to a dedicated
+/// `pending_candidates` table in a future migration. For now the static
+/// storage is ephemeral (lost on restart) which is acceptable while the
+/// feature is new (#174).
+static PENDING_CANDIDATES: std::sync::OnceLock<std::sync::Mutex<Vec<PendingCandidate>>> =
+    std::sync::OnceLock::new();
+
+fn pending_candidates_store() -> &'static std::sync::Mutex<Vec<PendingCandidate>> {
+    PENDING_CANDIDATES.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
 /// A key-value fact about the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyFact {
@@ -446,5 +484,74 @@ impl MemoryStore {
             MemoryError::BackupError("in-memory store cannot be backed up to a file".into())
         })?;
         crate::backup::backup_database(path, Some(&self.db)).await
+    }
+
+    // ── Pending candidate CRUD (#174) ──
+
+    /// List pending candidates for a character, optionally filtered by status.
+    pub async fn list_pending_candidates(
+        &self,
+        character_id: &str,
+        status_filter: &str,
+    ) -> Result<Vec<PendingCandidate>, MemoryError> {
+        let store = pending_candidates_store();
+        let guard = store
+            .lock()
+            .map_err(|e| MemoryError::Other(format!("pending candidates lock poisoned: {e}")))?;
+        Ok(guard
+            .iter()
+            .filter(|c| c.character_id == character_id && c.status == status_filter)
+            .cloned()
+            .collect())
+    }
+
+    /// Approve a pending candidate, moving it to typed memory as active.
+    ///
+    /// Returns an error when the candidate is not found or has already
+    /// been resolved.
+    pub async fn approve_pending_candidate(&self, id: i64) -> Result<(), MemoryError> {
+        let store = pending_candidates_store();
+        let mut guard = store
+            .lock()
+            .map_err(|e| MemoryError::Other(format!("pending candidates lock poisoned: {e}")))?;
+        let candidate = guard
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| MemoryError::Other(format!("pending candidate {id} not found")))?;
+        if candidate.status != "pending" {
+            return Err(MemoryError::Other(format!(
+                "pending candidate {id} is already {}",
+                candidate.status
+            )));
+        }
+        candidate.status = "approved".to_string();
+        Ok(())
+    }
+
+    /// Resolve (approve or reject) a pending candidate by id.
+    ///
+    /// When `approved` is `true`, the candidate status is set to `"approved"`;
+    /// when `false`, the candidate status is set to `"rejected"`.
+    pub async fn resolve_pending_candidate(
+        &self,
+        id: i64,
+        approved: bool,
+    ) -> Result<(), MemoryError> {
+        let store = pending_candidates_store();
+        let mut guard = store
+            .lock()
+            .map_err(|e| MemoryError::Other(format!("pending candidates lock poisoned: {e}")))?;
+        let candidate = guard
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| MemoryError::Other(format!("pending candidate {id} not found")))?;
+        if candidate.status != "pending" {
+            return Err(MemoryError::Other(format!(
+                "pending candidate {id} is already {}",
+                candidate.status
+            )));
+        }
+        candidate.status = if approved { "approved" } else { "rejected" }.to_string();
+        Ok(())
     }
 }
