@@ -34,7 +34,7 @@ pub fn render(
             }
             ui.add_sized(
                 [220.0, 0.0],
-                egui::Label::new(match settings.language {
+                egui::Label::new(match settings.language() {
                     crate::settings::Language::En => "English",
                     crate::settings::Language::Ja => "日本語",
                 }),
@@ -73,8 +73,8 @@ pub fn render(
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(format_quality_label(
-                    settings.language,
-                    settings.graphics.quality,
+                    settings.language(),
+                    settings.graphics().quality,
                 )),
             );
             if ui.button(">").clicked() {

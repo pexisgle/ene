@@ -9,7 +9,6 @@
 //! Methods mirror the legacy `app_config.rs` shape 1:1.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use ene_config::CharacterConfig;
 use ene_config::serde::{Deserialize, Serialize};
@@ -513,28 +512,13 @@ pub enum CommitmentFilter {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct AiConfig {
-    pub ai: ene_config::EneConfig,
-}
-
 // ── Top-level settings (the runtime's single source of truth) ──
 
 pub struct CharacterSettings {
     pub assets_dir: PathBuf,
     pub characters: Vec<CharacterEntry>,
-    pub graphics: GraphicsSettings,
-    pub language: Language,
-    /// Selected microphone device name for voice capture, or `None`
-    /// for the OS default input device.
-    pub mic_device: Option<String>,
     pub character_state: CharacterState,
-    pub ai: AiConfig,
-    /// Dirty-tracked config store shared with the settings UI for persistence.
     pub store: Arc<RwLock<ene_config::ConfigStore>>,
-    /// Set when in-memory settings diverge from the store; cleared by
-    /// `sync_to_store` so repeated `flush_if_dirty` calls are cheap.
-    settings_dirty: AtomicBool,
 }
 
 impl std::fmt::Debug for CharacterSettings {
@@ -542,11 +526,7 @@ impl std::fmt::Debug for CharacterSettings {
         f.debug_struct("CharacterSettings")
             .field("assets_dir", &self.assets_dir)
             .field("characters", &self.characters)
-            .field("graphics", &self.graphics)
-            .field("language", &self.language)
-            .field("mic_device", &self.mic_device)
             .field("character_state", &self.character_state)
-            .field("ai", &self.ai)
             .finish_non_exhaustive()
     }
 }
@@ -591,27 +571,22 @@ impl CharacterSettings {
             })
             .unwrap_or(0);
 
+        let initial_config = ene_config::EneConfig {
+            character: format!("{}/{}", assets_dir.display(), selected_card),
+            ..Default::default()
+        };
+
         let mut settings = Self {
             assets_dir: assets_dir.to_path_buf(),
             characters,
-            graphics: GraphicsSettings::default(),
-            language: Language::default(),
-            mic_device: None,
             character_state: CharacterState {
                 selected_character,
                 selected_motion,
                 ..Default::default()
             },
-            ai: AiConfig {
-                ai: ene_config::EneConfig {
-                    character: format!("{}/{}", assets_dir.display(), selected_card),
-                    ..Default::default()
-                },
-            },
             store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
-                ene_config::EneConfig::default(),
+                initial_config,
             ))),
-            settings_dirty: AtomicBool::new(true),
         };
         settings.load_from_file();
         settings
@@ -642,7 +617,7 @@ impl CharacterSettings {
             self.assets_dir.display(),
             self.current_character_card()
         );
-        self.ai.ai.character = path;
+        self.with_config_mut(|c| c.character = path);
     }
 
     pub fn clamp_runtime_values(&mut self) {
@@ -655,11 +630,87 @@ impl CharacterSettings {
             self.character_state.character_position.z.clamp(-4.0, 3.0);
         self.character_state.look_at_strength =
             self.character_state.look_at_strength.clamp(0.0, 1.0);
-        self.graphics.quality = cycle_graphics_quality(self.graphics.quality, 0);
+        let current_quality = self.graphics().quality;
+        let clamped = cycle_graphics_quality(current_quality, 0);
+        self.set_graphics(GraphicsSettings { quality: clamped });
+    }
+
+    // ── Config accessors (read from / write through the store) ──
+
+    /// Returns a snapshot of the current global config.
+    pub fn config(&self) -> ene_config::EneConfig {
+        self.store.read().config()
+    }
+
+    /// Returns a new `EneConfig` by value. Use this where a move/clone is needed.
+    pub fn config_clone(&self) -> ene_config::EneConfig {
+        self.store.read().config()
+    }
+
+    /// Get a typed section from the global config.
+    pub fn config_section<T>(&self) -> T
+    where
+        T: serde::de::DeserializeOwned + Default + ene_config::HasConfigKey,
+    {
+        self.store.read().get_section::<T>()
+    }
+
+    /// Write a typed section into the global config.
+    pub fn set_config_section<T>(&self, section: &T)
+    where
+        T: serde::Serialize + ene_config::HasConfigKey,
+    {
+        self.store.read().set_section(section);
+    }
+
+    /// Mutate the global config.
+    pub fn with_config_mut(&self, f: impl FnOnce(&mut ene_config::EneConfig)) {
+        self.store.read().with_config_mut(f);
+    }
+
+    // ── Desktop-section accessors ─────────────────────────────────
+
+    pub fn graphics(&self) -> GraphicsSettings {
+        self.config_section::<DesktopSection>().graphics
+    }
+
+    pub fn language(&self) -> Language {
+        self.config_section::<DesktopSection>().language
+    }
+
+    pub fn mic_device(&self) -> Option<String> {
+        self.config_section::<DesktopSection>().mic_device
+    }
+
+    pub fn set_graphics(&self, graphics: GraphicsSettings) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.graphics = graphics;
+                let _ = c.set_section(&d);
+            }
+        });
+    }
+
+    pub fn set_language(&self, language: Language) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.language = language;
+                let _ = c.set_section(&d);
+            }
+        });
+    }
+
+    pub fn set_mic_device(&self, mic_device: Option<String>) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.mic_device = mic_device;
+                let _ = c.set_section(&d);
+            }
+        });
     }
 
     pub fn save_per_character_settings(&self) {
-        self.sync_to_store();
+        self.sync_character_state_to_store();
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
         if let Err(e) = store.flush(Some(&char_name)) {
@@ -722,7 +773,7 @@ impl CharacterSettings {
     }
 
     pub fn save(&self) {
-        self.sync_to_store();
+        self.sync_character_state_to_store();
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
         if let Err(e) = store.flush(Some(&char_name)) {
@@ -731,7 +782,6 @@ impl CharacterSettings {
     }
 
     pub fn mark_dirty(&self) {
-        self.settings_dirty.store(true, Ordering::Release);
         let store = self.store.read();
         store.mark_dirty();
     }
@@ -740,7 +790,7 @@ impl CharacterSettings {
     /// underlying `ConfigStore` to disk only if anything was
     /// changed since the last flush.
     pub fn flush_if_dirty(&self) {
-        self.sync_to_store();
+        self.sync_character_state_to_store();
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
         if let Err(e) = store.flush_if_dirty(Some(&char_name)) {
@@ -748,23 +798,10 @@ impl CharacterSettings {
         }
     }
 
-    fn sync_to_store(&self) {
-        if !self.settings_dirty.swap(false, Ordering::AcqRel) {
-            return;
-        }
+    /// Sync the in-memory character state into the store's per-character
+    /// config so it gets flushed to disk on the next save.
+    fn sync_character_state_to_store(&self) {
         let store = self.store.read();
-        store.with_config_mut(|config| {
-            config.version = 1;
-            let desktop = DesktopSection {
-                graphics: self.graphics.clone(),
-                language: self.language,
-                mic_device: self.mic_device.clone(),
-            };
-            if let Err(e) = config.set_section(&desktop) {
-                tracing::warn!("[Config] Failed to set desktop section: {e}");
-            }
-        });
-
         let entry = self.current_entry();
         let default_motion_name = entry
             .motion_names
@@ -802,7 +839,6 @@ impl CharacterSettings {
             }
         };
 
-        self.ai.ai = full.clone();
         *self.store.write() = ene_config::ConfigStore::from_config(full.clone());
 
         // Resolve `full.character` (a card name or full path) to
@@ -817,31 +853,26 @@ impl CharacterSettings {
             }
         }
 
-        if let Ok(desktop) = full.get_section::<DesktopSection>() {
-            self.graphics = desktop.graphics;
-            self.language = desktop.language;
-            self.mic_device = desktop.mic_device;
-        }
-
         self.sync_classifier_language_from_ui();
 
-        crate::i18n::select_language(self.language);
+        crate::i18n::select_language(self.language());
 
         self.clamp_runtime_values();
         self.load_per_character_settings();
     }
 
     /// Keep cognitive prompt language aligned with the desktop UI language.
-    pub fn sync_classifier_language_from_ui(&mut self) {
-        let lang = match self.language {
+    pub fn sync_classifier_language_from_ui(&self) {
+        let lang = match self.language() {
             Language::En => "en",
             Language::Ja => "ja",
         };
-        if let Ok(mut mind) = self.ai.ai.get_section::<ene_mind::MindConfig>() {
-            mind.emotion.classifier_language = lang.into();
-            let _ = self.ai.ai.set_section(&mind);
-            *self.store.write() = ene_config::ConfigStore::from_config(self.ai.ai.clone());
-        }
+        self.with_config_mut(|c| {
+            if let Ok(mut mind) = c.get_section::<ene_mind::MindConfig>() {
+                mind.emotion.classifier_language = lang.into();
+                let _ = c.set_section(&mind);
+            }
+        });
     }
 }
 

@@ -99,7 +99,7 @@ impl AppState {
         bootstrap_handle: &tokio::runtime::Handle,
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
-        let config = settings.ai.ai.clone();
+        let config = settings.config_clone();
 
         // Voice pipeline: spawn the TTS playback thread once and build the
         // shared audio state. The playback sender is cloned into the AI
@@ -116,7 +116,7 @@ impl AppState {
             let state = crate::audio::AudioState {
                 mic_active,
                 tts_playing,
-                mic_device: settings.mic_device.clone(),
+                mic_device: settings.mic_device(),
                 config: config.clone(),
             };
             (Some(sender), Some(handle), state, viseme)
@@ -426,7 +426,7 @@ impl AppState {
             ));
         }
         self.reconnect_attempted = true;
-        let config = self.settings.ai.ai.clone();
+        let config = self.settings.config_clone();
         #[cfg(feature = "voice")]
         let audio_tx = self.audio_tx.clone();
         #[cfg(not(feature = "voice"))]

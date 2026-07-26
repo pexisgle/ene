@@ -63,11 +63,7 @@ pub fn render(
     _world: &mut World,
     _ui_entity: Entity,
 ) {
-    let mut ai_cfg = settings
-        .ai
-        .ai
-        .get_section::<ene_runtime::AiConfig>()
-        .unwrap_or_default();
+    let mut ai_cfg = settings.config_section::<ene_runtime::AiConfig>();
 
     ui.vertical(|ui| {
         ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "chat-open-hint"));
@@ -87,7 +83,7 @@ pub fn render(
                 egui::TextEdit::singleline(&mut input.ai_user_name).desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.ai.user_name = input.ai_user_name.trim().to_string();
+                settings.with_config_mut(|c| c.user_name = input.ai_user_name.trim().to_string());
                 settings.mark_dirty();
             }
         });
@@ -102,7 +98,7 @@ pub fn render(
             );
             if response.changed() {
                 ai_cfg.tasks.chat.model = Some(input.ai_chat_model.trim().to_string());
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -129,7 +125,7 @@ pub fn render(
                         );
                     }
                 }
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -159,7 +155,7 @@ pub fn render(
                 {
                     def.api_key.source = current_source;
                 }
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -177,7 +173,7 @@ pub fn render(
                         && def.is_openai_compatible()
                     {
                         def.api_key.env = input.ai_api_key_env.trim().to_string();
-                        let _ = settings.ai.ai.set_section(&ai_cfg);
+                        settings.set_config_section(&ai_cfg);
                         settings.mark_dirty();
                     }
                 }
@@ -196,7 +192,7 @@ pub fn render(
                         && def.is_openai_compatible()
                     {
                         def.api_key.inline = input.ai_api_key.trim().to_string();
-                        let _ = settings.ai.ai.set_section(&ai_cfg);
+                        settings.set_config_section(&ai_cfg);
                         settings.mark_dirty();
                     }
                 }
@@ -204,7 +200,7 @@ pub fn render(
         }
 
         // Inline validation + connection test (#241).
-        let issues = ene_ai::validate_settings(&settings.ai.ai);
+        let issues = ene_ai::validate_settings(&settings.config());
         if !issues.is_empty() {
             for issue in &issues {
                 ui.colored_label(egui::Color32::from_rgb(200, 120, 40), issue.message());
@@ -296,7 +292,7 @@ pub fn render(
                         .dimensions
                         .map_or_else(|| "1536".to_string(), |d| d.to_string());
                 }
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -309,7 +305,7 @@ pub fn render(
             );
             if response.changed() {
                 ai_cfg.tasks.embedding.model = Some(input.ai_embedding_model.trim().to_string());
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
@@ -330,7 +326,7 @@ pub fn render(
                     && let Ok(dims) = input.ai_embedding_dimensions.parse::<usize>()
                 {
                     ai_cfg.tasks.embedding.dimensions = Some(dims);
-                    let _ = settings.ai.ai.set_section(&ai_cfg);
+                    settings.set_config_section(&ai_cfg);
                     settings.mark_dirty();
                 }
             }

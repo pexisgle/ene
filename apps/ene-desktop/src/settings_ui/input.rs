@@ -25,6 +25,16 @@ pub struct SettingsInputState {
     pub ai_embedding_dimensions: String,
     /// Last AI settings validation / connection-test message (#241).
     pub ai_validation_message: Option<String>,
+    pub tts_provider: String,
+    pub tts_model: String,
+    pub tts_voice: String,
+    pub tts_language: String,
+    pub tts_model_path: String,
+    pub tts_voices_path: String,
+    pub stt_provider: String,
+    pub stt_model: String,
+    pub stt_language: String,
+    pub stt_model_path: String,
 }
 
 impl SettingsInputState {
@@ -52,12 +62,8 @@ impl SettingsInputState {
         self.character_pos_x = format!("{:+.2}", settings.character_state.character_position.x);
         self.character_pos_y = format!("{:+.2}", settings.character_state.character_position.y);
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
-        self.ai_user_name.clone_from(&settings.ai.ai.user_name);
-        let ai_cfg = settings
-            .ai
-            .ai
-            .get_section::<ene_runtime::AiConfig>()
-            .unwrap_or_default();
+        self.ai_user_name.clone_from(&settings.config().user_name);
+        let ai_cfg = settings.config_section::<ene_runtime::AiConfig>();
         self.ai_chat_model = ai_cfg.tasks.chat.model.clone().unwrap_or_default();
         if let Some(def) = ai_cfg.providers.get(&ai_cfg.tasks.chat.provider) {
             self.ai_base_url.clone_from(&def.base_url);
@@ -86,5 +92,17 @@ impl SettingsInputState {
                 .dimensions
                 .map_or_else(|| "1536".to_string(), |d| d.to_string())
         };
+
+        self.tts_provider.clone_from(&ai_cfg.tts.provider);
+        self.tts_model.clone_from(&ai_cfg.tts.model);
+        self.tts_voice.clone_from(&ai_cfg.tts.voice);
+        self.tts_language.clone_from(&ai_cfg.tts.language);
+        self.tts_model_path = ai_cfg.tts.model_path.clone().unwrap_or_default();
+        self.tts_voices_path = ai_cfg.tts.voices_path.clone().unwrap_or_default();
+
+        self.stt_provider.clone_from(&ai_cfg.stt.provider);
+        self.stt_model.clone_from(&ai_cfg.stt.model);
+        self.stt_language.clone_from(&ai_cfg.stt.language);
+        self.stt_model_path = ai_cfg.stt.model_path.clone().unwrap_or_default();
     }
 }

@@ -14,6 +14,7 @@ pub mod page_graphics;
 pub mod page_memory;
 pub mod page_permissions;
 pub mod page_sessions;
+pub mod page_voice;
 pub mod widgets;
 
 pub use input::SettingsInputState;
@@ -35,6 +36,7 @@ pub enum PageKind {
     CharacterEditor,
     Graphics,
     Ai,
+    Voice,
     Features,
     Memory,
     Permissions,
@@ -259,6 +261,7 @@ impl SettingsUi {
                 PageKind::CharacterEditor,
                 PageKind::Graphics,
                 PageKind::Ai,
+                PageKind::Voice,
                 PageKind::Features,
                 PageKind::Memory,
                 PageKind::Permissions,
@@ -277,6 +280,7 @@ impl SettingsUi {
                     }
                     PageKind::Debug => i18n_embed_fl::fl!(crate::i18n::loader(), "debug"),
                     PageKind::Ai => i18n_embed_fl::fl!(crate::i18n::loader(), "ai"),
+                    PageKind::Voice => i18n_embed_fl::fl!(crate::i18n::loader(), "voice"),
                     PageKind::Features => {
                         i18n_embed_fl::fl!(crate::i18n::loader(), "features")
                     }
@@ -322,6 +326,7 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
+            PageKind::Voice => page_voice::render(ui, settings, ai, &mut self.input, world),
             PageKind::Features => page_features::render(ui, settings, ai, world),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
             PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),

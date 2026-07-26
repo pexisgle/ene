@@ -102,7 +102,7 @@ impl Runtime {
         state.app.update();
 
         // First-run onboarding when the chat API key is missing (#241).
-        if ene_ai::needs_onboarding(&state.settings.ai.ai) {
+        if ene_ai::needs_onboarding(&state.settings.config()) {
             let mut ui = state.ui_bevy_state_mut();
             ui.0.show_onboarding = true;
             ui.0.focused_page = Some(crate::settings_ui::PageKind::Ai);
@@ -331,7 +331,7 @@ impl ApplicationHandler for Runtime {
                         let downsample = self
                             .state
                             .settings
-                            .graphics
+                            .graphics()
                             .resolved()
                             .mask_render_downsample;
                         if let Some(cam) =
@@ -474,7 +474,7 @@ impl Runtime {
     /// `apply_linux_click_through_system` can read them.
     fn sync_runtime_to_bevy(&mut self) {
         let drag_active = self.state.character.drag.is_dragging();
-        let debug_fps = self.state.settings.graphics.resolved().debug_fps;
+        let debug_fps = self.state.settings.graphics().resolved().debug_fps;
         let transparent = self.transparent;
         self.state.app.world_mut().insert_resource(
             crate::system::platform::should_render_debug::DragActive(drag_active),
@@ -488,10 +488,9 @@ impl Runtime {
         let expression_hold_secs = self
             .state
             .settings
-            .ai
-            .ai
-            .get_section::<ene_mind::MindConfig>()
-            .map_or(4.0, |c| c.emotion.expression_hysteresis_seconds);
+            .config_section::<ene_mind::MindConfig>()
+            .emotion
+            .expression_hysteresis_seconds;
         if let Some(mut pipeline) =
             self.state
                 .app
@@ -732,7 +731,7 @@ impl Runtime {
     /// `settings.graphics.target_fps`. `0` means "poll
     /// continuously".
     fn set_frame_deadline(&mut self, event_loop: &ActiveEventLoop) {
-        let target_fps = self.state.settings.graphics.resolved().target_fps;
+        let target_fps = self.state.settings.graphics().resolved().target_fps;
         if target_fps == 0 {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
@@ -776,7 +775,7 @@ impl Runtime {
                         let downsample = self
                             .state
                             .settings
-                            .graphics
+                            .graphics()
                             .resolved()
                             .mask_render_downsample;
                         let mut guard = mask.lock();
@@ -1257,7 +1256,7 @@ impl Runtime {
 
         let result = cw.with_surface_view(|view| {
             let swapchain_size = (cw.config.width, cw.config.height);
-            let aa_mode = settings.graphics.resolved().antialiasing_mode;
+            let aa_mode = settings.graphics().resolved().antialiasing_mode;
             character.render(
                 device,
                 queue,
@@ -1397,7 +1396,7 @@ impl Runtime {
             let world = self.state.app.world();
             if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
                 let mut mask_guard = mask.lock();
-                let downsample = settings.graphics.resolved().mask_render_downsample;
+                let downsample = settings.graphics().resolved().mask_render_downsample;
                 let _ = mask_guard.resize(device, cw.config.width, cw.config.height, downsample);
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("mask.encoder"),

@@ -109,11 +109,11 @@ pub fn render(
                 crate::i18n::loader(),
                 "debug-update-fps"
             ));
-            let resolved = settings.graphics.resolved();
+            let resolved = settings.graphics().resolved();
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(crate::settings::debug_fps_label(
-                    settings.language,
+                    settings.language(),
                     resolved.debug_fps,
                 )),
             );
@@ -168,7 +168,7 @@ fn render_linux_only(
 
     ui.horizontal(|ui| {
         ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "mask-downsample"));
-        let resolved = settings.graphics.resolved();
+        let resolved = settings.graphics().resolved();
         ui.add_sized(
             [220.0, 0.0],
             egui::Label::new(format!("{}x", resolved.mask_render_downsample)),

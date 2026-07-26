@@ -8,7 +8,8 @@ use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
 use crate::component::ui::UiStateComponent;
 use crate::settings::{
-    CharacterSettings, GraphicsQuality, cycle_graphics_quality, graphics_quality_label,
+    CharacterSettings, GraphicsQuality, GraphicsSettings, cycle_graphics_quality,
+    graphics_quality_label,
 };
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
@@ -130,12 +131,14 @@ pub fn apply_action(
             settings.mark_dirty();
         }
         SettingsAction::GraphicsQualityDown => {
-            settings.graphics.quality = cycle_graphics_quality(settings.graphics.quality, -1);
-            settings.mark_dirty();
+            let current = settings.graphics().quality;
+            let next = cycle_graphics_quality(current, -1);
+            settings.set_graphics(GraphicsSettings { quality: next });
         }
         SettingsAction::GraphicsQualityUp => {
-            settings.graphics.quality = cycle_graphics_quality(settings.graphics.quality, 1);
-            settings.mark_dirty();
+            let current = settings.graphics().quality;
+            let next = cycle_graphics_quality(current, 1);
+            settings.set_graphics(GraphicsSettings { quality: next });
         }
         SettingsAction::LookAtStrengthDown => {
             adjust_f32(&mut settings.character_state.look_at_strength, -0.05);
@@ -182,16 +185,18 @@ pub fn apply_action(
             }
         }
         SettingsAction::LanguageDown => {
-            settings.language = crate::settings::cycle_language(settings.language, -1);
-            crate::i18n::select_language(settings.language);
+            let current = settings.language();
+            let next = crate::settings::cycle_language(current, -1);
+            settings.set_language(next);
+            crate::i18n::select_language(next);
             settings.sync_classifier_language_from_ui();
-            settings.mark_dirty();
         }
         SettingsAction::LanguageUp => {
-            settings.language = crate::settings::cycle_language(settings.language, 1);
-            crate::i18n::select_language(settings.language);
+            let current = settings.language();
+            let next = crate::settings::cycle_language(current, 1);
+            settings.set_language(next);
+            crate::i18n::select_language(next);
             settings.sync_classifier_language_from_ui();
-            settings.mark_dirty();
         }
         SettingsAction::LoadCharacterCard { path } => {
             load_character_card(&path, world, ui_entity);

@@ -34,16 +34,8 @@ pub fn render(
 fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "features-mind"));
 
-    let mut memory = settings
-        .ai
-        .ai
-        .get_section::<ene_store::StoreConfig>()
-        .unwrap_or_default();
-    let mut mind = settings
-        .ai
-        .ai
-        .get_section::<ene_mind::MindConfig>()
-        .unwrap_or_default();
+    let mut memory = settings.config_section::<ene_store::StoreConfig>();
+    let mut mind = settings.config_section::<ene_mind::MindConfig>();
 
     let mut memory_enabled = memory.enabled;
     if ui
@@ -54,7 +46,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         .changed()
     {
         memory.enabled = memory_enabled;
-        let _ = settings.ai.ai.set_section(&memory);
+        settings.set_config_section(&memory);
         settings.mark_dirty();
         sync_features(settings, ai);
     }
@@ -183,48 +175,24 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 }
 
 fn persist_mind(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, mind: &ene_mind::MindConfig) {
-    let _ = settings.ai.ai.set_section(mind);
+    settings.set_config_section(mind);
     settings.mark_dirty();
     sync_features(settings, ai);
 }
 
 fn sync_features(settings: &CharacterSettings, ai: &Arc<AiBridge>) {
-    let mind = settings
-        .ai
-        .ai
-        .get_section::<ene_mind::MindConfig>()
-        .unwrap_or_default();
-    let store = settings
-        .ai
-        .ai
-        .get_section::<ene_store::StoreConfig>()
-        .unwrap_or_default();
-    let tools = settings
-        .ai
-        .ai
-        .get_section::<PluginConfig>()
-        .unwrap_or_default();
-    let rag = settings
-        .ai
-        .ai
-        .get_section::<ToolRagConfig>()
-        .unwrap_or_default();
+    let mind = settings.config_section::<ene_mind::MindConfig>();
+    let store = settings.config_section::<ene_store::StoreConfig>();
+    let tools = settings.config_section::<PluginConfig>();
+    let rag = settings.config_section::<ToolRagConfig>();
     ai.sync_feature_runtime(&mind, &store, &tools, &rag);
 }
 
 fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiBridge>) {
     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "features-tools"));
 
-    let mut tools = settings
-        .ai
-        .ai
-        .get_section::<PluginConfig>()
-        .unwrap_or_default();
-    let mut rag = settings
-        .ai
-        .ai
-        .get_section::<ToolRagConfig>()
-        .unwrap_or_default();
+    let mut tools = settings.config_section::<PluginConfig>();
+    let mut rag = settings.config_section::<ToolRagConfig>();
 
     let mut tools_enabled = tools.enabled;
     if ui
@@ -248,7 +216,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
             .changed()
         {
             rag.enabled = rag_enabled;
-            let _ = settings.ai.ai.set_section(&rag);
+            settings.set_config_section(&rag);
             settings.mark_dirty();
             sync_features(settings, ai);
         }
@@ -286,13 +254,9 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
 
 /// `PluginConfig` serializes at `plugins` and would wipe sibling `plugins.rag`.
 fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &PluginConfig) {
-    let rag = settings
-        .ai
-        .ai
-        .get_section::<ToolRagConfig>()
-        .unwrap_or_default();
-    let _ = settings.ai.ai.set_section(tools);
-    let _ = settings.ai.ai.set_section(&rag);
+    let rag = settings.config_section::<ToolRagConfig>();
+    settings.set_config_section(tools);
+    settings.set_config_section(&rag);
     settings.mark_dirty();
     sync_features(settings, ai);
 }
@@ -305,11 +269,7 @@ fn render_audio(
 ) {
     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio"));
 
-    let mut ai_cfg = settings
-        .ai
-        .ai
-        .get_section::<ene_ai::AiConfig>()
-        .unwrap_or_default();
+    let mut ai_cfg = settings.config_section::<ene_ai::AiConfig>();
     let mut changed = false;
     let mut mic_device_changed = false;
 
@@ -319,7 +279,7 @@ fn render_audio(
             crate::i18n::loader(),
             "audio-mic-device"
         ));
-        let mut device = settings.mic_device.clone().unwrap_or_default();
+        let mut device = settings.mic_device().unwrap_or_default();
         if ui
             .add(egui::TextEdit::singleline(&mut device).desired_width(200.0))
             .on_hover_text(i18n_embed_fl::fl!(
@@ -328,12 +288,11 @@ fn render_audio(
             ))
             .changed()
         {
-            settings.mic_device = if device.trim().is_empty() {
+            settings.set_mic_device(if device.trim().is_empty() {
                 None
             } else {
                 Some(device.trim().to_string())
-            };
-            settings.mark_dirty();
+            });
             mic_device_changed = true;
         }
     });
@@ -369,9 +328,13 @@ fn render_audio(
         ));
         ui.weak(provider_display(&ai_cfg.tts.provider));
     });
+    ui.weak(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "audio-open-voice-settings"
+    ));
 
     if changed {
-        let _ = settings.ai.ai.set_section(&ai_cfg);
+        settings.set_config_section(&ai_cfg);
         settings.mark_dirty();
     }
 
@@ -383,8 +346,8 @@ fn render_audio(
     if (changed || mic_device_changed)
         && let Some(mut audio) = world.get_resource_mut::<crate::audio::AudioState>()
     {
-        audio.config = settings.ai.ai.clone();
-        audio.mic_device.clone_from(&settings.mic_device);
+        audio.config = settings.config_clone();
+        audio.mic_device = settings.mic_device();
     }
     #[cfg(not(feature = "voice"))]
     {
