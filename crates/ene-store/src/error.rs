@@ -89,7 +89,3 @@ pub enum EneMemoryError {
     #[error("Other error: {0}")]
     Other(String),
 }
-
-/// Type alias for internal module usages.
-#[deprecated(since = "0.1.0", note = "use `EneMemoryError` directly")]
-pub type MemoryError = EneMemoryError;

@@ -277,7 +277,11 @@ fn refresh_grants(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, anno
     }
 }
 
-fn set_message(world: &mut World, ui_entity: Entity, result: Result<(), String>) {
+fn set_message(
+    world: &mut World,
+    ui_entity: Entity,
+    result: Result<(), crate::ai_bridge::AiBridgeError>,
+) {
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         state.0.permission_message = Some(match result {
             Ok(()) => fl!(crate::i18n::loader(), "permissions-action-ok"),

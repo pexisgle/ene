@@ -1,7 +1,7 @@
 //! Tool-embedding index queries.
 
 use super::{
-    MemoryError, MemoryStore, ToolEmbeddingFieldRow, bytes_to_embedding, cosine_similarity_expr,
+    EneMemoryError, MemoryStore, ToolEmbeddingFieldRow, bytes_to_embedding, cosine_similarity_expr,
     cosine_similarity_filter, embedding_to_bytes, validate_embedding,
 };
 use crate::entities;
@@ -27,7 +27,7 @@ impl MemoryStore {
         model_name: &str,
         embedding: &[f32],
         source_text: &str,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<(), EneMemoryError> {
         use sea_orm::ActiveValue::Set;
 
         validate_embedding(embedding, self.embedding_dim)?;
@@ -77,7 +77,7 @@ impl MemoryStore {
     /// BLOB and `source_text` columns.
     pub async fn list_tool_embedding_fields(
         &self,
-    ) -> Result<Vec<ToolEmbeddingFieldRow>, MemoryError> {
+    ) -> Result<Vec<ToolEmbeddingFieldRow>, EneMemoryError> {
         let rows = entities::tool_embedding_index::Entity::find()
             .all(&self.db)
             .await?;
@@ -105,7 +105,7 @@ impl MemoryStore {
     /// then discarded them.
     pub async fn list_tool_embedding_hashes(
         &self,
-    ) -> Result<Vec<(String, String, String, String, String)>, MemoryError> {
+    ) -> Result<Vec<(String, String, String, String, String)>, EneMemoryError> {
         #[derive(FromQueryResult)]
         struct HashRow {
             tool_name: String,
@@ -141,7 +141,7 @@ impl MemoryStore {
     }
 
     /// Deletes all field embeddings for a tool (cascades across all fields).
-    pub async fn delete_tool_embeddings(&self, tool_name: &str) -> Result<usize, MemoryError> {
+    pub async fn delete_tool_embeddings(&self, tool_name: &str) -> Result<usize, EneMemoryError> {
         let res = entities::tool_embedding_index::Entity::delete_many()
             .filter(entities::tool_embedding_index::Column::ToolName.eq(tool_name))
             .exec(&self.db)
@@ -158,7 +158,7 @@ impl MemoryStore {
         query_embedding: &[f32],
         limit: usize,
         similarity_threshold: f32,
-    ) -> Result<Vec<(String, f32)>, MemoryError> {
+    ) -> Result<Vec<(String, f32)>, EneMemoryError> {
         #[derive(Debug, FromQueryResult)]
         struct SearchToolRow {
             tool_name: String,

@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::error::MemoryError;
+use crate::error::EneMemoryError;
 use crate::session::SessionMeta;
 
 /// Current session-export format version.
@@ -42,8 +42,8 @@ impl SessionExport {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::SerializationError`] if serialization fails.
-    pub fn to_json(&self) -> Result<String, MemoryError> {
+    /// Returns [`EneMemoryError::SerializationError`] if serialization fails.
+    pub fn to_json(&self) -> Result<String, EneMemoryError> {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
@@ -51,13 +51,15 @@ impl SessionExport {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::SerializationError`] on malformed JSON and
-    /// [`MemoryError::UnsupportedFormatVersion`] when `format_version` does
+    /// Returns [`EneMemoryError::SerializationError`] on malformed JSON and
+    /// [`EneMemoryError::UnsupportedFormatVersion`] when `format_version` does
     /// not equal [`SESSION_EXPORT_FORMAT_VERSION`].
-    pub fn from_json(json: &str) -> Result<Self, MemoryError> {
+    pub fn from_json(json: &str) -> Result<Self, EneMemoryError> {
         let export: Self = serde_json::from_str(json)?;
         if export.format_version != SESSION_EXPORT_FORMAT_VERSION {
-            return Err(MemoryError::UnsupportedFormatVersion(export.format_version));
+            return Err(EneMemoryError::UnsupportedFormatVersion(
+                export.format_version,
+            ));
         }
         Ok(export)
     }
@@ -309,6 +311,6 @@ mod tests {
     fn rejects_unknown_format_version() {
         let json = r#"{"format_version":999,"exported_at":"2026-01-01T00:00:00Z","session":{"id":1,"session_id":"s","card_name":"","title":"","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","archived":false,"turn_count":0},"messages":[],"tool_logs":[]}"#;
         let err = SessionExport::from_json(json).unwrap_err();
-        assert!(matches!(err, MemoryError::UnsupportedFormatVersion(999)));
+        assert!(matches!(err, EneMemoryError::UnsupportedFormatVersion(999)));
     }
 }
