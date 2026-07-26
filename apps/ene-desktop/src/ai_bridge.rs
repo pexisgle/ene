@@ -629,13 +629,14 @@ fn turn_matches(active_turn: &Mutex<Option<TurnId>>, event_turn: &TurnId) -> boo
 /// than immediately resolving with `None` again and again.
 async fn recv_audio_chunk(stream: &mut Option<AudioStreamReceiver>) -> Option<AudioChunk> {
     match stream {
-        Some(rx) => match rx.recv().await {
-            Some(chunk) => Some(chunk),
-            None => {
+        Some(rx) => {
+            if let Some(chunk) = rx.recv().await {
+                Some(chunk)
+            } else {
                 *stream = None;
                 std::future::pending().await
             }
-        },
+        }
         None => std::future::pending().await,
     }
 }
@@ -648,7 +649,7 @@ async fn recv_audio_chunk(stream: &mut Option<AudioStreamReceiver>) -> Option<Au
 fn forward_audio_chunk(
     chunk: AudioChunk,
     audio_turn: &mut Option<TurnId>,
-    audio_tx: &Option<AudioChunkSender>,
+    audio_tx: Option<&AudioChunkSender>,
 ) {
     #[cfg(feature = "voice")]
     {
@@ -979,7 +980,7 @@ async fn pump_events(
         // `forward_audio_chunk`.
         chunk = recv_audio_chunk(&mut audio_stream) => {
             if let Some(chunk) = chunk {
-                forward_audio_chunk(chunk, &mut audio_turn, &audio_tx);
+                forward_audio_chunk(chunk, &mut audio_turn, audio_tx.as_ref());
             }
         }
         }
