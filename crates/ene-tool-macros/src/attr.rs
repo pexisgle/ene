@@ -1,24 +1,52 @@
 //! Attribute parsing for the `#[tool(...)]` container attribute and the
 //! `#[arg(...)]` field-level attribute on `ToolSpec` derive input.
+//!
+//! Uses syn v3's `parse_nested_meta` API natively — no darling dependency.
 
-use darling::{FromDeriveInput, FromField, FromMeta};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::Path;
+use syn::{DeriveInput, Path};
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// Extract a readable string from a `Path` for error messages.
+fn path_ident_str(path: &Path) -> String {
+    path.get_ident()
+        .map_or_else(|| format!("{path:?}"), ToString::to_string)
+}
+
+/// Parse a boolean from a parse-nested-meta position.
+///
+/// `background_capable` (bare) → `true`
+/// `background_capable = true` → `true`
+/// `background_capable = false` → `false`
+fn parse_flag(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<bool> {
+    if meta.input.peek(syn::Token![=]) {
+        let lit: syn::LitStr = meta.value()?.parse()?;
+        match lit.value().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(syn::Error::new_spanned(lit, "expected `true` or `false`")),
+        }
+    } else {
+        Ok(true)
+    }
+}
+
+// ── StringList / SemiList ────────────────────────────────────────────
 
 /// A comma-separated list of strings, parsed from a single `FromMeta` value.
 #[derive(Debug, Clone, Default)]
 pub struct StringList(pub Vec<String>);
 
-impl FromMeta for StringList {
-    fn from_string(value: &str) -> darling::Result<Self> {
-        Ok(Self(
-            value
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+impl StringList {
+    fn from_attr_value(s: &str) -> Self {
+        Self(
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
                 .collect(),
-        ))
+        )
     }
 }
 
@@ -26,81 +54,61 @@ impl FromMeta for StringList {
 #[derive(Debug, Clone, Default)]
 pub struct SemiList(pub Vec<String>);
 
-impl FromMeta for SemiList {
-    fn from_string(value: &str) -> darling::Result<Self> {
-        Ok(Self(
-            value
-                .split(';')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+impl SemiList {
+    fn from_attr_value(s: &str) -> Self {
+        Self(
+            s.split(';')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
                 .collect(),
-        ))
+        )
     }
 }
+
+// ── ArgAttrs ─────────────────────────────────────────────────────────
 
 /// A field-level `#[arg(...)]` block.
 ///
 /// All members are optional. The default is "no overrides", meaning the
 /// field is included in the schema with whatever `schemars` produces
 /// from the field's Rust type plus its `///` doc comment.
-#[derive(Debug, Default, FromField)]
-#[darling(attributes(arg))]
+#[derive(Debug, Default)]
 pub struct ArgAttrs {
     /// When `true`, the field is hidden from the generated JSON schema.
-    /// Use this for fields that are set by the host and not by the LLM
-    /// (e.g. `_user_answers` on a re-invocation path).
-    #[darling(default)]
     pub internal: bool,
 
     /// Constrain this `String` (or string-typed) field to a fixed set of
     /// values. Comma-separated: `enum_values = "left, right, middle"`.
-    #[darling(default)]
     pub enum_values: StringList,
 
-    /// Default value to inject into the schema's `default` field, as a
-    /// JSON literal: `default = "left"`, `default = "42"`, etc.
-    #[darling(default)]
+    /// Default value to inject into the schema's `default` field.
     pub default: Option<String>,
 
     /// Minimum (inclusive) for numeric fields.
-    #[darling(default)]
     pub minimum: Option<i64>,
 
     /// Maximum (inclusive) for numeric fields.
-    #[darling(default)]
     pub maximum: Option<i64>,
 
     /// Minimum length for string fields.
-    #[darling(default)]
     pub min_length: Option<usize>,
 
     /// Maximum length for string fields.
-    #[darling(default)]
     pub max_length: Option<usize>,
 
     /// Minimum number of array items.
-    #[darling(default)]
     pub min_items: Option<usize>,
 
     /// Maximum number of array items.
-    #[darling(default)]
     pub max_items: Option<usize>,
 
-    /// Free-form description override. If unset, the `///` doc comment on
-    /// the field is used (and schemars puts it in `description`).
-    #[darling(default)]
+    /// Free-form description override.
     pub description: Option<String>,
 
-    /// When `true`, drop the field from `properties` AND `required` in the
-    /// generated schema. Alias for `internal` kept for readability.
-    #[darling(default)]
+    /// When `true`, drop the field from `properties` AND `required`.
     pub hidden: bool,
 
-    /// When `true`, the field is a stateful field (not an arg). It is
-    /// hidden from the schema and NOT deserialized from JSON. Instead,
-    /// it is copied from `self` in the generated `execute()` method.
-    /// Use `#[serde(skip, default = "...")]` alongside this.
-    #[darling(default)]
+    /// When `true`, the field is a stateful field (not an arg).
     pub skip: bool,
 }
 
@@ -108,7 +116,61 @@ impl ArgAttrs {
     pub const fn is_hidden(&self) -> bool {
         self.internal || self.hidden || self.skip
     }
+
+    pub fn from_field(f: &syn::Field) -> syn::Result<Self> {
+        let mut attrs = Self::default();
+        for attr in &f.attrs {
+            if attr.path().is_ident("arg") {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("internal") {
+                        attrs.internal = true;
+                    } else if meta.path.is_ident("hidden") {
+                        attrs.hidden = true;
+                    } else if meta.path.is_ident("skip") {
+                        attrs.skip = true;
+                    } else if meta.path.is_ident("enum_values") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.enum_values = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("default") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.default = Some(s.value());
+                    } else if meta.path.is_ident("description") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.description = Some(s.value());
+                    } else if meta.path.is_ident("minimum") {
+                        let n: syn::LitInt = meta.value()?.parse()?;
+                        attrs.minimum = Some(n.base10_parse()?);
+                    } else if meta.path.is_ident("maximum") {
+                        let n: syn::LitInt = meta.value()?.parse()?;
+                        attrs.maximum = Some(n.base10_parse()?);
+                    } else if meta.path.is_ident("min_length") {
+                        let n: syn::LitInt = meta.value()?.parse()?;
+                        attrs.min_length = Some(n.base10_parse()?);
+                    } else if meta.path.is_ident("max_length") {
+                        let n: syn::LitInt = meta.value()?.parse()?;
+                        attrs.max_length = Some(n.base10_parse()?);
+                    } else if meta.path.is_ident("min_items") {
+                        let n: syn::LitInt = meta.value()?.parse()?;
+                        attrs.min_items = Some(n.base10_parse()?);
+                    } else if meta.path.is_ident("max_items") {
+                        let n: syn::LitInt = meta.value()?.parse()?;
+                        attrs.max_items = Some(n.base10_parse()?);
+                    } else {
+                        let name = path_ident_str(&meta.path);
+                        return Err(syn::Error::new_spanned(
+                            meta.path,
+                            format!("unknown arg attribute: `{name}`"),
+                        ));
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        Ok(attrs)
+    }
 }
+
+// ── has_tool_skip ────────────────────────────────────────────────────
 
 /// Check if a field has `#[tool(skip)]`. Recognizes
 /// `#[tool(skip)]` standalone and `#[tool(skip, name = "…")]`
@@ -129,78 +191,129 @@ pub fn has_tool_skip(field: &syn::Field) -> bool {
     false
 }
 
-#[derive(Debug, FromDeriveInput, Default)]
-#[darling(attributes(tool))]
+// ── ToolSpecAttrs ────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
 pub struct ToolSpecAttrs {
-    /// Optional namespace. When set with `name`, the final name is
-    /// `"{namespace}.{name}"`. When omitted, `name` is the full name.
-    #[darling(default)]
     pub namespace: Option<String>,
-
-    /// Required: short action name (e.g. "read") OR full name when no
-    /// `namespace` is set.
     pub name: String,
-
-    /// Human-friendly display name. Defaults to Title-Case of `name`.
-    #[darling(default)]
     pub display_name: Option<String>,
-
-    /// Required: one-line summary used for embedding.
     pub summary: String,
-
-    /// Optional full description. Defaults to `summary`.
-    #[darling(default)]
     pub description: Option<String>,
-
-    /// Tool category. Either a bare identifier (e.g. "Filesystem") or a
-    /// fully qualified path (e.g. "`::ene_plugin_proto::ToolCategory::Filesystem`").
     pub category: String,
-
-    /// Side effects expression. Can be a bare variant or fully qualified.
-    #[darling(default)]
     pub side_effects: Option<String>,
-
-    /// Primary keywords (high embedding weight). Comma-separated.
-    #[darling(default)]
     pub keywords_primary: StringList,
-
-    /// Secondary keywords (mid embedding weight). Comma-separated.
-    #[darling(default)]
     pub keywords_secondary: StringList,
-
-    /// Domain tags. Comma-separated.
-    #[darling(default)]
     pub keywords_domain: StringList,
-
-    /// Negative keywords. Comma-separated.
-    #[darling(default)]
     pub keywords_negative: StringList,
-
-    /// Free-form caveats. Comma-separated.
-    #[darling(default)]
     pub caveats: StringList,
-
-    /// Preconditions that must hold before invocation. Comma-separated.
-    #[darling(default)]
     pub preconditions: StringList,
-
-    /// Related tool names. Comma-separated.
-    #[darling(default)]
     pub related: StringList,
-
-    /// Optional semantic version. Default: 1.0.0.
-    #[darling(default)]
     pub version: Option<String>,
-
-    /// Examples, each expressed as a `ToolExample` literal. Format:
-    /// `examples = "desc1|input1|output1; desc2|input2"`.
-    #[darling(default)]
     pub examples: SemiList,
-
-    /// When `true`, the tool can run in background mode (non-blocking).
-    #[darling(default)]
     pub background_capable: bool,
 }
+
+impl ToolSpecAttrs {
+    pub fn from_derive_input(ast: &DeriveInput) -> syn::Result<Self> {
+        let mut attrs = ToolSpecAttrs::default();
+        let mut found = false;
+
+        for attr in &ast.attrs {
+            if attr.path().is_ident("tool") {
+                found = true;
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("namespace") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.namespace = Some(s.value());
+                    } else if meta.path.is_ident("name") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.name = s.value();
+                    } else if meta.path.is_ident("display_name") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.display_name = Some(s.value());
+                    } else if meta.path.is_ident("summary") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.summary = s.value();
+                    } else if meta.path.is_ident("description") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.description = Some(s.value());
+                    } else if meta.path.is_ident("category") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.category = s.value();
+                    } else if meta.path.is_ident("side_effects") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.side_effects = Some(s.value());
+                    } else if meta.path.is_ident("keywords_primary") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.keywords_primary = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("keywords_secondary") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.keywords_secondary = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("keywords_domain") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.keywords_domain = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("keywords_negative") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.keywords_negative = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("caveats") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.caveats = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("preconditions") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.preconditions = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("related") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.related = StringList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("version") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.version = Some(s.value());
+                    } else if meta.path.is_ident("examples") {
+                        let s: syn::LitStr = meta.value()?.parse()?;
+                        attrs.examples = SemiList::from_attr_value(&s.value());
+                    } else if meta.path.is_ident("background_capable") {
+                        attrs.background_capable = parse_flag(&meta)?;
+                    } else {
+                        let name = path_ident_str(&meta.path);
+                        return Err(syn::Error::new_spanned(
+                            meta.path,
+                            format!("unknown tool attribute: `{name}`"),
+                        ));
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+
+        if !found {
+            return Err(syn::Error::new_spanned(
+                ast,
+                "missing `#[tool(...)]` attribute; required fields: name, summary, category",
+            ));
+        }
+        if attrs.name.is_empty() {
+            return Err(syn::Error::new_spanned(
+                ast,
+                "`#[tool(name = \"...\")]` is required",
+            ));
+        }
+        if attrs.summary.is_empty() {
+            return Err(syn::Error::new_spanned(
+                ast,
+                "`#[tool(summary = \"...\")]` is required",
+            ));
+        }
+        if attrs.category.is_empty() {
+            return Err(syn::Error::new_spanned(
+                ast,
+                "`#[tool(category = \"...\")]` is required",
+            ));
+        }
+        Ok(attrs)
+    }
+}
+
+// ── ToolSpecAttrs methods ────────────────────────────────────────────
 
 impl ToolSpecAttrs {
     pub fn full_name(&self) -> String {
@@ -216,9 +329,12 @@ impl ToolSpecAttrs {
             .unwrap_or_else(|| title_case(&self.name))
     }
 
-    pub fn summary_value(&self) -> darling::Result<String> {
+    pub fn summary_value(&self) -> syn::Result<String> {
         if self.summary.trim().is_empty() {
-            return Err(darling::Error::custom("`summary` must not be empty"));
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`summary` must not be empty",
+            ));
         }
         Ok(self.summary.clone())
     }
@@ -263,7 +379,7 @@ impl ToolSpecAttrs {
         self.related.0.clone()
     }
 
-    pub fn version_tokens(&self) -> darling::Result<TokenStream2> {
+    pub fn version_tokens(&self) -> syn::Result<TokenStream2> {
         let v = match self.version.as_deref() {
             Some(s) => parse_version(s)?,
             None => (1, 0, 0),
@@ -305,31 +421,44 @@ impl ToolSpecAttrs {
     }
 }
 
-fn parse_version(s: &str) -> darling::Result<(u32, u32, u32)> {
+// ── parse_version ────────────────────────────────────────────────────
+
+fn parse_version(s: &str) -> syn::Result<(u32, u32, u32)> {
     let mut parts = s.split('.');
-    let maj: u32 = parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .ok_or_else(|| darling::Error::custom(format!("malformed version: '{s}'")))?;
+    let maj: u32 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("malformed version: '{s}'"),
+        )
+    })?;
     let min = match parts.next() {
-        Some(s) => s
-            .parse()
-            .map_err(|_| darling::Error::custom(format!("malformed version minor: '{s}'")))?,
+        Some(s) => s.parse().map_err(|_| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("malformed version minor: '{s}'"),
+            )
+        })?,
         None => 0,
     };
     let pat = match parts.next() {
-        Some(s) => s
-            .parse()
-            .map_err(|_| darling::Error::custom(format!("malformed version patch: '{s}'")))?,
+        Some(s) => s.parse().map_err(|_| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("malformed version patch: '{s}'"),
+            )
+        })?,
         None => 0,
     };
     if parts.next().is_some() {
-        return Err(darling::Error::custom(format!(
-            "version has too many segments: '{s}' (expected at most 3)"
-        )));
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("version has too many segments: '{s}' (expected at most 3)"),
+        ));
     }
     Ok((maj, min, pat))
 }
+
+// ── title_case ───────────────────────────────────────────────────────
 
 fn title_case(s: &str) -> String {
     s.split(['_', '.'])
@@ -348,16 +477,14 @@ fn title_case(s: &str) -> String {
         .join(" ")
 }
 
+// ── path_token ───────────────────────────────────────────────────────
+
 fn path_token(name: &str, default_module: &str, default_variant: &str) -> TokenStream2 {
     if name.contains("::")
         && let Ok(path) = syn::parse_str::<Path>(name)
     {
         return quote! { #path };
     }
-    // Parse the default module path once. A failure here means the proc-macro
-    // itself is buggy (the `default_module` literals are hardcoded in the
-    // call sites), so we surface a proper compile error instead of panicking
-    // — proc-macro panics produce the unhelpful "proc macro panicked" message.
     let mod_path: syn::Path = match syn::parse_str(default_module) {
         Ok(p) => p,
         Err(err) => return err.to_compile_error(),
@@ -365,8 +492,6 @@ fn path_token(name: &str, default_module: &str, default_variant: &str) -> TokenS
     let mut parts = name.split_whitespace();
     let head = parts.next().unwrap_or(default_variant);
     if let Ok(ident) = syn::parse_str::<syn::Ident>(head) {
-        // Validate bare identifiers against known variants for
-        // ToolCategory and SideEffects to catch typos early.
         let known = if default_module.contains("ToolCategory") {
             &[
                 "Filesystem",

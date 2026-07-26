@@ -12,15 +12,10 @@
 //! See `docs/reference/tools/derive-macro.md` for the full attribute reference.
 
 #![expect(
-    clippy::needless_continue,
-    reason = "proc-macro control flow is clearer with explicit continues"
-)]
-#![expect(
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred in derive codegen"
 )]
 
-use darling::{FromDeriveInput, FromField};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -237,7 +232,7 @@ impl Parse for ToolActionAttr {
 
 fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) {
     // Validate that the impl block is for the ToolAction trait.
-    if let Some((_, trait_path, _)) = &item.trait_ {
+    if let Some((trait_path, _)) = &item.trait_ {
         let is_tool_action = trait_path
             .segments
             .last()
@@ -291,7 +286,9 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
 
     let tool_name_str = struct_attrs.full_name();
     let display_name = struct_attrs.display_name_value();
-    let summary = struct_attrs.summary_value()?;
+    let summary = struct_attrs
+        .summary_value()
+        .map_err(|e| syn::Error::new_spanned(ast, e.to_string()))?;
     let description = struct_attrs.description_value();
     let category = struct_attrs.category_path();
     let side_effects = struct_attrs.side_effects_path();

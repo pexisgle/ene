@@ -7,6 +7,7 @@
 //! plugin-provided tools.
 
 use std::collections::HashMap;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -981,16 +982,11 @@ fn verify_plugin_checksum(
         return Ok(());
     };
 
-    let mut file = std::fs::File::open(path).map_err(|e| PluginHostError::SpawnFailed {
-        name: plugin_name.to_string(),
-        reason: format!("cannot open binary for checksum verification: {e}"),
-    })?;
-    let mut hasher = sha2::Sha256::new();
-    std::io::copy(&mut file, &mut hasher).map_err(|e| PluginHostError::SpawnFailed {
+    let contents = std::fs::read(path).map_err(|e| PluginHostError::SpawnFailed {
         name: plugin_name.to_string(),
         reason: format!("cannot read binary for checksum verification: {e}"),
     })?;
-    let actual = hex::encode(hasher.finalize());
+    let actual = hex::encode(sha2::Sha256::digest(&contents));
     if actual != expected {
         return Err(PluginHostError::ChecksumMismatch {
             name: plugin_name.to_string(),

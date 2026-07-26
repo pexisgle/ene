@@ -1,7 +1,7 @@
 //! TTS audio playback via `rodio`.
 //!
-//! A dedicated OS thread owns the rodio [`OutputStream`] and [`Sink`]
-//! (both must stay alive on the thread that created them). The AI
+//! A dedicated OS thread owns the cpal output stream, rodio mixer, and
+//! player (all must stay alive on the thread that created them). The AI
 //! bridge pump forwards [`EneEvent::AudioChunk`](ene_runtime::EneEvent::AudioChunk)
 //! payloads over a [`crossbeam_channel`]; the playback thread appends
 //! each chunk to the sink, feeds the same PCM to the shared
@@ -21,10 +21,70 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use rodio::Player;
 use rodio::buffer::SamplesBuffer;
-use rodio::{OutputStream, Sink};
+use rodio::mixer::{self, Mixer};
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use super::{AudioChunkPayload, AudioChunkReceiver, AudioChunkSender, VisemeState};
+
+/// Manually assembled audio sink: a rodio [`Mixer`] fed into a cpal output
+/// stream, with a [`Player`] for queueing sounds.
+struct AudioSink {
+    _mixer: Mixer,
+    player: Player,
+    _stream: cpal::Stream,
+}
+
+/// Open the default output device and set up a rodio mixer + player backed
+/// by a raw cpal output stream.
+fn open_audio_sink() -> Result<AudioSink, String> {
+    use std::num::NonZero;
+
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| "no default audio output device".to_string())?;
+    let supported = device
+        .default_output_config()
+        .map_err(|e| format!("failed to get default output config: {e}"))?;
+
+    let channels = NonZero::new(supported.channels()).ok_or("output device has zero channels")?;
+    let sample_rate =
+        NonZero::new(supported.sample_rate()).ok_or("output device has zero sample rate")?;
+
+    let (mixer, mut mixer_source) = mixer::mixer(channels, sample_rate);
+
+    let err_fn = move |e: cpal::Error| {
+        tracing::error!(component = "AudioPlayback", error = %e, "audio output stream error");
+    };
+
+    let stream = device
+        .build_output_stream::<f32, _, _>(
+            supported.config(),
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                for sample in data.iter_mut() {
+                    *sample = mixer_source.next().unwrap_or(0.0);
+                }
+            },
+            err_fn,
+            None,
+        )
+        .map_err(|e| format!("failed to build output stream: {e}"))?;
+
+    stream
+        .play()
+        .map_err(|e| format!("failed to play output stream: {e}"))?;
+
+    let player = Player::connect_new(&mixer);
+
+    Ok(AudioSink {
+        _mixer: mixer,
+        player,
+        _stream: stream,
+    })
+}
 
 /// How long the playback loop waits on the channel before re-checking
 /// the shutdown flag. Bounds the join latency on drop.
@@ -96,29 +156,19 @@ fn playback_loop(
     tts_playing: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let stream = match OutputStream::try_default() {
-        Ok((stream, handle)) => match Sink::try_new(&handle) {
-            Ok(sink) => Some((stream, sink)),
-            Err(e) => {
-                tracing::warn!(
-                    component = "AudioPlayback",
-                    error = %e,
-                    "failed to create rodio sink; TTS audio disabled"
-                );
-                None
-            }
-        },
+    let sink = match open_audio_sink() {
+        Ok(sink) => Some(sink),
         Err(e) => {
             tracing::warn!(
                 component = "AudioPlayback",
                 error = %e,
-                "no default audio output device; TTS audio disabled"
+                "failed to open audio output; TTS audio disabled"
             );
             None
         }
     };
 
-    let Some((_stream, sink)) = stream else {
+    let Some(sink) = sink else {
         // No audio backend: drain and discard so the sender never blocks.
         drain_until_shutdown(&rx, &viseme, &shutdown);
         return;
@@ -147,9 +197,9 @@ fn playback_loop(
                 // immediately so queued audio is discarded; otherwise let the
                 // utterance drain naturally before resetting.
                 if abort {
-                    sink.stop();
+                    sink.player.stop();
                 } else if was_speaking {
-                    sink.sleep_until_end();
+                    sink.player.sleep_until_end();
                 }
                 tts_playing.store(false, Ordering::Relaxed);
                 viseme.reset();
@@ -160,8 +210,16 @@ fn playback_loop(
                 // than feeding the whole chunk at enqueue time.
                 viseme.push_chunk(chunk.pcm.clone(), chunk.sample_rate);
 
-                let buffer = SamplesBuffer::new(1, chunk.sample_rate, chunk.pcm);
-                sink.append(buffer);
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "hardcoded mono (1) and validated sample_rate > 0"
+                )]
+                let buffer = SamplesBuffer::new(
+                    std::num::NonZero::new(1u16).unwrap(),
+                    std::num::NonZero::new(chunk.sample_rate).unwrap(),
+                    chunk.pcm,
+                );
+                sink.player.append(buffer);
 
                 if first {
                     tts_playing.store(true, Ordering::Relaxed);

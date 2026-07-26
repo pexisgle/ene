@@ -385,7 +385,7 @@ pub fn start_mic_capture(
         .map_err(|e| CaptureError::NoSupportedConfig(e.to_string()))?;
     let config = supported.config();
     let sample_format = supported.sample_format();
-    let src_rate = config.sample_rate.0;
+    let src_rate = config.sample_rate;
     let channels = usize::from(config.channels.max(1));
 
     let state = CaptureState {
@@ -411,7 +411,7 @@ pub fn start_mic_capture(
 
     let stream = device
         .build_input_stream_raw(
-            &config,
+            config,
             sample_format,
             move |data, _info| {
                 if let Some(state) = state.as_mut() {
@@ -437,7 +437,7 @@ pub fn start_mic_capture(
     let _ = event_tx.send(AppEvent::MicStateChanged { active: true });
     tracing::info!(
         component = "MicCapture",
-        device = %device.name().unwrap_or_else(|_| "unknown".to_string()),
+        device = %device.description().map_or_else(|_| "unknown".to_string(), |d| d.name().to_string()),
         src_rate,
         channels,
         sample_format = ?sample_format,
@@ -455,7 +455,11 @@ pub fn start_mic_capture(
 fn select_device_by_name(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
     let devices = host.input_devices().ok()?;
     devices
-        .filter_map(|d| d.name().ok().map(|n| (n, d)))
+        .filter_map(|d| {
+            d.description()
+                .ok()
+                .map(|desc| (desc.name().to_string(), d))
+        })
         .find(|(n, _)| n == name)
         .map(|(_, d)| d)
 }
