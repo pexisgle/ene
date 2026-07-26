@@ -98,13 +98,24 @@ impl ScreenSummaryProvider {
         let text = match self.summarize_captured(&captured, cursor).await {
             Ok(t) => t,
             Err(e) => {
-                tracing::warn!(
-                    component = "ProactiveObserve",
-                    error = %e,
-                    width = captured.image.width(),
-                    height = captured.image.height(),
-                    "Local vision summary failed; screen source unavailable"
-                );
+                if e.contains("runtime busy")
+                    || e.contains("cancelled")
+                    || e.contains("actor dropped reply")
+                {
+                    tracing::debug!(
+                        component = "ProactiveObserve",
+                        detail = %e,
+                        "Local vision summary skipped during active turn"
+                    );
+                } else {
+                    tracing::warn!(
+                        component = "ProactiveObserve",
+                        error = %e,
+                        width = captured.image.width(),
+                        height = captured.image.height(),
+                        "Local vision summary failed; screen source unavailable"
+                    );
+                }
                 *self.last_failure_at.lock() = Some(Instant::now());
                 return None;
             }
