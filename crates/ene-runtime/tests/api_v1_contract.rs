@@ -325,6 +325,37 @@ fn api_version_constant_is_one() {
     assert_eq!(ene_runtime::API_VERSION, "1");
 }
 
+#[tokio::test]
+async fn list_sessions_with_store_disabled_returns_public_api_error() {
+    // #269: EneHandle::list_sessions returns Result<Vec<PublicSessionMeta>,
+    // PublicApiError> — a single Result of API v1 DTO types, not
+    // Result<Result<Vec<ene_store::SessionMeta>, ene_store::EneMemoryError>,
+    // ActorDeadError>. The type annotation below is a compile-time proof of
+    // the contract; the disabled-store case is also a realistic error path.
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+    let result: Result<Vec<ene_runtime::PublicSessionMeta>, ene_runtime::PublicApiError> =
+        handle.list_sessions(false, 10).await;
+    let err = result.expect_err("memory store is disabled in this config");
+    assert!(
+        matches!(err, ene_runtime::PublicApiError::Internal { .. }),
+        "expected Internal for a disabled store, got {err:?}"
+    );
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn archive_session_with_store_disabled_returns_public_api_error() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+    let result: Result<bool, ene_runtime::PublicApiError> =
+        handle.archive_session("missing-session", true).await;
+    assert!(result.is_err(), "expected an error with memory disabled");
+    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+}
+
 #[test]
 fn public_chat_event_mirrors_terminal_done() {
     let turn = TurnId::new();

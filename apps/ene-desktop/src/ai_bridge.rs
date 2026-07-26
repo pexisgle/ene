@@ -52,6 +52,40 @@ pub struct AiBridge {
 /// before it is cancelled and an error is returned to the UI.
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Converts the API v1 [`ene_runtime::PublicSessionMeta`] DTO back into the
+/// `ene_store::SessionMeta` shape the desktop settings UI (#176) already
+/// consumes directly.
+///
+/// `EneHandle::list_sessions` returns the DTO as of #269 so the runtime's
+/// public contract doesn't leak `ene_store` types; converting back here (a
+/// trivial field copy — both types share the same fields) keeps
+/// [`AiBridge::list_sessions_blocking`]'s own `Result<_, String>` signature
+/// unchanged, since reworking that boundary is #274's job, not #269's.
+fn session_meta_from_public(m: ene_runtime::PublicSessionMeta) -> ene_store::SessionMeta {
+    ene_store::SessionMeta {
+        id: m.id,
+        session_id: m.session_id,
+        card_name: m.card_name,
+        title: m.title,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        archived: m.archived,
+        turn_count: m.turn_count,
+    }
+}
+
+/// Converts the API v1 [`ene_runtime::PublicExportedMessage`] DTO back into
+/// `ene_store::ExportedMessage`, mirroring [`session_meta_from_public`].
+fn exported_message_from_public(
+    m: ene_runtime::PublicExportedMessage,
+) -> ene_store::ExportedMessage {
+    ene_store::ExportedMessage {
+        role: m.role,
+        content: m.content,
+        created_at: m.created_at,
+    }
+}
+
 impl AiBridge {
     /// Build a new bridge and spawn the background drain task. Must
     /// be called from inside `tokio::runtime::Handle::current()`.
@@ -244,13 +278,12 @@ impl AiBridge {
     ) -> Result<Vec<ene_store::SessionMeta>, String> {
         self.block_on_timeout(self.handle.list_sessions(include_archived, limit))
             .and_then(|r| r.map_err(|e| e.to_string()))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+            .map(|metas| metas.into_iter().map(session_meta_from_public).collect())
     }
 
     /// Export a session as a pretty-printed JSON string (#176).
     pub fn export_session_blocking(&self, session_id: impl Into<String>) -> Result<String, String> {
         self.block_on_timeout(self.handle.export_session(session_id))
-            .and_then(|r| r.map_err(|e| e.to_string()))
             .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
@@ -258,7 +291,6 @@ impl AiBridge {
     /// session's row id (#176).
     pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, String> {
         self.block_on_timeout(self.handle.import_session(json))
-            .and_then(|r| r.map_err(|e| e.to_string()))
             .and_then(|r| r.map_err(|e| e.to_string()))
     }
 
@@ -272,7 +304,14 @@ impl AiBridge {
     ) -> Result<Vec<(String, ene_store::ExportedMessage)>, String> {
         self.block_on_timeout(self.handle.search_sessions(query, limit, offset))
             .and_then(|r| r.map_err(|e| e.to_string()))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+            .map(|matches| {
+                matches
+                    .into_iter()
+                    .map(|(session_id, message)| {
+                        (session_id, exported_message_from_public(message))
+                    })
+                    .collect()
+            })
     }
 
     /// Archive or unarchive a session, returning whether the archived
@@ -283,7 +322,6 @@ impl AiBridge {
         archived: bool,
     ) -> Result<bool, String> {
         self.block_on_timeout(self.handle.archive_session(session_id, archived))
-            .and_then(|r| r.map_err(|e| e.to_string()))
             .and_then(|r| r.map_err(|e| e.to_string()))
     }
 

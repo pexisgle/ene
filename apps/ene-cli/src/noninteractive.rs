@@ -532,12 +532,10 @@ async fn session_command(
 ) -> Result<i32, OutputError> {
     match action {
         SessionAction::List { archived } => {
-            let sessions = ctx
-                .handle
-                .list_sessions(*archived, 50)
-                .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list sessions: {e}")))?;
+            let sessions =
+                ctx.handle.list_sessions(*archived, 50).await.map_err(|e| {
+                    OutputError::new(ErrorCode::Runtime, format!("list sessions: {e}"))
+                })?;
             if json {
                 output::print_json(&sessions)?;
             } else {
@@ -546,14 +544,9 @@ async fn session_command(
             Ok(EXIT_OK)
         }
         SessionAction::Export { id } => {
-            let bundle = ctx
-                .handle
-                .export_session(id.clone())
-                .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
-                .map_err(|e| {
-                    OutputError::new(ErrorCode::Runtime, format!("export session: {e}"))
-                })?;
+            let bundle = ctx.handle.export_session(id.clone()).await.map_err(|e| {
+                OutputError::new(ErrorCode::Runtime, format!("export session: {e}"))
+            })?;
             // The export bundle is already JSON; print it verbatim.
             println!("{bundle}");
             Ok(EXIT_OK)
@@ -562,14 +555,9 @@ async fn session_command(
             let json_text = tokio::fs::read_to_string(path).await.map_err(|e| {
                 OutputError::new(ErrorCode::Usage, format!("read {}: {e}", path.display()))
             })?;
-            let id = ctx
-                .handle
-                .import_session(json_text)
-                .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
-                .map_err(|e| {
-                    OutputError::new(ErrorCode::Runtime, format!("import session: {e}"))
-                })?;
+            let id = ctx.handle.import_session(json_text).await.map_err(|e| {
+                OutputError::new(ErrorCode::Runtime, format!("import session: {e}"))
+            })?;
             if json {
                 output::print_json(&serde_json::json!({ "imported_id": id }))?;
             } else {
@@ -582,7 +570,6 @@ async fn session_command(
                 .handle
                 .search_sessions(query.clone(), 20, 0)
                 .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
                 .map_err(|e| {
                     OutputError::new(ErrorCode::Runtime, format!("search sessions: {e}"))
                 })?;
@@ -618,7 +605,6 @@ async fn set_archived(
         .handle
         .archive_session(id, archived)
         .await
-        .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
         .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("update session: {e}")))?;
     if json {
         output::print_json(&serde_json::json!({ "id": id, "updated": updated }))?;
@@ -629,7 +615,7 @@ async fn set_archived(
     Ok(EXIT_OK)
 }
 
-fn print_session_list(sessions: &[ene_store::SessionMeta]) {
+fn print_session_list(sessions: &[ene_runtime::PublicSessionMeta]) {
     if sessions.is_empty() {
         println!("No stored sessions.");
         return;
@@ -650,7 +636,7 @@ fn print_session_list(sessions: &[ene_store::SessionMeta]) {
     }
 }
 
-fn print_session_search(matches: &[(String, ene_store::ExportedMessage)]) {
+fn print_session_search(matches: &[(String, ene_runtime::PublicExportedMessage)]) {
     if matches.is_empty() {
         println!("No matching messages.");
         return;
