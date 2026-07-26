@@ -11,6 +11,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  SCCACHE_CACHE_SIZE: 2G
 
 jobs:
   fmt:
@@ -30,6 +31,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
@@ -37,6 +48,7 @@ jobs:
         with:
           cmd-format: "nix develop --command {0}"
           cache-directories: ~/.cache/sccache
+          cache-on-failure: true
       - name: Run clippy
         run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 
@@ -45,6 +57,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
@@ -52,6 +74,7 @@ jobs:
         with:
           cmd-format: "nix develop --command {0}"
           cache-directories: ~/.cache/sccache
+          cache-on-failure: true
       - name: Run tests
         run: nix develop --command cargo test --workspace
 

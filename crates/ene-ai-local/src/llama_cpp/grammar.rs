@@ -24,7 +24,10 @@ pub(crate) fn json_schema_to_grammar(schema_json: &str) -> Result<String, LlmPro
     let grammar = unsafe { CStr::from_ptr(ptr) }
         .to_string_lossy()
         .into_owned();
-    unsafe { ene_json_schema_grammar_free(ptr) };
+    // SAFETY: `ptr` was allocated by `ene_json_schema_to_grammar` and verified to be non-null.
+    unsafe {
+        ene_json_schema_grammar_free(ptr);
+    }
     Ok(grammar)
 }
 
