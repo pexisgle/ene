@@ -12,8 +12,11 @@
 //!
 //! - [`command`] — [`EneCommand`] (now solely turn-execution / control-plane
 //!   commands; the session/candidate/vision-payload variants are gone).
-//! - [`event`] — [`EneEvent`], [`TerminalReason`], [`EneStatus`],
-//!   [`EneEventReceiver`], [`EneStateSnapshot`].
+//! - [`event`] — [`EneEvent`] (chat bus), [`AudioChunk`] (audio channel),
+//!   [`LifecycleEvent`] (lifecycle bus), [`TerminalReason`], [`EneStatus`],
+//!   [`EneEventReceiver`], [`AudioStreamReceiver`], [`LifecycleReceiver`],
+//!   [`EneStateSnapshot`]. See the module doc there for the three-channel
+//!   event bus design (#272).
 //! - [`actor`] — [`actor::TurnActor`] (formerly `EneActor`) and its
 //!   supporting free functions.
 //! - [`crate::query::sessions`] / [`crate::query::candidates`] — read-only
@@ -29,7 +32,10 @@ mod event;
 /// moved to [`crate::query::candidates`].
 pub use crate::query::candidates::PendingCandidateSummary;
 pub use command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
-pub use event::{EneEvent, EneEventReceiver, EneStateSnapshot, EneStatus, TerminalReason};
+pub use event::{
+    AudioChunk, AudioStreamReceiver, EneEvent, EneEventReceiver, EneStateSnapshot, EneStatus,
+    LifecycleEvent, LifecycleReceiver, TerminalReason,
+};
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::error::EneRuntimeError;
@@ -43,6 +49,22 @@ use ene_plugin_host::PluginHealthEvent;
 use ene_tool_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// Bounded capacity for the dedicated audio (PCM) channel (#272).
+///
+/// Chosen to buffer several seconds of TTS chunks (each chunk is roughly one
+/// sentence of synthesized speech) ahead of a real-time playback consumer
+/// without letting an unconsumed stream grow without bound. See
+/// `send_audio_chunk` in `streaming_cognitive.rs` for the back-pressure
+/// policy applied when this fills up.
+const AUDIO_CHANNEL_CAPACITY: usize = 64;
+
+/// Small broadcast capacity for the lifecycle bus (#272).
+///
+/// Lifecycle notifications (`StatusChanged`, `PendingCandidateAvailable`,
+/// `ToolBackgroundCompleted`) are low-frequency and turn-independent, so a
+/// much smaller buffer than the chat bus's 1024 is sufficient.
+const LIFECYCLE_CHANNEL_CAPACITY: usize = 64;
 
 /// Error returned when a command is sent to an actor that is no longer running.
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +122,21 @@ impl TurnGate {
 pub struct EneHandle {
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     event_tx: broadcast::Sender<EneEvent>,
+    /// Lifecycle bus sender (#272): `StatusChanged` / `PendingCandidateAvailable`
+    /// / `ToolBackgroundCompleted`. Separate broadcast channel from `event_tx`
+    /// so lifecycle traffic never shares a buffer with chat events.
+    lifecycle_tx: broadcast::Sender<LifecycleEvent>,
+    /// Audio channel sender (#272): bounded `mpsc`, single-consumer. The
+    /// paired receiver lives in `audio_rx` until [`EneHandle::take_audio_stream`]
+    /// transfers it out.
+    audio_tx: mpsc::Sender<AudioChunk>,
+    /// Holds the audio channel's receiver until claimed by
+    /// [`EneHandle::take_audio_stream`]. Shared across `EneHandle` clones
+    /// (not per-clone) so ownership transfer is global, not per-clone.
+    /// `parking_lot::Mutex` (sync, non-fallible lock) rather than
+    /// `tokio::sync::Mutex` because `take_audio_stream` is a plain
+    /// synchronous method, not `async fn`.
+    audio_rx: Arc<parking_lot::Mutex<Option<mpsc::Receiver<AudioChunk>>>>,
     diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
     diagnostics: crate::diagnostics::EneDiagnostics,
     turn_gate: Arc<TurnGate>,
@@ -136,6 +173,9 @@ impl Clone for EneHandle {
         Self {
             cmd_tx: Arc::clone(&self.cmd_tx),
             event_tx: self.event_tx.clone(),
+            lifecycle_tx: self.lifecycle_tx.clone(),
+            audio_tx: self.audio_tx.clone(),
+            audio_rx: Arc::clone(&self.audio_rx),
             diag_tx: self.diag_tx.clone(),
             diagnostics: crate::diagnostics::EneDiagnostics {
                 cmd_tx: Arc::clone(&self.cmd_tx),
@@ -165,6 +205,8 @@ impl EneHandle {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let cmd_tx = Arc::new(cmd_tx);
         let (event_tx, _event_rx) = broadcast::channel(1024);
+        let (lifecycle_tx, _lifecycle_rx) = broadcast::channel(LIFECYCLE_CHANNEL_CAPACITY);
+        let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
         let (diag_tx, diag_rx) = broadcast::channel(256);
 
         LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
@@ -388,6 +430,8 @@ impl EneHandle {
         let actor = actor::TurnActor::new(
             cmd_rx,
             event_tx.clone(),
+            lifecycle_tx.clone(),
+            audio_tx.clone(),
             diag_tx.clone(),
             diag_rx,
             Arc::clone(&turn_gate),
@@ -407,6 +451,9 @@ impl EneHandle {
         Ok(Self {
             cmd_tx,
             event_tx,
+            lifecycle_tx,
+            audio_tx,
+            audio_rx: Arc::new(parking_lot::Mutex::new(Some(audio_rx))),
             diag_tx,
             diagnostics,
             turn_gate,
@@ -425,6 +472,32 @@ impl EneHandle {
             inner: self.event_tx.subscribe(),
             diag_tx: self.diag_tx.clone(),
         }
+    }
+
+    /// Subscribe to the lifecycle event stream (#272): `StatusChanged`,
+    /// `PendingCandidateAvailable`, `ToolBackgroundCompleted`.
+    ///
+    /// Separate from [`EneHandle::subscribe`] (the chat bus) — lifecycle
+    /// notifications are turn-independent and low-frequency. Multiple
+    /// subscribers are allowed, same as the chat bus.
+    pub fn subscribe_lifecycle(&self) -> LifecycleReceiver {
+        LifecycleReceiver {
+            inner: self.lifecycle_tx.subscribe(),
+            diag_tx: self.diag_tx.clone(),
+        }
+    }
+
+    /// Take ownership of the audio (PCM) stream (#272).
+    ///
+    /// Returns `Some` exactly once across every clone of this `EneHandle` —
+    /// the audio channel is single-consumer by construction, modeling the
+    /// current single playback-sink path. Every call after the first (from
+    /// this handle or any of its clones) returns `None`.
+    pub fn take_audio_stream(&self) -> Option<AudioStreamReceiver> {
+        self.audio_rx
+            .lock()
+            .take()
+            .map(|inner| AudioStreamReceiver { inner })
     }
 
     /// Concrete diagnostics facade (pipeline detail, memory, tools).

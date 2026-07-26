@@ -183,6 +183,10 @@ pub struct StreamContext {
     pub tool_rag: Option<Arc<ToolRag>>,
     pub provider: Arc<dyn ene_ai::LlmProvider>,
     pub event_tx: broadcast::Sender<EneEvent>,
+    /// Audio channel sender for TTS PCM chunks (#272). Bounded `mpsc`,
+    /// separate from `event_tx` so heavyweight audio payloads never share a
+    /// buffer with lightweight chat events.
+    pub audio_tx: mpsc::Sender<crate::handle::AudioChunk>,
     pub diag_tx: broadcast::Sender<DiagnosticEvent>,
     pub cancel_token: CancellationToken,
     pub pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,

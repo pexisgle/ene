@@ -2,8 +2,10 @@
 //!
 //! A dedicated OS thread owns the cpal output stream, rodio mixer, and
 //! player (all must stay alive on the thread that created them). The AI
-//! bridge pump forwards [`EneEvent::AudioChunk`](ene_runtime::EneEvent::AudioChunk)
-//! payloads over a [`crossbeam_channel`]; the playback thread appends
+//! bridge pump forwards [`AudioChunk`](ene_runtime::AudioChunk) payloads
+//! (received from the dedicated audio channel — see
+//! [`ene_runtime::EneHandle::take_audio_stream`], #272) over a
+//! [`crossbeam_channel`]; the playback thread appends
 //! each chunk to the sink, feeds the same PCM to the shared
 //! [`VisemeState`](super::VisemeState) for lip-sync, and toggles the
 //! `tts_playing` flag used for self-voice suppression.

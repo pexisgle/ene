@@ -355,11 +355,7 @@ async fn process_turn(
                 }
                 break;
             }
-            EneEvent::ContextCompressed { .. }
-            | EneEvent::ToolBackgroundCompleted { .. }
-            | EneEvent::StatusChanged { .. }
-            | EneEvent::AudioChunk { .. }
-            | EneEvent::PendingCandidateAvailable { .. } => {}
+            EneEvent::ContextCompressed { .. } => {}
         }
     }
 

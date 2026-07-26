@@ -136,6 +136,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
             response: "Hi there!".into(),
         }),
         event_tx,
+        audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
