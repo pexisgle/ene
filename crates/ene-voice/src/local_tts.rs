@@ -28,6 +28,24 @@ use tokio_stream::Stream;
 /// Provider name used in `ai.tts.provider` configuration.
 pub const PROVIDER_NAME: &str = "kokoro";
 
+/// Default `HuggingFace` download URL for the Kokoro 82M ONNX model file.
+pub const KOKORO_DEFAULT_MODEL_URL: &str =
+    "https://huggingface.co/huangjune/Kokoro-82M-v1.0-ONNX/resolve/main/model.onnx";
+
+/// Default `HuggingFace` download URL for the Kokoro `voices.bin` embeddings file.
+pub const KOKORO_DEFAULT_VOICES_URL: &str =
+    "https://huggingface.co/huangjune/Kokoro-82M-v1.0-ONNX/resolve/main/voices.bin";
+
+/// Get the default local path for `kokoro.onnx`.
+pub fn default_kokoro_model_path() -> std::path::PathBuf {
+    ene_config::models_dir().join("gguf").join("kokoro.onnx")
+}
+
+/// Get the default local path for `voices.bin`.
+pub fn default_kokoro_voices_path() -> std::path::PathBuf {
+    ene_config::models_dir().join("gguf").join("voices.bin")
+}
+
 /// Kokoro ONNX emits 24 kHz mono PCM.
 #[cfg(feature = "local-tts")]
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
@@ -150,6 +168,114 @@ pub struct LocalTtsProvider {
     language: Option<String>,
 }
 
+/// Ensure a file exists at `dest`, downloading it from `url` if missing.
+pub fn ensure_file_downloaded(url: &str, dest: &std::path::Path) -> Result<(), AudioProviderError> {
+    if dest.is_file() {
+        return Ok(());
+    }
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AudioProviderError::Init(format!(
+                "Failed to create target directory {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    tracing::info!(
+        component = "LocalTts",
+        url = url,
+        dest = %dest.display(),
+        "Downloading missing TTS model file..."
+    );
+
+    let part_path = dest.with_extension("part");
+
+    let download_future = async {
+        let client = reqwest::Client::builder()
+            .user_agent("ene-voice/0.1.0")
+            .build()
+            .map_err(|e| AudioProviderError::Init(format!("HTTP client build error: {e}")))?;
+
+        let mut response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| AudioProviderError::Init(format!("Failed to download {url}: {e}")))?;
+
+        if !response.status().is_success() {
+            return Err(AudioProviderError::Init(format!(
+                "Failed to download {url}: HTTP {}",
+                response.status()
+            )));
+        }
+
+        let mut file = tokio::fs::File::create(&part_path).await.map_err(|e| {
+            AudioProviderError::Init(format!(
+                "Failed to create part file {}: {e}",
+                part_path.display()
+            ))
+        })?;
+
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| AudioProviderError::Init(format!("Download stream error: {e}")))?
+        {
+            use tokio::io::AsyncWriteExt;
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| AudioProviderError::Init(format!("Failed to write chunk: {e}")))?;
+        }
+
+        use tokio::io::AsyncWriteExt;
+        file.flush()
+            .await
+            .map_err(|e| AudioProviderError::Init(format!("Failed to flush file: {e}")))?;
+
+        tokio::fs::rename(&part_path, dest)
+            .await
+            .map_err(|e| AudioProviderError::Init(format!("Failed to rename part file: {e}")))?;
+
+        Ok(())
+    };
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(download_future))
+    } else {
+        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+            AudioProviderError::Init(format!("Failed to create tokio runtime: {e}"))
+        })?;
+        rt.block_on(download_future)
+    }
+}
+
+/// Fallback `HuggingFace` download URL for the Kokoro 82M ONNX model file.
+pub const KOKORO_FALLBACK_MODEL_URL: &str =
+    "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx";
+
+/// Fallback `HuggingFace` download URL for the Kokoro `voices.bin` embeddings file.
+pub const KOKORO_FALLBACK_VOICES_URL: &str =
+    "https://huggingface.co/speaches-ai/Kokoro-82M-v1.0-ONNX-fp16/resolve/main/voices.bin";
+
+/// Ensure Kokoro ONNX model and `voices.bin` files exist on disk, downloading them
+/// automatically if missing.
+pub fn ensure_kokoro_files_exist(
+    model_path: &std::path::Path,
+    voices_path: &std::path::Path,
+) -> Result<(), AudioProviderError> {
+    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_MODEL_URL, model_path) {
+        tracing::warn!(error = %e, "Primary Kokoro model URL failed; attempting fallback URL...");
+        ensure_file_downloaded(KOKORO_FALLBACK_MODEL_URL, model_path)?;
+    }
+    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_VOICES_URL, voices_path) {
+        tracing::warn!(error = %e, "Primary Kokoro voices URL failed; attempting fallback URL...");
+        ensure_file_downloaded(KOKORO_FALLBACK_VOICES_URL, voices_path)?;
+    }
+    Ok(())
+}
+
 #[cfg(feature = "local-tts")]
 impl LocalTtsProvider {
     /// Load the Kokoro ONNX model and the selected voice embedding.
@@ -173,6 +299,9 @@ impl LocalTtsProvider {
         ort_dylib_path: Option<&str>,
     ) -> Result<Self, AudioProviderError> {
         crate::ort_init::ensure_ort_init(ort_dylib_path)?;
+
+        // Auto-download missing model files if needed
+        let _ = ensure_kokoro_files_exist(model_path, voices_path);
 
         if !model_path.is_file() {
             return Err(AudioProviderError::Init(format!(
@@ -531,5 +660,21 @@ mod tests {
         let tokens = crate::g2p::text_to_tokens("hello", Some("en"));
         assert_eq!(tokens.first().copied(), Some(0));
         assert_eq!(tokens.last().copied(), Some(0));
+    }
+
+    #[test]
+    fn default_urls_and_paths_are_valid() {
+        assert!(KOKORO_DEFAULT_MODEL_URL.starts_with("https://"));
+        assert!(KOKORO_DEFAULT_VOICES_URL.starts_with("https://"));
+        assert!(
+            default_kokoro_model_path()
+                .to_string_lossy()
+                .contains("kokoro.onnx")
+        );
+        assert!(
+            default_kokoro_voices_path()
+                .to_string_lossy()
+                .contains("voices.bin")
+        );
     }
 }

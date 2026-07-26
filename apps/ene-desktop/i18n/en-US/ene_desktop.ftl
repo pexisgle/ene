@@ -245,6 +245,7 @@ enable-tool-rag = Enable Tool RAG
 enable-tool = Enable tool
 
 # Audio
+voice = Voice
 audio = Audio
 audio-mic = Mic
 audio-mic-active = Listening…
@@ -257,6 +258,30 @@ audio-vad-threshold = VAD threshold
 audio-stt-provider = Speech-to-text provider
 audio-tts-provider = Text-to-speech provider
 audio-provider-none = None
+audio-tts-section = Text-to-Speech (TTS)
+audio-stt-section = Speech-to-Text (STT)
+audio-mic-section = Microphone & VAD
+audio-tts-model = TTS Model
+audio-tts-voice = Voice Character
+audio-tts-speed = Speech Speed
+audio-tts-language = Language
+audio-tts-model-path = Custom Model Path
+audio-tts-voices-path = Custom Voices Path
+audio-stt-model = STT Model
+audio-stt-language = Language
+audio-stt-model-path = Custom Model Path
+audio-open-voice-settings = Open Voice Settings
+audio-tts-presets = Quick Presets
+audio-preset-kokoro = Kokoro 82M (Local, Recommended)
+audio-preset-openai = OpenAI TTS (Cloud)
+audio-preset-none = Disabled
+audio-model-status = Model Status
+audio-status-ready = Ready
+audio-status-missing = Not Downloaded
+audio-download-button = Auto-Download Model Now
+audio-downloading = Downloading model files...
+audio-download-success = Model files downloaded successfully
+audio-download-error = Download failed: { $error }
 
 # Permission
 permission-requested = Permission Requested

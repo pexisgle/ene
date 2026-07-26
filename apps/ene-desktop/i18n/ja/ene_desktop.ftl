@@ -245,6 +245,7 @@ enable-tool-rag = Tool RAG を有効化
 enable-tool = ツールを有効化
 
 # Audio
+voice = 音声
 audio = オーディオ
 audio-mic = マイク
 audio-mic-active = 聴いています…
@@ -257,6 +258,30 @@ audio-vad-threshold = VAD しきい値
 audio-stt-provider = 音声認識プロバイダー
 audio-tts-provider = 音声合成プロバイダー
 audio-provider-none = なし
+audio-tts-section = 音声合成 (TTS)
+audio-stt-section = 音声認識 (STT)
+audio-mic-section = マイク & 発話区間検出
+audio-tts-model = TTS モデル
+audio-tts-voice = ボイス・役柄
+audio-tts-speed = 発話速度
+audio-tts-language = 言語
+audio-tts-model-path = カスタムモデルパス
+audio-tts-voices-path = カスタムボイスデータパス
+audio-stt-model = STT モデル
+audio-stt-language = 言語
+audio-stt-model-path = カスタムモデルパス
+audio-open-voice-settings = 音声設定を開く
+audio-tts-presets = プリセット選択
+audio-preset-kokoro = Kokoro 82M (ローカル・推奨)
+audio-preset-openai = OpenAI TTS (クラウド)
+audio-preset-none = 無効
+audio-model-status = モデル状況
+audio-status-ready = 準備完了
+audio-status-missing = 未ダウンロード
+audio-download-button = モデルを自動ダウンロード
+audio-downloading = モデルファイルをダウンロード中...
+audio-download-success = モデルファイルのダウンロードが完了しました
+audio-download-error = ダウンロードに失敗しました: { $error }
 
 # Permission
 permission-requested = 権限が要求されました

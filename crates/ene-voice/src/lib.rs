@@ -18,3 +18,7 @@ pub mod local_tts;
 pub mod ort_init;
 /// Silero VAD engine.
 pub mod silero_vad;
+
+pub use local_tts::{
+    default_kokoro_model_path, default_kokoro_voices_path, ensure_kokoro_files_exist,
+};
