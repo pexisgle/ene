@@ -13,6 +13,7 @@
 5. **Persistence-Agnostic Domain Vocabulary**: `ene-core` defines the core domain types shared across the cognitive and persistence layers — `AffectState` (PAD affect), typed-memory kinds/statuses/queries, the commitment ledger's vocabulary, and the `MemoryPort` trait itself. It depends on nothing internal to the workspace, so both `ene-store` and `ene-mind` can depend on it without either depending on the other for domain vocabulary.
 6. **Out-of-Process Plugins (Protocol v4)**: Tools, LLM providers, and MCP servers run as child processes communicating over length-prefixed JSON IPC using **Protocol v4**.
 7. **Decoupled 3D Rendering**: `ene-vrm` renders VRM 1.0 models via `wgpu` without importing any cognitive, memory, or runtime types.
+8. **Fault-Tolerant Actor (#268)**: Actor commands and background tasks are panic-isolated via `catch_unwind`; a panic in one command does not crash the actor or the process. This is a design invariant, not an incidental property — see [§4](#4-fault-tolerance--panic-isolation) for the mechanism and the build-configuration requirement it depends on.
 
 ---
 
@@ -102,7 +103,19 @@ User Message
 
 ---
 
-## 4. Plugin System & IPC Protocol v4
+## 4. Fault Tolerance & Panic Isolation
+
+`ene-desktop` is a single process hosting the GUI, the actor, LLM streaming, and audio together. A panic in one command handler or background task must not take the whole process down — a design invariant, not just an implementation detail (#268).
+
+**Mechanism**: `TurnActor::run_command_isolated` (`crates/ene-runtime/src/handle/actor.rs`) runs every dispatched `EneCommand` through `isolate_panic()`, which wraps the command future in `std::panic::AssertUnwindSafe(..).catch_unwind()`. A panic is caught, logged, surfaced as `DiagnosticEvent::ActorPanic { component, message }`, and the command is treated as non-terminal — the actor's mailbox loop keeps running and processes the next command normally. The actor's background `JoinSet`s (call-tool, classifier, memory-writer, search, deferred-tool tasks) are reaped the same way: `reap_join_set()` detects `JoinError::is_panic()` and emits the same `ActorPanic` diagnostic instead of letting the panic propagate through `.await`.
+
+**Build-configuration requirement**: this guarantee **requires `panic = "unwind"`** (Rust's default — the workspace root `Cargo.toml`'s `[profile.release]` deliberately does *not* set `panic = "abort"`). Under `panic = "abort"`, the process aborts immediately on any panic — stack unwinding never happens, so `catch_unwind` never runs and never catches anything. `panic = "abort"` is therefore **NOT compatible** with this fault-tolerance model: re-adding it to any release profile would silently disable panic isolation in the build that ships, while `cargo test` (which always unwinds regardless of profile) would keep passing and give no warning. See the comment on `[profile.release]` in the root `Cargo.toml` before changing it.
+
+**Shared-state safety under a mid-command panic**: the actor's shared state (`pending_permissions`, `permission_scopes`, `undo_stack`, and friends) is guarded by `tokio::sync::Mutex` / `parking_lot::Mutex`, neither of which poisons on panic (unlike `std::sync::Mutex`) — a panic while holding a guard simply drops it during unwind and the lock is immediately reusable. Each mutation of this state is a single synchronous call while the lock is held (e.g. `UndoStack::record`, a `Vec::push`, a `HashMap::insert`) with no `.await` in between, so a panic can only land strictly before or strictly after a given mutation — never mid-mutation, so these structures cannot be left torn or partially updated. `crates/ene-runtime/src/handle/mod.rs`'s test `actor_survives_command_panic_and_audited_state_stays_consistent` exercises this end-to-end through a live actor mailbox: it panics a command after mutating all three fields, then asserts the actor is still alive, a `DiagnosticEvent::ActorPanic` fired, and all three mutations survived intact.
+
+---
+
+## 5. Plugin System & IPC Protocol v4
 
 Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate with the host via **IPC Protocol v4**:
 
@@ -114,7 +127,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 
 ---
 
-## 5. Summary of Crate Roles
+## 6. Summary of Crate Roles
 
 | Crate | Responsibility |
 |---|---|

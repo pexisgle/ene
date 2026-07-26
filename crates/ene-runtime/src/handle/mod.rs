@@ -949,6 +949,121 @@ mod tests {
         assert!(saw_panic, "expected ActorPanic diagnostic event");
     }
 
+    /// Regression test for #268: with `panic = "abort"` removed from the
+    /// release profile, `catch_unwind`-based isolation in
+    /// `run_command_isolated` is finally live in release builds (it always
+    /// unwound in debug/test, which is why this couldn't be caught by simply
+    /// running the test suite before the profile fix — the risk was release
+    /// builds specifically). This drives a full mailbox round trip through a
+    /// live actor (unlike `isolate_panic_contains_panic_and_emits_diagnostic`,
+    /// which calls the bare `isolate_panic` helper directly) and asserts all
+    /// four properties #268 requires:
+    ///   (a) the panic is caught, not propagated out of the actor task,
+    ///   (b) the actor survives and keeps processing commands afterward,
+    ///   (c) a `DiagnosticEvent::ActorPanic { component: "command", .. }` fires,
+    ///   (d) `pending_permissions`, `permission_scopes`, and `undo_stack` —
+    ///       the three fields #268 flagged for audit — are left in a
+    ///       consistent, still-usable state: the mutations recorded just
+    ///       before the panic are fully present, not torn or lost, and the
+    ///       (non-poisoning) locks guarding them are not stuck.
+    #[tokio::test]
+    async fn actor_survives_command_panic_and_audited_state_stays_consistent() {
+        let handle = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+        let mut diag_rx = handle.diagnostics().subscribe();
+
+        let request_id = RequestId::new("test-268-request");
+        let (permission_tx, permission_rx) = oneshot::channel();
+
+        // Send the panic-inducing command directly through the private
+        // mailbox sender (test-only `EneCommand` variant, see command.rs).
+        // `cmd_tx` is an unbounded mpsc, so ordering with the `list_permissions`
+        // call below is guaranteed by FIFO delivery into the single-threaded
+        // actor loop, without needing a reply channel on this command itself.
+        handle
+            .cmd_tx
+            .send(EneCommand::TestInjectPanicAfterMutations {
+                request_id: request_id.clone(),
+                permission_tx,
+            })
+            .expect("actor mailbox open");
+
+        // (a) + (b): if the panic had propagated out of `run_command_isolated`
+        // and killed the actor task, every subsequent call on `handle` would
+        // return `ActorDeadError` / a dropped reply channel. It doesn't.
+        let scopes = handle
+            .list_permissions()
+            .await
+            .expect("actor must still be alive and answer ListPermissions after the panic");
+
+        // (d) permission_scopes: the push completed before the panic and the
+        // tokio::sync::Mutex guarding it was released on unwind (it does not
+        // poison), so the entry is present and intact — not lost, not duplicated.
+        assert_eq!(
+            scopes.len(),
+            1,
+            "expected exactly the one scope pushed before the panic, got {scopes:?}"
+        );
+        assert_eq!(scopes[0].id, 999_999);
+        assert_eq!(scopes[0].action, "test.action");
+        assert_eq!(scopes[0].target_pattern, "test-pattern");
+
+        // (d) pending_permissions: resolve the entry inserted before the panic
+        // through the real public API. If the map had been left empty, stuck
+        // locked, or the sender dropped, this would fail (ActorDeadError) or
+        // `permission_rx` below would never resolve.
+        handle
+            .decide_permission(request_id, PermissionDecision::AllowOnce)
+            .expect("actor must still accept PermissionDecision after the panic");
+        let decision = permission_rx
+            .await
+            .expect("pending_permissions entry must have survived the panic");
+        assert_eq!(decision, PermissionDecision::AllowOnce);
+
+        // (d) undo_stack: the recorded entry from before the panic must still
+        // be poppable and correctly attributed, proving the stack was not
+        // left in a partially-updated state.
+        let report = handle
+            .undo()
+            .await
+            .expect("actor must still be alive and answer Undo after the panic");
+        match report {
+            crate::undo::UndoReport::Reverted { metadata, .. }
+            | crate::undo::UndoReport::Failed { metadata, .. } => {
+                // No `utility.undo` tool is registered in this test's plugin-off
+                // config, so the rollback itself is expected to fail (`Failed`);
+                // either way what matters here is that the *metadata* recorded
+                // before the panic round-trips intact.
+                assert_eq!(metadata.tool_name, "filesystem.write");
+                assert_eq!(metadata.turn_id, "test-turn");
+                assert_eq!(metadata.target_resources, vec!["/test/path".to_string()]);
+            }
+            other => panic!("expected the pre-panic undo entry to be poppable, got {other:?}"),
+        }
+
+        // (c) the panic must have been surfaced as a diagnostic, not swallowed
+        // silently.
+        let mut saw_panic = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            if let DiagnosticEvent::ActorPanic { component, message } = ev
+                && component == "command"
+            {
+                assert!(
+                    message.contains("induced panic after mutating shared actor state"),
+                    "unexpected panic message: {message}"
+                );
+                saw_panic = true;
+            }
+        }
+        assert!(
+            saw_panic,
+            "expected DiagnosticEvent::ActorPanic {{ component: \"command\", .. }}"
+        );
+
+        let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    }
+
     /// Regression test for #271: a read-only session query must not queue
     /// behind an in-flight `Run` turn. Before the split, `ListSessions` was
     /// an `EneCommand` variant handled by the same single-threaded actor
