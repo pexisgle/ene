@@ -31,9 +31,9 @@
 //! (config/control commands are already infrequent, low-latency, and never
 //! block behind a `Run` turn any worse than `Run` itself already does).
 
+use super::TurnGate;
 use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 use super::event::{EneEvent, EneStateSnapshot, EneStatus, TerminalReason};
-use super::TurnGate;
 use crate::diagnostics::{DiagnosticEvent, MemoryQueryHandle, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
