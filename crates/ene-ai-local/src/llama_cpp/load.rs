@@ -138,9 +138,7 @@ impl LoadedModel {
 
     #[must_use]
     pub(crate) fn supports_vision(&self) -> bool {
-        self.mtmd
-            .as_ref()
-            .is_some_and(MtmdContext::supports_vision)
+        self.mtmd.as_ref().is_some_and(MtmdContext::supports_vision)
     }
 }
 

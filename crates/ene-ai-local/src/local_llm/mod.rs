@@ -289,7 +289,10 @@ mod tests {
             .await
             .expect("plain completion");
         eprintln!("smoke plain: {plain:?}");
-        assert!(!plain.trim().is_empty(), "expected non-empty plain completion");
+        assert!(
+            !plain.trim().is_empty(),
+            "expected non-empty plain completion"
+        );
 
         let schema = serde_json::json!({
             "type": "object",
@@ -307,6 +310,9 @@ mod tests {
             .await
             .expect("grammar completion");
         eprintln!("smoke grammar: {out:?}");
-        assert!(!out.trim().is_empty(), "expected non-empty grammar completion");
+        assert!(
+            !out.trim().is_empty(),
+            "expected non-empty grammar completion"
+        );
     }
 }

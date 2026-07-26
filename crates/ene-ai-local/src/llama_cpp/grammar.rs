@@ -34,7 +34,8 @@ mod tests {
 
     #[test]
     fn converts_object_schema_to_gbnf() {
-        let schema = r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#;
+        let schema =
+            r#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}"#;
         let grammar = json_schema_to_grammar(schema).expect("grammar conversion");
         assert!(grammar.contains("root"), "{grammar}");
         assert!(
