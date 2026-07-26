@@ -405,9 +405,17 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     }
     .instrument(sync_span);
 
-    let (embed_result, sync_hash) = async { tokio::join!(embed_fut, sync_fut) }
-        .instrument(span_pre_a)
-        .await;
+    let (embed_result, sync_hash) = async {
+        let embed_res = embed_fut.await;
+        let sync_res = if embed_res.is_ok() {
+            sync_fut.await
+        } else {
+            None
+        };
+        (embed_res, sync_res)
+    }
+    .instrument(span_pre_a)
+    .await;
     let query_embedding = match embed_result {
         Ok(emb) => {
             if let Some(ref emb) = emb {
@@ -462,9 +470,20 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let scene_span = tracing::info_span!(parent: &span_pre_b, "scene_summary");
         let (pre, style, scene) = async {
             tokio::join!(
-                engine
-                    .before_proactive_turn(turn_ctx)
-                    .instrument(recall_span),
+                async {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_mins(2),
+                        engine.before_proactive_turn(turn_ctx),
+                    )
+                    .instrument(recall_span)
+                    .await
+                    {
+                        Ok(inner) => inner,
+                        Err(_) => Err(ene_mind::error::EneCognitionError::Other(
+                            "before_proactive_turn timed out after 120s".to_string(),
+                        )),
+                    }
+                },
                 CharacterProcessor::select_style_examples(
                     &card,
                     &user_name,
@@ -515,7 +534,20 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let scene_span = tracing::info_span!(parent: &span_pre_b, "scene_summary");
         async {
             tokio::join!(
-                engine.before_turn(turn_ctx).instrument(recall_span),
+                async {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_mins(2),
+                        engine.before_turn(turn_ctx),
+                    )
+                    .instrument(recall_span)
+                    .await
+                    {
+                        Ok(inner) => inner,
+                        Err(_) => Err(ene_mind::error::EneCognitionError::Other(
+                            "before_turn timed out after 120s".to_string(),
+                        )),
+                    }
+                },
                 select_relevant_tools(
                     registry.as_ref(),
                     tool_rag.as_deref(),
@@ -631,6 +663,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let span_pre_c = tracing::info_span!("pre_turn.phase_c");
     let persist_span = tracing::info_span!(parent: &span_pre_c, "persist_affect");
     let compose_span = tracing::info_span!(parent: &span_pre_c, "compose_prompt");
+    let compose_timeout = std::time::Duration::from_secs(30);
     let (persist_result, composed_result) = async {
         tokio::join!(
             async {
@@ -643,9 +676,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 }
             }
             .instrument(persist_span),
-            engine
-                .compose_prompt_packet(compose_ctx, pre_turn, prefetch)
-                .instrument(compose_span),
+            tokio::time::timeout(
+                compose_timeout,
+                engine
+                    .compose_prompt_packet(compose_ctx, pre_turn, prefetch)
+                    .instrument(compose_span),
+            ),
         )
     }
     .instrument(span_pre_c)
@@ -660,11 +696,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     }
 
     let composed = match composed_result {
-        Ok(v) => {
+        Ok(Ok(v)) => {
             tracing::info!(%turn, "Prompt packet context assembled successfully");
             v
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             return stream_finish(
                 session,
                 &event_tx,
@@ -673,6 +709,18 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 origin,
                 TerminalReason::Failed {
                     message: e.to_string(),
+                },
+            );
+        }
+        Err(_timeout) => {
+            return stream_finish(
+                session,
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Failed {
+                    message: "prompt composition timed out".to_string(),
                 },
             );
         }
@@ -1051,14 +1099,25 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 spoken_text: None,
             };
 
-            if let Some(store) = mem_store.as_deref()
-                && let Err(error) = engine.finalize_turn(store, &mind, &post).await
-            {
-                tracing::warn!(
-                    component = "CognitionEngine",
-                    error = %error,
-                    "Post-turn finalize_turn failed"
-                );
+            if let Some(store) = mem_store.as_deref() {
+                let finalize_result = tokio::time::timeout(
+                    std::time::Duration::from_mins(1),
+                    engine.finalize_turn(store, &mind, &post),
+                )
+                .await;
+                if let Err(error) = match finalize_result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err(ene_mind::error::EneCognitionError::Other(
+                        "finalize_turn timed out after 60s".to_string(),
+                    )),
+                } {
+                    tracing::warn!(
+                        component = "CognitionEngine",
+                        error = %error,
+                        "Post-turn finalize_turn failed"
+                    );
+                }
             }
 
             log_empty_response_if_needed(&EmptyResponseContext {

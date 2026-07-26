@@ -905,6 +905,7 @@ impl EneHandle {
             classifier_tasks: tokio::task::JoinSet::new(),
             memory_writer_tasks: tokio::task::JoinSet::new(),
             vision_tasks: tokio::task::JoinSet::new(),
+            vision_cancel: Arc::new(AtomicBool::new(false)),
             search_tasks: tokio::task::JoinSet::new(),
             deferred_tool_tasks: tokio::task::JoinSet::new(),
             classifier_rx,
@@ -1370,6 +1371,7 @@ struct EneActor {
     memory_writer_tasks: tokio::task::JoinSet<()>,
     /// In-flight screen-summary vision jobs (must not block the command loop).
     vision_tasks: tokio::task::JoinSet<()>,
+    vision_cancel: Arc<AtomicBool>,
     /// In-flight tool-search jobs; reaped so panics are not lost (#236).
     search_tasks: tokio::task::JoinSet<()>,
     /// In-flight deferred (background) tool tasks (#196). Each task polls
@@ -1729,6 +1731,27 @@ impl EneActor {
                             {
                                 self.proactive.on_proactive_completed();
                             }
+                        } else if self
+                            .terminal_emitted
+                            .compare_exchange(
+                                false,
+                                true,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            // Stream task panicked and the catch_unwind handler
+                            // did not emit Terminal (or the sender was dropped
+                            // before the handler ran). Emit a fallback Terminal
+                            // so consumers do not wait forever.
+                            let _ = self.event_tx.send(EneEvent::Terminal {
+                                turn: self.active_turn.clone().unwrap_or_default(),
+                                origin: self.active_origin,
+                                reason: TerminalReason::Failed {
+                                    message: "stream task terminated unexpectedly".into(),
+                                },
+                            });
                         }
                         self.stream_handle = None;
                         self.stream_session_rx = None;
@@ -2063,9 +2086,10 @@ impl EneActor {
         let prompts = ene_config::PromptLibrary::load(&prompt_language);
         let system = prompts.proactive().screen_summary_system.trim().to_string();
         let user = prompts.proactive().render_screen_summary_user(&app_label);
+        let cancel = Arc::clone(&self.vision_cancel);
         self.vision_tasks.spawn(async move {
             let result = local
-                .summarize_rgb(width, height, rgb, &system, &user)
+                .summarize_rgb_with_cancel(width, height, rgb, &system, &user, Some(cancel))
                 .await
                 .map_err(|e| e.to_string());
             let _ = reply.send(result);
@@ -2251,9 +2275,13 @@ impl EneActor {
                     );
                     return true;
                 }
-                // Discard any in-flight proactive decision.
+                // Discard any in-flight proactive decision and background vision tasks.
                 self.proactive.on_user_turn_started();
                 self.abort_proactive_decision();
+                self.vision_cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.vision_cancel = Arc::new(AtomicBool::new(false));
+                self.vision_tasks.abort_all();
                 self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
@@ -2820,35 +2848,75 @@ impl EneActor {
         self.stream_session_rx = Some(session_rx);
 
         let handle = tokio::spawn(async move {
-            let outcome = streaming::run_stream_cognitive(streaming::StreamContext {
-                config,
-                session,
-                user_input,
-                embedder,
-                registry,
-                tool_rag,
-                provider,
-                event_tx,
-                diag_tx,
-                cancel_token,
-                pending_permissions,
-                pending_user_inputs,
-                permission_scopes,
-                undo_stack,
-                terminal_emitted,
-                turn: turn_for_stream,
-                origin,
-                allow_tools,
-                runtime_directive,
-                proactive_screen_image,
-                generation_timeout,
-                classifier_tx,
-                memory_writer_tx,
-                deferred_tool_tx,
-                tts_provider,
-                partial_text,
-            })
-            .await;
+            let outcome = {
+                let panic_event_tx = event_tx.clone();
+                let panic_terminal_emitted = Arc::clone(&terminal_emitted);
+                let panic_turn = turn_for_stream.clone();
+                let stream_turn = panic_turn.clone();
+                match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
+                    streaming::run_stream_cognitive(streaming::StreamContext {
+                        config,
+                        session,
+                        user_input,
+                        embedder,
+                        registry,
+                        tool_rag,
+                        provider,
+                        event_tx,
+                        diag_tx,
+                        cancel_token,
+                        pending_permissions,
+                        pending_user_inputs,
+                        permission_scopes,
+                        undo_stack,
+                        terminal_emitted: Arc::clone(&panic_terminal_emitted),
+                        turn: stream_turn,
+                        origin,
+                        allow_tools,
+                        runtime_directive,
+                        proactive_screen_image,
+                        generation_timeout,
+                        classifier_tx,
+                        memory_writer_tx,
+                        deferred_tool_tx,
+                        tts_provider,
+                        partial_text,
+                    })
+                    .await
+                }))
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        let msg = if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = e.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        tracing::error!(
+                            component = "StreamTask",
+                            error = %msg,
+                            "Stream task panicked; emitting fallback Terminal"
+                        );
+                        streaming::emit_terminal(
+                            &panic_event_tx,
+                            &panic_terminal_emitted,
+                            &panic_turn,
+                            origin,
+                            TerminalReason::Failed {
+                                message: format!("stream task panicked: {msg}"),
+                            },
+                        );
+                        // The actor gracefully handles RecvError::Closed
+                        // when the sender is dropped. We still try to send
+                        // even on panic so the actor gets the session snapshot
+                        // if available, but the Terminal is already emitted.
+                        return;
+                    }
+                }
+            };
             let _ = session_tx.send(outcome);
         });
         self.stream_handle = Some(handle);

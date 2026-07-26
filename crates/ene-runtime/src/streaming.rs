@@ -251,15 +251,33 @@ pub(crate) async fn select_relevant_tools(
         let profiles = registry.list_rag_profiles();
 
         // Ensure the index is up-to-date (no-op for already-indexed fields).
-        if let Err(e) = rag.ensure_index(&all_tools, &profiles).await {
-            tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
+        let rag_timeout = std::time::Duration::from_secs(10);
+        match tokio::time::timeout(rag_timeout, rag.ensure_index(&all_tools, &profiles)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
+            }
+            Err(_) => {
+                tracing::warn!(component = "ToolRag", "ensure_index timed out");
+            }
         }
 
         // Select relevant tools via the RAG pipeline.
-        if let Some(emb) = query_embedding {
-            rag.select_with_embedding(user_input, emb).await
+        let select_fut: std::pin::Pin<
+            Box<dyn std::future::Future<Output = Vec<ene_plugin_proto::ToolSpec>> + Send>,
+        > = if let Some(emb) = query_embedding {
+            Box::pin(rag.select_with_embedding(user_input, emb))
         } else {
-            rag.select(user_input).await
+            Box::pin(rag.select(user_input))
+        };
+        if let Ok(tools) = tokio::time::timeout(rag_timeout, select_fut).await {
+            tools
+        } else {
+            tracing::warn!(
+                component = "ToolRag",
+                "tool selection timed out; falling back to full list"
+            );
+            registry.list_tools()
         }
     } else {
         // Fallback: no ToolRag, return all tools from the registry.
@@ -429,15 +447,28 @@ pub(crate) async fn perform_tool_executions(
                         description: description.clone(),
                     });
 
+                    let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
                     match decide_rx.await {
                         Ok(PermissionDecision::AllowOnce) => {
                             audit_decision = ene_store::AuditDecision::AllowOnce;
                             ctx.registry.approve_permission(req_id.as_str()).await;
-                            result = ctx
-                                .registry
-                                .call_tool(&name, &args, Some(&call_ctx))
-                                .await
-                                .map(|r| r.text_for_llm());
+                            result = tokio::time::timeout(
+                                tool_timeout,
+                                ctx.registry.call_tool(&name, &args, Some(&call_ctx)),
+                            )
+                            .await
+                            .map_or_else(
+                                |_| {
+                                    Err(PluginHostError::ExecutionFailed {
+                                        message: format!(
+                                            "Tool '{}' timed out after {:.2} seconds",
+                                            name,
+                                            tool_timeout.as_secs_f64()
+                                        ),
+                                    })
+                                },
+                                |r| r.map(|r| r.text_for_llm()),
+                            );
                         }
                         Ok(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
@@ -469,11 +500,23 @@ pub(crate) async fn perform_tool_executions(
                                     });
                                 }
                             }
-                            result = ctx
-                                .registry
-                                .call_tool(&name, &args, Some(&call_ctx))
-                                .await
-                                .map(|r| r.text_for_llm());
+                            result = tokio::time::timeout(
+                                tool_timeout,
+                                ctx.registry.call_tool(&name, &args, Some(&call_ctx)),
+                            )
+                            .await
+                            .map_or_else(
+                                |_| {
+                                    Err(PluginHostError::ExecutionFailed {
+                                        message: format!(
+                                            "Tool '{}' timed out after {:.2} seconds",
+                                            name,
+                                            tool_timeout.as_secs_f64()
+                                        ),
+                                    })
+                                },
+                                |r| r.map(|r| r.text_for_llm()),
+                            );
                         }
                         _ => {
                             audit_decision = ene_store::AuditDecision::Denied;
@@ -512,11 +555,24 @@ pub(crate) async fn perform_tool_executions(
                     match resp_rx.await {
                         Ok(UserInputResponse::Multi(answers)) => {
                             let new_args = inject_user_answers(&args, &answers);
-                            result = ctx
-                                .registry
-                                .call_tool(&name, &new_args, Some(&call_ctx))
-                                .await
-                                .map(|r| r.text_for_llm());
+                            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+                            result = tokio::time::timeout(
+                                tool_timeout,
+                                ctx.registry.call_tool(&name, &new_args, Some(&call_ctx)),
+                            )
+                            .await
+                            .map_or_else(
+                                |_| {
+                                    Err(PluginHostError::ExecutionFailed {
+                                        message: format!(
+                                            "Tool '{}' timed out after {:.2} seconds",
+                                            name,
+                                            tool_timeout.as_secs_f64()
+                                        ),
+                                    })
+                                },
+                                |r| r.map(|r| r.text_for_llm()),
+                            );
                         }
                         Ok(UserInputResponse::Cancel) | Err(_) => {
                             result = Err(PluginHostError::ExecutionFailed {
@@ -740,10 +796,25 @@ pub(crate) async fn execute_system_search_tool(
     let matching_tools = if let Some(rag) = tool_rag {
         let all_tools = registry.list_tools();
         let profiles = registry.list_rag_profiles();
-        if let Err(e) = rag.ensure_index(&all_tools, &profiles).await {
-            tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
+        let rag_timeout = std::time::Duration::from_secs(10);
+        match tokio::time::timeout(rag_timeout, rag.ensure_index(&all_tools, &profiles)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
+            }
+            Err(_) => {
+                tracing::warn!(component = "ToolRag", "ensure_index timed out");
+            }
         }
-        rag.select(query).await
+        if let Ok(tools) = tokio::time::timeout(rag_timeout, rag.select(query)).await {
+            tools
+        } else {
+            tracing::warn!(
+                component = "ToolRag",
+                "system tool search timed out; returning empty results"
+            );
+            return Ok("Tool search timed out. Please try again.".to_string());
+        }
     } else {
         let query_lower = query.to_lowercase();
         registry
