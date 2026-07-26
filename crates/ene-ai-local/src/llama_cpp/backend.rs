@@ -7,18 +7,18 @@ use parking_lot::Mutex;
 use std::sync::OnceLock;
 
 static BACKEND: OnceLock<Result<LlamaBackend, String>> = OnceLock::new();
-static INFERENCE: Mutex<()> = Mutex::new(());
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Run `f` with the process-global backend (initialized once).
 ///
-/// Holds a process-wide inference lock so embedding and decision paths never
-/// enter llama.cpp concurrently from different threads.
+/// Each model instance (`LoadedModel`) maintains its own internal lock so separate
+/// models (e.g. embedding vs decision vs vision) do not block each other globally.
 pub(crate) fn with_backend<T, F>(f: F) -> Result<T, LlmProviderError>
 where
     F: FnOnce(&LlamaBackend) -> Result<T, LlmProviderError>,
 {
-    let _guard = INFERENCE.lock();
     let backend = BACKEND.get_or_init(|| {
+        let _guard = INIT_LOCK.lock();
         let mut backend =
             LlamaBackend::init().map_err(|e| format!("LlamaBackend::init failed: {e}"))?;
         // Quiet llama.cpp / mtmd helper stderr; keep failures for tracing if needed.
@@ -35,33 +35,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     #[test]
-    fn inference_lock_serializes_concurrent_callers() {
-        let active = Arc::new(AtomicUsize::new(0));
-        let max_active = Arc::new(AtomicUsize::new(0));
-
-        let handles: Vec<_> = std::iter::repeat_with(|| {
-            let active = Arc::clone(&active);
-            let max_active = Arc::clone(&max_active);
-            std::thread::spawn(move || {
-                let _guard = INFERENCE.lock();
-                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                max_active.fetch_max(now, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(5));
-                active.fetch_sub(1, Ordering::SeqCst);
-            })
-        })
-        .take(4)
-        .collect();
-
-        for handle in handles {
-            handle.join().expect("thread join");
-        }
-
-        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    fn backend_init_once() {
+        let res = with_backend(|_| Ok(42));
+        assert!(res.is_ok());
     }
 }

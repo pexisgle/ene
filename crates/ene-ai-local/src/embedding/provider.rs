@@ -119,12 +119,21 @@ impl EmbeddingProvider for GgufEmbeddingProvider {
             Ok(out)
         });
         let elapsed = start.elapsed();
-        tracing::debug!(
-            "[Embedding] GGUF({}) batch {} items → {:.2}ms",
-            self.model_name,
-            items.len(),
-            elapsed.as_secs_f64() * 1000.0,
-        );
+        if elapsed.as_secs_f64() > 2.0 {
+            tracing::warn!(
+                "[Embedding] GGUF({}) batch {} items took {:.2}s (lock contention or slow GGUF inference)",
+                self.model_name,
+                items.len(),
+                elapsed.as_secs_f64(),
+            );
+        } else {
+            tracing::debug!(
+                "[Embedding] GGUF({}) batch {} items → {:.2}ms",
+                self.model_name,
+                items.len(),
+                elapsed.as_secs_f64() * 1000.0,
+            );
+        }
         result
     }
 

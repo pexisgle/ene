@@ -80,17 +80,45 @@ impl LocalLlamaCppProvider {
         system: &str,
         user: &str,
     ) -> Result<String, LlmProviderError> {
+        self.summarize_rgb_with_cancel(width, height, rgb, system, user, None)
+            .await
+    }
+
+    /// Summarize an RGB8 screen capture with optional atomic cancellation check.
+    pub async fn summarize_rgb_with_cancel(
+        &self,
+        width: u32,
+        height: u32,
+        rgb: Vec<u8>,
+        system: &str,
+        user: &str,
+        cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<String, LlmProviderError> {
         let model = Arc::clone(&self.model);
         let timeout = self.request_timeout;
         let system = system.to_string();
         let user = user.to_string();
-        tokio::task::spawn_blocking(move || {
-            let guard = model.lock();
-            crate::llama_cpp::generate_with_rgb_image(
-                &guard, &system, &user, width, height, &rgb, timeout,
-            )
-        })
+        let safety_timeout = timeout.saturating_mul(2).max(Duration::from_secs(10));
+        tokio::time::timeout(
+            safety_timeout,
+            tokio::task::spawn_blocking(move || {
+                let guard = model.lock();
+                crate::llama_cpp::generate_with_rgb_image_with_cancel(
+                    &guard,
+                    &system,
+                    &user,
+                    width,
+                    height,
+                    &rgb,
+                    timeout,
+                    cancel.as_deref(),
+                )
+            }),
+        )
         .await
+        .map_err(|_| {
+            LlmProviderError::LocalLlm("vision task timed out at runtime boundary".to_string())
+        })?
         .map_err(|e| LlmProviderError::LocalLlm(format!("vision task join error: {e}")))?
     }
 
@@ -142,11 +170,18 @@ impl LlmProvider for LocalLlamaCppProvider {
         let schema = json_schema;
         let model = Arc::clone(&self.model);
         let timeout = self.request_timeout;
-        tokio::task::spawn_blocking(move || {
-            let guard = model.lock();
-            generate_chat(&guard, &messages, schema.as_ref(), timeout)
-        })
+        let safety_timeout = timeout.saturating_mul(2).max(Duration::from_secs(10));
+        tokio::time::timeout(
+            safety_timeout,
+            tokio::task::spawn_blocking(move || {
+                let guard = model.lock();
+                generate_chat(&guard, &messages, schema.as_ref(), timeout)
+            }),
+        )
         .await
+        .map_err(|_| {
+            LlmProviderError::LocalLlm("decision task timed out at runtime boundary".to_string())
+        })?
         .map_err(|e| LlmProviderError::LocalLlm(format!("decision task join error: {e}")))?
     }
 }

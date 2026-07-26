@@ -13,6 +13,7 @@ use llama_cpp_4::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
 use llama_cpp_4::mtmd::{MtmdBitmap, MtmdContext, MtmdInputChunks, MtmdInputText};
 use llama_cpp_4::sampling::LlamaSampler;
 use llama_cpp_4::token::detokenizer::StreamDetokenizer;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 const MAX_DECISION_TOKENS: i32 = 320;
@@ -32,6 +33,10 @@ pub(crate) fn generate_chat(
 }
 
 /// Vision completion from raw RGB8 pixels (desktop screen summary).
+#[expect(
+    dead_code,
+    reason = "convenience wrapper retained for non-cancelled vision callers"
+)]
 pub(crate) fn generate_with_rgb_image(
     loaded: &LoadedModel,
     system: &str,
@@ -40,6 +45,20 @@ pub(crate) fn generate_with_rgb_image(
     height: u32,
     rgb: &[u8],
     timeout: Duration,
+) -> Result<String, LlmProviderError> {
+    generate_with_rgb_image_with_cancel(loaded, system, user, width, height, rgb, timeout, None)
+}
+
+/// Vision completion from raw RGB8 pixels with optional cancellation check.
+pub(crate) fn generate_with_rgb_image_with_cancel(
+    loaded: &LoadedModel,
+    system: &str,
+    user: &str,
+    width: u32,
+    height: u32,
+    rgb: &[u8],
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
 ) -> Result<String, LlmProviderError> {
     // Fold system into a single user turn; Image part alone inserts the mtmd marker.
     let mut text = String::new();
@@ -58,7 +77,14 @@ pub(crate) fn generate_with_rgb_image(
             },
         ],
     }];
-    generate_chat_vision_with_bitmaps(loaded, &messages, &[(width, height, rgb)], None, timeout)
+    generate_chat_vision_with_bitmaps_with_cancel(
+        loaded,
+        &messages,
+        &[(width, height, rgb)],
+        None,
+        timeout,
+        cancel,
+    )
 }
 
 fn generate_chat_text(
@@ -114,6 +140,11 @@ fn generate_chat_text(
                 .add(token, i, &[0], i == last_index)
                 .map_err(|e| map_llama_err("batch.add prompt", e))?;
         }
+        if Instant::now() >= deadline {
+            return Err(LlmProviderError::LocalLlm(
+                "decision generation timed out before prompt decode".to_string(),
+            ));
+        }
         ctx.decode(&mut batch)
             .map_err(|e| map_llama_err("decode prompt", e))?;
 
@@ -126,6 +157,7 @@ fn generate_chat_text(
             deadline,
             MAX_DECISION_TOKENS,
             n_cur,
+            None,
         )
     })
 }
@@ -153,6 +185,24 @@ fn generate_chat_vision_with_bitmaps(
     images: &[(u32, u32, &[u8])],
     json_schema: Option<&serde_json::Value>,
     timeout: Duration,
+) -> Result<String, LlmProviderError> {
+    generate_chat_vision_with_bitmaps_with_cancel(
+        loaded,
+        messages,
+        images,
+        json_schema,
+        timeout,
+        None,
+    )
+}
+
+fn generate_chat_vision_with_bitmaps_with_cancel(
+    loaded: &LoadedModel,
+    messages: &[LlmMessage],
+    images: &[(u32, u32, &[u8])],
+    json_schema: Option<&serde_json::Value>,
+    timeout: Duration,
+    cancel: Option<&AtomicBool>,
 ) -> Result<String, LlmProviderError> {
     let mtmd = loaded.mtmd.as_ref().ok_or_else(|| {
         LlmProviderError::LocalLlm(
@@ -191,6 +241,18 @@ fn generate_chat_vision_with_bitmaps(
         mtmd.tokenize(&text, &bitmap_refs, &mut chunks)
             .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd tokenize: {e}")))?;
 
+        if let Some(c) = cancel
+            && c.load(Ordering::Relaxed)
+        {
+            return Err(LlmProviderError::LocalLlm("task cancelled".to_string()));
+        }
+
+        if Instant::now() >= deadline {
+            return Err(LlmProviderError::LocalLlm(
+                "vision generation timed out before mtmd eval".to_string(),
+            ));
+        }
+
         let mut n_past = 0_i32;
         mtmd.eval_chunks(ctx.as_ptr(), &chunks, 0, 0, 512, true, &mut n_past)
             .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd eval: {e}")))?;
@@ -204,6 +266,7 @@ fn generate_chat_vision_with_bitmaps(
             deadline,
             MAX_VISION_TOKENS,
             n_past,
+            cancel,
         )
     })
 }
@@ -216,6 +279,7 @@ fn sample_tokens(
     deadline: Instant,
     max_tokens: i32,
     mut n_cur: i32,
+    cancel: Option<&AtomicBool>,
 ) -> Result<String, LlmProviderError> {
     let sampler = build_sampler(&loaded.model, json_schema)?;
     let mut detok = StreamDetokenizer::new(&loaded.model, Special::Plaintext);
@@ -223,6 +287,11 @@ fn sample_tokens(
     let mut n_decode = 0_i32;
 
     while n_decode < max_tokens {
+        if let Some(c) = cancel
+            && c.load(Ordering::Relaxed)
+        {
+            return Err(LlmProviderError::LocalLlm("task cancelled".to_string()));
+        }
         if Instant::now() >= deadline {
             return Err(LlmProviderError::LocalLlm(
                 "decision generation timed out after deadline".to_string(),

@@ -9,7 +9,13 @@ mod grammar;
 mod load;
 
 pub(crate) use embed::embed_text;
-pub(crate) use generate::{generate_chat, generate_with_rgb_image};
+#[expect(
+    unused_imports,
+    reason = "convenience wrapper retained for non-cancelled vision callers"
+)]
+pub(crate) use generate::{
+    generate_chat, generate_with_rgb_image, generate_with_rgb_image_with_cancel,
+};
 pub(crate) use load::{LoadSpec, LoadedModel};
 
 use ene_ai::error::LlmProviderError;
