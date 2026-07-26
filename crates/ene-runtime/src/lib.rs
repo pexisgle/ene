@@ -48,6 +48,9 @@ pub mod message_builder;
 mod proactive;
 /// Stable public API v1 facade: version, JSON event mirrors, redaction (#189).
 pub mod public_api;
+/// Read-only session and pending-candidate query handles that bypass the
+/// turn-execution actor mailbox entirely (#271).
+pub mod query;
 /// Permission types and streaming engine internals.
 ///
 /// Not part of the stable public API v1 contract (#189). Prefer [`EneHandle`].
@@ -58,6 +61,9 @@ mod streaming_cognitive;
 pub mod types;
 /// Actor-native undo stack and metadata (#178).
 pub mod undo;
+/// Screen-image vision summarization handle, bypasses the turn-execution
+/// actor mailbox entirely (#271).
+pub mod vision;
 
 // ── Bootstrap helpers ──
 /// Host helpers for `ConfigStore` → card → [`EneHandle::open`].
@@ -69,6 +75,14 @@ pub use handle::{
     ActorDeadError, DeferredToolTask, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot,
     EneStatus, FeatureSettingsUpdate, ShutdownTimeout, TerminalReason,
 };
+
+// ── Read-only query / vision handles (#271) ──
+/// Pending memory-candidate approval handle and its summary DTO.
+pub use query::candidates::{MemoryCandidateHandle, PendingCandidateSummary};
+/// Read-only session query handle (list / export / import / search / archive).
+pub use query::sessions::SessionQueryHandle;
+/// Screen-image vision summarization handle.
+pub use vision::VisionHandle;
 
 // ── Diagnostics ──
 /// Diagnostics facade and memory query handle.

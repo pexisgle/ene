@@ -75,7 +75,8 @@ impl CliCommand for SessionCommand {
 async fn handle_list(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
     let sessions = ctx
         .handle
-        .list_sessions(false, 50)
+        .sessions()
+        .list(false, 50)
         .await
         .map_err(session_error)?;
 
@@ -108,7 +109,8 @@ async fn handle_export(ctx: &AppContext, session_id: &str) -> Result<CommandOutc
     }
     let json = ctx
         .handle
-        .export_session(session_id)
+        .sessions()
+        .export(session_id)
         .await
         .map_err(session_error)?;
 
@@ -128,7 +130,8 @@ async fn handle_import(ctx: &AppContext, path: &str) -> Result<CommandOutcome, C
 
     let id = ctx
         .handle
-        .import_session(json)
+        .sessions()
+        .import(&json)
         .await
         .map_err(session_error)?;
 
@@ -147,7 +150,8 @@ async fn handle_search(ctx: &AppContext, query: &str) -> Result<CommandOutcome, 
     }
     let matches = ctx
         .handle
-        .search_sessions(query, 20, 0)
+        .sessions()
+        .search(query, 20, 0)
         .await
         .map_err(session_error)?;
 
@@ -183,7 +187,8 @@ async fn handle_archive(
     }
     let updated = ctx
         .handle
-        .archive_session(session_id, archived)
+        .sessions()
+        .set_archived(session_id, archived)
         .await
         .map_err(session_error)?;
 

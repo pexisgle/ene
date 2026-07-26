@@ -321,7 +321,8 @@ impl AiBridge {
         include_archived: bool,
         limit: usize,
     ) -> Result<Vec<ene_store::SessionMeta>, AiBridgeError> {
-        let metas = self.block_on_timeout(self.handle.list_sessions(include_archived, limit))??;
+        let metas =
+            self.block_on_timeout(self.handle.sessions().list(include_archived, limit))??;
         Ok(metas.into_iter().map(session_meta_from_public).collect())
     }
 
@@ -330,13 +331,15 @@ impl AiBridge {
         &self,
         session_id: impl Into<String>,
     ) -> Result<String, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.export_session(session_id))??)
+        let session_id = session_id.into();
+        Ok(self.block_on_timeout(self.handle.sessions().export(&session_id))??)
     }
 
     /// Import a session from a JSON string, returning the imported
     /// session's row id (#176).
     pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.import_session(json))??)
+        let json = json.into();
+        Ok(self.block_on_timeout(self.handle.sessions().import(&json))??)
     }
 
     /// Search session messages, returning matching
@@ -347,8 +350,9 @@ impl AiBridge {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<(String, ene_store::ExportedMessage)>, AiBridgeError> {
+        let query = query.into();
         let matches =
-            self.block_on_timeout(self.handle.search_sessions(query, limit, offset))??;
+            self.block_on_timeout(self.handle.sessions().search(&query, limit, offset))??;
         Ok(matches
             .into_iter()
             .map(|(session_id, message)| (session_id, exported_message_from_public(message)))
@@ -362,7 +366,8 @@ impl AiBridge {
         session_id: impl Into<String>,
         archived: bool,
     ) -> Result<bool, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.archive_session(session_id, archived))??)
+        let session_id = session_id.into();
+        Ok(self.block_on_timeout(self.handle.sessions().set_archived(&session_id, archived))??)
     }
 
     /// Forward a `UserInputResponse` for the request
@@ -531,17 +536,17 @@ impl AiBridge {
 
     /// List pending memory candidates awaiting user approval.
     pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.list_pending_candidates())??)
+        Ok(self.block_on_timeout(self.handle.candidates().list_pending())??)
     }
 
     /// Approve a pending memory candidate, persisting it as a typed memory.
     pub fn approve_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.approve_candidate(id))??)
+        Ok(self.block_on_timeout(self.handle.candidates().approve(id))??)
     }
 
     /// Reject a pending memory candidate.
     pub fn reject_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
-        Ok(self.block_on_timeout(self.handle.reject_candidate(id))??)
+        Ok(self.block_on_timeout(self.handle.candidates().reject(id))??)
     }
 
     // ── Commitment management (#223) ──

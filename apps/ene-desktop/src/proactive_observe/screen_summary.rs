@@ -155,6 +155,7 @@ impl ScreenSummaryProvider {
         let rgb = focus.to_rgb8();
         let (width, height) = rgb.dimensions();
         self.handle
+            .vision()
             .summarize_screen_image(width, height, rgb.into_raw(), captured.app_label.clone())
             .await
     }

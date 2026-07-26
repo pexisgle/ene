@@ -532,10 +532,12 @@ async fn session_command(
 ) -> Result<i32, OutputError> {
     match action {
         SessionAction::List { archived } => {
-            let sessions =
-                ctx.handle.list_sessions(*archived, 50).await.map_err(|e| {
-                    OutputError::new(ErrorCode::Runtime, format!("list sessions: {e}"))
-                })?;
+            let sessions = ctx
+                .handle
+                .sessions()
+                .list(*archived, 50)
+                .await
+                .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list sessions: {e}")))?;
             if json {
                 output::print_json(&sessions)?;
             } else {
@@ -544,7 +546,7 @@ async fn session_command(
             Ok(EXIT_OK)
         }
         SessionAction::Export { id } => {
-            let bundle = ctx.handle.export_session(id.clone()).await.map_err(|e| {
+            let bundle = ctx.handle.sessions().export(id).await.map_err(|e| {
                 OutputError::new(ErrorCode::Runtime, format!("export session: {e}"))
             })?;
             // The export bundle is already JSON; print it verbatim.
@@ -555,9 +557,14 @@ async fn session_command(
             let json_text = tokio::fs::read_to_string(path).await.map_err(|e| {
                 OutputError::new(ErrorCode::Usage, format!("read {}: {e}", path.display()))
             })?;
-            let id = ctx.handle.import_session(json_text).await.map_err(|e| {
-                OutputError::new(ErrorCode::Runtime, format!("import session: {e}"))
-            })?;
+            let id = ctx
+                .handle
+                .sessions()
+                .import(&json_text)
+                .await
+                .map_err(|e| {
+                    OutputError::new(ErrorCode::Runtime, format!("import session: {e}"))
+                })?;
             if json {
                 output::print_json(&serde_json::json!({ "imported_id": id }))?;
             } else {
@@ -568,7 +575,8 @@ async fn session_command(
         SessionAction::Search { query } => {
             let matches = ctx
                 .handle
-                .search_sessions(query.clone(), 20, 0)
+                .sessions()
+                .search(query, 20, 0)
                 .await
                 .map_err(|e| {
                     OutputError::new(ErrorCode::Runtime, format!("search sessions: {e}"))
@@ -603,7 +611,8 @@ async fn set_archived(
 ) -> Result<i32, OutputError> {
     let updated = ctx
         .handle
-        .archive_session(id, archived)
+        .sessions()
+        .set_archived(id, archived)
         .await
         .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("update session: {e}")))?;
     if json {

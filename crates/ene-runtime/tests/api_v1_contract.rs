@@ -336,7 +336,7 @@ async fn list_sessions_with_store_disabled_returns_public_api_error() {
         .await
         .expect("open initializes handle");
     let result: Result<Vec<ene_runtime::PublicSessionMeta>, ene_runtime::PublicApiError> =
-        handle.list_sessions(false, 10).await;
+        handle.sessions().list(false, 10).await;
     let err = result.expect_err("memory store is disabled in this config");
     assert!(
         matches!(err, ene_runtime::PublicApiError::Internal { .. }),
@@ -350,8 +350,10 @@ async fn archive_session_with_store_disabled_returns_public_api_error() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
         .expect("open initializes handle");
-    let result: Result<bool, ene_runtime::PublicApiError> =
-        handle.archive_session("missing-session", true).await;
+    let result: Result<bool, ene_runtime::PublicApiError> = handle
+        .sessions()
+        .set_archived("missing-session", true)
+        .await;
     assert!(result.is_err(), "expected an error with memory disabled");
     let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
 }
