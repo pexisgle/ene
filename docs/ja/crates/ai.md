@@ -1,6 +1,6 @@
 # `ene-ai` & `ene-ai-local` — API リファレンス
 
-> **クレート**: `ene-ai` (コアトレイト & クラウドプロバイダ) | `ene-ai-local` (`llama-cpp-2` による GGUF ローカル推論)
+> **クレート**: `ene-ai` (コアトレイト & クラウドプロバイダ) | `ene-ai-local` (`llama-cpp-4` による GGUF ローカル推論)
 
 `ene-ai` および `ene-ai-local` は、Ene 向けに LLM チャット補完およびテキスト埋め込みベクトルの抽象化を提供します。
 
@@ -21,10 +21,10 @@
 
 ## 2. `ene-ai-local` (ローカル GGUF LLM 推論)
 
-`ene-ai-local` は `llama-cpp-2` をラップしたローカルモデル実行エンジンを格納しています：
+`ene-ai-local` は `llama-cpp-4` をラップしたローカルモデル実行エンジンを格納しています：
 
 - **ローカルモデル読み込み**: ディスクから `.gguf` 重みファイルを読み込みます。
-- **ハードウェアアクセラレーション**: `llama-cpp-2` バインディングを介して CUDA, Metal, CPU バックエンドを自動選択します。
+- **ハードウェアアクセラレーション**: Cargo feature (`vulkan` / `cuda`) でビルドされた GPU バックエンドと CPU を、`llama-cpp-4` バインディング経由で利用します。
 - **プロセス内推論**: 外部ネットワーク通信を行うことなく、 `LlmProvider` を実装する `LocalLlmProvider` を提供します。
 
 ---

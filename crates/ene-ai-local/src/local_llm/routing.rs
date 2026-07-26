@@ -21,7 +21,7 @@ const DECISION_MAX_TOKENS: u32 = 256;
 /// Which decision backend is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionProviderKind {
-    /// In-process llama-cpp-2.
+    /// In-process llama-cpp-4.
     LlamaCpp,
     /// Cloud OpenAI-compatible.
     Cloud,

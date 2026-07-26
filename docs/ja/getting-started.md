@@ -9,7 +9,7 @@
 Ene は Rust 2024 エディションのワークスペースとして構築されており、以下のシステムツールが必要です：
 
 - **Rust ツールチェーン**: 1.85 以上 (Rust 2024 エディション対応)
-- **C/C++ コンパイラ**: `clang` / `gcc` および `cmake` (`llama-cpp-2` や `libsqlite3-sys` のビルド用)
+- **C/C++ コンパイラ**: `clang` / `gcc` および `cmake` (`llama-cpp-4` や `libsqlite3-sys` のビルド用)
 - **グラフィックスライブラリ**: Vulkan / Wayland / X11 開発用ヘッダー (`ene-desktop` および `ene-vrm` の `wgpu` 用)
 - **オーディオライブラリ**: `alsa` / `jack` 開発用ヘッダー (`ene-voice` の `cpal` 用)
 

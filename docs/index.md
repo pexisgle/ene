@@ -36,7 +36,7 @@ Ene Workspace
 │   ├── ene-store          (SQLite + SeaORM + sqlite-vec memory & vector store)
 │   ├── ene-config         (Settings, character cards, schema definition)
 │   ├── ene-ai             (Core AI provider traits, OpenAI, Anthropic adapter)
-│   ├── ene-ai-local       (Local LLM inference via llama-cpp-2)
+│   ├── ene-ai-local       (Local LLM inference via llama-cpp-4)
 │   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
 │   ├── ene-connector      (Shared connector framework & MCP bridge)
 │   └── ene-vrm            (3D VRM 1.0 loader & wgpu renderer)

@@ -1,4 +1,4 @@
-//! In-process llama-cpp-2 provider for proactive decisions (#165 / #171).
+//! In-process llama-cpp-4 provider for proactive decisions (#165 / #171).
 
 mod routing;
 
@@ -256,5 +256,57 @@ mod tests {
             panic!("expected empty path to fail");
         };
         assert!(matches!(err, LlmProviderError::LocalLlm(_)));
+    }
+
+    /// Manual smoke: load a local GGUF and run a short JSON-schema constrained turn.
+    ///
+    /// ```text
+    /// ENE_SMOKE_GGUF=assets/models/gguf/gemma-4-E4B-it-Q4_0.gguf \
+    ///   cargo test -p ene-ai-local -- --ignored smoke_gguf_load_and_grammar --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires a local GGUF path via ENE_SMOKE_GGUF"]
+    async fn smoke_gguf_load_and_grammar() {
+        let path = std::env::var("ENE_SMOKE_GGUF").expect("ENE_SMOKE_GGUF");
+        let mmproj = std::env::var("ENE_SMOKE_MMPROJ").ok();
+        let provider = LocalLlamaCppProvider::load(&LocalGgufLoadParams {
+            model_path: path,
+            mmproj_path: mmproj,
+            acceleration: ProactiveAcceleration::Cpu,
+            gpu_layers: "0".to_string(),
+            context_size: 2048,
+            request_timeout_seconds: 120,
+        })
+        .expect("load GGUF");
+
+        let messages = [LlmMessage::User {
+            parts: vec![ene_ai::message::UserMessagePart::Text {
+                text: "Say hi in one short word.".into(),
+            }],
+        }];
+        let plain = provider
+            .chat_completion(&messages, None)
+            .await
+            .expect("plain completion");
+        eprintln!("smoke plain: {plain:?}");
+        assert!(!plain.trim().is_empty(), "expected non-empty plain completion");
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "ok": { "type": "boolean" } },
+            "required": ["ok"],
+            "additionalProperties": false
+        });
+        let schema_messages = [LlmMessage::User {
+            parts: vec![ene_ai::message::UserMessagePart::Text {
+                text: "Reply with JSON only: {\"ok\": true}".into(),
+            }],
+        }];
+        let out = provider
+            .chat_completion(&schema_messages, Some(schema))
+            .await
+            .expect("grammar completion");
+        eprintln!("smoke grammar: {out:?}");
+        assert!(!out.trim().is_empty(), "expected non-empty grammar completion");
     }
 }

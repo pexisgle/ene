@@ -80,7 +80,7 @@ pub enum ResolvedEmbedding {
         /// Optional query prefix for retrieval queries.
         query_prefix: Option<String>,
     },
-    /// Local GGUF embedding via llama-cpp-2.
+    /// Local GGUF embedding via llama-cpp-4.
     Local(ResolvedLocalModel),
 }
 

@@ -1,10 +1,11 @@
-//! Shared llama-cpp-2 adapter for local decision + embedding (#171).
+//! Shared llama-cpp-4 adapter for local decision + embedding (#171).
 //!
-//! Keeps low-level llama.cpp types inside `ene-ai`; callers use typed helpers only.
+//! Keeps low-level llama.cpp types inside `ene-ai-local`; callers use typed helpers only.
 
 mod backend;
 mod embed;
 mod generate;
+mod grammar;
 mod load;
 
 pub(crate) use embed::embed_text;

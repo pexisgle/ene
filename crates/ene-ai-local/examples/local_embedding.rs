@@ -1,4 +1,4 @@
-//! Local embedding example using ene-ai-local (llama-cpp-2).
+//! Local embedding example using ene-ai-local (llama-cpp-4).
 //!
 //! Set `ENE_EMBEDDING_MODEL_URL` to an HTTPS `.gguf` URL, or pass one as the first CLI arg.
 //!

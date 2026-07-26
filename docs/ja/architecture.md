@@ -118,7 +118,7 @@ flowchart TD
 | `ene-mind` | セッション管理、プロンプト予算配分、感情 (PADモデル)、記憶想起、プロアクティブ発話、演出調停 |
 | `ene-store` | SQLite / SeaORM エンティティ、マイグレーション、ベクトル検索 (`sqlite-vec`)、コミットメント台帳 |
 | `ene-ai` | `AiProvider` トレイト、OpenAI プロバイダ、Anthropic IPC アダプタ、プロバイダファクトリ |
-| `ene-ai-local` | `llama-cpp-2` によるローカル GGUF LLM 推論 |
+| `ene-ai-local` | `llama-cpp-4` によるローカル GGUF LLM 推論 |
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
 | `ene-connector` | プラットフォーム連携 (Discord, Telegram, Slack, Webhook) および MCP クライアント/サーバーブリッジ |
 | `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |

@@ -1,15 +1,18 @@
-//! Chat completion via llama-cpp-2 (text + optional mtmd vision).
+//! Chat completion via llama-cpp-4 (text + optional mtmd vision).
 
 use super::backend::with_backend;
+use super::grammar::json_schema_to_grammar;
 use super::load::LoadedModel;
 use super::map_llama_err;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, UserMessagePart};
-use llama_cpp_2::json_schema_to_grammar;
-use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::{AddBos, LlamaChatMessage, LlamaModel};
-use llama_cpp_2::mtmd::{MtmdBitmap, MtmdInputText, mtmd_default_marker};
-use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_4::context::LlamaContext;
+use llama_cpp_4::context::params::LlamaContextParams;
+use llama_cpp_4::llama_batch::LlamaBatch;
+use llama_cpp_4::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
+use llama_cpp_4::mtmd::{MtmdBitmap, MtmdContext, MtmdInputChunks, MtmdInputText};
+use llama_cpp_4::sampling::LlamaSampler;
+use llama_cpp_4::token::detokenizer::StreamDetokenizer;
 use std::time::{Duration, Instant};
 
 const MAX_DECISION_TOKENS: i32 = 320;
@@ -69,8 +72,7 @@ fn generate_chat_text(
         .ok_or_else(|| LlmProviderError::LocalLlm("request timeout overflow".to_string()))?;
 
     with_backend(|backend| {
-        let ctx_params = llama_cpp_2::context::params::LlamaContextParams::default()
-            .with_n_ctx(Some(loaded.context_size));
+        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(loaded.context_size));
         let mut ctx = loaded
             .model
             .new_context(backend, ctx_params)
@@ -157,7 +159,7 @@ fn generate_chat_vision_with_bitmaps(
             "vision requested but mmproj is not loaded for this local model".to_string(),
         )
     })?;
-    if !mtmd.support_vision() {
+    if !mtmd.supports_vision() {
         return Err(LlmProviderError::LocalLlm(
             "loaded mmproj does not support vision".to_string(),
         ));
@@ -168,8 +170,7 @@ fn generate_chat_vision_with_bitmaps(
         .ok_or_else(|| LlmProviderError::LocalLlm("request timeout overflow".to_string()))?;
 
     with_backend(|backend| {
-        let ctx_params = llama_cpp_2::context::params::LlamaContextParams::default()
-            .with_n_ctx(Some(loaded.context_size));
+        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(loaded.context_size));
         let mut ctx = loaded
             .model
             .new_context(backend, ctx_params)
@@ -179,25 +180,19 @@ fn generate_chat_vision_with_bitmaps(
         let bitmaps: Vec<MtmdBitmap> = images
             .iter()
             .map(|(w, h, rgb)| {
-                MtmdBitmap::from_image_data(*w, *h, rgb)
+                MtmdBitmap::from_rgb(*w, *h, rgb)
                     .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd bitmap: {e}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
 
-        let chunks = mtmd
-            .tokenize(
-                MtmdInputText {
-                    text: prompt,
-                    add_special: true,
-                    parse_special: true,
-                },
-                &bitmap_refs,
-            )
+        let text = MtmdInputText::new(&prompt, true, true);
+        let mut chunks = MtmdInputChunks::new();
+        mtmd.tokenize(&text, &bitmap_refs, &mut chunks)
             .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd tokenize: {e}")))?;
 
-        let n_past = chunks
-            .eval_chunks(mtmd, &ctx, 0, 0, 512, true)
+        let mut n_past = 0_i32;
+        mtmd.eval_chunks(ctx.as_ptr(), &chunks, 0, 0, 512, true, &mut n_past)
             .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd eval: {e}")))?;
 
         let mut batch = LlamaBatch::new(512, 1);
@@ -215,22 +210,17 @@ fn generate_chat_vision_with_bitmaps(
 
 fn sample_tokens(
     loaded: &LoadedModel,
-    ctx: &mut llama_cpp_2::context::LlamaContext<'_>,
+    ctx: &mut LlamaContext<'_>,
     batch: &mut LlamaBatch,
     json_schema: Option<&serde_json::Value>,
     deadline: Instant,
     max_tokens: i32,
     mut n_cur: i32,
 ) -> Result<String, LlmProviderError> {
-    let mut sampler = build_sampler(&loaded.model, json_schema)?;
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
+    let sampler = build_sampler(&loaded.model, json_schema)?;
+    let mut detok = StreamDetokenizer::new(&loaded.model, Special::Plaintext);
     let mut output = String::new();
     let mut n_decode = 0_i32;
-
-    // After mtmd eval, logits are already for the last position; first sample
-    // uses the current context without an empty batch add when n_cur > 0 from text path.
-    // Text path leaves the last prompt token in `batch`; vision path starts from n_past.
-    let mut need_initial_from_ctx = batch.n_tokens() == 0;
 
     while n_decode < max_tokens {
         if Instant::now() >= deadline {
@@ -239,28 +229,20 @@ fn sample_tokens(
             ));
         }
 
-        let idx = if need_initial_from_ctx {
-            need_initial_from_ctx = false;
-            // Sampler idx is the logits *output* index from the last eval (-1 = last),
-            // not the absolute KV position. Passing n_cur-1 yields nullptr logits.
-            -1
-        } else {
-            batch.n_tokens().saturating_sub(1)
-        };
-
+        // Always sample the last computed logits. After a multi-token prompt decode
+        // only the final token requests logits, so `batch.n_tokens()-1` is out of range.
         // `llama_sampler_sample` already calls `llama_sampler_accept` — do not accept twice.
         // A second accept empties grammar stacks (e.g. after compound token `{"`) and the next
         // sample hits GGML_ASSERT(!stacks.empty()).
-        let token = sampler.sample(ctx, idx);
+        let token = sampler.sample(ctx, -1);
 
         if loaded.model.is_eog_token(token) {
             break;
         }
 
-        let piece = loaded
-            .model
-            .token_to_piece(token, &mut decoder, true, None)
-            .map_err(|e| map_llama_err("token_to_piece", e))?;
+        let piece = detok
+            .push(token)
+            .map_err(|e| map_llama_err("detokenize", e))?;
         output.push_str(&piece);
 
         batch.clear();
@@ -272,6 +254,11 @@ fn sample_tokens(
         n_cur = n_cur.saturating_add(1);
         n_decode = n_decode.saturating_add(1);
     }
+
+    let tail = detok
+        .finish()
+        .map_err(|e| map_llama_err("detokenize finish", e))?;
+    output.push_str(&tail);
 
     Ok(output)
 }
@@ -285,10 +272,10 @@ fn build_sampler(
         let grammar_schema = schema.get("schema").unwrap_or(schema);
         let schema_str = serde_json::to_string(grammar_schema)
             .map_err(|e| map_llama_err("serialize json schema", e))?;
-        let grammar = json_schema_to_grammar(&schema_str)
-            .map_err(|e| map_llama_err("json_schema_to_grammar", e))?;
-        let grammar_sampler = LlamaSampler::grammar(model, &grammar, "root")
-            .map_err(|e| map_llama_err("grammar sampler", e))?;
+        let grammar = json_schema_to_grammar(&schema_str)?;
+        // llama-cpp-4's grammar constructor panics on invalid grammar / NUL; our shim
+        // returns a validated GBNF string and root is fixed.
+        let grammar_sampler = LlamaSampler::grammar(model, &grammar, "root");
         chain.push(grammar_sampler);
     }
     chain.push(LlamaSampler::greedy());
@@ -306,46 +293,27 @@ fn apply_messages_template(
         .map(|m| llm_message_to_chat(m, with_media_markers))
         .collect::<Result<Vec<_>, _>>()?;
 
-    match model.chat_template(None) {
-        Ok(tmpl) => match model.apply_chat_template(&tmpl, &chat, true) {
-            Ok(prompt) => Ok(prompt),
-            Err(e) => {
-                let model_lower = loaded.model_name.to_ascii_lowercase();
-                let is_gemma = model_lower.contains("gemma");
-                if is_gemma {
-                    tracing::debug!(
-                        component = "LlamaCpp",
-                        error = %e,
-                        "apply_chat_template failed; using Gemma 4 turn fallback"
-                    );
-                    Ok(format_gemma4_prompt(messages, with_media_markers))
-                } else {
-                    tracing::warn!(
-                        component = "LlamaCpp",
-                        error = %e,
-                        model = %loaded.model_name,
-                        "apply_chat_template failed for non-Gemma model; using Gemma 4 fallback \
-                         which may produce incorrect output"
-                    );
-                    Ok(format_gemma4_prompt(messages, with_media_markers))
-                }
-            }
-        },
+    match model.apply_chat_template(None, &chat, true) {
+        Ok(prompt) => Ok(prompt),
         Err(e) => {
             let model_lower = loaded.model_name.to_ascii_lowercase();
             let is_gemma = model_lower.contains("gemma");
             if is_gemma {
-                Ok(format_gemma4_prompt(messages, with_media_markers))
+                tracing::debug!(
+                    component = "LlamaCpp",
+                    error = %e,
+                    "apply_chat_template failed; using Gemma 4 turn fallback"
+                );
             } else {
                 tracing::warn!(
                     component = "LlamaCpp",
                     error = %e,
                     model = %loaded.model_name,
-                    "no chat template available for non-Gemma model; using Gemma 4 fallback \
+                    "apply_chat_template failed for non-Gemma model; using Gemma 4 fallback \
                      which may produce incorrect output"
                 );
-                Ok(format_gemma4_prompt(messages, with_media_markers))
             }
+            Ok(format_gemma4_prompt(messages, with_media_markers))
         }
     }
 }
@@ -373,7 +341,7 @@ fn llm_message_to_chat(
 }
 
 fn flatten_user_parts(parts: &[UserMessagePart], with_media_markers: bool) -> String {
-    let marker = mtmd_default_marker();
+    let marker = MtmdContext::default_marker();
     let mut text = String::new();
     let mut image_count = 0_usize;
     for part in parts {
@@ -508,7 +476,7 @@ mod tests {
 
     #[test]
     fn gemma4_fallback_includes_turns_and_media_marker() {
-        let marker = mtmd_default_marker();
+        let marker = MtmdContext::default_marker();
         let messages = [
             LlmMessage::System {
                 content: "Be brief.".into(),
@@ -535,7 +503,7 @@ mod tests {
 
     #[test]
     fn flatten_user_parts_does_not_duplicate_marker() {
-        let marker = mtmd_default_marker();
+        let marker = MtmdContext::default_marker();
         let parts = [
             UserMessagePart::Text {
                 text: format!("hello\n{marker}"),

@@ -1,4 +1,4 @@
-//! `GgufEmbeddingProvider` backed by llama-cpp-2.
+//! `GgufEmbeddingProvider` backed by llama-cpp-4.
 
 use super::EneEmbeddingError;
 use crate::llama_cpp::{LoadSpec, LoadedModel, embed_text};

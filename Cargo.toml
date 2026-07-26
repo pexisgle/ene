@@ -20,7 +20,7 @@ tokio-util = "0.7"
 
 # ── AI / LLM ──
 async-openai = { version = "0.41", default-features = false, features = ["chat-completion", "embedding", "byot"] }
-llama-cpp-2 = { version = "0.1.152", default-features = false }
+llama-cpp-4 = { version = "0.4.2", default-features = false }
 encoding_rs = "0.8"
 # Local voice pipeline (STT/TTS/VAD); opt-in via ene-ai feature flags.
 whisper-rs = "0.16"
@@ -124,9 +124,6 @@ ene-tool-rag = { path = "crates/ene-tool-rag" }
 ene-tool-sdk = { path = "crates/ene-tool-sdk" }
 ene-voice = { path = "crates/ene-voice" }
 ene-vrm = { path = "crates/ene-vrm" }
-
-[patch.crates-io]
-llama-cpp-sys-2 = { path = "vendor/llama-cpp-sys-2" }
 
 [workspace.metadata.cargo-husky]
 run-for-all = true

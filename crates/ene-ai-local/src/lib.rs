@@ -20,7 +20,7 @@
 pub mod embedding;
 /// GGUF download and path resolution.
 pub mod gguf;
-/// Shared llama-cpp-2 adapter (decision + embedding).
+/// Shared llama-cpp-4 adapter (decision + embedding).
 pub(crate) mod llama_cpp;
 /// In-process llama.cpp decision provider.
 pub mod local_llm;

@@ -4,13 +4,10 @@ use super::backend::with_backend;
 use super::map_llama_err;
 use ene_ai::config::ProactiveAcceleration;
 use ene_ai::error::LlmProviderError;
-use llama_cpp_2::LlamaBackendDeviceType;
-use llama_cpp_2::list_llama_ggml_backend_devices;
-use llama_cpp_2::llama_backend::LlamaBackend;
-use llama_cpp_2::model::LlamaModel;
-use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::mtmd::{MtmdContext, MtmdContextParams};
-use std::ffi::CString;
+use llama_cpp_4::llama_backend::LlamaBackend;
+use llama_cpp_4::model::LlamaModel;
+use llama_cpp_4::model::params::LlamaModelParams;
+use llama_cpp_4::mtmd::{MtmdContext, MtmdContextParams};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
@@ -18,8 +15,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct GpuOffload {
     pub n_gpu_layers: u32,
-    /// Device index into `list_llama_ggml_backend_devices`, if forcing a GPU.
-    pub device_index: Option<usize>,
+    /// When true, pin offload to ggml main GPU index 0 (built Cargo backend).
+    pub use_main_gpu: bool,
 }
 
 /// Parameters for loading a GGUF into llama.cpp.
@@ -51,7 +48,10 @@ impl LoadSpec {
     }
 }
 
-/// Resolve layer count and optional device index from config.
+/// Resolve layer count and whether to use `with_main_gpu(0)`.
+///
+/// llama-cpp-4 has no pre-load device enumeration; GPU choice is the backend
+/// compiled via Cargo features (`vulkan` / `cuda`) plus main GPU index 0.
 pub(crate) fn resolve_gpu_offload(
     acceleration: ProactiveAcceleration,
     gpu_layers: &str,
@@ -60,80 +60,48 @@ pub(crate) fn resolve_gpu_offload(
     match acceleration {
         ProactiveAcceleration::Cpu => Ok(GpuOffload {
             n_gpu_layers: 0,
-            device_index: None,
+            use_main_gpu: false,
         }),
         ProactiveAcceleration::Vulkan => {
-            let idx = find_device_index(DevicePrefer::Vulkan)?;
-            Ok(GpuOffload {
-                n_gpu_layers: layers,
-                device_index: Some(idx),
-            })
+            if cfg!(feature = "vulkan") {
+                Ok(GpuOffload {
+                    n_gpu_layers: layers,
+                    use_main_gpu: true,
+                })
+            } else {
+                Err(LlmProviderError::LocalLlm(
+                    "Vulkan acceleration requested but ene-ai-local was built without the `vulkan` feature"
+                        .to_string(),
+                ))
+            }
         }
         ProactiveAcceleration::Cuda => {
-            let idx = find_device_index(DevicePrefer::Cuda)?;
-            Ok(GpuOffload {
-                n_gpu_layers: layers,
-                device_index: Some(idx),
-            })
+            if cfg!(feature = "cuda") {
+                Ok(GpuOffload {
+                    n_gpu_layers: layers,
+                    use_main_gpu: true,
+                })
+            } else {
+                Err(LlmProviderError::LocalLlm(
+                    "CUDA acceleration requested but ene-ai-local was built without the `cuda` feature"
+                        .to_string(),
+                ))
+            }
         }
         ProactiveAcceleration::Auto => {
-            if let Ok(idx) = find_device_index(DevicePrefer::Vulkan) {
-                return Ok(GpuOffload {
+            if cfg!(feature = "vulkan") || cfg!(feature = "cuda") {
+                Ok(GpuOffload {
                     n_gpu_layers: layers,
-                    device_index: Some(idx),
-                });
-            }
-            if let Ok(idx) = find_device_index(DevicePrefer::Cuda) {
-                return Ok(GpuOffload {
-                    n_gpu_layers: layers,
-                    device_index: Some(idx),
-                });
-            }
-            Ok(GpuOffload {
-                n_gpu_layers: 0,
-                device_index: None,
-            })
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum DevicePrefer {
-    Vulkan,
-    Cuda,
-}
-
-fn find_device_index(prefer: DevicePrefer) -> Result<usize, LlmProviderError> {
-    // Backend must exist before device enumeration is meaningful.
-    with_backend(|_| Ok(()))?;
-    let devices = list_llama_ggml_backend_devices();
-    for (i, dev) in devices.iter().enumerate() {
-        let name = dev.name.to_ascii_lowercase();
-        let backend = dev.backend.to_ascii_lowercase();
-        let is_gpu = matches!(dev.device_type, LlamaBackendDeviceType::Gpu);
-        if !is_gpu {
-            continue;
-        }
-        match prefer {
-            DevicePrefer::Vulkan => {
-                if backend.contains("vulkan") || name.contains("vulkan") {
-                    return Ok(i);
-                }
-            }
-            DevicePrefer::Cuda => {
-                if backend.contains("cuda") || name.contains("cuda") {
-                    return Ok(i);
-                }
+                    use_main_gpu: true,
+                })
+            } else {
+                Ok(GpuOffload {
+                    n_gpu_layers: 0,
+                    use_main_gpu: false,
+                })
             }
         }
     }
-    let kind = match prefer {
-        DevicePrefer::Vulkan => "Vulkan",
-        DevicePrefer::Cuda => "CUDA",
-    };
-    Err(LlmProviderError::LocalLlm(format!(
-        "{kind} device not found among ggml backends"
-    )))
 }
 
 fn parse_gpu_layers(raw: &str) -> u32 {
@@ -170,7 +138,9 @@ impl LoadedModel {
 
     #[must_use]
     pub(crate) fn supports_vision(&self) -> bool {
-        self.mtmd.as_ref().is_some_and(MtmdContext::support_vision)
+        self.mtmd
+            .as_ref()
+            .is_some_and(MtmdContext::supports_vision)
     }
 }
 
@@ -184,18 +154,16 @@ fn load_with_backend(
     let mut params = LlamaModelParams::default();
     if offload.n_gpu_layers > 0 {
         params = params.with_n_gpu_layers(offload.n_gpu_layers);
-    }
-    if let Some(idx) = offload.device_index {
-        params = params
-            .with_devices(&[idx])
-            .map_err(|e| map_llama_err("invalid GPU device index", e))?;
+        if offload.use_main_gpu {
+            params = params.with_main_gpu(0);
+        }
     }
 
     tracing::info!(
         component = "LlamaCpp",
         path = %path.display(),
         n_gpu_layers = offload.n_gpu_layers,
-        device_index = ?offload.device_index,
+        use_main_gpu = offload.use_main_gpu,
         "Loading GGUF"
     );
 
@@ -204,25 +172,22 @@ fn load_with_backend(
 
     let mtmd = if let Some(mmproj) = mmproj_path {
         let use_gpu = offload.n_gpu_layers > 0;
-        let mtmd_params = MtmdContextParams {
-            use_gpu,
-            print_timings: false,
-            n_threads: 4,
-            media_marker: CString::new(llama_cpp_2::mtmd::mtmd_default_marker())
-                .map_err(|e| LlmProviderError::LocalLlm(format!("invalid media marker: {e}")))?,
+        let mtmd_params = MtmdContextParams::default()
+            .use_gpu(use_gpu)
+            .print_timings(false)
+            .n_threads(4)
             // Gemma 4 supported budgets: 70, 140, 280, 560, 1120 — keep modest for overlays.
-            image_min_tokens: 70,
-            image_max_tokens: 280,
-        };
+            .image_min_tokens(70)
+            .image_max_tokens(280);
         tracing::info!(
             component = "LlamaCpp",
             path = %mmproj.display(),
             use_gpu,
             "Loading mmproj for vision"
         );
-        match MtmdContext::init_from_file(mmproj.to_string_lossy().as_ref(), &model, &mtmd_params) {
+        match MtmdContext::init_from_file(mmproj, &model, mtmd_params) {
             Ok(ctx) => {
-                if ctx.support_vision() {
+                if ctx.supports_vision() {
                     Some(ctx)
                 } else {
                     tracing::warn!(

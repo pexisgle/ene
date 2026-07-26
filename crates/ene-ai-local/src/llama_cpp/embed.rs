@@ -1,12 +1,12 @@
-//! Embedding forward pass via llama-cpp-2.
+//! Embedding forward pass via llama-cpp-4.
 
 use super::backend::with_backend;
 use super::load::LoadedModel;
 use super::map_llama_err;
 use ene_ai::error::LlmProviderError;
-use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
-use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::AddBos;
+use llama_cpp_4::context::params::{LlamaContextParams, LlamaPoolingType};
+use llama_cpp_4::llama_batch::LlamaBatch;
+use llama_cpp_4::model::AddBos;
 
 /// Embed `text` with last-token pooling (Jina v5 / llama.cpp default for retrieval GGUFs).
 pub(crate) fn embed_text(loaded: &LoadedModel, text: &str) -> Result<Vec<f32>, LlmProviderError> {

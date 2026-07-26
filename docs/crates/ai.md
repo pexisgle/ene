@@ -1,6 +1,6 @@
 # `ene-ai` & `ene-ai-local` — API Reference
 
-> **Crates**: `ene-ai` (Core traits & cloud providers) | `ene-ai-local` (GGUF local LLM inference via `llama-cpp-2`)
+> **Crates**: `ene-ai` (Core traits & cloud providers) | `ene-ai-local` (GGUF local LLM inference via `llama-cpp-4`)
 
 Together, `ene-ai` and `ene-ai-local` provide LLM chat completions and text embedding abstractions for Ene.
 
@@ -21,10 +21,10 @@ Together, `ene-ai` and `ene-ai-local` provide LLM chat completions and text embe
 
 ## 2. `ene-ai-local` (Local GGUF LLM Inference)
 
-`ene-ai-local` houses local model execution wrapping `llama-cpp-2`:
+`ene-ai-local` houses local model execution wrapping `llama-cpp-4`:
 
 - **Local Model Loading**: Loads `.gguf` weight files from disk.
-- **Hardware Acceleration**: Automatically selects CUDA, Metal, or CPU backends via `llama-cpp-2` bindings.
+- **Hardware Acceleration**: Uses the GPU backend compiled via Cargo features (`vulkan` / `cuda`) plus CPU, through `llama-cpp-4` bindings.
 - **In-Process Inference**: Exposes `LocalLlmProvider` implementing `LlmProvider` without external network calls.
 
 ---

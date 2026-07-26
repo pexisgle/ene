@@ -1,4 +1,4 @@
-//! Local GGUF embedding via llama-cpp-2 (#171).
+//! Local GGUF embedding via llama-cpp-4 (#171).
 
 mod error;
 mod provider;
