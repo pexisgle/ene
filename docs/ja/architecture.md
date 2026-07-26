@@ -1,6 +1,6 @@
 # システムアーキテクチャと設計 (API v1)
 
-**Ene** は明確な責務分離に基づいて設計されています。アクターベースのランタイムファサード (`ene-runtime`)、純粋な認知ターンエンジン (`ene-mind`)、独立した永続化層 (`ene-store`)、プロセス外 IPC プラグインホスト (`ene-plugin-host`)、および独立した VRM レンダラー (`ene-vrm`) で構成されています。
+**Ene** は明確な責務分離に基づいて設計されています。アクターベースのランタイムファサード (`ene-runtime`)、純粋な認知ターンエンジン (`ene-mind`)、永続化に依存しないドメイン語彙 (`ene-core`) の上に構築された独立した永続化層 (`ene-store`)、プロセス外 IPC プラグインホスト (`ene-plugin-host`)、および独立した VRM レンダラー (`ene-vrm`) で構成されています。
 
 ---
 
@@ -8,10 +8,11 @@
 
 1. **API v1 ホスト契約**: ホストアプリケーション (`ene-cli`, `ene-desktop`, 外部連携) は `EneHandle::open` を介してのみ Ene と対話します。ターンは必須の `TurnId` で識別されます。ターンの実行は単一飛行 (single-flight) であり、同時実行の試みは `RunError::Busy` を返します。
 2. **アクター実行モデル**: `ene-runtime` は内部の Tokio アクターを介して状態を管理します。 `EneHandle` の公開メソッドはノンブロッキングのチャネル送信、または oneshot 非同期リクエストです。
-3. **純粋な認知 Mind**: `ene-mind` はプロンプトパケットの構築、ハイブリッド記憶想起、感情状態 (PADモデル) の更新、プロアクティブ発話トリガー、および出力 Performance 演出の調停を所有します。 `ene-mind` は `ene-runtime` や `ene-plugin-host` に**一切依存しません**。
+3. **純粋な認知 Mind**: `ene-mind` はプロンプトパケットの構築、ハイブリッド記憶想起、感情状態 (PADモデル) の更新、プロアクティブ発話トリガー、および出力 Performance 演出の調停を所有します。 `ene-mind` は `ene-runtime` や `ene-plugin-host` に**一切依存しません**。また、その認知ロジック群 (想起、記憶アービター、忘却、キャラクター同期、ジャーナル、自己内省) は永続化層に対して常に `ene_core::MemoryPort` トレイト (#270) 経由でのみアクセスし、具象型 `ene_store::MemoryStore` には直接依存しません。これにより SQLite なしでインメモリのテストダブルに対して単体テストできます。
 4. **孤立した永続化層**: `ene-store` は SQLite スキーマ、マイグレーション、SeaORM エンティティ、およびベクトル検索 (`sqlite-vec`) を所有します。 `ene-store` は `ene-mind` や `ene-ai` に**一切依存しません**。
-5. **プロセス外プラグイン (Protocol v4)**: ツール、LLM プロバイダ、MCP サーバーは **Protocol v4** による長さプレフィックス付き JSON IPC を使用して子プロセスとして動作します。
-6. **疎結合な 3D レンダリング**: `ene-vrm` は認知・記憶・ランタイムの型を一切インポートすることなく、 `wgpu` を介して VRM 1.0 モデルを描画します。
+5. **永続化に依存しないドメイン語彙**: `ene-core` は認知層と永続化層の双方が共有するコアドメイン型 — `AffectState` (PAD 感情状態)、typed-memory の種別/ステータス/クエリ、コミットメント台帳の語彙、および `MemoryPort` トレイト自体 — を定義します。ワークスペース内部の他クレートに一切依存しないため、`ene-store` と `ene-mind` はどちらも、互いに依存することなくこのクレートに依存できます。
+6. **プロセス外プラグイン (Protocol v4)**: ツール、LLM プロバイダ、MCP サーバーは **Protocol v4** による長さプレフィックス付き JSON IPC を使用して子プロセスとして動作します。
+7. **疎結合な 3D レンダリング**: `ene-vrm` は認知・記憶・ランタイムの型を一切インポートすることなく、 `wgpu` を介して VRM 1.0 モデルを描画します。
 
 ---
 
@@ -33,6 +34,7 @@ flowchart TD
   Runtime --> Config[crates/ene-config]
 
   Mind --> Store
+  Mind --> Core[crates/ene-core]
   Mind --> Config
   Mind --> Ai
   Mind --> Proto[crates/ene-plugin-proto]
@@ -55,6 +57,7 @@ flowchart TD
   ToolRag --> Proto
 
   Store --> Config
+  Store --> Core
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
@@ -70,6 +73,7 @@ flowchart TD
 ```
 
 ### 厳格なアーキテクチャ境界ルール
+- `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — ドメイン語彙は `ene-store` と `ene-mind` の双方より下位に位置し、どちらもこの型のために互いへ依存しない
 - `ene-store` ↛ `ene-ai` / `ene-mind`
 - `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
@@ -117,6 +121,7 @@ flowchart TD
 | `ene-runtime` | アクターベースのランタイムファサード、ターン管理、イベントブロードキャスト、DB IPC ソケットサーバー |
 | `ene-mind` | セッション管理、プロンプト予算配分、感情 (PADモデル)、記憶想起、プロアクティブ発話、演出調停 |
 | `ene-store` | SQLite / SeaORM エンティティ、マイグレーション、ベクトル検索 (`sqlite-vec`)、コミットメント台帳 |
+| `ene-core` | 永続化に依存しないドメイン語彙 (`AffectState`、typed-memory の種別/ステータス/クエリ、コミットメント台帳の型) および `MemoryPort` トレイト抽象 |
 | `ene-ai` | `AiProvider` トレイト、OpenAI プロバイダ、Anthropic IPC アダプタ、プロバイダファクトリ |
 | `ene-ai-local` | `llama-cpp-4` によるローカル GGUF LLM 推論 |
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |

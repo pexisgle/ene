@@ -7,6 +7,14 @@ pub enum EneCognitionError {
     #[error(transparent)]
     Memory(#[from] ene_store::EneMemoryError),
 
+    /// Memory operation failed via the `MemoryPort` abstraction (#270).
+    ///
+    /// Used by cognitive-logic modules (recall, arbiter, forgetting,
+    /// character sync, journal, reflection) that call `&dyn MemoryPort`
+    /// instead of the concrete `ene_store::MemoryStore`.
+    #[error(transparent)]
+    MemoryPort(#[from] ene_core::MemoryPortError),
+
     /// Configuration error.
     #[error(transparent)]
     Config(#[from] ene_config::EneConfigError),

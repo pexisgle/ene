@@ -4,7 +4,7 @@
 //! This module handles time-based `Active → Faded → Archived` transitions only.
 
 use chrono::{DateTime, Utc};
-use ene_store::{MemoryStore, NaturalDecayReport};
+use ene_core::{MemoryPort, NaturalDecayReport};
 use tracing::debug;
 
 use crate::config::MindMemoryConfig;
@@ -49,7 +49,7 @@ impl ForgettingLifecycle {
 
     /// Apply natural decay transitions for the given scope.
     pub async fn apply(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         ctx: &ForgettingContext<'_>,
         config: &MindMemoryConfig,
     ) -> Result<ForgettingReport, CognitionError> {
@@ -63,7 +63,7 @@ impl ForgettingLifecycle {
                 Self::BATCH_LIMIT,
             )
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
 
         debug!(
             component = "ForgettingLifecycle",
@@ -86,7 +86,7 @@ mod tests {
     async fn apply_runs_natural_decay() {
         use ene_store::{
             AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,
-            MemorySource, MemoryStatus, NewMemoryItem,
+            MemorySource, MemoryStatus, MemoryStore, NewMemoryItem,
         };
 
         let store = MemoryStore::open_in_memory(4).await.unwrap();

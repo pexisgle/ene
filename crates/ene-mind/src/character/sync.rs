@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider};
 use ene_config::CharacterCardV3;
-use ene_store::{MemoryItem, MemoryStore, NewMemoryItem};
+use ene_core::{MemoryItem, MemoryPort, NewMemoryItem};
 
 use crate::config::CharacterMemoryConfig;
 use crate::error::CognitionError;
@@ -32,7 +32,7 @@ pub struct CharacterMemorySyncReport {
 
 /// Synchronize lorebook and style indices for a character card.
 pub async fn sync_character_memories(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     embedder: &Arc<dyn EmbeddingProvider>,
     character_id: &str,
     user_name: &str,
@@ -68,7 +68,7 @@ pub async fn sync_character_memories(
             &desired_refs,
         )
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
 
     let mut lorebook_inserted = 0usize;
     let mut lorebook_updated = 0usize;
@@ -94,7 +94,7 @@ pub async fn sync_character_memories(
             match store
                 .get_active_typed_memory_by_source_ref(character_id, source_ref)
                 .await
-                .map_err(CognitionError::Memory)?
+                .map_err(CognitionError::MemoryPort)?
             {
                 Some(existing) if ccv3_item_matches(&existing, &item) => continue,
                 Some(existing) => {
@@ -106,7 +106,7 @@ pub async fn sync_character_memories(
                     let new_id = store
                         .supersede_typed_memory(&item, id)
                         .await
-                        .map_err(CognitionError::Memory)?;
+                        .map_err(CognitionError::MemoryPort)?;
                     if is_lore {
                         lorebook_updated += 1;
                     } else if is_style {
@@ -118,7 +118,7 @@ pub async fn sync_character_memories(
                     let id = store
                         .insert_typed_memory(&item)
                         .await
-                        .map_err(CognitionError::Memory)?;
+                        .map_err(CognitionError::MemoryPort)?;
                     if is_lore {
                         lorebook_inserted += 1;
                     } else if is_style {
@@ -131,7 +131,7 @@ pub async fn sync_character_memories(
             let id = store
                 .insert_typed_memory(&item)
                 .await
-                .map_err(CognitionError::Memory)?;
+                .map_err(CognitionError::MemoryPort)?;
             if is_lore {
                 lorebook_inserted += 1;
             } else if is_style {
@@ -143,7 +143,7 @@ pub async fn sync_character_memories(
         store
             .upsert_memory_embedding(memory_id, embedder.model_name(), &content, &embedding)
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
     }
 
     Ok((
@@ -196,6 +196,7 @@ mod tests {
 
     use ene_ai::{EmbeddingKind, EmbeddingProvider};
     use ene_config::CharacterCardV3;
+    use ene_store::MemoryStore;
 
     use super::*;
     use crate::config::CharacterMemoryConfig;

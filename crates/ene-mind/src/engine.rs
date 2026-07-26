@@ -412,7 +412,7 @@ impl CognitionEngine {
                 ctx.user_name,
                 ctx.user_input,
                 ctx.history,
-                ctx.store,
+                ctx.store.map(|s| s as &dyn ene_core::MemoryPort),
                 ctx.embedder,
                 &ctx.config.character,
                 2,

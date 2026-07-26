@@ -5,9 +5,8 @@
 //! references (`typed_memories.commitment_id`) and are no longer dual-written
 //! from arbiter persist → sync.
 
-use ene_store::{
-    ActiveCommitmentPrompt, Commitment, CommitmentStatus, MemoryKind, MemoryStore, NewCommitment,
-};
+use ene_core::{ActiveCommitmentPrompt, Commitment, MemoryPort};
+use ene_store::{CommitmentStatus, MemoryKind, MemoryStore, NewCommitment};
 use tracing::{debug, warn};
 
 use crate::error::CognitionError;
@@ -155,8 +154,13 @@ impl CommitmentLedger {
     }
 
     /// List active commitments for prompt injection (independent of vector recall).
+    ///
+    /// Takes `&dyn MemoryPort` (rather than the concrete `MemoryStore`, like
+    /// this ledger's other associated functions) because its only caller
+    /// outside this module, `ene-mind`'s recall runner (#270), holds its
+    /// store handle behind that abstraction.
     pub async fn list_active(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         character_id: &str,
         user_id: Option<&str>,
         limit: usize,
@@ -164,7 +168,7 @@ impl CommitmentLedger {
         store
             .list_active_commitments(character_id, user_id, limit)
             .await
-            .map_err(CognitionError::Memory)
+            .map_err(CognitionError::MemoryPort)
     }
 
     /// Map active commitments to lightweight prompt DTOs.
