@@ -77,10 +77,11 @@ pub use diagnostics::{
 };
 
 // ── Public API v1 ──
-/// Public API version constant and JSON chat-event mirrors.
+/// Public API version constant, JSON chat-event mirrors, session DTOs, and
+/// the unified [`public_api::PublicApiError`] category (#269).
 pub use public_api::{
-    API_VERSION, PublicChatEvent, PublicPerfCue, redact_text, redact_tool_arguments,
-    redact_tool_arguments_json,
+    API_VERSION, PublicApiError, PublicChatEvent, PublicExportedMessage, PublicPerfCue,
+    PublicSessionMeta, redact_text, redact_tool_arguments, redact_tool_arguments_json,
 };
 
 // ── Config types ──

@@ -1100,12 +1100,15 @@ impl EneHandle {
     }
 
     /// List stored sessions, newest first (#176).
+    ///
+    /// Part of the API v1 contract (#269): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not
+    /// `ene_store::EneMemoryError`.
     pub async fn list_sessions(
         &self,
         include_archived: bool,
         limit: usize,
-    ) -> Result<Result<Vec<ene_store::SessionMeta>, ene_store::EneMemoryError>, ActorDeadError>
-    {
+    ) -> Result<Vec<crate::public_api::PublicSessionMeta>, crate::public_api::PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ListSessions {
@@ -1114,14 +1117,19 @@ impl EneHandle {
                 reply,
             })
             .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+        let metas = rx.await.map_err(|_| ActorDeadError)??;
+        Ok(metas.into_iter().map(Into::into).collect())
     }
 
     /// Export a session to a versioned, redacted JSON bundle (#176).
+    ///
+    /// Part of the API v1 contract (#269): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not
+    /// `ene_store::EneMemoryError`.
     pub async fn export_session(
         &self,
         session_id: impl Into<String>,
-    ) -> Result<Result<String, ene_store::EneMemoryError>, ActorDeadError> {
+    ) -> Result<String, crate::public_api::PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ExportSession {
@@ -1129,14 +1137,18 @@ impl EneHandle {
                 reply,
             })
             .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+        Ok(rx.await.map_err(|_| ActorDeadError)??)
     }
 
     /// Import a session from a JSON export bundle (#176).
+    ///
+    /// Part of the API v1 contract (#269): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not
+    /// `ene_store::EneMemoryError`.
     pub async fn import_session(
         &self,
         json: impl Into<String>,
-    ) -> Result<Result<i64, ene_store::EneMemoryError>, ActorDeadError> {
+    ) -> Result<i64, crate::public_api::PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ImportSession {
@@ -1144,18 +1156,24 @@ impl EneHandle {
                 reply,
             })
             .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+        Ok(rx.await.map_err(|_| ActorDeadError)??)
     }
 
     /// Full-text search over stored conversation messages (#176).
+    ///
+    /// Part of the API v1 contract (#269): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not
+    /// `ene_store::EneMemoryError`, and matches carry
+    /// [`crate::public_api::PublicExportedMessage`] rather than
+    /// `ene_store::ExportedMessage`.
     pub async fn search_sessions(
         &self,
         query: impl Into<String>,
         limit: usize,
         offset: usize,
     ) -> Result<
-        Result<Vec<(String, ene_store::ExportedMessage)>, ene_store::EneMemoryError>,
-        ActorDeadError,
+        Vec<(String, crate::public_api::PublicExportedMessage)>,
+        crate::public_api::PublicApiError,
     > {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
@@ -1166,15 +1184,23 @@ impl EneHandle {
                 reply,
             })
             .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+        let matches = rx.await.map_err(|_| ActorDeadError)??;
+        Ok(matches
+            .into_iter()
+            .map(|(session_id, message)| (session_id, message.into()))
+            .collect())
     }
 
     /// Archive or unarchive a session (#176).
+    ///
+    /// Part of the API v1 contract (#269): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not
+    /// `ene_store::EneMemoryError`.
     pub async fn archive_session(
         &self,
         session_id: impl Into<String>,
         archived: bool,
-    ) -> Result<Result<bool, ene_store::EneMemoryError>, ActorDeadError> {
+    ) -> Result<bool, crate::public_api::PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ArchiveSession {
@@ -1183,7 +1209,7 @@ impl EneHandle {
                 reply,
             })
             .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+        Ok(rx.await.map_err(|_| ActorDeadError)??)
     }
 
     /// Send a user-input response for a pending interactive tool.
