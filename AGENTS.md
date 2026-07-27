@@ -1,83 +1,124 @@
-# Agent Instructions
+# AGENTS.md
 
-## Scope
+This file provides guidance to opencode and Claude Code when working with code in this repository.
 
-- These are repository-wide defaults. A nearer `AGENTS.md`/`AGENTS.override.md` may narrow them; the user's request wins.
-- Inspect `git status` first and preserve unrelated user changes. Do not reset, overwrite, commit, branch, or open a PR unless explicitly asked.
-- Prefer the smallest focused change. Treat current code/tests and accepted ADRs as evidence when documentation conflicts; do not copy stale examples.
+## Build environment
 
-## Source of truth
+Native deps (Vulkan, ALSA, OpenSSL, libclang, mold) come from the checked-in Nix flake.
+Run everything from the repo root. If `direnv` is active, plain `cargo` works; otherwise
+prefix with `nix develop --command` (this is what CI does).
 
-This is a Rust 2024 Cargo workspace. `Cargo.toml` includes `crates/*`, `plugins/provider/*`,
-`plugins/tool/*`, and `apps/*`; `apps/ene-cli` is the default member, so commands
-without `--workspace` do not cover the whole repository.
+**Platform support**: Linux is the only supported dev/CI platform (all CI jobs run on
+`ubuntu-latest`). Windows is produced by cross-compiling from Linux to the
+`x86_64-pc-windows-gnu` target via the flake's mingw toolchain — there is no native Windows
+dev shell. macOS is not a supported target.
 
-| Need | Start here |
-|---|---|
-| Setup | `README.md`, `docs/getting-started.md` |
-| Config/paths | `docs/configuration.md`, `crates/ene-config/src/` |
-| Architecture/design rationale | `docs/architecture.md`, `docs/crates/` |
-| **API signatures (structs, methods, fields, enum variants)** | **rustdoc is authoritative — run `cargo doc -p <crate> --open`.** `docs/crates/*.md` intentionally hold no hand-written signatures (#273); they only cover role, architectural boundaries, and design rationale, since transcribed signatures go stale. |
-| Runtime/events | `docs/concepts/turn-and-session.md`, `docs/crates/runtime.md` (role/boundaries; see rustdoc for `EneEvent`/`LifecycleEvent` variants) |
-| Plugins/Tools/IPC | `docs/concepts/plugins-and-mcp.md`, `docs/crates/plugin-system.md`, `docs/crates/tool-sdk.md` |
-| Apps | `docs/apps/cli.md`, `docs/apps/desktop.md` |
-| Japanese user docs | Matching files under `docs/ja/` |
+## Commands
 
-Read relevant docs, the affected crate's `Cargo.toml`, public API, tests, and call
-sites before planning a non-trivial change.
-
-## Environment and validation
-
-Run commands from the repository root. On Linux use the checked-in Nix/direnv
-environment: prefer `cargo` when available, otherwise `direnv exec . cargo ...` or
-`nix develop --command cargo ...`. Do not add `cd` to repository-root commands.
+`default-members = ["apps/ene-cli"]`, so **a bare `cargo test` / `cargo clippy` only covers
+the CLI, not the workspace.** Always pass `--workspace` or `-p <package>` explicitly.
 
 | Purpose | Command |
 |---|---|
-| Format check | `cargo fmt --all -- --check` |
-| Focused compile/test | `cargo check -p <package>` / `cargo test -p <package>` |
-| Workspace lint | `cargo clippy --workspace -- -D warnings` |
-| Workspace tests | `cargo test --workspace` |
-| CLI / desktop | `cargo run -p ene-cli -- --help` / `cargo run -p ene-desktop` |
+| Format | `cargo fmt --all` (check: `-- --check`) |
+| Focused iteration | `cargo check -p <pkg>` / `cargo test -p <pkg>` |
+| Full lint (CI gate) | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Full tests (CI gate) | `cargo test --workspace` |
+| Run | `cargo run -p ene-cli -- --help` / `cargo run -p ene-desktop` |
 
-Use focused checks while iterating, then run workspace lint/tests for code changes;
-use `--all-targets` when tests/examples/non-library targets are affected. Report the
-failing package/target and root cause; do not hide failures by relaxing lints.
+CI additionally runs `cargo doc --workspace --no-deps`. It is deliberately *not* run with
+`RUSTDOCFLAGS=-D warnings` — pre-existing broken intra-doc links would fail unrelated work.
 
-## Architecture boundaries and API v1
+## Lints are the spec, not a suggestion
 
-- `ene-runtime` is the host/actor facade and bootstrap layer. `ene-mind` owns session, recall, prompt composition, affect, performance, and memory writing; it must not depend on runtime or tool-host.
-- `ene-store` alone owns SQLite/SeaORM connections, schema, migrations, and raw DB access. It must not depend on AI/mind; callers use its public API. Stateful tool/plugin binaries use `ene-plugin-db` over IPC.
-- `ene-ai` owns LLM/embedding providers. `ene-tool-rag` owns retrieval; `ene-plugin-proto` is wire ABI only (protocol v4); `ene-plugin` is the authoring facade; `ene-plugin-host` owns process/registry orchestration for all plugins (tools, providers, MCP); `ene-vrm` is rendering-only.
-- Keep `plugins/tool/*` lightweight separate binaries. Do not add arbitrary cross-crate dependencies or move business/DB logic into ABI crates.
-- Preserve API v1: every turn has a `TurnId`; `run` is single-flight and returns `Busy`; `Terminal` follows history commit and synchronous finalization; deferred memory work may continue; `Performance` is the presentation event; detailed pipeline diagnostics are separate from the chat bus.
-- Keep dependencies in root `[workspace.dependencies]` for workspace crates and use `{ workspace = true }`; do not silently change versions.
+`[workspace.lints.clippy]` in the root `Cargo.toml` denies `all`, `pedantic`, and `cargo` as
+whole groups, plus these individually: `unwrap_used`, `expect_used`, `panic`, `todo`,
+`unimplemented`, `dbg_macro`, `mem_forget`, `let_underscore_must_use`, `print_stdout`,
+`print_stderr`. Clippy failures are build failures.
 
-## Rust, safety, and generated data
+- No `unwrap`/`expect`/panic paths in production code. Tests opt out per-crate via
+  `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` — see `crates/ene-runtime/src/lib.rs`.
+- `allow_attributes_without_reason` is denied: every exception must be
+  `#[expect(lint, reason = "...")]`, scoped as narrowly as possible. Never widen a lint
+  workspace-wide to make an error go away.
+- `clippy::restriction` is intentionally *not* blanket-enabled; adopt lints from it one at a
+  time with a reason comment.
 
-- Use Tokio for async code and `thiserror` for library errors. Do not expose `anyhow`, bare `String`, or `Box<dyn Error>` as library boundaries.
-- Avoid `unwrap`, `expect`, and panic paths in production. Tests may use them only under existing scoped lint expectations; production exceptions need narrow `#[expect(..., reason = "...")]`.
-- Use structured `tracing` for library/runtime diagnostics. CLI output/examples may use stdout/stderr; do not use `println!` for library logging.
-- **Mechanically enforced** via `[workspace.lints.clippy]` in the root `Cargo.toml` (a `cargo clippy --workspace --all-targets -- -D warnings` failure, not just review feedback): `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro`, `mem_forget`, `let_underscore_must_use`, and `print_stdout`/`print_stderr` (the latter two allowed back in at the crate level for `apps/ene-cli`, plugin binaries' fatal-error paths, and example/test code that legitimately prints, each with a scoped `#[expect(..., reason = "...")]`). `all`, `pedantic`, and `cargo` are denied as whole groups; `clippy::restriction` is intentionally **not** blanket-enabled (it's an opt-in menu of mutually contradictory lints, not a group meant for wholesale denial) — only the lints above are adopted from it individually. Everything else in this section (Tokio/thiserror boundaries, `parking_lot`/`OnceLock`/visibility, doc comments, secrets handling) is **review-only**: not caught by clippy, so PR review is the enforcement mechanism.
-- Prefer `parking_lot` for internal locks where compatible, `OnceLock` for one-time initialization, and the narrowest visibility (`pub(crate)` by default). Comments explain non-obvious why; public API changes need rustdoc and reference docs.
-- Configuration is defaults → JSON → `ENE_` environment variables (`__` separates nested keys, e.g. `ENE_AI__TASKS__CHAT__MODEL`). Current public sections are `ai.*`, `store.*`, `mind.*`, `plugins.*`, and `desktop.*`; plugin entries are `plugins.list.<name>` with flattened fields.
-- Add settings at the owning `define_config!` invocation, which may be outside `ene-config`. Regenerate schemas through the CLI; never hand-edit or commit ignored `assets/schema/*`.
-- Never commit/log secrets, `.env`, `memory.db*`, `undo.db*`, `todo.db*`, downloaded model weights, or heavy ignored assets. `assets/` is for development/default resources.
+## Rust conventions (review-enforced, not caught by clippy)
 
-## Plugins, Tools, IPC, and localization
+- Async is Tokio. Library errors are `thiserror` — never expose `anyhow`, bare `String`, or
+  `Box<dyn Error>` at a library boundary.
+- Diagnostics use structured `tracing`. `print_stdout`/`print_stderr` are re-allowed at the
+  crate level only for `apps/ene-cli`, plugin binaries' fatal-error paths, and examples.
+- Prefer `parking_lot` locks, `OnceLock` for one-time init, and the narrowest visibility
+  (`pub(crate)` by default).
+- Keep deps in root `[workspace.dependencies]` and reference them as `{ workspace = true }`.
+  Don't bump versions as a side effect of unrelated work.
 
-- New tools are plugins: `cargo new --bin plugins/tool/<name>`; derive `ToolAction`; prefer `ene_tool_sdk::ActionSetProvider`/`prelude`; wrap with `ene_plugin::ToolPluginAdapter` and serve with `run_plugin_server(Box::new(ToolPluginAdapter(provider))).await`; use `ene-plugin-db` for state; use namespaced `<namespace>.<action>` names; declare side effects/sandbox needs.
-- Verify tool binaries with `/tool list` and update both `docs/concepts/plugins-and-mcp.md` and `docs/ja/concepts/plugins-and-mcp.md`.
-- IPC work starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4). Preserve length-prefixed JSON, update host/plugins/tests, and bump `PLUGIN_IPC_PROTOCOL_VERSION` only for intentional wire incompatibility. The host maintains N-1 backward compatibility: it advertises `[PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION]` via `VersionRange::host_supported()`, never a single pinned value, so a plugin binary built against the previous version still connects. Bumping `PLUGIN_IPC_PROTOCOL_VERSION` requires bumping `PLUGIN_IPC_MIN_SUPPORTED_VERSION` too (dropping the oldest supported version); prefer `#[serde(default)]` new fields over a version bump when possible; gate any behavior on a message newer than the minimum supported version via `IpcPluginConnection::negotiated_version()` (see `supports_cancel_stream()` for the pattern).
-- Backend events/statuses stay stable English contracts. UI strings belong in `apps/ene-desktop/i18n/{en-US,ja}/ene_desktop.ftl` and `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`; keep EN/JA user docs synchronized.
+## Architecture boundaries
 
-## Completion
+Violating these is the most common way to break this repo:
 
-1. Inspect status, relevant docs/manifests/code/tests/generated-file rules.
-2. Make the focused change; update regression tests and public docs when behavior/API changes.
-3. Run formatting, focused checks, then required workspace checks. Review the final diff and confirm no secrets, generated files, or user changes were touched.
-4. Report exact changed paths and validation results. Do not claim an unrun check passed.
+- `ene-runtime` — host/actor facade and bootstrap. `ene-mind` owns session, recall, prompt
+  composition, affect, performance, and memory writing, and **must not depend on runtime or
+  the tool host**.
+- `ene-store` alone owns SQLite/SeaORM connections, schema, migrations, and raw DB access. It
+  must not depend on ai/mind. Plugin binaries reach state through `ene-plugin-db` over IPC.
+- `ene-plugin-proto` is wire ABI only. `ene-plugin` is the authoring facade,
+  `ene-plugin-host` owns process/registry orchestration, `ene-vrm` is rendering-only.
+  Never move business or DB logic into ABI crates.
+- API v1 invariants: every turn has a `TurnId`; `run` is single-flight and returns
+  `RunError::Busy`; `Terminal` follows history commit and synchronous finalization (deferred
+  memory work may continue after it); `Performance` is the presentation event, kept separate
+  from detailed pipeline diagnostics.
+- `release` deliberately omits `panic = "abort"` — `ene-runtime`'s actor relies on
+  `catch_unwind` isolation (`crates/ene-runtime/src/handle/actor.rs`). Do not add it.
 
-Do not bypass hooks or use `--no-verify` to conceal failures. `cargo-husky` formats
-staged Rust files; inspect any resulting diff. When commits are explicitly requested,
-use Conventional Commits and include required documentation updates.
+## Docs and where truth lives
+
+**rustdoc is authoritative for all signatures** (`cargo doc -p <crate> --open`).
+`docs/crates/*.md` intentionally contain no hand-written signatures — they cover role,
+boundaries, and rationale only. Do not transcribe signatures into Markdown.
+
+Orientation: `docs/architecture.md`, `docs/configuration.md`, `docs/concepts/`, `docs/apps/`.
+User-facing docs are bilingual: every change under `docs/` needs the matching file under
+`docs/ja/`. UI strings live in `apps/ene-desktop/i18n/{en-US,ja}/` and
+`apps/ene-cli/i18n/{en-US,ja}/` — keep both locales in sync. Backend event and status names
+stay stable English contracts.
+
+## Configuration
+
+Precedence is defaults → JSON → `ENE_` env vars, with `__` separating nested keys
+(e.g. `ENE_AI__TASKS__CHAT__MODEL`). Public sections: `ai.*`, `store.*`, `mind.*`,
+`plugins.*`, `desktop.*`; plugin entries are `plugins.list.<name>` with flattened fields.
+
+Add settings at the owning `define_config!` invocation, which often lives outside
+`ene-config` (`ene-ai`, `ene-mind`, `ene-store`, `ene-plugin-host`, `apps/ene-desktop`).
+Schemas regenerate automatically at config init — `assets/schema/*` is gitignored; never
+hand-edit or commit it.
+
+## Plugins and IPC
+
+New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`. Derive
+`ToolAction`, build on `ene_tool_sdk::{prelude, ActionSetProvider}`, then serve via
+`run_plugin_server(PluginDispatch::new(Some(Arc::new(ToolProviderPlugin::new(provider))), None, None, None, None))`
+(see `plugins/tool/utility/src/main.rs`). Use namespaced `<namespace>.<action>` names and
+declare side effects / sandbox needs. Verify with `/tool list` and update both
+`docs/concepts/plugins-and-mcp.md` and its `docs/ja/` counterpart.
+
+IPC starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4, length-prefixed JSON). The
+host advertises a range via `VersionRange::host_supported()` and keeps N-1 compatibility, so
+`PLUGIN_IPC_MIN_SUPPORTED_VERSION = PLUGIN_IPC_PROTOCOL_VERSION - 1`. Prefer adding
+`#[serde(default)]` fields over bumping the version; gate behavior on newer messages via
+`IpcPluginConnection::negotiated_version()` (see `supports_cancel_stream()` for the pattern).
+
+## Repo etiquette
+
+- Conventional Commits — `cliff.toml` generates the changelog from them.
+- `cargo-husky` installs a pre-commit hook that runs `cargo fmt --all` (whole tree, not just
+  staged files) and re-stages formatted files. Inspect the resulting diff. Never use
+  `--no-verify` to get past a failing check.
+- Never commit or log secrets, `.env`, `memory.db*`, `undo.db*`, `todo.db*`, model weights,
+  or anything under `assets/models/`.
+- Report the failing package and root cause rather than relaxing a lint. Don't claim a check
+  passed that you didn't run.

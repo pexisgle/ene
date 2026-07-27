@@ -4,6 +4,7 @@
 .vscode
 .opencode
 .fastembed_cache
+.claude/
 
 assets/models/
 

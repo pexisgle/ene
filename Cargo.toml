@@ -158,7 +158,6 @@ cargo_common_metadata = "allow"
 multiple_crate_versions = "allow"
 
 # ── `restriction` lints adopted individually: real conventions with teeth ──
-# AGENTS.md: "Avoid `unwrap`, `expect`, and panic paths in production."
 # Test code is exempted crate-by-crate via
 # `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` (see
 # crates/ene-runtime/src/lib.rs for the pattern), not a workspace allow.
@@ -167,9 +166,7 @@ expect_used = "deny"
 panic = "deny"
 todo = "deny"
 unimplemented = "deny"
-# AGENTS.md: "Use structured `tracing` for library/runtime diagnostics...
-# do not use `println!` for library logging." `apps/ene-cli` allows these
-# at the crate level since CLI output is its whole job.
+# `apps/ene-cli` allows these at the crate level since CLI output is its whole job.
 print_stdout = "deny"
 print_stderr = "deny"
 # Catches debug scaffolding left behind.

@@ -106,5 +106,5 @@ body:
       options:
         - label: 既存issueと重複していないことを確認した
           required: true
-        - label: API v1 / アーキテクチャ境界 (AGENTS.md) を考慮した
+        - label: API v1 / アーキテクチャ境界 を考慮した
           required: false

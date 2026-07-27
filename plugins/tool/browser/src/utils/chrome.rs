@@ -37,7 +37,6 @@ pub fn find_chrome_executable() -> Option<PathBuf> {
     }
 
     let common_paths: &[&str] = if cfg!(target_os = "macos") {
-        // macOS is not a supported target (AGENTS.md §3).
         // The lookup falls through to the `PATH` scan
         // above, which already covers the standard
         // `/usr/bin/` and `/usr/local/bin/` installs.

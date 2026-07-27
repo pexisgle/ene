@@ -41,7 +41,7 @@
 //! ## Crate Boundaries
 //!
 //! Enforced by the [Cognitive Runtime ADR](../../docs/reference/architecture/cognitive-runtime.md)
-//! and [AGENTS.md §4.1](../../AGENTS.md); see the
+//! and the architecture boundaries; see the
 //! [API v1 ADR](../../docs/reference/architecture/api-v1.md) for the target crate map.
 //!
 //! - Depends on: `ene-store`, `ene-config`, `ene-ai`
