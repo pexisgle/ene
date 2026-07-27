@@ -6,6 +6,10 @@
     clippy::arithmetic_side_effects,
     reason = "search result ranking uses intentional score arithmetic"
 )]
+#![expect(
+    clippy::print_stderr,
+    reason = "standalone plugin process reports a fatal startup error to stderr before exit"
+)]
 
 mod action;
 mod provider;

@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use ene_config::EneConfig;
 use ene_runtime::{
-    EneEvent, EneEventReceiver, EneHandle, EneRuntimeError, PermissionDecision, RunError, TurnId,
-    UserInputResponse, open_with_config,
+    AudioChunk, AudioStreamReceiver, EneEvent, EneEventReceiver, EneHandle, EneRuntimeError,
+    LifecycleEvent, LifecycleReceiver, PermissionDecision, RunError, TurnId, UserInputResponse,
+    open_with_config,
 };
 
 #[cfg(not(feature = "voice"))]
@@ -52,6 +53,89 @@ pub struct AiBridge {
 /// before it is cancelled and an error is returned to the UI.
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Errors surfaced by [`AiBridge`]'s `*_blocking` wrapper methods to the
+/// winit/egui UI layer (#274).
+///
+/// This is the desktop app's own thin boundary type, not a second
+/// competing definition of `ene_runtime::PublicApiError` — it wraps that
+/// type (plus [`ene_runtime::EneRuntimeError`] and
+/// [`ene_store::EneMemoryError`], both already `thiserror`-typed at their
+/// own crate boundaries) and adds exactly one desktop-local concern that
+/// doesn't belong in `ene-runtime`: a blocking call that exceeded
+/// [`BLOCKING_TIMEOUT`] and was cancelled before the actor replied.
+///
+/// UI call sites format this with `{error}` (its `Display` impl, via
+/// `thiserror`) the same way they previously formatted the bare `String`
+/// this type replaces, so this change does not by itself introduce any
+/// new UI copy — see the type-level note in the PR description about
+/// hardcoded English error text still living in these format strings
+/// (a separate i18n concern, out of scope here).
+#[derive(Debug, thiserror::Error)]
+pub enum AiBridgeError {
+    /// The blocking call exceeded [`BLOCKING_TIMEOUT`] and was cancelled.
+    #[error("operation timed out after {0}s")]
+    Timeout(u64),
+    /// The runtime actor rejected the request, or host-internal wiring
+    /// (`EneHandle::diagnostics()` and friends) failed.
+    #[error(transparent)]
+    Runtime(#[from] EneRuntimeError),
+    /// One of the API v1 contract methods on [`EneHandle`] returned a
+    /// stable [`ene_runtime::PublicApiError`] category.
+    #[error(transparent)]
+    Api(#[from] ene_runtime::PublicApiError),
+    /// A memory-store operation invoked directly from the desktop bridge
+    /// (bypassing the actor command channel via `MemoryQueryHandle::store`)
+    /// failed.
+    #[error(transparent)]
+    Storage(#[from] ene_store::EneMemoryError),
+    /// An AI provider call made directly from the bridge (outside the
+    /// actor) failed.
+    #[error(transparent)]
+    Ai(#[from] ene_ai::AiError),
+}
+
+impl From<ene_runtime::ActorDeadError> for AiBridgeError {
+    fn from(_: ene_runtime::ActorDeadError) -> Self {
+        Self::Api(ene_runtime::PublicApiError::ActorDead)
+    }
+}
+
+/// Converts the API v1 [`ene_runtime::PublicSessionMeta`] DTO back into the
+/// `ene_store::SessionMeta` shape the desktop settings UI (#176) already
+/// consumes directly.
+///
+/// `EneHandle::list_sessions` returns the DTO as of #269 so the runtime's
+/// public contract doesn't leak `ene_store` types; converting back here (a
+/// trivial field copy — both types share the same fields) keeps
+/// [`AiBridge::list_sessions_blocking`]'s own return type (now
+/// `Result<_, AiBridgeError>` as of #274) working with the `ene_store`
+/// shapes the desktop UI already renders, without the UI layer having to
+/// know about the DTO split at all.
+fn session_meta_from_public(m: ene_runtime::PublicSessionMeta) -> ene_store::SessionMeta {
+    ene_store::SessionMeta {
+        id: m.id,
+        session_id: m.session_id,
+        card_name: m.card_name,
+        title: m.title,
+        created_at: m.created_at,
+        updated_at: m.updated_at,
+        archived: m.archived,
+        turn_count: m.turn_count,
+    }
+}
+
+/// Converts the API v1 [`ene_runtime::PublicExportedMessage`] DTO back into
+/// `ene_store::ExportedMessage`, mirroring [`session_meta_from_public`].
+fn exported_message_from_public(
+    m: ene_runtime::PublicExportedMessage,
+) -> ene_store::ExportedMessage {
+    ene_store::ExportedMessage {
+        role: m.role,
+        content: m.content,
+        created_at: m.created_at,
+    }
+}
+
 impl AiBridge {
     /// Build a new bridge and spawn the background drain task. Must
     /// be called from inside `tokio::runtime::Handle::current()`.
@@ -74,6 +158,14 @@ impl AiBridge {
             .unwrap_or_default();
         let handle = bootstrap_handle.block_on(open_with_config(config))?;
         let receiver = handle.subscribe();
+        let lifecycle_receiver = handle.subscribe_lifecycle();
+        // Claim the audio channel up front regardless of the `voice` feature
+        // or whether a playback sender was supplied: the audio channel is
+        // bounded and single-consumer (#272), so this bridge must always be
+        // the one consumer that drains it, or a sustained TTS stream could
+        // eventually stall waiting to deliver a final marker (see
+        // `send_audio_chunk` in ene-runtime).
+        let audio_stream = handle.take_audio_stream();
         let processing = Arc::new(AtomicBool::new(false));
         let active_turn = Arc::new(Mutex::new(None));
         let proactive_observe = spawn_proactive_observer(bootstrap_handle, handle.clone(), &mind);
@@ -87,6 +179,8 @@ impl AiBridge {
 
         bootstrap_handle.spawn(pump_events(
             receiver,
+            lifecycle_receiver,
+            audio_stream,
             event_tx,
             handle,
             processing,
@@ -100,15 +194,15 @@ impl AiBridge {
     /// Run a future on the bridge runtime with [`BLOCKING_TIMEOUT`].
     ///
     /// Prevents indefinite UI freezes when the actor is slow or
-    /// deadlocked: the future is cancelled after the timeout and an
-    /// error string is returned to the caller.
-    fn block_on_timeout<F, T>(&self, fut: F) -> Result<T, String>
+    /// deadlocked: the future is cancelled after the timeout and a typed
+    /// [`AiBridgeError::Timeout`] is returned to the caller.
+    fn block_on_timeout<F, T>(&self, fut: F) -> Result<T, AiBridgeError>
     where
         F: std::future::Future<Output = T>,
     {
         self.runtime
             .block_on(tokio::time::timeout(BLOCKING_TIMEOUT, fut))
-            .map_err(|_| format!("Operation timed out after {}s", BLOCKING_TIMEOUT.as_secs()))
+            .map_err(|_| AiBridgeError::Timeout(BLOCKING_TIMEOUT.as_secs()))
     }
 
     /// Send a `Run` command. Also sets the `processing` flag
@@ -192,10 +286,8 @@ impl AiBridge {
         &self,
         request_id: impl Into<ene_runtime::RequestId>,
         decision: PermissionDecision,
-    ) -> Result<(), String> {
-        self.handle
-            .decide_permission(request_id, decision)
-            .map_err(|e| e.to_string())
+    ) -> Result<(), AiBridgeError> {
+        Ok(self.handle.decide_permission(request_id, decision)?)
     }
 
     /// List the standing session-wide permission grants (#177).
@@ -203,33 +295,31 @@ impl AiBridge {
     /// Blocks the calling thread on the tokio runtime while the actor
     /// answers, mirroring [`AiBridge::get_snapshot_blocking`]. Intended
     /// for the permission-center settings page.
-    pub fn list_permissions_blocking(&self) -> Result<Vec<ene_runtime::PermissionScope>, String> {
-        self.block_on_timeout(self.handle.list_permissions())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn list_permissions_blocking(
+        &self,
+    ) -> Result<Vec<ene_runtime::PermissionScope>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.list_permissions())??)
     }
 
     /// Revoke a single standing permission grant by id (#177).
     ///
     /// Returns whether a grant was actually removed.
-    pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, String> {
-        self.block_on_timeout(self.handle.revoke_permission(id))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.revoke_permission(id))??)
     }
 
     /// Revoke every standing permission grant, returning the number
     /// removed (#177).
-    pub fn reset_all_permissions_blocking(&self) -> Result<usize, String> {
-        self.block_on_timeout(self.handle.reset_all_permissions())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn reset_all_permissions_blocking(&self) -> Result<usize, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.reset_all_permissions())??)
     }
 
     /// Undo the most recent reversible tool operation (#178).
     ///
     /// Blocks the calling thread on the tokio runtime while the actor
     /// answers, mirroring [`AiBridge::reset_all_permissions_blocking`].
-    pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, String> {
-        self.block_on_timeout(self.handle.undo())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.undo())??)
     }
 
     /// List stored session metadata (#176).
@@ -241,25 +331,26 @@ impl AiBridge {
         &self,
         include_archived: bool,
         limit: usize,
-    ) -> Result<Vec<ene_store::SessionMeta>, String> {
-        self.block_on_timeout(self.handle.list_sessions(include_archived, limit))
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    ) -> Result<Vec<ene_store::SessionMeta>, AiBridgeError> {
+        let metas =
+            self.block_on_timeout(self.handle.sessions().list(include_archived, limit))??;
+        Ok(metas.into_iter().map(session_meta_from_public).collect())
     }
 
     /// Export a session as a pretty-printed JSON string (#176).
-    pub fn export_session_blocking(&self, session_id: impl Into<String>) -> Result<String, String> {
-        self.block_on_timeout(self.handle.export_session(session_id))
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn export_session_blocking(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<String, AiBridgeError> {
+        let session_id = session_id.into();
+        Ok(self.block_on_timeout(self.handle.sessions().export(&session_id))??)
     }
 
     /// Import a session from a JSON string, returning the imported
     /// session's row id (#176).
-    pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, String> {
-        self.block_on_timeout(self.handle.import_session(json))
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, AiBridgeError> {
+        let json = json.into();
+        Ok(self.block_on_timeout(self.handle.sessions().import(&json))??)
     }
 
     /// Search session messages, returning matching
@@ -269,10 +360,14 @@ impl AiBridge {
         query: impl Into<String>,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<(String, ene_store::ExportedMessage)>, String> {
-        self.block_on_timeout(self.handle.search_sessions(query, limit, offset))
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    ) -> Result<Vec<(String, ene_store::ExportedMessage)>, AiBridgeError> {
+        let query = query.into();
+        let matches =
+            self.block_on_timeout(self.handle.sessions().search(&query, limit, offset))??;
+        Ok(matches
+            .into_iter()
+            .map(|(session_id, message)| (session_id, exported_message_from_public(message)))
+            .collect())
     }
 
     /// Archive or unarchive a session, returning whether the archived
@@ -281,10 +376,9 @@ impl AiBridge {
         &self,
         session_id: impl Into<String>,
         archived: bool,
-    ) -> Result<bool, String> {
-        self.block_on_timeout(self.handle.archive_session(session_id, archived))
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    ) -> Result<bool, AiBridgeError> {
+        let session_id = session_id.into();
+        Ok(self.block_on_timeout(self.handle.sessions().set_archived(&session_id, archived))??)
     }
 
     /// Forward a `UserInputResponse` for the request
@@ -293,16 +387,13 @@ impl AiBridge {
         &self,
         request_id: impl Into<ene_runtime::RequestId>,
         response: UserInputResponse,
-    ) -> Result<(), String> {
-        self.handle
-            .submit_user_input(request_id, response)
-            .map_err(|e| e.to_string())
+    ) -> Result<(), AiBridgeError> {
+        Ok(self.handle.submit_user_input(request_id, response)?)
     }
 
     /// Fetches a fresh actor snapshot on the runtime thread.
-    pub fn get_snapshot_blocking(&self) -> Result<ene_runtime::EneStateSnapshot, String> {
-        self.block_on_timeout(self.handle.diagnostics().get_snapshot())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn get_snapshot_blocking(&self) -> Result<ene_runtime::EneStateSnapshot, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.diagnostics().get_snapshot())??)
     }
 
     /// Snapshot of cached provider health reports for the AI settings page (#175).
@@ -316,9 +407,12 @@ impl AiBridge {
     }
 
     /// Run [`ene_ai::validate_api_key`] on the bridge runtime (#241).
-    pub fn validate_api_key_blocking(&self, base_url: &str, api_key: &str) -> Result<(), String> {
-        self.block_on_timeout(ene_ai::validate_api_key(base_url, api_key))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn validate_api_key_blocking(
+        &self,
+        base_url: &str,
+        api_key: &str,
+    ) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(ene_ai::validate_api_key(base_url, api_key))??)
     }
 
     /// Refresh memory journal payload (typed memories + affect + commitments).
@@ -328,7 +422,7 @@ impl AiBridge {
         include_user_deleted: bool,
         include_archived: bool,
         include_superseded: bool,
-    ) -> Result<MemoryJournalPayload, String> {
+    ) -> Result<MemoryJournalPayload, AiBridgeError> {
         let snapshot = self.get_snapshot_blocking()?;
         let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.clone();
@@ -344,24 +438,18 @@ impl AiBridge {
                 limit,
                 offset: 0,
             };
-            let memories = memory
-                .list_journal_memories(&options)
-                .await
-                .map_err(|e| e.to_string())?;
-            let affect = memory
-                .show_affect_state(character_id)
-                .await
-                .map_err(|e| e.to_string())?;
+            let memories = memory.list_journal_memories(&options).await?;
+            let affect = memory.show_affect_state(character_id).await?;
             let commitments = memory
                 .list_active_commitments(character_id, Some(&user_id), limit)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             let (pending_writes, permanent_writes) = memory
                 .store()
-                .ok_or_else(|| "Memory store is not available".to_string())?
+                .ok_or_else(|| {
+                    ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
+                })?
                 .count_pending_memory_writes(character_id)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             Ok(MemoryJournalPayload {
                 memories,
                 affect,
@@ -377,7 +465,7 @@ impl AiBridge {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<MemoryJournalRecallRow>, String> {
+    ) -> Result<Vec<MemoryJournalRecallRow>, AiBridgeError> {
         let snapshot = self.get_snapshot_blocking()?;
         let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.as_str();
@@ -385,8 +473,7 @@ impl AiBridge {
         self.block_on_timeout(async {
             let recalled = memory
                 .search_typed_memories_explained(character_id, Some(user_id), query, limit)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             Ok(recalled
                 .iter()
                 .map(|entry| {
@@ -415,35 +502,26 @@ impl AiBridge {
         &self,
         id: i64,
         action: MemoryJournalAction,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
             match action {
-                MemoryJournalAction::Pin => memory
-                    .pin_typed_memory(id, true)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Unpin => memory
-                    .pin_typed_memory(id, false)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Archive => memory
-                    .set_memory_status(id, ene_store::MemoryStatus::Archived)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Forget => memory
-                    .user_forget_typed_memory(id)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Dispute => memory
-                    .set_memory_status(id, ene_store::MemoryStatus::Disputed)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Restore => memory
-                    .user_restore_typed_memory(id)
-                    .await
-                    .map_err(|e| e.to_string()),
+                MemoryJournalAction::Pin => memory.pin_typed_memory(id, true).await,
+                MemoryJournalAction::Unpin => memory.pin_typed_memory(id, false).await,
+                MemoryJournalAction::Archive => {
+                    memory
+                        .set_memory_status(id, ene_store::MemoryStatus::Archived)
+                        .await
+                }
+                MemoryJournalAction::Forget => memory.user_forget_typed_memory(id).await,
+                MemoryJournalAction::Dispute => {
+                    memory
+                        .set_memory_status(id, ene_store::MemoryStatus::Disputed)
+                        .await
+                }
+                MemoryJournalAction::Restore => memory.user_restore_typed_memory(id).await,
             }
+            .map_err(AiBridgeError::from)
         })?
     }
 
@@ -453,64 +531,62 @@ impl AiBridge {
         &self,
         id: i64,
         status: ene_store::MemoryStatus,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
-        self.block_on_timeout(memory.set_memory_status(id, status))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+        Ok(self.block_on_timeout(memory.set_memory_status(id, status))??)
     }
 
     /// Pins a memory row in the typed store.
     #[expect(dead_code, reason = "replaced by execute_journal_action")]
-    pub fn pin_memory(&self, id: i64) -> Result<bool, String> {
+    pub fn pin_memory(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
-        self.block_on_timeout(memory.pin_typed_memory(id, true))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+        Ok(self.block_on_timeout(memory.pin_typed_memory(id, true))??)
     }
 
     // ── Pending candidate approval (#174 / #223) ──
 
     /// List pending memory candidates awaiting user approval.
-    pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, String> {
-        self.block_on_timeout(self.handle.list_pending_candidates())
-            .and_then(std::convert::identity)
+    pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.candidates().list_pending())??)
     }
 
     /// Approve a pending memory candidate, persisting it as a typed memory.
-    pub fn approve_candidate(&self, id: i64) -> Result<(), String> {
-        self.block_on_timeout(self.handle.approve_candidate(id))
-            .and_then(std::convert::identity)
+    pub fn approve_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.candidates().approve(id))??)
     }
 
     /// Reject a pending memory candidate.
-    pub fn reject_candidate(&self, id: i64) -> Result<(), String> {
-        self.block_on_timeout(self.handle.reject_candidate(id))
-            .and_then(std::convert::identity)
+    pub fn reject_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.candidates().reject(id))??)
     }
 
     // ── Commitment management (#223) ──
 
     /// Mark a commitment as done.
-    pub fn complete_commitment(&self, id: i64) -> Result<bool, String> {
+    pub fn complete_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
-            let store = memory
-                .store()
-                .ok_or_else(|| "Memory store is not available".to_string())?;
+            let store = memory.store().ok_or_else(|| {
+                ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
+            })?;
             store
                 .complete_commitment(id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(AiBridgeError::from)
         })?
     }
 
     /// Mark a commitment as cancelled.
-    pub fn cancel_commitment(&self, id: i64) -> Result<bool, String> {
+    pub fn cancel_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
-            let store = memory
-                .store()
-                .ok_or_else(|| "Memory store is not available".to_string())?;
-            store.cancel_commitment(id).await.map_err(|e| e.to_string())
+            let store = memory.store().ok_or_else(|| {
+                ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
+            })?;
+            store
+                .cancel_commitment(id)
+                .await
+                .map_err(AiBridgeError::from)
         })?
     }
 }
@@ -543,8 +619,86 @@ fn turn_matches(active_turn: &Mutex<Option<TurnId>>, event_turn: &TurnId) -> boo
     }
 }
 
+/// Awaits the next audio chunk, or never resolves when no audio stream was
+/// claimed (`take_audio_stream` returned `None`) or it has since closed.
+///
+/// Used as a `tokio::select!` branch in [`pump_events`] so the absence of an
+/// audio stream degrades to "this branch never fires" instead of a busy
+/// loop. Once the underlying `mpsc::Receiver` reports closed (`None`), the
+/// `Option` is cleared so subsequent polls also degrade to pending rather
+/// than immediately resolving with `None` again and again.
+async fn recv_audio_chunk(stream: &mut Option<AudioStreamReceiver>) -> Option<AudioChunk> {
+    match stream {
+        Some(rx) => {
+            if let Some(chunk) = rx.recv().await {
+                Some(chunk)
+            } else {
+                *stream = None;
+                std::future::pending().await
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Forwards one audio chunk to the desktop playback subsystem, applying the
+/// same turn-ownership gate the pre-#272 chat-bus path used (H1).
+///
+/// Without the `voice` feature there is no playback subsystem, so the
+/// chunk is dropped.
+fn forward_audio_chunk(
+    chunk: AudioChunk,
+    audio_turn: &mut Option<TurnId>,
+    audio_tx: Option<&AudioChunkSender>,
+) {
+    #[cfg(feature = "voice")]
+    {
+        let AudioChunk {
+            turn,
+            origin: _,
+            pcm,
+            sample_rate,
+            is_final,
+        } = chunk;
+        // Track the turn that owns the in-flight TTS audio separately from
+        // `active_turn`: the fire-and-forget TTS worker keeps emitting
+        // chunks after `Terminal` clears `active_turn`, so filtering on
+        // `active_turn` would drop the tail of the utterance (H1).
+        if !route_audio_chunk(audio_turn, &turn, is_final) {
+            return;
+        }
+        if let Some(tx) = audio_tx {
+            // `try_send` avoids blocking the async pump when the bounded
+            // playback channel is full (L10); a full buffer means the sink
+            // is behind and the dropped chunk is preferable to stalling all
+            // event routing. The natural TTS final marker never aborts
+            // playback.
+            if let Err(e) = tx.try_send(AudioChunkPayload {
+                pcm,
+                sample_rate,
+                is_final,
+                abort: false,
+            }) {
+                tracing::warn!(
+                    component = "AiBridge",
+                    error = %e,
+                    "playback channel full; dropping audio chunk"
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "voice"))]
+    {
+        let _audio_turn = audio_turn;
+        let _audio_tx = audio_tx;
+        let _chunk = chunk;
+    }
+}
+
 async fn pump_events(
     mut receiver: EneEventReceiver,
+    mut lifecycle_receiver: LifecycleReceiver,
+    mut audio_stream: Option<AudioStreamReceiver>,
     event_tx: AppEventSender,
     handle: EneHandle,
     processing: Arc<AtomicBool>,
@@ -555,11 +709,13 @@ async fn pump_events(
     // `active_turn` because the fire-and-forget TTS worker keeps emitting
     // chunks after `Terminal` clears `active_turn` (H1). Only cleared by
     // the `is_final` marker or a playback reset on broadcast lag (M2).
-    #[cfg(feature = "voice")]
+    // Always defined (not `#[cfg(feature = "voice")]`) because it is now
+    // threaded through `forward_audio_chunk`'s signature unconditionally.
     let mut audio_turn: Option<TurnId> = None;
 
     loop {
-        match receiver.recv().await {
+        tokio::select! {
+        chat_event = receiver.recv() => match chat_event {
             Ok(EneEvent::TextDelta {
                 turn,
                 origin: _,
@@ -568,7 +724,7 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(delta)));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(delta))));
             }
             Ok(EneEvent::Performance {
                 turn,
@@ -584,29 +740,29 @@ async fn pump_events(
                         ene_mind::PerfKind::Motion => {
                             let layer = cue.motion_layer.unwrap_or(ene_config::MotionLayer::Full);
                             let priority = cue_source_to_u8(source);
-                            let _ = event_tx.send(AppEvent::MotionCue {
+                            drop(event_tx.send(AppEvent::MotionCue {
                                 name: cue.name,
                                 layer,
                                 priority,
                                 duration: 0.0,
-                            });
+                            }));
                         }
                         ene_mind::PerfKind::Expression => {
                             let weight = cue.weight.unwrap_or(1.0);
                             let hold_secs = cue.hold_secs.unwrap_or(4.0);
-                            let _ = event_tx.send(AppEvent::ExpressionCue {
+                            drop(event_tx.send(AppEvent::ExpressionCue {
                                 name: cue.name,
                                 weight,
                                 hold_secs,
-                            });
+                            }));
                         }
                         ene_mind::PerfKind::Cancel => {
-                            let _ = event_tx.send(AppEvent::CancelCue { scope: cue.name });
+                            drop(event_tx.send(AppEvent::CancelCue { scope: cue.name }));
                         }
                         ene_mind::PerfKind::LookAt => {
-                            let _ = event_tx.send(AppEvent::LookAtCue {
+                            drop(event_tx.send(AppEvent::LookAtCue {
                                 target: cue.name.clone(),
-                            });
+                            }));
                         }
                     }
                 }
@@ -620,10 +776,10 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallStart {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallStart {
                     name,
                     arguments,
-                }));
+                })));
             }
             Ok(EneEvent::ToolCallResult {
                 turn,
@@ -634,10 +790,10 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallResult {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallResult {
                     name,
                     result,
-                }));
+                })));
             }
             Ok(EneEvent::PermissionRequired {
                 turn,
@@ -650,12 +806,12 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::PermissionRequired {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::PermissionRequired {
                     request_id,
                     action,
                     target,
                     description,
-                }));
+                })));
             }
             Ok(EneEvent::UserInputRequired {
                 turn,
@@ -666,67 +822,12 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::UserInputRequired {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::UserInputRequired {
                     request_id,
                     prompt,
-                }));
+                })));
             }
             Ok(EneEvent::ContextCompressed { .. }) => {}
-            Ok(EneEvent::AudioChunk {
-                turn,
-                origin: _,
-                pcm,
-                sample_rate,
-                is_final,
-            }) => {
-                // Audio chunks are forwarded to the playback subsystem
-                // regardless of the active turn so TTS audio for the
-                // current utterance plays even after the text stream
-                // has finished. Without the `voice` feature there is no
-                // playback subsystem, so the chunk is dropped.
-                #[cfg(feature = "voice")]
-                {
-                    // Track the turn that owns the in-flight TTS audio
-                    // separately from `active_turn`: the fire-and-forget
-                    // TTS worker keeps emitting chunks after `Terminal`
-                    // clears `active_turn`, so filtering on `active_turn`
-                    // would drop the tail of the utterance (H1).
-                    if !route_audio_chunk(&mut audio_turn, &turn, is_final) {
-                        continue;
-                    }
-                    if let Some(tx) = &audio_tx {
-                        // `try_send` avoids blocking the async pump when the
-                        // bounded playback channel is full (L10); a full
-                        // buffer means the sink is behind and the dropped
-                        // chunk is preferable to stalling all event routing.
-                        // The natural TTS final marker never aborts playback.
-                        if let Err(e) = tx.try_send(AudioChunkPayload {
-                            pcm,
-                            sample_rate,
-                            is_final,
-                            abort: false,
-                        }) {
-                            tracing::warn!(
-                                component = "AiBridge",
-                                error = %e,
-                                "playback channel full; dropping audio chunk"
-                            );
-                        }
-                    }
-                }
-                #[cfg(not(feature = "voice"))]
-                {
-                    let _audio_tx = &audio_tx;
-                    let _turn = turn;
-                    let _pcm = pcm;
-                    let _sample_rate = sample_rate;
-                    let _is_final = is_final;
-                }
-            }
-            Ok(EneEvent::PendingCandidateAvailable { count }) => {
-                let _ = event_tx.send(AppEvent::PendingCandidatesCount(count));
-            }
-            Ok(EneEvent::StatusChanged { .. } | EneEvent::ToolBackgroundCompleted { .. }) => {}
             Ok(EneEvent::TurnStarted { turn, origin: _ }) => {
                 if let Ok(mut guard) = active_turn.lock() {
                     *guard = Some(turn);
@@ -770,7 +871,7 @@ async fn pump_events(
                         );
                     }
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished)));
             }
             Ok(EneEvent::Terminal {
                 turn,
@@ -802,7 +903,7 @@ async fn pump_events(
                     }
                 }
                 let user_message = crate::runtime_error::user_message_from_turn(&message);
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(user_message)));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(user_message))));
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(
@@ -839,7 +940,7 @@ async fn pump_events(
                         tracing::warn!("[Ene] Lagged cancel failed: {e}");
                     }
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished)));
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 tracing::error!(
@@ -849,13 +950,39 @@ async fn pump_events(
                 processing.store(false, Ordering::Relaxed);
                 let shutdown_handle = handle.clone();
                 tokio::spawn(async move {
-                    let _ = shutdown_handle
+                    drop(shutdown_handle
                         .shutdown(std::time::Duration::from_secs(2))
-                        .await;
+                        .await);
                 });
-                let _ = event_tx.send(AppEvent::RuntimeDisconnected);
+                drop(event_tx.send(AppEvent::RuntimeDisconnected));
                 break;
             }
+        },
+        // Lifecycle bus (#272): turn-independent, low-frequency. Only
+        // `PendingCandidateAvailable` currently drives UI state here;
+        // `StatusChanged` / `ToolBackgroundCompleted` are observed
+        // elsewhere (diagnostics / background tool UI) or not yet wired.
+        lifecycle_event = lifecycle_receiver.recv() => match lifecycle_event {
+            Ok(LifecycleEvent::PendingCandidateAvailable { count }) => {
+                drop(event_tx.send(AppEvent::PendingCandidatesCount(count)));
+            }
+            Ok(LifecycleEvent::StatusChanged { .. } | LifecycleEvent::ToolBackgroundCompleted { .. }) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!("[Ene] Dropped {n} lifecycle events (broadcast lag)");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // The actor is gone; the chat-bus `Closed` arm above already
+                // handles the shutdown/reconnect flow, so this is a no-op.
+            }
+        },
+        // Audio channel (#272): bounded mpsc, single-consumer. Chunks are
+        // forwarded regardless of `active_turn` (H1) — see
+        // `forward_audio_chunk`.
+        chunk = recv_audio_chunk(&mut audio_stream) => {
+            if let Some(chunk) = chunk {
+                forward_audio_chunk(chunk, &mut audio_turn, audio_tx.as_ref());
+            }
+        }
         }
     }
 }

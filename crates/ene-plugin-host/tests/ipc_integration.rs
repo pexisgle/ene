@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use ene_plugin_host::{IpcPluginConnection, PluginHostError};
 use ene_plugin_proto::{
-    CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities,
-    PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError, ToolName, ToolResult,
-    ToolSpec, VersionRange, cleanup_path, read_plugin_request, write_plugin_response,
+    CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+    PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest, PluginIpcResponse,
+    SandboxConfigData, ToolError, ToolName, ToolResult, ToolSpec, VersionRange, cleanup_path,
+    read_plugin_request, write_plugin_response,
 };
 use tokio::sync::Mutex;
 
@@ -53,7 +54,29 @@ struct MockState {
 ///
 /// Accepts connections in a loop until the listener is dropped or the
 /// socket is cleaned up. Each connection is handled sequentially.
+///
+/// `plugin_range` is the version range the mock declares during the
+/// handshake, letting tests simulate a plugin binary built against an older
+/// (or unsupported) protocol version.
 async fn run_mock_server(socket_path: PathBuf, state: Arc<Mutex<MockState>>) {
+    run_mock_server_with_version(
+        socket_path,
+        state,
+        VersionRange {
+            min: PLUGIN_IPC_PROTOCOL_VERSION,
+            max: PLUGIN_IPC_PROTOCOL_VERSION,
+        },
+    )
+    .await;
+}
+
+/// Like [`run_mock_server`], but lets the caller control the plugin's
+/// advertised version range for handshake negotiation tests.
+async fn run_mock_server_with_version(
+    socket_path: PathBuf,
+    state: Arc<Mutex<MockState>>,
+    plugin_range: VersionRange,
+) {
     cleanup_path(&socket_path);
     let mut listener = IpcListener::bind(&socket_path).expect("failed to bind mock server");
 
@@ -75,7 +98,7 @@ async fn run_mock_server(socket_path: PathBuf, state: Arc<Mutex<MockState>>) {
             let emit_push =
                 matches!(&req, PluginIpcRequest::CallTool { name, .. } if name == "mock.push");
 
-            let resp = dispatch_mock(&state, req).await;
+            let resp = dispatch_mock(&state, req, plugin_range).await;
 
             if emit_push {
                 let mut s = state.lock().await;
@@ -99,18 +122,24 @@ async fn run_mock_server(socket_path: PathBuf, state: Arc<Mutex<MockState>>) {
 }
 
 /// Dispatches a single request to mock behavior.
-async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> PluginIpcResponse {
+///
+/// `our_range` is the mock plugin's own advertised protocol version range,
+/// mirroring the negotiation `ene-plugin`'s real `server.rs` performs.
+async fn dispatch_mock(
+    state: &Mutex<MockState>,
+    req: PluginIpcRequest,
+    our_range: VersionRange,
+) -> PluginIpcResponse {
     match req {
         PluginIpcRequest::Handshake {
             version: host_range,
             sandbox: _,
             plugin_config: _,
         } => {
-            let our_range = VersionRange {
-                min: PLUGIN_IPC_PROTOCOL_VERSION,
-                max: PLUGIN_IPC_PROTOCOL_VERSION,
-            };
-            if host_range.max < our_range.min || host_range.min > our_range.max {
+            // Mirrors `VersionRange::negotiate`: pick the highest common
+            // version, or fail with a message naming both ranges when they
+            // do not overlap.
+            let Some(negotiated) = our_range.negotiate(&host_range) else {
                 return PluginIpcResponse::Error {
                     request_id: String::new(),
                     message: format!(
@@ -118,8 +147,7 @@ async fn dispatch_mock(state: &Mutex<MockState>, req: PluginIpcRequest) -> Plugi
                         host_range.min, host_range.max, our_range.min, our_range.max
                     ),
                 };
-            }
-            let negotiated = host_range.max.min(our_range.max);
+            };
             PluginIpcResponse::HandshakeAck {
                 version: negotiated,
                 capabilities: PluginCapabilities {
@@ -297,6 +325,31 @@ async fn spawn_and_connect(name: &str) -> (IpcPluginConnection, Arc<Mutex<MockSt
     (conn, state, socket_path)
 }
 
+/// Spawns a mock server that declares `plugin_range` during the handshake
+/// (rather than always the current [`PLUGIN_IPC_PROTOCOL_VERSION`]) and
+/// attempts to connect, returning the raw [`Result`] so both successful and
+/// failing negotiations can be asserted on.
+async fn try_connect_with_plugin_version(
+    name: &str,
+    plugin_range: VersionRange,
+) -> (Result<IpcPluginConnection, PluginHostError>, PathBuf) {
+    let socket_path = test_socket_path(name);
+    let state = Arc::new(Mutex::new(MockState::default()));
+
+    let server_path = socket_path.clone();
+    tokio::spawn(async move {
+        run_mock_server_with_version(server_path, state, plugin_range).await;
+    });
+
+    // Give the server a moment to bind.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let result =
+        IpcPluginConnection::connect(&socket_path, SandboxConfigData::default(), None).await;
+
+    (result, socket_path)
+}
+
 // ── Test: Handshake ──────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -311,6 +364,79 @@ async fn handshake_succeeds_and_returns_capabilities() {
     let tools = conn.list_tools().await.expect("list_tools should succeed");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name.as_str(), "mock.echo");
+
+    // The handshake negotiated the current protocol version (mock and host
+    // both advertise it by default), so the negotiated-version accessor and
+    // the v4 `CancelStream` feature gate agree.
+    assert_eq!(conn.negotiated_version(), PLUGIN_IPC_PROTOCOL_VERSION);
+    assert!(conn.supports_cancel_stream());
+
+    cleanup_path(&socket_path);
+}
+
+// ── Test: N-1 backward compatibility (issue #275) ────────────────────────
+
+#[tokio::test]
+async fn handshake_negotiates_min_supported_version_for_older_plugin() {
+    // A plugin built against the oldest version the host still supports
+    // declares `{min: N-1, max: N-1}` — mirroring how a real out-of-process
+    // plugin binary that hasn't been rebuilt against the newest
+    // `ene-plugin-proto` would behave. The host's range
+    // (`VersionRange::host_supported()`) spans `[N-1, N]`, so negotiation
+    // must succeed at exactly N-1, the highest version common to both.
+    let old_plugin_range = VersionRange {
+        min: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+        max: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+    };
+    let (result, socket_path) =
+        try_connect_with_plugin_version("old-plugin", old_plugin_range).await;
+
+    let mut conn = result.expect("handshake with an N-1 plugin should succeed");
+    assert_eq!(conn.negotiated_version(), PLUGIN_IPC_MIN_SUPPORTED_VERSION);
+
+    // The negotiated version predates `CancelStream` (v4), so the feature
+    // gate must report it unsupported and `cancel_stream` must fall back to
+    // a no-op rather than sending a message the plugin cannot deserialize.
+    assert!(!conn.supports_cancel_stream());
+    conn.cancel_stream("some-stream")
+        .await
+        .expect("cancel_stream must no-op instead of erroring on an old plugin");
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn handshake_below_supported_floor_fails_with_both_ranges_in_diagnostic() {
+    // A plugin two versions behind the host (below `host_supported().min`)
+    // cannot negotiate any common version. The resulting diagnostic must
+    // name both the host's supported range and the plugin's offered range
+    // so a developer can tell the plugin needs rebuilding.
+    let ancient_range = VersionRange {
+        min: PLUGIN_IPC_MIN_SUPPORTED_VERSION - 1,
+        max: PLUGIN_IPC_MIN_SUPPORTED_VERSION - 1,
+    };
+    let (result, socket_path) =
+        try_connect_with_plugin_version("ancient-plugin", ancient_range).await;
+
+    let Err(err) = result else {
+        panic!("handshake below the supported floor must fail");
+    };
+    let message = err.to_string();
+
+    let host_range = VersionRange::host_supported();
+    assert!(
+        message.contains(&host_range.min.to_string())
+            && message.contains(&host_range.max.to_string()),
+        "diagnostic must include the host's supported range: {message}"
+    );
+    assert!(
+        message.contains(&ancient_range.min.to_string()),
+        "diagnostic must include the plugin's offered range: {message}"
+    );
+    assert!(
+        matches!(err, PluginHostError::HandshakeFailed { .. }),
+        "expected HandshakeFailed, got: {err:?}"
+    );
 
     cleanup_path(&socket_path);
 }

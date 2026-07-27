@@ -240,9 +240,9 @@ impl MaskCaptureCamera {
         let slice = self.readback_slice();
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
+            drop(tx.send(r));
         });
-        let _ = rx.recv();
+        drop(rx.recv());
         let mapped_len = self.copy_mapped_into_last_readback();
         let _ = mapped_len;
         self.unmap_readback();

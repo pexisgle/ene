@@ -32,9 +32,20 @@ Ene Host Application (ene-runtime)
 Plugins communicate over `stdin`/`stdout` using **IPC Protocol v4**:
 
 - **Framing**: Every packet begins with a 4-byte little-endian `u32` payload size followed by UTF-8 JSON.
-- **Handshake Negotiation**: Host sends `PluginIpcRequest::Handshake { version_range: VersionRange { min: 4, max: 4 } }`. Plugin negotiates version and responds with `HandshakeAck { version: 4, capabilities: PluginCapabilities }`.
+- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 3, max: 4 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
 - **Request Correlation**: All async requests and responses include a mandatory `request_id` (`Uuid`).
 - **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`).
+
+### Versioning policy (N-1 backward compatibility)
+
+Tool and provider plugins ship as independent out-of-process binaries. Bumping `PLUGIN_IPC_PROTOCOL_VERSION` does not recompile plugin binaries that are already installed, so the host maintains **one version of backward compatibility**:
+
+- The host always advertises `[PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION]` during the handshake (`VersionRange::host_supported()` in `crates/ene-plugin-proto/src/ipc.rs`), rather than a single pinned version. A plugin built against the previous protocol version can still connect and negotiate at that older version.
+- A plugin binary is not required to support a range — it may keep declaring `VersionRange { min: N, max: N }` for whatever version it was built against. The compatibility responsibility is concentrated in the host, not pushed onto every plugin author.
+- **Bumping the protocol version**: when `PLUGIN_IPC_PROTOCOL_VERSION` is bumped, `PLUGIN_IPC_MIN_SUPPORTED_VERSION` must be bumped by the same amount, dropping support for the oldest previously-supported version.
+- **When a bump is required**: only for changing the meaning of an existing message, adding a required field, or removing/renaming an enum variant. New fields should use `#[serde(default)]` so older/newer peers stay wire-compatible without a version bump.
+- **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_cancel_stream()` gates `PluginIpcRequest::CancelStream` (introduced in v4) so a v3 plugin isn't sent a message it cannot deserialize; the connection falls back to its existing timeout-based stream termination instead.
+- **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 3..=4, plugin supports 2..=2"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
 
 ---
 
@@ -63,27 +74,41 @@ Plugins communicate over `stdin`/`stdout` using **IPC Protocol v4**:
 
 ## 5. Writing a Custom Tool Plugin
 
-Developers can quickly author new tool plugins using `ene-plugin` and `#[derive(ToolAction)]`:
+Developers can quickly author new tool plugins using `ene-tool-sdk`'s `#[derive(ToolAction)]` and `ene-plugin`'s server entry point. This sketch is illustrative — see an existing plugin under `plugins/tool/*` (e.g. `plugins/tool/app/src/main.rs`) for the current, compiling pattern, or `cargo doc -p ene-tool-macros --open` for the derive macro's exact requirements:
 
-```rust
-use ene_plugin::prelude::*;
+```rust,ignore
+use ene_tool_sdk::prelude::*;
 
-#[derive(Debug, Deserialize, ToolAction)]
-#[tool_action(name = "custom.greet", description = "Generates a personalized greeting.")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(namespace = "custom", name = "greet",
+       summary = "Generates a personalized greeting.", category = "Custom",
+       keywords_primary = "greet, hello")]
 pub struct GreetAction {
     pub name: String,
 }
 
 impl GreetAction {
-    pub async fn run(&self) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         Ok(format!("Hello, {}!", self.name))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let provider = ActionSetProvider::new().register::<GreetAction>();
-    run_plugin_server(Box::new(ToolPluginAdapter(provider))).await?;
-    Ok(())
+async fn main() {
+    use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};
+    use std::sync::Arc;
+
+    let provider = ActionSetProvider::new(vec![Box::new(GreetAction { name: String::new() })]);
+    let dispatch = PluginDispatch::new(
+        Some(Arc::new(ToolProviderPlugin::new(provider))),
+        None,
+        None,
+        None,
+        None,
+    );
+    if let Err(e) = run_plugin_server(dispatch).await {
+        tracing::error!("fatal error: {e}");
+        std::process::exit(1);
+    }
 }
 ```

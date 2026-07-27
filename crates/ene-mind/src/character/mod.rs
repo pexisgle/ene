@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use ene_ai::EmbeddingProvider;
 use ene_config::{CharacterCardV3, UserPersona};
-use ene_store::MemoryStore;
+use ene_core::MemoryPort;
 
 use crate::config::CharacterMemoryConfig;
 use crate::error::CognitionError;
@@ -54,7 +54,7 @@ impl CharacterProcessor {
 
     /// Synchronize `CCv3` lorebook and style indices into typed memory.
     pub async fn sync_card_memories(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         embedder: &Arc<dyn EmbeddingProvider>,
         character_id: &str,
         user_name: &str,
@@ -80,7 +80,7 @@ impl CharacterProcessor {
         user_name: &str,
         user_input: &str,
         _history: &[HistoryEntry],
-        store: Option<&MemoryStore>,
+        store: Option<&dyn MemoryPort>,
         embedder: Option<&Arc<dyn EmbeddingProvider>>,
         config: &CharacterMemoryConfig,
         max_examples: usize,

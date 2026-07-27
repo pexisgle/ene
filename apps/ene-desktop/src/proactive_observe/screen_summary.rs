@@ -98,9 +98,9 @@ impl ScreenSummaryProvider {
         let text = match self.summarize_captured(&captured, cursor).await {
             Ok(t) => t,
             Err(e) => {
-                if e.contains("runtime busy")
-                    || e.contains("cancelled")
-                    || e.contains("actor dropped reply")
+                if matches!(e, ene_runtime::PublicApiError::ActorDead)
+                    || e.to_string().contains("runtime busy")
+                    || e.to_string().contains("cancelled")
                 {
                     tracing::debug!(
                         component = "ProactiveObserve",
@@ -143,7 +143,7 @@ impl ScreenSummaryProvider {
         &self,
         captured: &CapturedScreen,
         cursor: Option<(i32, i32)>,
-    ) -> Result<String, String> {
+    ) -> Result<String, ene_runtime::PublicApiError> {
         // When the cursor position is known, crop a region of interest
         // around it so the vision model receives higher-detail pixels
         // near the user's focus (#215). Falls back to the full frame
@@ -166,6 +166,7 @@ impl ScreenSummaryProvider {
         let rgb = focus.to_rgb8();
         let (width, height) = rgb.dimensions();
         self.handle
+            .vision()
             .summarize_screen_image(width, height, rgb.into_raw(), captured.app_label.clone())
             .await
     }

@@ -21,12 +21,19 @@
 //!   binaries) opens its own database connection or issues raw SQL against
 //!   `memory.db`; they call into `MemoryStore` (or, for plugin binaries, the IPC-based
 //!   `ene-plugin-db` client backed by `ene-store`'s `db_server`) instead.
-//! - Depends on: `ene-config`. The store has no LLM, embedding
+//! - Depends on: `ene-config`, `ene-core`. The store has no LLM, embedding
 //!   provider, or prompt-assembly dependency; callers supply vectors and the mind
 //!   runtime owns summarization and prompt formatting.
 //!   It does NOT depend on `ene-runtime`, `ene-ai`, `ene-mind`, or
 //!   `ene-tool-proto` — the store sits low in the dependency graph so it can be
 //!   safely called from any of those crates without introducing a cycle.
+//! - Domain vocabulary (`AffectState`, typed-memory kinds/statuses, the
+//!   commitment ledger's types) is defined in `ene-core` (#270) and
+//!   re-exported here unchanged — `ene-store` owns only the `SeaORM`
+//!   entities and SQL that convert those domain types to/from DB rows. It
+//!   additionally implements `ene_core::MemoryPort` for `MemoryStore`, the
+//!   trait `ene-mind`'s cognitive logic programs against instead of this
+//!   concrete type.
 //!
 //! ## Quick Start
 //!
@@ -44,10 +51,6 @@
 #![expect(
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
-)]
-#![expect(
-    deprecated,
-    reason = "MemoryError type alias is deprecated internally; callers should use EneMemoryError"
 )]
 #![cfg_attr(
     test,
@@ -83,6 +86,8 @@ pub mod export;
 pub(crate) mod forgetting;
 /// `SeaORM` schema migrations.
 pub mod migrator;
+/// `impl MemoryPort for MemoryStore` (#270).
+pub mod port;
 /// Hybrid memory search scoring.
 pub mod search;
 /// Session metadata domain model (#176).
@@ -102,11 +107,12 @@ pub use backup::{OpenOptions, list_backups, restore_database};
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Store feature toggle configuration.
 pub use config::StoreConfig;
+/// `MemoryPort` trait and its error type, re-exported from `ene-core` for convenience.
+pub use ene_core::{MemoryPort, MemoryPortError};
 /// Pending deferred memory-write queue (#240).
 pub use entities::pending_memory_writes::{PendingMemoryWrite, PendingMemoryWriteStatus};
 /// Memory error type.
 pub use error::EneMemoryError;
-pub use error::MemoryError;
 /// Session export format types (#176).
 pub use export::{
     ExportedMessage, ExportedToolLog, SESSION_EXPORT_FORMAT_VERSION, SessionExport, redact_secrets,

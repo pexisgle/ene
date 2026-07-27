@@ -124,7 +124,7 @@ impl MemoryQueryHandle {
             ))
         })?;
         ene_mind::MemoryJournal::search(
-            store,
+            store.as_ref(),
             embedder.as_ref(),
             &self.mind_memory,
             character_id,
@@ -151,7 +151,7 @@ impl MemoryQueryHandle {
             ))
         })?;
         ene_mind::MemoryJournal::search_explained(
-            store,
+            store.as_ref(),
             embedder.as_ref(),
             &self.mind_memory,
             character_id,
@@ -386,13 +386,13 @@ impl std::fmt::Debug for DiagnosticEventReceiver {
 
 impl DiagnosticEventReceiver {
     fn note_lag(&self, skipped: u64) {
-        let _ = self.diag_tx.send(DiagnosticEvent::Lagged {
+        drop(self.diag_tx.send(DiagnosticEvent::Lagged {
             channel: "diagnostics".to_string(),
             skipped,
-        });
-        let _ = self.diag_tx.send(DiagnosticEvent::ResyncNeeded {
+        }));
+        drop(self.diag_tx.send(DiagnosticEvent::ResyncNeeded {
             channel: "diagnostics".to_string(),
-        });
+        }));
     }
 
     /// Non-blocking poll.
@@ -542,5 +542,5 @@ impl EneDiagnostics {
 }
 
 pub(crate) fn emit_diag(diag_tx: &broadcast::Sender<DiagnosticEvent>, event: DiagnosticEvent) {
-    let _ = diag_tx.send(event);
+    drop(diag_tx.send(event));
 }

@@ -412,7 +412,7 @@ impl CognitionEngine {
                 ctx.user_name,
                 ctx.user_input,
                 ctx.history,
-                ctx.store,
+                ctx.store.map(|s| s as &dyn ene_core::MemoryPort),
                 ctx.embedder,
                 &ctx.config.character,
                 2,
@@ -641,9 +641,11 @@ impl CognitionEngine {
             let Ok(input) =
                 serde_json::from_str::<crate::lifecycle::OwnedPostTurnInput>(&row.payload_json)
             else {
-                let _ = store
-                    .fail_pending_memory_write(row.id, "invalid payload JSON")
-                    .await;
+                drop(
+                    store
+                        .fail_pending_memory_write(row.id, "invalid payload JSON")
+                        .await,
+                );
                 continue;
             };
             let borrowed = input.as_borrowed();
@@ -658,7 +660,7 @@ impl CognitionEngine {
             .await;
             match result {
                 Ok(()) => {
-                    let _ = store.complete_pending_memory_write(row.id).await;
+                    drop(store.complete_pending_memory_write(row.id).await);
                     tracing::info!(
                         component = "MemoryWriter",
                         pending_id = row.id,

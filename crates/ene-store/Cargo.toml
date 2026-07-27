@@ -11,6 +11,7 @@ publish.workspace = true
 crate-type = ["lib"]
 
 [dependencies]
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "fs"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -25,6 +26,7 @@ blake3 = { workspace = true }
 parking_lot = { workspace = true }
 
 ene-config = { workspace = true }
+ene-core = { workspace = true }
 ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
 serde = { workspace = true }

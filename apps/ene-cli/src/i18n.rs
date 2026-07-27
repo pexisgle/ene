@@ -18,12 +18,12 @@ pub fn loader() -> &'static FluentLanguageLoader {
     static LOADER: OnceLock<FluentLanguageLoader> = OnceLock::new();
     LOADER.get_or_init(|| {
         let loader = fluent_language_loader!();
-        let _ = loader.load_languages(&Localizations, &[loader.fallback_language().clone()]);
+        drop(loader.load_languages(&Localizations, &[loader.fallback_language().clone()]));
 
         // Negotiate language with system locale on startup.
         let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
         let localizer = i18n_embed::DefaultLocalizer::new(&loader, &Localizations);
-        let _ = localizer.select(&requested_languages);
+        drop(localizer.select(&requested_languages));
 
         loader
     })
@@ -42,6 +42,6 @@ pub fn select_language(lang: &str) {
     if let Ok(lang_id) = request_lang.parse() {
         let requested_languages = vec![lang_id];
         let localizer = i18n_embed::DefaultLocalizer::new(loader(), &Localizations);
-        let _ = localizer.select(&requested_languages);
+        drop(localizer.select(&requested_languages));
     }
 }

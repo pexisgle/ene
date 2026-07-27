@@ -1,0 +1,68 @@
+//! Pending memory-candidate workflow vocabulary and decay-report DTO.
+//!
+//! Moved from `ene-store` (#270). These are plain value types exchanged
+//! between the cognitive layer (`ene-mind`'s arbiter) and whichever store
+//! implementation backs [`crate::MemoryPort`] — not `SeaORM` entities.
+
+use serde::{Deserialize, Serialize};
+
+use crate::memory::MemoryKind;
+
+/// Workflow status of a pending memory candidate (#174).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingCandidateStatus {
+    /// Awaiting user review.
+    Pending,
+    /// Approved by the user (persisted to typed memory).
+    Approved,
+    /// Rejected by the user.
+    Rejected,
+}
+
+impl PendingCandidateStatus {
+    /// Returns the `snake_case` string representation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// A pending memory candidate awaiting user approval (#174).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingCandidate {
+    /// Primary key.
+    pub id: i64,
+    /// Character identifier.
+    pub character_id: String,
+    /// User identifier (may be empty).
+    pub user_id: String,
+    /// Short title or label.
+    pub title: String,
+    /// Full candidate content.
+    pub content: String,
+    /// Memory kind.
+    pub kind: MemoryKind,
+    /// Confidence score (0.0 .. 1.0).
+    pub confidence: f32,
+    /// Human-readable reason for the extraction.
+    pub reason_detail: String,
+    /// Title of the existing memory this candidate would supersede, if any.
+    pub existing_memory_title: Option<String>,
+    /// Source quote from the conversation that triggered this candidate.
+    pub source_quote: String,
+    /// Workflow status.
+    pub status: PendingCandidateStatus,
+}
+
+/// Result of a natural-decay batch run (#76).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NaturalDecayReport {
+    /// Memories transitioned to `faded`.
+    pub faded_count: usize,
+    /// Memories transitioned to `archived`.
+    pub archived_count: usize,
+}

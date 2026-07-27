@@ -1,11 +1,36 @@
 use thiserror::Error;
 
-/// Error types for the cognitive runtime.
+/// Error type for the *cognition* domain: recall, memory writing/arbitration,
+/// forgetting, character-card memory sync, the affect/emotion classifier,
+/// context budgeting/compression, commitments, and the turn engine (#274).
+///
+/// This is the error type nearly every function in those submodules returns
+/// (directly, or via the [`CognitionError`] alias) — it is the common
+/// currency *within* the cognition half of `ene-mind`, not the crate's
+/// outward-facing boundary type. It intentionally does not know about
+/// session lifecycle (split/compression bookkeeping, history persistence):
+/// that is [`crate::session::EneSessionError`]'s job.
+///
+/// External callers (`ene-runtime` and other embedders) should generally
+/// match on [`MindError`] instead, which composes this type with
+/// `EneSessionError` behind one `#[non_exhaustive]`-friendly surface. Code
+/// living inside `ene-mind`'s cognition submodules should keep using this
+/// type (or the `CognitionError` alias) directly — wrapping every internal
+/// call site in `MindError` this early would lose the ability to match on
+/// cognition-specific variants without re-destructuring.
 #[derive(Error, Debug)]
 pub enum EneCognitionError {
     /// Memory operation failed.
     #[error(transparent)]
     Memory(#[from] ene_store::EneMemoryError),
+
+    /// Memory operation failed via the `MemoryPort` abstraction (#270).
+    ///
+    /// Used by cognitive-logic modules (recall, arbiter, forgetting,
+    /// character sync, journal, reflection) that call `&dyn MemoryPort`
+    /// instead of the concrete `ene_store::MemoryStore`.
+    #[error(transparent)]
+    MemoryPort(#[from] ene_core::MemoryPortError),
 
     /// Configuration error.
     #[error(transparent)]
@@ -64,19 +89,40 @@ pub enum EneCognitionError {
     Aggregate(String),
 }
 
-/// Type alias for internal module usage.
-///
-/// [`EneCognitionError`] is the canonical public name for the crate boundary;
-/// `CognitionError` is a shorter alias used pervasively within the crate internals.
+/// Shorter alias for [`EneCognitionError`], used pervasively within the
+/// cognition submodules' own signatures (`recall`, `memory_writer`,
+/// `context`, `character`, `emotion`, `commitments`, `engine`). Same type,
+/// just less noisy at internal call sites — see [`EneCognitionError`]'s
+/// docs for why this is *not* the crate boundary type.
 pub type CognitionError = EneCognitionError;
 
-/// Single public error type for the `ene-mind` crate boundary (API v1 / #118).
+/// Single public error type for the `ene-mind` crate boundary (API v1 / #118,
+/// #274).
+///
+/// This — not [`EneCognitionError`] — is the type external embedders
+/// (`ene-runtime` in particular, via `#[from] ene_mind::MindError` on
+/// `EneRuntimeError`) should match against. It projects both halves of
+/// `ene-mind`'s internal error surface into one boundary type:
+///
+/// - [`EneCognitionError`]: recall, memory writing/arbitration, forgetting,
+///   character memory sync, affect/emotion, context budgeting/compression,
+///   commitments, and the turn engine.
+/// - [`crate::session::EneSessionError`]: session lifecycle — history
+///   bookkeeping, manual split/compression triggers.
+///
+/// Kept as a thin two-variant wrapper rather than merged into
+/// `EneCognitionError` because the two halves have non-overlapping
+/// concerns and separate owners internally; merging them would force every
+/// cognition-submodule call site (the vast majority of `ene-mind`'s
+/// internal `Result` usage) to also account for session-lifecycle variants
+/// that can never occur there.
 #[derive(Error, Debug)]
 pub enum MindError {
-    /// Cognitive pipeline failure.
+    /// Cognitive pipeline failure — see [`EneCognitionError`].
     #[error(transparent)]
     Cognition(#[from] EneCognitionError),
-    /// Session / split / compression failure.
+    /// Session / split / compression failure — see
+    /// [`crate::session::EneSessionError`].
     #[error(transparent)]
     Session(#[from] crate::session::EneSessionError),
 }

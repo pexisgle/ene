@@ -796,7 +796,7 @@ fn run_recall_search(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, q
 fn set_action_message(
     world: &mut World,
     ui_entity: Entity,
-    result: Result<bool, String>,
+    result: Result<bool, crate::ai_bridge::AiBridgeError>,
     action_key: &str,
 ) {
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {

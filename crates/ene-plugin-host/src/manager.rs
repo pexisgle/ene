@@ -67,8 +67,8 @@ impl SupervisedPlugin {
             });
         }
 
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        drop(self.child.kill());
+        drop(self.child.wait());
 
         ene_plugin_proto::cleanup_path(&self.socket_path);
 
@@ -102,8 +102,8 @@ impl Drop for SupervisedPlugin {
         );
         // Kill the child and reap it to avoid leaving a zombie process.
         // Both are best-effort: the process may already have exited.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        drop(self.child.kill());
+        drop(self.child.wait());
         ene_plugin_proto::cleanup_path(&self.socket_path);
     }
 }
@@ -131,7 +131,7 @@ struct PluginToolRegistry {
 impl PluginToolRegistry {
     fn emit_health(&self, event: PluginHealthEvent) {
         if let Some(tx) = &self.health_tx {
-            let _ = tx.send(event);
+            drop(tx.send(event));
         }
     }
 }
@@ -662,8 +662,8 @@ impl PluginHostManager {
         }
         for plugin in &self.supervised {
             let mut p = plugin.lock().await;
-            let _ = p.child.kill();
-            let _ = p.child.wait();
+            drop(p.child.kill());
+            drop(p.child.wait());
             ene_plugin_proto::cleanup_path(&p.socket_path);
         }
     }
@@ -695,7 +695,7 @@ impl PluginHostManager {
             {
                 let p = ene_config::plugin_socket_dir().join(format!("ene-plugin-{name}.sock"));
                 if p.exists() {
-                    let _ = std::fs::remove_file(&p);
+                    drop(std::fs::remove_file(&p));
                 }
                 p
             }
@@ -881,10 +881,10 @@ async fn health_probe_loop(
                 p.name.clone()
             };
 
-            let _ = health_tx.send(PluginHealthEvent::Unhealthy {
+            drop(health_tx.send(PluginHealthEvent::Unhealthy {
                 plugin: name.clone(),
                 reason: reason.to_string(),
-            });
+            }));
 
             tracing::warn!(
                 component = "PluginHostManager",
@@ -901,15 +901,15 @@ async fn health_probe_loop(
                     plugin = %name,
                     "Plugin exceeded max restarts; disabled"
                 );
-                let _ = health_tx.send(PluginHealthEvent::Disabled { plugin: name });
+                drop(health_tx.send(PluginHealthEvent::Disabled { plugin: name }));
                 continue;
             }
 
             let attempt = p.restart_count.saturating_add(1);
-            let _ = health_tx.send(PluginHealthEvent::Restarting {
+            drop(health_tx.send(PluginHealthEvent::Restarting {
                 plugin: name.clone(),
                 attempt,
-            });
+            }));
 
             let delay = p.delay_for_restart();
             drop(p);
@@ -935,12 +935,12 @@ async fn health_probe_loop(
                 Ok(new_conn) => {
                     let mut c = conn.lock().await;
                     *c = new_conn;
-                    let _ = health_tx.send(PluginHealthEvent::Restarted {
+                    drop(health_tx.send(PluginHealthEvent::Restarted {
                         plugin: name.clone(),
-                    });
-                    let _ = health_tx.send(PluginHealthEvent::Recovered {
+                    }));
+                    drop(health_tx.send(PluginHealthEvent::Recovered {
                         plugin: name.clone(),
-                    });
+                    }));
                     tracing::info!(
                         component = "PluginHostManager",
                         plugin = %name,
@@ -1064,6 +1064,6 @@ mod tests {
         // No checksum configured → trust-on-first-use, passes.
         assert!(verify_plugin_checksum("fake", &bin_path, None).is_ok());
 
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_dir_all(&dir));
     }
 }

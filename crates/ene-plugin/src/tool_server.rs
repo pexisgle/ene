@@ -95,11 +95,11 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
                             }
                             Err(e) => {
                                 tracing::error!(component = "ToolServer", error = %e, "IPC read error");
-                                let _ = write_ipc_response(
+                                drop(write_ipc_response(
                                     &mut stream,
                                     &IpcResponse::Error { message: e.to_string() },
                                 )
-                                .await;
+                                .await);
                                 break;
                             }
                         }
@@ -129,7 +129,7 @@ pub async fn run_tool_server(provider: Box<dyn ToolProvider>) -> Result<(), Tool
         let handles: Vec<_> = guard.drain(..).collect();
         drop(guard);
         for handle in handles {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            drop(tokio::time::timeout(Duration::from_secs(5), handle).await);
         }
     }
 

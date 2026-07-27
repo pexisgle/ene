@@ -1,6 +1,6 @@
 //! Commitment ledger queries.
 
-use super::{MemoryError, MemoryStore};
+use super::{EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::{DateTime, Utc};
 use sea_orm::sea_query::Expr;
@@ -11,7 +11,9 @@ use sea_orm::{ColumnTrait, EntityTrait};
     clippy::unnecessary_wraps,
     reason = "store helper signature returns Result for uniform error propagation"
 )]
-fn model_to_commitment(m: entities::commitments::Model) -> Result<crate::Commitment, MemoryError> {
+fn model_to_commitment(
+    m: entities::commitments::Model,
+) -> Result<crate::Commitment, EneMemoryError> {
     Ok(crate::Commitment {
         id: Some(m.id),
         character_id: m.character_id,
@@ -31,7 +33,10 @@ impl MemoryStore {
     // ── Companion Commitments ─────────────────────────────────────────────────
 
     /// Insert a new commitment row and return its assigned ID.
-    pub async fn insert_commitment(&self, item: &crate::NewCommitment) -> Result<i64, MemoryError> {
+    pub async fn insert_commitment(
+        &self,
+        item: &crate::NewCommitment,
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -54,7 +59,10 @@ impl MemoryStore {
     }
 
     /// Retrieve a commitment by its ID.
-    pub async fn get_commitment(&self, id: i64) -> Result<Option<crate::Commitment>, MemoryError> {
+    pub async fn get_commitment(
+        &self,
+        id: i64,
+    ) -> Result<Option<crate::Commitment>, EneMemoryError> {
         let maybe_model = entities::commitments::Entity::find_by_id(id)
             .one(&self.db)
             .await?;
@@ -73,7 +81,7 @@ impl MemoryStore {
         character_id: &str,
         user_id: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<crate::Commitment>, MemoryError> {
+    ) -> Result<Vec<crate::Commitment>, EneMemoryError> {
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
         let mut query = entities::commitments::Entity::find()
@@ -109,7 +117,7 @@ impl MemoryStore {
         &self,
         id: i64,
         new_status: crate::CommitmentStatus,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<bool, EneMemoryError> {
         use sea_orm::sea_query::Expr;
         use sea_orm::{EntityTrait, QueryFilter};
 
@@ -146,7 +154,7 @@ impl MemoryStore {
         id: i64,
         description: &str,
         due_label: Option<&str>,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<bool, EneMemoryError> {
         use sea_orm::sea_query::Expr;
         use sea_orm::{EntityTrait, QueryFilter};
 
@@ -171,13 +179,13 @@ impl MemoryStore {
     }
 
     /// Mark a commitment as done.
-    pub async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryError> {
+    pub async fn complete_commitment(&self, id: i64) -> Result<bool, EneMemoryError> {
         self.update_commitment_status(id, crate::CommitmentStatus::Done)
             .await
     }
 
     /// Mark a commitment as cancelled.
-    pub async fn cancel_commitment(&self, id: i64) -> Result<bool, MemoryError> {
+    pub async fn cancel_commitment(&self, id: i64) -> Result<bool, EneMemoryError> {
         self.update_commitment_status(id, crate::CommitmentStatus::Cancelled)
             .await
     }
@@ -185,7 +193,10 @@ impl MemoryStore {
     /// Mark active commitments whose `due_at` is before `now` as stale.
     ///
     /// Returns the number of rows updated.
-    pub async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryError> {
+    pub async fn mark_stale_commitments(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<usize, EneMemoryError> {
         use sea_orm::{EntityTrait, QueryFilter};
 
         let result = entities::commitments::Entity::update_many()

@@ -1,34 +1,35 @@
-# `ene-ai` & `ene-ai-local` — API Reference
+# `ene-ai` & `ene-ai-local`
 
-> **Crates**: `ene-ai` (Core traits & cloud providers) | `ene-ai-local` (GGUF local LLM inference via `llama-cpp-4`)
+> **Crates**: `ene-ai` (provider traits, message/streaming types, OpenAI-compatible provider, registry) | `ene-ai-local` (local GGUF inference via `llama-cpp-4`)
 
-Together, `ene-ai` and `ene-ai-local` provide LLM chat completions and text embedding abstractions for Ene.
-
----
-
-## 1. `ene-ai` (Core Provider Library)
-
-### Core Traits
-- `LlmProvider`: Asynchronous LLM chat completion trait supporting streaming token generation.
-- `EmbeddingProvider`: Text embedding vector generation trait.
-
-### Implementations
-- `OpenAiProvider`: Cloud provider interface for OpenAI models (GPT-4o, text-embedding-3).
-- `IpcLlmProvider`: Host adapter translating IPC protocol v4 messages from provider plugins (such as `ene-plugin-anthropic`) to the `LlmProvider` trait.
-- `LlmProviderRegistry`: Factory and registry for instantiating providers based on settings.
+Together, `ene-ai` and `ene-ai-local` provide LLM chat-completion and text-embedding abstractions for Ene. `ene-ai` defines the generic message/streaming types and provider traits plus a global provider registry and the built-in OpenAI-compatible implementation; local inference (GGUF/llama.cpp) lives in `ene-ai-local`, and local audio (STT/TTS/VAD) lives in the separate `ene-voice` crate.
 
 ---
 
-## 2. `ene-ai-local` (Local GGUF LLM Inference)
+## Architectural boundaries
 
-`ene-ai-local` houses local model execution wrapping `llama-cpp-4`:
+- `ene-ai` owns the provider abstraction layer: message/streaming types, the provider traits, health monitoring/failover routing, and retry policy. It has no persistence or cognitive-logic dependency.
+- Out-of-process LLM providers (e.g. an Anthropic plugin) are bridged into the same `LlmProvider` trait via an IPC adapter owned by `ene-plugin-host`, not by `ene-ai` itself — `ene-ai` only defines the trait the adapter implements.
+- `ene-ai-local` depends on `ene-ai` (to implement its provider traits) and `ene-config`, and performs in-process inference — no network calls.
 
-- **Local Model Loading**: Loads `.gguf` weight files from disk.
-- **Hardware Acceleration**: Uses the GPU backend compiled via Cargo features (`vulkan` / `cuda`) plus CPU, through `llama-cpp-4` bindings.
-- **In-Process Inference**: Exposes `LocalLlmProvider` implementing `LlmProvider` without external network calls.
+## Design rationale
+
+- **Why a provider trait instead of a concrete client type**: `LlmProvider`/`EmbeddingProvider` let cloud providers (OpenAI-compatible), local GGUF inference, and out-of-process plugin providers (via IPC) all satisfy the same interface, so `ene-mind`/`ene-runtime` code that streams a completion or embeds text does not need to know which backend is serving the request.
+- **Why local inference is a separate crate**: `llama-cpp-4` pulls in GPU backend build complexity (`vulkan`/`cuda` Cargo features) that cloud-only deployments don't need; splitting it out keeps `ene-ai` lightweight for consumers that only use remote providers.
+
+## API reference
+
+Struct and method signatures are not duplicated here — they drift. Generate rustdoc for the authoritative, current API:
+
+```sh
+cargo doc -p ene-ai --open
+cargo doc -p ene-ai-local --open
+```
+
+Start at the `LlmProvider` / `EmbeddingProvider` traits in `ene-ai`.
 
 ---
 
-## Related Links
+## Related
 - [Configuration Reference](../configuration.md)
 - [System Architecture](../architecture.md)

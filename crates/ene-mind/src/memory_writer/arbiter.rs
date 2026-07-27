@@ -7,9 +7,10 @@
 
 use std::collections::HashMap;
 
-use ene_store::{
-    AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemorySalience, MemoryScope,
-    MemorySource, MemoryStatus, MemoryStore, NewMemoryItem,
+use ene_core::{
+    AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemoryPort, MemorySalience,
+    MemoryScope, MemorySource, MemoryStatus, NewMemoryItem, PendingCandidate,
+    PendingCandidateStatus,
 };
 use tracing::debug;
 use unicode_normalization::UnicodeNormalization;
@@ -237,7 +238,7 @@ impl MemoryArbiter {
 
     /// Load active memories, evaluate candidates, and apply decisions.
     pub async fn arbitrate_and_apply(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         candidates: &[MemoryCandidate],
         ctx: &ArbiterContext<'_>,
     ) -> Result<Vec<AppliedDecision>, CognitionError> {
@@ -253,7 +254,7 @@ impl MemoryArbiter {
             let items = store
                 .get_typed_memories_by_character(ctx.character_id, Some(*kind), 10_000, 0)
                 .await
-                .map_err(CognitionError::Memory)?;
+                .map_err(CognitionError::MemoryPort)?;
             existing.extend(items);
         }
 
@@ -277,7 +278,7 @@ impl MemoryArbiter {
     /// of each persisted decision so the self-reflection pipeline (#210) can
     /// score interaction outcomes by user sentiment.
     pub async fn apply_decisions(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         decisions: &[CandidateDecision],
         ctx: &ArbiterContext<'_>,
     ) -> Result<Vec<AppliedDecision>, CognitionError> {
@@ -560,7 +561,7 @@ impl MemoryArbiter {
     }
 
     async fn apply_one(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         decision: &CandidateDecision,
         ctx: &ArbiterContext<'_>,
     ) -> Result<AppliedDecision, CognitionError> {
@@ -570,7 +571,7 @@ impl MemoryArbiter {
                 let id = store
                     .insert_typed_memory(item)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: Some(id),
@@ -585,7 +586,7 @@ impl MemoryArbiter {
                 let id = store
                     .supersede_typed_memory(new_item, *superseded_id)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: Some(id),
@@ -597,7 +598,7 @@ impl MemoryArbiter {
                 let updated = store
                     .set_memory_status(*memory_id, MemoryStatus::UserDeleted)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: None,
@@ -609,7 +610,7 @@ impl MemoryArbiter {
                 let updated = store
                     .set_memory_status(*memory_id, MemoryStatus::Disputed)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: None,
@@ -620,7 +621,7 @@ impl MemoryArbiter {
             ArbiterAction::AskConfirmationLater => {
                 // Defer the candidate to the user-approval queue (#174) so it
                 // can be reviewed and persisted later instead of being dropped.
-                let pending = ene_store::PendingCandidate {
+                let pending = PendingCandidate {
                     id: 0,
                     character_id: ctx.character_id.to_string(),
                     user_id: ctx.user_id.to_string(),
@@ -631,11 +632,11 @@ impl MemoryArbiter {
                     reason_detail: decision.reason.detail.clone(),
                     existing_memory_title: None,
                     source_quote: decision.candidate.source_quote.clone(),
-                    status: ene_store::PendingCandidateStatus::Pending,
+                    status: PendingCandidateStatus::Pending,
                 };
                 let inserted_id = store
                     .insert_pending_candidate(pending)
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 tracing::debug!(
                     component = "MemoryArbiter",
                     character_id = %ctx.character_id,
@@ -888,6 +889,7 @@ mod tests {
     use super::*;
     use crate::memory_writer::candidate::ToolResultSummary;
     use chrono::Utc;
+    use ene_store::MemoryStore;
 
     fn ctx(turn: TurnInput<'_>) -> ArbiterContext<'_> {
         ArbiterContext {
@@ -1690,6 +1692,84 @@ mod tests {
         assert_eq!(mem.title, "project X");
         assert_eq!(mem.status, MemoryStatus::Active);
         assert_eq!(mem.source, MemorySource::Inferred);
+    }
+
+    /// Demonstrates the #270 decoupling: the arbiter's cognitive logic
+    /// (validation, dedup, contradiction resolution) runs against
+    /// `&dyn MemoryPort` and can be exercised with a plain in-memory test
+    /// double — no `SQLite`, no `ene_store::MemoryStore` — while still
+    /// covering the full persist → supersede flow through the trait.
+    #[tokio::test]
+    async fn arbitrate_and_apply_works_against_in_memory_port_without_sqlite() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+
+        let port = InMemoryMemoryPort::new();
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ctx(turn);
+
+        // First candidate persists as a brand-new memory.
+        let applied =
+            MemoryArbiter::arbitrate_and_apply(&port, &[sample_candidate(0.9)], &arbiter_ctx)
+                .await
+                .unwrap();
+        assert_eq!(applied.len(), 1);
+        assert!(matches!(
+            applied[0].decision.action,
+            ArbiterAction::Persist(_)
+        ));
+        let first_id = applied[0].inserted_id.expect("persisted id");
+
+        let stored = port.all_items();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].title, "project X");
+        assert_eq!(stored[0].status, MemoryStatus::Active);
+        assert_eq!(stored[0].source, MemorySource::Inferred);
+
+        // A higher-confidence candidate with different content for the same
+        // (title-adjacent) semantic key supersedes the first row — exercises
+        // the arbiter's contradiction-resolution path, not just insertion.
+        let mut stronger = sample_candidate(0.97);
+        stronger.content = "User is now working on project Y instead".to_string();
+        let semantic_matches = HashMap::from([(
+            0,
+            vec![SemanticMatch {
+                memory_id: first_id,
+                similarity: 0.9,
+                memory: stored[0].clone(),
+            }],
+        )]);
+        let arbiter_ctx_2 = ArbiterContext {
+            semantic_matches,
+            ..ctx(TurnInput {
+                user_message: "remember project X",
+                assistant_message: None,
+                tool_results: &[],
+            })
+        };
+        let applied_2 = MemoryArbiter::arbitrate_and_apply(&port, &[stronger], &arbiter_ctx_2)
+            .await
+            .unwrap();
+        assert_eq!(applied_2.len(), 1);
+        assert!(matches!(
+            applied_2[0].decision.action,
+            ArbiterAction::Supersede { .. }
+        ));
+
+        let final_items = port.all_items();
+        let old = final_items
+            .iter()
+            .find(|m| m.id == Some(first_id))
+            .expect("original row still present");
+        assert_eq!(old.status, MemoryStatus::Superseded);
+        assert!(
+            final_items
+                .iter()
+                .any(|m| m.status == MemoryStatus::Active && m.content.contains("project Y"))
+        );
     }
 
     #[tokio::test]

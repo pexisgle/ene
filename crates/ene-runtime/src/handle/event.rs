@@ -1,0 +1,392 @@
+//! Events broadcast from the actor to all consumers, plus actor status and
+//! read-only state snapshot types.
+//!
+//! ## Three-channel event bus (#272)
+//!
+//! Traffic used to ride a single 1024-capacity `broadcast` channel mixing
+//! three unrelated classes: lightweight ordered chat events, heavyweight
+//! `AudioChunk` PCM payloads, and turn-independent lifecycle notifications.
+//! Because `tokio::sync::broadcast` retains a per-subscriber buffer, a burst
+//! of audio chunks inflated every subscriber's buffer and could `Lagged` a
+//! slow chat subscriber for reasons entirely unrelated to chat volume. The
+//! bus is now split by traffic class:
+//!
+//! - **Chat bus** ([`EneEvent`] / [`EneEventReceiver`]) — `broadcast`,
+//!   capacity 1024. Lightweight, ordered, turn-scoped events. Multiple
+//!   subscribers via [`crate::EneHandle::subscribe`].
+//! - **Audio channel** ([`AudioChunk`] / [`AudioStreamReceiver`]) — bounded
+//!   `mpsc`, single-consumer by construction:
+//!   [`crate::EneHandle::take_audio_stream`] transfers ownership of the
+//!   receiver and returns `None` on every call after the first.
+//! - **Lifecycle bus** ([`LifecycleEvent`] / [`LifecycleReceiver`]) —
+//!   `broadcast`, small capacity. Turn-independent notifications. Multiple
+//!   subscribers via [`crate::EneHandle::subscribe_lifecycle`].
+
+use crate::diagnostics::MemoryQueryHandle;
+use crate::types::{RequestId, TurnId};
+use chrono::{DateTime, Utc};
+use ene_config::EneConfig;
+use ene_mind::{CardName, SessionId};
+use tokio::sync::{broadcast, mpsc};
+
+/// Lightweight, ordered, turn-scoped chat events emitted from the actor via
+/// the chat broadcast channel (#272).
+///
+/// Consumers (CLI, Bevy systems, logging) receive these through
+/// [`crate::EneHandle::subscribe`] which returns an [`EneEventReceiver`].
+/// `AudioChunk` (see [`crate::handle::AudioChunk`]) and the lifecycle
+/// variants (see [`LifecycleEvent`]) are intentionally not part of this
+/// enum — they ride their own dedicated channels.
+#[derive(Debug, Clone)]
+pub enum EneEvent {
+    /// A chunk of generated text from the LLM (markers stripped).
+    TextDelta {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// The raw text delta.
+        delta: String,
+    },
+    /// Presentation cues (expression / emote) for the active turn.
+    Performance {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// Cue list (usually one expression).
+        cues: Vec<ene_mind::PerformanceCue>,
+        /// How the cues were chosen.
+        source: ene_mind::CueSource,
+    },
+    /// A tool call has been requested by the LLM.
+    ToolCallStart {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// The tool name (e.g. "fs.write").
+        name: String,
+        /// JSON-encoded arguments.
+        arguments: String,
+    },
+    /// A tool call has completed with its result.
+    ToolCallResult {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// The tool name.
+        name: String,
+        /// The tool's output as a string.
+        result: String,
+    },
+    /// A destructive operation requires user approval before execution.
+    PermissionRequired {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// Unique identifier for this permission request.
+        request_id: RequestId,
+        /// The category of operation (e.g. "write", "delete").
+        action: String,
+        /// The target resource path.
+        target: String,
+        /// Human-readable description of what will be done.
+        description: String,
+    },
+    /// An interactive tool needs user input (e.g. a clarifying question).
+    UserInputRequired {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// Unique identifier for this input request.
+        request_id: RequestId,
+        /// The prompt describing the question, options, and free-text allowance.
+        prompt: ene_plugin_proto::UserInputPrompt,
+    },
+    /// Thin signal that rolling context compression completed for this turn.
+    ContextCompressed {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// Compression level label (e.g. "scene").
+        level: String,
+    },
+    /// Terminal event for a run: emitted exactly once after `after_turn` completes.
+    Terminal {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+        /// Why the run terminated.
+        reason: TerminalReason,
+    },
+    /// A turn has started streaming (after provider open succeeds).
+    TurnStarted {
+        /// Active turn.
+        turn: TurnId,
+        /// Who initiated this turn.
+        origin: crate::types::TurnOrigin,
+    },
+}
+
+/// A chunk of synthesized PCM audio from the TTS pipeline (#272).
+///
+/// Delivered over a dedicated bounded `mpsc` channel — not the chat
+/// broadcast bus — because the PCM payload is heavyweight relative to chat
+/// events and the playback path is single-consumer by nature. Obtain the
+/// receiving end via [`crate::EneHandle::take_audio_stream`], which hands
+/// over ownership and returns `None` on every call after the first.
+#[derive(Debug, Clone)]
+pub struct AudioChunk {
+    /// Active turn.
+    pub turn: TurnId,
+    /// Who initiated this turn.
+    pub origin: crate::types::TurnOrigin,
+    /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.
+    pub pcm: Vec<f32>,
+    /// Sample rate in Hz (e.g. 24000).
+    pub sample_rate: u32,
+    /// Whether this is the final audio chunk for the turn.
+    pub is_final: bool,
+}
+
+/// Turn-independent lifecycle notifications emitted from the actor via the
+/// lifecycle broadcast channel (#272).
+///
+/// Consumers receive these through [`crate::EneHandle::subscribe_lifecycle`]
+/// which returns a [`LifecycleReceiver`]. Separated from [`EneEvent`]
+/// because these are not turn-scoped chat traffic: `StatusChanged` and
+/// `PendingCandidateAvailable` can fire between turns, and
+/// `ToolBackgroundCompleted` fires asynchronously after the originating
+/// turn has already completed.
+#[derive(Debug, Clone)]
+pub enum LifecycleEvent {
+    /// The actor's status changed.
+    StatusChanged {
+        /// New status value.
+        status: EneStatus,
+    },
+    /// New pending memory candidates are available for review (#174).
+    PendingCandidateAvailable {
+        /// Number of pending candidates.
+        count: usize,
+    },
+    /// A deferred (background) tool task has reached a terminal state (#196).
+    ///
+    /// Emitted asynchronously after the originating turn has completed, once
+    /// the background-capable tool reports that the task finished, failed, or
+    /// was cancelled. Consumers can use `task_id` to correlate this with the
+    /// earlier `DeferredAccepted` result returned to the LLM.
+    ToolBackgroundCompleted {
+        /// The tool name that owns the background task.
+        tool_name: String,
+        /// The `task_id` returned by the deferred call acceptance.
+        task_id: String,
+        /// Terminal status of the background task.
+        status: ene_plugin_proto::DeferredStatus,
+    },
+}
+
+/// Reason a single run terminated.
+///
+/// Used in [`EneEvent::Terminal`]. Exactly one of these is emitted per
+/// `EneCommand::Run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalReason {
+    /// The LLM stream completed normally (no more tool calls and the
+    /// provider finished the response).
+    Done,
+    /// The run terminated due to an error.
+    Failed {
+        /// Human-readable error description.
+        message: String,
+    },
+    /// The run was cancelled by the user via `EneCommand::Cancel`.
+    Cancelled,
+}
+
+/// A snapshot of the current actor state for read-only queries.
+#[derive(Clone)]
+pub struct EneStateSnapshot {
+    /// The loaded character card, if any.
+    pub character_card: Option<ene_config::CharacterCardV3>,
+    /// Conversation history (`ene_mind::HistoryEntry`).
+    pub history: Vec<ene_mind::HistoryEntry>,
+    /// A copy of the current configuration.
+    pub config: EneConfig,
+    /// Current session ID.
+    pub session_id: SessionId,
+    /// Character card name.
+    pub card_name: CardName,
+    /// Memory query handle (enabled only if memory is configured).
+    /// Prefer [`crate::EneDiagnostics::memory`] for new code.
+    pub memory: MemoryQueryHandle,
+    /// Current conversation turn count.
+    pub current_turn_count: u32,
+    /// When the session started (UTC).
+    pub session_started_at: DateTime<Utc>,
+}
+
+/// Current status of the actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EneStatus {
+    /// Not currently processing anything.
+    Idle,
+    /// An AI stream is running.
+    Running,
+    /// An error state (non-fatal).
+    Error,
+}
+
+/// Event receiver handle obtained from [`crate::EneHandle::subscribe`].
+///
+/// Wraps the broadcast receiver and provides a ergonomic interface for
+/// consuming events from the actor. On lag, emits
+/// [`crate::diagnostics::DiagnosticEvent::Lagged`] /
+/// [`crate::diagnostics::DiagnosticEvent::ResyncNeeded`] so gaps are never
+/// silent (#189).
+pub struct EneEventReceiver {
+    pub(super) inner: broadcast::Receiver<EneEvent>,
+    pub(super) diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
+}
+
+impl std::fmt::Debug for EneEventReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EneEventReceiver").finish()
+    }
+}
+
+impl EneEventReceiver {
+    fn note_lag(&self, skipped: u64) {
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::Lagged {
+                    channel: "events".to_string(),
+                    skipped,
+                }),
+        );
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
+                    channel: "events".to_string(),
+                }),
+        );
+    }
+
+    /// Non-blocking poll of the event stream.
+    pub fn try_recv(&mut self) -> Result<EneEvent, broadcast::error::TryRecvError> {
+        match self.inner.try_recv() {
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::TryRecvError::Lagged(n))
+            }
+            other => other,
+        }
+    }
+
+    /// Async receive, waiting for the next event.
+    pub async fn recv(&mut self) -> Result<EneEvent, broadcast::error::RecvError> {
+        match self.inner.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::RecvError::Lagged(n))
+            }
+            other => other,
+        }
+    }
+}
+
+/// Single-consumer receiver for the audio channel, obtained from
+/// [`crate::EneHandle::take_audio_stream`] (#272).
+///
+/// Wraps a bounded `mpsc::Receiver<AudioChunk>`. Unlike [`EneEventReceiver`]
+/// / [`LifecycleReceiver`] there is no lag/lossiness to report here: the
+/// bounded channel applies back-pressure to the TTS pipeline instead
+/// (dropping only non-final chunks under sustained back-pressure — see
+/// `send_audio_chunk` in `streaming_cognitive.rs`), so a consumer that keeps
+/// draining never silently loses the terminal `is_final` marker.
+pub struct AudioStreamReceiver {
+    pub(super) inner: mpsc::Receiver<AudioChunk>,
+}
+
+impl std::fmt::Debug for AudioStreamReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioStreamReceiver").finish()
+    }
+}
+
+impl AudioStreamReceiver {
+    /// Non-blocking poll of the audio stream.
+    pub fn try_recv(&mut self) -> Result<AudioChunk, mpsc::error::TryRecvError> {
+        self.inner.try_recv()
+    }
+
+    /// Async receive, waiting for the next audio chunk. Returns `None` once
+    /// every sender has been dropped (actor shutdown).
+    pub async fn recv(&mut self) -> Option<AudioChunk> {
+        self.inner.recv().await
+    }
+}
+
+/// Lifecycle event receiver handle obtained from
+/// [`crate::EneHandle::subscribe_lifecycle`] (#272).
+///
+/// Mirrors [`EneEventReceiver`]'s lag-reporting behavior on its own
+/// `"lifecycle"` diagnostics channel tag so gaps here are never silent
+/// either, even though lifecycle traffic is low-frequency and unlikely to
+/// ever overflow its small buffer.
+pub struct LifecycleReceiver {
+    pub(super) inner: broadcast::Receiver<LifecycleEvent>,
+    pub(super) diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
+}
+
+impl std::fmt::Debug for LifecycleReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LifecycleReceiver").finish()
+    }
+}
+
+impl LifecycleReceiver {
+    fn note_lag(&self, skipped: u64) {
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::Lagged {
+                    channel: "lifecycle".to_string(),
+                    skipped,
+                }),
+        );
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
+                    channel: "lifecycle".to_string(),
+                }),
+        );
+    }
+
+    /// Non-blocking poll of the lifecycle stream.
+    pub fn try_recv(&mut self) -> Result<LifecycleEvent, broadcast::error::TryRecvError> {
+        match self.inner.try_recv() {
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::TryRecvError::Lagged(n))
+            }
+            other => other,
+        }
+    }
+
+    /// Async receive, waiting for the next lifecycle event.
+    pub async fn recv(&mut self) -> Result<LifecycleEvent, broadcast::error::RecvError> {
+        match self.inner.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::RecvError::Lagged(n))
+            }
+            other => other,
+        }
+    }
+}

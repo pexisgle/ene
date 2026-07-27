@@ -686,7 +686,7 @@ impl CharacterSettings {
         self.store.read().with_config_mut(|c| {
             if let Ok(mut d) = c.get_section::<DesktopSection>() {
                 d.graphics = graphics;
-                let _ = c.set_section(&d);
+                drop(c.set_section(&d));
             }
         });
     }
@@ -695,7 +695,7 @@ impl CharacterSettings {
         self.store.read().with_config_mut(|c| {
             if let Ok(mut d) = c.get_section::<DesktopSection>() {
                 d.language = language;
-                let _ = c.set_section(&d);
+                drop(c.set_section(&d));
             }
         });
     }
@@ -704,7 +704,7 @@ impl CharacterSettings {
         self.store.read().with_config_mut(|c| {
             if let Ok(mut d) = c.get_section::<DesktopSection>() {
                 d.mic_device = mic_device;
-                let _ = c.set_section(&d);
+                drop(c.set_section(&d));
             }
         });
     }
@@ -870,7 +870,7 @@ impl CharacterSettings {
         self.with_config_mut(|c| {
             if let Ok(mut mind) = c.get_section::<ene_mind::MindConfig>() {
                 mind.emotion.classifier_language = lang.into();
-                let _ = c.set_section(&mind);
+                drop(c.set_section(&mind));
             }
         });
     }

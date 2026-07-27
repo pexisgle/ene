@@ -1,62 +1,38 @@
-# `ene-runtime` — API Reference
+# `ene-runtime`
 
-> **Crate**: `ene-runtime` | **Role**: Actor-based host facade & system turn engine
+> **Crate**: `ene-runtime` | **Role**: Actor-based host facade & turn engine
 
-`ene-runtime` is the primary entry point for applications (`ene-cli`, `ene-desktop`) embedding Ene. It coordinates turn execution, prompt composition (`ene-mind`), memory storage (`ene-store`), plugin supervision (`ene-plugin-host`), and DB IPC socket serving.
+`ene-runtime` is the primary entry point for applications (`ene-cli`, `ene-desktop`) embedding Ene. It owns `EneHandle`, the thread-safe facade that coordinates turn execution, prompt composition (`ene-mind`), memory storage (`ene-store`), plugin supervision (`ene-plugin-host`), and the tool DB IPC socket server.
 
 ---
 
-## Key Types & Methods
+## Architectural boundaries
 
-### `EneHandle`
-The thread-safe handle returned when opening Ene:
+- `EneHandle`'s public methods are non-blocking channel sends or oneshot async requests into a single-threaded actor (`handle::actor::TurnActor`); they never touch shared mutable state directly.
+- Read-only session/candidate queries and screen-image vision summarization bypass the actor mailbox entirely and talk to `ene-store` / the vision model directly — they do not compete with turn-execution commands for actor throughput.
+- The event bus is split into three dedicated channels by traffic class, not one: a `broadcast` chat bus (`EneEvent`), a bounded single-consumer `mpsc` audio channel (`AudioChunk`), and a small-capacity `broadcast` lifecycle bus (`LifecycleEvent`). A burst on one channel cannot lag or starve consumers of another.
+- The stable public API v1 contract lives entirely in `public_api` (`PublicApiError`, `PublicChatEvent`, `PublicLifecycleEvent`, `PublicSessionMeta`, `PublicExportedMessage`, `API_VERSION`). No `ene-store` / `ene-mind` / `ene-plugin-proto` type appears in a `Public*` type's fields; internal error enums project into `PublicApiError`'s stable categories via `From` impls, so adding an internal error variant does not break the contract.
+- `message_builder` and `streaming` are intentionally `#[doc(hidden)]` — not part of the API v1 contract, kept visible only for the CLI debug command and integration tests.
 
-```rust
-pub struct EneHandle { /* ... */ }
+## Design rationale
 
-impl EneHandle {
-    /// Opens the Ene runtime with specified configuration and character card.
-    pub async fn open(config: EneConfig, card: CharacterCard) -> Result<Self, EneRuntimeError>;
+- **Why an actor model**: turn execution needs strictly serialized mutation of shared state (active turn, undo stack, permission grants) without exposing raw locks across an async, potentially multi-consumer API. A single-threaded actor mailbox gives that serialization for free and keeps `EneHandle` cheaply cloneable.
+- **Why panic isolation matters here**: `ene-desktop` hosts the GUI, the actor, LLM streaming, and audio in one process. Every dispatched command and background task runs through `catch_unwind`-based isolation so a panic in one command surfaces as a diagnostic event instead of taking down the whole process. This depends on the workspace *not* setting `panic = "abort"` in release profiles — see `docs/architecture.md` §4 for the full mechanism and why that build-configuration detail is load-bearing.
+- **Why the event bus was split into three channels**: a single mixed `broadcast` channel let heavyweight `AudioChunk` PCM payloads inflate every chat subscriber's buffer and lag them for reasons unrelated to chat volume. Separating by traffic class removes that coupling.
+- **Why read-only queries bypass the actor**: session listing/export/search and vision summarization don't touch turn-execution-critical state, so routing them through the same mailbox as `Run`/`Cancel` would add avoidable head-of-line blocking.
 
-    /// Initiates a conversation turn (single-flight execution shell).
-    pub fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError>;
+## API reference
 
-    /// Cancels an in-flight conversation turn.
-    pub fn cancel(&self, turn_id: TurnId) -> Result<(), CancelError>;
+Struct and method signatures are not duplicated here — they drift. Generate rustdoc for the authoritative, current API:
 
-    /// Subscribes to the live chat event stream (TokenStream, Performance, Terminal).
-    pub fn subscribe(&self) -> broadcast::Receiver<EneEvent>;
-
-    /// Obtains async diagnostics inspection interface.
-    pub fn diagnostics(&self) -> DiagnosticsHandle;
-
-    /// Shuts down the runtime and flushes background memory writers.
-    pub async fn shutdown(self) -> Result<(), EneRuntimeError>;
-}
+```sh
+cargo doc -p ene-runtime --open
 ```
 
-### `EneEvent`
-Live chat events broadcast during a turn:
-
-```rust
-pub enum EneEvent {
-    TurnStarted { turn_id: TurnId },
-    TokenStream { chunk: String },
-    Performance { cue: PerformanceCue },
-    ToolCallStarted { tool_name: String },
-    ToolCallFinished { tool_name: String },
-    Terminal { turn_id: TurnId, status: TurnStatus },
-}
-```
+Start at `EneHandle`, then `handle::EneEvent` and `handle::LifecycleEvent` for the event bus.
 
 ---
 
-## DB IPC Server (`DbServer`)
-
-`ene-runtime` opens a local Unix Domain Socket (UDS) server that allows stateful tool sub-processes (`ene-plugin-fs`, `ene-plugin-utility`) to execute scoped CRUD operations on `undo.db` and `todo.db` via `ene-plugin-db`.
-
----
-
-## Related Links
+## Related
 - [System Architecture](../architecture.md)
 - [Turns & Sessions](../concepts/turn-and-session.md)

@@ -160,7 +160,7 @@ pub async fn process_stream(
                     _ => PermissionDecision::Deny,
                 };
 
-                let _ = handle.decide_permission(request_id, decision);
+                drop(handle.decide_permission(request_id, decision));
                 tracing::info!("Permission decision submitted; resuming processing");
             }
             Ok(EneEvent::UserInputRequired {
@@ -245,15 +245,9 @@ pub async fn process_stream(
                 } else {
                     UserInputResponse::Multi(answers)
                 };
-                let _ = handle.submit_user_input(request_id, decision);
+                drop(handle.submit_user_input(request_id, decision));
                 tracing::info!("User input submitted; resuming processing");
             }
-            Ok(
-                EneEvent::ToolBackgroundCompleted { .. }
-                | EneEvent::StatusChanged { .. }
-                | EneEvent::AudioChunk { .. }
-                | EneEvent::PendingCandidateAvailable { .. },
-            ) => {}
             Err(e) => {
                 tracing::warn!(error = ?e, "Event receive error");
                 break;

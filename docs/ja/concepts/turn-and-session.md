@@ -15,18 +15,26 @@
 - 進行中の LLM トークン生成を停止するには、ホストは `EneHandle::cancel(turn_id)` を呼び出します。
 
 ### イベントバス構造
-実行中、 `ene-runtime` はクリーンでユーザー向けのイベントをチャネル (`EneEvent`) 経由でブロードキャストします：
+`ene-runtime` はトラフィックの性質ごとに3系統の専用チャネルへイベントを分離しており、一方のチャネルのバーストが他方の subscriber を lag させたり飢餓状態にしたりすることはありません。
 
-```text
-EneEvent::TurnStarted { turn_id }
-  │
-  ├── EneEvent::TokenStream { chunk }        (LLM ストリーミングトークン)
-  ├── EneEvent::Performance { cue }           (アバターの表情・動作演出)
-  ├── EneEvent::ToolCallStarted { tool_name } (ツール呼び出し開始)
-  ├── EneEvent::ToolCallFinished { tool_name }
-  │
-  └── EneEvent::Terminal { turn_id, status } (ターン完了、セッション更新完了)
-```
+- **チャットバス** (`EneEvent`、`EneHandle::subscribe` 経由) — 軽量・順序保証付き・ターンスコープのチャットイベントを流す `broadcast` チャネル（容量1024）。複数 subscriber を許容します。以下は1ターン分のチャットバスのイベント順序です（フィールドは省略しています。正確なバリアント一覧とフィールドは `cargo doc -p ene-runtime --open` で `handle::EneEvent` を参照してください）。
+
+  ```text
+  EneEvent::TurnStarted { turn, origin }
+    │
+    ├── EneEvent::TextDelta { turn, origin, delta }          (LLM ストリーミングテキスト)
+    ├── EneEvent::Performance { turn, origin, cues, source }  (アバターの表情・動作演出)
+    ├── EneEvent::ToolCallStart { turn, origin, name, arguments }
+    ├── EneEvent::ToolCallResult { turn, origin, name, result }
+    ├── EneEvent::PermissionRequired { turn, origin, request_id, .. }
+    ├── EneEvent::UserInputRequired { turn, origin, request_id, prompt }
+    ├── EneEvent::ContextCompressed { turn, origin, level }
+    │
+    └── EneEvent::Terminal { turn, origin, reason }          (ターン完了、セッション更新完了)
+  ```
+
+- **音声チャネル** (`AudioChunk`、`EneHandle::take_audio_stream` 経由) — 合成された TTS PCM を流す bounded `mpsc` チャネル。単一コンシューマ専用で、最初の呼び出しで receiver の所有権が移譲され、以降の呼び出しはすべて `None` を返します。PCM ペイロードはチャットイベントに比べて重量級であり、同居させると全チャットsubscriberの `broadcast` バッファを膨張させてしまうため、チャットバスから分離しています。
+- **ライフサイクルバス** (`LifecycleEvent`、`EneHandle::subscribe_lifecycle` 経由) — `StatusChanged` / `PendingCandidateAvailable` / `ToolBackgroundCompleted` といったターン非依存の通知を流す、小容量の `broadcast` チャネル。チャットバスと同様に複数 subscriber を許容します。
 
 ---
 
@@ -64,13 +72,14 @@ EneEvent::TurnStarted { turn_id }
 
 ## 4. 感情モデル (PAD)
 
-Ene は 3 次元 **PAD (Pleasure-Arousal-Dominance)** 空間を使用してキャラクターの感情状態をモデル化します：
+Ene は PAD (**Pleasure-Arousal-Dominance**) 由来の空間を使用してキャラクターの感情状態をモデル化します。実体は `ene-core::AffectState` です：
 
-- **Pleasure ($P \in [-1, 1]$)**: 快・不快の評価。
-- **Arousal ($A \in [-1, 1]$)**: 覚醒・沈静のエネルギープラトー。
-- **Dominance ($D \in [-1, 1]$)**: 支配・服従の自信レベル。
+- **Valence ($\in [-1, 1]$)**: 快・不快の評価 (Pleasure 軸)。
+- **Arousal ($\in [-1, 1]$)**: 覚醒・沈静のエネルギーレベル。
+- **Dominance ($\in [-1, 1]$)**: 支配・服従の自信レベル。
+- さらに trust / affinity / irritation / curiosity / fatigue といった、古典的な3軸 PAD モデルを拡張する次元があります。全フィールドは `ene_core::AffectState` (`cargo doc -p ene-core --open`) を参照してください。
 
 ### 感情の動態
 - **自然減衰**: 時間経過に伴い、感情値は基準値に向かってゆるやかに減衰します。
-- **感情分類**: 応答テキストおよびユーザー入力は `PadClassifier` を介して感情値を微変動させます。
-- **Performance キュー**: `PadEmotion` は `PerformanceCue` 表現 (Happy, Angry, Surprised, Thinking など) にマッピングされ、 `ene-desktop` の VRM 再生に送られます。
+- **感情分類**: 応答テキストおよびユーザー入力は `ene-mind` の `EmotionEngine` を介して感情値を微変動させます。
+- **Performance キュー**: `ene-mind` の出力調停が感情状態を `PerformanceCue` (表情・動作) にマッピングし、`EneEvent::Performance` として `ene-desktop`/VRM 再生に送られます。

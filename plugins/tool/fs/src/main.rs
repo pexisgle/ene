@@ -25,6 +25,10 @@
     clippy::option_if_let_else,
     reason = "tool IPC handlers and path helpers favor local clarity over nursery lints"
 )]
+#![expect(
+    clippy::print_stderr,
+    reason = "standalone plugin process reports a fatal startup error to stderr before exit"
+)]
 #![cfg_attr(
     test,
     expect(

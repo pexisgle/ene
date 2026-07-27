@@ -1,6 +1,6 @@
 //! Session, conversation-log, and export/import queries.
 
-use super::{ConversationLogEntry, MemoryError, MemoryStore};
+use super::{ConversationLogEntry, EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::Utc;
 use sea_orm::sea_query::{Expr, OnConflict};
@@ -25,7 +25,7 @@ impl MemoryStore {
         card_name: &str,
         role: &str,
         content: &str,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -52,7 +52,7 @@ impl MemoryStore {
         card_name: &str,
         user_message: &str,
         assistant_response: &str,
-    ) -> Result<(i64, i64), MemoryError> {
+    ) -> Result<(i64, i64), EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -112,7 +112,7 @@ impl MemoryStore {
     pub async fn get_logs_by_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<ConversationLogEntry>, MemoryError> {
+    ) -> Result<Vec<ConversationLogEntry>, EneMemoryError> {
         let rows = entities::conversation_logs::Entity::find()
             .filter(entities::conversation_logs::Column::SessionId.eq(session_id))
             .order_by_asc(entities::conversation_logs::Column::CreatedAt)
@@ -139,7 +139,7 @@ impl MemoryStore {
     pub async fn upsert_session(
         &self,
         meta: &crate::session::NewSessionMeta,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveValue::Set;
 
         let now = Utc::now();
@@ -166,7 +166,7 @@ impl MemoryStore {
         let row = self
             .get_session(&meta.session_id)
             .await?
-            .ok_or_else(|| MemoryError::Other("session row missing after upsert".to_string()))?;
+            .ok_or_else(|| EneMemoryError::Other("session row missing after upsert".to_string()))?;
         Ok(row.id)
     }
 
@@ -177,7 +177,7 @@ impl MemoryStore {
         &self,
         session_id: &str,
         turn_count: i64,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<(), EneMemoryError> {
         entities::session::Entity::update_many()
             .col_expr(
                 entities::session::Column::UpdatedAt,
@@ -198,7 +198,7 @@ impl MemoryStore {
     pub async fn get_session(
         &self,
         session_id: &str,
-    ) -> Result<Option<crate::session::SessionMeta>, MemoryError> {
+    ) -> Result<Option<crate::session::SessionMeta>, EneMemoryError> {
         let row = entities::session::Entity::find()
             .filter(entities::session::Column::SessionId.eq(session_id))
             .one(&self.db)
@@ -214,7 +214,7 @@ impl MemoryStore {
         &self,
         include_archived: bool,
         limit: usize,
-    ) -> Result<Vec<crate::session::SessionMeta>, MemoryError> {
+    ) -> Result<Vec<crate::session::SessionMeta>, EneMemoryError> {
         let mut query = entities::session::Entity::find();
         if !include_archived {
             query = query.filter(entities::session::Column::Archived.eq(0));
@@ -235,7 +235,7 @@ impl MemoryStore {
         &self,
         session_id: &str,
         archived: bool,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<bool, EneMemoryError> {
         let res = entities::session::Entity::update_many()
             .col_expr(
                 entities::session::Column::Archived,
@@ -252,7 +252,7 @@ impl MemoryStore {
     pub async fn list_messages(
         &self,
         session_id: &str,
-    ) -> Result<Vec<crate::export::ExportedMessage>, MemoryError> {
+    ) -> Result<Vec<crate::export::ExportedMessage>, EneMemoryError> {
         let rows = entities::conversation_logs::Entity::find()
             .filter(entities::conversation_logs::Column::SessionId.eq(session_id))
             .order_by_asc(entities::conversation_logs::Column::CreatedAt)
@@ -272,7 +272,7 @@ impl MemoryStore {
         query: &str,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<(String, crate::export::ExportedMessage)>, MemoryError> {
+    ) -> Result<Vec<(String, crate::export::ExportedMessage)>, EneMemoryError> {
         if query.is_empty() {
             return Ok(Vec::new());
         }
@@ -318,15 +318,15 @@ impl MemoryStore {
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::Other`] if the session does not exist.
+    /// Returns [`EneMemoryError::Other`] if the session does not exist.
     pub async fn build_export(
         &self,
         session_id: &str,
-    ) -> Result<crate::export::SessionExport, MemoryError> {
+    ) -> Result<crate::export::SessionExport, EneMemoryError> {
         let session = self
             .get_session(session_id)
             .await?
-            .ok_or_else(|| MemoryError::Other(format!("session not found: {session_id}")))?;
+            .ok_or_else(|| EneMemoryError::Other(format!("session not found: {session_id}")))?;
 
         let messages = self
             .list_messages(session_id)
@@ -361,7 +361,7 @@ impl MemoryStore {
     pub async fn import_export(
         &self,
         export: &crate::export::SessionExport,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 

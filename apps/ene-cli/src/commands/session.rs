@@ -3,6 +3,19 @@ use crate::{context::AppContext, style};
 use async_trait::async_trait;
 use ene_config::Truncate;
 
+/// Map an API v1 [`ene_runtime::PublicApiError`] onto the CLI's own error
+/// type, preserving the actor-dead vs. execution-failure distinction that
+/// used to come from the double-`Result` (`ActorDeadError` vs.
+/// `ene_store::EneMemoryError`) `EneHandle` returned before #269.
+fn session_error(e: ene_runtime::PublicApiError) -> CliError {
+    match e {
+        ene_runtime::PublicApiError::ActorDead => {
+            CliError::ActorError("actor is no longer running".to_string())
+        }
+        other => CliError::ExecutionFailed(other.to_string()),
+    }
+}
+
 pub struct SessionCommand;
 
 #[async_trait]
@@ -62,10 +75,10 @@ impl CliCommand for SessionCommand {
 async fn handle_list(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
     let sessions = ctx
         .handle
-        .list_sessions(false, 50)
+        .sessions()
+        .list(false, 50)
         .await
-        .map_err(|e| CliError::ActorError(e.to_string()))?
-        .map_err(|e| CliError::ExecutionFailed(format!("Failed to list sessions: {e}")))?;
+        .map_err(session_error)?;
 
     if sessions.is_empty() {
         println!("No stored sessions.");
@@ -96,10 +109,10 @@ async fn handle_export(ctx: &AppContext, session_id: &str) -> Result<CommandOutc
     }
     let json = ctx
         .handle
-        .export_session(session_id)
+        .sessions()
+        .export(session_id)
         .await
-        .map_err(|e| CliError::ActorError(e.to_string()))?
-        .map_err(|e| CliError::ExecutionFailed(format!("Failed to export session: {e}")))?;
+        .map_err(session_error)?;
 
     println!("{json}");
     Ok(CommandOutcome::Continue)
@@ -117,10 +130,10 @@ async fn handle_import(ctx: &AppContext, path: &str) -> Result<CommandOutcome, C
 
     let id = ctx
         .handle
-        .import_session(json)
+        .sessions()
+        .import(&json)
         .await
-        .map_err(|e| CliError::ActorError(e.to_string()))?
-        .map_err(|e| CliError::ExecutionFailed(format!("Failed to import session: {e}")))?;
+        .map_err(session_error)?;
 
     println!(
         "{}",
@@ -137,10 +150,10 @@ async fn handle_search(ctx: &AppContext, query: &str) -> Result<CommandOutcome, 
     }
     let matches = ctx
         .handle
-        .search_sessions(query, 20, 0)
+        .sessions()
+        .search(query, 20, 0)
         .await
-        .map_err(|e| CliError::ActorError(e.to_string()))?
-        .map_err(|e| CliError::ExecutionFailed(format!("Failed to search sessions: {e}")))?;
+        .map_err(session_error)?;
 
     if matches.is_empty() {
         println!("No matching messages.");
@@ -174,10 +187,10 @@ async fn handle_archive(
     }
     let updated = ctx
         .handle
-        .archive_session(session_id, archived)
+        .sessions()
+        .set_archived(session_id, archived)
         .await
-        .map_err(|e| CliError::ActorError(e.to_string()))?
-        .map_err(|e| CliError::ExecutionFailed(format!("Failed to update session: {e}")))?;
+        .map_err(session_error)?;
 
     if updated {
         let verb = if archived { "Archived" } else { "Unarchived" };

@@ -45,7 +45,7 @@ fn http_client() -> Result<&'static reqwest::Client, PluginError> {
         .build()
         .map_err(|e| PluginError::provider(format!("failed to build HTTP client: {e}")))?;
     // A racing task may have initialized first; either client is equivalent.
-    let _ = HTTP_CLIENT.set(client);
+    drop(HTTP_CLIENT.set(client));
     HTTP_CLIENT
         .get()
         .ok_or_else(|| PluginError::provider("HTTP client initialization failed"))
@@ -366,11 +366,12 @@ async fn stream_sse_response(
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
             Err(e) => {
-                let _ = tx
-                    .send(Err(PluginError::provider(format!(
+                drop(
+                    tx.send(Err(PluginError::provider(format!(
                         "stream read error: {e}"
                     ))))
-                    .await;
+                    .await,
+                );
                 return;
             }
         };
@@ -403,7 +404,7 @@ async fn stream_sse_response(
                             }
                         }
                         Some(Err(e)) => {
-                            let _ = tx.send(Err(e)).await;
+                            drop(tx.send(Err(e)).await);
                             return;
                         }
                         None => {}

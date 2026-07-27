@@ -300,8 +300,9 @@ impl LocalTtsProvider {
     ) -> Result<Self, AudioProviderError> {
         crate::ort_init::ensure_ort_init(ort_dylib_path)?;
 
-        // Auto-download missing model files if needed
-        let _ = ensure_kokoro_files_exist(model_path, voices_path);
+        // Auto-download missing model files if needed. Failure is handled by
+        // the file-existence check just below, which produces a proper error.
+        drop(ensure_kokoro_files_exist(model_path, voices_path));
 
         if !model_path.is_file() {
             return Err(AudioProviderError::Init(format!(
@@ -504,7 +505,7 @@ impl TtsProvider for LocalTtsProvider {
                     }
                 }
                 Err(e) => {
-                    let _ = tx.blocking_send(Err(e));
+                    drop(tx.blocking_send(Err(e)));
                 }
             }
         });

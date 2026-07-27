@@ -171,7 +171,7 @@ impl X11Context {
             })
             .collect();
         // `shape::rectangles` is fire-and-forget (no reply).
-        let _ = shape::rectangles(
+        drop(shape::rectangles(
             &self.conn,
             ShapeOp::SET,
             ShapeKind::INPUT,
@@ -180,7 +180,7 @@ impl X11Context {
             0,
             0,
             &xrects,
-        );
+        ));
     }
 
     /// Clear the shape input region (no input = full
@@ -231,7 +231,13 @@ impl X11Context {
             ]),
         };
         let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
-        let _ = x11rb::protocol::xproto::send_event(&self.conn, true, self.window, mask, event);
+        drop(x11rb::protocol::xproto::send_event(
+            &self.conn,
+            true,
+            self.window,
+            mask,
+            event,
+        ));
     }
 }
 

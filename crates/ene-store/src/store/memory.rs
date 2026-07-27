@@ -1,7 +1,7 @@
 //! Typed-memory, memory-embedding, memory-span, and pending-write queries.
 
 use super::{
-    ActiveSceneSummaryRow, MemoryError, MemoryStore, NaturalDecayReport, NewMemorySpan,
+    ActiveSceneSummaryRow, EneMemoryError, MemoryStore, NaturalDecayReport, NewMemorySpan,
     cosine_similarity_expr, cosine_similarity_filter, embedding_to_bytes, validate_embedding,
 };
 use crate::entities;
@@ -61,7 +61,7 @@ pub(super) fn strip_tags_footer(content: &str) -> &str {
 )]
 fn model_to_memory_item(
     m: entities::typed_memories::Model,
-) -> Result<crate::MemoryItem, MemoryError> {
+) -> Result<crate::MemoryItem, EneMemoryError> {
     Ok(crate::MemoryItem {
         id: Some(m.id),
         scope: crate::MemoryScope::from_db_str(&m.scope),
@@ -139,7 +139,7 @@ fn merge_hybrid_candidate(
 async fn list_session_ids_for_card_on_conn<C: ConnectionTrait>(
     conn: &C,
     card_name: &str,
-) -> Result<Vec<String>, MemoryError> {
+) -> Result<Vec<String>, EneMemoryError> {
     use sea_orm::QuerySelect;
 
     let rows = entities::conversation_logs::Entity::find()
@@ -166,7 +166,7 @@ impl MemoryStore {
         user_id: &str,
         payload_json: impl Into<String>,
         last_error: impl Into<String>,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use entities::pending_memory_writes::{ActiveModel, PendingMemoryWriteStatus};
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
@@ -196,7 +196,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         limit: usize,
-    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, MemoryError> {
+    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, EneMemoryError> {
         use entities::pending_memory_writes::{Column, Entity};
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
@@ -213,7 +213,7 @@ impl MemoryStore {
     pub async fn count_pending_memory_writes(
         &self,
         character_id: &str,
-    ) -> Result<(usize, usize), MemoryError> {
+    ) -> Result<(usize, usize), EneMemoryError> {
         use entities::pending_memory_writes::{Column, Entity, PendingMemoryWriteStatus};
         use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
@@ -237,7 +237,7 @@ impl MemoryStore {
     pub async fn schedule_pending_memory_writes_now(
         &self,
         character_id: &str,
-    ) -> Result<usize, MemoryError> {
+    ) -> Result<usize, EneMemoryError> {
         use entities::pending_memory_writes::{Column, Entity, PendingMemoryWriteStatus};
         use sea_orm::{EntityTrait, QueryFilter};
 
@@ -257,7 +257,7 @@ impl MemoryStore {
     pub async fn take_due_pending_memory_writes(
         &self,
         limit: usize,
-    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, MemoryError> {
+    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, EneMemoryError> {
         use entities::pending_memory_writes::{
             ActiveModel, Column, Entity, PendingMemoryWriteStatus,
         };
@@ -293,7 +293,7 @@ impl MemoryStore {
     }
 
     /// Mark a pending memory write as successfully applied and delete it (#240).
-    pub async fn complete_pending_memory_write(&self, id: i64) -> Result<(), MemoryError> {
+    pub async fn complete_pending_memory_write(&self, id: i64) -> Result<(), EneMemoryError> {
         use entities::pending_memory_writes::Entity;
         use sea_orm::EntityTrait;
 
@@ -306,12 +306,12 @@ impl MemoryStore {
         &self,
         id: i64,
         last_error: impl Into<String>,
-    ) -> Result<entities::pending_memory_writes::PendingMemoryWrite, MemoryError> {
+    ) -> Result<entities::pending_memory_writes::PendingMemoryWrite, EneMemoryError> {
         use entities::pending_memory_writes::{ActiveModel, Entity, PendingMemoryWriteStatus};
         use sea_orm::{ActiveModelTrait, EntityTrait};
 
         let Some(model) = Entity::find_by_id(id).one(&self.db).await? else {
-            return Err(MemoryError::Other(format!(
+            return Err(EneMemoryError::Other(format!(
                 "pending memory write id={id} not found"
             )));
         };
@@ -349,7 +349,7 @@ impl MemoryStore {
     pub async fn insert_typed_memory(
         &self,
         item: &crate::NewMemoryItem,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -389,7 +389,7 @@ impl MemoryStore {
     pub async fn get_typed_memory(
         &self,
         id: i64,
-    ) -> Result<Option<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Option<crate::MemoryItem>, EneMemoryError> {
         let maybe_model = entities::typed_memories::Entity::find_by_id(id)
             .one(&self.db)
             .await?;
@@ -406,7 +406,7 @@ impl MemoryStore {
         kind: Option<crate::MemoryKind>,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
         let mut query = entities::typed_memories::Entity::find()
@@ -434,7 +434,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         kind: Option<crate::MemoryKind>,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::{EntityTrait, PaginatorTrait, QueryFilter};
 
         let mut query = entities::typed_memories::Entity::find()
@@ -453,7 +453,7 @@ impl MemoryStore {
         character_id: &str,
         prefix: &str,
         limit: usize,
-    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
         let models = entities::typed_memories::Entity::find()
@@ -478,7 +478,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         source_ref: &str,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<bool, EneMemoryError> {
         Ok(self
             .get_active_typed_memory_by_source_ref(character_id, source_ref)
             .await?
@@ -490,7 +490,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         source_ref: &str,
-    ) -> Result<Option<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Option<crate::MemoryItem>, EneMemoryError> {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
         let model = entities::typed_memories::Entity::find()
@@ -515,7 +515,7 @@ impl MemoryStore {
         character_id: &str,
         prefixes: &[&str],
         keep_refs: &std::collections::HashSet<String>,
-    ) -> Result<usize, MemoryError> {
+    ) -> Result<usize, EneMemoryError> {
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
         let mut archived = 0usize;
@@ -557,7 +557,7 @@ impl MemoryStore {
     pub async fn search(
         &self,
         query: &crate::Query<'_>,
-    ) -> Result<Vec<crate::ScoredMemory>, MemoryError> {
+    ) -> Result<Vec<crate::ScoredMemory>, EneMemoryError> {
         use crate::search::{lexical_overlap_score, score_candidate};
         use crate::typed_memory::MemoryCandidateSource;
         use std::collections::HashMap;
@@ -758,7 +758,7 @@ impl MemoryStore {
         model_name: &str,
         limit: usize,
         similarity_threshold: f32,
-    ) -> Result<Vec<(crate::MemoryItem, f32)>, MemoryError> {
+    ) -> Result<Vec<(crate::MemoryItem, f32)>, EneMemoryError> {
         self.search_typed_memories_vector(
             query_embedding,
             character_id,
@@ -781,7 +781,7 @@ impl MemoryStore {
         statuses: &[&str],
         limit: usize,
         similarity_threshold: f32,
-    ) -> Result<Vec<(crate::MemoryItem, f32)>, MemoryError> {
+    ) -> Result<Vec<(crate::MemoryItem, f32)>, EneMemoryError> {
         #[derive(Debug, FromQueryResult)]
         struct SearchMemoryRow {
             id: i64,
@@ -911,7 +911,7 @@ impl MemoryStore {
         character_id: &str,
         user_id: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
         let mut query = entities::typed_memories::Entity::find()
@@ -938,7 +938,7 @@ impl MemoryStore {
     async fn get_typed_memories_by_commitment_ids(
         &self,
         commitment_ids: &[i64],
-    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
         use sea_orm::{EntityTrait, QueryFilter};
 
         if commitment_ids.is_empty() {
@@ -963,7 +963,7 @@ impl MemoryStore {
         character_id: &str,
         user_id: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
         use crate::search::tokenize;
         use sea_orm::{Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
@@ -1011,7 +1011,7 @@ impl MemoryStore {
         &self,
         new_item: &crate::NewMemoryItem,
         superseded_id: i64,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait, TransactionTrait};
 
         let txn = self.db.begin().await?;
@@ -1020,12 +1020,12 @@ impl MemoryStore {
             .one(&txn)
             .await?
             .ok_or_else(|| {
-                MemoryError::Other(format!("superseded memory id={superseded_id} not found"))
+                EneMemoryError::Other(format!("superseded memory id={superseded_id} not found"))
             })?;
 
         let old_status = crate::MemoryStatus::from_db_str(&old_model.status);
         if !is_supersedeable_status(old_status) {
-            return Err(MemoryError::Other(format!(
+            return Err(EneMemoryError::Other(format!(
                 "memory id={superseded_id} cannot be superseded (status={})",
                 old_model.status
             )));
@@ -1074,7 +1074,7 @@ impl MemoryStore {
     }
 
     /// Bump the access count and last-accessed timestamp for a typed memory.
-    pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, MemoryError> {
+    pub async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, EneMemoryError> {
         use sea_orm::ExprTrait;
 
         let now = Utc::now();
@@ -1098,7 +1098,7 @@ impl MemoryStore {
         &self,
         id: i64,
         new_status: crate::MemoryStatus,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<bool, EneMemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
 
         let maybe_model = entities::typed_memories::Entity::find_by_id(id)
@@ -1111,7 +1111,7 @@ impl MemoryStore {
 
         let current = crate::MemoryStatus::from_db_str(&model.status);
         if let Err(invalid) = crate::forgetting::validate_transition(current, new_status) {
-            return Err(MemoryError::InvalidTransition {
+            return Err(EneMemoryError::InvalidTransition {
                 from: invalid.from,
                 to: invalid.to,
             });
@@ -1130,7 +1130,7 @@ impl MemoryStore {
     }
 
     /// User-driven restore to [`MemoryStatus::Active`] (journal/CLI UX).
-    pub async fn user_restore_typed_memory(&self, id: i64) -> Result<bool, MemoryError> {
+    pub async fn user_restore_typed_memory(&self, id: i64) -> Result<bool, EneMemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
 
         let maybe_model = entities::typed_memories::Entity::find_by_id(id)
@@ -1143,7 +1143,7 @@ impl MemoryStore {
 
         let current = crate::MemoryStatus::from_db_str(&model.status);
         if let Err(invalid) = crate::forgetting::validate_user_restore(current) {
-            return Err(MemoryError::InvalidTransition {
+            return Err(EneMemoryError::InvalidTransition {
                 from: invalid.from,
                 to: invalid.to,
             });
@@ -1159,7 +1159,7 @@ impl MemoryStore {
     }
 
     /// User-driven forget (`Active` → `UserDeleted`).
-    pub async fn user_forget_typed_memory(&self, id: i64) -> Result<bool, MemoryError> {
+    pub async fn user_forget_typed_memory(&self, id: i64) -> Result<bool, EneMemoryError> {
         self.set_memory_status(id, crate::MemoryStatus::UserDeleted)
             .await
     }
@@ -1168,7 +1168,7 @@ impl MemoryStore {
     pub async fn list_journal_memories(
         &self,
         options: &crate::MemoryJournalListOptions<'_>,
-    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
         let mut allowed_statuses = RECALLABLE_STATUSES.to_vec();
@@ -1208,7 +1208,7 @@ impl MemoryStore {
     }
 
     /// Set whether a typed memory is pinned (exempt from natural decay).
-    pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, MemoryError> {
+    pub async fn pin_typed_memory(&self, id: i64, pinned: bool) -> Result<bool, EneMemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
 
         let maybe_model = entities::typed_memories::Entity::find_by_id(id)
@@ -1234,7 +1234,7 @@ impl MemoryStore {
         user_id: Option<&str>,
         statuses: &[crate::MemoryStatus],
         limit: usize,
-    ) -> Result<Vec<crate::MemoryItem>, MemoryError> {
+    ) -> Result<Vec<crate::MemoryItem>, EneMemoryError> {
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
         if statuses.is_empty() {
@@ -1270,7 +1270,7 @@ impl MemoryStore {
         now: DateTime<Utc>,
         half_life_days: f64,
         limit: usize,
-    ) -> Result<NaturalDecayReport, MemoryError> {
+    ) -> Result<NaturalDecayReport, EneMemoryError> {
         let candidates = self
             .list_memories_for_decay(
                 character_id,
@@ -1313,7 +1313,7 @@ impl MemoryStore {
         &self,
         id: i64,
         days_ago: i64,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<bool, EneMemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
 
         let maybe_model = entities::typed_memories::Entity::find_by_id(id)
@@ -1340,7 +1340,7 @@ impl MemoryStore {
         model_name: &str,
         field: &str,
         embedding: &[f32],
-    ) -> Result<(), MemoryError> {
+    ) -> Result<(), EneMemoryError> {
         use sea_orm::sea_query::OnConflict;
         use sea_orm::{ActiveValue::Set, EntityTrait};
 
@@ -1380,7 +1380,7 @@ impl MemoryStore {
     pub async fn list_session_ids_for_card(
         &self,
         card_name: &str,
-    ) -> Result<Vec<String>, MemoryError> {
+    ) -> Result<Vec<String>, EneMemoryError> {
         list_session_ids_for_card_on_conn(&self.db, card_name).await
     }
 
@@ -1389,7 +1389,7 @@ impl MemoryStore {
         &self,
         session_id: &str,
         turn_start: i32,
-    ) -> Result<bool, MemoryError> {
+    ) -> Result<bool, EneMemoryError> {
         use sea_orm::PaginatorTrait;
 
         let count = entities::memory_spans::Entity::find()
@@ -1401,7 +1401,7 @@ impl MemoryStore {
     }
 
     /// Insert a memory span row.
-    pub async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, MemoryError> {
+    pub async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -1422,7 +1422,7 @@ impl MemoryStore {
     pub async fn list_memory_spans_by_session(
         &self,
         session_id: &str,
-    ) -> Result<Vec<NewMemorySpan>, MemoryError> {
+    ) -> Result<Vec<NewMemorySpan>, EneMemoryError> {
         use sea_orm::QueryOrder;
 
         let rows = entities::memory_spans::Entity::find()
@@ -1449,7 +1449,7 @@ impl MemoryStore {
         &self,
         session_id: &str,
         compression_level: i32,
-    ) -> Result<Vec<NewMemorySpan>, MemoryError> {
+    ) -> Result<Vec<NewMemorySpan>, EneMemoryError> {
         use sea_orm::QueryOrder;
 
         let rows = entities::memory_spans::Entity::find()
@@ -1476,7 +1476,7 @@ impl MemoryStore {
     pub async fn get_active_scene_summary(
         &self,
         session_id: &str,
-    ) -> Result<Option<ActiveSceneSummaryRow>, MemoryError> {
+    ) -> Result<Option<ActiveSceneSummaryRow>, EneMemoryError> {
         use sea_orm::QueryOrder;
 
         let row = entities::memory_spans::Entity::find()
@@ -1505,7 +1505,7 @@ impl MemoryStore {
         &self,
         span_id: i64,
         summary: &str,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<(), EneMemoryError> {
         use sea_orm::{ActiveModelTrait, ActiveValue::Set};
 
         let mut active: entities::memory_spans::ActiveModel = entities::memory_spans::ActiveModel {

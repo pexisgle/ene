@@ -16,8 +16,9 @@ without `--workspace` do not cover the whole repository.
 |---|---|
 | Setup | `README.md`, `docs/getting-started.md` |
 | Config/paths | `docs/configuration.md`, `crates/ene-config/src/` |
-| Architecture/API | `docs/architecture.md`, `docs/crates/` |
-| Runtime/events | `docs/concepts/turn-and-session.md`, `docs/crates/runtime.md` |
+| Architecture/design rationale | `docs/architecture.md`, `docs/crates/` |
+| **API signatures (structs, methods, fields, enum variants)** | **rustdoc is authoritative — run `cargo doc -p <crate> --open`.** `docs/crates/*.md` intentionally hold no hand-written signatures (#273); they only cover role, architectural boundaries, and design rationale, since transcribed signatures go stale. |
+| Runtime/events | `docs/concepts/turn-and-session.md`, `docs/crates/runtime.md` (role/boundaries; see rustdoc for `EneEvent`/`LifecycleEvent` variants) |
 | Plugins/Tools/IPC | `docs/concepts/plugins-and-mcp.md`, `docs/crates/plugin-system.md`, `docs/crates/tool-sdk.md` |
 | Apps | `docs/apps/cli.md`, `docs/apps/desktop.md` |
 | Japanese user docs | Matching files under `docs/ja/` |
@@ -57,6 +58,7 @@ failing package/target and root cause; do not hide failures by relaxing lints.
 - Use Tokio for async code and `thiserror` for library errors. Do not expose `anyhow`, bare `String`, or `Box<dyn Error>` as library boundaries.
 - Avoid `unwrap`, `expect`, and panic paths in production. Tests may use them only under existing scoped lint expectations; production exceptions need narrow `#[expect(..., reason = "...")]`.
 - Use structured `tracing` for library/runtime diagnostics. CLI output/examples may use stdout/stderr; do not use `println!` for library logging.
+- **Mechanically enforced** via `[workspace.lints.clippy]` in the root `Cargo.toml` (a `cargo clippy --workspace --all-targets -- -D warnings` failure, not just review feedback): `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `dbg_macro`, `mem_forget`, `let_underscore_must_use`, and `print_stdout`/`print_stderr` (the latter two allowed back in at the crate level for `apps/ene-cli`, plugin binaries' fatal-error paths, and example/test code that legitimately prints, each with a scoped `#[expect(..., reason = "...")]`). `all`, `pedantic`, and `cargo` are denied as whole groups; `clippy::restriction` is intentionally **not** blanket-enabled (it's an opt-in menu of mutually contradictory lints, not a group meant for wholesale denial) — only the lints above are adopted from it individually. Everything else in this section (Tokio/thiserror boundaries, `parking_lot`/`OnceLock`/visibility, doc comments, secrets handling) is **review-only**: not caught by clippy, so PR review is the enforcement mechanism.
 - Prefer `parking_lot` for internal locks where compatible, `OnceLock` for one-time initialization, and the narrowest visibility (`pub(crate)` by default). Comments explain non-obvious why; public API changes need rustdoc and reference docs.
 - Configuration is defaults → JSON → `ENE_` environment variables (`__` separates nested keys, e.g. `ENE_AI__TASKS__CHAT__MODEL`). Current public sections are `ai.*`, `store.*`, `mind.*`, `plugins.*`, and `desktop.*`; plugin entries are `plugins.list.<name>` with flattened fields.
 - Add settings at the owning `define_config!` invocation, which may be outside `ene-config`. Regenerate schemas through the CLI; never hand-edit or commit ignored `assets/schema/*`.
@@ -66,7 +68,7 @@ failing package/target and root cause; do not hide failures by relaxing lints.
 
 - New tools are plugins: `cargo new --bin plugins/tool/<name>`; derive `ToolAction`; prefer `ene_tool_sdk::ActionSetProvider`/`prelude`; wrap with `ene_plugin::ToolPluginAdapter` and serve with `run_plugin_server(Box::new(ToolPluginAdapter(provider))).await`; use `ene-plugin-db` for state; use namespaced `<namespace>.<action>` names; declare side effects/sandbox needs.
 - Verify tool binaries with `/tool list` and update both `docs/concepts/plugins-and-mcp.md` and `docs/ja/concepts/plugins-and-mcp.md`.
-- IPC work starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4). Preserve length-prefixed JSON, update host/plugins/tests, and bump `PLUGIN_IPC_PROTOCOL_VERSION` only for intentional wire incompatibility.
+- IPC work starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4). Preserve length-prefixed JSON, update host/plugins/tests, and bump `PLUGIN_IPC_PROTOCOL_VERSION` only for intentional wire incompatibility. The host maintains N-1 backward compatibility: it advertises `[PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION]` via `VersionRange::host_supported()`, never a single pinned value, so a plugin binary built against the previous version still connects. Bumping `PLUGIN_IPC_PROTOCOL_VERSION` requires bumping `PLUGIN_IPC_MIN_SUPPORTED_VERSION` too (dropping the oldest supported version); prefer `#[serde(default)]` new fields over a version bump when possible; gate any behavior on a message newer than the minimum supported version via `IpcPluginConnection::negotiated_version()` (see `supports_cancel_stream()` for the pattern).
 - Backend events/statuses stay stable English contracts. UI strings belong in `apps/ene-desktop/i18n/{en-US,ja}/ene_desktop.ftl` and `apps/ene-cli/i18n/{en-US,ja}/ene_cli.ftl`; keep EN/JA user docs synchronized.
 
 ## Completion

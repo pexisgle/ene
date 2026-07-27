@@ -13,12 +13,12 @@ mod tool;
 #[cfg(test)]
 mod tests;
 
-use crate::error::MemoryError;
+use crate::error::EneMemoryError;
 use crate::migrator::Migrator;
 use chrono::{DateTime, Utc};
+pub use ene_core::{KeyFact, NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// A single conversation log entry returned by `get_logs_by_session`.
@@ -160,7 +160,7 @@ pub(crate) fn cosine_similarity_filter(
 
 /// Validates an embedding vector before it is persisted.
 ///
-/// Returns an [`MemoryError::InvalidEmbedding`] if the
+/// Returns an [`EneMemoryError::InvalidEmbedding`] if the
 /// vector's length does not match the store's configured
 /// `embedding_dim`, or if it contains any `NaN` or
 /// infinite component. Both conditions are fatal for
@@ -171,80 +171,21 @@ pub(crate) fn cosine_similarity_filter(
 pub(crate) fn validate_embedding(
     embedding: &[f32],
     expected_dim: usize,
-) -> Result<(), MemoryError> {
+) -> Result<(), EneMemoryError> {
     if embedding.len() != expected_dim {
-        return Err(MemoryError::InvalidEmbedding(format!(
+        return Err(EneMemoryError::InvalidEmbedding(format!(
             "length {} does not match expected {expected_dim}",
             embedding.len()
         )));
     }
     for (i, &v) in embedding.iter().enumerate() {
         if !v.is_finite() {
-            return Err(MemoryError::InvalidEmbedding(format!(
+            return Err(EneMemoryError::InvalidEmbedding(format!(
                 "component {i} is not finite (NaN or Infinity)"
             )));
         }
     }
     Ok(())
-}
-
-/// Workflow status of a pending memory candidate (#174).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PendingCandidateStatus {
-    /// Awaiting user review.
-    Pending,
-    /// Approved by the user (persisted to typed memory).
-    Approved,
-    /// Rejected by the user.
-    Rejected,
-}
-
-impl PendingCandidateStatus {
-    /// Returns the `snake_case` string representation.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Approved => "approved",
-            Self::Rejected => "rejected",
-        }
-    }
-}
-
-/// A pending memory candidate awaiting user approval (#174).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingCandidate {
-    /// Primary key.
-    pub id: i64,
-    /// Character identifier.
-    pub character_id: String,
-    /// User identifier (may be empty).
-    pub user_id: String,
-    /// Short title or label.
-    pub title: String,
-    /// Full candidate content.
-    pub content: String,
-    /// Memory kind.
-    pub kind: crate::MemoryKind,
-    /// Confidence score (0.0 .. 1.0).
-    pub confidence: f32,
-    /// Human-readable reason for the extraction.
-    pub reason_detail: String,
-    /// Title of the existing memory this candidate would supersede, if any.
-    pub existing_memory_title: Option<String>,
-    /// Source quote from the conversation that triggered this candidate.
-    pub source_quote: String,
-    /// Workflow status.
-    pub status: PendingCandidateStatus,
-}
-
-/// A key-value fact about the user.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyFact {
-    /// The key identifier for this fact.
-    pub key: String,
-    /// The value associated with the key.
-    pub value: String,
 }
 
 /// SQLite-backed long-term memory store with vector similarity search.
@@ -262,15 +203,6 @@ pub struct MemoryStore {
     pending_candidates: parking_lot::Mutex<Vec<PendingCandidate>>,
 }
 
-/// Result of a natural-decay batch run (#76).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct NaturalDecayReport {
-    /// Memories transitioned to `faded`.
-    pub faded_count: usize,
-    /// Memories transitioned to `archived`.
-    pub archived_count: usize,
-}
-
 /// Applies the `SQLite` PRAGMAs the store depends on to the
 /// given connection. Idempotent and safe to call from both
 /// `open` and `open_in_memory`.
@@ -284,7 +216,7 @@ pub struct NaturalDecayReport {
 ///   `database is locked` immediately.
 /// * `foreign_keys=ON` enables enforcement of foreign-key
 ///   constraints declared in migrations.
-async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), MemoryError> {
+async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), EneMemoryError> {
     const STATEMENTS: &[&str] = &[
         "PRAGMA journal_mode = WAL",
         "PRAGMA busy_timeout = 5000",
@@ -293,14 +225,14 @@ async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), MemoryError> {
     ];
     for stmt in STATEMENTS {
         db.execute_unprepared(stmt).await.map_err(|e| {
-            MemoryError::MemoryStoreConnectionError(format!("failed to apply `{stmt}`: {e}"))
+            EneMemoryError::MemoryStoreConnectionError(format!("failed to apply `{stmt}`: {e}"))
         })?;
     }
     Ok(())
 }
 
 /// Read applied `SeaORM` migration names from `seaql_migrations`.
-async fn applied_migration_names(db: &DatabaseConnection) -> Result<Vec<String>, MemoryError> {
+async fn applied_migration_names(db: &DatabaseConnection) -> Result<Vec<String>, EneMemoryError> {
     use sea_orm::{DbBackend, Statement};
 
     // Table may not exist yet on a brand-new database.
@@ -323,7 +255,7 @@ async fn applied_migration_names(db: &DatabaseConnection) -> Result<Vec<String>,
     let mut names = Vec::with_capacity(rows.len());
     for row in rows {
         let name: String = row.try_get_by_index(0).map_err(|e| {
-            MemoryError::MemoryStoreConnectionError(format!("decode seaql_migrations: {e}"))
+            EneMemoryError::MemoryStoreConnectionError(format!("decode seaql_migrations: {e}"))
         })?;
         names.push(name);
     }
@@ -381,7 +313,7 @@ impl MemoryStore {
     /// When pending migrations exist and `backup_on_migrate` is enabled, a
     /// file backup is taken first; on migration failure the backup is
     /// restored (#239).
-    pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, MemoryError> {
+    pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, EneMemoryError> {
         Self::open_with_options(path, embedding_dim, &crate::backup::OpenOptions::default()).await
     }
 
@@ -390,10 +322,10 @@ impl MemoryStore {
         path: &Path,
         embedding_dim: usize,
         options: &crate::backup::OpenOptions,
-    ) -> Result<Self, MemoryError> {
-        let path_str = path
-            .to_str()
-            .ok_or_else(|| MemoryError::MemoryStoreConnectionError("Invalid path".to_string()))?;
+    ) -> Result<Self, EneMemoryError> {
+        let path_str = path.to_str().ok_or_else(|| {
+            EneMemoryError::MemoryStoreConnectionError("Invalid path".to_string())
+        })?;
         init_sqlite_vec();
         let mut opt = ConnectOptions::new(format!("sqlite:{path_str}?mode=rwc"));
         opt.max_connections(8);
@@ -416,7 +348,7 @@ impl MemoryStore {
             .filter(|name| !expected.iter().any(|e| e == *name))
             .collect();
         if !unknown.is_empty() {
-            return Err(MemoryError::SchemaTooNew {
+            return Err(EneMemoryError::SchemaTooNew {
                 unknown: unknown
                     .into_iter()
                     .map(String::as_str)
@@ -457,12 +389,12 @@ impl MemoryStore {
                 drop(db);
                 if let Some(backup) = backup_path {
                     crate::backup::restore_database(&backup, path)?;
-                    Err(MemoryError::MigrationRolledBack {
+                    Err(EneMemoryError::MigrationRolledBack {
                         backup: backup.display().to_string(),
                         cause: cause.to_string(),
                     })
                 } else {
-                    Err(MemoryError::from(cause))
+                    Err(EneMemoryError::from(cause))
                 }
             }
         }
@@ -476,7 +408,7 @@ impl MemoryStore {
     /// path with a pool limited to one connection. The same PRAGMAs as
     /// [`open`](Self::open) are applied so behavior matches the file-backed
     /// path.
-    pub async fn open_in_memory(embedding_dim: usize) -> Result<Self, MemoryError> {
+    pub async fn open_in_memory(embedding_dim: usize) -> Result<Self, EneMemoryError> {
         init_sqlite_vec();
         let mut opt = ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
@@ -490,16 +422,16 @@ impl MemoryStore {
     }
 
     /// Run `PRAGMA integrity_check` on the open connection (#239).
-    pub async fn check_integrity(&self) -> Result<(), MemoryError> {
+    pub async fn check_integrity(&self) -> Result<(), EneMemoryError> {
         crate::backup::check_integrity(&self.db).await
     }
 
     /// Create a timestamped file backup of this store's database (#239).
     ///
     /// Returns an error when the store is in-memory (no path).
-    pub async fn backup(&self) -> Result<std::path::PathBuf, MemoryError> {
+    pub async fn backup(&self) -> Result<std::path::PathBuf, EneMemoryError> {
         let path = self.path().ok_or_else(|| {
-            MemoryError::BackupError("in-memory store cannot be backed up to a file".into())
+            EneMemoryError::BackupError("in-memory store cannot be backed up to a file".into())
         })?;
         crate::backup::backup_database(path, Some(&self.db)).await
     }
@@ -513,7 +445,7 @@ impl MemoryStore {
     pub fn insert_pending_candidate(
         &self,
         candidate: PendingCandidate,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         let mut guard = self.pending_candidates.lock();
         let next_id = guard
             .iter()
@@ -534,7 +466,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         status_filter: Option<PendingCandidateStatus>,
-    ) -> Result<Vec<PendingCandidate>, MemoryError> {
+    ) -> Result<Vec<PendingCandidate>, EneMemoryError> {
         let guard = self.pending_candidates.lock();
         Ok(guard
             .iter()
@@ -551,16 +483,16 @@ impl MemoryStore {
     /// The candidate is inserted via [`Self::insert_typed_memory`] and its
     /// status flipped to [`PendingCandidateStatus::Approved`]. Returns an
     /// error when the candidate is not found or has already been resolved.
-    pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, MemoryError> {
+    pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, EneMemoryError> {
         let candidate =
             {
                 let guard = self.pending_candidates.lock();
                 guard.iter().find(|c| c.id == id).cloned().ok_or_else(|| {
-                    MemoryError::Other(format!("pending candidate {id} not found"))
+                    EneMemoryError::Other(format!("pending candidate {id} not found"))
                 })?
             };
         if candidate.status != PendingCandidateStatus::Pending {
-            return Err(MemoryError::Other(format!(
+            return Err(EneMemoryError::Other(format!(
                 "pending candidate {id} is already {}",
                 candidate.status.as_str()
             )));
@@ -605,7 +537,7 @@ impl MemoryStore {
         &self,
         id: i64,
         approved: bool,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<(), EneMemoryError> {
         if approved {
             self.approve_pending_candidate(id).await?;
             return Ok(());
@@ -614,9 +546,9 @@ impl MemoryStore {
         let candidate = guard
             .iter_mut()
             .find(|c| c.id == id)
-            .ok_or_else(|| MemoryError::Other(format!("pending candidate {id} not found")))?;
+            .ok_or_else(|| EneMemoryError::Other(format!("pending candidate {id} not found")))?;
         if candidate.status != PendingCandidateStatus::Pending {
-            return Err(MemoryError::Other(format!(
+            return Err(EneMemoryError::Other(format!(
                 "pending candidate {id} is already {}",
                 candidate.status.as_str()
             )));

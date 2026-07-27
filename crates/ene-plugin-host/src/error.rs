@@ -32,14 +32,25 @@ pub enum PluginHostError {
         reason: String,
     },
 
-    /// The plugin responded with an incompatible protocol version.
-    #[error("protocol version mismatch for plugin '{name}': expected {expected}, got {got}")]
+    /// The plugin acknowledged a protocol version outside the host's
+    /// supported range.
+    ///
+    /// Carries the host's full supported range (not just a single expected
+    /// value) alongside the version the plugin reported, so the diagnostic
+    /// makes clear e.g. "host supports 3..=4, plugin acknowledged 2" instead
+    /// of a bare version mismatch.
+    #[error(
+        "protocol version mismatch for plugin '{name}': host supports {host_min}..={host_max}, plugin acknowledged {got}"
+    )]
     ProtocolMismatch {
         /// The plugin name.
         name: String,
-        /// The version the host requires.
-        expected: u32,
-        /// The version the plugin acknowledged.
+        /// Minimum protocol version the host supports (inclusive).
+        host_min: u32,
+        /// Maximum protocol version the host supports (inclusive), i.e.
+        /// [`PLUGIN_IPC_PROTOCOL_VERSION`](ene_plugin_proto::PLUGIN_IPC_PROTOCOL_VERSION).
+        host_max: u32,
+        /// The version the plugin acknowledged in `HandshakeAck`.
         got: u32,
     },
 

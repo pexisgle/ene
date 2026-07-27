@@ -131,11 +131,13 @@ impl MaskReadbackWorker {
         let generation = Arc::clone(&self.generation);
         let in_flight = Arc::clone(&self.in_flight);
 
-        let _ = thread::Builder::new()
-            .name("ene.mask_readback.frame".into())
-            .spawn(move || {
-                run_single_readback(&mask, &device, &queue, &generation, gen_id, &in_flight);
-            });
+        drop(
+            thread::Builder::new()
+                .name("ene.mask_readback.frame".into())
+                .spawn(move || {
+                    run_single_readback(&mask, &device, &queue, &generation, gen_id, &in_flight);
+                }),
+        );
     }
 
     /// Reference to the underlying `MaskCaptureCamera` for
@@ -181,11 +183,18 @@ fn run_single_readback(
         let mut guard = mask.lock();
         let slice = guard.readback_slice();
         slice.map_async(wgpu::MapMode::Read, move |_result| {
+            // `std::sync::mpsc::SendError<()>` is `Copy`, so `drop()` would
+            // itself trip `clippy::dropping_copy_types`; a dropped receiver
+            // just means the caller stopped waiting for the readback.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "SendError<()> is Copy; drop() would trip dropping_copy_types"
+            )]
             let _ = tx.send(());
         });
     }
 
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    drop(device.poll(wgpu::PollType::wait_indefinitely()));
 
     if rx.recv().is_err() {
         tracing::warn!(target: "ene.linux.mask_readback", "map_async callback dropped sender");

@@ -1,6 +1,6 @@
 //! Affect-state and pending-affect-proposal queries.
 
-use super::{MemoryError, MemoryStore};
+use super::{EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::Utc;
 use sea_orm::EntityTrait;
@@ -10,7 +10,7 @@ impl MemoryStore {
     pub async fn get_affect_state(
         &self,
         character_id: &str,
-    ) -> Result<crate::AffectState, MemoryError> {
+    ) -> Result<crate::AffectState, EneMemoryError> {
         use entities::affect_states::Entity;
         use sea_orm::EntityTrait;
 
@@ -49,7 +49,10 @@ impl MemoryStore {
     }
 
     /// Persist or update an [`crate::AffectState`].
-    pub async fn upsert_affect_state(&self, state: &crate::AffectState) -> Result<(), MemoryError> {
+    pub async fn upsert_affect_state(
+        &self,
+        state: &crate::AffectState,
+    ) -> Result<(), EneMemoryError> {
         use entities::affect_states::{ActiveModel, Column, Entity};
         use sea_orm::sea_query::OnConflict;
 
@@ -58,7 +61,7 @@ impl MemoryStore {
 
         let now = Utc::now();
         let discrete_json = serde_json::to_string(&state.discrete_emotions)
-            .map_err(|e| MemoryError::Other(e.to_string()))?;
+            .map_err(|e| EneMemoryError::Other(e.to_string()))?;
 
         let active = ActiveModel {
             character_id: sea_orm::Set(state.character_id),
@@ -107,12 +110,12 @@ impl MemoryStore {
     pub async fn upsert_pending_affect_proposal(
         &self,
         proposal: &crate::PendingAffectProposal,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<(), EneMemoryError> {
         use entities::pending_affect_proposals::{ActiveModel, Column, Entity};
         use sea_orm::sea_query::OnConflict;
 
         let proposal_json =
-            serde_json::to_string(proposal).map_err(|e| MemoryError::Other(e.to_string()))?;
+            serde_json::to_string(proposal).map_err(|e| EneMemoryError::Other(e.to_string()))?;
 
         let active = ActiveModel {
             character_id: sea_orm::Set(proposal.character_id.clone()),
@@ -142,7 +145,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         user_id: &str,
-    ) -> Result<Option<crate::PendingAffectProposal>, MemoryError> {
+    ) -> Result<Option<crate::PendingAffectProposal>, EneMemoryError> {
         use entities::pending_affect_proposals::Entity;
         use sea_orm::EntityTrait;
 
@@ -175,7 +178,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         user_id: &str,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<(), EneMemoryError> {
         use entities::pending_affect_proposals::Entity;
         use sea_orm::EntityTrait;
 
@@ -190,7 +193,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         user_id: &str,
-    ) -> Result<Option<crate::PendingAffectProposal>, MemoryError> {
+    ) -> Result<Option<crate::PendingAffectProposal>, EneMemoryError> {
         let proposal = self
             .get_pending_affect_proposal(character_id, user_id)
             .await?;

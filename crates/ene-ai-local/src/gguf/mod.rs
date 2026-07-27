@@ -32,7 +32,7 @@ pub async fn ensure_gguf_available(
             path = %path.display(),
             "cached file lacks GGUF magic; re-downloading"
         );
-        let _ = tokio::fs::remove_file(&path).await;
+        drop(tokio::fs::remove_file(&path).await);
     }
     if !local.model_path.trim().is_empty() {
         return Err(LlmProviderError::Provider(format!(
@@ -71,7 +71,7 @@ pub async fn ensure_mmproj_available(
             path = %path.display(),
             "cached mmproj lacks GGUF magic; re-downloading"
         );
-        let _ = tokio::fs::remove_file(&path).await;
+        drop(tokio::fs::remove_file(&path).await);
     }
     if !local.mmproj_path.trim().is_empty() {
         return Err(LlmProviderError::Provider(format!(

@@ -398,7 +398,7 @@ fn export_session(ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity, sess
                 world,
                 ui_entity,
                 &fl!(crate::i18n::loader(), "sessions-export-error"),
-                &error,
+                &error.to_string(),
             );
             return;
         }
@@ -466,7 +466,7 @@ fn set_message(world: &mut World, ui_entity: Entity, message: String) {
 fn set_action_result(
     world: &mut World,
     ui_entity: Entity,
-    result: Result<(), String>,
+    result: Result<(), crate::ai_bridge::AiBridgeError>,
     ok_label: &str,
     error_label: &str,
 ) {

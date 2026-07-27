@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 
-use crate::error::MemoryError;
+use crate::error::EneMemoryError;
 
 /// Prefix inserted before the timestamp in backup filenames.
 ///
@@ -89,16 +89,16 @@ pub fn is_backup_of(db_path: &Path, path: &Path) -> bool {
 }
 
 /// List backup files for `db_path`, newest first.
-pub fn list_backups(db_path: &Path) -> Result<Vec<PathBuf>, MemoryError> {
+pub fn list_backups(db_path: &Path) -> Result<Vec<PathBuf>, EneMemoryError> {
     let parent = db_path.parent().unwrap_or_else(|| Path::new("."));
     if !parent.exists() {
         return Ok(Vec::new());
     }
     let mut backups = Vec::new();
     for entry in fs::read_dir(parent).map_err(|e| {
-        MemoryError::BackupError(format!("failed to list {}: {e}", parent.display()))
+        EneMemoryError::BackupError(format!("failed to list {}: {e}", parent.display()))
     })? {
-        let entry = entry.map_err(|e| MemoryError::BackupError(format!("readdir: {e}")))?;
+        let entry = entry.map_err(|e| EneMemoryError::BackupError(format!("readdir: {e}")))?;
         let path = entry.path();
         if path.is_file() && is_backup_of(db_path, &path) {
             backups.push(path);
@@ -109,12 +109,12 @@ pub fn list_backups(db_path: &Path) -> Result<Vec<PathBuf>, MemoryError> {
 }
 
 /// Delete oldest backups until at most `max_backups` remain.
-pub fn prune_backups(db_path: &Path, max_backups: usize) -> Result<(), MemoryError> {
+pub fn prune_backups(db_path: &Path, max_backups: usize) -> Result<(), EneMemoryError> {
     let max = max_backups.max(1);
     let backups = list_backups(db_path)?;
     for stale in backups.into_iter().skip(max) {
         fs::remove_file(&stale).map_err(|e| {
-            MemoryError::BackupError(format!("failed to remove {}: {e}", stale.display()))
+            EneMemoryError::BackupError(format!("failed to remove {}: {e}", stale.display()))
         })?;
     }
     Ok(())
@@ -127,9 +127,9 @@ pub fn prune_backups(db_path: &Path, max_backups: usize) -> Result<(), MemoryErr
 pub async fn backup_database(
     db_path: &Path,
     conn: Option<&DatabaseConnection>,
-) -> Result<PathBuf, MemoryError> {
+) -> Result<PathBuf, EneMemoryError> {
     if !db_path.exists() {
-        return Err(MemoryError::BackupError(format!(
+        return Err(EneMemoryError::BackupError(format!(
             "database does not exist: {}",
             db_path.display()
         )));
@@ -139,7 +139,7 @@ pub async fn backup_database(
     }
     let dest = unique_backup_path(db_path);
     fs::copy(db_path, &dest).map_err(|e| {
-        MemoryError::BackupError(format!(
+        EneMemoryError::BackupError(format!(
             "failed to copy {} -> {}: {e}",
             db_path.display(),
             dest.display()
@@ -169,7 +169,7 @@ fn unique_backup_path(db_path: &Path) -> PathBuf {
     }
 }
 
-fn copy_sidecar(db_path: &Path, backup: &Path, suffix: &str) -> Result<(), MemoryError> {
+fn copy_sidecar(db_path: &Path, backup: &Path, suffix: &str) -> Result<(), EneMemoryError> {
     let mut src_name = db_path.as_os_str().to_os_string();
     src_name.push(suffix);
     let src = PathBuf::from(src_name);
@@ -180,7 +180,7 @@ fn copy_sidecar(db_path: &Path, backup: &Path, suffix: &str) -> Result<(), Memor
     dest_name.push(suffix);
     let dest = PathBuf::from(dest_name);
     fs::copy(&src, &dest).map_err(|e| {
-        MemoryError::BackupError(format!(
+        EneMemoryError::BackupError(format!(
             "failed to copy sidecar {} -> {}: {e}",
             src.display(),
             dest.display()
@@ -192,22 +192,22 @@ fn copy_sidecar(db_path: &Path, backup: &Path, suffix: &str) -> Result<(), Memor
 /// Replace `db_path` with the contents of `backup_path`.
 ///
 /// Removes leftover `-wal` / `-shm` sidecars so the restored file opens cleanly.
-pub fn restore_database(backup_path: &Path, db_path: &Path) -> Result<(), MemoryError> {
+pub fn restore_database(backup_path: &Path, db_path: &Path) -> Result<(), EneMemoryError> {
     if !backup_path.exists() {
-        return Err(MemoryError::BackupError(format!(
+        return Err(EneMemoryError::BackupError(format!(
             "backup does not exist: {}",
             backup_path.display()
         )));
     }
     if let Some(parent) = db_path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
-            MemoryError::BackupError(format!("failed to create {}: {e}", parent.display()))
+            EneMemoryError::BackupError(format!("failed to create {}: {e}", parent.display()))
         })?;
     }
     remove_sidecar(db_path, "-wal")?;
     remove_sidecar(db_path, "-shm")?;
     fs::copy(backup_path, db_path).map_err(|e| {
-        MemoryError::BackupError(format!(
+        EneMemoryError::BackupError(format!(
             "failed to restore {} -> {}: {e}",
             backup_path.display(),
             db_path.display()
@@ -216,40 +216,40 @@ pub fn restore_database(backup_path: &Path, db_path: &Path) -> Result<(), Memory
     Ok(())
 }
 
-fn remove_sidecar(db_path: &Path, suffix: &str) -> Result<(), MemoryError> {
+fn remove_sidecar(db_path: &Path, suffix: &str) -> Result<(), EneMemoryError> {
     let mut name = db_path.as_os_str().to_os_string();
     name.push(suffix);
     let path = PathBuf::from(name);
     if path.exists() {
         fs::remove_file(&path).map_err(|e| {
-            MemoryError::BackupError(format!("failed to remove {}: {e}", path.display()))
+            EneMemoryError::BackupError(format!("failed to remove {}: {e}", path.display()))
         })?;
     }
     Ok(())
 }
 
 /// Run `PRAGMA wal_checkpoint(TRUNCATE)` so the main DB file is self-contained.
-pub async fn checkpoint_wal(db: &DatabaseConnection) -> Result<(), MemoryError> {
+pub async fn checkpoint_wal(db: &DatabaseConnection) -> Result<(), EneMemoryError> {
     db.execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE)")
         .await
-        .map_err(|e| MemoryError::BackupError(format!("wal_checkpoint failed: {e}")))?;
+        .map_err(|e| EneMemoryError::BackupError(format!("wal_checkpoint failed: {e}")))?;
     Ok(())
 }
 
 /// Run `PRAGMA integrity_check` and return Ok when the result is `ok`.
-pub async fn check_integrity(db: &DatabaseConnection) -> Result<(), MemoryError> {
+pub async fn check_integrity(db: &DatabaseConnection) -> Result<(), EneMemoryError> {
     let rows = db
         .query_all_raw(Statement::from_string(
             DbBackend::Sqlite,
             "PRAGMA integrity_check".to_string(),
         ))
         .await
-        .map_err(|e| MemoryError::IntegrityCheckFailed(format!("query failed: {e}")))?;
+        .map_err(|e| EneMemoryError::IntegrityCheckFailed(format!("query failed: {e}")))?;
     let mut messages = Vec::new();
     for row in rows {
         let msg: String = row
             .try_get_by_index(0)
-            .map_err(|e| MemoryError::IntegrityCheckFailed(format!("decode failed: {e}")))?;
+            .map_err(|e| EneMemoryError::IntegrityCheckFailed(format!("decode failed: {e}")))?;
         messages.push(msg);
     }
     if messages.len() == 1
@@ -259,7 +259,7 @@ pub async fn check_integrity(db: &DatabaseConnection) -> Result<(), MemoryError>
     {
         return Ok(());
     }
-    Err(MemoryError::IntegrityCheckFailed(messages.join("; ")))
+    Err(EneMemoryError::IntegrityCheckFailed(messages.join("; ")))
 }
 
 #[cfg(test)]

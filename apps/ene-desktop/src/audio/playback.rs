@@ -2,8 +2,10 @@
 //!
 //! A dedicated OS thread owns the cpal output stream, rodio mixer, and
 //! player (all must stay alive on the thread that created them). The AI
-//! bridge pump forwards [`EneEvent::AudioChunk`](ene_runtime::EneEvent::AudioChunk)
-//! payloads over a [`crossbeam_channel`]; the playback thread appends
+//! bridge pump forwards [`AudioChunk`](ene_runtime::AudioChunk) payloads
+//! (received from the dedicated audio channel — see
+//! [`ene_runtime::EneHandle::take_audio_stream`], #272) over a
+//! [`crossbeam_channel`]; the playback thread appends
 //! each chunk to the sink, feeds the same PCM to the shared
 //! [`VisemeState`](super::VisemeState) for lip-sync, and toggles the
 //! `tts_playing` flag used for self-voice suppression.
@@ -113,7 +115,7 @@ impl AudioPlaybackHandle {
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(join) = self.join.take() {
-            let _ = join.join();
+            drop(join.join());
         }
     }
 }
@@ -438,11 +440,11 @@ mod tests {
         });
 
         // Send a chunk, then raise the shutdown flag.
-        let _ = tx.send(chunk(vec![0.1; 100], 24_000, false));
+        drop(tx.send(chunk(vec![0.1; 100], 24_000, false)));
         std::thread::sleep(Duration::from_millis(50));
         shutdown.store(true, Ordering::Relaxed);
         // The drain loop should exit within the poll interval.
-        let _ = handle.join();
+        drop(handle.join());
     }
 
     #[test]

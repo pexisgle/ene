@@ -128,20 +128,20 @@ fn render_tty(state: &mut ProgressState) {
 
     let mut stderr = std::io::stderr().lock();
     if state.rendered_lines > 0 {
-        let _ = write!(stderr, "\x1b[{}A", state.rendered_lines);
+        drop(write!(stderr, "\x1b[{}A", state.rendered_lines));
     }
 
     for i in 0..slot_count {
-        let _ = write!(stderr, "\x1b[2K\r");
+        drop(write!(stderr, "\x1b[2K\r"));
         if let Some(line) = lines.get(i) {
-            let _ = writeln!(stderr, "{line}");
+            drop(writeln!(stderr, "{line}"));
         } else {
-            let _ = writeln!(stderr);
+            drop(writeln!(stderr));
         }
     }
 
     state.rendered_lines = lines.len();
-    let _ = stderr.flush();
+    drop(stderr.flush());
 }
 
 fn log_throttled(state: &mut ProgressState, filename: &str, downloaded: u64, total: Option<u64>) {
@@ -205,7 +205,7 @@ fn finish_progress(filename: &str) {
 
     if state.active.is_empty() {
         state.rendered_lines = 0;
-        let _ = std::io::stderr().lock().flush();
+        drop(std::io::stderr().lock().flush());
         return;
     }
 
@@ -253,7 +253,7 @@ impl PartCleanup {
 impl Drop for PartCleanup {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            let _ = std::fs::remove_file(&path);
+            drop(std::fs::remove_file(&path));
         }
     }
 }
@@ -376,7 +376,7 @@ pub async fn download_gguf(url: &str, dest: &Path) -> Result<(), LlmProviderErro
             path = %dest.display(),
             "cached file lacks GGUF magic; re-downloading"
         );
-        let _ = tokio::fs::remove_file(dest).await;
+        drop(tokio::fs::remove_file(dest).await);
     }
 
     let key = dest.to_string_lossy().into_owned();

@@ -1,66 +1,33 @@
-# `ene-mind` — API リファレンス
+# `ene-mind`
 
-> **クレート**: `ene-mind` | **役割**: 認知ターンエンジン、プロンプト予算制御、感情、記憶想起
+> **クレート**: `ene-mind` | **役割**: 純粋な認知ターンエンジン — セッション、想起、プロンプト構築、感情、演出
 
-`ene-mind` は Ene の純粋な認知コアです。プロンプト構築、セッション管理、アイデンティティ保護、PAD 感情動態、プロアクティブ発話評価、演出調停、およびバックグラウンド記憶書込を所有します。
-
----
-
-## アーキテクチャ境界保証
-`ene-mind` は `ene-runtime`, `ene-plugin-host`, `ene-vrm` に**一切依存・インポートしません**。
+`ene-mind` は Ene の純粋な認知コアです。セッション状態、記憶抽出、想起プランニング、感情エンジン、コンテキスト予算管理、プロアクティブ発話評価、出力/演出調停、プロンプトパケット構築のすべてがここに存在します。`ene-runtime` は `CognitionEngine` を*呼び出す*だけで、自身のストリーミングパス内で mind ロジックを再実装することはありません。
 
 ---
 
-## 主要モジュールと型
+## アーキテクチャ境界
 
-### `SessionManager`
-チャットセッション状態、対話履歴文脈、および自動セッション圧縮・分割を管理します：
+- `ene-mind` は `ene-runtime` や `ene-plugin-host` に**一切依存しません** — これによりホストファサードとそれが駆動する認知層との間の循環依存を防いでいます。
+- `ene-mind` の認知ロジックモジュール (想起、記憶調停者、忘却、キャラクター同期、ジャーナル、自己内省) は永続化層を `ene_core::MemoryPort` トレイト経由でのみ呼び出します — 具象型の `ene_store::MemoryStore` を直接呼び出すことはありません。これにより SQLite なしのインメモリテストダブルに対してユニットテストできます。
+- `ene-mind` は `ene-store` を公開 API 経由でのみ呼び出し、生の SQL や `sea-orm` クエリを発行することはありません。`ene-store` が唯一の SQLite 所有者であり続けます。
+- 旧・独立セッションクレートから吸収されたセッション状態は `session` モジュール配下にあります。
 
-```rust
-pub struct SessionManager { /* ... */ }
+## 設計思想
+
+- **なぜ具象ストア型ではなく `MemoryPort` か**: 認知ロジック (想起プランニング、記憶調停者、忘却ライフサイクル) を特定の永続化バックエンドから切り離すことで、これらのコードパスは SQLite セットアップのコストなしにテスト内のインメモリダブルに対して実行できます。また `ene-store` はすべての mind 側呼び出し箇所を変更することなくスキーマを進化させられます。
+- **なぜ感情/情動状態が単純な3軸 PAD モデルより豊かか**: `ene-core::AffectState` は Pleasure/Arousal/Dominance (`valence`/`arousal`/`dominance` として実装) に trust・affinity・irritation・curiosity・fatigue の各次元を加えて拡張しています。これらはプレゼンテーション層だけでなく、プロアクティブ発話のゲーティングや演出キューの選択にも供給されます。
+- **なぜプロンプト構築がフラットなメッセージ配列ではなく独立した予算対応ステップか**: アイデンティティ・感情・想起記憶・ツール仕様・対話履歴の各セクションは固定のトークン予算を奪い合い、予算圧迫下でアイデンティティ/安全ルールを維持するには切り詰めの順序が重要です — セクション構成については `docs/concepts/turn-and-session.md` §3 を参照してください。
+
+## API リファレンス
+
+構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:
+
+```sh
+cargo doc -p ene-mind --open
 ```
 
-### `PromptComposer`
-明示的なトークン予算配分を備えた `PromptPacket` を構築します：
-
-```rust
-pub struct PromptComposer { /* ... */ }
-
-impl PromptComposer {
-    pub async fn compose(
-        &self,
-        input: &str,
-        session: &Session,
-        recalled: &[ScoredMemory],
-    ) -> Result<PromptPacket, CognitionError>;
-}
-```
-
-### `PadEmotion`
-3次元 Pleasure-Arousal-Dominance 空間でキャラクターの感情状態を管理します：
-
-```rust
-pub struct PadEmotion {
-    pub pleasure: f32,  // [-1.0, 1.0]
-    pub arousal: f32,   // [-1.0, 1.0]
-    pub dominance: f32, // [-1.0, 1.0]
-}
-
-impl PadEmotion {
-    pub fn update(&mut self, delta: PadDelta);
-    pub fn to_performance_cue(&self) -> PerformanceCue;
-}
-```
-
-### `ProactiveEngine`
-ユーザーの放置時間や文脈を評価し、自主的なプロアクティブ発話をトリガーします：
-
-```rust
-pub struct ProactiveEngine { /* ... */ }
-```
-
-### `MemoryWriter`
-ターントランスクリプトからエピソード/セマンティックファクトを非同期に抽出し、 `ene-store` へ永続化します。
+ターン処理のエントリポイントは `CognitionEngine` (`engine` モジュール)、感情については `AffectState` / `EmotionEngine` (`ene-core` / `emotion` からの re-export) を参照してください。
 
 ---
 

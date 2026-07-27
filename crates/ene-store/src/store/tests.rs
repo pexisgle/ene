@@ -294,7 +294,7 @@ async fn upsert_memory_embedding_rejects_bad_embedding() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, MemoryError::InvalidEmbedding(_)),
+        matches!(err, EneMemoryError::InvalidEmbedding(_)),
         "expected InvalidEmbedding, got {err:?}"
     );
 
@@ -304,7 +304,7 @@ async fn upsert_memory_embedding_rejects_bad_embedding() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, MemoryError::InvalidEmbedding(_)),
+        matches!(err, EneMemoryError::InvalidEmbedding(_)),
         "expected InvalidEmbedding, got {err:?}"
     );
 
@@ -314,7 +314,7 @@ async fn upsert_memory_embedding_rejects_bad_embedding() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, MemoryError::InvalidEmbedding(_)),
+        matches!(err, EneMemoryError::InvalidEmbedding(_)),
         "expected InvalidEmbedding, got {err:?}"
     );
 
@@ -621,7 +621,7 @@ async fn supersede_typed_memory_rejects_terminal_status() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, MemoryError::Other(_)),
+        matches!(err, EneMemoryError::Other(_)),
         "expected Other error, got {err:?}"
     );
 }
@@ -1294,7 +1294,7 @@ async fn set_memory_status_rejects_invalid_edge() {
         .unwrap_err();
     assert!(matches!(
         err,
-        MemoryError::InvalidTransition {
+        EneMemoryError::InvalidTransition {
             from: crate::MemoryStatus::Faded,
             to: crate::MemoryStatus::Active,
         }
@@ -1593,7 +1593,7 @@ async fn schema_too_new_is_reported() {
         .err()
         .expect("expected SchemaTooNew");
     assert!(
-        matches!(err, MemoryError::SchemaTooNew { .. }),
+        matches!(err, EneMemoryError::SchemaTooNew { .. }),
         "unexpected error: {err}"
     );
 }

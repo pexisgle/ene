@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use ene_config::CharacterCardV3;
-use ene_store::MemoryStore;
+use ene_core::MemoryPort;
 
 use super::lorebook_boost::merge_lorebook_recall;
 use crate::commitments::CommitmentLedger;
@@ -15,8 +15,8 @@ use crate::recall::{
 
 /// Input for executing hybrid typed-memory recall.
 pub struct ExecuteRecallInput<'a> {
-    /// Memory store handle.
-    pub store: &'a MemoryStore,
+    /// Memory store handle (behind the `MemoryPort` abstraction, #270).
+    pub store: &'a dyn MemoryPort,
     /// Character card name.
     pub character_id: &'a str,
     /// User name / id for scoping.
@@ -30,7 +30,7 @@ pub struct ExecuteRecallInput<'a> {
     /// Embedding model name.
     pub embedding_model: &'a str,
     /// Loaded affect state (optional).
-    pub affect: Option<&'a ene_store::AffectState>,
+    pub affect: Option<&'a ene_core::AffectState>,
     /// Character card for lorebook key-trigger recall (#83).
     pub card: Option<&'a CharacterCardV3>,
 }
@@ -85,7 +85,7 @@ pub async fn execute_hybrid_recall(
         .store
         .search(&search_options)
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
 
     let diversify_options = MemoryDiversifyOptions::from_config(&config.memory);
     let diversified = MemoryDiversifyPipeline::diversify(scored, &plan, diversify_options);
@@ -119,7 +119,7 @@ async fn maybe_merge_lorebook_recall(
     .await
 }
 
-async fn bump_recalled_memory_access(store: &MemoryStore, recalled: &[RecalledMemory]) {
+async fn bump_recalled_memory_access(store: &dyn MemoryPort, recalled: &[RecalledMemory]) {
     for memory in recalled {
         let Some(id) = memory.item.id else {
             continue;
@@ -144,6 +144,7 @@ mod tests {
     use super::*;
     use crate::config::MindConfig;
     use ene_config::{CharacterCardV3, Lorebook, LorebookEntry};
+    use ene_store::MemoryStore;
     use ene_store::{MemoryConfidence, MemoryKind, MemorySalience, MemorySource, MemoryStatus};
     use ene_store::{MemoryScope, NewMemoryItem};
 

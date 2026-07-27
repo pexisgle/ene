@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::empty_response_log::{EmptyResponseContext, log_empty_response_if_needed};
-use crate::handle::{EneEvent, TerminalReason};
+use crate::handle::{AudioChunk, EneEvent, TerminalReason};
 use crate::message_builder::build_cognitive_output_contract;
 use crate::streaming::{
     PHASE_CONTEXT_SEARCH, PHASE_EMBEDDING, PHASE_PROMPT_BUILDING, StreamContext, StreamOutcome,
@@ -30,6 +30,51 @@ use tracing::Instrument;
 
 /// Maximum sentence buffer length before forcing a TTS flush (chars).
 const TTS_MAX_BUFFER_CHARS: usize = 100;
+
+/// Sends a synthesized audio chunk on the dedicated bounded audio channel
+/// (#272).
+///
+/// Back-pressure policy: a full channel means the playback consumer is
+/// falling behind, so non-final chunks are dropped with a warning rather
+/// than stalling the TTS pipeline (and, transitively, the turn). The
+/// terminal `is_final` marker is different — losing it would leave a
+/// consumer's "is TTS still playing" state stuck forever — so it instead
+/// waits (bounded by [`FINAL_CHUNK_SEND_TIMEOUT`]) for capacity to free up
+/// before giving up and logging an error. When the channel is fully closed
+/// (no consumer ever called [`crate::EneHandle::take_audio_stream`], or the
+/// one consumer dropped it) every send is a silent no-op; that shape is a
+/// deliberate, supported way to opt out of audio delivery entirely.
+async fn send_audio_chunk(audio_tx: &tokio::sync::mpsc::Sender<AudioChunk>, chunk: AudioChunk) {
+    use tokio::sync::mpsc::error::TrySendError;
+
+    let is_final = chunk.is_final;
+    match audio_tx.try_send(chunk) {
+        // `Closed` means no consumer ever called `take_audio_stream` (or the
+        // one consumer dropped it) — a deliberate, supported opt-out.
+        Ok(()) | Err(TrySendError::Closed(_)) => {}
+        Err(TrySendError::Full(chunk)) => {
+            if is_final {
+                const FINAL_CHUNK_SEND_TIMEOUT: std::time::Duration =
+                    std::time::Duration::from_millis(500);
+                if tokio::time::timeout(FINAL_CHUNK_SEND_TIMEOUT, audio_tx.send(chunk))
+                    .await
+                    .is_err()
+                {
+                    tracing::error!(
+                        component = "TtsPipeline",
+                        "audio channel still full after {FINAL_CHUNK_SEND_TIMEOUT:?}; \
+                         dropping final PCM marker (#272)"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    component = "TtsPipeline",
+                    "audio channel full; dropping non-final PCM chunk (#272)"
+                );
+            }
+        }
+    }
+}
 
 /// Finds the index just past the first sentence boundary in `buf`.
 ///
@@ -173,7 +218,7 @@ fn spawn_interrupted_memory_work(
         provider.clone(),
         embedder.cloned(),
     );
-    let _ = memory_writer_tx.send(handle);
+    drop(memory_writer_tx.send(handle));
 }
 
 /// Mutates `messages` in-place for a proactive turn: strips trailing empty
@@ -228,6 +273,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         tool_rag,
         provider,
         event_tx,
+        audio_tx,
         diag_tx,
         cancel_token,
         pending_permissions,
@@ -489,7 +535,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     &user_name,
                     compose_query,
                     &history,
-                    mem_store.as_deref(),
+                    mem_store.as_deref().map(|s| s as &dyn ene_core::MemoryPort),
                     embedder.as_ref(),
                     &mind.character,
                     2,
@@ -561,7 +607,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     &user_name,
                     recall_query,
                     &history,
-                    mem_store.as_deref(),
+                    mem_store.as_deref().map(|s| s as &dyn ene_core::MemoryPort),
                     embedder.as_ref(),
                     &mind.character,
                     2,
@@ -740,7 +786,8 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mut turn_tool_results: Vec<ToolResultSummary> = Vec::new();
 
     // TTS pipeline: spawn a background worker that synthesizes sentences into
-    // PCM audio chunks and emits them through the broadcast channel.
+    // PCM audio chunks and emits them through the dedicated audio channel
+    // (#272; not the chat broadcast bus — see `send_audio_chunk`).
     // The worker monitors the turn's CancellationToken so barge-in can stop
     // synthesis immediately instead of finishing the current sentence (#H4).
     let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -751,7 +798,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     };
     if let Some(ref provider) = tts_provider {
         let tts_provider = Arc::clone(provider);
-        let event_tx = event_tx.clone();
+        let audio_tx = audio_tx.clone();
         let turn = turn.clone();
         let tts_cancel = cancel_token.clone();
         tokio::spawn(
@@ -786,13 +833,17 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                 };
                                 match chunk_res {
                                     Ok(chunk) => {
-                                        let _ = event_tx.send(EneEvent::AudioChunk {
-                                            turn: turn.clone(),
-                                            origin,
-                                            pcm: chunk.pcm,
-                                            sample_rate: chunk.sample_rate,
-                                            is_final: false,
-                                        });
+                                        send_audio_chunk(
+                                            &audio_tx,
+                                            AudioChunk {
+                                                turn: turn.clone(),
+                                                origin,
+                                                pcm: chunk.pcm,
+                                                sample_rate: chunk.sample_rate,
+                                                is_final: false,
+                                            },
+                                        )
+                                        .await;
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -823,13 +874,17 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 // (`abort: false`); a barge-in abort is signalled separately by
                 // the synthetic final the pump emits on `Terminal(Cancelled)`.
                 if !tts_cancel.is_cancelled() {
-                    let _ = event_tx.send(EneEvent::AudioChunk {
-                        turn: turn.clone(),
-                        origin,
-                        pcm: Vec::new(),
-                        sample_rate: 0,
-                        is_final: true,
-                    });
+                    send_audio_chunk(
+                        &audio_tx,
+                        AudioChunk {
+                            turn: turn.clone(),
+                            origin,
+                            pcm: Vec::new(),
+                            sample_rate: 0,
+                            is_final: true,
+                        },
+                    )
+                    .await;
                 }
             }
             .instrument(tracing::info_span!("tts_pipeline")),
@@ -948,11 +1003,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             // hard-aborted turn can recover its partial response
                             // for interruption recording (#H5).
                             partial_text.lock().push_str(&text);
-                            let _ = event_tx.send(EneEvent::TextDelta {
+                            drop(event_tx.send(EneEvent::TextDelta {
                                 turn: turn.clone(),
                                 origin,
                                 delta: text.clone(),
-                            });
+                            }));
                             if let Some(ref tx) = tts_tx {
                                 tts_sentence_buf.push_str(&text);
                                 tts_sentence_buf_chars =
@@ -964,7 +1019,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                     let sentence: String = tts_sentence_buf.drain(..end).collect();
                                     tts_sentence_buf_chars = tts_sentence_buf_chars
                                         .saturating_sub(sentence.chars().count());
-                                    let _ = tx.send(sentence);
+                                    drop(tx.send(sentence));
                                 }
                             }
                         }
@@ -1072,12 +1127,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 let (cues, sources): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
                 let primary_source = sources.into_iter().max_by_key(|s| cue_source_priority(*s));
                 if let Some(source) = primary_source {
-                    let _ = event_tx.send(EneEvent::Performance {
+                    drop(event_tx.send(EneEvent::Performance {
                         turn: turn.clone(),
                         origin,
                         cues,
                         source,
-                    });
+                    }));
                 }
             }
 
@@ -1161,7 +1216,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     provider.clone(),
                     embedder.clone(),
                 );
-                let _ = memory_writer_tx.send(memory_writer_handle);
+                drop(memory_writer_tx.send(memory_writer_handle));
             }
 
             if !is_proactive
@@ -1268,14 +1323,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 // A send failure means the actor has shut down; the
                 // classifier task runs as a detached orphan until
                 // completion, which is acceptable at shutdown.
-                let _ = classifier_tx.send(classifier_handle);
+                drop(classifier_tx.send(classifier_handle));
             }
 
             // Flush any remaining TTS buffer before Terminal.
             if let Some(ref tx) = tts_tx
                 && !tts_sentence_buf.trim().is_empty()
             {
-                let _ = tx.send(tts_sentence_buf.clone());
+                drop(tx.send(tts_sentence_buf.clone()));
             }
             drop(tts_tx);
 

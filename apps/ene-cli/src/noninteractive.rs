@@ -135,7 +135,7 @@ async fn run_prompt(
             if let Ok(code) = tokio::time::timeout(duration, fut).await {
                 code
             } else {
-                let _ = ctx.handle.cancel(&turn);
+                drop(ctx.handle.cancel(&turn));
                 if format.is_structured() {
                     output::print_jsonl(&StreamEvent::Terminal {
                         turn: turn.to_string(),
@@ -303,7 +303,7 @@ async fn process_turn(
                     continue;
                 }
                 if yes {
-                    let _ = handle.decide_permission(request_id, PermissionDecision::AllowOnce);
+                    drop(handle.decide_permission(request_id, PermissionDecision::AllowOnce));
                 } else {
                     denied_permission = true;
                     if format == OutputFormat::Jsonl {
@@ -313,7 +313,7 @@ async fn process_turn(
                             target: target.clone(),
                         })?;
                     }
-                    let _ = handle.decide_permission(request_id, PermissionDecision::Deny);
+                    drop(handle.decide_permission(request_id, PermissionDecision::Deny));
                 }
             }
             EneEvent::UserInputRequired {
@@ -325,7 +325,7 @@ async fn process_turn(
                     continue;
                 }
                 // No interactive prompt is available in non-interactive mode.
-                let _ = handle.submit_user_input(request_id, UserInputResponse::Cancel);
+                drop(handle.submit_user_input(request_id, UserInputResponse::Cancel));
             }
             EneEvent::Terminal {
                 turn: t, reason, ..
@@ -355,11 +355,7 @@ async fn process_turn(
                 }
                 break;
             }
-            EneEvent::ContextCompressed { .. }
-            | EneEvent::ToolBackgroundCompleted { .. }
-            | EneEvent::StatusChanged { .. }
-            | EneEvent::AudioChunk { .. }
-            | EneEvent::PendingCandidateAvailable { .. } => {}
+            EneEvent::ContextCompressed { .. } => {}
         }
     }
 
@@ -405,8 +401,8 @@ fn print_text_delta(delta: &str) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    let _ = lock.write_all(delta.as_bytes());
-    let _ = lock.flush();
+    drop(lock.write_all(delta.as_bytes()));
+    drop(lock.flush());
 }
 
 /// Map a [`PerfKind`] to its stable string label.
@@ -534,9 +530,9 @@ async fn session_command(
         SessionAction::List { archived } => {
             let sessions = ctx
                 .handle
-                .list_sessions(*archived, 50)
+                .sessions()
+                .list(*archived, 50)
                 .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list sessions: {e}")))?;
             if json {
                 output::print_json(&sessions)?;
@@ -546,14 +542,9 @@ async fn session_command(
             Ok(EXIT_OK)
         }
         SessionAction::Export { id } => {
-            let bundle = ctx
-                .handle
-                .export_session(id.clone())
-                .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
-                .map_err(|e| {
-                    OutputError::new(ErrorCode::Runtime, format!("export session: {e}"))
-                })?;
+            let bundle = ctx.handle.sessions().export(id).await.map_err(|e| {
+                OutputError::new(ErrorCode::Runtime, format!("export session: {e}"))
+            })?;
             // The export bundle is already JSON; print it verbatim.
             println!("{bundle}");
             Ok(EXIT_OK)
@@ -564,9 +555,9 @@ async fn session_command(
             })?;
             let id = ctx
                 .handle
-                .import_session(json_text)
+                .sessions()
+                .import(&json_text)
                 .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
                 .map_err(|e| {
                     OutputError::new(ErrorCode::Runtime, format!("import session: {e}"))
                 })?;
@@ -580,9 +571,9 @@ async fn session_command(
         SessionAction::Search { query } => {
             let matches = ctx
                 .handle
-                .search_sessions(query.clone(), 20, 0)
+                .sessions()
+                .search(query, 20, 0)
                 .await
-                .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
                 .map_err(|e| {
                     OutputError::new(ErrorCode::Runtime, format!("search sessions: {e}"))
                 })?;
@@ -616,9 +607,9 @@ async fn set_archived(
 ) -> Result<i32, OutputError> {
     let updated = ctx
         .handle
-        .archive_session(id, archived)
+        .sessions()
+        .set_archived(id, archived)
         .await
-        .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?
         .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("update session: {e}")))?;
     if json {
         output::print_json(&serde_json::json!({ "id": id, "updated": updated }))?;
@@ -629,7 +620,7 @@ async fn set_archived(
     Ok(EXIT_OK)
 }
 
-fn print_session_list(sessions: &[ene_store::SessionMeta]) {
+fn print_session_list(sessions: &[ene_runtime::PublicSessionMeta]) {
     if sessions.is_empty() {
         println!("No stored sessions.");
         return;
@@ -650,7 +641,7 @@ fn print_session_list(sessions: &[ene_store::SessionMeta]) {
     }
 }
 
-fn print_session_search(matches: &[(String, ene_store::ExportedMessage)]) {
+fn print_session_search(matches: &[(String, ene_runtime::PublicExportedMessage)]) {
     if matches.is_empty() {
         println!("No matching messages.");
         return;

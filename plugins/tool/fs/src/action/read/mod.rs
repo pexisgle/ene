@@ -1,3 +1,12 @@
+// `fmt::Error` is `Copy`, so `drop()` would itself trip
+// `clippy::dropping_copy_types`; every `write!`/`writeln!` in this module
+// targets a local `String` buffer via `fmt::Write`, which never actually
+// fails.
+#![expect(
+    clippy::let_underscore_must_use,
+    reason = "fmt::Write to a String is infallible in practice"
+)]
+
 mod read_binary;
 
 use self::read_binary::is_binary_file;

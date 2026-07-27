@@ -6,7 +6,7 @@
 
 use chrono::Utc;
 use ene_ai::EmbeddingProvider;
-use ene_store::{MemoryStore, Query, ScoredMemory};
+use ene_core::{MemoryPort, Query, ScoredMemory};
 
 use crate::config::MindMemoryConfig;
 use crate::error::CognitionError;
@@ -19,7 +19,7 @@ pub struct MemoryJournal;
 impl MemoryJournal {
     /// Embed `query_text`, build a [`Query`] from mind memory policy, and search.
     pub async fn search(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         embedder: &dyn EmbeddingProvider,
         mind_memory: &MindMemoryConfig,
         character_id: &str,
@@ -39,12 +39,15 @@ impl MemoryJournal {
             embedder.model_name(),
             limit,
         );
-        store.search(&query).await.map_err(CognitionError::Memory)
+        store
+            .search(&query)
+            .await
+            .map_err(CognitionError::MemoryPort)
     }
 
     /// [`search`] plus explainable recall reasons.
     pub async fn search_explained(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         embedder: &dyn EmbeddingProvider,
         mind_memory: &MindMemoryConfig,
         character_id: &str,

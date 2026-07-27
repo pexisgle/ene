@@ -796,6 +796,13 @@ impl DbIpcServer {
                 let mut hex = String::with_capacity(b.len() * 2 + 3);
                 hex.push_str("X'");
                 for byte in b {
+                    // `fmt::Error` is `Copy`, so `drop()` would itself trip
+                    // `clippy::dropping_copy_types`; writing into a `String`
+                    // via `fmt::Write` never actually fails.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "fmt::Write to a String is infallible in practice"
+                    )]
                     let _ = write!(hex, "{byte:02x}");
                 }
                 hex.push('\'');

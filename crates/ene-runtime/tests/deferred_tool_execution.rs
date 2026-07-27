@@ -22,7 +22,7 @@ use ene_config::{CharacterCardV3, EneConfig};
 use ene_plugin_host::{DeferredCallResult, PluginHostError, ToolRegistry};
 use ene_plugin_proto::ToolResult;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
-use ene_runtime::{DeferredToolTask, EneEvent, TerminalReason};
+use ene_runtime::{DeferredToolTask, EneEvent, LifecycleEvent, TerminalReason};
 use ene_store::MemoryStore;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -218,6 +218,7 @@ async fn deferred_tool_execution_emits_completion_event() {
             calls: AtomicUsize::new(0),
         }),
         event_tx: event_tx.clone(),
+        audio_tx: mpsc::channel(8).0,
         diag_tx,
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(Mutex::new(HashMap::new())),
@@ -284,9 +285,12 @@ async fn deferred_tool_execution_emits_completion_event() {
     assert_eq!(task.tool_name, "background.sleep");
     assert_eq!(task.task_id, "task-456");
 
-    // Simulate the actor's polling loop.
+    // Simulate the actor's polling loop. `ToolBackgroundCompleted` lives on
+    // the lifecycle bus, not the chat bus (#272), since it fires
+    // asynchronously after the originating turn has already completed.
+    let (lifecycle_tx, mut lifecycle_rx) = broadcast::channel::<LifecycleEvent>(16);
     let poll_registry = registry.clone();
-    let poll_event_tx = event_tx.clone();
+    let poll_lifecycle_tx = lifecycle_tx.clone();
     let poll_handle = tokio::spawn(async move {
         let task = DeferredToolTask {
             tool_name: "background.sleep".into(),
@@ -302,11 +306,13 @@ async fn deferred_tool_execution_emits_completion_event() {
                 .await
             {
                 ene_plugin_proto::DeferredStatus::Completed { result } => {
-                    let _ = poll_event_tx.send(EneEvent::ToolBackgroundCompleted {
-                        tool_name: task.tool_name,
-                        task_id: task.task_id,
-                        status: ene_plugin_proto::DeferredStatus::Completed { result },
-                    });
+                    drop(
+                        poll_lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
+                            tool_name: task.tool_name,
+                            task_id: task.task_id,
+                            status: ene_plugin_proto::DeferredStatus::Completed { result },
+                        }),
+                    );
                     break;
                 }
                 ene_plugin_proto::DeferredStatus::Pending => {
@@ -319,10 +325,10 @@ async fn deferred_tool_execution_emits_completion_event() {
 
     poll_handle.await.unwrap();
 
-    // Verify the completion event was emitted.
+    // Verify the completion event was emitted on the lifecycle bus.
     let mut saw_completion = false;
-    while let Ok(event) = event_rx.try_recv() {
-        if let EneEvent::ToolBackgroundCompleted {
+    while let Ok(event) = lifecycle_rx.try_recv() {
+        if let LifecycleEvent::ToolBackgroundCompleted {
             tool_name,
             task_id,
             status,

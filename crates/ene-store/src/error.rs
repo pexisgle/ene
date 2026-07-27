@@ -1,7 +1,14 @@
 use thiserror::Error;
 
 /// Error types for the memory subsystem.
+///
+/// Marked `#[non_exhaustive]` so downstream crates (notably `ene-runtime`'s
+/// `public_api::PublicApiError` boundary, #269) cannot exhaustively match
+/// this enum without a wildcard arm. That means adding a new variant here
+/// never breaks a downstream crate's compile — new variants silently fall
+/// through any wildcard arm until that crate chooses to special-case them.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum EneMemoryError {
     /// `SeaORM` error from the memory store.
     #[error("Memory store error: {0}")]
@@ -82,7 +89,3 @@ pub enum EneMemoryError {
     #[error("Other error: {0}")]
     Other(String),
 }
-
-/// Type alias for internal module usages.
-#[deprecated(since = "0.1.0", note = "use `EneMemoryError` directly")]
-pub type MemoryError = EneMemoryError;

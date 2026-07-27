@@ -225,7 +225,7 @@ impl AppState {
         reason = "transitional AI bridge entry point for external callers"
     )]
     pub fn request_quit(&self, event_tx: &AppEventSender) {
-        let _ = event_tx.send(AppEvent::Quit);
+        drop(event_tx.send(AppEvent::Quit));
     }
 
     /// Borrow the bevy UI entity (the entity spawned by
