@@ -915,5 +915,10 @@ mod tests {
         assert!(provider.supports_streaming);
         assert!(provider.supports_vision);
         assert_eq!(provider.supported_models.len(), 3);
+        // A cloud HTTP proxy explicitly opts into higher-than-default
+        // concurrency, per the `ConcurrencyHint` design (see the type's
+        // docs): declaring it is evidence the choice was considered.
+        assert_eq!(provider.concurrency.max_in_flight, 8);
+        assert_eq!(provider.concurrency.queue_depth, 16);
     }
 }

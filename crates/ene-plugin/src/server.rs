@@ -1052,6 +1052,7 @@ mod tests {
                 kind: "mock_tts".into(),
                 voices: vec!["default".into()],
                 formats: vec!["wav".into()],
+                concurrency: ConcurrencyHint::default(),
             }]
         }
 
@@ -1077,6 +1078,7 @@ mod tests {
                 kind: "mock_stt".into(),
                 models: vec!["mock-model".into()],
                 formats: vec!["wav".into()],
+                concurrency: ConcurrencyHint::default(),
             }]
         }
 

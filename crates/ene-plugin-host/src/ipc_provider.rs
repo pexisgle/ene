@@ -20,22 +20,120 @@
 //! Transient failures (transport errors) on `chat_completion` and stream
 //! establishment are retried according to the [`RetryPolicy`] supplied by the
 //! factory, matching the OpenAI provider's behavior (#C2).
+//!
+//! ## Concurrency admission control
+//!
+//! The process boundary protects the *host* from a misbehaving plugin — a
+//! bad plugin cannot exhaust the host's tokio blocking pool — but nothing
+//! protects the *plugin* from the host opening unbounded concurrent requests
+//! against it. [`ConcurrencyLimiter`] enforces the
+//! [`ConcurrencyHint`](ene_plugin_proto::ConcurrencyHint) the plugin declared
+//! during the handshake (or the safe serial default if it declared none):
+//! `max_in_flight` requests may run at once, up to `queue_depth` additional
+//! callers may wait for a permit, and anything beyond that fails fast with
+//! [`LlmProviderError::Busy`] rather than growing the wait queue unboundedly.
+//!
+//! The limiter is built once per (plugin, provider kind) in
+//! [`IpcLlmProviderFactory`](crate::factory::IpcLlmProviderFactory) and
+//! shared (via `Arc`) across every [`IpcLlmProvider`] instance the factory
+//! subsequently creates, since a fresh provider is built per call
+//! (`create_task_chat_provider`) — a limiter scoped to a single provider
+//! instance would never actually bound anything. The acquired permit is
+//! held for the duration of `chat_completion`, and for streams it is moved
+//! into [`IpcChatStream`] so `Drop` releases it whether the stream ends
+//! naturally or is cancelled mid-flight (see that type's docs).
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use ene_ai::RetryPolicy;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk};
-use ene_plugin_proto::PluginIpcResponse;
-use tokio::sync::Mutex;
+use ene_plugin_proto::{ConcurrencyHint, PluginIpcResponse};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 
 use crate::error::PluginHostError;
 use crate::ipc_plugin::IpcPluginConnection;
+
+/// Bounds concurrent in-flight requests against a single plugin-supplied
+/// provider, per the declared [`ConcurrencyHint`].
+///
+/// `max_in_flight` permits may be held at once; up to `queue_depth`
+/// additional callers may wait for a permit to free up. Once both are
+/// exhausted, [`acquire`](Self::acquire) fails fast with
+/// [`LlmProviderError::Busy`] instead of letting the wait queue grow
+/// unboundedly — the same fail-fast-over-queue-forever discipline
+/// `ene-infer` applies to local inference engines, applied here to the
+/// plugin IPC boundary.
+pub struct ConcurrencyLimiter {
+    semaphore: Arc<Semaphore>,
+    /// Number of callers currently waiting for a permit (i.e. that already
+    /// lost the fast-path `try_acquire` race). Bounded by `queue_depth`.
+    waiting: AtomicU32,
+    queue_depth: u32,
+}
+
+impl ConcurrencyLimiter {
+    /// Builds a limiter enforcing `hint`.
+    ///
+    /// `max_in_flight` is clamped to at least 1: a plugin declaring `0`
+    /// would otherwise deadlock every request against this provider
+    /// forever, which is a worse failure mode than the clamp.
+    pub(crate) fn new(hint: ConcurrencyHint) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(hint.max_in_flight.max(1) as usize)),
+            waiting: AtomicU32::new(0),
+            queue_depth: hint.queue_depth,
+        }
+    }
+
+    /// Acquires a permit, waiting if necessary (bounded by `queue_depth`).
+    ///
+    /// Fast path: if a permit is immediately available, returns it without
+    /// touching the waiter count at all. Otherwise, reserves one of the
+    /// `queue_depth` wait slots (failing fast with
+    /// [`LlmProviderError::Busy`] if none remain) and then waits for a
+    /// permit to free up.
+    pub(crate) async fn acquire(
+        &self,
+        kind: &str,
+    ) -> Result<OwnedSemaphorePermit, LlmProviderError> {
+        if let Ok(permit) = Arc::clone(&self.semaphore).try_acquire_owned() {
+            return Ok(permit);
+        }
+
+        let mut current = self.waiting.load(Ordering::Acquire);
+        loop {
+            if current >= self.queue_depth {
+                return Err(LlmProviderError::Busy(format!(
+                    "provider '{kind}' is at its concurrency limit \
+                     (max_in_flight reached, queue_depth={} full)",
+                    self.queue_depth
+                )));
+            }
+            match self.waiting.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+
+        let result = Arc::clone(&self.semaphore).acquire_owned().await;
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        result.map_err(|_| {
+            LlmProviderError::Provider(format!("provider '{kind}' concurrency limiter closed"))
+        })
+    }
+}
 
 /// An `LlmProvider` that delegates to a plugin binary over IPC.
 ///
@@ -48,10 +146,20 @@ pub struct IpcLlmProvider {
     max_tokens: Option<u32>,
     provider_config: serde_json::Value,
     retry_policy: RetryPolicy,
+    /// Shared with every other `IpcLlmProvider` instance created by the same
+    /// factory for the same (plugin, kind) pair, so the concurrency bound
+    /// holds across the many short-lived provider instances
+    /// `create_task_chat_provider` builds (one per call), not just within a
+    /// single instance's lifetime.
+    limiter: Arc<ConcurrencyLimiter>,
 }
 
 impl IpcLlmProvider {
     /// Creates a new IPC-backed LLM provider.
+    ///
+    /// `limiter` should be the same `Arc<ConcurrencyLimiter>` shared by every
+    /// provider instance the owning factory creates for this (plugin, kind)
+    /// pair — see the module docs.
     pub fn new(
         kind: String,
         conn: Arc<Mutex<IpcPluginConnection>>,
@@ -59,6 +167,7 @@ impl IpcLlmProvider {
         max_tokens: Option<u32>,
         provider_config: serde_json::Value,
         retry_policy: RetryPolicy,
+        limiter: Arc<ConcurrencyLimiter>,
     ) -> Self {
         Self {
             kind,
@@ -67,6 +176,7 @@ impl IpcLlmProvider {
             max_tokens,
             provider_config,
             retry_policy,
+            limiter,
         }
     }
 }
@@ -94,12 +204,20 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
 /// `CancelStream` IPC request so the plugin stops generating the abandoned
 /// stream server-side (Cr-4). Natural completion sets `completed` to avoid a
 /// pointless cancel round-trip after `StreamEnd`/`StreamError`.
+///
+/// `_permit` holds this stream's [`ConcurrencyLimiter`] slot for as long as
+/// the stream is alive. It is never read — its only purpose is the
+/// `OwnedSemaphorePermit` drop glue, which fires as one of this struct's
+/// field drops regardless of *why* `IpcChatStream` is being dropped (natural
+/// completion or mid-flight cancellation), releasing the slot for the next
+/// queued caller in both cases.
 struct IpcChatStream {
     rx: ReceiverStream<Result<LlmResponseChunk, LlmProviderError>>,
     reader: Option<JoinHandle<()>>,
     conn: Arc<Mutex<IpcPluginConnection>>,
     request_id: String,
     completed: Arc<std::sync::atomic::AtomicBool>,
+    _permit: OwnedSemaphorePermit,
 }
 
 impl Drop for IpcChatStream {
@@ -166,6 +284,14 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
             .collect();
 
         let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Admission control (#stage6): acquire this provider's concurrency
+        // slot *before* establishing the stream and *before* the retry loop,
+        // so retries never re-acquire while already holding a permit (which
+        // would deadlock a max_in_flight=1 provider against itself). The
+        // permit moves into `IpcChatStream` below and is held for the
+        // stream's entire lifetime.
+        let permit = self.limiter.acquire(&self.kind).await?;
 
         // Establish the stream with retry on transient (transport) failures,
         // matching the OpenAI provider's `establish_sse_connection` (#C2).
@@ -301,6 +427,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
             conn: Arc::clone(&self.conn),
             request_id: request_id.clone(),
             completed,
+            _permit: permit,
         }))
     }
 
@@ -313,6 +440,14 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
             .iter()
             .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
             .collect();
+
+        // Admission control (#stage6): held for the entire call below,
+        // including all retry attempts, so a retry never re-acquires while
+        // already holding a permit (which would deadlock a
+        // max_in_flight=1 provider against itself). Released when this
+        // function returns, on every path (success, error, or panic
+        // unwind).
+        let _permit = self.limiter.acquire(&self.kind).await?;
 
         // Retry transient (transport) failures with the same policy as the
         // OpenAI path (#C2). The connection's own `do_request` already
@@ -370,5 +505,129 @@ fn parse_tool_call_delta(value: &serde_json::Value, index: usize) -> LlmToolCall
             .get("arguments")
             .and_then(serde_json::Value::as_str)
             .map(String::from),
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unit tests use unwrap/expect for concise failure messages"
+)]
+mod concurrency_limiter_tests {
+    use std::time::Duration;
+
+    use ene_ai::error::LlmProviderError;
+    use ene_plugin_proto::ConcurrencyHint;
+
+    use super::ConcurrencyLimiter;
+
+    #[test]
+    fn default_hint_is_serial_with_shallow_queue() {
+        let hint = ConcurrencyHint::default();
+        assert_eq!(hint.max_in_flight, 1);
+        assert_eq!(hint.queue_depth, 2);
+    }
+
+    #[tokio::test]
+    async fn acquire_succeeds_immediately_under_the_limit() {
+        let limiter = ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 2,
+            queue_depth: 0,
+        });
+        let _p1 = limiter.acquire("test").await.unwrap();
+        let _p2 = limiter.acquire("test").await.unwrap();
+        // Both in-flight slots are held; a third caller with no queue depth
+        // must fail fast rather than block.
+        let err = limiter.acquire("test").await.unwrap_err();
+        assert!(matches!(err, LlmProviderError::Busy(_)));
+    }
+
+    #[tokio::test]
+    async fn over_limit_with_no_queue_depth_fails_fast() {
+        let limiter = ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 0,
+        });
+        let _permit = limiter.acquire("test").await.unwrap();
+        let err = limiter
+            .acquire("test")
+            .await
+            .expect_err("second caller must be rejected: no in-flight slot, no queue depth");
+        assert!(matches!(err, LlmProviderError::Busy(_)));
+        assert!(err.to_string().contains("test"));
+    }
+
+    #[tokio::test]
+    async fn queued_caller_is_admitted_once_a_permit_frees_up() {
+        let limiter = std::sync::Arc::new(ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 1,
+        }));
+        let permit = limiter.acquire("test").await.unwrap();
+
+        // A second caller has queue room (queue_depth: 1) and should wait
+        // rather than being rejected immediately.
+        let waiter_limiter = std::sync::Arc::clone(&limiter);
+        let waiter = tokio::spawn(async move { waiter_limiter.acquire("test").await });
+
+        // Give the waiter task a chance to start waiting before releasing.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !waiter.is_finished(),
+            "waiter should still be blocked while the only permit is held"
+        );
+
+        drop(permit);
+        let result = waiter.await.unwrap();
+        assert!(
+            result.is_ok(),
+            "queued caller must be admitted once the permit is released"
+        );
+    }
+
+    #[tokio::test]
+    async fn beyond_queue_depth_fails_fast_instead_of_queueing_unboundedly() {
+        let limiter = std::sync::Arc::new(ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 1,
+        }));
+        let _permit = limiter.acquire("test").await.unwrap();
+
+        // One caller fills the single queue slot.
+        let queued_limiter = std::sync::Arc::clone(&limiter);
+        let queued = tokio::spawn(async move { queued_limiter.acquire("test").await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // A second caller, beyond max_in_flight + queue_depth, must be
+        // rejected immediately rather than growing the wait queue further.
+        let err = limiter.acquire("test").await.unwrap_err();
+        assert!(matches!(err, LlmProviderError::Busy(_)));
+
+        queued.abort();
+    }
+
+    /// Simulates the `IpcChatStream` drop path: a permit held by a
+    /// long-lived value (standing in for the stream) is released as soon as
+    /// that value is dropped — whether from natural completion or, as here,
+    /// early/mid-flight cancellation — freeing the slot for the next caller.
+    #[tokio::test]
+    async fn permit_is_released_when_holder_is_dropped_mid_flight() {
+        let limiter = ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 0,
+        });
+        let permit = limiter.acquire("test").await.unwrap();
+
+        // While held, no other caller can get in (fail-fast, no queue depth).
+        assert!(limiter.acquire("test").await.is_err());
+
+        // Drop simulates `IpcChatStream`'s `_permit` field being dropped when
+        // the stream itself is dropped mid-flight (cancellation), not only
+        // on natural `StreamEnd`/`StreamError` completion.
+        drop(permit);
+
+        // The slot is immediately available again.
+        assert!(limiter.acquire("test").await.is_ok());
     }
 }
