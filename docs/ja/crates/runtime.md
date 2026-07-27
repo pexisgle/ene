@@ -1,73 +1,35 @@
-# `ene-runtime` — API リファレンス
+# `ene-runtime`
 
-> **クレート**: `ene-runtime` | **役割**: アクターベースのホストファサード & システムターンエンジン
+> **クレート**: `ene-runtime` | **役割**: アクターベースのホストファサード & ターンエンジン
 
-`ene-runtime` は Ene を組込むアプリケーション (`ene-cli`, `ene-desktop`) のメインエントリポイントです。ターンの実行、プロンプト構築 (`ene-mind`)、記憶永続化 (`ene-store`)、プラグイン監視 (`ene-plugin-host`)、および DB IPC ソケットサーバーを統合管理します。
+`ene-runtime` は Ene を組み込むアプリケーション (`ene-cli`, `ene-desktop`) のメインエントリポイントです。スレッドセーフなファサードである `EneHandle` を所有し、ターンの実行、プロンプト構築 (`ene-mind`)、記憶永続化 (`ene-store`)、プラグイン監視 (`ene-plugin-host`)、およびツール DB IPC ソケットサーバーを統合管理します。
 
 ---
 
-## 主要型とメソッド
+## アーキテクチャ境界
 
-### `EneHandle`
-Ene を起動した際に返されるスレッドセーフなハンドル：
+- `EneHandle` の公開メソッドはすべて、単一スレッドのアクター (`handle::actor::TurnActor`) への非ブロッキングなチャネル送信または oneshot 非同期リクエストです。共有可変状態に直接触れることはありません。
+- 読み取り専用のセッション/候補クエリと画面画像のビジョン要約は、アクターのメールボックスを完全にバイパスして `ene-store` やビジョンモデルに直接アクセスします。ターン実行コマンドとアクターのスループットを奪い合いません。
+- イベントバスは単一チャネルではなく、トラフィックの性質ごとに3系統の専用チャネルへ分離されています: `broadcast` によるチャットバス (`EneEvent`)、bounded かつ単一コンシューマの `mpsc` による音声チャネル (`AudioChunk`)、小容量の `broadcast` によるライフサイクルバス (`LifecycleEvent`)。一方のチャネルのバーストが他方の subscriber を lag させたり飢餓状態にしたりすることはありません。
+- 安定版パブリック API v1 契約は `public_api` にすべて集約されています (`PublicApiError`, `PublicChatEvent`, `PublicLifecycleEvent`, `PublicSessionMeta`, `PublicExportedMessage`, `API_VERSION`)。`Public*` 型のフィールドに `ene-store` / `ene-mind` / `ene-plugin-proto` の型が現れることはありません。内部エラー enum は `From` 実装を介して `PublicApiError` の安定したカテゴリへ射影されるため、内部エラーバリアントの追加が契約を破壊することはありません。
+- `message_builder` と `streaming` は意図的に `#[doc(hidden)]` になっています — API v1 契約の一部ではなく、CLI のデバッグコマンドと統合テストのためだけに公開されています。
 
-```rust
-pub struct EneHandle { /* ... */ }
+## 設計思想
 
-impl EneHandle {
-    /// 指定された設定とキャラクターカードで Ene ランタイムを初期化・起動します。
-    pub async fn open(config: EneConfig, card: CharacterCard) -> Result<Self, EneRuntimeError>;
+- **なぜアクターモデルか**: ターン実行には、共有状態 (アクティブターン、Undo スタック、パーミッション許可) に対する厳密に直列化されたミューテーションが必要ですが、それを生のロックとして非同期かつ複数コンシューマ向けの API に露出させたくありません。単一スレッドのアクターメールボックスはこの直列化を自然に実現し、`EneHandle` を安価に clone 可能に保ちます。
+- **なぜパニック分離が重要か**: `ene-desktop` は GUI・アクター・LLM ストリーミング・オーディオを単一プロセス内でホストします。ディスパッチされるすべてのコマンドとバックグラウンドタスクは `catch_unwind` ベースの分離を経由するため、コマンド内のパニックはプロセス全体を巻き込む代わりに診断イベントとして表面化します。この仕組みはワークスペースが release プロファイルで `panic = "abort"` を設定していないことに依存しています — 詳細な仕組みとそのビルド設定がなぜ重要かは `docs/architecture.md` §4 を参照してください。
+- **なぜイベントバスを3系統に分離したか**: 単一の混合 `broadcast` チャネルでは、重量級の `AudioChunk` PCM ペイロードがすべてのチャットsubscriberのバッファを膨張させ、チャット流量とは無関係な理由で subscriber を lag させていました。トラフィックの性質ごとに分離することでこの結合を取り除いています。
+- **なぜ読み取り専用クエリがアクターをバイパスするか**: セッションの一覧表示・エクスポート・検索やビジョン要約はターン実行クリティカルな状態に触れないため、`Run`/`Cancel` と同じメールボックスを経由させると回避可能なヘッドオブラインブロッキングが発生します。
 
-    /// 会話ターンを開始します (単一飛行のシェル)。
-    pub fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError>;
+## API リファレンス
 
-    /// 実行中の会話ターンをキャンセルします。
-    pub fn cancel(&self, turn_id: TurnId) -> Result<(), CancelError>;
+構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:
 
-    /// リアルタイムチャットイベントストリーム (TokenStream, Performance, Terminal) を購読します。
-    pub fn subscribe(&self) -> broadcast::Receiver<EneEvent>;
-
-    /// ライフサイクルイベントストリーム (StatusChanged, PendingCandidateAvailable,
-    /// ToolBackgroundCompleted) を購読します。
-    pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent>;
-
-    /// 音声 (TTS PCM) ストリームの所有権を取得します。単一コンシューマ専用で、
-    /// 2回目以降の呼び出しは `None` を返します。
-    pub fn take_audio_stream(&self) -> Option<mpsc::Receiver<AudioChunk>>;
-
-    /// 非同期診断・検査用ハンドルを取得します。
-    pub fn diagnostics(&self) -> DiagnosticsHandle;
-
-    /// ランタイムをシャットダウンし、バックグラウンド記憶書込をフラッシュします。
-    pub async fn shutdown(self) -> Result<(), EneRuntimeError>;
-}
+```sh
+cargo doc -p ene-runtime --open
 ```
 
-### イベントバス: トラフィックの性質ごとに3系統のチャネルへ分離
-
-`ene-runtime` のイベントは3系統の専用チャネルに分離されており、一方のバーストが他方の subscriber を lag させたり飢餓状態にしたりすることはありません。
-
-- **チャットバス** (`EneEvent`、`subscribe` 経由) — 軽量・順序保証付き・ターンスコープのチャットイベントを流す `broadcast` チャネル：
-
-  ```rust
-  pub enum EneEvent {
-      TurnStarted { turn_id: TurnId },
-      TokenStream { chunk: String },
-      Performance { cue: PerformanceCue },
-      ToolCallStarted { tool_name: String },
-      ToolCallFinished { tool_name: String },
-      Terminal { turn_id: TurnId, status: TurnStatus },
-  }
-  ```
-
-- **音声チャネル** (`AudioChunk`、`take_audio_stream` 経由) — 合成された TTS PCM を流す、bounded かつ単一コンシューマ専用の `mpsc` チャネル。重量級の PCM ペイロードがチャットsubscriberの `broadcast` バッファを膨張させないよう、チャットバスから分離しています。
-- **ライフサイクルバス** (`LifecycleEvent`、`subscribe_lifecycle` 経由) — `StatusChanged` / `PendingCandidateAvailable` / `ToolBackgroundCompleted` といったターン非依存の通知を流す、小容量の `broadcast` チャネル。
-
----
-
-## DB IPC サーバー (`DbServer`)
-
-`ene-runtime` はローカル Unix ドメインソケット (UDS) サーバーを起動し、状態を保持するツールサブプロセス (`ene-plugin-fs`, `ene-plugin-utility`) が `ene-plugin-db` を介して `undo.db` / `todo.db` に対するスコープ付き CRUD 操作を実行できるようにします。
+`EneHandle` から始め、イベントバスについては `handle::EneEvent` と `handle::LifecycleEvent` を参照してください。
 
 ---
 

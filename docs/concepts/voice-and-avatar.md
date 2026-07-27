@@ -38,15 +38,6 @@ Microphone Input
 
 ### Performance Cue Mapping
 
-During conversation turns, `ene-mind` emits `EneEvent::Performance` cues containing avatar expressions:
+During conversation turns, `ene-runtime` broadcasts `EneEvent::Performance { turn, origin, cues, source }` on the chat bus, where `cues: Vec<ene_mind::PerformanceCue>` comes from `ene-mind`'s output arbitration. Each `PerformanceCue` carries a `kind` (expression / motion / look-at / cancel), a `name` identifying the specific cue, and kind-specific fields (target weight and hold duration for expressions, a `MotionLayer` for motions) — see `cargo doc -p ene-mind --open` (`output::performance::PerformanceCue`) for the authoritative fields.
 
-```rust
-pub struct PerformanceCue {
-    pub expression: ExpressionKind, // Happy, Angry, Surprised, Neutral, etc.
-    pub blink: bool,
-    pub viseme: Option<VisemeCategory>, // A, I, U, E, O lip shapes
-    pub motion: Option<MotionPreset>,
-}
-```
-
-`ene-desktop` receives these performance events and maps them directly to VRM blendshapes and skeletal bone animations.
+`ene-desktop` receives these performance events and maps them to VRM blendshapes and skeletal bone animations.

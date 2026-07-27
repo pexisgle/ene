@@ -22,19 +22,22 @@ of another:
 - **Chat bus** (`EneEvent`, via `EneHandle::subscribe`) — a `broadcast`
   channel (capacity 1024) carrying lightweight, ordered, turn-scoped chat
   events. Multiple subscribers allowed. Below is the chat bus's event
-  sequence for a single turn (variant names in this diagram are
-  illustrative — see [`ene-runtime`'s crate docs](../crates/runtime.md)
-  for the exact current variant set):
+  sequence for a single turn (fields omitted for brevity — run
+  `cargo doc -p ene-runtime --open` and see `handle::EneEvent` for the
+  authoritative variant list and fields):
 
   ```text
-  EneEvent::TurnStarted { turn_id }
+  EneEvent::TurnStarted { turn, origin }
     │
-    ├── EneEvent::TokenStream { chunk }        (LLM streaming tokens)
-    ├── EneEvent::Performance { cue }           (Avatar facial expression / motion)
-    ├── EneEvent::ToolCallStarted { tool_name } (Tool invocation indicator)
-    ├── EneEvent::ToolCallFinished { tool_name }
+    ├── EneEvent::TextDelta { turn, origin, delta }     (LLM streaming text)
+    ├── EneEvent::Performance { turn, origin, cues, source } (Avatar expression / motion)
+    ├── EneEvent::ToolCallStart { turn, origin, name, arguments }
+    ├── EneEvent::ToolCallResult { turn, origin, name, result }
+    ├── EneEvent::PermissionRequired { turn, origin, request_id, .. }
+    ├── EneEvent::UserInputRequired { turn, origin, request_id, prompt }
+    ├── EneEvent::ContextCompressed { turn, origin, level }
     │
-    └── EneEvent::Terminal { turn_id, status } (Turn complete, session committed)
+    └── EneEvent::Terminal { turn, origin, reason }     (Turn complete, session committed)
   ```
 
 - **Audio channel** (`AudioChunk`, via `EneHandle::take_audio_stream`) — a
@@ -84,13 +87,14 @@ Budget allocation dynamically truncates oldest dialogue messages while maintaini
 
 ## 4. Affect & Emotion Model (PAD)
 
-Ene models character emotional state using the 3D **Pleasure-Arousal-Dominance (PAD)** space:
+Ene models character emotional state using a PAD-derived (**Pleasure-Arousal-Dominance**) space, represented by `ene-core::AffectState`:
 
-- **Pleasure ($P \in [-1, 1]$)**: Positive vs negative valence.
-- **Arousal ($A \in [-1, 1]$)**: Excited vs calm energy level.
-- **Dominance ($D \in [-1, 1]$)**: Dominant/confident vs submissive state.
+- **Valence ($\in [-1, 1]$)**: Positive vs negative feeling (the "pleasure" axis).
+- **Arousal ($\in [-1, 1]$)**: Excited vs calm energy level.
+- **Dominance ($\in [-1, 1]$)**: Dominant/confident vs submissive state.
+- Plus trust, affinity, irritation, curiosity, and fatigue dimensions that extend beyond the classic 3-axis PAD model — see `ene_core::AffectState` (`cargo doc -p ene-core --open`) for the full field list.
 
 ### Emotional Dynamics
 - **Natural Decay**: Affect values drift toward baseline over time.
-- **Classification**: Text responses and user input trigger subtle affect shifts via `PadClassifier`.
-- **Performance Cues**: `PadEmotion` maps to `PerformanceCue` expressions (e.g., Happy, Angry, Surprised, Thinking) sent to `ene-desktop` for VRM avatar playback.
+- **Classification**: Text responses and user input trigger subtle affect shifts via `ene-mind`'s `EmotionEngine`.
+- **Performance Cues**: `ene-mind`'s output arbitration maps affect state to `PerformanceCue`s (expression/motion) sent as `EneEvent::Performance` for `ene-desktop`/VRM avatar playback.

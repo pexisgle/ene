@@ -1,37 +1,28 @@
-# `ene-voice` — API リファレンス
+# `ene-voice`
 
-> **クレート**: `ene-voice` | **役割**: ローカル音声 STT, TTS, VAD, および cpal PCM デバイス I/O
+> **クレート**: `ene-voice` | **役割**: ローカル音声 STT, TTS, VAD, およびクロスプラットフォーム PCM デバイス I/O
 
-`ene-voice` は、ローカルの音声認識 (Whisper)、音声合成、発話区間検出 (Silero VAD)、およびクロスプラットフォームのオーディオデバイスストリーム (`cpal`/`rodio`) をカプセル化します。
+`ene-voice` は、ローカルの音声認識 (`whisper-rs` による Whisper)、音声合成、発話区間検出 (ONNX Runtime による Silero VAD)、およびクロスプラットフォームのオーディオデバイスストリーム (`cpal`/`rodio`) をカプセル化します。`apps/ene-desktop` から直接利用され、`ene-runtime` からは利用されません。
 
 ---
 
-## 主要コンポーネントと API
+## アーキテクチャ境界
 
-### 音声認識 STT (`SttEngine`)
-`whisper-rs` を使用して、キャプチャされた PCM オーディオに対してローカル Whisper モデルによるテキスト化を行います：
+- `ene-voice` は `ene-ai` (プロバイダ関連型) と `ene-config` に依存します。`ene-mind`、`ene-runtime`、`ene-store` への依存はありません — 音声 I/O はプレゼンテーション層の関心事であり、ホストアプリがチャットターンの周辺で配線するものであって、認知/ランタイム層が知る必要はありません。
+- ここでの推論 (Whisper のテキスト化、Silero VAD) はすべてローカルかつプロセス内で実行されます。音声パイプライン自体にネットワーク呼び出しはありません。
 
-```rust
-pub struct SttEngine { /* ... */ }
+## 設計思想
 
-impl SttEngine {
-    pub async fn transcribe(&self, pcm_samples: &[f32]) -> Result<String, VoiceError>;
-}
+- **なぜローカルのみの推論か**: 音声のキャプチャと再生は、本質的にレイテンシに敏感かつプライバシーに敏感です (生のマイク音声を扱うため)。ローカルモデルを経由させることで、リモート STT/TTS API のラウンドトリップレイテンシとデータ露出の両方を回避できます。
+- **なぜ VAD が STT と別ステージか**: 常時フル Whisper 文字起こしを実行するのは無駄が多いため、Silero VAD が安価に発話の開始/終了境界を検出し、実際の発話に対してのみ文字起こしを実行します。
+
+## API リファレンス
+
+構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:
+
+```sh
+cargo doc -p ene-voice --open
 ```
-
-### 発話区間検出 (`SileroVad`)
-ONNX Runtime (`ort`) を使用して、ユーザーの発話開始・終了境界をリアルタイムに検出します：
-
-```rust
-pub struct SileroVad { /* ... */ }
-
-impl SileroVad {
-    pub fn is_speech(&mut self, chunk: &[f32]) -> Result<bool, VoiceError>;
-}
-```
-
-### 音声合成 TTS (`TtsEngine`)
-応答テキストを PCM オーディオバッファに合成し、再生および口パク (Viseme) の計算用に提供します。
 
 ---
 

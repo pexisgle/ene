@@ -38,15 +38,6 @@ Ene はオプションで完全ローカルな音声対話パイプラインを�
 
 ### Performance キューのマッピング
 
-会話ターン中、 `ene-mind` はアバターの感情表現を含む `EneEvent::Performance` キューを発行します：
+会話ターン中、`ene-runtime` はチャットバス上で `EneEvent::Performance { turn, origin, cues, source }` をブロードキャストします。`cues: Vec<ene_mind::PerformanceCue>` は `ene-mind` の出力調停から得られます。各 `PerformanceCue` は種別 (`kind`: 表情 / 動作 / 視線 / キャンセル)、キューを識別する `name`、および種別ごとのフィールド (表情の場合は目標ウェイトと保持時間、動作の場合は `MotionLayer`) を持ちます。正確なフィールドは `cargo doc -p ene-mind --open` (`output::performance::PerformanceCue`) を参照してください。
 
-```rust
-pub struct PerformanceCue {
-    pub expression: ExpressionKind, // Happy, Angry, Surprised, Neutral など
-    pub blink: bool,
-    pub viseme: Option<VisemeCategory>, // あ, い, う, え, お の口形状
-    pub motion: Option<MotionPreset>,
-}
-```
-
-`ene-desktop` はこれらの Performance イベントを受信し、VRM のブレンドシェイプおよびボーンアニメーションに直接マッピングして再生します。
+`ene-desktop` はこれらの Performance イベントを受信し、VRM のブレンドシェイプおよびボーンアニメーションにマッピングして再生します。

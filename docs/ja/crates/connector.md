@@ -1,23 +1,32 @@
-# `ene-connector` — API リファレンス
+# `ene-connector`
 
-> **クレート**: `ene-connector` | **役割**: 外部サービス連携および MCP ブリッジのための共有コネクタフレームワーク
+> **クレート**: `ene-connector` | **役割**: 汎用的な外部サービスコネクタフレームワーク
 
-`ene-connector` は、外部サービス（カレンダー、MCP、GitHub など）へのコネクタを構築し、Model Context Protocol (MCP) サーバーを Ene にブリッジするための再利用可能な共通フレームワークを提供します。
+`ene-connector` は外部サービスへのコネクタを構築するための再利用可能なフレームワークを提供します: コネクタのアイデンティティと認証済みアカウント、OAuth トークン/API キーの記憶域 (シークレットはドロップ時に消記され、ログに出力されることもありません)、および再利用可能なポリシー (バックオフ付きリトライ、レート制限、タイムアウト、ページネーション)。このクレート自体は特定の外部サービスを実装しません — 具体的なコネクタはこのフレームワークの上に構築されます。例えば Model Context Protocol (MCP) ブリッジは、このフレームワークの利用者として `ene-plugin-host` 側 (`McpConnector`、`McpToolRegistry`) に実装されており、`ene-connector` 自体の内部にはありません。
+
+注意: このクレートは開発中です (`lib.rs` の `#![expect(missing_docs, ...)]`)。ここで説明する他のクレートよりも公開 API が変わりやすい点に留意してください。
 
 ---
 
-## 主要コンポーネント
+## アーキテクチャ境界
 
-### 1. フレームワーク抽象化
-- **`Connector` トレイト**: すべての外部サービスコネクタが実装する統一されたライフサイクルトレイト。
-- **`ConnectorRegistry`**: アクティブなコネクタインスタンスを管理するスレッドセーフなレジストリ。
-- **`CredentialStore`**: ドロップ時にメモリ消記（Zeroize）を行うセキュアな OAuth2 トークンおよび API キー記憶域。
-- **ポリシー**: 再利用可能な `RetryPolicy`、`RateLimiter`、`TimeoutPolicy`、および `PaginationCursor`。
+- `ene-connector` は `Connector` ライフサイクルトレイト、`ConnectorRegistry`、`CredentialStore`、およびポリシー型 (`RetryPolicy`、`RateLimiter`、`TimeoutPolicy`、`PaginationCursor`) を定義します。MCP 固有やツール変換のロジックは持ちません。
+- 具体的な統合 (現時点では MCP ブリッジ) は `ene-connector` のトレイトを利用するクレート側に実装され、`ene-connector` 自体には実装されません — これによりフレームワークを特定の外部プロトコルから切り離しています。
 
-### 2. MCP (Model Context Protocol) ブリッジ
-- `stdio` または HTTP SSE 上で動作する外部 MCP サーバーに接続。
-- MCP ツールスキーマを Ene の `ToolSpec` 定義に変換。
-- LLM からのツール呼び出しを対象の MCP サーバーへ転送し結果を返却。
+## 設計思想
+
+- **なぜ統合ごとの使い捨てクライアントコードではなく共有コネクタフレームワークか**: アイデンティティ/認証情報管理、リトライ/バックオフ、レート制限、ページネーションは、それ以外は無関係な外部サービス間でも同じ形をしています。ここに集約することで、新しいコネクタは `Connector` ライフサイクルトレイトを実装するだけで済み、ポリシー処理を再発明する必要がありません。
+- **なぜ認証情報をドロップ時に消記するか**: `CredentialStore` は OAuth トークンや API キーを保持しますが、使用後にプロセスメモリやログに残留してはいけません。
+
+## API リファレンス
+
+構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:
+
+```sh
+cargo doc -p ene-connector --open
+```
+
+`Connector` トレイトと `ConnectorRegistry` から始めてください。
 
 ---
 

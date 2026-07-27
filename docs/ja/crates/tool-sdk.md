@@ -1,42 +1,35 @@
-# ツール SDK 関連クレート — API リファレンス
+# ツール SDK 関連クレート
 
 > **クレート**: `ene-tool-sdk` | `ene-plugin-db` | `ene-tool-macros` | `ene-tool-rag`
 
-ツールプラグインの開発、ステートフルなストレージ操作、Proc-macro、および RAG によるツール探索を支援するライブラリクレート群です。
+ツールプラグインの開発、ツールバイナリのステートフルなストレージアクセス、ツール定義ボイラープレート用の proc-macro、および RAG によるツール探索を支援するヘルパーライブラリクレート群です。
 
 ---
 
-## 1. `ene-tool-sdk` (ツールプラグイン開発 SDK)
+## アーキテクチャ境界
 
-ツールバイナリ向けの標準アクション定義およびプロバイダを提供します：
-- `ToolAction`: 個々のツールアクションを非同期実行するためのトレイト。
-- `ActionSetProvider`: 単一のプラグインバイナリ内で複数の `ToolAction` 型を登録・保持するコンテナ。
-- ヘルパー: HTML-to-Markdown 変換、コンテンツ切り詰め。
+- `ene-tool-sdk` は `ToolAction` トレイト、`ActionSetProvider`、`prelude` を提供します。依存先は `ene-plugin` (さらにその依存先は `ene-plugin-proto` のみ) であり、`ene-runtime`、`ene-mind`、`ene-store` には依存しません。
+- `ene-plugin-db` は状態を保持するツールバイナリ (例: ファイルシステムの Undo 履歴、TODO ストア) が使用する IPC *クライアント* です。独自のデータベース接続を開く代わりに、ホストの `db_server` (`ene-store` が所有) とソケット越しに通信します — 状態を保持するツールバイナリが2つ目の SQLite ライターになることはありません。
+- `ene-tool-macros` は proc-macro のみのクレートです: `#[tool(...)]`/`#[arg(...)]` 属性からコンパイル時に `ToolSpec`/`ToolAction` のボイラープレートを生成し、それ自体のランタイムロジックは持ちません。
+- `ene-tool-rag` は `ene-ai` (埋め込み)、`ene-store` (インデックス保存)、`ene-plugin-proto` (ツール型) に依存し、トークン予算の制約下でプロンプトパケットに注入するツールを選択するために `ene-runtime` から利用されます。
 
----
+## 設計思想
 
-## 2. `ene-plugin-db` (ステートフルツール用 DB IPC クライアント)
+- **なぜツール定義に derive マクロを使うか**: 各ツールアクションは JSON スキーマ、引数のデシリアライズ、`ToolAction`/`ToolSpec` の連携コードを必要とし、これを毎回手書きすると重複が発生します。`#[derive(ToolAction)]` は構造体のフィールドと `#[tool(...)]`/`#[arg(...)]` 属性からこれらを生成するため、開発者は `run` メソッドだけを書けば済みます。
+- **なぜ検索拡張生成 (RAG) によるツール選択が存在するか**: 利用可能なツールの数が増えるにつれ、毎ターン全ツールの完全なスキーマを送信すると、大きく、かつ無制限にプロンプトのトークン予算を消費してしまいます。`ene-tool-rag` はツールの説明文/パラメータをインデックス化し、埋め込み類似度とオプションの LLM 再ランクを用いて、現在のターンに関連するツールのみを注入します。
 
-状態を保持するツールプラグイン (`ene-plugin-fs`, `ene-plugin-utility`) は `ene-plugin-db` を使用してホストの `DbServer` ソケットと通信します：
-- `UndoManager`: `ene-plugin-fs` 向けにファイルの変更・元戻しスタックを管理します。
-- `TodoStore`: `ene-plugin-utility` 向けにアクティブな TODO 項目の CRUD 操作を管理します。
+## API リファレンス
 
----
+構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:
 
-## 3. `ene-tool-macros` (Proc-Macros)
+```sh
+cargo doc -p ene-tool-sdk --open
+cargo doc -p ene-plugin-db --open
+cargo doc -p ene-tool-macros --open
+cargo doc -p ene-tool-rag --open
+```
 
-ツール定義を簡略化するプロシージャルマクロを提供します：
-- `#[derive(ToolAction)]`: `ToolSpec` メタデータ、JSON 引数のデシリアライズ、および `execute()` のボイラープレートコードを自動生成します。
-- `#[derive(ToolSpec)]`: `#[tool(...)]`/`#[arg(...)]` 属性から `ToolSpec`/`ToolRagProfile` の構築を生成します。
-- `#[tool_action(args = ...)]`: 手書きの `ToolAction` impl に `name()`/`definition()`/`rag_profile()` の転送メソッドを追加する属性マクロ。
-
----
-
-## 4. `ene-tool-rag` (ツール検索拡張生成 RAG)
-
-多ベクトル意味検索および字句検索によるツール発見機能を提供します：
-- ツールの説明文およびアクションパラメータをインデックス化します。
-- LLM 再ランクと重み付きフィールド類似度を使用して、トークン予算内で関連するツールのみをプロンプトパケットに注入します。
+開発用には `ene_tool_sdk::prelude`、`ToolAction`/`ToolSpec` derive マクロの詳細は `ene-tool-macros` から始めてください。
 
 ---
 

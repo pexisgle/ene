@@ -1,31 +1,32 @@
-# `ene-ai` & `ene-ai-local` — API リファレンス
+# `ene-ai` & `ene-ai-local`
 
-> **クレート**: `ene-ai` (コアトレイト & クラウドプロバイダ) | `ene-ai-local` (`llama-cpp-4` による GGUF ローカル推論)
+> **クレート**: `ene-ai` (プロバイダトレイト、メッセージ/ストリーミング型、OpenAI 互換プロバイダ、レジストリ) | `ene-ai-local` (`llama-cpp-4` による GGUF ローカル推論)
 
-`ene-ai` および `ene-ai-local` は、Ene 向けに LLM チャット補完およびテキスト埋め込みベクトルの抽象化を提供します。
-
----
-
-## 1. `ene-ai` (コアプロバイダライブラリ)
-
-### コアトレイト
-- `LlmProvider`: トークンのストリーミング生成をサポートする非同期 LLM チャット補完トレイト。
-- `EmbeddingProvider`: テキスト埋め込みベクトル生成トレイト。
-
-### 実装
-- `OpenAiProvider`: OpenAI モデル (GPT-4o, text-embedding-3 など) 向けクラウドプロバイダ。
-- `IpcLlmProvider`: プロバイダプラグイン (`ene-plugin-anthropic` など) からの IPC Protocol v4 メッセージを `LlmProvider` トレイトへ変換するホストアダプタ。
-- `LlmProviderRegistry`: 設定に基づいてプロバイダを動的に生成・登録するファクトリ。
+`ene-ai` と `ene-ai-local` は Ene 向けに LLM チャット補完およびテキスト埋め込みの抽象化を提供します。`ene-ai` は汎用のメッセージ/ストリーミング型・プロバイダトレイト・グローバルなプロバイダレジストリ・組み込みの OpenAI 互換実装を定義します。ローカル推論 (GGUF/llama.cpp) は `ene-ai-local` に、ローカル音声 (STT/TTS/VAD) は別クレートの `ene-voice` にあります。
 
 ---
 
-## 2. `ene-ai-local` (ローカル GGUF LLM 推論)
+## アーキテクチャ境界
 
-`ene-ai-local` は `llama-cpp-4` をラップしたローカルモデル実行エンジンを格納しています：
+- `ene-ai` はプロバイダ抽象化層を所有します: メッセージ/ストリーミング型、プロバイダトレイト、ヘルスモニタリング/フェイルオーバールーティング、リトライポリシー。永続化や認知ロジックへの依存はありません。
+- プロセス外の LLM プロバイダ (例: Anthropic プラグイン) は `ene-ai` 自身ではなく `ene-plugin-host` が所有する IPC アダプタを介して同じ `LlmProvider` トレイトへブリッジされます。`ene-ai` はアダプタが実装するトレイトを定義するだけです。
+- `ene-ai-local` は自身のプロバイダトレイトを実装するために `ene-ai` と `ene-config` に依存し、プロセス内で推論を実行します — ネットワーク呼び出しはありません。
 
-- **ローカルモデル読み込み**: ディスクから `.gguf` 重みファイルを読み込みます。
-- **ハードウェアアクセラレーション**: Cargo feature (`vulkan` / `cuda`) でビルドされた GPU バックエンドと CPU を、`llama-cpp-4` バインディング経由で利用します。
-- **プロセス内推論**: 外部ネットワーク通信を行うことなく、 `LlmProvider` を実装する `LocalLlmProvider` を提供します。
+## 設計思想
+
+- **なぜ具象クライアント型ではなくプロバイダトレイトか**: `LlmProvider`/`EmbeddingProvider` により、クラウドプロバイダ (OpenAI 互換)、ローカル GGUF 推論、IPC 経由のプロセス外プラグインプロバイダのすべてが同一インターフェースを満たせます。これにより `ene-mind`/`ene-runtime` 側の補完ストリーミングや埋め込みコードは、どのバックエンドが応答しているかを知る必要がありません。
+- **なぜローカル推論が別クレートか**: `llama-cpp-4` は GPU バックエンドのビルド複雑性 (`vulkan`/`cuda` Cargo feature) を持ち込みますが、クラウドのみのデプロイにはこれは不要です。分離することで、リモートプロバイダのみを使用する利用者向けに `ene-ai` を軽量に保てます。
+
+## API リファレンス
+
+構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:
+
+```sh
+cargo doc -p ene-ai --open
+cargo doc -p ene-ai-local --open
+```
+
+`ene-ai` の `LlmProvider` / `EmbeddingProvider` トレイトから始めてください。
 
 ---
 

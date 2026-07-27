@@ -63,27 +63,41 @@ Ene ホストアプリケーション (ene-runtime)
 
 ## 5. カスタムツールプラグインの開発
 
-開発者は `ene-plugin` と `#[derive(ToolAction)]` を使用して独自のツールプラグインを迅速に作成できます：
+開発者は `ene-tool-sdk` の `#[derive(ToolAction)]` と `ene-plugin` のサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-tool-macros --open` を参照してください：
 
-```rust
-use ene_plugin::prelude::*;
+```rust,ignore
+use ene_tool_sdk::prelude::*;
 
-#[derive(Debug, Deserialize, ToolAction)]
-#[tool_action(name = "custom.greet", description = "パーソナライズされた挨拶文を生成します。")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(namespace = "custom", name = "greet",
+       summary = "パーソナライズされた挨拶文を生成します。", category = "Custom",
+       keywords_primary = "greet, hello")]
 pub struct GreetAction {
     pub name: String,
 }
 
 impl GreetAction {
-    pub async fn run(&self) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         Ok(format!("こんにちは、{}さん！", self.name))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let provider = ActionSetProvider::new().register::<GreetAction>();
-    run_plugin_server(Box::new(ToolPluginAdapter(provider))).await?;
-    Ok(())
+async fn main() {
+    use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};
+    use std::sync::Arc;
+
+    let provider = ActionSetProvider::new(vec![Box::new(GreetAction { name: String::new() })]);
+    let dispatch = PluginDispatch::new(
+        Some(Arc::new(ToolProviderPlugin::new(provider))),
+        None,
+        None,
+        None,
+        None,
+    );
+    if let Err(e) = run_plugin_server(dispatch).await {
+        tracing::error!("fatal error: {e}");
+        std::process::exit(1);
+    }
 }
 ```

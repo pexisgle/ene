@@ -16,8 +16,9 @@ without `--workspace` do not cover the whole repository.
 |---|---|
 | Setup | `README.md`, `docs/getting-started.md` |
 | Config/paths | `docs/configuration.md`, `crates/ene-config/src/` |
-| Architecture/API | `docs/architecture.md`, `docs/crates/` |
-| Runtime/events | `docs/concepts/turn-and-session.md`, `docs/crates/runtime.md` |
+| Architecture/design rationale | `docs/architecture.md`, `docs/crates/` |
+| **API signatures (structs, methods, fields, enum variants)** | **rustdoc is authoritative — run `cargo doc -p <crate> --open`.** `docs/crates/*.md` intentionally hold no hand-written signatures (#273); they only cover role, architectural boundaries, and design rationale, since transcribed signatures go stale. |
+| Runtime/events | `docs/concepts/turn-and-session.md`, `docs/crates/runtime.md` (role/boundaries; see rustdoc for `EneEvent`/`LifecycleEvent` variants) |
 | Plugins/Tools/IPC | `docs/concepts/plugins-and-mcp.md`, `docs/crates/plugin-system.md`, `docs/crates/tool-sdk.md` |
 | Apps | `docs/apps/cli.md`, `docs/apps/desktop.md` |
 | Japanese user docs | Matching files under `docs/ja/` |
