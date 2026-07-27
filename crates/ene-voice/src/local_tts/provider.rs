@@ -1,9 +1,5 @@
-//! Local text-to-speech provider backed by Kokoro ONNX (`ort`).
-//!
-//! The heavy native dependency is gated behind the `local-tts` cargo feature.
-//! When the feature is disabled, [`LocalTtsProviderFactory`] still registers
-//! but fails fast with [`AudioProviderError::Init`] so the crate (and the
-//! workspace) keeps compiling without the ONNX Runtime toolchain.
+//! `local-tts`-gated Kokoro ONNX provider: the ONNX session, voice
+//! embeddings, and the [`ene_ai::TtsProvider`] wiring.
 //!
 //! # Migration to `ene_infer::LocalModel`
 //!
@@ -27,47 +23,20 @@
     reason = "voice embedding slicing indexes into bounds-checked `voices.bin` floats"
 )]
 
-use ene_ai::{AudioProviderError, AudioProviderRegistry, TtsProvider, TtsProviderFactory};
-#[cfg(feature = "local-tts")]
-use ene_ai::{Capability, CapabilitySet, EngineDescriptor, LocalTtsEngine, ResourceClass};
-#[cfg(feature = "local-tts")]
+use ene_ai::{
+    AudioProviderError, Capability, CapabilitySet, EngineDescriptor, LocalTtsEngine, ResourceClass,
+};
 use ene_infer::{EngineConfig, EngineHandle, JobContext, LocalModel};
-#[cfg(feature = "local-tts")]
 use std::time::Duration;
 
-/// Provider name used in `ai.tts.provider` configuration.
-pub const PROVIDER_NAME: &str = "kokoro";
-
-/// Default `HuggingFace` download URL for the Kokoro 82M ONNX model file.
-pub const KOKORO_DEFAULT_MODEL_URL: &str =
-    "https://huggingface.co/huangjune/Kokoro-82M-v1.0-ONNX/resolve/main/model.onnx";
-
-/// Default `HuggingFace` download URL for the Kokoro `voices.bin` embeddings file.
-pub const KOKORO_DEFAULT_VOICES_URL: &str =
-    "https://huggingface.co/huangjune/Kokoro-82M-v1.0-ONNX/resolve/main/voices.bin";
-
-/// Get the default local path for `kokoro.onnx`.
-pub fn default_kokoro_model_path() -> std::path::PathBuf {
-    ene_config::models_dir().join("gguf").join("kokoro.onnx")
-}
-
-/// Get the default local path for `voices.bin`.
-pub fn default_kokoro_voices_path() -> std::path::PathBuf {
-    ene_config::models_dir().join("gguf").join("voices.bin")
-}
+use super::download::VOICE_DIM;
 
 /// Kokoro ONNX emits 24 kHz mono PCM.
-#[cfg(feature = "local-tts")]
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
-
-/// Dimensionality of a single Kokoro voice style embedding.
-#[cfg(feature = "local-tts")]
-const VOICE_DIM: usize = 256;
 
 /// Known Kokoro-82M (v1.0) voice names mapped to their stacked index in
 /// `voices.bin` (C5). `voices.bin` is a flat little-endian `f32` array of
 /// `VOICE_DIM`-float vectors concatenated in this order.
-#[cfg(feature = "local-tts")]
 const KOKORO_VOICES: &[(&str, usize)] = &[
     ("af_alloy", 0),
     ("af_aoede", 1),
@@ -124,190 +93,10 @@ const KOKORO_VOICES: &[(&str, usize)] = &[
     ("zm_yunyang", 52),
 ];
 
-/// Resolve the Kokoro ONNX model path from configuration.
-///
-/// Precedence: `TtsConfig::model_path` when non-empty, then `TtsConfig::model`
-/// when non-empty, then a default cache location. Environment overrides are
-/// handled by the config system (`ENE_AI__TTS__MODEL_PATH`).
-///
-/// Not gated behind the `local-tts` feature: [`prefetch_if_configured`] needs
-/// this resolution logic from the runtime bootstrap path, which never enables
-/// `local-tts` (that feature only gates the ONNX Runtime native dependency).
-fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
-    if let Some(path) = ai
-        .tts
-        .model_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        return std::path::PathBuf::from(path);
-    }
-    if !ai.tts.model.trim().is_empty() {
-        return std::path::PathBuf::from(ai.tts.model.trim());
-    }
-    ene_config::models_dir().join("gguf").join("kokoro.onnx")
-}
-
-/// Resolve the Kokoro `voices.bin` path from configuration.
-///
-/// Precedence: `TtsConfig::voices_path` when non-empty, then a default cache
-/// location. Environment overrides are handled by the config system
-/// (`ENE_AI__TTS__VOICES_PATH`).
-///
-/// Not gated behind the `local-tts` feature; see [`resolve_model_path`].
-fn resolve_voices_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
-    if let Some(path) = ai
-        .tts
-        .voices_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
-        return std::path::PathBuf::from(path);
-    }
-    ene_config::models_dir().join("gguf").join("voices.bin")
-}
-
-/// Ensure a file exists at `dest`, downloading it from `url` if missing.
-///
-/// This performs network I/O and must be awaited from an async bootstrap
-/// path (see [`prefetch_if_configured`]); it is never called from [`open`],
-/// which must stay network-free.
-pub async fn ensure_file_downloaded(
-    url: &str,
-    dest: &std::path::Path,
-) -> Result<(), AudioProviderError> {
-    if dest.is_file() {
-        return Ok(());
-    }
-
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            AudioProviderError::Init(format!(
-                "Failed to create target directory {}: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    tracing::info!(
-        component = "LocalTts",
-        url = url,
-        dest = %dest.display(),
-        "Downloading missing TTS model file..."
-    );
-
-    let part_path = dest.with_extension("part");
-
-    let client = reqwest::Client::builder()
-        .user_agent("ene-voice/0.1.0")
-        .build()
-        .map_err(|e| AudioProviderError::Init(format!("HTTP client build error: {e}")))?;
-
-    let mut response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| AudioProviderError::Init(format!("Failed to download {url}: {e}")))?;
-
-    if !response.status().is_success() {
-        return Err(AudioProviderError::Init(format!(
-            "Failed to download {url}: HTTP {}",
-            response.status()
-        )));
-    }
-
-    let mut file = tokio::fs::File::create(&part_path).await.map_err(|e| {
-        AudioProviderError::Init(format!(
-            "Failed to create part file {}: {e}",
-            part_path.display()
-        ))
-    })?;
-
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| AudioProviderError::Init(format!("Download stream error: {e}")))?
-    {
-        use tokio::io::AsyncWriteExt;
-        file.write_all(&chunk)
-            .await
-            .map_err(|e| AudioProviderError::Init(format!("Failed to write chunk: {e}")))?;
-    }
-
-    use tokio::io::AsyncWriteExt;
-    file.flush()
-        .await
-        .map_err(|e| AudioProviderError::Init(format!("Failed to flush file: {e}")))?;
-
-    tokio::fs::rename(&part_path, dest)
-        .await
-        .map_err(|e| AudioProviderError::Init(format!("Failed to rename part file: {e}")))?;
-
-    Ok(())
-}
-
-/// Fallback `HuggingFace` download URL for the Kokoro 82M ONNX model file.
-pub const KOKORO_FALLBACK_MODEL_URL: &str =
-    "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model.onnx";
-
-/// Fallback `HuggingFace` download URL for the Kokoro `voices.bin` embeddings file.
-pub const KOKORO_FALLBACK_VOICES_URL: &str =
-    "https://huggingface.co/speaches-ai/Kokoro-82M-v1.0-ONNX-fp16/resolve/main/voices.bin";
-
-/// Ensure Kokoro ONNX model and `voices.bin` files exist on disk, downloading them
-/// automatically if missing.
-///
-/// Performs network I/O; must be awaited from an async context (settings UI
-/// download button, or [`prefetch_if_configured`] during bootstrap). Never
-/// called from [`open`].
-pub async fn ensure_kokoro_files_exist(
-    model_path: &std::path::Path,
-    voices_path: &std::path::Path,
-) -> Result<(), AudioProviderError> {
-    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_MODEL_URL, model_path).await {
-        tracing::warn!(error = %e, "Primary Kokoro model URL failed; attempting fallback URL...");
-        ensure_file_downloaded(KOKORO_FALLBACK_MODEL_URL, model_path).await?;
-    }
-    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_VOICES_URL, voices_path).await {
-        tracing::warn!(error = %e, "Primary Kokoro voices URL failed; attempting fallback URL...");
-        ensure_file_downloaded(KOKORO_FALLBACK_VOICES_URL, voices_path).await?;
-    }
-    Ok(())
-}
-
-/// Prefetch the Kokoro ONNX model and `voices.bin` files if `ai.tts` selects
-/// the local Kokoro provider ([`PROVIDER_NAME`]).
-///
-/// Intended to be called once from the runtime's async bootstrap path
-/// (mirrors `ene_ai_local::prefetch_configured_gguf`), before any TTS
-/// provider is constructed, so [`open`] never needs to perform network I/O.
-/// A no-op when TTS is disabled or configured for a different provider (e.g.
-/// `"openai"`).
-///
-/// # Errors
-///
-/// Returns [`AudioProviderError`] when the download fails. Callers should
-/// treat this as non-fatal: log it and continue, since `open()` performs its
-/// own file-existence check and reports a clear error either way.
-pub async fn prefetch_if_configured(ai: &ene_ai::AiConfig) -> Result<(), AudioProviderError> {
-    let Some(resolved) = ai.resolve_tts() else {
-        return Ok(());
-    };
-    if resolved.provider != PROVIDER_NAME {
-        return Ok(());
-    }
-    let model_path = resolve_model_path(ai);
-    let voices_path = resolve_voices_path(ai);
-    ensure_kokoro_files_exist(&model_path, &voices_path).await
-}
-
 /// Errors produced by [`KokoroModel`] itself, as distinct from the
 /// framework-level [`ene_infer::EngineError`] conditions (busy, timeout,
 /// cancelled, engine down) that [`ene_ai::LocalTtsEngine`] maps to
 /// [`AudioProviderError`] independently of this type.
-#[cfg(feature = "local-tts")]
 #[derive(Debug, thiserror::Error)]
 pub enum KokoroError {
     /// The model/voice file is missing, the requested voice is unknown, or
@@ -331,7 +120,6 @@ pub enum KokoroError {
 
 /// Number of Kokoro synthesis jobs allowed to queue behind the one currently
 /// executing. See `local_stt.rs::STT_QUEUE_DEPTH` for the identical reasoning.
-#[cfg(feature = "local-tts")]
 const TTS_QUEUE_DEPTH: usize = 2;
 
 /// Generous upper bound on a single Kokoro synthesis call, comfortably longer
@@ -341,7 +129,6 @@ const TTS_QUEUE_DEPTH: usize = 2;
 /// preempts a job that is still queued when its deadline elapses:
 /// `ort::session::Session::run` is a single opaque call this crate cannot
 /// interrupt mid-flight once it has started (see [`TTS_STALL_TIMEOUT`]).
-#[cfg(feature = "local-tts")]
 const TTS_JOB_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Kept at the crate default (`None`) for the same reason as whisper's
@@ -351,7 +138,6 @@ const TTS_JOB_TIMEOUT: Duration = Duration::from_mins(1);
 /// before and after it. Any `stall_timeout` shorter than the slowest
 /// realistic synthesis call would misidentify a merely slow (but healthy)
 /// job as a wedged worker and permanently disable the engine.
-#[cfg(feature = "local-tts")]
 const TTS_STALL_TIMEOUT: Option<Duration> = None;
 
 /// The exclusively-owned Kokoro ONNX inference model.
@@ -361,7 +147,6 @@ const TTS_STALL_TIMEOUT: Option<Duration> = None;
 /// `session.run()` is a stateless batch call (no recurrent/decoder state
 /// carried between requests), so [`ene_infer::LocalModel::reset`] has
 /// nothing to do and is not overridden.
-#[cfg(feature = "local-tts")]
 pub struct KokoroModel {
     session: ort::session::Session,
     voice: Vec<f32>,
@@ -369,7 +154,6 @@ pub struct KokoroModel {
     language: Option<String>,
 }
 
-#[cfg(feature = "local-tts")]
 impl KokoroModel {
     /// Builds a fresh model, loading the ONNX session and voice embedding
     /// from disk.
@@ -464,7 +248,6 @@ impl KokoroModel {
     }
 }
 
-#[cfg(feature = "local-tts")]
 impl LocalModel for KokoroModel {
     type Request = ene_ai::TtsSynthesisRequest;
     type Response = ene_ai::TtsSynthesisResponse;
@@ -508,7 +291,6 @@ impl LocalModel for KokoroModel {
 }
 
 /// Look up the stacked `voices.bin` index for a Kokoro voice name.
-#[cfg(feature = "local-tts")]
 fn voice_index(name: &str) -> Option<usize> {
     KOKORO_VOICES
         .iter()
@@ -516,7 +298,7 @@ fn voice_index(name: &str) -> Option<usize> {
         .map(|(_, idx)| *idx)
 }
 
-/// Load a single `VOICE_DIM`-dim voice embedding for `voice_name` from
+/// Load a single [`VOICE_DIM`]-dim voice embedding for `voice_name` from
 /// `voices.bin`.
 ///
 /// `voices.bin` is a flat little-endian `f32` array of stacked voice vectors
@@ -527,7 +309,6 @@ fn voice_index(name: &str) -> Option<usize> {
 /// Returns [`AudioProviderError::Init`] when the file is missing, its byte
 /// length is not a multiple of four (M16), it is too small for the requested
 /// voice, or `voice_name` is not a known voice.
-#[cfg(feature = "local-tts")]
 fn load_voice_embedding(
     voices_path: &std::path::Path,
     voice_name: &str,
@@ -591,11 +372,11 @@ fn load_voice_embedding(
 /// Returns [`AudioProviderError::Init`] when the model or voice file is
 /// missing, the requested voice is unknown, or ONNX Runtime fails to build a
 /// session. Once the handle is returned, per-job failures surface through
-/// [`TtsProvider::synthesize_stream`] instead.
+/// [`ene_ai::TtsProvider::synthesize_stream`] instead.
 ///
 /// This never performs network I/O: it is a synchronous, fail-fast
 /// constructor. Callers are responsible for ensuring the model files are
-/// already present (see [`prefetch_if_configured`], called from the
+/// already present (see [`super::prefetch_if_configured`], called from the
 /// runtime's async bootstrap path before providers are constructed).
 ///
 /// [`EngineHandle::try_spawn`] (not [`EngineHandle::spawn`]) builds the first
@@ -603,11 +384,10 @@ fn load_voice_embedding(
 /// `factory()` call to the worker thread, so a missing model file or a bad
 /// ONNX session fails right here with [`AudioProviderError::Init`] instead
 /// of being silently deferred to the first
-/// [`TtsProvider::synthesize_stream`] call reporting an opaque `EngineDown`
-/// — which is when the runtime bootstrap path expects to see this error
-/// (and log a clear warning), not on first use.
-#[cfg(feature = "local-tts")]
-fn open(
+/// [`ene_ai::TtsProvider::synthesize_stream`] call reporting an opaque
+/// `EngineDown` — which is when the runtime bootstrap path expects to see
+/// this error (and log a clear warning), not on first use.
+pub(super) fn open(
     model_path: &std::path::Path,
     voices_path: &std::path::Path,
     voice_name: &str,
@@ -637,7 +417,7 @@ fn open(
         .map_err(|e| AudioProviderError::Init(e.to_string()))?;
 
     let descriptor = EngineDescriptor::new(
-        PROVIDER_NAME,
+        super::PROVIDER_NAME,
         CapabilitySet::empty().with(Capability::Tts),
         // Kokoro-82M runs CPU-only in this workspace today (the `ort`
         // dependency enables no GPU execution provider feature).
@@ -651,67 +431,7 @@ fn open(
     Ok(LocalTtsEngine::new(handle, descriptor))
 }
 
-/// Factory for the local Kokoro ONNX TTS provider.
-pub struct LocalTtsProviderFactory;
-
-#[cfg(feature = "local-tts")]
-impl LocalTtsProviderFactory {
-    fn build(config: &ene_config::EneConfig) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        let ai = config
-            .get_section::<ene_ai::AiConfig>()
-            .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
-        let resolved = ai.resolve_tts().ok_or_else(|| {
-            AudioProviderError::Init(
-                "TTS provider is disabled (ai.tts.provider = \"none\")".to_string(),
-            )
-        })?;
-        let model_path = resolve_model_path(&ai);
-        let voices_path = resolve_voices_path(&ai);
-        let voice_name = resolved.voice.clone().unwrap_or_default();
-        let engine = open(
-            &model_path,
-            &voices_path,
-            &voice_name,
-            resolved.speed,
-            resolved.language.clone(),
-            ai.ort_dylib_path.as_deref(),
-        )?;
-        Ok(Box::new(engine))
-    }
-}
-
-#[cfg(not(feature = "local-tts"))]
-impl LocalTtsProviderFactory {
-    fn build(_config: &ene_config::EneConfig) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        Err(AudioProviderError::Init(
-            "local TTS requested but ene-ai was built without the `local-tts` feature".to_string(),
-        ))
-    }
-}
-
-impl TtsProviderFactory for LocalTtsProviderFactory {
-    fn provider_name(&self) -> &str {
-        PROVIDER_NAME
-    }
-
-    fn create_provider(
-        &self,
-        config: &ene_config::EneConfig,
-    ) -> Result<Box<dyn TtsProvider>, AudioProviderError> {
-        Self::build(config)
-    }
-}
-
-/// Register the local Kokoro TTS factory at startup.
-///
-/// Registered unconditionally; the factory fails fast at `create_provider`
-/// time when the `local-tts` feature is disabled.
-#[ctor::ctor(unsafe)]
-fn register_local_tts() {
-    AudioProviderRegistry::register_tts(std::sync::Arc::new(LocalTtsProviderFactory));
-}
-
-#[cfg(all(test, feature = "local-tts"))]
+#[cfg(test)]
 mod tests {
     #![allow(
         clippy::float_cmp,
@@ -799,114 +519,5 @@ mod tests {
         let tokens = crate::g2p::text_to_tokens("hello", Some("en"));
         assert_eq!(tokens.first().copied(), Some(0));
         assert_eq!(tokens.last().copied(), Some(0));
-    }
-
-    #[test]
-    fn default_urls_and_paths_are_valid() {
-        assert!(KOKORO_DEFAULT_MODEL_URL.starts_with("https://"));
-        assert!(KOKORO_DEFAULT_VOICES_URL.starts_with("https://"));
-        assert!(
-            default_kokoro_model_path()
-                .to_string_lossy()
-                .contains("kokoro.onnx")
-        );
-        assert!(
-            default_kokoro_voices_path()
-                .to_string_lossy()
-                .contains("voices.bin")
-        );
-    }
-}
-
-/// Runs `ene_infer::conformance::run_all` against a test-only stand-in for
-/// [`KokoroModel`]. See `local_stt.rs`'s `conformance_tests` module for why
-/// this cannot be the real `KokoroModel` (orphan rule; "run for
-/// approximately this long" has no meaningful encoding as synthesis text)
-/// and what this battery does and does not validate about the real engine.
-#[cfg(test)]
-mod conformance_tests {
-    use std::time::{Duration, Instant};
-
-    use ene_infer::conformance::{ConformanceRequest, ConformanceResponse};
-    use ene_infer::{JobContext, LocalModel};
-
-    #[derive(Debug, Clone, Default)]
-    struct ScriptedTtsRequest {
-        run_for: Duration,
-        then_panic: bool,
-    }
-
-    impl ConformanceRequest for ScriptedTtsRequest {
-        fn scripted(run_for: Duration, then_panic: bool) -> Self {
-            Self {
-                run_for,
-                then_panic,
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    struct ScriptedTtsResponse {
-        resets_seen: usize,
-    }
-
-    impl ConformanceResponse for ScriptedTtsResponse {
-        fn resets_seen(&self) -> usize {
-            self.resets_seen
-        }
-    }
-
-    #[derive(Debug, thiserror::Error)]
-    #[error("scripted kokoro stand-in stopped cooperatively")]
-    struct ScriptedTtsError;
-
-    #[derive(Debug, Default)]
-    struct ScriptedTtsModel {
-        resets_seen: usize,
-    }
-
-    impl LocalModel for ScriptedTtsModel {
-        type Request = ScriptedTtsRequest;
-        type Response = ScriptedTtsResponse;
-        type Error = ScriptedTtsError;
-
-        #[expect(
-            clippy::unnecessary_literal_bound,
-            reason = "must match LocalModel::engine_name's trait signature, which ties the return type to &self's lifetime"
-        )]
-        fn engine_name(&self) -> &str {
-            "scripted-kokoro"
-        }
-
-        fn run(
-            &mut self,
-            req: Self::Request,
-            ctx: &JobContext,
-        ) -> Result<Self::Response, Self::Error> {
-            assert!(!req.then_panic, "scripted panic for conformance testing");
-            let start = Instant::now();
-            loop {
-                if ctx.should_stop().is_some() {
-                    return Err(ScriptedTtsError);
-                }
-                ctx.tick();
-                if start.elapsed() >= req.run_for {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Ok(ScriptedTtsResponse {
-                resets_seen: self.resets_seen,
-            })
-        }
-
-        fn reset(&mut self) {
-            self.resets_seen += 1;
-        }
-    }
-
-    #[tokio::test]
-    async fn kokoro_engine_wiring_passes_conformance_battery() {
-        ene_infer::conformance::run_all(ScriptedTtsModel::default).await;
     }
 }
