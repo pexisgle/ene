@@ -52,6 +52,53 @@ pub struct AiBridge {
 /// before it is cancelled and an error is returned to the UI.
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Errors surfaced by [`AiBridge`]'s `*_blocking` wrapper methods to the
+/// winit/egui UI layer (#274).
+///
+/// This is the desktop app's own thin boundary type, not a second
+/// competing definition of `ene_runtime::PublicApiError` — it wraps that
+/// type (plus [`ene_runtime::EneRuntimeError`] and
+/// [`ene_store::EneMemoryError`], both already `thiserror`-typed at their
+/// own crate boundaries) and adds exactly one desktop-local concern that
+/// doesn't belong in `ene-runtime`: a blocking call that exceeded
+/// [`BLOCKING_TIMEOUT`] and was cancelled before the actor replied.
+///
+/// UI call sites format this with `{error}` (its `Display` impl, via
+/// `thiserror`) the same way they previously formatted the bare `String`
+/// this type replaces, so this change does not by itself introduce any
+/// new UI copy — see the type-level note in the PR description about
+/// hardcoded English error text still living in these format strings
+/// (a separate i18n concern, out of scope here).
+#[derive(Debug, thiserror::Error)]
+pub enum AiBridgeError {
+    /// The blocking call exceeded [`BLOCKING_TIMEOUT`] and was cancelled.
+    #[error("operation timed out after {0}s")]
+    Timeout(u64),
+    /// The runtime actor rejected the request, or host-internal wiring
+    /// (`EneHandle::diagnostics()` and friends) failed.
+    #[error(transparent)]
+    Runtime(#[from] EneRuntimeError),
+    /// One of the API v1 contract methods on [`EneHandle`] returned a
+    /// stable [`ene_runtime::PublicApiError`] category.
+    #[error(transparent)]
+    Api(#[from] ene_runtime::PublicApiError),
+    /// A memory-store operation invoked directly from the desktop bridge
+    /// (bypassing the actor command channel via `MemoryQueryHandle::store`)
+    /// failed.
+    #[error(transparent)]
+    Storage(#[from] ene_store::EneMemoryError),
+    /// An AI provider call made directly from the bridge (outside the
+    /// actor) failed.
+    #[error(transparent)]
+    Ai(#[from] ene_ai::AiError),
+}
+
+impl From<ene_runtime::ActorDeadError> for AiBridgeError {
+    fn from(_: ene_runtime::ActorDeadError) -> Self {
+        Self::Api(ene_runtime::PublicApiError::ActorDead)
+    }
+}
+
 /// Converts the API v1 [`ene_runtime::PublicSessionMeta`] DTO back into the
 /// `ene_store::SessionMeta` shape the desktop settings UI (#176) already
 /// consumes directly.
@@ -59,8 +106,10 @@ const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 /// `EneHandle::list_sessions` returns the DTO as of #269 so the runtime's
 /// public contract doesn't leak `ene_store` types; converting back here (a
 /// trivial field copy — both types share the same fields) keeps
-/// [`AiBridge::list_sessions_blocking`]'s own `Result<_, String>` signature
-/// unchanged, since reworking that boundary is #274's job, not #269's.
+/// [`AiBridge::list_sessions_blocking`]'s own return type (now
+/// `Result<_, AiBridgeError>` as of #274) working with the `ene_store`
+/// shapes the desktop UI already renders, without the UI layer having to
+/// know about the DTO split at all.
 fn session_meta_from_public(m: ene_runtime::PublicSessionMeta) -> ene_store::SessionMeta {
     ene_store::SessionMeta {
         id: m.id,
@@ -134,15 +183,15 @@ impl AiBridge {
     /// Run a future on the bridge runtime with [`BLOCKING_TIMEOUT`].
     ///
     /// Prevents indefinite UI freezes when the actor is slow or
-    /// deadlocked: the future is cancelled after the timeout and an
-    /// error string is returned to the caller.
-    fn block_on_timeout<F, T>(&self, fut: F) -> Result<T, String>
+    /// deadlocked: the future is cancelled after the timeout and a typed
+    /// [`AiBridgeError::Timeout`] is returned to the caller.
+    fn block_on_timeout<F, T>(&self, fut: F) -> Result<T, AiBridgeError>
     where
         F: std::future::Future<Output = T>,
     {
         self.runtime
             .block_on(tokio::time::timeout(BLOCKING_TIMEOUT, fut))
-            .map_err(|_| format!("Operation timed out after {}s", BLOCKING_TIMEOUT.as_secs()))
+            .map_err(|_| AiBridgeError::Timeout(BLOCKING_TIMEOUT.as_secs()))
     }
 
     /// Send a `Run` command. Also sets the `processing` flag
@@ -226,10 +275,8 @@ impl AiBridge {
         &self,
         request_id: impl Into<ene_runtime::RequestId>,
         decision: PermissionDecision,
-    ) -> Result<(), String> {
-        self.handle
-            .decide_permission(request_id, decision)
-            .map_err(|e| e.to_string())
+    ) -> Result<(), AiBridgeError> {
+        Ok(self.handle.decide_permission(request_id, decision)?)
     }
 
     /// List the standing session-wide permission grants (#177).
@@ -237,33 +284,31 @@ impl AiBridge {
     /// Blocks the calling thread on the tokio runtime while the actor
     /// answers, mirroring [`AiBridge::get_snapshot_blocking`]. Intended
     /// for the permission-center settings page.
-    pub fn list_permissions_blocking(&self) -> Result<Vec<ene_runtime::PermissionScope>, String> {
-        self.block_on_timeout(self.handle.list_permissions())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn list_permissions_blocking(
+        &self,
+    ) -> Result<Vec<ene_runtime::PermissionScope>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.list_permissions())??)
     }
 
     /// Revoke a single standing permission grant by id (#177).
     ///
     /// Returns whether a grant was actually removed.
-    pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, String> {
-        self.block_on_timeout(self.handle.revoke_permission(id))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.revoke_permission(id))??)
     }
 
     /// Revoke every standing permission grant, returning the number
     /// removed (#177).
-    pub fn reset_all_permissions_blocking(&self) -> Result<usize, String> {
-        self.block_on_timeout(self.handle.reset_all_permissions())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn reset_all_permissions_blocking(&self) -> Result<usize, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.reset_all_permissions())??)
     }
 
     /// Undo the most recent reversible tool operation (#178).
     ///
     /// Blocks the calling thread on the tokio runtime while the actor
     /// answers, mirroring [`AiBridge::reset_all_permissions_blocking`].
-    pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, String> {
-        self.block_on_timeout(self.handle.undo())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.undo())??)
     }
 
     /// List stored session metadata (#176).
@@ -275,23 +320,23 @@ impl AiBridge {
         &self,
         include_archived: bool,
         limit: usize,
-    ) -> Result<Vec<ene_store::SessionMeta>, String> {
-        self.block_on_timeout(self.handle.list_sessions(include_archived, limit))
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .map(|metas| metas.into_iter().map(session_meta_from_public).collect())
+    ) -> Result<Vec<ene_store::SessionMeta>, AiBridgeError> {
+        let metas = self.block_on_timeout(self.handle.list_sessions(include_archived, limit))??;
+        Ok(metas.into_iter().map(session_meta_from_public).collect())
     }
 
     /// Export a session as a pretty-printed JSON string (#176).
-    pub fn export_session_blocking(&self, session_id: impl Into<String>) -> Result<String, String> {
-        self.block_on_timeout(self.handle.export_session(session_id))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn export_session_blocking(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Result<String, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.export_session(session_id))??)
     }
 
     /// Import a session from a JSON string, returning the imported
     /// session's row id (#176).
-    pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, String> {
-        self.block_on_timeout(self.handle.import_session(json))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.import_session(json))??)
     }
 
     /// Search session messages, returning matching
@@ -301,17 +346,13 @@ impl AiBridge {
         query: impl Into<String>,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<(String, ene_store::ExportedMessage)>, String> {
-        self.block_on_timeout(self.handle.search_sessions(query, limit, offset))
-            .and_then(|r| r.map_err(|e| e.to_string()))
-            .map(|matches| {
-                matches
-                    .into_iter()
-                    .map(|(session_id, message)| {
-                        (session_id, exported_message_from_public(message))
-                    })
-                    .collect()
-            })
+    ) -> Result<Vec<(String, ene_store::ExportedMessage)>, AiBridgeError> {
+        let matches =
+            self.block_on_timeout(self.handle.search_sessions(query, limit, offset))??;
+        Ok(matches
+            .into_iter()
+            .map(|(session_id, message)| (session_id, exported_message_from_public(message)))
+            .collect())
     }
 
     /// Archive or unarchive a session, returning whether the archived
@@ -320,9 +361,8 @@ impl AiBridge {
         &self,
         session_id: impl Into<String>,
         archived: bool,
-    ) -> Result<bool, String> {
-        self.block_on_timeout(self.handle.archive_session(session_id, archived))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    ) -> Result<bool, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.archive_session(session_id, archived))??)
     }
 
     /// Forward a `UserInputResponse` for the request
@@ -331,16 +371,13 @@ impl AiBridge {
         &self,
         request_id: impl Into<ene_runtime::RequestId>,
         response: UserInputResponse,
-    ) -> Result<(), String> {
-        self.handle
-            .submit_user_input(request_id, response)
-            .map_err(|e| e.to_string())
+    ) -> Result<(), AiBridgeError> {
+        Ok(self.handle.submit_user_input(request_id, response)?)
     }
 
     /// Fetches a fresh actor snapshot on the runtime thread.
-    pub fn get_snapshot_blocking(&self) -> Result<ene_runtime::EneStateSnapshot, String> {
-        self.block_on_timeout(self.handle.diagnostics().get_snapshot())
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn get_snapshot_blocking(&self) -> Result<ene_runtime::EneStateSnapshot, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.diagnostics().get_snapshot())??)
     }
 
     /// Snapshot of cached provider health reports for the AI settings page (#175).
@@ -354,9 +391,12 @@ impl AiBridge {
     }
 
     /// Run [`ene_ai::validate_api_key`] on the bridge runtime (#241).
-    pub fn validate_api_key_blocking(&self, base_url: &str, api_key: &str) -> Result<(), String> {
-        self.block_on_timeout(ene_ai::validate_api_key(base_url, api_key))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+    pub fn validate_api_key_blocking(
+        &self,
+        base_url: &str,
+        api_key: &str,
+    ) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(ene_ai::validate_api_key(base_url, api_key))??)
     }
 
     /// Refresh memory journal payload (typed memories + affect + commitments).
@@ -366,7 +406,7 @@ impl AiBridge {
         include_user_deleted: bool,
         include_archived: bool,
         include_superseded: bool,
-    ) -> Result<MemoryJournalPayload, String> {
+    ) -> Result<MemoryJournalPayload, AiBridgeError> {
         let snapshot = self.get_snapshot_blocking()?;
         let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.clone();
@@ -382,24 +422,18 @@ impl AiBridge {
                 limit,
                 offset: 0,
             };
-            let memories = memory
-                .list_journal_memories(&options)
-                .await
-                .map_err(|e| e.to_string())?;
-            let affect = memory
-                .show_affect_state(character_id)
-                .await
-                .map_err(|e| e.to_string())?;
+            let memories = memory.list_journal_memories(&options).await?;
+            let affect = memory.show_affect_state(character_id).await?;
             let commitments = memory
                 .list_active_commitments(character_id, Some(&user_id), limit)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             let (pending_writes, permanent_writes) = memory
                 .store()
-                .ok_or_else(|| "Memory store is not available".to_string())?
+                .ok_or_else(|| {
+                    ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
+                })?
                 .count_pending_memory_writes(character_id)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             Ok(MemoryJournalPayload {
                 memories,
                 affect,
@@ -415,7 +449,7 @@ impl AiBridge {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<Vec<MemoryJournalRecallRow>, String> {
+    ) -> Result<Vec<MemoryJournalRecallRow>, AiBridgeError> {
         let snapshot = self.get_snapshot_blocking()?;
         let character_id = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.as_str();
@@ -423,8 +457,7 @@ impl AiBridge {
         self.block_on_timeout(async {
             let recalled = memory
                 .search_typed_memories_explained(character_id, Some(user_id), query, limit)
-                .await
-                .map_err(|e| e.to_string())?;
+                .await?;
             Ok(recalled
                 .iter()
                 .map(|entry| {
@@ -453,35 +486,26 @@ impl AiBridge {
         &self,
         id: i64,
         action: MemoryJournalAction,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
             match action {
-                MemoryJournalAction::Pin => memory
-                    .pin_typed_memory(id, true)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Unpin => memory
-                    .pin_typed_memory(id, false)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Archive => memory
-                    .set_memory_status(id, ene_store::MemoryStatus::Archived)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Forget => memory
-                    .user_forget_typed_memory(id)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Dispute => memory
-                    .set_memory_status(id, ene_store::MemoryStatus::Disputed)
-                    .await
-                    .map_err(|e| e.to_string()),
-                MemoryJournalAction::Restore => memory
-                    .user_restore_typed_memory(id)
-                    .await
-                    .map_err(|e| e.to_string()),
+                MemoryJournalAction::Pin => memory.pin_typed_memory(id, true).await,
+                MemoryJournalAction::Unpin => memory.pin_typed_memory(id, false).await,
+                MemoryJournalAction::Archive => {
+                    memory
+                        .set_memory_status(id, ene_store::MemoryStatus::Archived)
+                        .await
+                }
+                MemoryJournalAction::Forget => memory.user_forget_typed_memory(id).await,
+                MemoryJournalAction::Dispute => {
+                    memory
+                        .set_memory_status(id, ene_store::MemoryStatus::Disputed)
+                        .await
+                }
+                MemoryJournalAction::Restore => memory.user_restore_typed_memory(id).await,
             }
+            .map_err(AiBridgeError::from)
         })?
     }
 
@@ -491,64 +515,62 @@ impl AiBridge {
         &self,
         id: i64,
         status: ene_store::MemoryStatus,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
-        self.block_on_timeout(memory.set_memory_status(id, status))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+        Ok(self.block_on_timeout(memory.set_memory_status(id, status))??)
     }
 
     /// Pins a memory row in the typed store.
     #[expect(dead_code, reason = "replaced by execute_journal_action")]
-    pub fn pin_memory(&self, id: i64) -> Result<bool, String> {
+    pub fn pin_memory(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
-        self.block_on_timeout(memory.pin_typed_memory(id, true))
-            .and_then(|r| r.map_err(|e| e.to_string()))
+        Ok(self.block_on_timeout(memory.pin_typed_memory(id, true))??)
     }
 
     // ── Pending candidate approval (#174 / #223) ──
 
     /// List pending memory candidates awaiting user approval.
-    pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, String> {
-        self.block_on_timeout(self.handle.list_pending_candidates())
-            .and_then(std::convert::identity)
+    pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.list_pending_candidates())??)
     }
 
     /// Approve a pending memory candidate, persisting it as a typed memory.
-    pub fn approve_candidate(&self, id: i64) -> Result<(), String> {
-        self.block_on_timeout(self.handle.approve_candidate(id))
-            .and_then(std::convert::identity)
+    pub fn approve_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.approve_candidate(id))??)
     }
 
     /// Reject a pending memory candidate.
-    pub fn reject_candidate(&self, id: i64) -> Result<(), String> {
-        self.block_on_timeout(self.handle.reject_candidate(id))
-            .and_then(std::convert::identity)
+    pub fn reject_candidate(&self, id: i64) -> Result<(), AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.reject_candidate(id))??)
     }
 
     // ── Commitment management (#223) ──
 
     /// Mark a commitment as done.
-    pub fn complete_commitment(&self, id: i64) -> Result<bool, String> {
+    pub fn complete_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
-            let store = memory
-                .store()
-                .ok_or_else(|| "Memory store is not available".to_string())?;
+            let store = memory.store().ok_or_else(|| {
+                ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
+            })?;
             store
                 .complete_commitment(id)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(AiBridgeError::from)
         })?
     }
 
     /// Mark a commitment as cancelled.
-    pub fn cancel_commitment(&self, id: i64) -> Result<bool, String> {
+    pub fn cancel_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
-            let store = memory
-                .store()
-                .ok_or_else(|| "Memory store is not available".to_string())?;
-            store.cancel_commitment(id).await.map_err(|e| e.to_string())
+            let store = memory.store().ok_or_else(|| {
+                ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
+            })?;
+            store
+                .cancel_commitment(id)
+                .await
+                .map_err(AiBridgeError::from)
         })?
     }
 }

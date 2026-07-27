@@ -52,10 +52,6 @@
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
 )]
-#![expect(
-    deprecated,
-    reason = "MemoryError type alias is deprecated internally; callers should use EneMemoryError"
-)]
 #![cfg_attr(
     test,
     expect(
@@ -117,7 +113,6 @@ pub use ene_core::{MemoryPort, MemoryPortError};
 pub use entities::pending_memory_writes::{PendingMemoryWrite, PendingMemoryWriteStatus};
 /// Memory error type.
 pub use error::EneMemoryError;
-pub use error::MemoryError;
 /// Session export format types (#176).
 pub use export::{
     ExportedMessage, ExportedToolLog, SESSION_EXPORT_FORMAT_VERSION, SessionExport, redact_secrets,

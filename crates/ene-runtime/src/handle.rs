@@ -272,26 +272,26 @@ pub enum EneCommand {
         /// Privacy-safe OS app label (may be empty).
         app_label: String,
         /// Reply channel.
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<Result<String, crate::public_api::PublicApiError>>,
     },
     /// List pending memory candidates awaiting user approval (#174).
     ListPendingCandidates {
         /// Reply channel for the candidate list.
-        respond: oneshot::Sender<Result<Vec<PendingCandidateSummary>, String>>,
+        respond: oneshot::Sender<Result<Vec<PendingCandidateSummary>, ene_store::EneMemoryError>>,
     },
     /// Approve a pending memory candidate (#174).
     ApproveCandidate {
         /// Candidate id to approve.
         id: i64,
         /// Reply channel.
-        respond: oneshot::Sender<Result<(), String>>,
+        respond: oneshot::Sender<Result<(), ene_store::EneMemoryError>>,
     },
     /// Reject a pending memory candidate (#174).
     RejectCandidate {
         /// Candidate id to reject.
         id: i64,
         /// Reply channel.
-        respond: oneshot::Sender<Result<(), String>>,
+        respond: oneshot::Sender<Result<(), ene_store::EneMemoryError>>,
     },
 }
 
@@ -1266,13 +1266,16 @@ impl EneHandle {
     }
 
     /// Summarize a screen RGB capture via the local vision model (Gemma + mmproj).
+    ///
+    /// Part of the API v1 contract (#274): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
     pub async fn summarize_screen_image(
         &self,
         width: u32,
         height: u32,
         rgb: Vec<u8>,
         app_label: String,
-    ) -> Result<String, String> {
+    ) -> Result<String, crate::public_api::PublicApiError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::SummarizeScreenImage {
@@ -1282,37 +1285,51 @@ impl EneHandle {
                 app_label,
                 reply: tx,
             })
-            .map_err(|_| "actor dead".to_string())?;
-        rx.await.map_err(|_| "actor dropped reply".to_string())?
+            .map_err(|_| ActorDeadError)?;
+        rx.await.map_err(|_| ActorDeadError)?
     }
 
     // ── Pending candidate approval (#174 / #223) ──
 
     /// List pending memory candidates awaiting user approval (#174).
-    pub async fn list_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, String> {
+    ///
+    /// Part of the API v1 contract (#274): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
+    pub async fn list_pending_candidates(
+        &self,
+    ) -> Result<Vec<PendingCandidateSummary>, crate::public_api::PublicApiError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ListPendingCandidates { respond: tx })
-            .map_err(|_| "actor dead".to_string())?;
-        rx.await.map_err(|_| "actor dropped reply".to_string())?
+            .map_err(|_| ActorDeadError)?;
+        Ok(rx.await.map_err(|_| ActorDeadError)??)
     }
 
     /// Approve a pending memory candidate (#174).
-    pub async fn approve_candidate(&self, id: i64) -> Result<(), String> {
+    ///
+    /// Part of the API v1 contract (#274): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
+    pub async fn approve_candidate(
+        &self,
+        id: i64,
+    ) -> Result<(), crate::public_api::PublicApiError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ApproveCandidate { id, respond: tx })
-            .map_err(|_| "actor dead".to_string())?;
-        rx.await.map_err(|_| "actor dropped reply".to_string())?
+            .map_err(|_| ActorDeadError)?;
+        Ok(rx.await.map_err(|_| ActorDeadError)??)
     }
 
     /// Reject a pending memory candidate (#174).
-    pub async fn reject_candidate(&self, id: i64) -> Result<(), String> {
+    ///
+    /// Part of the API v1 contract (#274): errors are the stable
+    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
+    pub async fn reject_candidate(&self, id: i64) -> Result<(), crate::public_api::PublicApiError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::RejectCandidate { id, respond: tx })
-            .map_err(|_| "actor dead".to_string())?;
-        rx.await.map_err(|_| "actor dropped reply".to_string())?
+            .map_err(|_| ActorDeadError)?;
+        Ok(rx.await.map_err(|_| ActorDeadError)??)
     }
 }
 
@@ -1983,14 +2000,15 @@ impl EneActor {
         *self.health_bridge_handle.lock().await = bridge_handle;
     }
 
-    async fn ensure_proactive_llm(&mut self) -> Result<(), String> {
+    async fn ensure_proactive_llm(&mut self) -> Result<(), crate::public_api::PublicApiError> {
         if self.proactive_llm.is_some() {
             return Ok(());
         }
-        let ai_cfg = self
-            .config
-            .get_section::<ene_ai::AiConfig>()
-            .map_err(|e| format!("AI config unavailable: {e}"))?;
+        let ai_cfg = self.config.get_section::<ene_ai::AiConfig>().map_err(|e| {
+            crate::public_api::PublicApiError::Internal {
+                message: format!("AI config unavailable: {e}"),
+            }
+        })?;
         match ene_ai_local::build_proactive_llm_handles(&ai_cfg).await {
             Ok(handles) => {
                 tracing::info!(
@@ -2002,7 +2020,9 @@ impl EneActor {
                 self.proactive_llm = Some(handles);
                 Ok(())
             }
-            Err(e) => Err(format!("Failed to start proactive decision provider: {e}")),
+            Err(e) => Err(crate::public_api::PublicApiError::Internal {
+                message: format!("Failed to start proactive decision provider: {e}"),
+            }),
         }
     }
 
@@ -2012,35 +2032,47 @@ impl EneActor {
         height: u32,
         rgb: Vec<u8>,
         app_label: String,
-        reply: oneshot::Sender<Result<String, String>>,
+        reply: oneshot::Sender<Result<String, crate::public_api::PublicApiError>>,
     ) {
+        use crate::public_api::PublicApiError;
+
         const MAX_PIXELS: u64 = 1920 * 1080;
         let width_u = u64::from(width);
         let height_u = u64::from(height);
         let expected = width_u.saturating_mul(height_u).saturating_mul(3);
         if width == 0 || height == 0 {
-            let _ = reply.send(Err("invalid screen image dimensions".to_string()));
+            let _ = reply.send(Err(PublicApiError::Invalid {
+                message: "invalid screen image dimensions".to_string(),
+            }));
             return;
         }
         if width_u.saturating_mul(height_u) > MAX_PIXELS {
-            let _ = reply.send(Err(format!(
-                "screen image too large ({width}x{height}; max {MAX_PIXELS} pixels)"
-            )));
+            let _ = reply.send(Err(PublicApiError::Invalid {
+                message: format!(
+                    "screen image too large ({width}x{height}; max {MAX_PIXELS} pixels)"
+                ),
+            }));
             return;
         }
         let Ok(expected_len) = usize::try_from(expected) else {
-            let _ = reply.send(Err("screen image byte length overflows usize".to_string()));
+            let _ = reply.send(Err(PublicApiError::Invalid {
+                message: "screen image byte length overflows usize".to_string(),
+            }));
             return;
         };
         if rgb.len() != expected_len {
-            let _ = reply.send(Err(format!(
-                "rgb buffer length mismatch (got {}, expected {expected_len})",
-                rgb.len()
-            )));
+            let _ = reply.send(Err(PublicApiError::Invalid {
+                message: format!(
+                    "rgb buffer length mismatch (got {}, expected {expected_len})",
+                    rgb.len()
+                ),
+            }));
             return;
         }
         if self.stream_handle.is_some() || self.proactive_decision_rx.is_some() {
-            let _ = reply.send(Err("runtime busy".to_string()));
+            let _ = reply.send(Err(PublicApiError::Internal {
+                message: "runtime busy".to_string(),
+            }));
             return;
         }
 
@@ -2057,18 +2089,24 @@ impl EneActor {
             return;
         }
         let Some(handles) = self.proactive_llm.as_ref() else {
-            let _ = reply.send(Err("proactive LLM handles missing after ensure".to_string()));
+            let _ = reply.send(Err(PublicApiError::Internal {
+                message: "proactive LLM handles missing after ensure".to_string(),
+            }));
             return;
         };
         let Some(local) = handles.local().cloned() else {
-            let _ = reply.send(Err(format!(
-                "local proactive model is not available (decision_backend={:?})",
-                handles.decision_kind
-            )));
+            let _ = reply.send(Err(PublicApiError::Internal {
+                message: format!(
+                    "local proactive model is not available (decision_backend={:?})",
+                    handles.decision_kind
+                ),
+            }));
             return;
         };
         if !local.supports_vision() {
-            let _ = reply.send(Err("local model has no vision mmproj loaded".to_string()));
+            let _ = reply.send(Err(PublicApiError::Internal {
+                message: "local model has no vision mmproj loaded".to_string(),
+            }));
             return;
         }
 
@@ -2093,7 +2131,9 @@ impl EneActor {
             let result = local
                 .summarize_rgb(width, height, rgb, &system, &user)
                 .await
-                .map_err(|e| e.to_string());
+                .map_err(|e| PublicApiError::Internal {
+                    message: e.to_string(),
+                });
             let _ = reply.send(result);
         });
     }
@@ -2725,32 +2765,30 @@ impl EneActor {
                                 Some(ene_store::PendingCandidateStatus::Pending),
                             )
                             .map(|list| list.iter().map(PendingCandidateSummary::from).collect())
-                            .map_err(|e| e.to_string())
                     }
-                    None => Err("memory store not available".to_string()),
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
                 };
                 let _ = respond.send(result);
                 true
             }
             EneCommand::ApproveCandidate { id, respond } => {
                 let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => store
-                        .approve_pending_candidate(id)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| e.to_string()),
-                    None => Err("memory store not available".to_string()),
+                    Some(store) => store.approve_pending_candidate(id).await.map(|_| ()),
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
                 };
                 let _ = respond.send(result);
                 true
             }
             EneCommand::RejectCandidate { id, respond } => {
                 let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => store
-                        .resolve_pending_candidate(id, false)
-                        .await
-                        .map_err(|e| e.to_string()),
-                    None => Err("memory store not available".to_string()),
+                    Some(store) => store.resolve_pending_candidate(id, false).await,
+                    None => Err(ene_store::EneMemoryError::Other(
+                        "Memory store is not enabled".to_string(),
+                    )),
                 };
                 let _ = respond.send(result);
                 true

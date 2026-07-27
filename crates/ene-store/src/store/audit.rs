@@ -1,6 +1,6 @@
 //! Audit-log queries (#177).
 
-use super::{MemoryError, MemoryStore};
+use super::{EneMemoryError, MemoryStore};
 use crate::entities;
 use chrono::Utc;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
@@ -27,7 +27,7 @@ impl MemoryStore {
     pub async fn insert_audit_entry(
         &self,
         entry: &crate::audit::NewAuditEntry,
-    ) -> Result<i64, MemoryError> {
+    ) -> Result<i64, EneMemoryError> {
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -70,7 +70,7 @@ impl MemoryStore {
     pub async fn list_audit_entries(
         &self,
         limit: usize,
-    ) -> Result<Vec<crate::audit::AuditEntry>, MemoryError> {
+    ) -> Result<Vec<crate::audit::AuditEntry>, EneMemoryError> {
         let rows = entities::audit_log::Entity::find()
             .order_by_desc(entities::audit_log::Column::CreatedAt)
             .limit(limit as u64)
@@ -85,7 +85,7 @@ impl MemoryStore {
         &self,
         tool_name: &str,
         limit: usize,
-    ) -> Result<Vec<crate::audit::AuditEntry>, MemoryError> {
+    ) -> Result<Vec<crate::audit::AuditEntry>, EneMemoryError> {
         let rows = entities::audit_log::Entity::find()
             .filter(entities::audit_log::Column::ToolName.eq(tool_name))
             .order_by_desc(entities::audit_log::Column::CreatedAt)
