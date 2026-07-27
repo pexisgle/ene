@@ -88,6 +88,10 @@ async fn full_queue_returns_busy_without_blocking() {
                 .await
         })
     };
+    // `tokio::spawn` only schedules `second`'s task; it does not run it.
+    // Yield a moment so it actually executes its `try_send` before we check
+    // that the queue is full.
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // The one queue slot is now occupied by `second`; this must fail fast.
     let third = engine

@@ -129,6 +129,10 @@ async fn concurrency_is_serialized_and_busy_past_capacity<M>(
                 .await
         })
     };
+    // `tokio::spawn` only schedules `second`'s task; it does not run it.
+    // Yield the queue-filling job a moment to actually execute its
+    // `try_send` before we check that the queue is full.
+    tokio::time::sleep(Duration::from_millis(20)).await;
     // The queue slot is occupied by `second`; this one must be rejected
     // outright rather than wait.
     let third = engine
