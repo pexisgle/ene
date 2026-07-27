@@ -20,6 +20,7 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 
 ene-config = { workspace = true }
+ene-core = { workspace = true }
 ene-store = { workspace = true }
 ene-ai = { workspace = true }
 

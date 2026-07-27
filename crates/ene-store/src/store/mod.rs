@@ -16,9 +16,9 @@ mod tests;
 use crate::error::MemoryError;
 use crate::migrator::Migrator;
 use chrono::{DateTime, Utc};
+pub use ene_core::{KeyFact, NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// A single conversation log entry returned by `get_logs_by_session`.
@@ -188,65 +188,6 @@ pub(crate) fn validate_embedding(
     Ok(())
 }
 
-/// Workflow status of a pending memory candidate (#174).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PendingCandidateStatus {
-    /// Awaiting user review.
-    Pending,
-    /// Approved by the user (persisted to typed memory).
-    Approved,
-    /// Rejected by the user.
-    Rejected,
-}
-
-impl PendingCandidateStatus {
-    /// Returns the `snake_case` string representation.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Approved => "approved",
-            Self::Rejected => "rejected",
-        }
-    }
-}
-
-/// A pending memory candidate awaiting user approval (#174).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingCandidate {
-    /// Primary key.
-    pub id: i64,
-    /// Character identifier.
-    pub character_id: String,
-    /// User identifier (may be empty).
-    pub user_id: String,
-    /// Short title or label.
-    pub title: String,
-    /// Full candidate content.
-    pub content: String,
-    /// Memory kind.
-    pub kind: crate::MemoryKind,
-    /// Confidence score (0.0 .. 1.0).
-    pub confidence: f32,
-    /// Human-readable reason for the extraction.
-    pub reason_detail: String,
-    /// Title of the existing memory this candidate would supersede, if any.
-    pub existing_memory_title: Option<String>,
-    /// Source quote from the conversation that triggered this candidate.
-    pub source_quote: String,
-    /// Workflow status.
-    pub status: PendingCandidateStatus,
-}
-
-/// A key-value fact about the user.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeyFact {
-    /// The key identifier for this fact.
-    pub key: String,
-    /// The value associated with the key.
-    pub value: String,
-}
-
 /// SQLite-backed long-term memory store with vector similarity search.
 ///
 /// Uses `SeaORM` for async database connection management and `sqlite-vec` for cosine-similarity queries.
@@ -260,15 +201,6 @@ pub struct MemoryStore {
     /// Ephemeral (lost on restart) while the feature is new; a dedicated
     /// `pending_candidates` table will back this in a future migration.
     pending_candidates: parking_lot::Mutex<Vec<PendingCandidate>>,
-}
-
-/// Result of a natural-decay batch run (#76).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct NaturalDecayReport {
-    /// Memories transitioned to `faded`.
-    pub faded_count: usize,
-    /// Memories transitioned to `archived`.
-    pub archived_count: usize,
 }
 
 /// Applies the `SQLite` PRAGMAs the store depends on to the

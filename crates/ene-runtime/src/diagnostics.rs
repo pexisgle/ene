@@ -124,7 +124,7 @@ impl MemoryQueryHandle {
             ))
         })?;
         ene_mind::MemoryJournal::search(
-            store,
+            store.as_ref(),
             embedder.as_ref(),
             &self.mind_memory,
             character_id,
@@ -151,7 +151,7 @@ impl MemoryQueryHandle {
             ))
         })?;
         ene_mind::MemoryJournal::search_explained(
-            store,
+            store.as_ref(),
             embedder.as_ref(),
             &self.mind_memory,
             character_id,

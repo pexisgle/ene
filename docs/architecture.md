@@ -1,6 +1,6 @@
 # System Architecture & Design (API v1)
 
-**Ene** is designed around a clean separation of concerns: an actor-based runtime facade (`ene-runtime`), a pure cognitive turn engine (`ene-mind`), an isolated persistence layer (`ene-store`), an out-of-process IPC plugin host (`ene-plugin-host`), and a standalone VRM renderer (`ene-vrm`).
+**Ene** is designed around a clean separation of concerns: an actor-based runtime facade (`ene-runtime`), a pure cognitive turn engine (`ene-mind`), an isolated persistence layer (`ene-store`) built on persistence-agnostic domain vocabulary (`ene-core`), an out-of-process IPC plugin host (`ene-plugin-host`), and a standalone VRM renderer (`ene-vrm`).
 
 ---
 
@@ -8,10 +8,11 @@
 
 1. **API v1 Host Contract**: The host application (`ene-cli`, `ene-desktop`, or external integrations) interacts with Ene exclusively through `EneHandle::open`. Turns are identified by a mandatory `TurnId`. Turn execution is single-flight; concurrent execution attempts return `RunError::Busy`.
 2. **Actor Execution Model**: `ene-runtime` manages state via an internal Tokio actor. Public methods on `EneHandle` are non-blocking channel sends or oneshot async requests.
-3. **Pure Cognitive Mind**: `ene-mind` owns prompt packet composition, hybrid memory recall, affect/emotions (PAD model), proactive speech triggers, and output performance arbitration. `ene-mind` **never** depends on `ene-runtime` or `ene-plugin-host`.
+3. **Pure Cognitive Mind**: `ene-mind` owns prompt packet composition, hybrid memory recall, affect/emotions (PAD model), proactive speech triggers, and output performance arbitration. `ene-mind` **never** depends on `ene-runtime` or `ene-plugin-host`, and its cognitive-logic modules (recall, memory arbiter, forgetting, character sync, journal, self-reflection) call the persistence layer only through the `ene_core::MemoryPort` trait (#270) — never the concrete `ene_store::MemoryStore` — so they can be unit-tested against an in-memory test double without SQLite.
 4. **Isolated Persistence**: `ene-store` owns all SQLite schema, migrations, SeaORM entities, and vector search (`sqlite-vec`). `ene-store` **never** depends on `ene-mind` or `ene-ai`.
-5. **Out-of-Process Plugins (Protocol v4)**: Tools, LLM providers, and MCP servers run as child processes communicating over length-prefixed JSON IPC using **Protocol v4**.
-6. **Decoupled 3D Rendering**: `ene-vrm` renders VRM 1.0 models via `wgpu` without importing any cognitive, memory, or runtime types.
+5. **Persistence-Agnostic Domain Vocabulary**: `ene-core` defines the core domain types shared across the cognitive and persistence layers — `AffectState` (PAD affect), typed-memory kinds/statuses/queries, the commitment ledger's vocabulary, and the `MemoryPort` trait itself. It depends on nothing internal to the workspace, so both `ene-store` and `ene-mind` can depend on it without either depending on the other for domain vocabulary.
+6. **Out-of-Process Plugins (Protocol v4)**: Tools, LLM providers, and MCP servers run as child processes communicating over length-prefixed JSON IPC using **Protocol v4**.
+7. **Decoupled 3D Rendering**: `ene-vrm` renders VRM 1.0 models via `wgpu` without importing any cognitive, memory, or runtime types.
 
 ---
 
@@ -33,6 +34,7 @@ flowchart TD
   Runtime --> Config[crates/ene-config]
 
   Mind --> Store
+  Mind --> Core[crates/ene-core]
   Mind --> Config
   Mind --> Ai
   Mind --> Proto[crates/ene-plugin-proto]
@@ -55,6 +57,7 @@ flowchart TD
   ToolRag --> Proto
 
   Store --> Config
+  Store --> Core
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
@@ -70,6 +73,7 @@ flowchart TD
 ```
 
 ### Strict Architectural Boundaries
+- `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — domain vocabulary sits below both `ene-store` and `ene-mind`; neither depends on the other for it
 - `ene-store` ↛ `ene-ai` / `ene-mind`
 - `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
@@ -117,6 +121,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-runtime` | Actor-based runtime facade, turn manager, event broadcasting, DB IPC socket server |
 | `ene-mind` | Session manager, prompt budgeting, affect (PAD model), memory recall, proactive speech, performance arbitration |
 | `ene-store` | SQLite / SeaORM database entities, migrations, vector recall (`sqlite-vec`), commitment ledger |
+| `ene-core` | Persistence-agnostic domain vocabulary (`AffectState`, typed-memory kinds/statuses/queries, commitment ledger types) and the `MemoryPort` trait abstraction |
 | `ene-ai` | `AiProvider` trait, OpenAI provider, Anthropic IPC provider adapter, provider factory |
 | `ene-ai-local` | Local GGUF LLM inference via `llama-cpp-4` |
 | `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX), cpal audio I/O |

@@ -6,6 +6,8 @@ pub mod deterministic;
 pub mod forgetting;
 pub mod llm;
 pub mod reflection;
+#[cfg(test)]
+pub mod test_support;
 pub mod tool_grounding;
 
 pub use arbiter::{

@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use ene_ai::EmbeddingProvider;
 use ene_config::{CharacterCardV3, expand_cbs_macros};
-use ene_store::{
-    AffectAnnotation, MemoryConfidence, MemoryKind, MemoryScope, MemorySource, MemoryStatus,
-    MemoryStore, NewMemoryItem,
+use ene_core::{
+    AffectAnnotation, MemoryConfidence, MemoryKind, MemoryPort, MemoryPortError, MemoryScope,
+    MemorySource, MemoryStatus, NewMemoryItem,
 };
 
 use crate::config::CharacterMemoryConfig;
@@ -108,7 +108,7 @@ impl StyleExampleSelector {
                 source: MemorySource::Ccv3,
                 source_ref: Some(format!("{STYLE_SOURCE_PREFIX}{index}")),
                 confidence: MemoryConfidence::new(1.0),
-                salience: ene_store::MemorySalience::new(0.8),
+                salience: ene_core::MemorySalience::new(0.8),
                 affect: AffectAnnotation::default(),
                 relationship_impact: 0.0,
                 valid_from: None,
@@ -127,7 +127,7 @@ impl StyleExampleSelector {
         card: &CharacterCardV3,
         user_name: &str,
         user_input: &str,
-        store: Option<&MemoryStore>,
+        store: Option<&dyn MemoryPort>,
         embedder: Option<&Arc<dyn EmbeddingProvider>>,
         _config: &CharacterMemoryConfig,
         max_examples: usize,
@@ -189,11 +189,11 @@ fn select_from_card(
 }
 
 async fn select_from_store(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     character_id: &str,
     intent: StyleIntent,
     max_examples: usize,
-) -> Result<Vec<StyleExample>, ene_store::EneMemoryError> {
+) -> Result<Vec<StyleExample>, MemoryPortError> {
     let items = store
         .list_typed_memories_by_source_prefix(character_id, STYLE_SOURCE_PREFIX, 64)
         .await?;

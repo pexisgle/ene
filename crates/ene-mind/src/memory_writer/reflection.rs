@@ -6,9 +6,9 @@
 //! during recall to boost or penalize similar memories.
 use crate::config::ReflectionConfig;
 use crate::memory_writer::arbiter::AppliedDecision;
-use ene_store::{
-    AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource,
-    MemoryStatus, MemoryStore, NewMemoryItem,
+use ene_core::{
+    AffectAnnotation, MemoryConfidence, MemoryKind, MemoryPort, MemorySalience, MemoryScope,
+    MemorySource, MemoryStatus, NewMemoryItem,
 };
 use parking_lot::Mutex;
 
@@ -94,7 +94,7 @@ impl SelfReflectionPipeline {
     /// into the store).
     pub async fn generate_reflection(
         &self,
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         character_id: &str,
         session_id: &str,
         user_id: &str,
@@ -189,9 +189,9 @@ impl SelfReflectionPipeline {
 
 /// Load existing reflection memories for a character (up to 50).
 pub async fn load_reflection_memories(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     character_id: &str,
-) -> Vec<ene_store::MemoryItem> {
+) -> Vec<ene_core::MemoryItem> {
     match store
         .get_typed_memories_by_character(character_id, Some(MemoryKind::Reflection), 50, 0)
         .await
@@ -214,8 +214,8 @@ pub async fn load_reflection_memories(
 /// `success_boost`; those matching "Strategies to avoid" are penalized by
 /// `failure_penalty`.
 pub fn apply_reflection_adjustment(
-    memories: &mut [ene_store::ScoredMemory],
-    reflections: &[ene_store::MemoryItem],
+    memories: &mut [ene_core::ScoredMemory],
+    reflections: &[ene_core::MemoryItem],
     success_boost: f32,
     failure_penalty: f32,
 ) {
@@ -233,7 +233,7 @@ pub fn apply_reflection_adjustment(
     }
 }
 
-fn parse_strategies(reflections: &[ene_store::MemoryItem]) -> (Vec<String>, Vec<String>) {
+fn parse_strategies(reflections: &[ene_core::MemoryItem]) -> (Vec<String>, Vec<String>) {
     let mut s = Vec::new();
     let mut f = Vec::new();
     for r in reflections {

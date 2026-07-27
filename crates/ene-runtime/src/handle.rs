@@ -3108,7 +3108,7 @@ async fn warmup_character_memories_ready(
     let store = session.memory.memory_store.as_ref()?;
     let embedder = session.memory.embedding_provider.as_ref()?;
     match ene_mind::character::sync_character_memories(
-        store,
+        store.as_ref(),
         embedder,
         session.card_name(),
         &config.user_name,
