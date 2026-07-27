@@ -2463,9 +2463,11 @@ dependencies = [
  "cc",
  "ene-ai",
  "ene-config",
+ "ene-infer",
  "ene-plugin-proto",
  "image",
  "llama-cpp-4",
+ "once_cell",
  "parking_lot",
  "rand 0.10.2",
  "reqwest",
@@ -2475,6 +2477,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
 ]
 
