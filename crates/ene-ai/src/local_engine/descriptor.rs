@@ -105,7 +105,7 @@ impl CapabilitySet {
 
     /// Builds a set from an iterator of capabilities.
     #[must_use]
-    pub fn from_iter(caps: impl IntoIterator<Item = Capability>) -> Self {
+    pub fn from_capabilities(caps: impl IntoIterator<Item = Capability>) -> Self {
         caps.into_iter().fold(Self::empty(), Self::with)
     }
 }
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn capability_set_from_iter() {
-        let set = CapabilitySet::from_iter([Capability::Stt, Capability::Streaming]);
+        let set = CapabilitySet::from_capabilities([Capability::Stt, Capability::Streaming]);
         assert!(set.contains(Capability::Stt));
         assert!(set.contains(Capability::Streaming));
         assert!(!set.contains(Capability::Tts));

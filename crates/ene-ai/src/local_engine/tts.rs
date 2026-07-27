@@ -216,6 +216,10 @@ mod tests {
         type Response = MockTtsResponse;
         type Error = MockTtsError;
 
+        #[expect(
+            clippy::unnecessary_literal_bound,
+            reason = "must match LocalModel::engine_name's trait signature, which ties the return type to &self's lifetime"
+        )]
         fn engine_name(&self) -> &str {
             "mock-tts"
         }

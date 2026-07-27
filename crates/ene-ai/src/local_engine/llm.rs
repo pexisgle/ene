@@ -179,7 +179,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use ene_infer::{EngineConfig, JobContext, LocalModel};
-    use ene_plugin_proto::ToolSpec;
+    use ene_plugin_proto::{ToolName, ToolSpec};
 
     use super::{LlmChatRequest, LlmChatResponse, LocalLlmEngine, map_engine_error};
     use crate::local_engine::descriptor::{
@@ -242,6 +242,10 @@ mod tests {
         type Response = MockChatResponse;
         type Error = MockChatError;
 
+        #[expect(
+            clippy::unnecessary_literal_bound,
+            reason = "must match LocalModel::engine_name's trait signature, which ties the return type to &self's lifetime"
+        )]
         fn engine_name(&self) -> &str {
             "mock-chat"
         }
@@ -320,14 +324,16 @@ mod tests {
             EngineConfig::default(),
         );
         let tools = [ToolSpec::new(
-            "search",
+            ToolName::new("search"),
             String::new(),
             serde_json::json!({}),
         )];
-        let err = provider
+        let result = provider
             .create_chat_stream(&[text_message("hi")], &tools)
-            .await
-            .expect_err("tools not declared as a capability must be rejected");
+            .await;
+        let Err(err) = result else {
+            panic!("tools not declared as a capability must be rejected")
+        };
         assert!(matches!(err, crate::error::LlmProviderError::Provider(_)));
     }
 
@@ -341,7 +347,7 @@ mod tests {
             EngineConfig::default(),
         );
         let tools = [ToolSpec::new(
-            "search",
+            ToolName::new("search"),
             String::new(),
             serde_json::json!({}),
         )];
