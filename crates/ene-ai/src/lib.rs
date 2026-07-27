@@ -29,6 +29,11 @@ pub mod config;
 pub mod error;
 /// Provider health monitoring and failover routing.
 pub mod health;
+/// Blanket async-provider adapters over `ene-infer::EngineHandle`
+/// (`LocalLlmEngine`, `LocalTtsEngine`, `LocalSttEngine`), plus
+/// `EngineDescriptor` capability/concurrency/resource declarations and the
+/// process-wide `ResourceRegistry` admission budget.
+pub mod local_engine;
 /// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
 /// OpenAI-compatible provider implementation.
@@ -51,6 +56,12 @@ pub use error::{AiError, LlmProviderError};
 pub use health::{
     FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
     ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
+};
+pub use local_engine::{
+    Capability, CapabilitySet, ConcurrencyHint, EngineDescriptor, EngineId, LlmChatRequest,
+    LlmChatResponse, LocalLlmEngine, LocalSttEngine, LocalTtsEngine, ResourceBudgets,
+    ResourceClass, ResourceRegistry, SttTranscribeRequest, TtsSynthesisRequest,
+    TtsSynthesisResponse,
 };
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use openai::{

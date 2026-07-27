@@ -915,7 +915,8 @@ mod tests {
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
-        DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec, TtsProviderSpec, VersionRange,
+        ConcurrencyHint, DeferredStatus, LlmProviderSpec, SttProviderSpec, ToolSpec,
+        TtsProviderSpec, VersionRange,
     };
 
     /// A mock tool plugin for testing dispatch logic.
@@ -966,6 +967,7 @@ mod tests {
                 supported_models: vec!["mock-model".into()],
                 supports_streaming: true,
                 supports_vision: false,
+                concurrency: ConcurrencyHint::default(),
             }]
         }
 
@@ -1016,6 +1018,7 @@ mod tests {
                 supported_models: vec!["mock-model".into()],
                 supports_streaming: true,
                 supports_vision: false,
+                concurrency: ConcurrencyHint::default(),
             }]
         }
 
@@ -1049,6 +1052,7 @@ mod tests {
                 kind: "mock_tts".into(),
                 voices: vec!["default".into()],
                 formats: vec!["wav".into()],
+                concurrency: ConcurrencyHint::default(),
             }]
         }
 
@@ -1074,6 +1078,7 @@ mod tests {
                 kind: "mock_stt".into(),
                 models: vec!["mock-model".into()],
                 formats: vec!["wav".into()],
+                concurrency: ConcurrencyHint::default(),
             }]
         }
 

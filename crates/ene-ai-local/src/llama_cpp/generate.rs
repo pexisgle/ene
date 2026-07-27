@@ -1,64 +1,54 @@
 //! Chat completion via llama-cpp-4 (text + optional mtmd vision).
+//!
+//! Every function here takes an already-built `ctx: &mut LlamaContext<'_>`
+//! (cached worker-local state owned by `crate::local_llm::model::LlamaChatModel`,
+//! not created here) and a `job: &JobContext` for cooperative cancellation —
+//! there is deliberately no `timeout: Duration` parameter and no internal
+//! `Instant`-based deadline: the one timeout in this crate's design lives in
+//! `ene_infer::EngineConfig::job_timeout`, checked via `job.should_stop()`.
 
-use super::backend::with_backend;
 use super::grammar::json_schema_to_grammar;
 use super::load::LoadedModel;
 use super::map_llama_err;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, UserMessagePart};
+use ene_infer::JobContext;
 use llama_cpp_4::context::LlamaContext;
-use llama_cpp_4::context::params::LlamaContextParams;
 use llama_cpp_4::llama_batch::LlamaBatch;
 use llama_cpp_4::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
 use llama_cpp_4::mtmd::{MtmdBitmap, MtmdContext, MtmdInputChunks, MtmdInputText};
 use llama_cpp_4::sampling::LlamaSampler;
 use llama_cpp_4::token::detokenizer::StreamDetokenizer;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 const MAX_DECISION_TOKENS: i32 = 320;
 const MAX_VISION_TOKENS: i32 = 256;
 
-/// Generate a completion for `messages`, optionally constrained by JSON schema grammar.
+/// Generate a completion for `messages` on the caller's cached `ctx`,
+/// optionally constrained by JSON schema grammar.
 pub(crate) fn generate_chat(
     loaded: &LoadedModel,
+    ctx: &mut LlamaContext<'_>,
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
-    timeout: Duration,
+    job: &JobContext,
 ) -> Result<String, LlmProviderError> {
     if messages_have_images(messages) {
-        return generate_chat_vision(loaded, messages, json_schema, timeout);
+        return generate_chat_vision(loaded, ctx, messages, json_schema, job);
     }
-    generate_chat_text(loaded, messages, json_schema, timeout)
+    generate_chat_text(loaded, ctx, messages, json_schema, job)
 }
 
-/// Vision completion from raw RGB8 pixels (desktop screen summary).
-#[expect(
-    dead_code,
-    reason = "convenience wrapper retained for non-cancelled vision callers"
-)]
-pub(crate) fn generate_with_rgb_image(
+/// Vision completion from raw RGB8 pixels (desktop screen summary), on the
+/// caller's cached `ctx`.
+pub(crate) fn generate_vision(
     loaded: &LoadedModel,
+    ctx: &mut LlamaContext<'_>,
     system: &str,
     user: &str,
     width: u32,
     height: u32,
     rgb: &[u8],
-    timeout: Duration,
-) -> Result<String, LlmProviderError> {
-    generate_with_rgb_image_with_cancel(loaded, system, user, width, height, rgb, timeout, None)
-}
-
-/// Vision completion from raw RGB8 pixels with optional cancellation check.
-pub(crate) fn generate_with_rgb_image_with_cancel(
-    loaded: &LoadedModel,
-    system: &str,
-    user: &str,
-    width: u32,
-    height: u32,
-    rgb: &[u8],
-    timeout: Duration,
-    cancel: Option<&AtomicBool>,
+    job: &JobContext,
 ) -> Result<String, LlmProviderError> {
     // Fold system into a single user turn; Image part alone inserts the mtmd marker.
     let mut text = String::new();
@@ -77,132 +67,98 @@ pub(crate) fn generate_with_rgb_image_with_cancel(
             },
         ],
     }];
-    generate_chat_vision_with_bitmaps_with_cancel(
-        loaded,
-        &messages,
-        &[(width, height, rgb)],
-        None,
-        timeout,
-        cancel,
-    )
+    generate_chat_vision_with_bitmaps(loaded, ctx, &messages, &[(width, height, rgb)], None, job)
 }
 
 fn generate_chat_text(
     loaded: &LoadedModel,
+    ctx: &mut LlamaContext<'_>,
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
-    timeout: Duration,
+    job: &JobContext,
 ) -> Result<String, LlmProviderError> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| LlmProviderError::LocalLlm("request timeout overflow".to_string()))?;
+    let prompt = apply_messages_template(loaded, messages, false)?;
+    let tokens = loaded
+        .model
+        .str_to_token(&prompt, AddBos::Always)
+        .map_err(|e| map_llama_err("tokenize prompt", e))?;
 
-    with_backend(|backend| {
-        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(loaded.context_size));
-        let mut ctx = loaded
-            .model
-            .new_context(backend, ctx_params)
-            .map_err(|e| map_llama_err("failed to create llama context", e))?;
+    if tokens.is_empty() {
+        return Err(LlmProviderError::LocalLlm(
+            "prompt tokenized to empty sequence".to_string(),
+        ));
+    }
 
-        let prompt = apply_messages_template(loaded, messages, false)?;
-        let tokens = loaded
-            .model
-            .str_to_token(&prompt, AddBos::Always)
-            .map_err(|e| map_llama_err("tokenize prompt", e))?;
+    let n_ctx = i32::try_from(ctx.n_ctx())
+        .map_err(|_| LlmProviderError::LocalLlm("n_ctx does not fit in i32".to_string()))?;
+    let n_kv_req = i32::try_from(tokens.len())
+        .map_err(|_| LlmProviderError::LocalLlm("token count overflow".to_string()))?
+        .saturating_add(MAX_DECISION_TOKENS);
+    if n_kv_req > n_ctx {
+        return Err(LlmProviderError::LocalLlm(format!(
+            "prompt too long for context ({n_kv_req} > {n_ctx})"
+        )));
+    }
 
-        if tokens.is_empty() {
-            return Err(LlmProviderError::LocalLlm(
-                "prompt tokenized to empty sequence".to_string(),
-            ));
-        }
+    let mut batch = LlamaBatch::new(
+        tokens
+            .len()
+            .saturating_add(MAX_DECISION_TOKENS as usize)
+            .max(512),
+        1,
+    );
+    let last_index = i32::try_from(tokens.len().saturating_sub(1)).unwrap_or(0);
+    for (i, token) in (0_i32..).zip(tokens.iter().copied()) {
+        batch
+            .add(token, i, &[0], i == last_index)
+            .map_err(|e| map_llama_err("batch.add prompt", e))?;
+    }
+    if job.should_stop().is_some() {
+        return Err(LlmProviderError::LocalLlm(
+            "decision generation stopped before prompt decode".to_string(),
+        ));
+    }
+    ctx.decode(&mut batch)
+        .map_err(|e| map_llama_err("decode prompt", e))?;
+    job.tick();
 
-        let n_ctx = i32::try_from(ctx.n_ctx())
-            .map_err(|_| LlmProviderError::LocalLlm("n_ctx does not fit in i32".to_string()))?;
-        let n_kv_req = i32::try_from(tokens.len())
-            .map_err(|_| LlmProviderError::LocalLlm("token count overflow".to_string()))?
-            .saturating_add(MAX_DECISION_TOKENS);
-        if n_kv_req > n_ctx {
-            return Err(LlmProviderError::LocalLlm(format!(
-                "prompt too long for context ({n_kv_req} > {n_ctx})"
-            )));
-        }
-
-        let mut batch = LlamaBatch::new(
-            tokens
-                .len()
-                .saturating_add(MAX_DECISION_TOKENS as usize)
-                .max(512),
-            1,
-        );
-        let last_index = i32::try_from(tokens.len().saturating_sub(1)).unwrap_or(0);
-        for (i, token) in (0_i32..).zip(tokens.iter().copied()) {
-            batch
-                .add(token, i, &[0], i == last_index)
-                .map_err(|e| map_llama_err("batch.add prompt", e))?;
-        }
-        if Instant::now() >= deadline {
-            return Err(LlmProviderError::LocalLlm(
-                "decision generation timed out before prompt decode".to_string(),
-            ));
-        }
-        ctx.decode(&mut batch)
-            .map_err(|e| map_llama_err("decode prompt", e))?;
-
-        let n_cur = batch.n_tokens();
-        sample_tokens(
-            loaded,
-            &mut ctx,
-            &mut batch,
-            json_schema,
-            deadline,
-            MAX_DECISION_TOKENS,
-            n_cur,
-            None,
-        )
-    })
+    let n_cur = batch.n_tokens();
+    sample_tokens(
+        loaded,
+        ctx,
+        &mut batch,
+        json_schema,
+        job,
+        MAX_DECISION_TOKENS,
+        n_cur,
+    )
 }
 
 fn generate_chat_vision(
     loaded: &LoadedModel,
+    ctx: &mut LlamaContext<'_>,
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
-    timeout: Duration,
+    job: &JobContext,
 ) -> Result<String, LlmProviderError> {
     let bitmaps = extract_rgb_images(messages)?;
     if bitmaps.is_empty() {
-        return generate_chat_text(loaded, messages, json_schema, timeout);
+        return generate_chat_text(loaded, ctx, messages, json_schema, job);
     }
     let refs: Vec<(u32, u32, &[u8])> = bitmaps
         .iter()
         .map(|(w, h, data)| (*w, *h, data.as_slice()))
         .collect();
-    generate_chat_vision_with_bitmaps(loaded, messages, &refs, json_schema, timeout)
+    generate_chat_vision_with_bitmaps(loaded, ctx, messages, &refs, json_schema, job)
 }
 
 fn generate_chat_vision_with_bitmaps(
     loaded: &LoadedModel,
+    ctx: &mut LlamaContext<'_>,
     messages: &[LlmMessage],
     images: &[(u32, u32, &[u8])],
     json_schema: Option<&serde_json::Value>,
-    timeout: Duration,
-) -> Result<String, LlmProviderError> {
-    generate_chat_vision_with_bitmaps_with_cancel(
-        loaded,
-        messages,
-        images,
-        json_schema,
-        timeout,
-        None,
-    )
-}
-
-fn generate_chat_vision_with_bitmaps_with_cancel(
-    loaded: &LoadedModel,
-    messages: &[LlmMessage],
-    images: &[(u32, u32, &[u8])],
-    json_schema: Option<&serde_json::Value>,
-    timeout: Duration,
-    cancel: Option<&AtomicBool>,
+    job: &JobContext,
 ) -> Result<String, LlmProviderError> {
     let mtmd = loaded.mtmd.as_ref().ok_or_else(|| {
         LlmProviderError::LocalLlm(
@@ -215,60 +171,45 @@ fn generate_chat_vision_with_bitmaps_with_cancel(
         ));
     }
 
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| LlmProviderError::LocalLlm("request timeout overflow".to_string()))?;
+    let prompt = apply_messages_template(loaded, messages, true)?;
+    let bitmaps: Vec<MtmdBitmap> = images
+        .iter()
+        .map(|(w, h, rgb)| {
+            MtmdBitmap::from_rgb(*w, *h, rgb)
+                .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd bitmap: {e}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
 
-    with_backend(|backend| {
-        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(loaded.context_size));
-        let mut ctx = loaded
-            .model
-            .new_context(backend, ctx_params)
-            .map_err(|e| map_llama_err("failed to create llama context", e))?;
+    let text = MtmdInputText::new(&prompt, true, true);
+    let mut chunks = MtmdInputChunks::new();
+    mtmd.tokenize(&text, &bitmap_refs, &mut chunks)
+        .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd tokenize: {e}")))?;
 
-        let prompt = apply_messages_template(loaded, messages, true)?;
-        let bitmaps: Vec<MtmdBitmap> = images
-            .iter()
-            .map(|(w, h, rgb)| {
-                MtmdBitmap::from_rgb(*w, *h, rgb)
-                    .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd bitmap: {e}")))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
+    if job.should_stop().is_some() {
+        return Err(LlmProviderError::LocalLlm(
+            "vision generation stopped before mtmd eval".to_string(),
+        ));
+    }
 
-        let text = MtmdInputText::new(&prompt, true, true);
-        let mut chunks = MtmdInputChunks::new();
-        mtmd.tokenize(&text, &bitmap_refs, &mut chunks)
-            .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd tokenize: {e}")))?;
+    // `mtmd.eval_chunks` is a single opaque FFI call (no natural interruption
+    // point, hence no `job.tick()` mid-call — see `CHAT_STALL_TIMEOUT`'s docs
+    // in `local_llm::model` for why this engine sets no stall timeout).
+    let mut n_past = 0_i32;
+    mtmd.eval_chunks(ctx.as_ptr(), &chunks, 0, 0, 512, true, &mut n_past)
+        .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd eval: {e}")))?;
+    job.tick();
 
-        if let Some(c) = cancel
-            && c.load(Ordering::Relaxed)
-        {
-            return Err(LlmProviderError::LocalLlm("task cancelled".to_string()));
-        }
-
-        if Instant::now() >= deadline {
-            return Err(LlmProviderError::LocalLlm(
-                "vision generation timed out before mtmd eval".to_string(),
-            ));
-        }
-
-        let mut n_past = 0_i32;
-        mtmd.eval_chunks(ctx.as_ptr(), &chunks, 0, 0, 512, true, &mut n_past)
-            .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd eval: {e}")))?;
-
-        let mut batch = LlamaBatch::new(512, 1);
-        sample_tokens(
-            loaded,
-            &mut ctx,
-            &mut batch,
-            json_schema,
-            deadline,
-            MAX_VISION_TOKENS,
-            n_past,
-            cancel,
-        )
-    })
+    let mut batch = LlamaBatch::new(512, 1);
+    sample_tokens(
+        loaded,
+        ctx,
+        &mut batch,
+        json_schema,
+        job,
+        MAX_VISION_TOKENS,
+        n_past,
+    )
 }
 
 fn sample_tokens(
@@ -276,10 +217,9 @@ fn sample_tokens(
     ctx: &mut LlamaContext<'_>,
     batch: &mut LlamaBatch,
     json_schema: Option<&serde_json::Value>,
-    deadline: Instant,
+    job: &JobContext,
     max_tokens: i32,
     mut n_cur: i32,
-    cancel: Option<&AtomicBool>,
 ) -> Result<String, LlmProviderError> {
     let sampler = build_sampler(&loaded.model, json_schema)?;
     let mut detok = StreamDetokenizer::new(&loaded.model, Special::Plaintext);
@@ -287,22 +227,24 @@ fn sample_tokens(
     let mut n_decode = 0_i32;
 
     while n_decode < max_tokens {
-        if let Some(c) = cancel
-            && c.load(Ordering::Relaxed)
-        {
-            return Err(LlmProviderError::LocalLlm("task cancelled".to_string()));
-        }
-        if Instant::now() >= deadline {
+        // Unlike a single opaque FFI call (mtmd eval, a huge prompt decode),
+        // token-by-token sampling *is* a real interruption point: check and
+        // tick every iteration, per this stage's cancellation contract.
+        if job.should_stop().is_some() {
             return Err(LlmProviderError::LocalLlm(
-                "decision generation timed out after deadline".to_string(),
+                "generation stopped before completion".to_string(),
             ));
         }
+        job.tick();
 
         // Always sample the last computed logits. After a multi-token prompt decode
         // only the final token requests logits, so `batch.n_tokens()-1` is out of range.
         // `llama_sampler_sample` already calls `llama_sampler_accept` — do not accept twice.
         // A second accept empties grammar stacks (e.g. after compound token `{"`) and the next
-        // sample hits GGML_ASSERT(!stacks.empty()).
+        // sample hits GGML_ASSERT(!stacks.empty()). That `abort()` cannot be caught by
+        // `catch_unwind` (see `ene_infer`'s crate docs on this exact limit) — this code path
+        // avoids the double-accept that would trigger it, but a genuinely malformed grammar
+        // reaching llama.cpp by some other route is not something this crate can safely contain.
         let token = sampler.sample(ctx, -1);
 
         if loaded.model.is_eog_token(token) {

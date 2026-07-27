@@ -1,6 +1,7 @@
 //! Local GGUF embedding via llama-cpp-4 (#171).
 
 mod error;
+mod model;
 mod provider;
 
 pub use error::EneEmbeddingError;
@@ -10,11 +11,11 @@ use ene_ai::resolve::ResolvedLocalModel;
 
 /// Creates a GGUF local embedding provider from a resolved local model entry.
 ///
-/// # Runtime requirement
-///
-/// The returned provider uses `tokio::task::block_in_place` for the
-/// synchronous llama.cpp forward pass. That requires a **multi-thread**
-/// tokio runtime.
+/// The returned provider runs inference on a dedicated worker thread owned
+/// by an `ene_infer::EngineHandle` (see `model::LlamaEmbedModel`) — no
+/// `tokio::task::block_in_place`/`spawn_blocking`, so this has no particular
+/// runtime-flavor requirement beyond whatever the rest of the workspace
+/// already needs.
 pub fn create_local_provider(
     local: &ResolvedLocalModel,
 ) -> Result<Box<dyn ene_ai::EmbeddingProvider>, EneEmbeddingError> {

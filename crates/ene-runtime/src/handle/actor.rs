@@ -89,14 +89,16 @@ pub(super) struct TurnActor {
     /// response for interruption recording (#H5).
     stream_partial_text: Arc<parking_lot::Mutex<String>>,
     active_turn: Option<TurnId>,
-    /// Cancellation flag for the in-flight [`crate::vision::VisionHandle`]
-    /// inference, if any. A fresh flag is minted and handed out with each
-    /// [`VisionPrepared`] reply; starting a new user turn flips the current
-    /// flag and replaces it with a fresh one so a later vision call is not
-    /// pre-cancelled. The actual inference call runs entirely outside this
-    /// actor (#271) — this flag is the only thread the actor still holds
-    /// into an in-flight vision request, used solely to ask it to stop.
-    vision_cancel: Arc<AtomicBool>,
+    /// Cancellation token for the in-flight [`crate::vision::VisionHandle`]
+    /// inference, if any. A fresh token is minted and handed out with each
+    /// [`VisionPrepared`] reply; starting a new user turn cancels the
+    /// current token and replaces it with a fresh one so a later vision call
+    /// is not pre-cancelled. The actual inference call runs entirely outside
+    /// this actor (#271) — this token is the only thread the actor still
+    /// holds into an in-flight vision request, used solely to ask it to
+    /// stop (it flows into `ene_infer::JobContext::should_stop` on the
+    /// local llama.cpp worker).
+    vision_cancel: CancellationToken,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     /// Session-wide permission grants tracked for the permission center (#177).
@@ -212,7 +214,7 @@ impl TurnActor {
             stream_session_rx: None,
             stream_partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
             active_turn: None,
-            vision_cancel: Arc::new(AtomicBool::new(false)),
+            vision_cancel: CancellationToken::new(),
             pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
             permission_scopes: Arc::new(Mutex::new(Vec::new())),
@@ -686,7 +688,9 @@ impl TurnActor {
                 tracing::info!(
                     component = "Proactive",
                     decision_backend = ?handles.decision_kind,
-                    vision = handles.local().is_some_and(|l| l.supports_vision()),
+                    vision = handles
+                        .local()
+                        .is_some_and(|l| l.capabilities().contains(ene_ai::Capability::Vision)),
                     "Proactive decision provider ready"
                 );
                 self.proactive_llm = Some(handles);
@@ -744,7 +748,7 @@ impl TurnActor {
             })));
             return;
         };
-        if !local.supports_vision() {
+        if !local.capabilities().contains(ene_ai::Capability::Vision) {
             drop(reply.send(Err(PublicApiError::Internal {
                 message: "local model has no vision mmproj loaded".to_string(),
             })));
@@ -754,12 +758,12 @@ impl TurnActor {
         let prompts = ene_config::PromptLibrary::load(&prompt_language);
         let system = prompts.proactive().screen_summary_system.trim().to_string();
         let user = prompts.proactive().render_screen_summary_user(&app_label);
-        // Mint a fresh cancel flag for this request; a new user turn flips
-        // and replaces `self.vision_cancel` (see `EneCommand::Run`), so an
-        // older, already-handed-out flag being left `true` from a prior
-        // cancellation can never pre-cancel this new request.
-        self.vision_cancel = Arc::new(AtomicBool::new(false));
-        let cancel = Arc::clone(&self.vision_cancel);
+        // Mint a fresh cancel token for this request; a new user turn
+        // cancels and replaces `self.vision_cancel` (see `EneCommand::Run`),
+        // so an older, already-handed-out token being left cancelled from a
+        // prior turn can never pre-cancel this new request.
+        self.vision_cancel = CancellationToken::new();
+        let cancel = self.vision_cancel.clone();
         drop(reply.send(Ok(VisionPrepared {
             local,
             system,
@@ -949,15 +953,14 @@ impl TurnActor {
                 }
                 // Discard any in-flight proactive decision and cancel any
                 // in-flight vision summarization (#271 moved the inference
-                // itself off this actor; this flag is the only handle back
+                // itself off this actor; this token is the only handle back
                 // into it — see `VisionPrepared::cancel`). Replaced (not
-                // just flipped) so a vision request prepared *after* this
-                // point is not pre-cancelled by the old flag.
+                // just cancelled) so a vision request prepared *after* this
+                // point is not pre-cancelled by the old token.
                 self.proactive.on_user_turn_started();
                 self.abort_proactive_decision();
-                self.vision_cancel
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                self.vision_cancel = Arc::new(AtomicBool::new(false));
+                self.vision_cancel.cancel();
+                self.vision_cancel = CancellationToken::new();
                 self.drain_pending().await;
                 self.cancel_token = CancellationToken::new();
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
