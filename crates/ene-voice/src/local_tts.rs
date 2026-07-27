@@ -123,7 +123,10 @@ const KOKORO_VOICES: &[(&str, usize)] = &[
 /// Precedence: `TtsConfig::model_path` when non-empty, then `TtsConfig::model`
 /// when non-empty, then a default cache location. Environment overrides are
 /// handled by the config system (`ENE_AI__TTS__MODEL_PATH`).
-#[cfg(feature = "local-tts")]
+///
+/// Not gated behind the `local-tts` feature: [`prefetch_if_configured`] needs
+/// this resolution logic from the runtime bootstrap path, which never enables
+/// `local-tts` (that feature only gates the ONNX Runtime native dependency).
 fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
     if let Some(path) = ai
         .tts
@@ -145,7 +148,8 @@ fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
 /// Precedence: `TtsConfig::voices_path` when non-empty, then a default cache
 /// location. Environment overrides are handled by the config system
 /// (`ENE_AI__TTS__VOICES_PATH`).
-#[cfg(feature = "local-tts")]
+///
+/// Not gated behind the `local-tts` feature; see [`resolve_model_path`].
 fn resolve_voices_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
     if let Some(path) = ai
         .tts
@@ -169,7 +173,14 @@ pub struct LocalTtsProvider {
 }
 
 /// Ensure a file exists at `dest`, downloading it from `url` if missing.
-pub fn ensure_file_downloaded(url: &str, dest: &std::path::Path) -> Result<(), AudioProviderError> {
+///
+/// This performs network I/O and must be awaited from an async bootstrap
+/// path (see [`prefetch_if_configured`]); it is never called from
+/// [`LocalTtsProvider::open`], which must stay network-free.
+pub async fn ensure_file_downloaded(
+    url: &str,
+    dest: &std::path::Path,
+) -> Result<(), AudioProviderError> {
     if dest.is_file() {
         return Ok(());
     }
@@ -192,63 +203,52 @@ pub fn ensure_file_downloaded(url: &str, dest: &std::path::Path) -> Result<(), A
 
     let part_path = dest.with_extension("part");
 
-    let download_future = async {
-        let client = reqwest::Client::builder()
-            .user_agent("ene-voice/0.1.0")
-            .build()
-            .map_err(|e| AudioProviderError::Init(format!("HTTP client build error: {e}")))?;
+    let client = reqwest::Client::builder()
+        .user_agent("ene-voice/0.1.0")
+        .build()
+        .map_err(|e| AudioProviderError::Init(format!("HTTP client build error: {e}")))?;
 
-        let mut response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| AudioProviderError::Init(format!("Failed to download {url}: {e}")))?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| AudioProviderError::Init(format!("Failed to download {url}: {e}")))?;
 
-        if !response.status().is_success() {
-            return Err(AudioProviderError::Init(format!(
-                "Failed to download {url}: HTTP {}",
-                response.status()
-            )));
-        }
-
-        let mut file = tokio::fs::File::create(&part_path).await.map_err(|e| {
-            AudioProviderError::Init(format!(
-                "Failed to create part file {}: {e}",
-                part_path.display()
-            ))
-        })?;
-
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|e| AudioProviderError::Init(format!("Download stream error: {e}")))?
-        {
-            use tokio::io::AsyncWriteExt;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| AudioProviderError::Init(format!("Failed to write chunk: {e}")))?;
-        }
-
-        use tokio::io::AsyncWriteExt;
-        file.flush()
-            .await
-            .map_err(|e| AudioProviderError::Init(format!("Failed to flush file: {e}")))?;
-
-        tokio::fs::rename(&part_path, dest)
-            .await
-            .map_err(|e| AudioProviderError::Init(format!("Failed to rename part file: {e}")))?;
-
-        Ok(())
-    };
-
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(download_future))
-    } else {
-        let rt = tokio::runtime::Runtime::new().map_err(|e| {
-            AudioProviderError::Init(format!("Failed to create tokio runtime: {e}"))
-        })?;
-        rt.block_on(download_future)
+    if !response.status().is_success() {
+        return Err(AudioProviderError::Init(format!(
+            "Failed to download {url}: HTTP {}",
+            response.status()
+        )));
     }
+
+    let mut file = tokio::fs::File::create(&part_path).await.map_err(|e| {
+        AudioProviderError::Init(format!(
+            "Failed to create part file {}: {e}",
+            part_path.display()
+        ))
+    })?;
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| AudioProviderError::Init(format!("Download stream error: {e}")))?
+    {
+        use tokio::io::AsyncWriteExt;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| AudioProviderError::Init(format!("Failed to write chunk: {e}")))?;
+    }
+
+    use tokio::io::AsyncWriteExt;
+    file.flush()
+        .await
+        .map_err(|e| AudioProviderError::Init(format!("Failed to flush file: {e}")))?;
+
+    tokio::fs::rename(&part_path, dest)
+        .await
+        .map_err(|e| AudioProviderError::Init(format!("Failed to rename part file: {e}")))?;
+
+    Ok(())
 }
 
 /// Fallback `HuggingFace` download URL for the Kokoro 82M ONNX model file.
@@ -261,19 +261,49 @@ pub const KOKORO_FALLBACK_VOICES_URL: &str =
 
 /// Ensure Kokoro ONNX model and `voices.bin` files exist on disk, downloading them
 /// automatically if missing.
-pub fn ensure_kokoro_files_exist(
+///
+/// Performs network I/O; must be awaited from an async context (settings UI
+/// download button, or [`prefetch_if_configured`] during bootstrap). Never
+/// called from [`LocalTtsProvider::open`].
+pub async fn ensure_kokoro_files_exist(
     model_path: &std::path::Path,
     voices_path: &std::path::Path,
 ) -> Result<(), AudioProviderError> {
-    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_MODEL_URL, model_path) {
+    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_MODEL_URL, model_path).await {
         tracing::warn!(error = %e, "Primary Kokoro model URL failed; attempting fallback URL...");
-        ensure_file_downloaded(KOKORO_FALLBACK_MODEL_URL, model_path)?;
+        ensure_file_downloaded(KOKORO_FALLBACK_MODEL_URL, model_path).await?;
     }
-    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_VOICES_URL, voices_path) {
+    if let Err(e) = ensure_file_downloaded(KOKORO_DEFAULT_VOICES_URL, voices_path).await {
         tracing::warn!(error = %e, "Primary Kokoro voices URL failed; attempting fallback URL...");
-        ensure_file_downloaded(KOKORO_FALLBACK_VOICES_URL, voices_path)?;
+        ensure_file_downloaded(KOKORO_FALLBACK_VOICES_URL, voices_path).await?;
     }
     Ok(())
+}
+
+/// Prefetch the Kokoro ONNX model and `voices.bin` files if `ai.tts` selects
+/// the local Kokoro provider ([`PROVIDER_NAME`]).
+///
+/// Intended to be called once from the runtime's async bootstrap path
+/// (mirrors `ene_ai_local::prefetch_configured_gguf`), before any TTS
+/// provider is constructed, so [`LocalTtsProvider::open`] never needs to
+/// perform network I/O. A no-op when TTS is disabled or configured for a
+/// different provider (e.g. `"openai"`).
+///
+/// # Errors
+///
+/// Returns [`AudioProviderError`] when the download fails. Callers should
+/// treat this as non-fatal: log it and continue, since `open()` performs its
+/// own file-existence check and reports a clear error either way.
+pub async fn prefetch_if_configured(ai: &ene_ai::AiConfig) -> Result<(), AudioProviderError> {
+    let Some(resolved) = ai.resolve_tts() else {
+        return Ok(());
+    };
+    if resolved.provider != PROVIDER_NAME {
+        return Ok(());
+    }
+    let model_path = resolve_model_path(ai);
+    let voices_path = resolve_voices_path(ai);
+    ensure_kokoro_files_exist(&model_path, &voices_path).await
 }
 
 #[cfg(feature = "local-tts")]
@@ -290,6 +320,11 @@ impl LocalTtsProvider {
     /// Returns [`AudioProviderError::Init`] when the model or voice file is
     /// missing, the requested voice is unknown, or ONNX Runtime fails to build
     /// a session.
+    ///
+    /// This never performs network I/O: it is a synchronous, fail-fast
+    /// constructor. Callers are responsible for ensuring the model files are
+    /// already present (see [`prefetch_if_configured`], called from the
+    /// runtime's async bootstrap path before providers are constructed).
     pub fn open(
         model_path: &std::path::Path,
         voices_path: &std::path::Path,
@@ -300,14 +335,18 @@ impl LocalTtsProvider {
     ) -> Result<Self, AudioProviderError> {
         crate::ort_init::ensure_ort_init(ort_dylib_path)?;
 
-        // Auto-download missing model files if needed. Failure is handled by
-        // the file-existence check just below, which produces a proper error.
-        drop(ensure_kokoro_files_exist(model_path, voices_path));
-
         if !model_path.is_file() {
             return Err(AudioProviderError::Init(format!(
-                "Kokoro ONNX model not found at {}",
+                "Kokoro ONNX model not found at {}; fetch it before opening the TTS provider \
+                 (see Settings > Voice, or let bootstrap prefetch it automatically)",
                 model_path.display()
+            )));
+        }
+        if !voices_path.is_file() {
+            return Err(AudioProviderError::Init(format!(
+                "Kokoro voices.bin not found at {}; fetch it before opening the TTS provider \
+                 (see Settings > Voice, or let bootstrap prefetch it automatically)",
+                voices_path.display()
             )));
         }
         let session = ort::session::Session::builder()
@@ -580,6 +619,7 @@ mod tests {
         clippy::float_cmp,
         reason = "voice embeddings are written and read back as exact f32 bit patterns"
     )]
+    #![expect(clippy::expect_used, reason = "unit tests use expect for assertions")]
 
     use super::*;
     use std::io::Write;
