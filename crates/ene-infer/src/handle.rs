@@ -11,7 +11,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::EngineConfig;
 use crate::context::{JobContext, StopReason};
 use crate::error::EngineError;
-use crate::model::LocalModel;
+use crate::model::{LocalModel, StreamingLocalModel};
+use crate::stream::{ChunkReceiver, ChunkSink, send_terminal};
 
 /// The reply channel for one job. The worker owns this outright — no
 /// sharing, no `Arc`, no reclaiming ownership back from a clone — so there
@@ -20,15 +21,67 @@ use crate::model::LocalModel;
 type Reply<M> =
     oneshot::Sender<Result<<M as LocalModel>::Response, EngineError<<M as LocalModel>::Error>>>;
 
-/// One unit of work travelling from [`EngineHandle::submit`] to the worker
-/// thread.
+/// What a [`Job`] asks the worker to do, and how to report the outcome.
+///
+/// Both variants travel through the exact same bounded queue as
+/// [`EngineHandle::submit`]/[`EngineHandle::submit_stream`], which is what
+/// gives a streaming job and an ordinary one the same `Busy`/serialization
+/// behavior — one dedicated worker thread, one queue, no separate admission
+/// path for streaming work.
+enum JobKind<M: LocalModel> {
+    /// An [`EngineHandle::submit`] job: run to completion, reply once via
+    /// the oneshot channel.
+    Oneshot {
+        request: M::Request,
+        reply: Reply<M>,
+    },
+    /// An [`EngineHandle::submit_stream`] job. `run` already closes over the
+    /// request, the [`ChunkSink`] and its mapped-error delivery — it is
+    /// erased to `Box<dyn FnOnce(&mut M, &JobContext) + Send>` here
+    /// specifically so this enum (and therefore [`Job`], [`worker_loop`])
+    /// stays generic over plain `M: LocalModel`, with no `M::Chunk` bound
+    /// anywhere outside [`EngineHandle::submit_stream`] itself. `notify`
+    /// is a *separate* handle to the same underlying channel, used only if
+    /// `run` panics (the closure `run` owns, including its own channel
+    /// handle, is dropped mid-unwind along with everything else it
+    /// captured — this one survives because it was never moved into `run`).
+    Streaming {
+        run: Box<dyn FnOnce(&mut M, &JobContext) + Send>,
+        notify_engine_down: Box<dyn FnOnce(String) + Send>,
+    },
+}
+
+/// One unit of work travelling from [`EngineHandle::submit`]/
+/// [`EngineHandle::submit_stream`] to the worker thread.
 struct Job<M: LocalModel> {
-    request: M::Request,
     cancel: CancellationToken,
-    /// Cancelled by a `DropGuard` living in [`EngineHandle::submit`]'s own
-    /// stack frame — see [`JobContext`]'s field of the same name.
+    /// Cancelled by a `DropGuard` living in the caller's own stack frame (or,
+    /// for a stream, held inside the returned [`ChunkReceiver`]) — see
+    /// [`JobContext`]'s field of the same name.
     caller_gone: CancellationToken,
-    reply: Reply<M>,
+    kind: JobKind<M>,
+}
+
+/// Maps a model-level failure to the precise [`EngineError`] reason, giving
+/// priority to whatever stop condition fired: a model that returns its own
+/// (likely generic) "interrupted" error after noticing `should_stop` still
+/// gets reported as the framework's precise [`EngineError::Timeout`] /
+/// [`EngineError::Cancelled`], not [`EngineError::Model`]. Shared by the
+/// oneshot outcome mapping in [`worker_loop`] and by
+/// [`EngineHandle::submit_stream`]'s streaming-job closure.
+fn map_stop_to_error<E: std::error::Error>(
+    model_err: E,
+    stop: Option<StopReason>,
+    elapsed: Duration,
+) -> EngineError<E> {
+    match stop {
+        Some(StopReason::Deadline) => EngineError::Timeout { after: elapsed },
+        // `CallerGone` is folded into `Cancelled` here: nobody is listening
+        // for the exact variant in either case (the oneshot reply receiver
+        // was dropped, or the stream's `ChunkReceiver` was dropped).
+        Some(StopReason::Cancelled | StopReason::CallerGone) => EngineError::Cancelled,
+        None => EngineError::Model(model_err),
+    }
 }
 
 /// A handle to one model running on its own dedicated OS thread.
@@ -205,10 +258,12 @@ impl<M: LocalModel> EngineHandle<M> {
 
         let (reply_tx, reply_rx) = oneshot::channel();
         let job = Job {
-            request: req,
             cancel,
             caller_gone,
-            reply: reply_tx,
+            kind: JobKind::Oneshot {
+                request: req,
+                reply: reply_tx,
+            },
         };
 
         match self.tx.try_send(job) {
@@ -238,6 +293,114 @@ impl<M: LocalModel> EngineHandle<M> {
             .get()
             .cloned()
             .unwrap_or_else(|| "worker thread is not running".to_string())
+    }
+}
+
+impl<M: StreamingLocalModel> EngineHandle<M> {
+    /// Submits one job that delivers its output incrementally, returning
+    /// immediately with a [`ChunkReceiver`] rather than awaiting completion.
+    ///
+    /// This exists as a second `impl` block, gated on `M:
+    /// StreamingLocalModel`, specifically so [`Self::submit`] keeps working
+    /// unconditionally for every `M: LocalModel` — a model that never
+    /// implements [`StreamingLocalModel`] simply never has this method in
+    /// its `EngineHandle`'s API, with no change to how it compiles or runs
+    /// today.
+    ///
+    /// The returned [`ChunkReceiver`] yields `Ok(chunk)` for each chunk
+    /// [`StreamingLocalModel::run_streaming`] pushes, in order, followed —
+    /// only if the job did not simply run to completion — by one final
+    /// `Err(_)` explaining why (mapped exactly like [`Self::submit`]'s own
+    /// outcome: [`EngineError::Timeout`], [`EngineError::Cancelled`], or
+    /// [`EngineError::Model`]), then ends. `chunk_buffer` bounds the
+    /// channel between the worker and this handle's caller — coerced up to
+    /// at least 1 — and is the backpressure knob: once it fills,
+    /// [`ChunkSink::send`] blocks the worker thread until the consumer
+    /// drains it, [`EngineConfig::job_timeout`] elapses, or the consumer
+    /// drops this [`ChunkReceiver`], never growing past that bound.
+    ///
+    /// Dropping the returned [`ChunkReceiver`] — the streaming equivalent of
+    /// dropping [`Self::submit`]'s reply future — is observed by the worker
+    /// as [`crate::StopReason::CallerGone`], the same single cancellation
+    /// path [`Self::submit`] uses, not a second mechanism.
+    ///
+    /// Like [`Self::submit`], this call itself never blocks: a full queue or
+    /// a down engine is reported as the first (and only) item the returned
+    /// [`ChunkReceiver`] yields, rather than a synchronous error — a
+    /// consumer only ever has to deal with one shape ("read chunks from the
+    /// receiver until it ends"), regardless of whether the job ever actually
+    /// started.
+    pub fn submit_stream(
+        &self,
+        req: M::Request,
+        cancel: CancellationToken,
+        chunk_buffer: usize,
+    ) -> ChunkReceiver<M::Chunk, M::Error> {
+        let (tx, rx) =
+            mpsc::channel::<Result<M::Chunk, EngineError<M::Error>>>(chunk_buffer.max(1));
+
+        let caller_gone = CancellationToken::new();
+        let drop_guard = caller_gone.clone().drop_guard();
+
+        if let Some(reason) = self.down_reason.get() {
+            drop(tx.try_send(Err(EngineError::EngineDown {
+                reason: reason.clone(),
+            })));
+            return ChunkReceiver::new(rx, drop_guard);
+        }
+
+        // Three independent handles to the same channel, cloned up front
+        // rather than reached for later, because `sink` is about to be
+        // moved into `run` below:
+        // - `sink` (wraps one clone of `tx`): used by `run_streaming` itself
+        //   via `ChunkSink::send`, and to report a mapped mid-stream error.
+        // - `notify_tx`: survives a panic *inside* `run` (which drops `sink`
+        //   along with everything else `run` captured) so `worker_loop`'s
+        //   panic arm can still report `EngineDown` instead of the stream
+        //   silently ending.
+        // - `enqueue_result_tx`: used right here, only if the job never
+        //   makes it onto the worker's queue at all (`Busy`/`EngineDown`),
+        //   since in that case neither `run` nor `notify_engine_down` is
+        //   ever invoked.
+        let notify_tx = tx.clone();
+        let enqueue_result_tx = tx.clone();
+        let sink = ChunkSink::new(tx);
+
+        let run: Box<dyn FnOnce(&mut M, &JobContext) + Send> = Box::new(move |model, ctx| {
+            if let Err(model_err) = model.run_streaming(req, ctx, &sink) {
+                let stop = ctx.should_stop();
+                let elapsed = ctx.elapsed();
+                sink.notify_terminal(map_stop_to_error(model_err, stop, elapsed));
+            }
+        });
+        let notify_engine_down: Box<dyn FnOnce(String) + Send> = Box::new(move |reason| {
+            send_terminal(&notify_tx, EngineError::EngineDown { reason });
+        });
+
+        let job = Job {
+            cancel,
+            caller_gone,
+            kind: JobKind::Streaming {
+                run,
+                notify_engine_down,
+            },
+        };
+
+        match self.tx.try_send(job) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                drop(enqueue_result_tx.try_send(Err(EngineError::Busy {
+                    queue_depth: self.queue_depth,
+                })));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                drop(enqueue_result_tx.try_send(Err(EngineError::EngineDown {
+                    reason: self.down_reason(),
+                })));
+            }
+        }
+
+        ChunkReceiver::new(rx, drop_guard)
     }
 }
 
@@ -289,6 +452,25 @@ fn build_model<M: LocalModel>(
     }
 }
 
+/// Runs `model`'s [`LocalModel::reset`] after a job that returned from
+/// `run`/`run_streaming` without panicking — shared by [`worker_loop`]'s
+/// oneshot and streaming arms, since this bookkeeping does not depend on
+/// which kind of job just finished. Discards the model instead (triggering a
+/// full rebuild via `factory` on the next job) if `reset` itself panics.
+fn reset_or_rebuild<M: LocalModel>(model: &mut Option<M>, engine_name: &OnceLock<String>) {
+    let Some(model_mut) = model.as_mut() else {
+        return;
+    };
+    let reset_panicked = panic::catch_unwind(AssertUnwindSafe(|| model_mut.reset())).is_err();
+    if reset_panicked {
+        tracing::error!(
+            engine = engine_name.get().map_or("unknown", String::as_str),
+            "ene-infer: reset() panicked, rebuilding model"
+        );
+        *model = None;
+    }
+}
+
 /// The body of the dedicated worker thread: owns the model, pulls jobs off
 /// the bounded channel one at a time, and never lets more than one `run`
 /// call execute at once (there is only ever one worker thread per handle).
@@ -328,7 +510,14 @@ fn worker_loop<M: LocalModel>(
             match build_model(factory, engine_name) {
                 Ok(rebuilt) => model = Some(rebuilt),
                 Err(reason) => {
-                    respond(job.reply, Err(EngineError::EngineDown { reason }));
+                    match job.kind {
+                        JobKind::Oneshot { reply, .. } => {
+                            respond(reply, Err(EngineError::EngineDown { reason }));
+                        }
+                        JobKind::Streaming {
+                            notify_engine_down, ..
+                        } => notify_engine_down(reason),
+                    }
                     continue;
                 }
             }
@@ -342,74 +531,87 @@ fn worker_loop<M: LocalModel>(
         };
 
         let Job {
-            request,
             cancel,
             caller_gone,
-            reply,
+            kind,
         } = job;
         job_active.store(true, Ordering::Relaxed);
 
         let ctx = JobContext::new(job_timeout, cancel, caller_gone, heartbeat.cloned(), epoch);
 
-        let run_result = panic::catch_unwind(AssertUnwindSafe(|| model_mut.run(request, &ctx)));
+        match kind {
+            JobKind::Oneshot { request, reply } => {
+                let run_result =
+                    panic::catch_unwind(AssertUnwindSafe(|| model_mut.run(request, &ctx)));
+                job_active.store(false, Ordering::Relaxed);
 
-        job_active.store(false, Ordering::Relaxed);
+                match run_result {
+                    Ok(model_result) => {
+                        let stop = ctx.should_stop();
+                        let elapsed = ctx.elapsed();
+                        drop(ctx);
 
-        match run_result {
-            Ok(model_result) => {
-                let stop = ctx.should_stop();
-                let elapsed = ctx.elapsed();
+                        reset_or_rebuild(&mut model, engine_name);
+
+                        // A genuine `Ok` from `run` always wins, even if a
+                        // stop condition also fired: a job that legitimately
+                        // finished a moment before its deadline (or around
+                        // the same time as a cancellation) should not have
+                        // a good result thrown away in favor of
+                        // `Timeout`/`Cancelled`. The stop reason only
+                        // matters to explain an `Err` — a model that
+                        // noticed `should_stop()` and gave up returns
+                        // *some* `Err`, and we report the framework's
+                        // precise reason for it rather than the model's own
+                        // (likely generic) "interrupted" error.
+                        let outcome = model_result
+                            .map_err(|model_err| map_stop_to_error(model_err, stop, elapsed));
+                        respond(reply, outcome);
+                    }
+                    Err(panic_payload) => {
+                        let msg = panic_message(&panic_payload);
+                        tracing::error!(
+                            engine = engine_name.get().map_or("unknown", String::as_str),
+                            error = %msg,
+                            "ene-infer: run() panicked, rebuilding model"
+                        );
+                        model = None;
+                        respond(
+                            reply,
+                            Err(EngineError::EngineDown {
+                                reason: format!("run() panicked: {msg}"),
+                            }),
+                        );
+                    }
+                }
+            }
+            JobKind::Streaming {
+                run,
+                notify_engine_down,
+            } => {
+                let run_result = panic::catch_unwind(AssertUnwindSafe(|| run(model_mut, &ctx)));
+                job_active.store(false, Ordering::Relaxed);
                 drop(ctx);
 
-                let reset_panicked =
-                    panic::catch_unwind(AssertUnwindSafe(|| model_mut.reset())).is_err();
-                if reset_panicked {
-                    tracing::error!(
-                        engine = engine_name.get().map_or("unknown", String::as_str),
-                        "ene-infer: reset() panicked, rebuilding model"
-                    );
-                    model = None;
+                match run_result {
+                    // `run` (built in `EngineHandle::submit_stream`) already
+                    // pushed every chunk and, on a model-level failure,
+                    // already mapped and delivered the terminal
+                    // `EngineError` itself — there is nothing left to
+                    // `respond` to here, only the same post-job
+                    // reset-or-rebuild bookkeeping the oneshot path does.
+                    Ok(()) => reset_or_rebuild(&mut model, engine_name),
+                    Err(panic_payload) => {
+                        let msg = panic_message(&panic_payload);
+                        tracing::error!(
+                            engine = engine_name.get().map_or("unknown", String::as_str),
+                            error = %msg,
+                            "ene-infer: run_streaming() panicked, rebuilding model"
+                        );
+                        model = None;
+                        notify_engine_down(format!("run_streaming() panicked: {msg}"));
+                    }
                 }
-
-                // A genuine `Ok` from `run` always wins, even if a stop
-                // condition also fired: a job that legitimately finished a
-                // moment before its deadline (or around the same time as a
-                // cancellation) should not have a good result thrown away
-                // in favor of `Timeout`/`Cancelled`. The stop reason only
-                // matters to explain an `Err` — a model that noticed
-                // `should_stop()` and gave up returns *some* `Err`, and we
-                // report the framework's precise reason for it rather than
-                // the model's own (likely generic) "interrupted" error.
-                let outcome = match model_result {
-                    Ok(response) => Ok(response),
-                    Err(model_err) => match stop {
-                        Some(StopReason::Deadline) => Err(EngineError::Timeout { after: elapsed }),
-                        // `CallerGone` is folded into `Cancelled` here:
-                        // nobody is listening for the result in that case,
-                        // so the exact variant `respond` is about to
-                        // discard doesn't matter.
-                        Some(StopReason::Cancelled | StopReason::CallerGone) => {
-                            Err(EngineError::Cancelled)
-                        }
-                        None => Err(EngineError::Model(model_err)),
-                    },
-                };
-                respond(reply, outcome);
-            }
-            Err(panic_payload) => {
-                let msg = panic_message(&panic_payload);
-                tracing::error!(
-                    engine = engine_name.get().map_or("unknown", String::as_str),
-                    error = %msg,
-                    "ene-infer: run() panicked, rebuilding model"
-                );
-                model = None;
-                respond(
-                    reply,
-                    Err(EngineError::EngineDown {
-                        reason: format!("run() panicked: {msg}"),
-                    }),
-                );
             }
         }
     }

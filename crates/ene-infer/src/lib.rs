@@ -66,6 +66,7 @@ mod context;
 mod error;
 mod handle;
 mod model;
+mod stream;
 
 #[cfg(feature = "test-util")]
 /// A generic conformance battery for [`LocalModel`] implementations,
@@ -81,4 +82,5 @@ pub use config::EngineConfig;
 pub use context::{JobContext, StopReason};
 pub use error::EngineError;
 pub use handle::EngineHandle;
-pub use model::LocalModel;
+pub use model::{LocalModel, StreamingLocalModel};
+pub use stream::{ChunkReceiver, ChunkSink};
