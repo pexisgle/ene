@@ -13,21 +13,21 @@ use crate::context::{JobContext, StopReason};
 use crate::error::EngineError;
 use crate::model::LocalModel;
 
-/// The reply channel for one job, wrapped in `Arc` so [`JobContext`] can
-/// hold a clone to poll [`oneshot::Sender::is_closed`] (the caller-gone
-/// check) while the worker retains its own clone to eventually reclaim
-/// ownership via [`Arc::try_unwrap`] and actually send the result.
-/// `JobContext` has no lifetime parameter, so it cannot merely borrow this
-/// sender.
-type Reply<M> = Arc<
-    oneshot::Sender<Result<<M as LocalModel>::Response, EngineError<<M as LocalModel>::Error>>>,
->;
+/// The reply channel for one job. The worker owns this outright — no
+/// sharing, no `Arc`, no reclaiming ownership back from a clone — so there
+/// is no ordering dependency between anything else in the worker loop and
+/// actually sending the reply.
+type Reply<M> =
+    oneshot::Sender<Result<<M as LocalModel>::Response, EngineError<<M as LocalModel>::Error>>>;
 
 /// One unit of work travelling from [`EngineHandle::submit`] to the worker
 /// thread.
 struct Job<M: LocalModel> {
     request: M::Request,
     cancel: CancellationToken,
+    /// Cancelled by a `DropGuard` living in [`EngineHandle::submit`]'s own
+    /// stack frame — see [`JobContext`]'s field of the same name.
+    caller_gone: CancellationToken,
     reply: Reply<M>,
 }
 
@@ -78,6 +78,7 @@ impl<M: LocalModel> EngineHandle<M> {
                 epoch,
                 stall_timeout,
                 Arc::clone(&engine_name),
+                Arc::clone(&down_reason),
             );
         }
 
@@ -123,6 +124,13 @@ impl<M: LocalModel> EngineHandle<M> {
     /// [`EngineConfig::job_timeout`] is enforced only inside the worker,
     /// starting when the job begins executing.
     ///
+    /// If [`EngineConfig::stall_timeout`] previously caught a wedged
+    /// worker, this returns [`EngineError::EngineDown`] immediately rather
+    /// than [`EngineError::Busy`] — a permanently stuck worker fills the
+    /// queue forever, and a caller needs to be able to tell "briefly
+    /// saturated, retry shortly" apart from "this handle will never make
+    /// progress again".
+    ///
     /// # Errors
     ///
     /// See [`EngineError`].
@@ -131,11 +139,28 @@ impl<M: LocalModel> EngineHandle<M> {
         req: M::Request,
         cancel: CancellationToken,
     ) -> Result<M::Response, EngineError<M::Error>> {
+        if let Some(reason) = self.down_reason.get() {
+            return Err(EngineError::EngineDown {
+                reason: reason.clone(),
+            });
+        }
+
+        // Cancelled by `_drop_guard`'s `Drop` impl the moment this future
+        // (or its caller's future, transitively) is dropped — including a
+        // dropped `tokio::time::timeout`/`select!` race — which is exactly
+        // the "caller went away" condition `StopReason::CallerGone` exists
+        // to detect. `caller_gone` and `_drop_guard` share the same
+        // underlying cancellation flag (one is a clone of the other), so
+        // cancelling one is observed by the other.
+        let caller_gone = CancellationToken::new();
+        let _drop_guard = caller_gone.clone().drop_guard();
+
         let (reply_tx, reply_rx) = oneshot::channel();
         let job = Job {
             request: req,
             cancel,
-            reply: Arc::new(reply_tx),
+            caller_gone,
+            reply: reply_tx,
         };
 
         match self.tx.try_send(job) {
@@ -171,25 +196,21 @@ impl<M: LocalModel> EngineHandle<M> {
 /// Sends `value` back to the caller, tolerating the caller having already
 /// gone away (the receiver was dropped — nothing is listening, `send`
 /// returning `Err` is expected and not an error worth logging).
-fn respond<T: Send>(reply: Arc<oneshot::Sender<T>>, value: T) {
-    match Arc::try_unwrap(reply) {
-        Ok(sender) => {
-            // An `Err` here just means the caller already dropped the
-            // receiver (gone away); nothing to do about it.
-            drop(sender.send(value));
-        }
-        Err(_still_shared) => {
-            // Should not happen: the `JobContext` holding the other clone is
-            // dropped before this is called. Fail safe rather than leak.
-            tracing::error!(
-                "ene-infer: reply sender still shared after job completion, dropping result"
-            );
-        }
-    }
+fn respond<T: Send>(reply: oneshot::Sender<T>, value: T) {
+    drop(reply.send(value));
 }
 
 /// Extracts a human-readable message from a `catch_unwind` payload.
-fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+///
+/// Takes `&Box<dyn Any + Send>` rather than the seemingly-equivalent
+/// `&(dyn Any + Send)`: the latter's default object-lifetime elision binds
+/// the trait object to the *reference's* lifetime rather than `'static`,
+/// which silently breaks `downcast_ref` (it always returns `None`, since
+/// the payload really is `Any + 'static` and the two no longer type-match
+/// the way they appear to). Confirmed with a standalone repro before fixing
+/// this — see the regression test in `src/tests.rs` that pins the actual
+/// message surviving into `EngineError::EngineDown`.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -261,13 +282,11 @@ fn worker_loop<M: LocalModel>(
         let Job {
             request,
             cancel,
+            caller_gone,
             reply,
         } = job;
         job_active.store(true, Ordering::Relaxed);
 
-        let reply_for_ctx = Arc::clone(&reply);
-        let caller_gone: Box<dyn Fn() -> bool + Send + Sync> =
-            Box::new(move || reply_for_ctx.is_closed());
         let ctx = JobContext::new(job_timeout, cancel, caller_gone, heartbeat.cloned(), epoch);
 
         let run_result = panic::catch_unwind(AssertUnwindSafe(|| model_mut.run(request, &ctx)));
@@ -290,15 +309,28 @@ fn worker_loop<M: LocalModel>(
                     model = None;
                 }
 
-                let outcome = match stop {
-                    Some(StopReason::Deadline) => Err(EngineError::Timeout { after: elapsed }),
-                    // `CallerGone` is folded into `Cancelled` here: nobody is
-                    // listening for the result in that case, so the exact
-                    // variant `respond` is about to discard doesn't matter.
-                    Some(StopReason::Cancelled | StopReason::CallerGone) => {
-                        Err(EngineError::Cancelled)
-                    }
-                    None => model_result.map_err(EngineError::Model),
+                // A genuine `Ok` from `run` always wins, even if a stop
+                // condition also fired: a job that legitimately finished a
+                // moment before its deadline (or around the same time as a
+                // cancellation) should not have a good result thrown away
+                // in favor of `Timeout`/`Cancelled`. The stop reason only
+                // matters to explain an `Err` — a model that noticed
+                // `should_stop()` and gave up returns *some* `Err`, and we
+                // report the framework's precise reason for it rather than
+                // the model's own (likely generic) "interrupted" error.
+                let outcome = match model_result {
+                    Ok(response) => Ok(response),
+                    Err(model_err) => match stop {
+                        Some(StopReason::Deadline) => Err(EngineError::Timeout { after: elapsed }),
+                        // `CallerGone` is folded into `Cancelled` here:
+                        // nobody is listening for the result in that case,
+                        // so the exact variant `respond` is about to
+                        // discard doesn't matter.
+                        Some(StopReason::Cancelled | StopReason::CallerGone) => {
+                            Err(EngineError::Cancelled)
+                        }
+                        None => Err(EngineError::Model(model_err)),
+                    },
                 };
                 respond(reply, outcome);
             }
@@ -329,14 +361,24 @@ fn worker_loop<M: LocalModel>(
 }
 
 /// A long-lived thread (one per [`EngineHandle`], not one per job) that
-/// watches for stalled jobs and logs a warning. Never affects what
-/// [`EngineHandle::submit`] returns — see [`EngineConfig::stall_timeout`].
+/// watches for stalled jobs.
+///
+/// A genuine stall means the worker thread is stuck inside a synchronous
+/// `run` call that is never going to check `should_stop`/call `tick` again
+/// — there is no way to preempt that safely, so this does not try. Instead,
+/// once a stall is confirmed it records the reason in `down_reason` (the
+/// same cell [`EngineHandle::submit`] already consults) and stops watching:
+/// from that point on `submit` reports [`EngineError::EngineDown`] instead
+/// of letting the bounded queue fill up and return [`EngineError::Busy`]
+/// forever, which would leave callers unable to tell "briefly saturated"
+/// apart from "this handle will never make progress again".
 fn spawn_stall_watchdog(
     job_active: Arc<AtomicBool>,
     heartbeat: Arc<AtomicU64>,
     epoch: Instant,
     stall_timeout: Duration,
     engine_name: Arc<OnceLock<String>>,
+    down_reason: Arc<OnceLock<String>>,
 ) {
     let poll_interval = stall_timeout
         .checked_div(4)
@@ -345,7 +387,6 @@ fn spawn_stall_watchdog(
     let build = std::thread::Builder::new()
         .name("ene-infer-stall-watch".to_string())
         .spawn(move || {
-            let mut already_warned = false;
             loop {
                 std::thread::sleep(poll_interval);
                 if Arc::strong_count(&job_active) == 1 {
@@ -354,7 +395,6 @@ fn spawn_stall_watchdog(
                     return;
                 }
                 if !job_active.load(Ordering::Relaxed) {
-                    already_warned = false;
                     continue;
                 }
                 let now_nanos = epoch.elapsed().as_nanos();
@@ -365,13 +405,20 @@ fn spawn_stall_watchdog(
                 let now_nanos_u64 = now_nanos as u64;
                 let last_tick = heartbeat.load(Ordering::Relaxed);
                 let stalled_for = Duration::from_nanos(now_nanos_u64.saturating_sub(last_tick));
-                if stalled_for >= stall_timeout && !already_warned {
+                if stalled_for >= stall_timeout {
                     tracing::warn!(
                         engine = engine_name.get().map_or("unknown", String::as_str),
                         stalled_for = ?stalled_for,
-                        "ene-infer: job appears stalled (no JobContext::tick progress)"
+                        "ene-infer: job appears stalled; marking engine down (a stuck worker \
+                         thread cannot be preempted, so this handle will refuse further jobs \
+                         from now on)"
                     );
-                    already_warned = true;
+                    drop(down_reason.set(format!(
+                        "engine job stalled for at least {stalled_for:?} without JobContext::tick \
+                         progress (stall_timeout={stall_timeout:?}); the worker thread is presumed \
+                         permanently stuck"
+                    )));
+                    return;
                 }
             }
         });

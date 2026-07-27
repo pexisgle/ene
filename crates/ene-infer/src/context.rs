@@ -31,13 +31,19 @@ pub enum StopReason {
 /// lifetime parameter) so the trait signature can take it as a plain
 /// `&JobContext`. Anything it needs from the async side (whether the caller
 /// is still waiting, a shared heartbeat clock for stall detection) is
-/// captured by value — an `Arc` clone or a boxed closure over an `Arc` —
-/// rather than borrowed.
+/// captured by value — a `CancellationToken` or an `Arc` clone — rather
+/// than borrowed.
 pub struct JobContext {
     started_at: Instant,
     job_timeout: Duration,
     cancel: CancellationToken,
-    caller_gone: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Cancelled by a [`tokio_util::sync::DropGuard`] living in
+    /// [`crate::EngineHandle::submit`]'s own stack frame: when that future
+    /// is dropped (the caller went away), the guard cancels this token.
+    /// Deliberately a second, independent token from `cancel` — the caller
+    /// can cancel a job it's still waiting on without that meaning
+    /// "gone", and going away is not the same as an explicit cancel.
+    caller_gone: CancellationToken,
     /// Shared with the engine's stall watchdog thread (if
     /// [`crate::EngineConfig::stall_timeout`] is configured): nanoseconds
     /// since `epoch` as of the last [`Self::tick`] call.
@@ -50,7 +56,7 @@ impl JobContext {
     pub(crate) fn new(
         job_timeout: Duration,
         cancel: CancellationToken,
-        caller_gone: Box<dyn Fn() -> bool + Send + Sync>,
+        caller_gone: CancellationToken,
         heartbeat: Option<Arc<AtomicU64>>,
         epoch: Instant,
     ) -> Self {
@@ -80,7 +86,7 @@ impl JobContext {
         if self.started_at.elapsed() >= self.job_timeout {
             return Some(StopReason::Deadline);
         }
-        if (self.caller_gone)() {
+        if self.caller_gone.is_cancelled() {
             return Some(StopReason::CallerGone);
         }
         None
@@ -102,11 +108,15 @@ impl JobContext {
     /// Records a progress heartbeat, used for best-effort stall detection
     /// (see [`crate::EngineConfig::stall_timeout`]).
     ///
-    /// Stall detection is purely observational: it never affects the result
-    /// returned to the caller (there is no `StopReason` for it), it only
-    /// emits a `tracing::warn!` so a hung engine shows up in logs. Call this
-    /// at the same interruption points where [`Self::should_stop`] is
-    /// checked.
+    /// There is no `StopReason` for a stall, and it never changes what
+    /// *this* job returns — a stall cannot be preempted, only observed from
+    /// the outside once it's already too late for this job. What it does
+    /// affect is every *later* call to [`crate::EngineHandle::submit`] on
+    /// the same handle: once the watchdog confirms a stall it marks the
+    /// whole engine down (see [`crate::EngineError::EngineDown`]) rather
+    /// than letting the queue fill up and report
+    /// [`crate::EngineError::Busy`] forever. Call `tick` at the same
+    /// interruption points where [`Self::should_stop`] is checked.
     pub fn tick(&self) {
         let Some(heartbeat) = &self.heartbeat else {
             return;

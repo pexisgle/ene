@@ -366,6 +366,25 @@ where
 pub(crate) struct MockRequest {
     run_for: Duration,
     then_panic: bool,
+    /// If set, `run` never calls [`crate::JobContext::tick`] — a stand-in
+    /// for a model that stops honoring the `LocalModel` contract, used to
+    /// exercise stall detection. Not part of [`ConformanceRequest`]: real
+    /// engines are expected to always tick, so this is a `src/tests.rs`-only
+    /// escape hatch, not something the generic battery scripts.
+    no_tick: bool,
+}
+
+#[cfg(test)]
+impl MockRequest {
+    /// Builds a request that runs for `run_for` without ever calling
+    /// [`crate::JobContext::tick`], simulating a stalled model.
+    pub(crate) fn stalled(run_for: Duration) -> Self {
+        Self {
+            run_for,
+            then_panic: false,
+            no_tick: true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -374,6 +393,7 @@ impl ConformanceRequest for MockRequest {
         Self {
             run_for,
             then_panic,
+            no_tick: false,
         }
     }
 }
@@ -439,7 +459,9 @@ impl LocalModel for MockModel {
             if ctx.should_stop().is_some() {
                 return Err(MockError);
             }
-            ctx.tick();
+            if !req.no_tick {
+                ctx.tick();
+            }
             if start.elapsed() >= req.run_for {
                 break;
             }

@@ -56,7 +56,8 @@
     all(test, feature = "test-util"),
     expect(
         clippy::expect_used,
-        reason = "unit tests (gated on test-util, see src/tests.rs) use expect() for concise assertions"
+        clippy::panic,
+        reason = "unit tests (gated on test-util, see src/tests.rs) use expect()/panic! for concise assertions"
     )
 )]
 

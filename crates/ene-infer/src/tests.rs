@@ -195,6 +195,71 @@ async fn panic_in_run_yields_engine_down_and_engine_recovers() {
     );
 }
 
+/// Regression test: earlier, `respond` reclaimed the reply sender via
+/// `Arc::try_unwrap`, which only succeeded if `JobContext` (holding a second
+/// `Arc` clone) had already been dropped. The panic arm of `worker_loop`
+/// didn't drop it first, so `try_unwrap` failed, the real panic message was
+/// silently discarded, and callers saw the generic
+/// "worker thread is not running" fallback instead. The reply channel is no
+/// longer shared (see `Reply<M>`/`respond` in `handle.rs`), which makes this
+/// unrepresentable — this test pins the panic message actually surviving
+/// into `EngineDown`.
+#[tokio::test]
+async fn panic_reason_survives_into_engine_down() {
+    let engine = spawn_mock(EngineConfig::new(4, Duration::from_secs(5)));
+    let panicked = engine
+        .submit(
+            MockRequest::scripted(Duration::ZERO, true),
+            CancellationToken::new(),
+        )
+        .await;
+    let Err(EngineError::EngineDown { reason }) = panicked else {
+        panic!("expected EngineDown, got {panicked:?}");
+    };
+    assert!(
+        reason.contains("scripted mock panic for conformance testing"),
+        "expected the actual panic message to survive into EngineDown's reason, got: {reason}"
+    );
+    assert!(
+        !reason.contains("not running"),
+        "expected the real panic reason, not the generic worker-down fallback, got: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn stalled_worker_reports_engine_down_not_busy_forever() {
+    let cfg =
+        EngineConfig::new(4, Duration::from_secs(5)).with_stall_timeout(Duration::from_millis(30));
+    let engine = spawn_mock(cfg);
+
+    // This job never calls `tick()`, so the watchdog should notice the
+    // stall and mark the engine down while the job is still running (it
+    // takes 300ms; the watchdog polls roughly every 7.5ms).
+    engine
+        .submit(
+            MockRequest::stalled(Duration::from_millis(300)),
+            CancellationToken::new(),
+        )
+        .await
+        .ok();
+
+    // Give the watchdog a little extra margin past its poll interval.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let after = engine
+        .submit(
+            MockRequest::scripted(Duration::ZERO, false),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(after, Err(EngineError::EngineDown { .. })),
+        "expected EngineDown once a stall was detected, got {after:?} (Busy would mean a wedged \
+         worker fills the queue forever with no way for callers to tell it apart from transient \
+         saturation)"
+    );
+}
+
 #[tokio::test]
 async fn reset_runs_between_jobs() {
     let engine = spawn_mock(EngineConfig::new(4, Duration::from_secs(5)));

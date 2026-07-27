@@ -24,10 +24,15 @@ pub struct EngineConfig {
 
     /// If set, the engine logs a `tracing::warn!` when
     /// [`crate::JobContext::tick`] has not been called for this long while a
-    /// job is running. Purely diagnostic: it never changes what
-    /// [`crate::EngineHandle::submit`] returns, it only surfaces a hung
-    /// worker in logs (the framework has no way to preempt a synchronous
-    /// `run` call that never checks back in).
+    /// job is running, and marks the whole engine down: the framework has no
+    /// way to preempt a synchronous `run` call that never checks back in, so
+    /// the currently-running job's own result is unaffected, but every
+    /// *later* [`crate::EngineHandle::submit`] call on this handle
+    /// immediately returns [`crate::EngineError::EngineDown`] instead of
+    /// [`crate::EngineError::Busy`] — a permanently wedged worker would
+    /// otherwise fill the bounded queue and report `Busy` forever, leaving
+    /// callers unable to tell "briefly saturated" apart from "this handle
+    /// will never make progress again".
     pub stall_timeout: Option<Duration>,
 }
 
