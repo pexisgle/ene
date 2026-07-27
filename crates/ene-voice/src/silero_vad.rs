@@ -4,6 +4,42 @@
 //! When the feature is disabled, [`SileroVadFactory`] still registers but fails
 //! fast with [`AudioProviderError::Init`] so the crate (and the workspace)
 //! keeps compiling without the ONNX Runtime toolchain.
+//!
+//! # Deliberately *not* migrated to `ene_infer::LocalModel`
+//!
+//! Stage 4 migrated `local_stt.rs` (whisper.cpp) and `local_tts.rs` (Kokoro
+//! ONNX) onto [`ene_infer::LocalModel`] because both used to smuggle a
+//! `spawn_blocking`/`block_in_place` call or a mutex take/put-back pattern
+//! past `async fn` — the exact class of bug [`ene_infer`] exists to remove.
+//! [`SileroVadEngine`] was assessed for the same treatment and left alone,
+//! on purpose:
+//!
+//! - [`VadEngine::process_chunk`] is already a plain, synchronous `&mut self`
+//!   method (see `ene-ai`'s `traits.rs`) — there is no `async fn` here to
+//!   have gotten concurrency wrong in the first place, and no
+//!   `spawn_blocking`/`block_in_place`/mutex-take pattern to remove.
+//! - Callers already own a `Box<dyn VadEngine>` exclusively and call
+//!   `process_chunk` synchronously, once per fixed-size 512-sample frame, in
+//!   the same thread that owns it. That is already exactly the invariant
+//!   [`ene_infer::LocalModel`] exists to provide (a model owned by exactly
+//!   one caller, never invoked concurrently with itself) — nothing here
+//!   would change by adding a worker thread and a queue in front of it.
+//! - Wrapping it would add a queue, a channel round-trip, and an async
+//!   `submit` call *per 32ms audio frame* in what is currently a direct,
+//!   zero-allocation-on-the-hot-path function call. For a VAD loop meant to
+//!   keep up with a live microphone stream, that is pure overhead with no
+//!   correctness upside — [`ene_infer::EngineConfig::job_timeout`] and
+//!   cooperative cancellation solve problems (a wedged multi-second
+//!   inference call, an unbounded queue) that a 512-sample Silero step
+//!   simply does not have.
+//!
+//! In short: this file is the one of the four local providers that never had
+//! the bug class this stage exists to fix, and that is not a coincidence —
+//! its author already gave the model plain synchronous, exclusive ownership
+//! instead of reaching for `Arc<Mutex<_>>` around blocking work. Nothing
+//! here needed migrating; if a future change makes `process_chunk` slow
+//! enough to need a dedicated worker thread and cooperative timeouts, this
+//! doc comment is the note that it stopped being the exception.
 #![allow(
     clippy::arithmetic_side_effects,
     reason = "VAD chunk and failure-counter arithmetic uses bounded counters"
