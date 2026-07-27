@@ -13,17 +13,22 @@ use crate::context::{JobContext, StopReason};
 use crate::error::EngineError;
 use crate::model::LocalModel;
 
+/// The reply channel for one job, wrapped in `Arc` so [`JobContext`] can
+/// hold a clone to poll [`oneshot::Sender::is_closed`] (the caller-gone
+/// check) while the worker retains its own clone to eventually reclaim
+/// ownership via [`Arc::try_unwrap`] and actually send the result.
+/// `JobContext` has no lifetime parameter, so it cannot merely borrow this
+/// sender.
+type Reply<M> = Arc<
+    oneshot::Sender<Result<<M as LocalModel>::Response, EngineError<<M as LocalModel>::Error>>>,
+>;
+
 /// One unit of work travelling from [`EngineHandle::submit`] to the worker
 /// thread.
 struct Job<M: LocalModel> {
     request: M::Request,
     cancel: CancellationToken,
-    /// Wrapped in `Arc` so [`JobContext`] can hold a clone to poll
-    /// [`oneshot::Sender::is_closed`] (the caller-gone check) while the
-    /// worker retains its own clone to eventually reclaim ownership via
-    /// [`Arc::try_unwrap`] and actually send the result. `JobContext` has no
-    /// lifetime parameter, so it cannot merely borrow this sender.
-    reply: Arc<oneshot::Sender<Result<M::Response, EngineError<M::Error>>>>,
+    reply: Reply<M>,
 }
 
 /// A handle to one model running on its own dedicated OS thread.
@@ -86,7 +91,7 @@ impl<M: LocalModel> EngineHandle<M> {
                     &factory,
                     rx,
                     job_timeout,
-                    heartbeat,
+                    heartbeat.as_ref(),
                     &worker_job_active,
                     epoch,
                     &worker_engine_name,
@@ -98,7 +103,10 @@ impl<M: LocalModel> EngineHandle<M> {
             // `rx` was dropped along with the closure that failed to become
             // a thread, so the channel is already closed; every `submit`
             // will observe `TrySendError::Closed` and consult `down_reason`.
-            let _ = down_reason.set(format!("failed to spawn worker thread: {err}"));
+            // `set` can only fail if it raced another writer, which cannot
+            // happen here (this runs at most once); either way there is
+            // nothing more useful to do than drop the `Result`.
+            drop(down_reason.set(format!("failed to spawn worker thread: {err}")));
         }
 
         Self {
@@ -166,7 +174,9 @@ impl<M: LocalModel> EngineHandle<M> {
 fn respond<T: Send>(reply: Arc<oneshot::Sender<T>>, value: T) {
     match Arc::try_unwrap(reply) {
         Ok(sender) => {
-            let _ = sender.send(value);
+            // An `Err` here just means the caller already dropped the
+            // receiver (gone away); nothing to do about it.
+            drop(sender.send(value));
         }
         Err(_still_shared) => {
             // Should not happen: the `JobContext` holding the other clone is
@@ -199,7 +209,7 @@ fn build_model<M: LocalModel>(
         Ok(Ok(model)) => {
             // Only ever set once in practice (the name is stable for a
             // given `M`), but tolerate a later call losing the race.
-            let _ = engine_name.set(model.engine_name().to_string());
+            drop(engine_name.set(model.engine_name().to_string()));
             Ok(model)
         }
         Ok(Err(err)) => Err(format!("model factory returned an error: {err}")),
@@ -217,7 +227,7 @@ fn worker_loop<M: LocalModel>(
     factory: &(impl Fn() -> Result<M, M::Error> + Send + 'static),
     mut rx: mpsc::Receiver<Job<M>>,
     job_timeout: Duration,
-    heartbeat: Option<Arc<AtomicU64>>,
+    heartbeat: Option<&Arc<AtomicU64>>,
     job_active: &AtomicBool,
     epoch: Instant,
     engine_name: &OnceLock<String>,
@@ -258,7 +268,7 @@ fn worker_loop<M: LocalModel>(
         let reply_for_ctx = Arc::clone(&reply);
         let caller_gone: Box<dyn Fn() -> bool + Send + Sync> =
             Box::new(move || reply_for_ctx.is_closed());
-        let ctx = JobContext::new(job_timeout, cancel, caller_gone, heartbeat.clone(), epoch);
+        let ctx = JobContext::new(job_timeout, cancel, caller_gone, heartbeat.cloned(), epoch);
 
         let run_result = panic::catch_unwind(AssertUnwindSafe(|| model_mut.run(request, &ctx)));
 
@@ -281,11 +291,13 @@ fn worker_loop<M: LocalModel>(
                 }
 
                 let outcome = match stop {
-                    Some(StopReason::Cancelled) => Err(EngineError::Cancelled),
                     Some(StopReason::Deadline) => Err(EngineError::Timeout { after: elapsed }),
-                    // Nobody is listening; the value is discarded by
-                    // `respond` regardless of what we put here.
-                    Some(StopReason::CallerGone) => Err(EngineError::Cancelled),
+                    // `CallerGone` is folded into `Cancelled` here: nobody is
+                    // listening for the result in that case, so the exact
+                    // variant `respond` is about to discard doesn't matter.
+                    Some(StopReason::Cancelled | StopReason::CallerGone) => {
+                        Err(EngineError::Cancelled)
+                    }
                     None => model_result.map_err(EngineError::Model),
                 };
                 respond(reply, outcome);
@@ -309,10 +321,10 @@ fn worker_loop<M: LocalModel>(
     }
 
     job_active.store(false, Ordering::Relaxed);
-    if let Some(mut model) = model {
-        if panic::catch_unwind(AssertUnwindSafe(|| model.shutdown())).is_err() {
-            tracing::error!("ene-infer: shutdown() panicked while stopping worker thread");
-        }
+    if let Some(mut model) = model
+        && panic::catch_unwind(AssertUnwindSafe(|| model.shutdown())).is_err()
+    {
+        tracing::error!("ene-infer: shutdown() panicked while stopping worker thread");
     }
 }
 

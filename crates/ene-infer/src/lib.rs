@@ -53,12 +53,10 @@
 //! existed.
 #![warn(missing_docs)]
 #![cfg_attr(
-    test,
+    all(test, feature = "test-util"),
     expect(
-        clippy::unwrap_used,
         clippy::expect_used,
-        clippy::panic,
-        reason = "unit tests use unwrap/expect/panic for concise assertions"
+        reason = "unit tests (gated on test-util, see src/tests.rs) use expect() for concise assertions"
     )
 )]
 

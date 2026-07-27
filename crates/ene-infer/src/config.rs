@@ -9,7 +9,7 @@ use std::time::Duration;
 /// executing. There is deliberately no separate outer timeout wrapping
 /// [`crate::EngineHandle::submit`] — see the crate-level docs for why an
 /// outer/inner double timeout is the bug this crate exists to remove.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct EngineConfig {
     /// Maximum number of jobs allowed to wait in the queue at once. A full
     /// queue makes [`crate::EngineHandle::submit`] return

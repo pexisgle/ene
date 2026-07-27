@@ -15,10 +15,8 @@
 //! for testing your [`crate::LocalModel`], not on your production request
 //! type.
 #![expect(
-    clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
-    reason = "conformance is a test-only battery (feature = \"test-util\"); it reports failures via assertions/panics by design, and its bundled mock model panics on cue to exercise the panic-recovery case"
+    reason = "conformance is a test-only battery (feature = \"test-util\"); it reports failures via expect()/assert! by design"
 )]
 
 use std::sync::Arc;
@@ -27,6 +25,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::EngineConfig;
+#[cfg(test)]
 use crate::context::JobContext;
 use crate::error::EngineError;
 use crate::handle::EngineHandle;
@@ -44,7 +43,10 @@ pub trait ConformanceRequest: Default + Send + 'static {
 
 /// Lets the conformance battery read back observability signals generically
 /// from a [`crate::LocalModel::Response`].
-pub trait ConformanceResponse: Send + 'static {
+///
+/// Requires `Debug` so the battery can include the response in assertion
+/// failure messages.
+pub trait ConformanceResponse: std::fmt::Debug + Send + 'static {
     /// How many times [`crate::LocalModel::reset`] had run on this model
     /// instance before the job that produced this response started. Used to
     /// confirm `reset` actually ran after a cancelled/timed-out job, not
@@ -90,6 +92,7 @@ async fn concurrency_is_serialized_and_busy_past_capacity<M>(
 ) where
     M: LocalModel,
     M::Request: ConformanceRequest,
+    M::Response: ConformanceResponse,
 {
     let per_job = Duration::from_millis(150);
     // A single-slot queue makes "the queue is full" unambiguous: after the
@@ -169,6 +172,7 @@ async fn cancel_mid_job_returns_promptly_and_engine_stays_available<M>(
 ) where
     M: LocalModel,
     M::Request: ConformanceRequest,
+    M::Response: ConformanceResponse,
 {
     let engine = Arc::new(spawn_engine(
         factory,
@@ -228,6 +232,7 @@ async fn dropped_caller_does_not_wedge_the_engine<M>(factory: impl Fn() -> M + S
 where
     M: LocalModel,
     M::Request: ConformanceRequest,
+    M::Response: ConformanceResponse,
 {
     let engine = Arc::new(spawn_engine(
         factory,
@@ -241,8 +246,9 @@ where
             CancellationToken::new(),
         );
         // Losing the race drops `fut` — and with it the reply receiver —
-        // which is exactly the "caller gone" condition.
-        let _ = tokio::time::timeout(Duration::from_millis(30), fut).await;
+        // which is exactly the "caller gone" condition. Whichever way the
+        // race goes, we don't care about the outcome here.
+        drop(tokio::time::timeout(Duration::from_millis(30), fut).await);
     }
 
     let accept_started = Instant::now();
@@ -269,6 +275,7 @@ async fn panicking_run_yields_engine_down_then_recovers<M>(factory: impl Fn() ->
 where
     M: LocalModel,
     M::Request: ConformanceRequest,
+    M::Response: ConformanceResponse,
 {
     let engine = spawn_engine(factory, EngineConfig::new(4, Duration::from_secs(10)));
 
@@ -344,16 +351,20 @@ where
 
 // ---------------------------------------------------------------------
 // A trivial in-crate mock model, used both to self-test `run_all` above
-// and by this crate's own unit tests (see `src/tests.rs`).
+// and by this crate's own unit tests (see `src/tests.rs`). `#[cfg(test)]`
+// because nothing outside test builds ever constructs one — downstream
+// crates bring their own mock for their own migrated engine.
 // ---------------------------------------------------------------------
 
 /// A scripted request for [`MockModel`].
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MockRequest {
     run_for: Duration,
     then_panic: bool,
 }
 
+#[cfg(test)]
 impl ConformanceRequest for MockRequest {
     fn scripted(run_for: Duration, then_panic: bool) -> Self {
         Self {
@@ -364,11 +375,13 @@ impl ConformanceRequest for MockRequest {
 }
 
 /// [`MockModel`]'s response, reporting the model's own reset counter.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct MockResponse {
     pub(crate) resets_seen: usize,
 }
 
+#[cfg(test)]
 impl ConformanceResponse for MockResponse {
     fn resets_seen(&self) -> usize {
         self.resets_seen
@@ -376,6 +389,7 @@ impl ConformanceResponse for MockResponse {
 }
 
 /// [`MockModel`]'s error, returned when a job stops cooperatively.
+#[cfg(test)]
 #[derive(Debug, thiserror::Error)]
 #[error("mock model stopped cooperatively")]
 pub(crate) struct MockError;
@@ -384,30 +398,38 @@ pub(crate) struct MockError;
 /// for `run_for`, checking [`JobContext::should_stop`] and calling
 /// [`JobContext::tick`] every couple of milliseconds, optionally panicking
 /// instead, and counts how many times [`LocalModel::reset`] has run.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct MockModel {
     resets_seen: usize,
 }
 
+#[cfg(test)]
 impl MockModel {
     pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(test)]
 impl LocalModel for MockModel {
     type Request = MockRequest;
     type Response = MockResponse;
     type Error = MockError;
 
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "must match LocalModel::engine_name's trait signature, which ties the return type to &self's lifetime"
+    )]
     fn engine_name(&self) -> &str {
         "conformance-mock"
     }
 
     fn run(&mut self, req: Self::Request, ctx: &JobContext) -> Result<Self::Response, Self::Error> {
-        if req.then_panic {
-            panic!("scripted mock panic for conformance testing");
-        }
+        assert!(
+            !req.then_panic,
+            "scripted mock panic for conformance testing"
+        );
         let start = Instant::now();
         loop {
             if ctx.should_stop().is_some() {
