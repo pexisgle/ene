@@ -2,7 +2,8 @@
 //!
 //! Set `ENE_EMBEDDING_MODEL_URL` to an HTTPS `.gguf` URL, or pass one as the first CLI arg.
 //!
-//! Requires a multi-thread tokio runtime (`block_in_place`).
+//! Inference runs on a dedicated worker thread owned by an
+//! `ene_infer::EngineHandle`, so no particular tokio runtime flavor is required.
 
 #![expect(
     clippy::print_stdout,
