@@ -1,41 +1,33 @@
-# `ene-store` — API リファレンス
+# `ene-store`
 
 > **クレート**: `ene-store` | **役割**: データベース & ベクトル永続化層 (SQLite + SeaORM + sqlite-vec)
 
-`ene-store` は、データベース接続、SeaORM エンティティ、SQLite スキーママイグレーション、および `sqlite-vec` によるベクトル類似度検索の唯一の所有者です。
+`ene-store` はワークスペース全体における SQLite/SeaORM 接続、スキーママイグレーション、および `sqlite-vec` によるベクトル類似度検索の唯一の所有者です。加えて、ステートフルなツールプラグインがスキーマ宣言済みのスコープ付き CRUD を、独自のデータベース接続を開くことなく実行できるよう、ツールごとの DB IPC サーバー (`db_server`、Unix ソケット / named pipe) を提供します。
 
 ---
 
-## アーキテクチャ境界保証
-`ene-store` は `ene-ai` や `ene-mind` に**一切依存・インポートしません**。
+## アーキテクチャ境界
 
----
+- `ene-store` はワークスペース全体における SQLite / SeaORM 接続とスキーマの**唯一の所有者**です。他のどのクレート (`ene-mind`, `ene-runtime`, ツールバイナリ) も独自のデータベース接続を開いたり `memory.db` に対して生の SQL を発行したりせず、`MemoryStore` を呼び出します — ツールバイナリの場合は `ene-store` の `db_server` を裏側に持つ IPC ベースの `ene-plugin-db` クライアントを経由します。
+- `ene-store` は `ene-runtime`、`ene-ai`、`ene-mind`、`ene-plugin-proto` に**依存しません**。依存先は `ene-config` と `ene-core` のみで、依存グラフの下層に位置するため、これらのクレートのいずれからも循環を発生させずに安全に呼び出せます。
+- `ene-store` は LLM・埋め込みプロバイダ・プロンプト構築のいずれにも依存しません。呼び出し側がベクトルを供給し、要約とプロンプト整形は mind ランタイムが所有します。
+- ドメイン語彙 (`AffectState`、型付きメモリの種別/状態、コミットメント台帳の型) は `ene-core` で定義され、ここでは変更せずに re-export されるだけです。`ene-store` はこれらのドメイン型を DB 行との間で変換する SeaORM エンティティと SQL のみを所有し、`MemoryStore` に対して `ene_core::MemoryPort` を実装します — この trait こそが `ene-mind` の認知ロジックが具象型の代わりにプログラムする対象です。
 
-## 主要構造体と API
+## 設計思想
 
-### `MemoryStore`
-型付きメモリ、セッション対話履歴、およびコミットメントを管理する中心的な永続化インターフェース：
+- **なぜドメイン語彙が `ene-core` に移動したか**: この分離以前は、PAD 型の感情状態、型付きメモリの種別、コミットメント台帳の語彙が永続化クレートである `ene-store` の内部に定義されており、意図した依存方向が逆転していました — 「純粋な認知マインド」であるはずの `ene-mind` が、自身のドメイン概念を名指しするためだけに具象の永続化クレートに依存する必要がありました。`ene-core` は今や両者の下層に位置し、ワークスペース内部への依存を一切持ちません。
+- **なぜ共有ファイルアクセスではなくツールごとの DB IPC サーバーか**: 状態を保持するプロセス外ツールプラグイン (`ene-plugin-fs` の Undo 履歴、`ene-plugin-utility` の TODO ストア) は永続的な状態を必要としますが、それぞれが `memory.db` に対する2つ目の SQLite ライターになるべきではありません。`db_server` は代わりに、ツールごとのスキーマ宣言とプレフィックスベースのテーブル分離をワイヤー越しに強制します。
+- **なぜハイブリッド想起スコアリングが `ene-mind` ではなくここにあるか**: ベクトル・字句・新近性・顕著性のスコアリングはすべて `ene-store` だけが所有する基盤インデックス (`sqlite-vec`、FTS) への直接アクセスを必要とします。`ene-mind` は生の行に対するスコアリングを再実装するのではなく、`MemoryPort` を通じてランク付け済みの結果を消費します。
 
-```rust
-pub struct MemoryStore { /* ... */ }
+## API リファレンス
 
-impl MemoryStore {
-    /// 対象パスの SQLite メモリデータベースを開くか、新規作成します。
-    pub async fn open(db_path: impl AsRef<Path>) -> Result<Self, EneMemoryError>;
+構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:
 
-    /// 抽出された新しい型付きメモリファクトを保存します。
-    pub async fn save_memory(&self, memory: &NewMemory) -> Result<MemoryId, EneMemoryError>;
-
-    /// 多要因ハイブリッド想起検索 (ベクトル + 字句 + 新近性 + 顕著性) を実行します。
-    pub async fn hybrid_recall(&self, query: &MemoryQuery) -> Result<Vec<ScoredMemory>, EneMemoryError>;
-
-    /// アクティブなセッション履歴に対話ターンを追加します。
-    pub async fn append_session_turn(&self, session_id: SessionId, turn: &TurnRecord) -> Result<(), EneMemoryError>;
-
-    /// コミットメント台帳内のアクティブなコミットメント状態を更新します。
-    pub async fn update_commitment(&self, id: CommitmentId, status: CommitmentStatus) -> Result<(), EneMemoryError>;
-}
+```sh
+cargo doc -p ene-store --open
 ```
+
+`MemoryStore` (`store` モジュール) と、認知ロジックがプログラムする対象である `ene_core::MemoryPort` から始めてください。
 
 ---
 

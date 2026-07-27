@@ -1,36 +1,30 @@
-# `ene-vrm` — API Reference
+# `ene-vrm`
 
 > **Crate**: `ene-vrm` | **Role**: VRM 1.0 3D model loader & wgpu renderer for `ene-desktop`
 
-`ene-vrm` is a dedicated loader and renderer for VRM 1.0 files, powered by `gltf` and `wgpu`.
+`ene-vrm` is a dedicated loader and renderer for VRM 1.0 avatar files, built on `gltf` and `wgpu`. It is a pure graphics component: it accepts raw geometry, textures, bone transforms, and blendshape weights, and has no awareness of cognition, memory, or the runtime turn loop.
 
 ---
 
-## Architectural Guarantees
-- Zero dependencies on `ene-mind`, `ene-runtime`, or `ene-store`.
-- Pure graphics rendering engine taking raw geometry, textures, bone transforms, and blendshape weights.
+## Architectural boundaries
 
----
+- `ene-vrm` has zero dependencies on `ene-mind`, `ene-runtime`, or `ene-store`.
+- Mapping from a conversation turn's performance cues (expression/motion) to concrete blendshape weights and bone animations happens in `ene-desktop`, not in `ene-vrm` — this crate only renders whatever pose/weights it is given.
 
-## Core API
+## Design rationale
 
-```rust
-pub struct VrmModel { /* ... */ }
+- **Why rendering is decoupled from cognition/runtime**: it lets the avatar renderer be tested, profiled, and evolved (e.g. swapped for a different rendering backend) independently of the chat/turn pipeline, and keeps `wgpu`/graphics dependencies out of crates that don't need them.
 
-impl VrmModel {
-    /// Loads a VRM 1.0 model from a binary GLTF (.vrm) buffer.
-    pub fn load_from_bytes(bytes: &[u8]) -> Result<Self, VrmError>;
+## API reference
 
-    /// Updates skeletal bone transforms and blendshape expression weights.
-    pub fn update_pose(&mut self, pose: &VrmPose);
+Struct and method signatures are not duplicated here — they drift. Generate rustdoc for the authoritative, current API:
 
-    /// Renders the model using the provided wgpu RenderPass.
-    pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>);
-}
+```sh
+cargo doc -p ene-vrm --open
 ```
 
 ---
 
-## Related Links
+## Related
 - [Voice & Avatar Concepts](../concepts/voice-and-avatar.md)
 - [Desktop Application Guide](../apps/desktop.md)

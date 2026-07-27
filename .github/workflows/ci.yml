@@ -78,3 +78,34 @@ jobs:
       - name: Run tests
         run: nix develop --command cargo test --workspace
 
+  docs:
+    name: Doc build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: "nix develop --command {0}"
+          cache-directories: ~/.cache/sccache
+          cache-on-failure: true
+      # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
+      # pre-existing broken-intra-doc-link warnings unrelated to #273 (e.g.
+      # ene-ai, ene-voice, apps/ene-desktop). Turning warnings into hard
+      # errors here would fail CI on unrelated debt instead of catching new
+      # breakage. See the #273 PR description for the follow-up.
+      - name: Build docs
+        run: nix develop --command cargo doc --workspace --no-deps
+

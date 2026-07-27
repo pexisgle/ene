@@ -74,27 +74,41 @@ Tool and provider plugins ship as independent out-of-process binaries. Bumping `
 
 ## 5. Writing a Custom Tool Plugin
 
-Developers can quickly author new tool plugins using `ene-plugin` and `#[derive(ToolAction)]`:
+Developers can quickly author new tool plugins using `ene-tool-sdk`'s `#[derive(ToolAction)]` and `ene-plugin`'s server entry point. This sketch is illustrative — see an existing plugin under `plugins/tool/*` (e.g. `plugins/tool/app/src/main.rs`) for the current, compiling pattern, or `cargo doc -p ene-tool-macros --open` for the derive macro's exact requirements:
 
-```rust
-use ene_plugin::prelude::*;
+```rust,ignore
+use ene_tool_sdk::prelude::*;
 
-#[derive(Debug, Deserialize, ToolAction)]
-#[tool_action(name = "custom.greet", description = "Generates a personalized greeting.")]
+#[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(namespace = "custom", name = "greet",
+       summary = "Generates a personalized greeting.", category = "Custom",
+       keywords_primary = "greet, hello")]
 pub struct GreetAction {
     pub name: String,
 }
 
 impl GreetAction {
-    pub async fn run(&self) -> Result<String, ToolError> {
+    async fn run(&self) -> Result<String, ToolError> {
         Ok(format!("Hello, {}!", self.name))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let provider = ActionSetProvider::new().register::<GreetAction>();
-    run_plugin_server(Box::new(ToolPluginAdapter(provider))).await?;
-    Ok(())
+async fn main() {
+    use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};
+    use std::sync::Arc;
+
+    let provider = ActionSetProvider::new(vec![Box::new(GreetAction { name: String::new() })]);
+    let dispatch = PluginDispatch::new(
+        Some(Arc::new(ToolProviderPlugin::new(provider))),
+        None,
+        None,
+        None,
+        None,
+    );
+    if let Err(e) = run_plugin_server(dispatch).await {
+        tracing::error!("fatal error: {e}");
+        std::process::exit(1);
+    }
 }
 ```
