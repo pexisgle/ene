@@ -1274,6 +1274,32 @@ impl TurnActor {
                 let _ = reply.send(());
                 true
             }
+            #[cfg(test)]
+            EneCommand::TestInjectPanicAfterMutations {
+                request_id,
+                permission_tx,
+            } => {
+                self.pending_permissions
+                    .lock()
+                    .await
+                    .insert(request_id, permission_tx);
+                self.permission_scopes
+                    .lock()
+                    .await
+                    .push(crate::streaming::PermissionScope {
+                        id: 999_999,
+                        action: "test.action".to_string(),
+                        target_pattern: "test-pattern".to_string(),
+                        grant_type: crate::streaming::GrantType::Session,
+                        granted_at: chrono::Utc::now(),
+                    });
+                self.undo_stack.lock().await.record(
+                    "filesystem.write",
+                    "test-turn",
+                    vec!["/test/path".to_string()],
+                );
+                panic!("induced panic after mutating shared actor state (#268 regression test)");
+            }
         }
     }
 

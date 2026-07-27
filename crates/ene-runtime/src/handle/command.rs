@@ -201,6 +201,22 @@ pub enum EneCommand {
         /// Encoded frame, or `None` on encode failure.
         data_uri: Option<String>,
     },
+    /// Test-only (#268 regression coverage): mutates `pending_permissions`,
+    /// `permission_scopes`, and `undo_stack` — the three fields #268 called
+    /// out for post-panic consistency scrutiny — then panics, so the panic
+    /// hits mid-command with in-flight shared-state mutations already
+    /// applied. Exercises `run_command_isolated`'s `catch_unwind` under
+    /// realistic conditions rather than a synthetic bare future. Compiled
+    /// only under `cfg(test)`; not reachable from production code.
+    #[cfg(test)]
+    TestInjectPanicAfterMutations {
+        /// Request id inserted into `pending_permissions` before the panic.
+        request_id: RequestId,
+        /// Reply channel stashed in `pending_permissions` before the panic;
+        /// the test resolves it afterward via [`crate::EneHandle::decide_permission`]
+        /// to prove the map entry survived intact.
+        permission_tx: oneshot::Sender<PermissionDecision>,
+    },
 }
 
 /// Payload for [`EneCommand::UpdateFeatureSettings`].

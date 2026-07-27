@@ -13,6 +13,7 @@
 5. **永続化に依存しないドメイン語彙**: `ene-core` は認知層と永続化層の双方が共有するコアドメイン型 — `AffectState` (PAD 感情状態)、typed-memory の種別/ステータス/クエリ、コミットメント台帳の語彙、および `MemoryPort` トレイト自体 — を定義します。ワークスペース内部の他クレートに一切依存しないため、`ene-store` と `ene-mind` はどちらも、互いに依存することなくこのクレートに依存できます。
 6. **プロセス外プラグイン (Protocol v4)**: ツール、LLM プロバイダ、MCP サーバーは **Protocol v4** による長さプレフィックス付き JSON IPC を使用して子プロセスとして動作します。
 7. **疎結合な 3D レンダリング**: `ene-vrm` は認知・記憶・ランタイムの型を一切インポートすることなく、 `wgpu` を介して VRM 1.0 モデルを描画します。
+8. **耐障害アクター (#268)**: アクターのコマンドおよびバックグラウンドタスクは `catch_unwind` によってパニック隔離されており、1つのコマンドのパニックがアクターやプロセス全体をクラッシュさせることはありません。これは偶発的な性質ではなく設計上の不変条件です — 仕組みとビルド設定上の前提条件については [§4](#4-耐障害性とパニック隔離) を参照してください。
 
 ---
 
@@ -102,7 +103,19 @@ flowchart TD
 
 ---
 
-## 4. プラグインシステムと IPC Protocol v4
+## 4. 耐障害性とパニック隔離
+
+`ene-desktop` は GUI・アクター・LLM ストリーミング・音声を同一プロセスで同居させています。1つのコマンドハンドラやバックグラウンドタスクのパニックがプロセス全体を道連れにしてはならない — これは実装の細部ではなく設計上の不変条件です (#268)。
+
+**仕組み**: `TurnActor::run_command_isolated` (`crates/ene-runtime/src/handle/actor.rs`) は、ディスパッチされる全ての `EneCommand` を `isolate_panic()` 経由で実行します。この関数はコマンドの Future を `std::panic::AssertUnwindSafe(..).catch_unwind()` でラップし、パニックを捕捉してログに記録し、`DiagnosticEvent::ActorPanic { component, message }` として通知した上で、そのコマンドを非終端 (non-terminal) 扱いとします — アクターのメールボックスループは止まらず、次のコマンドを通常どおり処理し続けます。アクターのバックグラウンド `JoinSet` 群 (call-tool、classifier、memory-writer、search、deferred-tool の各タスク) も同様の方式で回収されます: `reap_join_set()` が `JoinError::is_panic()` を検出し、`.await` 経由でパニックが伝播するのを防いで同じ `ActorPanic` 診断を発行します。
+
+**ビルド設定上の前提条件**: この保証は **`panic = "unwind"`** (Rust のデフォルト) を前提とします — ワークスペースルートの `Cargo.toml` の `[profile.release]` は意図的に `panic = "abort"` を設定していません。`panic = "abort"` の下ではパニック発生時にプロセスが即座に abort し、スタックアンワインドが一切発生しないため、`catch_unwind` は呼ばれても何も捕捉しません。したがって `panic = "abort"` はこの耐障害モデルとは**両立しません** — release プロファイルに再度追加すると、出荷されるビルドでパニック隔離が無警告のまま無効化されます。`cargo test` はプロファイルに関わらず常にアンワインドするため、テストスイートを実行しても異常には気づけない点に注意してください。変更する前に、ルート `Cargo.toml` の `[profile.release]` に付けたコメントを確認してください。
+
+**コマンド途中のパニックに対する共有状態の安全性**: アクターの共有状態 (`pending_permissions`、`permission_scopes`、`undo_stack` など) は `tokio::sync::Mutex` / `parking_lot::Mutex` で保護されており、いずれも `std::sync::Mutex` と異なりパニックで**ポイズニングしません** — ガードを保持中にパニックしてもアンワインド時にガードが破棄されるだけで、ロックは直ちに再利用可能です。この状態への変更操作は (`UndoStack::record`、`Vec::push`、`HashMap::insert` などの) ロック保持中の単一の同期呼び出しであり、途中に `.await` を挟まないため、パニックはある変更操作の厳密に前か後にしか発生し得ず、変更操作の途中で中途半端な状態になることはありません。`crates/ene-runtime/src/handle/mod.rs` のテスト `actor_survives_command_panic_and_audited_state_stays_consistent` はこれを実際に稼働中のアクターメールボックスを通してエンドツーエンドで検証します: 上記3つのフィールドすべてを変更した後にコマンドをパニックさせ、アクターが生存していること、`DiagnosticEvent::ActorPanic` が発火したこと、3つの変更すべてが無傷で残っていることをアサートします。
+
+---
+
+## 5. プラグインシステムと IPC Protocol v4
 
 プロセス外プラグイン (ツール、カスタム LLM プロバイダ、MCP サーバー) は **IPC Protocol v4** を使用してホストと通信します：
 
@@ -114,7 +127,7 @@ flowchart TD
 
 ---
 
-## 5. 各クレートの役割一覧
+## 6. 各クレートの役割一覧
 
 | クレート | 主な責務 |
 |---|---|

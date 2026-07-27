@@ -275,6 +275,13 @@ debug = true
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# panic = "abort" intentionally omitted (defaults to "unwind"): ene-runtime's
+# actor relies on catch_unwind-based panic isolation (see
+# `isolate_panic()`/`run_command_isolated()` in
+# crates/ene-runtime/src/handle/actor.rs) to stop a panicking command or
+# background task from taking down the whole actor/process. `panic = "abort"`
+# would silently disable that guarantee in release builds. See
+# docs/architecture.md "Fault tolerance" section. Do not re-add this without
+# reading that section first.
 strip = true
 overflow-checks = true
