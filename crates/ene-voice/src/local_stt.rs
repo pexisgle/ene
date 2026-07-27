@@ -4,6 +4,24 @@
 //! When the feature is disabled, [`LocalSttProviderFactory`] still registers
 //! but fails fast with [`AudioProviderError::Init`] so the crate (and the
 //! workspace) keeps compiling without the whisper.cpp toolchain.
+//!
+//! # Migration to `ene_infer::LocalModel`
+//!
+//! This provider used to hold a `parking_lot::Mutex<Option<WhisperState>>`
+//! and `.lock().take()` the cached state out around a `tokio::task::spawn_blocking`
+//! call, putting it back afterward (M14). That pattern had three independent
+//! bugs: two concurrent `transcribe` calls could both observe `None` and each
+//! allocate a fresh multi-hundred-megabyte `WhisperState` (one silently
+//! clobbering the other on put-back), a cancelled or panicking task never
+//! reached the put-back line and lost the cached state permanently, and
+//! nothing actually serialized whisper inference — the mutex only protected
+//! the `Option`, not the inference call itself.
+//!
+//! [`WhisperModel`] deletes all of that: `state` is now a plain field owned
+//! exclusively by the single worker thread [`ene_infer::EngineHandle`] spawns
+//! for it. There is no `Arc`, no `Mutex`, and no take/put-back — a cancelled
+//! or panicking job simply leaves the field where it is (or the whole model
+//! is rebuilt from the factory on panic).
 #![allow(
     clippy::arithmetic_side_effects,
     reason = "FIR filter and resampler use bounded counter arithmetic over PCM buffers"
@@ -14,10 +32,15 @@
 )]
 
 #[cfg(feature = "local-stt")]
-use async_trait::async_trait;
+use std::sync::Arc;
 #[cfg(feature = "local-stt")]
-use ene_ai::SttResult;
+use std::time::Duration;
+
 use ene_ai::{AudioProviderError, AudioProviderRegistry, SttProvider, SttProviderFactory};
+#[cfg(feature = "local-stt")]
+use ene_ai::{Capability, CapabilitySet, EngineDescriptor, LocalSttEngine, ResourceClass};
+#[cfg(feature = "local-stt")]
+use ene_infer::{EngineConfig, EngineHandle, JobContext, LocalModel};
 
 /// Provider name used in `ai.stt.provider` configuration.
 pub const PROVIDER_NAME: &str = "whisper";
@@ -144,124 +167,210 @@ fn resample_to_whisper(pcm: &[f32], sample_rate: u32) -> Vec<f32> {
     out
 }
 
-/// Local whisper.cpp speech-to-text provider.
+/// Errors produced by [`WhisperModel`] itself, as distinct from the
+/// framework-level [`ene_infer::EngineError`] conditions (busy, timeout,
+/// cancelled, engine down) that [`ene_ai::LocalSttEngine`] maps to
+/// [`AudioProviderError`] independently of this type.
 #[cfg(feature = "local-stt")]
-pub struct LocalSttProvider {
-    ctx: std::sync::Arc<whisper_rs::WhisperContext>,
-    /// Cached inference state reused across `transcribe` calls (M14).
-    state: parking_lot::Mutex<Option<whisper_rs::WhisperState>>,
+#[derive(Debug, thiserror::Error)]
+pub enum WhisperError {
+    /// `whisper.cpp` failed to allocate a fresh inference state, either at
+    /// startup or when rebuilding the model after a panic.
+    #[error("whisper state init failed: {0}")]
+    StateInit(String),
+    /// The `state.full()` inference call itself failed.
+    #[error("whisper inference failed: {0}")]
+    Inference(String),
+    /// [`ene_infer::JobContext::should_stop`] had already fired before
+    /// inference started (the job was cancelled, or its deadline elapsed,
+    /// while queued behind another job).
+    #[error("job stopped before whisper inference started")]
+    StoppedEarly,
+}
+
+/// Number of whisper.cpp transcription jobs allowed to queue behind the one
+/// currently executing. One in flight plus one queued matches
+/// [`ene_ai::ConcurrencyHint::default`]'s conservative sizing for a
+/// single-worker local model; a third concurrent caller gets
+/// [`AudioProviderError::Busy`] immediately rather than piling up latency.
+#[cfg(feature = "local-stt")]
+const STT_QUEUE_DEPTH: usize = 2;
+
+/// Generous upper bound on a single whisper.cpp transcription call, comfortably
+/// longer than any realistic utterance on CPU with a base/small GGUF model.
+///
+/// This mostly matters for a job that is still *queued* when its deadline
+/// elapses (see [`WhisperModel::run`]'s upfront `should_stop` check) — once
+/// `state.full()` actually starts, whisper.cpp gives this crate no callback
+/// to interrupt it mid-call (see [`STT_STALL_TIMEOUT`] below), so this bound
+/// cannot preempt an in-progress inference. It is kept generous rather than
+/// tight for exactly that reason: a tight timeout here would not actually
+/// speed up cancellation, it would only make a legitimately slow-but-alive
+/// transcription more likely to be reported as [`AudioProviderError::Timeout`]
+/// after the fact.
+#[cfg(feature = "local-stt")]
+const STT_JOB_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Documents why this engine does not set
+/// [`ene_infer::EngineConfig::stall_timeout`] (kept at the crate default of
+/// `None`): `whisper_rs::WhisperState::full` is a single blocking FFI call
+/// with no natural interruption point this code hooks into, so
+/// [`ene_infer::JobContext::tick`] can only be called immediately before and
+/// after it, never *during* it. A `stall_timeout` measures the gap since the
+/// last `tick`, so any value shorter than the slowest realistic transcription
+/// would misidentify a merely slow (but healthy) job as a wedged worker and
+/// permanently disable the engine (see
+/// [`ene_infer::EngineConfig::stall_timeout`]'s docs). `whisper_rs` does
+/// expose `FullParams::set_abort_callback_safe`/`set_progress_callback_safe`,
+/// which could give real mid-call cancellation and a genuine tick source —
+/// left as a follow-up, not attempted here, since it requires either an
+/// `unsafe` pointer-lifetime workaround or a second polling thread per job to
+/// satisfy the callback's `'static` bound, which is more machinery than this
+/// migration's scope (replacing the take/put-back mutex pattern) calls for.
+#[cfg(feature = "local-stt")]
+const STT_STALL_TIMEOUT: Option<Duration> = None;
+
+/// The exclusively-owned whisper.cpp inference model.
+///
+/// Owned by exactly one [`ene_infer::EngineHandle`] worker thread for its
+/// entire lifetime — see this module's migration doc comment for what that
+/// replaces. `state` is reused across jobs purely to avoid reallocating it
+/// per request (each `full()` call reprocesses its input from scratch;
+/// whisper.cpp does not carry decode state between calls), so
+/// [`ene_infer::LocalModel::reset`] has nothing to do and is not overridden.
+#[cfg(feature = "local-stt")]
+pub struct WhisperModel {
+    state: whisper_rs::WhisperState,
     language: Option<String>,
 }
 
 #[cfg(feature = "local-stt")]
-impl LocalSttProvider {
-    /// Load the whisper GGUF model at `model_path`.
+impl WhisperModel {
+    /// Builds a fresh model from an already-loaded [`whisper_rs::WhisperContext`].
     ///
-    /// # Errors
-    ///
-    /// Returns [`AudioProviderError::Init`] when the model file is missing or
-    /// whisper.cpp fails to initialize a context.
-    pub fn open(
-        model_path: &std::path::Path,
+    /// Called once by [`open`] and again by [`ene_infer::EngineHandle`]
+    /// every time a panicked `run`/`reset` call forces a rebuild — `ctx` is
+    /// cheap to reuse (it wraps its own `Arc`-backed native handle) but a
+    /// fresh [`whisper_rs::WhisperState`] must be allocated each time.
+    fn new(
+        ctx: &whisper_rs::WhisperContext,
         language: Option<String>,
-    ) -> Result<Self, AudioProviderError> {
-        if !model_path.is_file() {
-            return Err(AudioProviderError::Init(format!(
-                "whisper GGUF model not found at {}",
-                model_path.display()
-            )));
-        }
-        let params = whisper_rs::WhisperContextParameters::default();
-        let ctx = whisper_rs::WhisperContext::new_with_params(model_path, params)
-            .map_err(|e| AudioProviderError::Init(format!("whisper context init failed: {e}")))?;
-        tracing::info!(
-            component = "LocalStt",
-            path = %model_path.display(),
-            "loaded whisper.cpp model"
-        );
-        Ok(Self {
-            ctx: std::sync::Arc::new(ctx),
-            state: parking_lot::Mutex::new(None),
-            language,
-        })
+    ) -> Result<Self, WhisperError> {
+        let state = ctx
+            .create_state()
+            .map_err(|e| WhisperError::StateInit(e.to_string()))?;
+        Ok(Self { state, language })
+    }
+}
+
+#[cfg(feature = "local-stt")]
+impl LocalModel for WhisperModel {
+    type Request = ene_ai::SttTranscribeRequest;
+    type Response = ene_ai::SttResult;
+    type Error = WhisperError;
+
+    #[expect(
+        clippy::unnecessary_literal_bound,
+        reason = "must match LocalModel::engine_name's trait signature, which ties the return type to &self's lifetime"
+    )]
+    fn engine_name(&self) -> &str {
+        "whisper"
     }
 
-    /// Run whisper inference on already-resampled 16 kHz PCM (blocking),
-    /// reusing the cached [`whisper_rs::WhisperState`].
-    fn run_inference(
-        state: &mut whisper_rs::WhisperState,
-        language: Option<&str>,
-        pcm: &[f32],
-    ) -> Result<SttResult, AudioProviderError> {
+    fn run(&mut self, req: Self::Request, ctx: &JobContext) -> Result<Self::Response, Self::Error> {
+        // The only natural interruption point available: once `full()` below
+        // starts, it runs to completion (see `STT_STALL_TIMEOUT`'s docs).
+        // This still lets a job that went stale while queued behind another
+        // one bail out instead of paying for a transcription nobody wants.
+        if ctx.should_stop().is_some() {
+            return Err(WhisperError::StoppedEarly);
+        }
+        ctx.tick();
+
+        let audio = resample_to_whisper(&req.pcm, req.sample_rate);
+        let language = self.language.clone();
+
         let mut params =
             whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
         params.set_print_special(false);
         params.set_print_progress(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
-        params.set_language(language);
+        params.set_language(language.as_deref());
 
-        state
-            .full(params, pcm)
-            .map_err(|e| AudioProviderError::Provider(format!("whisper inference failed: {e}")))?;
+        self.state
+            .full(params, &audio)
+            .map_err(|e| WhisperError::Inference(e.to_string()))?;
+        ctx.tick();
 
         let mut text = String::new();
-        for segment in state.as_iter() {
+        for segment in self.state.as_iter() {
             if let Ok(part) = segment.to_str_lossy() {
                 text.push_str(&part);
             }
         }
 
-        let duration_secs = (pcm.len() as f32) / (WHISPER_SAMPLE_RATE as f32);
-        Ok(SttResult {
+        let duration_secs = (audio.len() as f32) / (WHISPER_SAMPLE_RATE as f32);
+        Ok(ene_ai::SttResult {
             text: text.trim().to_string(),
-            language: language.map(str::to_string),
+            language,
             duration_secs,
         })
     }
 }
 
+/// Load the whisper GGUF model at `model_path` and spawn its dedicated
+/// [`ene_infer::EngineHandle`] worker thread.
+///
+/// # Errors
+///
+/// Returns [`AudioProviderError::Init`] when the model file is missing or
+/// whisper.cpp fails to initialize a context. Once the handle is returned,
+/// per-job failures surface through [`SttProvider::transcribe`] instead.
 #[cfg(feature = "local-stt")]
-#[async_trait]
-impl SttProvider for LocalSttProvider {
-    fn name(&self) -> &str {
-        PROVIDER_NAME
+fn open(
+    model_path: &std::path::Path,
+    language: Option<String>,
+) -> Result<LocalSttEngine<WhisperModel>, AudioProviderError> {
+    if !model_path.is_file() {
+        return Err(AudioProviderError::Init(format!(
+            "whisper GGUF model not found at {}",
+            model_path.display()
+        )));
     }
+    let params = whisper_rs::WhisperContextParameters::default();
+    let ctx = whisper_rs::WhisperContext::new_with_params(model_path, params)
+        .map_err(|e| AudioProviderError::Init(format!("whisper context init failed: {e}")))?;
+    let ctx = Arc::new(ctx);
+    tracing::info!(
+        component = "LocalStt",
+        path = %model_path.display(),
+        "loaded whisper.cpp model"
+    );
 
-    async fn transcribe(
-        &self,
-        pcm: &[f32],
-        sample_rate: u32,
-    ) -> Result<SttResult, AudioProviderError> {
-        let audio = resample_to_whisper(pcm, sample_rate);
-        let ctx = std::sync::Arc::clone(&self.ctx);
-        let language = self.language.clone();
-        // Take the cached state out so it can move into the blocking task; it
-        // is returned afterwards for reuse (M14).
-        let cached = self.state.lock().take();
-        let (state, result) = tokio::task::spawn_blocking(move || {
-            let mut state = match cached {
-                Some(state) => state,
-                None => match ctx.create_state() {
-                    Ok(state) => state,
-                    Err(e) => {
-                        return (
-                            None,
-                            Err(AudioProviderError::Init(format!(
-                                "whisper state init failed: {e}"
-                            ))),
-                        );
-                    }
-                },
-            };
-            let result = Self::run_inference(&mut state, language.as_deref(), &audio);
-            (Some(state), result)
-        })
-        .await
-        .map_err(|e| AudioProviderError::Provider(format!("whisper task join error: {e}")))?;
-        *self.state.lock() = state;
-        result
+    let factory = {
+        let ctx = Arc::clone(&ctx);
+        move || WhisperModel::new(&ctx, language.clone())
+    };
+    let mut cfg = EngineConfig::new(STT_QUEUE_DEPTH, STT_JOB_TIMEOUT);
+    if let Some(stall) = STT_STALL_TIMEOUT {
+        cfg = cfg.with_stall_timeout(stall);
     }
+    let handle = EngineHandle::spawn(factory, cfg);
+
+    let descriptor = EngineDescriptor::new(
+        PROVIDER_NAME,
+        CapabilitySet::empty().with(Capability::Stt),
+        // whisper.cpp runs CPU-only in this workspace today (no GPU feature
+        // is enabled for `whisper-rs`, so `WhisperContextParameters::default()`
+        // leaves `use_gpu` false). A distinct thread-count identity from
+        // Kokoro's TTS engine (see `local_tts.rs`) means the two do not
+        // unnecessarily serialize against each other even though both are
+        // CPU-bound: they are independent models with no reason to share an
+        // admission budget.
+        ResourceClass::Cpu { threads: 4 },
+    );
+    Ok(LocalSttEngine::new(handle, descriptor))
 }
 
 /// Factory for the local whisper.cpp STT provider.
@@ -275,8 +384,8 @@ impl LocalSttProviderFactory {
             .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
         let path = resolve_model_path(&ai);
         let language = resolve_language(&ai);
-        let provider = LocalSttProvider::open(&path, language)?;
-        Ok(Box::new(provider))
+        let engine = open(&path, language)?;
+        Ok(Box::new(engine))
     }
 }
 
@@ -352,5 +461,112 @@ mod tests {
         let out = apply_fir(&dc, &coeffs);
         let tail = out.last().copied().unwrap_or(0.0);
         assert!((tail - 1.0).abs() < 0.05, "DC tail = {tail}");
+    }
+}
+
+/// Runs `ene_infer::conformance::run_all` against a test-only stand-in for
+/// [`WhisperModel`] (not gated behind `local-stt`: it needs neither
+/// `whisper-rs` nor a model file, only the same [`ene_infer::LocalModel`]
+/// shape).
+///
+/// [`ConformanceRequest`]/[`ConformanceResponse`] cannot be implemented on
+/// [`WhisperModel`]'s real `ene_ai::SttTranscribeRequest`/`ene_ai::SttResult`
+/// types directly — neither the trait nor the type is local to this crate,
+/// so that would violate the orphan rule, and even if it didn't, "run for
+/// approximately this long" has no meaningful encoding as raw PCM samples.
+/// [`ScriptedSttModel`] validates the part that *is* generic: that this
+/// engine's [`ene_infer::EngineHandle`]/[`ene_infer::EngineConfig`]/factory
+/// wiring gets queueing, cancellation, panic recovery, and post-cancel
+/// `reset` right. It deliberately does *not* reproduce
+/// [`WhisperModel::run`]'s one-check-at-the-start limitation (see that
+/// method's doc comment) — a well-behaved [`ene_infer::LocalModel`] ticks
+/// throughout its work, and this battery is what confirms the framework
+/// wiring around one behaves correctly, independent of whisper.cpp's own
+/// inability to honor that mid-call.
+#[cfg(test)]
+mod conformance_tests {
+    use std::time::{Duration, Instant};
+
+    use ene_infer::conformance::{ConformanceRequest, ConformanceResponse};
+    use ene_infer::{JobContext, LocalModel};
+
+    #[derive(Debug, Clone, Default)]
+    struct ScriptedSttRequest {
+        run_for: Duration,
+        then_panic: bool,
+    }
+
+    impl ConformanceRequest for ScriptedSttRequest {
+        fn scripted(run_for: Duration, then_panic: bool) -> Self {
+            Self {
+                run_for,
+                then_panic,
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedSttResponse {
+        resets_seen: usize,
+    }
+
+    impl ConformanceResponse for ScriptedSttResponse {
+        fn resets_seen(&self) -> usize {
+            self.resets_seen
+        }
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("scripted whisper stand-in stopped cooperatively")]
+    struct ScriptedSttError;
+
+    #[derive(Debug, Default)]
+    struct ScriptedSttModel {
+        resets_seen: usize,
+    }
+
+    impl LocalModel for ScriptedSttModel {
+        type Request = ScriptedSttRequest;
+        type Response = ScriptedSttResponse;
+        type Error = ScriptedSttError;
+
+        #[expect(
+            clippy::unnecessary_literal_bound,
+            reason = "must match LocalModel::engine_name's trait signature, which ties the return type to &self's lifetime"
+        )]
+        fn engine_name(&self) -> &str {
+            "scripted-whisper"
+        }
+
+        fn run(
+            &mut self,
+            req: Self::Request,
+            ctx: &JobContext,
+        ) -> Result<Self::Response, Self::Error> {
+            assert!(!req.then_panic, "scripted panic for conformance testing");
+            let start = Instant::now();
+            loop {
+                if ctx.should_stop().is_some() {
+                    return Err(ScriptedSttError);
+                }
+                ctx.tick();
+                if start.elapsed() >= req.run_for {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Ok(ScriptedSttResponse {
+                resets_seen: self.resets_seen,
+            })
+        }
+
+        fn reset(&mut self) {
+            self.resets_seen += 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn whisper_engine_wiring_passes_conformance_battery() {
+        ene_infer::conformance::run_all(ScriptedSttModel::default).await;
     }
 }
