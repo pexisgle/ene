@@ -26,7 +26,7 @@ pub(crate) fn with_backend<T, F>(f: F) -> Result<T, LlmProviderError>
 where
     F: FnOnce(&LlamaBackend) -> Result<T, LlmProviderError>,
 {
-    let backend = BACKEND.get_or_try_init(|| {
+    let backend = BACKEND.get_or_try_init(|| -> Result<LlamaBackend, LlmProviderError> {
         let mut backend = LlamaBackend::init()
             .map_err(|e| LlmProviderError::LocalLlm(format!("LlamaBackend::init failed: {e}")))?;
         // Quiet llama.cpp / mtmd helper stderr; keep failures for tracing if needed.
