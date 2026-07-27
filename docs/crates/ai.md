@@ -10,7 +10,8 @@ Together, `ene-ai` and `ene-ai-local` provide LLM chat-completion and text-embed
 
 - `ene-ai` owns the provider abstraction layer: message/streaming types, the provider traits, health monitoring/failover routing, and retry policy. It has no persistence or cognitive-logic dependency.
 - Out-of-process LLM providers (e.g. an Anthropic plugin) are bridged into the same `LlmProvider` trait via an IPC adapter owned by `ene-plugin-host`, not by `ene-ai` itself — `ene-ai` only defines the trait the adapter implements.
-- `ene-ai-local` depends on `ene-ai` (to implement its provider traits) and `ene-config`, and performs in-process inference — no network calls.
+- `ene-ai-local` depends on `ene-ai` (to implement its provider traits) and `ene-config`, and performs in-process inference — no network calls except fetching model weights it does not yet have on disk.
+- `ene-ai` hosts a shared, safe model-file downloader (`ModelFetcher`, in the `model_fetch` module): in-flight request coalescing, `.part` file + atomic rename, RAII cleanup of partial downloads, HTTPS-only enforcement, progress reporting, and pluggable post-download validation via the `ModelValidator` trait. Both `ene-ai-local` (GGUF weights) and `ene-voice` (Kokoro ONNX model + `voices.bin`) depend on `ene-ai` already, so this is the one place model downloads are implemented safely rather than each local-inference crate hand-rolling its own.
 
 ## Design rationale
 

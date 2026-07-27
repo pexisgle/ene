@@ -26,7 +26,6 @@ tracing = { workspace = true }
 ctor = { workspace = true }
 whisper-rs = { workspace = true, optional = true }
 ort = { workspace = true, optional = true, features = ["std", "ndarray", "load-dynamic", "api-24"] }
-reqwest = { workspace = true, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -34,7 +34,6 @@ image = { workspace = true, features = ["png", "jpeg"] }
 base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["rustls"] }
 
 [build-dependencies]
 cc = "1"
