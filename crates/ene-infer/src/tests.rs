@@ -220,3 +220,22 @@ async fn reset_runs_between_jobs() {
         "expected reset() to have run exactly once between the two jobs"
     );
 }
+
+#[tokio::test]
+async fn stall_timeout_is_purely_diagnostic_and_does_not_break_jobs() {
+    // The stall watchdog only logs; it must never affect what a job
+    // returns, even when the watchdog's own poll window elapses mid-job.
+    let cfg =
+        EngineConfig::new(4, Duration::from_secs(5)).with_stall_timeout(Duration::from_millis(20));
+    let engine = spawn_mock(cfg);
+    let result = engine
+        .submit(
+            MockRequest::scripted(Duration::from_millis(120), false),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "expected a stall-monitored job to still succeed, got {result:?}"
+    );
+}
