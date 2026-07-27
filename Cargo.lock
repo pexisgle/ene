@@ -2858,6 +2858,7 @@ dependencies = [
  "blake3",
  "cargo-husky",
  "chrono",
+ "ctor",
  "ene-ai",
  "ene-ai-local",
  "ene-config",
