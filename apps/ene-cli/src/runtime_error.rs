@@ -82,6 +82,9 @@ fn user_message_from_ai(error: &ene_ai::AiError) -> String {
                 "runtime-error-ai-local-llm",
                 detail = err.to_string()
             ),
+            ene_ai::LlmProviderError::Busy(_) => {
+                i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-ai-busy")
+            }
             ene_ai::LlmProviderError::ContentFilter(_)
             | ene_ai::LlmProviderError::Truncated { .. }
             | ene_ai::LlmProviderError::Provider(_) => i18n_embed_fl::fl!(

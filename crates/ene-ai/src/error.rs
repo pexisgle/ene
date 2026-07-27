@@ -74,6 +74,10 @@ pub enum LlmProviderError {
     /// Local llama.cpp load / inference failure (#165 / #171).
     #[error("local LLM error: {0}")]
     LocalLlm(String),
+
+    /// The provider is at its concurrency limit; the request was not attempted.
+    #[error("provider busy: {0}")]
+    Busy(String),
 }
 
 impl LlmProviderError {
