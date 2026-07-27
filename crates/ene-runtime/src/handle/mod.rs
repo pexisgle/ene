@@ -365,6 +365,21 @@ impl EneHandle {
         // Resolve TTS provider from config (None when provider is "none").
         let tts_provider = {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
+
+            // Prefetch the configured local TTS model files before
+            // constructing the provider below, so `LocalTtsProvider::open`
+            // (ene-voice) never needs to perform network I/O itself — it
+            // only fails fast if a file is still missing. Mirrors the GGUF
+            // prefetch above. Non-fatal: on failure we log and let provider
+            // construction report a clear error.
+            if let Err(e) = ene_voice::prefetch_if_configured(&ai_config).await {
+                tracing::warn!(
+                    component = "Bootstrap",
+                    error = %e,
+                    "Local TTS model prefetch failed; will report a clear error on provider construction"
+                );
+            }
+
             if let Some(resolved) = ai_config.resolve_tts() {
                 match ene_ai::AudioProviderRegistry::create_tts_provider(
                     &resolved.provider,
