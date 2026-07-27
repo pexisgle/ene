@@ -1,1390 +1,69 @@
+//! `TurnActor` (formerly `EneActor`): the single-threaded actor that owns
+//! turn-execution state (#271).
+//!
+//! ## What moved out (#271)
+//!
+//! - Read-only session queries and pending-candidate approval used to be
+//!   `EneCommand` variants handled here even though they never touched
+//!   `active_turn` / `stream_handle` / `turn_gate` — see
+//!   [`crate::query::sessions::SessionQueryHandle`] and
+//!   [`crate::query::candidates::MemoryCandidateHandle`], which now talk to
+//!   `MemoryStore` directly.
+//! - Screen-image vision summarization used to run the actual model call
+//!   inside a `vision_tasks` `JoinSet` owned by this actor, with the raw RGB
+//!   buffer riding through `EneCommand`. See [`crate::vision::VisionHandle`],
+//!   which now performs that call itself; this actor only answers a small
+//!   `PrepareVisionSummary` request (busy-check + lazy model handle) and a
+//!   fire-and-forget `StashProactiveScreenImage`.
+//!
+//! ## What stayed (deliberately, see PR description)
+//!
+//! Turn execution (`Run` / `Cancel`), permission decisions, user-input
+//! responses, snapshot, manual split/undo, tool calls, character-card swap,
+//! feature/proactive settings updates, tool-index invalidation, `CCv3`
+//! memory hash, and plugin host restart all still go through this single
+//! actor. The issue's ideal design further splits config/control operations
+//! (`SetCharacter`, `UpdateFeatureSettings`, plugin host restart) into a
+//! separate `ControlPlane` actor from turn-execution-critical state
+//! (`turn_gate`, `active_turn`, `stream_handle`, `undo_stack`). That further
+//! split is deferred — see the PR body for why — since it does not
+//! contribute to the head-of-line-blocking problem the issue is about
+//! (config/control commands are already infrequent, low-latency, and never
+//! block behind a `Run` turn any worse than `Run` itself already does).
+
+use super::TurnGate;
+use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
+use super::event::{EneEvent, EneStateSnapshot, EneStatus, TerminalReason};
 use crate::diagnostics::{DiagnosticEvent, MemoryQueryHandle, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
-use crate::types::{CancelError, RequestId, RunError, TurnId};
-use chrono::{DateTime, Utc};
+use crate::types::{RequestId, TurnId};
+use crate::vision::VisionPrepared;
 use ene_ai::{AiTaskKind, LlmProviderRegistry, create_task_chat_provider};
-use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
+use ene_mind::CardName;
 use ene_mind::commitments::CommitmentLedger;
-use ene_mind::{CardName, SessionId};
 use ene_mind::{
     CompressionLevel, CompressionTaskInput, HistoryEntry as MindHistoryEntry,
     compression_has_usable_summary,
 };
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
 use ene_plugin_host::{CompositeToolRegistry, PluginHealthEvent, PluginHostError, ToolRegistry};
-use ene_plugin_proto::ToolSpec;
-use ene_store::PendingCandidate;
 #[cfg(any(unix, windows))]
 use ene_store::db_server::DbIpcServer;
 use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-/// Global monotonic counter used to generate unique DB IPC auth tokens.
-/// Intentionally process-global: each `EneHandle::open` call increments
-/// the counter so concurrent handles never share a token.
-static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// A deferred (background) tool task tracked by the actor (#196).
-///
-/// Created when a background-capable tool accepts a deferred call and
-/// returns a `task_id`. The actor polls the owning tool until the task
-/// reaches a terminal state, then emits [`EneEvent::ToolBackgroundCompleted`].
-#[derive(Debug, Clone)]
-pub struct DeferredToolTask {
-    /// The tool name that owns the background task.
-    pub tool_name: String,
-    /// The `task_id` returned by the deferred call acceptance.
-    pub task_id: String,
-    /// JSON-encoded arguments the task was started with.
-    pub arguments: String,
-    /// When the task was accepted for background execution.
-    pub started_at: DateTime<Utc>,
-}
-
-/// Summary of a pending memory candidate for the UI (#174 / #223).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PendingCandidateSummary {
-    /// Database primary key.
-    pub id: i64,
-    /// Short title or label.
-    pub title: String,
-    /// Full candidate content.
-    pub content: String,
-    /// Memory kind as string (e.g. "episodic", "semantic").
-    pub kind: String,
-    /// Confidence score (0.0 .. 1.0).
-    pub confidence: f32,
-    /// Human-readable reason for the extraction.
-    pub reason_detail: String,
-    /// Title of an existing memory this candidate would supersede, if any.
-    pub existing_memory_title: Option<String>,
-    /// Source quote from the conversation that triggered this candidate.
-    pub source_quote: String,
-}
-
-impl From<&PendingCandidate> for PendingCandidateSummary {
-    fn from(c: &PendingCandidate) -> Self {
-        Self {
-            id: c.id,
-            title: c.title.clone(),
-            content: c.content.clone(),
-            kind: c.kind.as_str().to_string(),
-            confidence: c.confidence,
-            reason_detail: c.reason_detail.clone(),
-            existing_memory_title: c.existing_memory_title.clone(),
-            source_quote: c.source_quote.clone(),
-        }
-    }
-}
-
-/// Commands sent to the actor from consumers (UI/CLI).
-///
-/// Fire-and-forget variants are sent via internal channels.
-/// Oneshot variants carry a reply channel for result confirmation.
-pub enum EneCommand {
-    /// Start an AI completion for the given user prompt.
-    Run {
-        /// The raw user input to send to the LLM.
-        input: String,
-        /// Turn id allocated by the handle.
-        turn: TurnId,
-    },
-    /// Cancel a specific in-flight turn.
-    Cancel {
-        /// Turn to cancel.
-        turn: TurnId,
-    },
-    /// Shut down the actor and clean up background tasks.
-    Shutdown,
-    /// Submit a permission decision for a pending destructive operation.
-    PermissionDecision {
-        /// The `request_id` from a prior `PermissionRequired` event.
-        request_id: RequestId,
-        /// The user's decision.
-        decision: PermissionDecision,
-    },
-    /// List all session-wide permission grants (#177).
-    ListPermissions {
-        /// Reply channel for the granted scopes.
-        reply: oneshot::Sender<Vec<crate::streaming::PermissionScope>>,
-    },
-    /// Revoke a single session-wide permission grant by id (#177).
-    RevokePermission {
-        /// The `PermissionScope::id` to revoke.
-        id: u64,
-        /// Reply channel reporting whether a scope was removed.
-        reply: oneshot::Sender<bool>,
-    },
-    /// Revoke all session-wide permission grants (#177).
-    ResetAllPermissions {
-        /// Reply channel carrying the number of revoked scopes.
-        reply: oneshot::Sender<usize>,
-    },
-    /// Undo the most recent reversible tool operation (#178).
-    Undo {
-        /// Reply channel carrying the undo report.
-        reply: oneshot::Sender<crate::undo::UndoReport>,
-    },
-    /// List stored sessions, newest first (#176).
-    ListSessions {
-        /// Whether to include archived sessions.
-        include_archived: bool,
-        /// Maximum number of sessions to return.
-        limit: usize,
-        /// Reply channel carrying the session list.
-        reply: oneshot::Sender<Result<Vec<ene_store::SessionMeta>, ene_store::EneMemoryError>>,
-    },
-    /// Export a session to a versioned, redacted JSON bundle (#176).
-    ExportSession {
-        /// Logical session id to export.
-        session_id: String,
-        /// Reply channel carrying the JSON export string.
-        reply: oneshot::Sender<Result<String, ene_store::EneMemoryError>>,
-    },
-    /// Import a session from a JSON export bundle (#176).
-    ImportSession {
-        /// JSON export bundle to import.
-        json: String,
-        /// Reply channel carrying the imported session row id.
-        reply: oneshot::Sender<Result<i64, ene_store::EneMemoryError>>,
-    },
-    /// Full-text search over stored conversation messages (#176).
-    SearchSessions {
-        /// Case-insensitive search query.
-        query: String,
-        /// Maximum number of matches to return.
-        limit: usize,
-        /// Number of matches to skip (pagination).
-        offset: usize,
-        /// Reply channel carrying `(session_id, message)` matches.
-        reply: oneshot::Sender<
-            Result<Vec<(String, ene_store::ExportedMessage)>, ene_store::EneMemoryError>,
-        >,
-    },
-    /// Archive or unarchive a session (#176).
-    ArchiveSession {
-        /// Logical session id to update.
-        session_id: String,
-        /// Whether the session should be archived.
-        archived: bool,
-        /// Reply channel carrying whether a session row was updated.
-        reply: oneshot::Sender<Result<bool, ene_store::EneMemoryError>>,
-    },
-    /// Submit a user-input response for a pending interactive tool.
-    UserInputResponse {
-        /// The `request_id` from a prior `UserInputRequired` event.
-        request_id: RequestId,
-        /// The user's response (selected option, free-text, or cancel).
-        response: UserInputResponse,
-    },
-    /// Request a read-only snapshot of the current actor state (for CLI queries).
-    GetSnapshot {
-        /// Reply channel for the snapshot.
-        reply: oneshot::Sender<EneStateSnapshot>,
-    },
-    /// Manually trigger a session split for the current conversation.
-    ManualSplit {
-        /// Result channel carrying the split result or an error.
-        reply: oneshot::Sender<Result<SplitResult, EneRuntimeError>>,
-    },
-    /// List all tools in the active tool registry.
-    ListTools {
-        /// Reply channel for the tools.
-        reply: oneshot::Sender<Vec<ToolSpec>>,
-    },
-    /// Search tools in the active tool registry using RAG if available.
-    SearchTools {
-        /// The query to search for.
-        query: String,
-        /// Reply channel for the matching tools.
-        reply: oneshot::Sender<Vec<ToolSpec>>,
-    },
-    /// Call a tool by name with JSON-encoded arguments.
-    CallTool {
-        /// The tool name.
-        name: String,
-        /// JSON-encoded arguments.
-        arguments: String,
-        /// Active turn for call-context propagation. `None` for
-        /// diagnostic / background tool calls outside a turn.
-        turn: Option<TurnId>,
-        /// Reply channel.
-        reply: oneshot::Sender<Result<String, EneRuntimeError>>,
-    },
-    /// Cancel a deferred (background) tool task by id (#196).
-    ///
-    /// Routes to the owning tool and asks it to abort the background task.
-    /// The reply reports whether a running task was actually cancelled.
-    CancelDeferredTool {
-        /// The tool name that owns the background task.
-        tool_name: String,
-        /// The `task_id` returned by the deferred call acceptance.
-        task_id: String,
-        /// Reply channel carrying whether a running task was cancelled.
-        reply: oneshot::Sender<bool>,
-    },
-    /// Invalidate the Tool RAG index, forcing re-embedding on next query.
-    InvalidateToolIndex,
-    /// Persist the `CCv3` character-memory content hash after startup warmup.
-    SetCcv3MemoryHash {
-        /// Combined lorebook + style content hash.
-        hash: u64,
-        /// Confirmation channel.
-        reply: oneshot::Sender<()>,
-    },
-    /// Replace the loaded character card.
-    SetCharacter {
-        /// New character card.
-        card: Box<CharacterCardV3>,
-        /// Confirmation channel.
-        reply: oneshot::Sender<Result<(), EneRuntimeError>>,
-    },
-    /// Update host-side proactive observation snapshot (#166).
-    UpdateProactiveObservation {
-        /// Normalized observation from desktop (no raw screenshots).
-        observation: ene_mind::ProactiveObservation,
-    },
-    /// Hot-update proactive policy (#103). Provider routing comes from [`AiConfig`].
-    UpdateProactiveSettings {
-        /// Mind proactive policy.
-        mind: ene_mind::ProactiveConfig,
-    },
-    /// Hot-update Features-tab settings (mind / store / tools / RAG) without
-    /// tearing down the local proactive GGUF.
-    UpdateFeatureSettings {
-        /// Boxed payload to keep [`EneCommand`] small.
-        settings: Box<FeatureSettingsUpdate>,
-    },
-    /// Summarize a screen RGB capture with the local vision (mmproj) model.
-    SummarizeScreenImage {
-        /// Image width in pixels.
-        width: u32,
-        /// Image height in pixels.
-        height: u32,
-        /// Tight RGB8 buffer (`width * height * 3`).
-        rgb: Vec<u8>,
-        /// Privacy-safe OS app label (may be empty).
-        app_label: String,
-        /// Reply channel.
-        reply: oneshot::Sender<Result<String, crate::public_api::PublicApiError>>,
-    },
-    /// List pending memory candidates awaiting user approval (#174).
-    ListPendingCandidates {
-        /// Reply channel for the candidate list.
-        respond: oneshot::Sender<Result<Vec<PendingCandidateSummary>, ene_store::EneMemoryError>>,
-    },
-    /// Approve a pending memory candidate (#174).
-    ApproveCandidate {
-        /// Candidate id to approve.
-        id: i64,
-        /// Reply channel.
-        respond: oneshot::Sender<Result<(), ene_store::EneMemoryError>>,
-    },
-    /// Reject a pending memory candidate (#174).
-    RejectCandidate {
-        /// Candidate id to reject.
-        id: i64,
-        /// Reply channel.
-        respond: oneshot::Sender<Result<(), ene_store::EneMemoryError>>,
-    },
-}
-
-/// Payload for [`EneCommand::UpdateFeatureSettings`].
-#[derive(Debug, Clone)]
-pub struct FeatureSettingsUpdate {
-    /// Full mind section (emotion + proactive).
-    pub mind: ene_mind::MindConfig,
-    /// Long-term memory store section.
-    pub store: ene_store::StoreConfig,
-    /// Plugin system section (formerly tool host section).
-    pub plugins: ene_plugin_host::PluginConfig,
-    /// Tool RAG section.
-    pub rag: ToolRagConfig,
-}
-
-/// Events emitted from the actor to all consumers via broadcast channel.
-///
-/// Consumers (CLI, Bevy systems, logging) receive these through
-/// [`EneHandle::subscribe`] which returns an [`EneEventReceiver`].
-#[derive(Debug, Clone)]
-pub enum EneEvent {
-    /// A chunk of generated text from the LLM (markers stripped).
-    TextDelta {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// The raw text delta.
-        delta: String,
-    },
-    /// Presentation cues (expression / emote) for the active turn.
-    Performance {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// Cue list (usually one expression).
-        cues: Vec<ene_mind::PerformanceCue>,
-        /// How the cues were chosen.
-        source: ene_mind::CueSource,
-    },
-    /// A tool call has been requested by the LLM.
-    ToolCallStart {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// The tool name (e.g. "fs.write").
-        name: String,
-        /// JSON-encoded arguments.
-        arguments: String,
-    },
-    /// A tool call has completed with its result.
-    ToolCallResult {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// The tool name.
-        name: String,
-        /// The tool's output as a string.
-        result: String,
-    },
-    /// A deferred (background) tool task has reached a terminal state (#196).
-    ///
-    /// Emitted asynchronously after the originating turn has completed, once
-    /// the background-capable tool reports that the task finished, failed, or
-    /// was cancelled. Consumers can use `task_id` to correlate this with the
-    /// earlier `DeferredAccepted` result returned to the LLM.
-    ToolBackgroundCompleted {
-        /// The tool name that owns the background task.
-        tool_name: String,
-        /// The `task_id` returned by the deferred call acceptance.
-        task_id: String,
-        /// Terminal status of the background task.
-        status: ene_plugin_proto::DeferredStatus,
-    },
-    /// A destructive operation requires user approval before execution.
-    PermissionRequired {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// Unique identifier for this permission request.
-        request_id: RequestId,
-        /// The category of operation (e.g. "write", "delete").
-        action: String,
-        /// The target resource path.
-        target: String,
-        /// Human-readable description of what will be done.
-        description: String,
-    },
-    /// An interactive tool needs user input (e.g. a clarifying question).
-    UserInputRequired {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// Unique identifier for this input request.
-        request_id: RequestId,
-        /// The prompt describing the question, options, and free-text allowance.
-        prompt: ene_plugin_proto::UserInputPrompt,
-    },
-    /// Thin signal that rolling context compression completed for this turn.
-    ContextCompressed {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// Compression level label (e.g. "scene").
-        level: String,
-    },
-    /// Terminal event for a run: emitted exactly once after `after_turn` completes.
-    Terminal {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// Why the run terminated.
-        reason: TerminalReason,
-    },
-    /// The actor's status changed.
-    StatusChanged {
-        /// New status value.
-        status: EneStatus,
-    },
-    /// A turn has started streaming (after provider open succeeds).
-    TurnStarted {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-    },
-    /// A chunk of synthesized PCM audio from the TTS pipeline.
-    ///
-    /// NOTE (#L6): `AudioChunk` carries a `Vec<f32>` PCM payload through the
-    /// same 1024-capacity broadcast channel as lightweight chat events. A burst
-    /// of audio chunks can therefore crowd out chat events (causing `Lagged`
-    /// for slow subscribers) and inflates every subscriber's buffer. This is
-    /// acceptable for the current single-consumer playback path, but a
-    /// dedicated bounded audio channel should be introduced before adding more
-    /// broadcast subscribers or higher sample rates.
-    AudioChunk {
-        /// Active turn.
-        turn: TurnId,
-        /// Who initiated this turn.
-        origin: crate::types::TurnOrigin,
-        /// Interleaved mono PCM samples normalized to `[-1.0, 1.0]`.
-        pcm: Vec<f32>,
-        /// Sample rate in Hz (e.g. 24000).
-        sample_rate: u32,
-        /// Whether this is the final audio chunk for the turn.
-        is_final: bool,
-    },
-    /// New pending memory candidates are available for review (#174).
-    PendingCandidateAvailable {
-        /// Number of pending candidates.
-        count: usize,
-    },
-}
-
-/// Reason a single run terminated.
-///
-/// Used in [`EneEvent::Terminal`]. Exactly one of these is emitted per
-/// `EneCommand::Run`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TerminalReason {
-    /// The LLM stream completed normally (no more tool calls and the
-    /// provider finished the response).
-    Done,
-    /// The run terminated due to an error.
-    Failed {
-        /// Human-readable error description.
-        message: String,
-    },
-    /// The run was cancelled by the user via `EneCommand::Cancel`.
-    Cancelled,
-}
-
-/// A snapshot of the current actor state for read-only queries.
-#[derive(Clone)]
-pub struct EneStateSnapshot {
-    /// The loaded character card, if any.
-    pub character_card: Option<CharacterCardV3>,
-    /// Conversation history (`ene_mind::HistoryEntry`).
-    pub history: Vec<ene_mind::HistoryEntry>,
-    /// A copy of the current configuration.
-    pub config: EneConfig,
-    /// Current session ID.
-    pub session_id: SessionId,
-    /// Character card name.
-    pub card_name: CardName,
-    /// Memory query handle (enabled only if memory is configured).
-    /// Prefer [`crate::EneDiagnostics::memory`] for new code.
-    pub memory: MemoryQueryHandle,
-    /// Current conversation turn count.
-    pub current_turn_count: u32,
-    /// When the session started (UTC).
-    pub session_started_at: DateTime<Utc>,
-}
-
-/// Current status of the actor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EneStatus {
-    /// Not currently processing anything.
-    Idle,
-    /// An AI stream is running.
-    Running,
-    /// An error state (non-fatal).
-    Error,
-}
-
-/// Error returned when a command is sent to an actor that is no longer running.
-#[derive(Debug, thiserror::Error)]
-#[error("Actor is no longer running")]
-pub struct ActorDeadError;
-
-/// Error returned by [`EneHandle::shutdown`] when the actor's drain
-/// takes longer than the supplied timeout.
-#[derive(Debug, thiserror::Error)]
-#[error("Actor did not shut down within {0:?}")]
-pub struct ShutdownTimeout(pub std::time::Duration);
-
-/// Event receiver handle obtained from [`EneHandle::subscribe`].
-///
-/// Wraps the broadcast receiver and provides a ergonomic interface for
-/// consuming events from the actor. On lag, emits
-/// [`DiagnosticEvent::Lagged`] / [`DiagnosticEvent::ResyncNeeded`] so gaps
-/// are never silent (#189).
-pub struct EneEventReceiver {
-    inner: broadcast::Receiver<EneEvent>,
-    diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
-}
-
-impl std::fmt::Debug for EneEventReceiver {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EneEventReceiver").finish()
-    }
-}
-
-impl EneEventReceiver {
-    fn note_lag(&self, skipped: u64) {
-        let _ = self
-            .diag_tx
-            .send(crate::diagnostics::DiagnosticEvent::Lagged {
-                channel: "events".to_string(),
-                skipped,
-            });
-        let _ = self
-            .diag_tx
-            .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
-                channel: "events".to_string(),
-            });
-    }
-
-    /// Non-blocking poll of the event stream.
-    pub fn try_recv(&mut self) -> Result<EneEvent, broadcast::error::TryRecvError> {
-        match self.inner.try_recv() {
-            Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                self.note_lag(n);
-                Err(broadcast::error::TryRecvError::Lagged(n))
-            }
-            other => other,
-        }
-    }
-
-    /// Async receive, waiting for the next event.
-    pub async fn recv(&mut self) -> Result<EneEvent, broadcast::error::RecvError> {
-        match self.inner.recv().await {
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                self.note_lag(n);
-                Err(broadcast::error::RecvError::Lagged(n))
-            }
-            other => other,
-        }
-    }
-}
-
-/// Shared single-flight turn gate between handle and actor.
-///
-/// Uses a single `parking_lot::Mutex<Option<TurnId>>` for both the
-/// busy flag and active turn ID, eliminating the split atomic/mutex
-/// design and the ordering window it created.
-struct TurnGate {
-    active: parking_lot::Mutex<Option<TurnId>>,
-}
-
-impl TurnGate {
-    fn new() -> Self {
-        Self {
-            active: parking_lot::Mutex::new(None),
-        }
-    }
-
-    fn try_begin(&self, turn: &TurnId) -> bool {
-        let mut guard = self.active.lock();
-        if guard.is_some() {
-            return false;
-        }
-        *guard = Some(turn.clone());
-        true
-    }
-
-    fn end(&self) {
-        *self.active.lock() = None;
-    }
-
-    fn matches(&self, turn: &TurnId) -> bool {
-        self.active
-            .lock()
-            .as_ref()
-            .is_some_and(|active| active.as_str() == turn.as_str())
-    }
-}
-
-/// Thread-safe handle to the ready actor.
-///
-/// Constructed only via [`EneHandle::open`], which initializes provider, store,
-/// tools, mind session, and warmup before returning. When the last clone is
-/// dropped the underlying `mpsc` channel closes and the actor exits.
-pub struct EneHandle {
-    cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
-    event_tx: broadcast::Sender<EneEvent>,
-    diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
-    diagnostics: crate::diagnostics::EneDiagnostics,
-    turn_gate: Arc<TurnGate>,
-    /// `JoinHandle` for the actor task. Used by [`EneHandle::shutdown`]
-    /// to await the actor's drain after sending `EneCommand::Shutdown`.
-    actor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Plugin host manager (process supervision for v3 plugin binaries).
-    ///
-    /// Shared across handle clones; the last clone to drop triggers a
-    /// graceful plugin shutdown (#247). `None` when plugin startup failed
-    /// or no plugins were discovered.
-    plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
-    /// Join handle for the plugin health → diagnostics bridge task (#238).
-    ///
-    /// Shared across handle clones. Aborted during plugin host shutdown so
-    /// the bridge does not outlive the host whose events it forwards.
-    health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-}
-
-impl std::fmt::Debug for EneHandle {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EneHandle").finish()
-    }
-}
-
-impl Clone for EneHandle {
-    fn clone(&self) -> Self {
-        Self {
-            cmd_tx: Arc::clone(&self.cmd_tx),
-            event_tx: self.event_tx.clone(),
-            diag_tx: self.diag_tx.clone(),
-            diagnostics: crate::diagnostics::EneDiagnostics {
-                cmd_tx: Arc::clone(&self.cmd_tx),
-                diag_tx: self.diag_tx.clone(),
-                memory: self.diagnostics.memory.clone(),
-                health_monitor: self.diagnostics.health_monitor.clone(),
-            },
-            turn_gate: Arc::clone(&self.turn_gate),
-            actor_handle: Arc::clone(&self.actor_handle),
-            plugin_host: Arc::clone(&self.plugin_host),
-            health_bridge_handle: Arc::clone(&self.health_bridge_handle),
-        }
-    }
-}
-
-impl EneHandle {
-    /// Open a ready runtime handle.
-    ///
-    /// Initializes the LLM provider registry, embedding provider, memory store
-    /// (when enabled), tool registry, mind session with `card`, and character
-    /// memory warmup **before** returning `Ok`. Config file I/O stays in the
-    /// host / `ene-config` — pass an already-loaded config and card.
-    pub async fn open(config: EneConfig, card: CharacterCardV3) -> Result<Self, EneRuntimeError> {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let cmd_tx = Arc::new(cmd_tx);
-        let (event_tx, _event_rx) = broadcast::channel(1024);
-        let (diag_tx, diag_rx) = broadcast::channel(256);
-
-        LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
-
-        let mind = config.get_section::<ene_mind::MindConfig>()?;
-        ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
-
-        let mem_config = config.get_section::<ene_store::StoreConfig>()?;
-        let plugin_config = config.get_section::<ene_plugin_host::PluginConfig>()?;
-        let rag_config = config.get_section::<ToolRagConfig>()?;
-        let needs_embedder = mem_config.enabled || (plugin_config.enabled && rag_config.enabled);
-
-        // Prefetch configured GGUF weights in parallel before backends load them.
-        {
-            let ai_config = config.get_section::<ene_ai::AiConfig>()?;
-            let needs_decision = mind.proactive.enabled;
-            if (needs_embedder || needs_decision)
-                && let Err(e) = ene_ai_local::prefetch_configured_gguf(
-                    &ai_config,
-                    needs_embedder,
-                    needs_decision,
-                )
-                .await
-            {
-                tracing::warn!(
-                    component = "GgufPrefetch",
-                    error = %e,
-                    "GGUF prefetch failed; will retry on load"
-                );
-            }
-        }
-
-        // Fail-closed: memory / tool-RAG features require a working embedder.
-        let embedder = if needs_embedder {
-            Some(init_embedding(&config)?)
-        } else {
-            None
-        };
-
-        let mut session = ConversationSession::new();
-        session.set_card(&card);
-        if let Some(ref emb) = embedder {
-            session.memory.embedding_provider = Some(emb.clone());
-        }
-
-        let memory_store = if mem_config.enabled {
-            let emb = embedder
-                .as_ref()
-                .ok_or(EneRuntimeError::MindPrerequisite("embedding provider"))?;
-            let store = init_memory_store(&config, emb.as_ref())
-                .await
-                .map_err(|e| {
-                    EneRuntimeError::Memory(ene_store::EneMemoryError::MemoryStoreConnectionError(
-                        e,
-                    ))
-                })?;
-            session.memory.memory_store = Some(store.clone());
-            Some(store)
-        } else {
-            None
-        };
-
-        // Generate DB tokens and spawn DB IPC servers for tool plugins.
-        let db_tokens = spawn_db_ipc_servers(&config, memory_store.as_ref())?;
-
-        // Start the plugin host (discovers and launches v3 plugin binaries).
-        // Non-fatal: on failure we log and continue with no plugin-provided
-        // providers/tools, mirroring the tool host's empty-set fallback (#247).
-        let mut plugin_host =
-            match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
-                Ok(host) => {
-                    for (kind, factory) in host.llm_factories() {
-                        tracing::info!(
-                            component = "Bootstrap",
-                            kind = %kind,
-                            "Registered plugin-provided LLM provider factory"
-                        );
-                        LlmProviderRegistry::register(Arc::clone(factory));
-                    }
-                    tracing::info!(
-                        component = "Bootstrap",
-                        tool_registries = host.tool_registries().len(),
-                        llm_factories = host.llm_factories().len(),
-                        "Plugin host started"
-                    );
-                    Some(host)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        component = "Bootstrap",
-                        error = %e,
-                        "Plugin host failed to start; continuing without plugins"
-                    );
-                    None
-                }
-            };
-
-        // Bridge plugin health events into the diagnostics channel (#238).
-        // The task's `JoinHandle` is retained so it can be aborted during
-        // plugin host shutdown rather than leaking past the host's lifetime.
-        let mut health_bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
-        if let Some(host) = plugin_host.as_mut()
-            && let Some(mut health_rx) = host.take_health_receiver()
-        {
-            let diag_tx = diag_tx.clone();
-            health_bridge_handle = Some(tokio::spawn(async move {
-                while let Some(event) = health_rx.recv().await {
-                    emit_diag(&diag_tx, plugin_health_event_to_diag(event));
-                }
-            }));
-        }
-
-        let registry = build_tool_registry(plugin_host.as_ref())?;
-        let tool_rag = match embedder.as_ref() {
-            Some(emb) => init_tool_rag(&config, emb, &session)?,
-            None => None,
-        };
-        if let Some(rag) = &tool_rag {
-            let specs = registry.list_tools();
-            let profiles = registry.list_rag_profiles();
-            if rag.opts().background_index_on_startup {
-                tracing::info!(
-                    component = "Bootstrap",
-                    "Warming up Tool RAG index in background..."
-                );
-                rag.start_background_indexer(specs, profiles);
-            } else {
-                tracing::debug!(
-                    component = "Bootstrap",
-                    "Skipping Tool RAG startup warmup (background_index_on_startup=false)"
-                );
-            }
-        }
-
-        // Warmup character memories before returning Ok.
-        let warmup_hash = warmup_character_memories_ready(&config, &session).await;
-
-        if let Some(hash) = warmup_hash {
-            session.memory.ccv3_memory_hash = Some(hash);
-        }
-
-        let mind_memory = mind.memory.clone();
-        let memory = MemoryQueryHandle::new(
-            session.memory.memory_store.clone(),
-            session.memory.embedding_provider.clone(),
-            mind_memory,
-        );
-
-        // Provider health monitor for failover diagnostics (#175).
-        let fallback_cfg = config.get_section::<ene_ai::AiConfig>()?.fallback;
-        let health_monitor = ene_ai::ProviderHealthMonitor::new(
-            std::time::Duration::from_millis(fallback_cfg.cache_ttl_ms),
-            fallback_cfg.max_history,
-        );
-
-        // Resolve TTS provider from config (None when provider is "none").
-        let tts_provider = {
-            let ai_config = config.get_section::<ene_ai::AiConfig>()?;
-            if let Some(resolved) = ai_config.resolve_tts() {
-                match ene_ai::AudioProviderRegistry::create_tts_provider(
-                    &resolved.provider,
-                    &config,
-                ) {
-                    Ok(provider) => {
-                        tracing::info!(
-                            component = "Bootstrap",
-                            provider = %provider.name(),
-                            "TTS provider initialized"
-                        );
-                        Some(Arc::from(provider))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            component = "Bootstrap",
-                            error = %e,
-                            "Failed to initialize TTS provider; audio synthesis disabled"
-                        );
-                        None
-                    }
-                }
-            } else {
-                tracing::debug!(
-                    component = "Bootstrap",
-                    "TTS disabled by configuration (provider = \"none\")"
-                );
-                None
-            }
-        };
-
-        let diagnostics = crate::diagnostics::EneDiagnostics {
-            cmd_tx: Arc::clone(&cmd_tx),
-            diag_tx: diag_tx.clone(),
-            memory,
-            health_monitor: health_monitor.clone(),
-        };
-
-        let turn_gate = Arc::new(TurnGate::new());
-        let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
-        let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
-        let (deferred_tool_tx, deferred_tool_rx) = mpsc::unbounded_channel();
-
-        let plugin_tool_registries = plugin_host
-            .as_ref()
-            .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
-
-        // Share the plugin host and its health-bridge task between the handle
-        // (for shutdown) and the actor (for Features-update reconfiguration).
-        let plugin_host = Arc::new(tokio::sync::Mutex::new(plugin_host));
-        let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
-
-        let actor = EneActor {
-            cmd_rx,
-            event_tx: event_tx.clone(),
-            diag_tx: diag_tx.clone(),
-            turn_gate: Arc::clone(&turn_gate),
-            config,
-            session,
-            registry,
-            tool_rag,
-            cancel_token: CancellationToken::new(),
-            stream_handle: None,
-            stream_session_rx: None,
-            stream_partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
-            active_turn: None,
-            pending_permissions: Arc::new(Mutex::new(HashMap::new())),
-            pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
-            permission_scopes: Arc::new(Mutex::new(Vec::new())),
-            undo_stack: Arc::new(Mutex::new(crate::undo::UndoStack::new(64))),
-            context: ene_mind::ContextManager::default(),
-            call_tool_tasks: tokio::task::JoinSet::new(),
-            classifier_tasks: tokio::task::JoinSet::new(),
-            memory_writer_tasks: tokio::task::JoinSet::new(),
-            vision_tasks: tokio::task::JoinSet::new(),
-            search_tasks: tokio::task::JoinSet::new(),
-            deferred_tool_tasks: tokio::task::JoinSet::new(),
-            classifier_rx,
-            memory_writer_rx,
-            deferred_tool_rx,
-            terminal_emitted: Arc::new(AtomicBool::new(false)),
-            classifier_tx,
-            memory_writer_tx,
-            deferred_tool_tx,
-            _diag_rx: diag_rx,
-            proactive: crate::proactive::ProactiveScheduler::default(),
-            proactive_decision_rx: None,
-            proactive_decision_handle: None,
-            proactive_llm: None,
-            active_origin: crate::types::TurnOrigin::User,
-            health_monitor,
-            deferred_max_polls: std::env::var("ENE_TOOLS__DEFERRED_MAX_POLLS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(600),
-            tts_provider,
-            plugin_tool_registries,
-            plugin_host: Arc::clone(&plugin_host),
-            health_bridge_handle: Arc::clone(&health_bridge_handle),
-        };
-        let join = tokio::spawn(actor.run());
-
-        Ok(Self {
-            cmd_tx,
-            event_tx,
-            diag_tx,
-            diagnostics,
-            turn_gate,
-            actor_handle: Arc::new(tokio::sync::Mutex::new(Some(join))),
-            plugin_host,
-            health_bridge_handle,
-        })
-    }
-
-    /// Subscribe to the chat event stream.
-    pub fn subscribe(&self) -> EneEventReceiver {
-        EneEventReceiver {
-            inner: self.event_tx.subscribe(),
-            diag_tx: self.diag_tx.clone(),
-        }
-    }
-
-    /// Concrete diagnostics facade (pipeline detail, memory, tools).
-    pub const fn diagnostics(&self) -> &crate::diagnostics::EneDiagnostics {
-        &self.diagnostics
-    }
-
-    /// Start a turn. Returns [`RunError::Busy`] if a turn is already in flight
-    /// — never silently aborts the active turn.
-    #[must_use = "the returned TurnId is needed for cancellation"]
-    pub fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError> {
-        let turn = TurnId::new();
-        if !self.turn_gate.try_begin(&turn) {
-            return Err(RunError::Busy);
-        }
-        if self
-            .cmd_tx
-            .send(EneCommand::Run {
-                input: input.into(),
-                turn: turn.clone(),
-            })
-            .is_err()
-        {
-            self.turn_gate.end();
-            return Err(RunError::ActorDead);
-        }
-        Ok(turn)
-    }
-
-    /// Cancel only the given turn. Wrong ids return [`CancelError::TurnMismatch`].
-    #[must_use = "caller should check whether cancellation succeeded"]
-    pub fn cancel(&self, turn: &TurnId) -> Result<(), CancelError> {
-        if !self.turn_gate.matches(turn) {
-            return Err(CancelError::TurnMismatch);
-        }
-        self.cmd_tx
-            .send(EneCommand::Cancel { turn: turn.clone() })
-            .map_err(|_| CancelError::ActorDead)
-    }
-
-    /// Send a `Shutdown` command and await the actor's drain, then shut down
-    /// the plugin host (if still alive).
-    pub async fn shutdown(&self, timeout: std::time::Duration) -> Result<(), ShutdownTimeout> {
-        if self.cmd_tx.send(EneCommand::Shutdown).is_err() {
-            let mut guard = self.actor_handle.lock().await;
-            if let Some(join) = guard.take() {
-                let _ = join.await;
-            }
-            drop(guard);
-            self.shutdown_plugin_host().await;
-            return Ok(());
-        }
-
-        let mut guard = self.actor_handle.lock().await;
-        let Some(join) = guard.as_mut() else {
-            drop(guard);
-            self.shutdown_plugin_host().await;
-            return Ok(());
-        };
-        match tokio::time::timeout(timeout, &mut *join).await {
-            Ok(Ok(())) => {
-                guard.take();
-                drop(guard);
-                self.shutdown_plugin_host().await;
-                Ok(())
-            }
-            Ok(Err(join_err)) => {
-                tracing::warn!(component = "EneHandle", error = %join_err, "Actor task ended with error");
-                guard.take();
-                drop(guard);
-                self.shutdown_plugin_host().await;
-                Ok(())
-            }
-            Err(_elapsed) => Err(ShutdownTimeout(timeout)),
-        }
-    }
-
-    /// Gracefully shuts down the plugin host if it is still alive (#247).
-    ///
-    /// Called from [`EneHandle::shutdown`] after the actor drains and from
-    /// [`Drop`] when the last handle clone is released. Only the first caller
-    /// performs the shutdown; subsequent calls are no-ops. Also aborts the
-    /// plugin health → diagnostics bridge task so it does not outlive the
-    /// host whose events it forwards (#238).
-    async fn shutdown_plugin_host(&self) {
-        let mut guard = self.plugin_host.lock().await;
-        if let Some(mut host) = guard.take() {
-            host.shutdown().await;
-        }
-        drop(guard);
-
-        let mut bridge = self.health_bridge_handle.lock().await;
-        if let Some(handle) = bridge.take() {
-            handle.abort();
-        }
-    }
-
-    /// Send a permission decision for a pending destructive operation.
-    pub fn decide_permission(
-        &self,
-        request_id: impl Into<RequestId>,
-        decision: PermissionDecision,
-    ) -> Result<(), ActorDeadError> {
-        self.cmd_tx
-            .send(EneCommand::PermissionDecision {
-                request_id: request_id.into(),
-                decision,
-            })
-            .map_err(|_| ActorDeadError)
-    }
-
-    /// List all session-wide permission grants (#177).
-    pub async fn list_permissions(
-        &self,
-    ) -> Result<Vec<crate::streaming::PermissionScope>, ActorDeadError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ListPermissions { reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
-    }
-
-    /// Revoke a single session-wide permission grant by id (#177).
-    pub async fn revoke_permission(&self, id: u64) -> Result<bool, ActorDeadError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::RevokePermission { id, reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
-    }
-
-    /// Revoke all session-wide permission grants (#177).
-    pub async fn reset_all_permissions(&self) -> Result<usize, ActorDeadError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ResetAllPermissions { reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
-    }
-
-    /// Undo the most recent reversible tool operation (#178).
-    pub async fn undo(&self) -> Result<crate::undo::UndoReport, ActorDeadError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::Undo { reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
-    }
-
-    /// List stored sessions, newest first (#176).
-    ///
-    /// Part of the API v1 contract (#269): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not
-    /// `ene_store::EneMemoryError`.
-    pub async fn list_sessions(
-        &self,
-        include_archived: bool,
-        limit: usize,
-    ) -> Result<Vec<crate::public_api::PublicSessionMeta>, crate::public_api::PublicApiError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ListSessions {
-                include_archived,
-                limit,
-                reply,
-            })
-            .map_err(|_| ActorDeadError)?;
-        let metas = rx.await.map_err(|_| ActorDeadError)??;
-        Ok(metas.into_iter().map(Into::into).collect())
-    }
-
-    /// Export a session to a versioned, redacted JSON bundle (#176).
-    ///
-    /// Part of the API v1 contract (#269): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not
-    /// `ene_store::EneMemoryError`.
-    pub async fn export_session(
-        &self,
-        session_id: impl Into<String>,
-    ) -> Result<String, crate::public_api::PublicApiError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ExportSession {
-                session_id: session_id.into(),
-                reply,
-            })
-            .map_err(|_| ActorDeadError)?;
-        Ok(rx.await.map_err(|_| ActorDeadError)??)
-    }
-
-    /// Import a session from a JSON export bundle (#176).
-    ///
-    /// Part of the API v1 contract (#269): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not
-    /// `ene_store::EneMemoryError`.
-    pub async fn import_session(
-        &self,
-        json: impl Into<String>,
-    ) -> Result<i64, crate::public_api::PublicApiError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ImportSession {
-                json: json.into(),
-                reply,
-            })
-            .map_err(|_| ActorDeadError)?;
-        Ok(rx.await.map_err(|_| ActorDeadError)??)
-    }
-
-    /// Full-text search over stored conversation messages (#176).
-    ///
-    /// Part of the API v1 contract (#269): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not
-    /// `ene_store::EneMemoryError`, and matches carry
-    /// [`crate::public_api::PublicExportedMessage`] rather than
-    /// `ene_store::ExportedMessage`.
-    pub async fn search_sessions(
-        &self,
-        query: impl Into<String>,
-        limit: usize,
-        offset: usize,
-    ) -> Result<
-        Vec<(String, crate::public_api::PublicExportedMessage)>,
-        crate::public_api::PublicApiError,
-    > {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::SearchSessions {
-                query: query.into(),
-                limit,
-                offset,
-                reply,
-            })
-            .map_err(|_| ActorDeadError)?;
-        let matches = rx.await.map_err(|_| ActorDeadError)??;
-        Ok(matches
-            .into_iter()
-            .map(|(session_id, message)| (session_id, message.into()))
-            .collect())
-    }
-
-    /// Archive or unarchive a session (#176).
-    ///
-    /// Part of the API v1 contract (#269): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not
-    /// `ene_store::EneMemoryError`.
-    pub async fn archive_session(
-        &self,
-        session_id: impl Into<String>,
-        archived: bool,
-    ) -> Result<bool, crate::public_api::PublicApiError> {
-        let (reply, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ArchiveSession {
-                session_id: session_id.into(),
-                archived,
-                reply,
-            })
-            .map_err(|_| ActorDeadError)?;
-        Ok(rx.await.map_err(|_| ActorDeadError)??)
-    }
-
-    /// Send a user-input response for a pending interactive tool.
-    pub fn submit_user_input(
-        &self,
-        request_id: impl Into<RequestId>,
-        response: UserInputResponse,
-    ) -> Result<(), ActorDeadError> {
-        self.cmd_tx
-            .send(EneCommand::UserInputResponse {
-                request_id: request_id.into(),
-                response,
-            })
-            .map_err(|_| ActorDeadError)
-    }
-
-    /// Push a privacy-safe proactive observation from the host (#166 / #168).
-    pub fn update_proactive_observation(
-        &self,
-        observation: ene_mind::ProactiveObservation,
-    ) -> Result<(), ActorDeadError> {
-        self.cmd_tx
-            .send(EneCommand::UpdateProactiveObservation { observation })
-            .map_err(|_| ActorDeadError)
-    }
-
-    /// Hot-update proactive policy in the running actor.
-    ///
-    /// Prefer [`Self::update_feature_settings`] when emotion / store / tools
-    /// also change — this path only patches `mind.proactive` and does not
-    /// reload the local decision model.
-    pub fn update_proactive_settings(
-        &self,
-        mind: ene_mind::ProactiveConfig,
-    ) -> Result<(), ActorDeadError> {
-        self.cmd_tx
-            .send(EneCommand::UpdateProactiveSettings { mind })
-            .map_err(|_| ActorDeadError)
-    }
-
-    /// Hot-update Features-tab sections (mind / store / tools / RAG).
-    ///
-    /// Does not tear down local GGUF handles. Tool process registry is rebuilt
-    /// when the tools section changes.
-    pub fn update_feature_settings(
-        &self,
-        settings: FeatureSettingsUpdate,
-    ) -> Result<(), ActorDeadError> {
-        self.cmd_tx
-            .send(EneCommand::UpdateFeatureSettings {
-                settings: Box::new(settings),
-            })
-            .map_err(|_| ActorDeadError)
-    }
-
-    /// Summarize a screen RGB capture via the local vision model (Gemma + mmproj).
-    ///
-    /// Part of the API v1 contract (#274): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
-    pub async fn summarize_screen_image(
-        &self,
-        width: u32,
-        height: u32,
-        rgb: Vec<u8>,
-        app_label: String,
-    ) -> Result<String, crate::public_api::PublicApiError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::SummarizeScreenImage {
-                width,
-                height,
-                rgb,
-                app_label,
-                reply: tx,
-            })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)?
-    }
-
-    // ── Pending candidate approval (#174 / #223) ──
-
-    /// List pending memory candidates awaiting user approval (#174).
-    ///
-    /// Part of the API v1 contract (#274): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
-    pub async fn list_pending_candidates(
-        &self,
-    ) -> Result<Vec<PendingCandidateSummary>, crate::public_api::PublicApiError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ListPendingCandidates { respond: tx })
-            .map_err(|_| ActorDeadError)?;
-        Ok(rx.await.map_err(|_| ActorDeadError)??)
-    }
-
-    /// Approve a pending memory candidate (#174).
-    ///
-    /// Part of the API v1 contract (#274): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
-    pub async fn approve_candidate(
-        &self,
-        id: i64,
-    ) -> Result<(), crate::public_api::PublicApiError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ApproveCandidate { id, respond: tx })
-            .map_err(|_| ActorDeadError)?;
-        Ok(rx.await.map_err(|_| ActorDeadError)??)
-    }
-
-    /// Reject a pending memory candidate (#174).
-    ///
-    /// Part of the API v1 contract (#274): errors are the stable
-    /// [`crate::public_api::PublicApiError`] categories, not a bare `String`.
-    pub async fn reject_candidate(&self, id: i64) -> Result<(), crate::public_api::PublicApiError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::RejectCandidate { id, respond: tx })
-            .map_err(|_| ActorDeadError)?;
-        Ok(rx.await.map_err(|_| ActorDeadError)??)
-    }
-}
-
-impl Drop for EneHandle {
-    /// Sends a graceful `Shutdown` command when the last handle clone is dropped.
-    ///
-    /// Because `Drop` is synchronous, the actor may still be running after this
-    /// returns. Background tasks spawned by the actor (classifiers, memory
-    /// writers, deferred tool tasks) become detached tokio tasks. Callers that
-    /// need a clean shutdown guarantee should use [`EneHandle::shutdown`] with
-    /// an explicit timeout before dropping the handle.
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.cmd_tx) == 1 {
-            let _ = self.cmd_tx.send(EneCommand::Shutdown);
-            // Last handle clone: shut down the plugin host (#247). `Drop` is
-            // synchronous, so spawn the async shutdown on the runtime when one
-            // is available; `SupervisedPlugin::drop` kills the processes as a
-            // synchronous backstop regardless.
-            if Arc::strong_count(&self.plugin_host) == 1 {
-                let plugin_host = Arc::clone(&self.plugin_host);
-                let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
-                let shutdown = async move {
-                    let mut guard = plugin_host.lock().await;
-                    if let Some(mut host) = guard.take() {
-                        host.shutdown().await;
-                    }
-                    drop(guard);
-
-                    // Abort the health → diagnostics bridge so it does not
-                    // outlive the host whose events it forwards (#238).
-                    let mut bridge = health_bridge_handle.lock().await;
-                    if let Some(handle) = bridge.take() {
-                        handle.abort();
-                    }
-                };
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => {
-                        handle.spawn(shutdown);
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            component = "EneHandle",
-                            "No tokio runtime available for plugin host shutdown; \
-                             relying on process-kill backstop"
-                        );
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ── Actor (internal) ──
-
-struct EneActor {
+/// Global monotonic counter used to generate unique DB IPC auth tokens.
+/// Intentionally process-global: each `EneHandle::open` call increments
+/// the counter so concurrent handles never share a token.
+static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(super) struct TurnActor {
     cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
     event_tx: broadcast::Sender<EneEvent>,
     diag_tx: broadcast::Sender<DiagnosticEvent>,
@@ -1411,8 +90,6 @@ struct EneActor {
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
     memory_writer_tasks: tokio::task::JoinSet<()>,
-    /// In-flight screen-summary vision jobs (must not block the command loop).
-    vision_tasks: tokio::task::JoinSet<()>,
     /// In-flight tool-search jobs; reaped so panics are not lost (#236).
     search_tasks: tokio::task::JoinSet<()>,
     /// In-flight deferred (background) tool tasks (#196). Each task polls
@@ -1433,7 +110,7 @@ struct EneActor {
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
     /// Held so the broadcast channel retains buffered diagnostic events until the
-    /// first subscriber attaches via [`EneHandle::diagnostics().subscribe()`].
+    /// first subscriber attaches via [`crate::EneHandle::diagnostics().subscribe()`].
     _diag_rx: broadcast::Receiver<DiagnosticEvent>,
     /// Proactive speech scheduler state (#166).
     proactive: crate::proactive::ProactiveScheduler,
@@ -1457,145 +134,94 @@ struct EneActor {
     plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
     /// Shared plugin host manager handle. Held by the actor so a Features
     /// update that changes the enabled plugin set can restart the host with
-    /// the new configuration (E1). Shared with [`EneHandle`] so shutdown
+    /// the new configuration (E1). Shared with [`crate::EneHandle`] so shutdown
     /// tears down whichever host is currently live.
     plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
     /// Shared handle to the plugin health → diagnostics bridge task. Kept in
     /// sync when the plugin host is restarted so shutdown aborts the live
     /// bridge rather than a stale one (#238).
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Current character-card name, shared with
+    /// [`crate::query::candidates::MemoryCandidateHandle`] so pending-candidate
+    /// queries can read it without a mailbox round-trip (#271). Kept in sync
+    /// on every `SetCharacter`.
+    card_name: Arc<parking_lot::Mutex<String>>,
 }
 
-/// Runs a future to completion, catching any panic and surfacing it as a
-/// [`DiagnosticEvent::ActorPanic`] instead of unwinding the caller (#236).
-///
-/// Returns `Ok(output)` on normal completion, or `Err(message)` when the
-/// future panicked. This keeps the actor command loop (and any other
-/// supervisor site) alive across a panicking unit of work.
-async fn isolate_panic<F, T>(
-    diag_tx: &broadcast::Sender<DiagnosticEvent>,
-    component: &str,
-    fut: F,
-) -> Result<T, String>
-where
-    F: std::future::Future<Output = T>,
-{
-    use futures::FutureExt;
-    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
-        Ok(output) => Ok(output),
-        Err(payload) => {
-            let message = crate::diagnostics::panic_message(&payload);
-            tracing::error!(
-                component = "ActorSupervisor",
-                component_name = %component,
-                error = %message,
-                "task panicked; contained by supervisor"
-            );
-            let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
-                component: component.to_string(),
-                message: message.clone(),
-            });
-            Err(message)
-        }
-    }
-}
-
-/// Drains finished tasks from a `JoinSet`, logging any that panicked.
-///
-/// Keeps the actor's background task sets from growing without bound while
-/// surfacing panics through structured diagnostics (#236).
-fn reap_join_set(
-    set: &mut tokio::task::JoinSet<()>,
-    component: &str,
-    message: &str,
-    diag_tx: &broadcast::Sender<DiagnosticEvent>,
-) {
-    while let Some(joined) = set.try_join_next() {
-        if let Err(e) = joined {
-            tracing::error!(component = %component, error = %e, "{message}");
-            if e.is_panic() {
-                let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
-                    component: component.to_string(),
-                    message: e.to_string(),
-                });
-            }
-        }
-    }
-}
-
-/// Polls a deferred (background) tool task until it reaches a terminal state (#196).
-///
-/// Emits [`EneEvent::ToolBackgroundCompleted`] when the task completes, fails,
-/// or is cancelled. Runs as a background task in the actor's `deferred_tool_tasks`
-/// `JoinSet`.
-///
-/// `max_polls` controls how many poll iterations (at 100ms each) before the task
-/// is considered timed out. Override via the `ENE_TOOLS__DEFERRED_MAX_POLLS` env var
-/// (default: 600 = 60s).
-async fn poll_deferred_task(
-    registry: Arc<dyn ToolRegistry>,
-    event_tx: broadcast::Sender<EneEvent>,
-    task: DeferredToolTask,
-    max_polls: u32,
-) {
-    use ene_plugin_proto::DeferredStatus;
-    use std::time::Duration;
-
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
-
-    for _ in 0..max_polls {
-        let status = registry.poll_deferred(&task.tool_name, &task.task_id).await;
-        match status {
-            DeferredStatus::Pending => {
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-            DeferredStatus::Completed { result } => {
-                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
-                    tool_name: task.tool_name.clone(),
-                    task_id: task.task_id.clone(),
-                    status: DeferredStatus::Completed { result },
-                });
-                return;
-            }
-            DeferredStatus::Failed { error } => {
-                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
-                    tool_name: task.tool_name.clone(),
-                    task_id: task.task_id.clone(),
-                    status: DeferredStatus::Failed { error },
-                });
-                return;
-            }
-            DeferredStatus::Cancelled => {
-                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
-                    tool_name: task.tool_name.clone(),
-                    task_id: task.task_id.clone(),
-                    status: DeferredStatus::Cancelled,
-                });
-                return;
-            }
-            DeferredStatus::Unknown => {
-                tracing::warn!(
-                    component = "DeferredTool",
-                    tool = %task.tool_name,
-                    task_id = %task.task_id,
-                    "Deferred task became unknown; stopping poll"
-                );
-                return;
-            }
+impl TurnActor {
+    /// Constructs a ready `TurnActor`. Called once from [`crate::EneHandle::open`].
+    pub(super) fn new(
+        cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
+        event_tx: broadcast::Sender<EneEvent>,
+        diag_tx: broadcast::Sender<DiagnosticEvent>,
+        diag_rx: broadcast::Receiver<DiagnosticEvent>,
+        turn_gate: Arc<TurnGate>,
+        config: EneConfig,
+        session: ConversationSession,
+        registry: Arc<dyn ToolRegistry>,
+        tool_rag: Option<Arc<ToolRag>>,
+        health_monitor: ene_ai::ProviderHealthMonitor,
+        tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
+        plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
+        plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
+        health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+        card_name: Arc<parking_lot::Mutex<String>>,
+    ) -> Self {
+        let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
+        let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
+        let (deferred_tool_tx, deferred_tool_rx) = mpsc::unbounded_channel();
+        Self {
+            cmd_rx,
+            event_tx,
+            diag_tx,
+            turn_gate,
+            config,
+            session,
+            registry,
+            tool_rag,
+            cancel_token: CancellationToken::new(),
+            stream_handle: None,
+            stream_session_rx: None,
+            stream_partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+            active_turn: None,
+            pending_permissions: Arc::new(Mutex::new(HashMap::new())),
+            pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
+            permission_scopes: Arc::new(Mutex::new(Vec::new())),
+            undo_stack: Arc::new(Mutex::new(crate::undo::UndoStack::new(64))),
+            context: ene_mind::ContextManager::default(),
+            call_tool_tasks: tokio::task::JoinSet::new(),
+            classifier_tasks: tokio::task::JoinSet::new(),
+            memory_writer_tasks: tokio::task::JoinSet::new(),
+            search_tasks: tokio::task::JoinSet::new(),
+            deferred_tool_tasks: tokio::task::JoinSet::new(),
+            classifier_rx,
+            memory_writer_rx,
+            deferred_tool_rx,
+            terminal_emitted: Arc::new(AtomicBool::new(false)),
+            classifier_tx,
+            memory_writer_tx,
+            deferred_tool_tx,
+            _diag_rx: diag_rx,
+            proactive: crate::proactive::ProactiveScheduler::default(),
+            proactive_decision_rx: None,
+            proactive_decision_handle: None,
+            proactive_llm: None,
+            active_origin: crate::types::TurnOrigin::User,
+            health_monitor,
+            deferred_max_polls: std::env::var("ENE_TOOLS__DEFERRED_MAX_POLLS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
+            tts_provider,
+            plugin_tool_registries,
+            plugin_host,
+            health_bridge_handle,
+            card_name,
         }
     }
 
-    tracing::warn!(
-        component = "DeferredTool",
-        tool = %task.tool_name,
-        task_id = %task.task_id,
-        "Deferred task polling timed out after {} polls",
-        max_polls
-    );
-}
-
-impl EneActor {
-    /// Runs a single command, isolating any panic so the actor loop survives (#236).
+    /// Runs a single command through [`isolate_panic`] so a panicking
+    /// command handler is contained instead of taking down the actor task.
     ///
     /// A panicking command is logged and surfaced as a [`DiagnosticEvent::ActorPanic`]
     /// instead of unwinding the whole actor task (which would take down the process).
@@ -1607,7 +233,7 @@ impl EneActor {
             .unwrap_or(true)
     }
 
-    async fn run(mut self) {
+    pub(super) async fn run(mut self) {
         loop {
             // Reap completed background tasks so the JoinSets
             // do not grow without bound. Call-tool volume is
@@ -1628,12 +254,6 @@ impl EneActor {
                 &mut self.memory_writer_tasks,
                 "MemoryWriterReaper",
                 "Deferred memory-writer task panicked",
-                &self.diag_tx,
-            );
-            reap_join_set(
-                &mut self.vision_tasks,
-                "VisionReaper",
-                "Screen summary vision task panicked",
                 &self.diag_tx,
             );
             reap_join_set(
@@ -1857,7 +477,6 @@ impl EneActor {
         self.classifier_tasks.abort_all();
         self.memory_writer_tasks.abort_all();
         self.call_tool_tasks.abort_all();
-        self.vision_tasks.abort_all();
         self.search_tasks.abort_all();
         self.drain_pending().await;
     }
@@ -1921,7 +540,7 @@ impl EneActor {
                 Ok(tokens) => tokens,
                 Err(e) => {
                     tracing::warn!(
-                        component = "EneActor",
+                        component = "TurnActor",
                         error = %e,
                         "Failed to spawn DB IPC servers during plugin reconfiguration; \
                          continuing without plugin DB access"
@@ -1936,7 +555,7 @@ impl EneActor {
                 Ok(host) => Some(host),
                 Err(e) => {
                     tracing::warn!(
-                        component = "EneActor",
+                        component = "TurnActor",
                         error = %e,
                         "Plugin host failed to restart after Features update; \
                          continuing without plugins"
@@ -1949,7 +568,7 @@ impl EneActor {
         if let Some(host) = new_host.as_ref() {
             for (kind, factory) in host.llm_factories() {
                 tracing::info!(
-                    component = "EneActor",
+                    component = "TurnActor",
                     kind = %kind,
                     "Re-registered plugin-provided LLM provider factory after Features update"
                 );
@@ -1980,14 +599,14 @@ impl EneActor {
                 self.registry = Arc::new(composite);
                 self.plugin_tool_registries = registries;
                 tracing::info!(
-                    component = "EneActor",
+                    component = "TurnActor",
                     tool_registries = registry_count,
                     "Plugin host reconfigured and tool registry rebuilt after Features update"
                 );
             }
             Err(e) => {
                 tracing::warn!(
-                    component = "EneActor",
+                    component = "TurnActor",
                     error = %e,
                     "Failed to rebuild tool registry after plugin reconfiguration"
                 );
@@ -2026,49 +645,18 @@ impl EneActor {
         }
     }
 
-    async fn summarize_screen_rgb(
+    /// Handles [`EneCommand::PrepareVisionSummary`] (#271): the busy-check
+    /// and lazy local-model init the legacy inline `SummarizeScreenImage`
+    /// handler used to do, minus the raw RGB buffer and the actual
+    /// (expensive) model call — both of which now live entirely in
+    /// [`crate::vision::VisionHandle`], outside this actor.
+    async fn prepare_vision_summary(
         &mut self,
-        width: u32,
-        height: u32,
-        rgb: Vec<u8>,
         app_label: String,
-        reply: oneshot::Sender<Result<String, crate::public_api::PublicApiError>>,
+        reply: oneshot::Sender<Result<VisionPrepared, crate::public_api::PublicApiError>>,
     ) {
         use crate::public_api::PublicApiError;
 
-        const MAX_PIXELS: u64 = 1920 * 1080;
-        let width_u = u64::from(width);
-        let height_u = u64::from(height);
-        let expected = width_u.saturating_mul(height_u).saturating_mul(3);
-        if width == 0 || height == 0 {
-            let _ = reply.send(Err(PublicApiError::Invalid {
-                message: "invalid screen image dimensions".to_string(),
-            }));
-            return;
-        }
-        if width_u.saturating_mul(height_u) > MAX_PIXELS {
-            let _ = reply.send(Err(PublicApiError::Invalid {
-                message: format!(
-                    "screen image too large ({width}x{height}; max {MAX_PIXELS} pixels)"
-                ),
-            }));
-            return;
-        }
-        let Ok(expected_len) = usize::try_from(expected) else {
-            let _ = reply.send(Err(PublicApiError::Invalid {
-                message: "screen image byte length overflows usize".to_string(),
-            }));
-            return;
-        };
-        if rgb.len() != expected_len {
-            let _ = reply.send(Err(PublicApiError::Invalid {
-                message: format!(
-                    "rgb buffer length mismatch (got {}, expected {expected_len})",
-                    rgb.len()
-                ),
-            }));
-            return;
-        }
         if self.stream_handle.is_some() || self.proactive_decision_rx.is_some() {
             let _ = reply.send(Err(PublicApiError::Internal {
                 message: "runtime busy".to_string(),
@@ -2110,32 +698,14 @@ impl EneActor {
             return;
         }
 
-        match crate::proactive::rgb_to_jpeg_data_uri(width, height, &rgb) {
-            Ok(uri) => {
-                self.proactive.last_screen_image_data_uri = Some(uri);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    component = "Proactive",
-                    error = %e,
-                    "Failed to stash screen frame for generation; continuing text-only"
-                );
-                self.proactive.last_screen_image_data_uri = None;
-            }
-        }
-
         let prompts = ene_config::PromptLibrary::load(&prompt_language);
         let system = prompts.proactive().screen_summary_system.trim().to_string();
         let user = prompts.proactive().render_screen_summary_user(&app_label);
-        self.vision_tasks.spawn(async move {
-            let result = local
-                .summarize_rgb(width, height, rgb, &system, &user)
-                .await
-                .map_err(|e| PublicApiError::Internal {
-                    message: e.to_string(),
-                });
-            let _ = reply.send(result);
-        });
+        let _ = reply.send(Ok(VisionPrepared {
+            local,
+            system,
+            user,
+        }));
     }
 
     async fn maybe_spawn_proactive_decision(&mut self) {
@@ -2312,7 +882,7 @@ impl EneActor {
                 // Never abort an in-flight turn here.
                 if self.stream_handle.is_some() {
                     tracing::warn!(
-                        component = "EneActor",
+                        component = "TurnActor",
                         "Run received while stream active; turn gate should have returned Busy"
                     );
                     return true;
@@ -2357,7 +927,7 @@ impl EneActor {
                         res = &mut handle => {
                             if let Err(e) = res {
                                 tracing::warn!(
-                                    component = "EneActor",
+                                    component = "TurnActor",
                                     error = %e,
                                     "Stream task join failed during cooperative cancel"
                                 );
@@ -2427,7 +997,6 @@ impl EneActor {
                 self.classifier_tasks.abort_all();
                 self.memory_writer_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
-                self.vision_tasks.abort_all();
                 self.abort_proactive_decision();
                 if let Some(handles) = self.proactive_llm.take() {
                     handles.shutdown().await;
@@ -2437,6 +1006,7 @@ impl EneActor {
             }
             EneCommand::SetCharacter { card, reply } => {
                 self.session.set_card(&card);
+                *self.card_name.lock() = self.session.card_name().to_string();
                 self.proactive.reset_session();
                 self.abort_proactive_decision();
                 let _ = reply.send(Ok(()));
@@ -2492,15 +1062,12 @@ impl EneActor {
                 }
                 true
             }
-            EneCommand::SummarizeScreenImage {
-                width,
-                height,
-                rgb,
-                app_label,
-                reply,
-            } => {
-                self.summarize_screen_rgb(width, height, rgb, app_label, reply)
-                    .await;
+            EneCommand::PrepareVisionSummary { app_label, reply } => {
+                self.prepare_vision_summary(app_label, reply).await;
+                true
+            }
+            EneCommand::StashProactiveScreenImage { data_uri } => {
+                self.proactive.last_screen_image_data_uri = data_uri;
                 true
             }
             EneCommand::PermissionDecision {
@@ -2553,75 +1120,6 @@ impl EneActor {
             EneCommand::Undo { reply } => {
                 let report = self.handle_undo().await;
                 let _ = reply.send(report);
-                true
-            }
-            EneCommand::ListSessions {
-                include_archived,
-                limit,
-                reply,
-            } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => store.list_sessions(include_archived, limit).await,
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = reply.send(result);
-                true
-            }
-            EneCommand::ExportSession { session_id, reply } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => match store.build_export(&session_id).await {
-                        Ok(export) => export.to_json(),
-                        Err(e) => Err(e),
-                    },
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = reply.send(result);
-                true
-            }
-            EneCommand::ImportSession { json, reply } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => match ene_store::SessionExport::from_json(&json) {
-                        Ok(export) => store.import_export(&export).await,
-                        Err(e) => Err(e),
-                    },
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = reply.send(result);
-                true
-            }
-            EneCommand::SearchSessions {
-                query,
-                limit,
-                offset,
-                reply,
-            } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => store.search_messages(&query, limit, offset).await,
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = reply.send(result);
-                true
-            }
-            EneCommand::ArchiveSession {
-                session_id,
-                archived,
-                reply,
-            } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => store.set_session_archived(&session_id, archived).await,
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = reply.send(result);
                 true
             }
             EneCommand::UserInputResponse {
@@ -2753,44 +1251,6 @@ impl EneActor {
             EneCommand::SetCcv3MemoryHash { hash, reply } => {
                 self.session.memory.ccv3_memory_hash = Some(hash);
                 let _ = reply.send(());
-                true
-            }
-            EneCommand::ListPendingCandidates { respond } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => {
-                        let character_id = self.session.card_name().to_string();
-                        store
-                            .list_pending_candidates(
-                                &character_id,
-                                Some(ene_store::PendingCandidateStatus::Pending),
-                            )
-                            .map(|list| list.iter().map(PendingCandidateSummary::from).collect())
-                    }
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = respond.send(result);
-                true
-            }
-            EneCommand::ApproveCandidate { id, respond } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => store.approve_pending_candidate(id).await.map(|_| ()),
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = respond.send(result);
-                true
-            }
-            EneCommand::RejectCandidate { id, respond } => {
-                let result = match self.session.memory.memory_store.as_ref() {
-                    Some(store) => store.resolve_pending_candidate(id, false).await,
-                    None => Err(ene_store::EneMemoryError::Other(
-                        "Memory store is not enabled".to_string(),
-                    )),
-                };
-                let _ = respond.send(result);
                 true
             }
         }
@@ -3159,9 +1619,137 @@ impl EneActor {
     }
 }
 
+/// Runs a future to completion, catching any panic and surfacing it as a
+/// [`DiagnosticEvent::ActorPanic`] instead of unwinding the caller (#236).
+///
+/// Returns `Ok(output)` on normal completion, or `Err(message)` when the
+/// future panicked. This keeps the actor command loop (and any other
+/// supervisor site) alive across a panicking unit of work.
+pub(super) async fn isolate_panic<F, T>(
+    diag_tx: &broadcast::Sender<DiagnosticEvent>,
+    component: &str,
+    fut: F,
+) -> Result<T, String>
+where
+    F: std::future::Future<Output = T>,
+{
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(output) => Ok(output),
+        Err(payload) => {
+            let message = crate::diagnostics::panic_message(&payload);
+            tracing::error!(
+                component = "ActorSupervisor",
+                component_name = %component,
+                error = %message,
+                "task panicked; contained by supervisor"
+            );
+            let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
+                component: component.to_string(),
+                message: message.clone(),
+            });
+            Err(message)
+        }
+    }
+}
+
+/// Drains finished tasks from a `JoinSet`, logging any that panicked.
+///
+/// Keeps the actor's background task sets from growing without bound while
+/// surfacing panics through structured diagnostics (#236).
+fn reap_join_set(
+    set: &mut tokio::task::JoinSet<()>,
+    component: &str,
+    message: &str,
+    diag_tx: &broadcast::Sender<DiagnosticEvent>,
+) {
+    while let Some(joined) = set.try_join_next() {
+        if let Err(e) = joined {
+            tracing::error!(component = %component, error = %e, "{message}");
+            if e.is_panic() {
+                let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
+                    component: component.to_string(),
+                    message: e.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Polls a deferred (background) tool task until it reaches a terminal state (#196).
+///
+/// Emits [`EneEvent::ToolBackgroundCompleted`] when the task completes, fails,
+/// or is cancelled. Runs as a background task in the actor's `deferred_tool_tasks`
+/// `JoinSet`.
+///
+/// `max_polls` controls how many poll iterations (at 100ms each) before the task
+/// is considered timed out. Override via the `ENE_TOOLS__DEFERRED_MAX_POLLS` env var
+/// (default: 600 = 60s).
+async fn poll_deferred_task(
+    registry: Arc<dyn ToolRegistry>,
+    event_tx: broadcast::Sender<EneEvent>,
+    task: DeferredToolTask,
+    max_polls: u32,
+) {
+    use ene_plugin_proto::DeferredStatus;
+    use std::time::Duration;
+
+    const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+    for _ in 0..max_polls {
+        let status = registry.poll_deferred(&task.tool_name, &task.task_id).await;
+        match status {
+            DeferredStatus::Pending => {
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
+            DeferredStatus::Completed { result } => {
+                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                    tool_name: task.tool_name.clone(),
+                    task_id: task.task_id.clone(),
+                    status: DeferredStatus::Completed { result },
+                });
+                return;
+            }
+            DeferredStatus::Failed { error } => {
+                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                    tool_name: task.tool_name.clone(),
+                    task_id: task.task_id.clone(),
+                    status: DeferredStatus::Failed { error },
+                });
+                return;
+            }
+            DeferredStatus::Cancelled => {
+                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                    tool_name: task.tool_name.clone(),
+                    task_id: task.task_id.clone(),
+                    status: DeferredStatus::Cancelled,
+                });
+                return;
+            }
+            DeferredStatus::Unknown => {
+                tracing::warn!(
+                    component = "DeferredTool",
+                    tool = %task.tool_name,
+                    task_id = %task.task_id,
+                    "Deferred task became unknown; stopping poll"
+                );
+                return;
+            }
+        }
+    }
+
+    tracing::warn!(
+        component = "DeferredTool",
+        tool = %task.tool_name,
+        task_id = %task.task_id,
+        "Deferred task polling timed out after {} polls",
+        max_polls
+    );
+}
+
 // ── Factory / init helpers (moved from runtime.rs) ──
 
-async fn warmup_character_memories_ready(
+pub(super) async fn warmup_character_memories_ready(
     config: &EneConfig,
     session: &ConversationSession,
 ) -> Option<u64> {
@@ -3239,7 +1827,7 @@ fn plugin_enable_set_changed(
 /// keying tokens off config would orphan DB servers (config key with no
 /// matching binary) or starve plugins of tokens (binary with no config
 /// entry). Mirroring the manager's discovery here keeps the two sets aligned.
-fn spawn_db_ipc_servers(
+pub(super) fn spawn_db_ipc_servers(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
 ) -> Result<HashMap<String, String>, EneRuntimeError> {
@@ -3405,7 +1993,7 @@ fn is_plugin_executable(path: &std::path::Path) -> bool {
 }
 
 /// Builds the active composite tool registry from plugin-contributed registries.
-fn build_tool_registry(
+pub(super) fn build_tool_registry(
     plugin_host: Option<&ene_plugin_host::PluginHostManager>,
 ) -> Result<Arc<dyn ToolRegistry>, EneRuntimeError> {
     let Some(host) = plugin_host else {
@@ -3456,7 +2044,7 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
     }
 }
 
-fn init_embedding(
+pub(super) fn init_embedding(
     config: &EneConfig,
 ) -> Result<Arc<dyn ene_ai::EmbeddingProvider>, ene_ai::EmbeddingError> {
     use ene_ai::ResolvedEmbedding;
@@ -3491,7 +2079,7 @@ fn init_embedding(
     }
 }
 
-async fn init_memory_store(
+pub(super) async fn init_memory_store(
     config: &EneConfig,
     embedder: &dyn ene_ai::EmbeddingProvider,
 ) -> Result<Arc<ene_store::MemoryStore>, String> {
@@ -3520,7 +2108,7 @@ async fn init_memory_store(
 ///
 /// Returns `None` when the pipeline is disabled. Invalid `forced` tool
 /// names fail `EneHandle::open`.
-fn init_tool_rag(
+pub(super) fn init_tool_rag(
     config: &EneConfig,
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
     session: &ConversationSession,
@@ -3534,139 +2122,4 @@ fn init_tool_rag(
     let store = session.memory.memory_store.clone();
     let opts = ToolRagOptions::from_config(rag_config)?;
     Ok(Some(Arc::new(ToolRag::new(embedder.clone(), store, opts))))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_config_memory_off() -> EneConfig {
-        let mut config = EneConfig::default();
-        let store = ene_store::StoreConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        config.set_section(&store).expect("store config merges");
-        let plugins = ene_plugin_host::PluginConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        let _ = config.set_section(&plugins);
-        let ai = ene_ai::AiConfig::default();
-        let _ = config.set_section(&ai);
-        config
-    }
-
-    fn test_card() -> CharacterCardV3 {
-        CharacterCardV3::default()
-    }
-
-    #[tokio::test]
-    async fn broadcast_channels_emit_lag_on_overflow() {
-        let handle = EneHandle::open(test_config_memory_off(), test_card())
-            .await
-            .expect("open initializes handle");
-
-        // Test event_tx buffer overflow (capacity is 1024)
-        let mut event_rx = handle.subscribe();
-        let mut diag_rx = handle.diagnostics().subscribe();
-
-        // Send 1025 events to exceed the buffer capacity of 1024
-        for i in 0..1025 {
-            let _ = handle.event_tx.send(EneEvent::TextDelta {
-                turn: TurnId::new(),
-                origin: crate::types::TurnOrigin::User,
-                delta: format!("delta {i}"),
-            });
-        }
-
-        // Try to receive and it should return RecvError::Lagged
-        let res = event_rx.recv().await;
-        assert!(
-            matches!(
-                res,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
-            ),
-            "Expected RecvError::Lagged for event channel overflow, got {res:?}"
-        );
-
-        let mut saw_lagged = false;
-        let mut saw_resync = false;
-        while let Ok(ev) = diag_rx.try_recv() {
-            match ev {
-                crate::diagnostics::DiagnosticEvent::Lagged { channel, .. }
-                    if channel == "events" =>
-                {
-                    saw_lagged = true;
-                }
-                crate::diagnostics::DiagnosticEvent::ResyncNeeded { channel }
-                    if channel == "events" =>
-                {
-                    saw_resync = true;
-                }
-                _ => {}
-            }
-        }
-        assert!(
-            saw_lagged,
-            "expected DiagnosticEvent::Lagged after event lag"
-        );
-        assert!(
-            saw_resync,
-            "expected DiagnosticEvent::ResyncNeeded after event lag"
-        );
-
-        // Test diag_tx buffer overflow (capacity is 256)
-        let mut diag_rx = handle.diagnostics().subscribe();
-
-        // Send 257 events to exceed the buffer capacity of 256
-        for i in 0..257 {
-            let _ = handle
-                .diag_tx
-                .send(crate::diagnostics::DiagnosticEvent::PipelinePhase {
-                    turn: TurnId::new(),
-                    phase: format!("phase {i}"),
-                });
-        }
-
-        // Try to receive and it should return RecvError::Lagged
-        let res = diag_rx.recv().await;
-        assert!(
-            matches!(
-                res,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
-            ),
-            "Expected RecvError::Lagged for diagnostics channel overflow, got {res:?}"
-        );
-
-        let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
-    }
-
-    #[tokio::test]
-    async fn isolate_panic_returns_output_on_success() {
-        let (diag_tx, _diag_rx) = broadcast::channel(16);
-        let result = isolate_panic(&diag_tx, "test", async { 42u32 }).await;
-        assert_eq!(result.expect("no panic"), 42);
-    }
-
-    #[tokio::test]
-    async fn isolate_panic_contains_panic_and_emits_diagnostic() {
-        let (diag_tx, mut diag_rx) = broadcast::channel(16);
-        let result: Result<u32, String> = isolate_panic(&diag_tx, "test-component", async {
-            panic!("boom");
-        })
-        .await;
-        let message = result.expect_err("panic must be contained, not propagated");
-        assert!(message.contains("boom"), "unexpected message: {message}");
-
-        // The supervisor must surface the panic as a diagnostic event.
-        let mut saw_panic = false;
-        while let Ok(ev) = diag_rx.try_recv() {
-            if let crate::diagnostics::DiagnosticEvent::ActorPanic { component, .. } = ev {
-                assert_eq!(component, "test-component");
-                saw_panic = true;
-            }
-        }
-        assert!(saw_panic, "expected ActorPanic diagnostic event");
-    }
 }
