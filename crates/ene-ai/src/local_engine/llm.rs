@@ -89,6 +89,23 @@ impl<M: ene_infer::LocalModel> LocalLlmEngine<M> {
     pub fn new(handle: EngineHandle<M>, descriptor: EngineDescriptor) -> Self {
         Self { handle, descriptor }
     }
+
+    /// The underlying handle, for callers whose model needs to submit
+    /// request shapes beyond [`LlmChatRequest`] on the same worker/model
+    /// instance this adapter wraps (e.g. a raw-image vision variant
+    /// alongside ordinary chat text — see `ene-ai-local`'s
+    /// `LocalLlamaCppProvider`, which holds a `LocalLlmEngine` for the
+    /// `LlmProvider` half and reaches through this accessor for the other).
+    #[must_use]
+    pub fn handle(&self) -> &EngineHandle<M> {
+        &self.handle
+    }
+
+    /// This engine's declared capability/concurrency/resource metadata.
+    #[must_use]
+    pub fn descriptor(&self) -> &EngineDescriptor {
+        &self.descriptor
+    }
 }
 
 #[async_trait]
