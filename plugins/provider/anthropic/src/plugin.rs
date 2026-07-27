@@ -11,7 +11,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ene_plugin::{LlmPlugin, LlmProviderSpec, PluginError, PluginStream, PluginStreamChunk};
+use ene_plugin::{
+    ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginError, PluginStream, PluginStreamChunk,
+};
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -229,6 +231,14 @@ impl LlmPlugin for AnthropicPlugin {
             ],
             supports_streaming: true,
             supports_vision: true,
+            // A stateless HTTP proxy to Anthropic's cloud API, not a local
+            // model — safe to run many requests concurrently. Explicit,
+            // per the `ConcurrencyHint` design: opting into more than the
+            // serial default requires stating so, which this does.
+            concurrency: ConcurrencyHint {
+                max_in_flight: 8,
+                queue_depth: 16,
+            },
         }]
     }
 

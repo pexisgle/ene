@@ -64,12 +64,12 @@ pub use server::{PluginDispatch, run_plugin_server};
 
 // Re-export key types from ene-plugin-proto so plugin authors only need
 // to depend on `ene-plugin` for the full authoring surface.
-/// Cross-platform IPC transport (re-exported from `ene-plugin-proto`).
-pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};
 pub use ene_plugin_proto::{
-    LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
+    ConcurrencyHint, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
     PluginIpcRequest, PluginIpcResponse, SttProviderSpec, TtsProviderSpec, VersionRange,
 };
+/// Cross-platform IPC transport (re-exported from `ene-plugin-proto`).
+pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};
 /// Shared tool types (re-exported from `ene-plugin-proto`).
 pub use ene_plugin_proto::{ToolError, ToolResult, ToolSpec};
 
