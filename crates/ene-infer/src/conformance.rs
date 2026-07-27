@@ -35,7 +35,7 @@ use crate::model::LocalModel;
 /// generically: how long to run, and whether to panic partway through.
 pub trait ConformanceRequest: Default + Send + 'static {
     /// Builds a request that, when run, checks
-    /// [`JobContext::should_stop`]/calls [`JobContext::tick`] in a loop for
+    /// [`crate::JobContext::should_stop`]/calls [`crate::JobContext::tick`] in a loop for
     /// approximately `run_for` before completing, or panics almost
     /// immediately if `then_panic` is `true`.
     fn scripted(run_for: Duration, then_panic: bool) -> Self;
@@ -399,8 +399,8 @@ impl ConformanceResponse for MockResponse {
 pub(crate) struct MockError;
 
 /// A trivial [`LocalModel`] used for this crate's own tests: it busy-waits
-/// for `run_for`, checking [`JobContext::should_stop`] and calling
-/// [`JobContext::tick`] every couple of milliseconds, optionally panicking
+/// for `run_for`, checking [`crate::JobContext::should_stop`] and calling
+/// [`crate::JobContext::tick`] every couple of milliseconds, optionally panicking
 /// instead, and counts how many times [`LocalModel::reset`] has run.
 #[cfg(test)]
 #[derive(Debug, Default)]
