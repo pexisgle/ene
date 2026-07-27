@@ -2853,6 +2853,7 @@ dependencies = [
  "ene-plugin-proto",
  "ene-store",
  "ene-tool-rag",
+ "ene-voice",
  "futures",
  "image",
  "parking_lot",
