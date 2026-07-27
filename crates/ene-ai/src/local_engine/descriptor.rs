@@ -155,20 +155,33 @@ impl Default for ConcurrencyHint {
 /// example) automatically starts sharing that device's budget the moment it
 /// declares `ResourceClass::Gpu { device: 0 }` — no change to callers or to
 /// engines already using that class.
+///
+/// `Cpu` deliberately carries no field. An earlier revision used
+/// `Cpu { threads: u32 }` and relied on two engines picking different
+/// numbers to avoid sharing a semaphore — that made a capacity question
+/// (how many CPU-bound jobs may run at once) masquerade as an identity
+/// question (are these the same resource), which does not scale: every new
+/// CPU engine had to pick an unused magic number, and retuning an existing
+/// engine's thread count would silently change what it shares a budget
+/// with. All CPU-bound local engines now declare the same `Cpu` value and
+/// share one process-wide budget; how large that budget is (whether two
+/// independent CPU engines may run concurrently at all) is controlled by
+/// [`crate::local_engine::resource::default_permits`] /
+/// [`crate::local_engine::resource::ResourceRegistry::configure_all`], not
+/// by this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceClass {
     /// A specific GPU device index, as used by `with_main_gpu(n)` /
-    /// CUDA/Vulkan device selection.
+    /// CUDA/Vulkan device selection. A real, meaningful identity: two
+    /// engines that declare the same device index genuinely do contend on
+    /// that one physical device.
     Gpu {
         /// Device index.
         device: u32,
     },
-    /// CPU-bound inference sized for roughly this many threads.
-    Cpu {
-        /// Advisory thread count; part of the class identity (see type docs)
-        /// rather than a semaphore permit count.
-        threads: u32,
-    },
+    /// CPU-bound inference. Shared by every CPU-bound local engine — see the
+    /// type-level docs for why this carries no field.
+    Cpu,
     /// A network-attached engine (e.g. a local sidecar process reached over
     /// HTTP/gRPC) that does not contend on host GPU/CPU capacity the same
     /// way.
@@ -282,10 +295,12 @@ mod tests {
             ResourceClass::Gpu { device: 0 },
             ResourceClass::Gpu { device: 1 }
         );
-        assert_ne!(
-            ResourceClass::Cpu { threads: 4 },
-            ResourceClass::Cpu { threads: 8 }
-        );
+        // `Cpu` carries no field: every CPU-bound engine shares this one
+        // value on purpose (see the type docs) rather than picking a
+        // distinguishing number, so there is nothing to assert `!=` here —
+        // this instead pins that two `Cpu` values are always equal.
+        assert_eq!(ResourceClass::Cpu, ResourceClass::Cpu);
+        assert_ne!(ResourceClass::Cpu, ResourceClass::Gpu { device: 0 });
     }
 
     #[test]

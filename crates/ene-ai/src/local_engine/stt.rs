@@ -107,6 +107,13 @@ mod tests {
         Echo(usize),
         Slow(Duration),
         Fail,
+        /// Scripted for `ene_infer::conformance::run_all` (see
+        /// `ConformanceRequest` below) — distinct from `Slow`/`Fail` because
+        /// the battery needs to script an optional panic too.
+        Scripted {
+            run_for: Duration,
+            then_panic: bool,
+        },
     }
 
     impl From<SttTranscribeRequest> for MockSttRequest {
@@ -121,9 +128,28 @@ mod tests {
         }
     }
 
+    impl ene_infer::conformance::ConformanceRequest for MockSttRequest {
+        fn scripted(run_for: Duration, then_panic: bool) -> Self {
+            Self::Scripted {
+                run_for,
+                then_panic,
+            }
+        }
+    }
+
+    impl Default for MockSttRequest {
+        /// Required by `ConformanceRequest: Default`; never actually run
+        /// with this value (the battery always builds requests via
+        /// `scripted`), so any variant works.
+        fn default() -> Self {
+            Self::Echo(0)
+        }
+    }
+
     #[derive(Debug)]
     struct MockSttResponse {
         sample_count: usize,
+        resets_seen: usize,
     }
 
     impl From<MockSttResponse> for SttResult {
@@ -136,8 +162,16 @@ mod tests {
         }
     }
 
+    impl ene_infer::conformance::ConformanceResponse for MockSttResponse {
+        fn resets_seen(&self) -> usize {
+            self.resets_seen
+        }
+    }
+
     #[derive(Debug, Default)]
-    struct MockSttModel;
+    struct MockSttModel {
+        resets_seen: usize,
+    }
 
     impl LocalModel for MockSttModel {
         type Request = MockSttRequest;
@@ -158,7 +192,10 @@ mod tests {
             ctx: &JobContext,
         ) -> Result<Self::Response, Self::Error> {
             match req {
-                MockSttRequest::Echo(n) => Ok(MockSttResponse { sample_count: n }),
+                MockSttRequest::Echo(n) => Ok(MockSttResponse {
+                    sample_count: n,
+                    resets_seen: self.resets_seen,
+                }),
                 MockSttRequest::Fail => Err(MockSttError("empty pcm".to_string())),
                 MockSttRequest::Slow(run_for) => {
                     let start = Instant::now();
@@ -172,14 +209,42 @@ mod tests {
                         }
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Ok(MockSttResponse { sample_count: 999 })
+                    Ok(MockSttResponse {
+                        sample_count: 999,
+                        resets_seen: self.resets_seen,
+                    })
+                }
+                MockSttRequest::Scripted {
+                    run_for,
+                    then_panic,
+                } => {
+                    assert!(!then_panic, "scripted panic for conformance testing");
+                    let start = Instant::now();
+                    loop {
+                        if ctx.should_stop().is_some() {
+                            return Err(MockSttError("stopped".to_string()));
+                        }
+                        ctx.tick();
+                        if start.elapsed() >= run_for {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Ok(MockSttResponse {
+                        sample_count: 0,
+                        resets_seen: self.resets_seen,
+                    })
                 }
             }
+        }
+
+        fn reset(&mut self) {
+            self.resets_seen += 1;
         }
     }
 
     fn provider(resource: ResourceClass, cfg: EngineConfig) -> LocalSttEngine<MockSttModel> {
-        let handle = ene_infer::EngineHandle::spawn(|| Ok(MockSttModel), cfg);
+        let handle = ene_infer::EngineHandle::spawn(|| Ok(MockSttModel::default()), cfg);
         let descriptor = EngineDescriptor::new(
             "mock-stt",
             CapabilitySet::empty().with(Capability::Stt),
@@ -190,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_happy_path() {
-        let p = provider(ResourceClass::Cpu { threads: 401 }, EngineConfig::default());
+        let p = provider(ResourceClass::Gpu { device: 401 }, EngineConfig::default());
         let pcm = vec![0.0_f32; 1600];
         let result = p
             .transcribe(&pcm, 16_000)
@@ -202,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn transcribe_model_error_maps_to_provider() {
-        let p = provider(ResourceClass::Cpu { threads: 402 }, EngineConfig::default());
+        let p = provider(ResourceClass::Gpu { device: 402 }, EngineConfig::default());
         let err = p
             .transcribe(&[], 16_000)
             .await
@@ -213,7 +278,7 @@ mod tests {
     #[tokio::test]
     async fn transcribe_deadline_maps_to_timeout() {
         let p = provider(
-            ResourceClass::Cpu { threads: 403 },
+            ResourceClass::Gpu { device: 403 },
             EngineConfig::new(4, Duration::from_millis(20)),
         );
         let pcm = vec![0.0_f32; 999];
@@ -241,5 +306,16 @@ mod tests {
             map_engine_error(down),
             AudioProviderError::Provider(_)
         ));
+    }
+
+    /// Runs the generic queueing/cancellation/panic-recovery/reset battery
+    /// against `MockSttModel` itself (the `LocalModel`, not the
+    /// `LocalSttEngine` adapter around it) — this is what keeps this
+    /// blanket adapter's assumptions about `ene_infer::LocalModel` correct
+    /// as new `LocalModel` implementations (voice engines, future
+    /// providers) land beside it.
+    #[tokio::test]
+    async fn mock_stt_model_passes_conformance_battery() {
+        ene_infer::conformance::run_all(MockSttModel::default).await;
     }
 }
