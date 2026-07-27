@@ -287,6 +287,48 @@ async fn reset_runs_between_jobs() {
 }
 
 #[tokio::test]
+async fn try_spawn_reuses_the_eagerly_built_instance() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls_in_factory = Arc::clone(&calls);
+    let engine = EngineHandle::try_spawn(
+        move || {
+            calls_in_factory.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(MockModel::new())
+        },
+        EngineConfig::new(4, Duration::from_secs(5)),
+    )
+    .expect("factory succeeds synchronously");
+
+    let result = engine
+        .submit(
+            MockRequest::scripted(Duration::ZERO, false),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("expected the first job to succeed");
+    assert_eq!(result.resets_seen(), 0);
+
+    // Exactly one call: the eager, synchronous one inside `try_spawn` itself.
+    // If the worker thread called `factory` again for its first job (as
+    // `spawn` always does), this would be 2.
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "expected try_spawn's eagerly-built instance to be reused for the first job, not rebuilt"
+    );
+}
+
+#[test]
+fn try_spawn_surfaces_a_synchronous_construction_failure() {
+    let result: Result<EngineHandle<MockModel>, MockError> =
+        EngineHandle::try_spawn(|| Err(MockError), EngineConfig::default());
+    assert!(
+        matches!(result, Err(MockError)),
+        "expected try_spawn to fail synchronously with the factory's own error"
+    );
+}
+
+#[tokio::test]
 async fn stall_timeout_is_purely_diagnostic_and_does_not_break_jobs() {
     // The stall watchdog only logs; it must never affect what a job
     // returns, even when the watchdog's own poll window elapses mid-job.

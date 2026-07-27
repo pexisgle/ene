@@ -47,9 +47,11 @@ impl<M: LocalModel> EngineHandle<M> {
     /// Spawns a dedicated worker thread that owns the model for its entire
     /// lifetime, and returns a handle for submitting jobs to it.
     ///
-    /// `factory` builds the model. It is called once at startup and again
-    /// any time `run` (or `reset`) panics, to rebuild a fresh model —
-    /// see the crate-level docs for why this requires `Fn`, not `FnOnce`.
+    /// `factory` builds the model. It is called once at startup — on the
+    /// worker thread, not synchronously here, see [`Self::try_spawn`] if
+    /// that matters for your model — and again any time `run` (or `reset`)
+    /// panics, to rebuild a fresh model. See the crate-level docs for why
+    /// this requires `Fn`, not `FnOnce`.
     ///
     /// # Errors
     ///
@@ -62,6 +64,51 @@ impl<M: LocalModel> EngineHandle<M> {
     pub fn spawn(
         factory: impl Fn() -> Result<M, M::Error> + Send + 'static,
         cfg: EngineConfig,
+    ) -> Self {
+        Self::spawn_with_initial(factory, cfg, None)
+    }
+
+    /// As [`Self::spawn`], but builds the first model synchronously on the
+    /// calling thread instead of deferring that first `factory()` call to
+    /// the worker thread.
+    ///
+    /// `spawn` cannot report a construction failure to its caller: it always
+    /// calls `factory` on the background worker thread, so a model whose
+    /// constructor is meant to fail fast (missing file, bad config, ...)
+    /// would otherwise have that failure silently deferred to the first
+    /// [`Self::submit`] call, surfacing as an opaque
+    /// [`EngineError::EngineDown`] instead of the model's own `M::Error` at
+    /// the call site where a caller can act on it. `try_spawn` fixes that:
+    /// it calls `factory` once, right here, and — only if that succeeds —
+    /// hands the already-built instance to the worker thread for its first
+    /// job instead of calling `factory` again. `factory` is still retained
+    /// for every later rebuild after a panic, exactly as with `spawn`.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever `factory()` returns if its first, synchronous call
+    /// fails. Unlike `spawn`, there is no handle to hand back in that case.
+    /// A panic from that first `factory()` call is not caught here (this
+    /// crate's `catch_unwind` recovery only wraps calls made from inside the
+    /// worker thread) and propagates as an ordinary Rust panic to the
+    /// caller — consistent with any other constructor that can panic, and
+    /// arguably more useful here than silently swallowing a construction-time
+    /// bug the way a deferred `EngineDown` would.
+    pub fn try_spawn(
+        factory: impl Fn() -> Result<M, M::Error> + Send + 'static,
+        cfg: EngineConfig,
+    ) -> Result<Self, M::Error> {
+        let first = factory()?;
+        Ok(Self::spawn_with_initial(factory, cfg, Some(first)))
+    }
+
+    /// Shared body of [`Self::spawn`]/[`Self::try_spawn`]. `initial`, when
+    /// `Some`, is handed to the worker loop as the already-built first model
+    /// instance so it does not call `factory` again for that first job.
+    fn spawn_with_initial(
+        factory: impl Fn() -> Result<M, M::Error> + Send + 'static,
+        cfg: EngineConfig,
+        initial: Option<M>,
     ) -> Self {
         let queue_depth = cfg.queue_depth.max(1);
         let (tx, rx) = mpsc::channel(queue_depth);
@@ -96,6 +143,7 @@ impl<M: LocalModel> EngineHandle<M> {
                     &worker_job_active,
                     epoch,
                     &worker_engine_name,
+                    initial,
                 );
             });
 
@@ -244,6 +292,10 @@ fn build_model<M: LocalModel>(
 /// The body of the dedicated worker thread: owns the model, pulls jobs off
 /// the bounded channel one at a time, and never lets more than one `run`
 /// call execute at once (there is only ever one worker thread per handle).
+///
+/// `initial`, when `Some` (see [`EngineHandle::try_spawn`]), is used as the
+/// first model instance instead of calling `factory` again — the caller
+/// already built and validated it synchronously before this thread started.
 fn worker_loop<M: LocalModel>(
     factory: &(impl Fn() -> Result<M, M::Error> + Send + 'static),
     mut rx: mpsc::Receiver<Job<M>>,
@@ -252,13 +304,23 @@ fn worker_loop<M: LocalModel>(
     job_active: &AtomicBool,
     epoch: Instant,
     engine_name: &OnceLock<String>,
+    initial: Option<M>,
 ) {
-    let mut model: Option<M> = match build_model(factory, engine_name) {
-        Ok(model) => Some(model),
-        Err(reason) => {
-            tracing::error!(reason = %reason, "ene-infer: initial model construction failed, will retry on first job");
-            None
+    let mut model: Option<M> = match initial {
+        Some(model) => {
+            // Mirrors `build_model`'s bookkeeping for the success path: only
+            // ever set once in practice, but tolerate a later call losing
+            // the race.
+            drop(engine_name.set(model.engine_name().to_string()));
+            Some(model)
         }
+        None => match build_model(factory, engine_name) {
+            Ok(model) => Some(model),
+            Err(reason) => {
+                tracing::error!(reason = %reason, "ene-infer: initial model construction failed, will retry on first job");
+                None
+            }
+        },
     };
 
     while let Some(job) = rx.blocking_recv() {
