@@ -36,6 +36,7 @@ runtime-error-ai-auth = AI プロバイダーの認証に失敗しました。AP
 runtime-error-ai-rate-limit = AI プロバイダーのレート制限に達しました。しばらくしてから再試行してください。
 runtime-error-ai-network = AI プロバイダーに接続できませんでした。ネットワーク接続を確認してください。
 runtime-error-ai-local-llm = ローカルモデルエラー: { $detail }
+runtime-error-ai-busy = AI プロバイダーが現在混み合っています。しばらくしてから再試行してください。
 runtime-error-ai-provider = AI プロバイダーエラー: { $detail }
 runtime-error-ai-embedding = 埋め込みプロバイダーエラー: { $detail }
 runtime-error-turn-failed = { $detail }

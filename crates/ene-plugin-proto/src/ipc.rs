@@ -804,6 +804,7 @@ mod tests {
                     supported_models: vec!["claude-sonnet-4-20250514".into()],
                     supports_streaming: true,
                     supports_vision: true,
+                    concurrency: crate::capabilities::ConcurrencyHint::default(),
                 }],
                 tts_providers: vec![],
                 stt_providers: vec![],

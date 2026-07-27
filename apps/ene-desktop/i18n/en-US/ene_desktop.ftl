@@ -380,6 +380,7 @@ runtime-error-ai-auth = AI provider authentication failed. Check your API key.
 runtime-error-ai-rate-limit = AI provider rate limit exceeded. Try again later.
 runtime-error-ai-network = Could not reach the AI provider. Check your network connection.
 runtime-error-ai-local-llm = Local model error: { $detail }
+runtime-error-ai-busy = The AI provider is busy right now. Try again in a moment.
 runtime-error-ai-provider = AI provider error: { $detail }
 runtime-error-ai-embedding = Embedding provider error: { $detail }
 runtime-error-turn-failed = { $detail }

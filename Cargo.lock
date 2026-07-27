@@ -2438,6 +2438,7 @@ dependencies = [
  "async-trait",
  "ctor",
  "ene-config",
+ "ene-infer",
  "ene-plugin-proto",
  "parking_lot",
  "rand 0.10.2",
@@ -2657,6 +2658,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.0",
+ "ene-infer",
  "ene-plugin-proto",
  "parking_lot",
  "serde",
