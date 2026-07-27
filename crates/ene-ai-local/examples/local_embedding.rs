@@ -4,6 +4,11 @@
 //!
 //! Requires a multi-thread tokio runtime (`block_in_place`).
 
+#![expect(
+    clippy::print_stdout,
+    reason = "example binary prints embedding similarity results to the terminal by design"
+)]
+
 use ene_ai::cosine_similarity;
 use ene_ai::{ProactiveAcceleration, ResolvedLocalModel};
 use ene_ai_local::{create_local_provider, ensure_gguf_available};

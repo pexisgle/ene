@@ -125,8 +125,10 @@ impl IpcListener {
             match tokio::net::UnixListener::bind(path) {
                 Ok(listener) => Ok(IpcListener::Unix(listener)),
                 Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
-                    // Stale socket file — remove and retry once.
-                    let _ = std::fs::remove_file(path);
+                    // Stale socket file — remove and retry once. A failed
+                    // removal (e.g. already gone) is fine; the retried
+                    // bind below will surface any real problem.
+                    drop(std::fs::remove_file(path));
                     tokio::net::UnixListener::bind(path).map(IpcListener::Unix)
                 }
                 Err(e) => Err(e),
@@ -183,7 +185,8 @@ impl IpcListener {
 pub fn cleanup_path(path: &Path) {
     #[cfg(unix)]
     {
-        let _ = std::fs::remove_file(path);
+        // Best-effort removal; nothing meaningful to do if it's already gone.
+        drop(std::fs::remove_file(path));
     }
     #[cfg(windows)]
     {

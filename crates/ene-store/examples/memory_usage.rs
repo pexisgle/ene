@@ -4,6 +4,11 @@
 //! `NewMemoryItem`, searching via `Query`, and lifecycle management.
 //! Legacy conversation summaries / keyfacts APIs are unsupported.
 
+#![expect(
+    clippy::print_stdout,
+    reason = "example binary prints query/result output to the terminal by design"
+)]
+
 use chrono::Utc;
 use ene_store::{
     AffectAnnotation, HybridSearchWeights, MemoryConfidence, MemoryKind, MemorySalience,

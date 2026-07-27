@@ -375,7 +375,7 @@ impl TtsProvider for LocalTtsProvider {
                     }
                 }
                 Err(e) => {
-                    let _ = tx.blocking_send(Err(e));
+                    drop(tx.blocking_send(Err(e)));
                 }
             }
         });

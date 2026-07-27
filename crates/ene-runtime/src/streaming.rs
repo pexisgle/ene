@@ -164,11 +164,11 @@ pub(crate) fn emit_terminal(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        let _ = event_tx.send(EneEvent::Terminal {
+        drop(event_tx.send(EneEvent::Terminal {
             turn: turn.clone(),
             origin,
             reason,
-        });
+        }));
     }
 }
 
@@ -311,12 +311,12 @@ pub(crate) async fn perform_tool_executions(
         let name = call.name.clone();
         let args = call.arguments.clone();
 
-        let _ = ctx.event_tx.send(EneEvent::ToolCallStart {
+        drop(ctx.event_tx.send(EneEvent::ToolCallStart {
             turn: ctx.turn.clone(),
             origin: ctx.origin,
             name: name.clone(),
             arguments: args.clone(),
-        });
+        }));
 
         // Warn before executing an irreversible operation (#178). Such
         // actions are never placed on the undo stack, so the user is told
@@ -347,12 +347,12 @@ pub(crate) async fn perform_tool_executions(
             {
                 Ok(Ok(ene_plugin_host::DeferredCallResult::Deferred { task_id })) => {
                     // Task accepted for background execution.
-                    let _ = ctx.deferred_tool_tx.send(crate::handle::DeferredToolTask {
+                    drop(ctx.deferred_tool_tx.send(crate::handle::DeferredToolTask {
                         tool_name: name.clone(),
                         task_id: task_id.clone(),
                         arguments: args.clone(),
                         started_at: chrono::Utc::now(),
-                    });
+                    }));
                     Ok(format!(
                         "Task queued for background execution with task_id: {task_id}"
                     ))
@@ -424,14 +424,14 @@ pub(crate) async fn perform_tool_executions(
                         guard.insert(req_id.clone(), decide_tx);
                     }
 
-                    let _ = ctx.event_tx.send(EneEvent::PermissionRequired {
+                    drop(ctx.event_tx.send(EneEvent::PermissionRequired {
                         turn: ctx.turn.clone(),
                         origin: ctx.origin,
                         request_id: req_id.clone(),
                         action: action.clone(),
                         target: target.clone(),
                         description: description.clone(),
-                    });
+                    }));
 
                     match decide_rx.await {
                         Ok(PermissionDecision::AllowOnce) => {
@@ -506,12 +506,12 @@ pub(crate) async fn perform_tool_executions(
                         guard.insert(req_id.clone(), resp_tx);
                     }
 
-                    let _ = ctx.event_tx.send(EneEvent::UserInputRequired {
+                    drop(ctx.event_tx.send(EneEvent::UserInputRequired {
                         turn: ctx.turn.clone(),
                         origin: ctx.origin,
                         request_id: req_id.clone(),
                         prompt: prompt.clone(),
-                    });
+                    }));
 
                     match resp_rx.await {
                         Ok(UserInputResponse::Multi(answers)) => {
@@ -569,12 +569,12 @@ pub(crate) async fn perform_tool_executions(
                 .await
                 .record(&name, &ctx.turn.to_string(), targets);
         }
-        let _ = ctx.event_tx.send(EneEvent::ToolCallResult {
+        drop(ctx.event_tx.send(EneEvent::ToolCallResult {
             turn: ctx.turn.clone(),
             origin: ctx.origin,
             name: name.clone(),
             result: result_str.clone(),
-        });
+        }));
 
         summaries.push(tool_grounding::summarize_tool_result(
             &name,
@@ -765,13 +765,33 @@ pub(crate) async fn execute_system_search_tool(
     } else {
         use std::fmt::Write as _;
         let mut output = String::new();
+        // `fmt::Error` is `Copy`, so `drop()` would itself trip
+        // `clippy::dropping_copy_types`; every `writeln!` in this block
+        // targets a local `String` buffer via `fmt::Write`, which never
+        // actually fails.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "fmt::Write to a String is infallible in practice"
+        )]
         let _ = writeln!(output, "Found the following tools matching your query:\n");
         for tool in matching_tools {
             if tool.name.as_str() == "system.search_tools" {
                 continue;
             }
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "fmt::Write to a String is infallible in practice"
+            )]
             let _ = writeln!(output, "- **{}**", tool.name.as_str());
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "fmt::Write to a String is infallible in practice"
+            )]
             let _ = writeln!(output, "  *Description:* {}", tool.description);
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "fmt::Write to a String is infallible in practice"
+            )]
             let _ = writeln!(
                 output,
                 "  *Parameters Schema:* {}\n",
@@ -1095,6 +1115,13 @@ mod tests {
                 if let EneEvent::PermissionRequired { request_id, .. } = ev {
                     let mut guard = consumer_perms.lock().await;
                     if let Some(tx) = guard.remove(&request_id) {
+                        // A oneshot send error is `Copy` here (it's just the
+                        // unsent `PermissionDecision`), so `drop()` would
+                        // itself trip `clippy::dropping_copy_types`.
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                        )]
                         let _ = tx.send(PermissionDecision::AllowOnce);
                     }
                     return;
@@ -1127,7 +1154,7 @@ mod tests {
         // await forever on the dropped decision and this would
         // time out rather than hang the suite.
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;
-        let _ = consumer.await;
+        drop(consumer.await);
 
         let result = result.expect("executor hung: decision was dropped");
         let output = result.expect("executor returned error");
@@ -1229,6 +1256,13 @@ mod tests {
                     EneEvent::PermissionRequired { request_id, .. } => {
                         let mut guard = consumer_perms.lock().await;
                         if let Some(tx) = guard.remove(&request_id) {
+                            // A oneshot send error is `Copy` here (it's just the
+                            // unsent `PermissionDecision`), so `drop()` would
+                            // itself trip `clippy::dropping_copy_types`.
+                            #[expect(
+                                clippy::let_underscore_must_use,
+                                reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                            )]
                             let _ = tx.send(PermissionDecision::AllowOnce);
                         }
                         answered_perm = true;
@@ -1236,9 +1270,9 @@ mod tests {
                     EneEvent::UserInputRequired { request_id, .. } => {
                         let mut guard = consumer_inputs.lock().await;
                         if let Some(tx) = guard.remove(&request_id) {
-                            let _ = tx.send(UserInputResponse::Multi(vec![MultiAnswer::Answer {
+                            drop(tx.send(UserInputResponse::Multi(vec![MultiAnswer::Answer {
                                 text: "hello".to_string(),
-                            }]));
+                            }])));
                         }
                         answered_input = true;
                     }
@@ -1272,7 +1306,7 @@ mod tests {
         let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;
-        let _ = consumer.await;
+        drop(consumer.await);
 
         let output = result
             .expect("executor hung: pending request not resolved")

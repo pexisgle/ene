@@ -839,7 +839,7 @@ impl CharacterSettings {
         };
         if let Ok(mut mind) = self.ai.ai.get_section::<ene_mind::MindConfig>() {
             mind.emotion.classifier_language = lang.into();
-            let _ = self.ai.ai.set_section(&mind);
+            drop(self.ai.ai.set_section(&mind));
             *self.store.write() = ene_config::ConfigStore::from_config(self.ai.ai.clone());
         }
     }

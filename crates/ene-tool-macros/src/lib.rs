@@ -490,7 +490,11 @@ fn apply_serde_attrs(f: &syn::Field, instr: &mut FieldInstr) {
         if !attr.path().is_ident("serde") {
             continue;
         }
-        let _ = attr.parse_nested_meta(|meta| {
+        // Best-effort: an unparseable `#[serde(...)]` shape just leaves the
+        // field's defaults untouched, so the parse error is intentionally
+        // discarded (via `drop`, not `let _ =`, to satisfy
+        // `clippy::let_underscore_must_use`).
+        drop(attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("rename") {
                 if let Ok(lit) = meta
                     .value()
@@ -506,7 +510,7 @@ fn apply_serde_attrs(f: &syn::Field, instr: &mut FieldInstr) {
                 instr.aliases.push(lit.value());
             }
             Ok(())
-        });
+        }));
     }
 }
 

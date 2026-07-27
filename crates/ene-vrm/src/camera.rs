@@ -324,6 +324,10 @@ mod tests {
     /// actually produces, so the-diag log can be
     /// interpreted correctly. Just prints the matrix.
     #[test]
+    #[expect(
+        clippy::print_stdout,
+        reason = "diagnostic test intentionally prints the matrix for manual inspection"
+    )]
     fn orthographic_rh_diag_640x480() {
         let half_h = 2.6 * 0.5;
         let half_w = half_h * 1.333_333_3;

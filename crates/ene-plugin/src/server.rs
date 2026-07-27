@@ -170,7 +170,7 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
         let handles: Vec<_> = guard.drain(..).collect();
         drop(guard);
         for handle in handles {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            drop(tokio::time::timeout(Duration::from_secs(5), handle).await);
         }
     }
 
@@ -222,7 +222,7 @@ async fn handle_connection(
     }
     drain_task.abort();
     drop(tx);
-    let _ = writer_task.await;
+    drop(writer_task.await);
 
     if let Err(e) = read_result {
         tracing::error!(component = "PluginServer", error = %e, "Connection read loop ended");
@@ -285,12 +285,13 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             Ok(Some(req)) => req,
             Err(e) => {
                 tracing::error!(component = "PluginServer", error = %e, "IPC read error");
-                let _ = tx
-                    .send(PluginIpcResponse::Error {
+                drop(
+                    tx.send(PluginIpcResponse::Error {
                         request_id: String::new(),
                         message: e.to_string(),
                     })
-                    .await;
+                    .await,
+                );
                 return Err(e);
             }
         };
@@ -316,14 +317,15 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
                 if let Some(token) = streams.lock().remove(&stream_request_id) {
                     token.cancel();
                 }
-                let _ = tx.send(PluginIpcResponse::Ack { request_id }).await;
+                drop(tx.send(PluginIpcResponse::Ack { request_id }).await);
             }
             PluginIpcRequest::Shutdown => {
-                let _ = tx
-                    .send(PluginIpcResponse::Ack {
+                drop(
+                    tx.send(PluginIpcResponse::Ack {
                         request_id: String::new(),
                     })
-                    .await;
+                    .await,
+                );
                 shutdown.notify_one();
                 return Ok(());
             }
@@ -805,12 +807,13 @@ async fn run_chat_stream(
     };
 
     let Some(llm) = &dispatch.llm else {
-        let _ = tx
-            .send(PluginIpcResponse::StreamError {
+        drop(
+            tx.send(PluginIpcResponse::StreamError {
                 request_id: request_id.clone(),
                 message: "no LLM plugin registered".to_string(),
             })
-            .await;
+            .await,
+        );
         return;
     };
 
@@ -827,12 +830,13 @@ async fn run_chat_stream(
     {
         Ok(stream) => stream,
         Err(e) => {
-            let _ = tx
-                .send(PluginIpcResponse::StreamError {
+            drop(
+                tx.send(PluginIpcResponse::StreamError {
                     request_id: request_id.clone(),
                     message: e.to_string(),
                 })
-                .await;
+                .await,
+            );
             return;
         }
     };
@@ -849,12 +853,12 @@ async fn run_chat_stream(
                     request_id = %request_id,
                     "Chat stream cancelled by host"
                 );
-                let _ = tx
+                drop(tx
                     .send(PluginIpcResponse::StreamError {
                         request_id: request_id.clone(),
                         message: "stream cancelled".to_string(),
                     })
-                    .await;
+                    .await);
                 return;
             }
             next = stream.next() => {
@@ -870,20 +874,20 @@ async fn run_chat_stream(
                         }
                     }
                     Some(Err(e)) => {
-                        let _ = tx
+                        drop(tx
                             .send(PluginIpcResponse::StreamError {
                                 request_id: request_id.clone(),
                                 message: e.to_string(),
                             })
-                            .await;
+                            .await);
                         return;
                     }
                     None => {
-                        let _ = tx
+                        drop(tx
                             .send(PluginIpcResponse::StreamEnd {
                                 request_id: request_id.clone(),
                             })
-                            .await;
+                            .await);
                         return;
                     }
                 }

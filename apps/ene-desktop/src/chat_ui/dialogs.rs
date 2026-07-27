@@ -90,37 +90,37 @@ pub fn render_permission_dialog(
                     .button(i18n_embed_fl::fl!(crate::i18n::loader(), "yes"))
                     .clicked()
                 {
-                    let _ = ai.answer_permission(
+                    drop(ai.answer_permission(
                         request_id.clone(),
                         ene_runtime::PermissionDecision::AllowOnce,
-                    );
+                    ));
                     clear_pending_permission(world, chat_entity);
                 }
                 if ui
                     .button(i18n_embed_fl::fl!(crate::i18n::loader(), "no"))
                     .clicked()
                 {
-                    let _ = ai.answer_permission(
+                    drop(ai.answer_permission(
                         request_id.clone(),
                         ene_runtime::PermissionDecision::Deny,
-                    );
+                    ));
                     clear_pending_permission(world, chat_entity);
                 }
                 if ui
                     .button(i18n_embed_fl::fl!(crate::i18n::loader(), "always"))
                     .clicked()
                 {
-                    let _ = ai.answer_permission(
+                    drop(ai.answer_permission(
                         request_id.clone(),
                         ene_runtime::PermissionDecision::AllowSession,
-                    );
+                    ));
                     clear_pending_permission(world, chat_entity);
                 }
             });
         });
     });
     if !open {
-        let _ = ai.answer_permission(request_id, ene_runtime::PermissionDecision::Deny);
+        drop(ai.answer_permission(request_id, ene_runtime::PermissionDecision::Deny));
         clear_pending_permission(world, chat_entity);
     }
 }
@@ -188,22 +188,23 @@ pub fn render_user_input_dialog(
                             }
                         })
                         .collect();
-                    let _ =
-                        ai.answer_user_input(request_id.clone(), UserInputResponse::Multi(answers));
+                    drop(
+                        ai.answer_user_input(request_id.clone(), UserInputResponse::Multi(answers)),
+                    );
                     clear_pending_user_input(world, chat_entity);
                 }
                 if ui
                     .button(i18n_embed_fl::fl!(crate::i18n::loader(), "cancel"))
                     .clicked()
                 {
-                    let _ = ai.answer_user_input(request_id.clone(), UserInputResponse::Cancel);
+                    drop(ai.answer_user_input(request_id.clone(), UserInputResponse::Cancel));
                     clear_pending_user_input(world, chat_entity);
                 }
             });
         });
     });
     if !open {
-        let _ = ai.answer_user_input(request_id, UserInputResponse::Cancel);
+        drop(ai.answer_user_input(request_id, UserInputResponse::Cancel));
         clear_pending_user_input(world, chat_entity);
     }
 }

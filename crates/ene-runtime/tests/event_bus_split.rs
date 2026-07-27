@@ -35,9 +35,9 @@ fn test_config_memory_off() -> EneConfig {
     config.set_section(&store).expect("store config merges");
     let mut tools = ene_plugin_host::PluginConfig::default();
     tools.enabled = false;
-    let _ = config.set_section(&tools);
+    drop(config.set_section(&tools));
     let ai = ene_ai::AiConfig::default();
-    let _ = config.set_section(&ai);
+    drop(config.set_section(&ai));
     config
 }
 
@@ -81,7 +81,7 @@ async fn audio_burst_does_not_lag_chat_subscribers() {
             };
             // Bounded send: back-pressures against the drain task below,
             // exactly like the production audio channel.
-            let _ = audio_tx.send(chunk).await;
+            drop(audio_tx.send(chunk).await);
         }
     });
 
@@ -98,11 +98,11 @@ async fn audio_burst_does_not_lag_chat_subscribers() {
     // traffic still shared this buffer, the burst above would have already
     // evicted some of these before they're ever read.
     for i in 0..CHAT_CAPACITY {
-        let _ = chat_tx.send(ene_runtime::EneEvent::TextDelta {
+        drop(chat_tx.send(ene_runtime::EneEvent::TextDelta {
             turn: turn.clone(),
             origin: TurnOrigin::User,
             delta: format!("chunk {i}"),
-        });
+        }));
     }
 
     audio_task.await.expect("audio burst task completes");
@@ -160,7 +160,7 @@ async fn take_audio_stream_transfers_ownership_once() {
         "take_audio_stream on a clone must also return None once claimed"
     );
 
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 /// API-shape regression test: the lifecycle bus is a distinct subscription
@@ -186,5 +186,5 @@ async fn subscribe_lifecycle_is_independent_of_chat_bus() {
         Err(broadcast::error::TryRecvError::Empty)
     ));
 
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }

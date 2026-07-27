@@ -55,13 +55,13 @@ pub async fn execute_shell_command(
     let read_stdout = async {
         let mut out = Vec::new();
         let mut limited = stdout_buf.take(MAX_OUTPUT_BYTES);
-        let _ = limited.read_to_end(&mut out).await;
+        drop(limited.read_to_end(&mut out).await);
         out
     };
     let read_stderr = async {
         let mut out = Vec::new();
         let mut limited = stderr_buf.take(MAX_OUTPUT_BYTES);
-        let _ = limited.read_to_end(&mut out).await;
+        drop(limited.read_to_end(&mut out).await);
         out
     };
 
@@ -82,8 +82,8 @@ pub async fn execute_shell_command(
             && (out.stdout.len() as u64 >= MAX_OUTPUT_BYTES
                 || out.stderr.len() as u64 >= MAX_OUTPUT_BYTES)
         {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            drop(child.start_kill());
+            drop(child.wait().await);
             return Err(std::io::Error::other(format!(
                 "Command output exceeded {MAX_OUTPUT_BYTES} bytes; killed"
             )));
@@ -92,8 +92,8 @@ pub async fn execute_shell_command(
     } else {
         // Timeout: `kill_on_drop` is also set so the child dies
         // when `child` is dropped, but be explicit to be safe.
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        drop(child.start_kill());
+        drop(child.wait().await);
         Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "Command timed out",

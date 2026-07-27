@@ -568,7 +568,7 @@ impl EneHandle {
         if self.cmd_tx.send(EneCommand::Shutdown).is_err() {
             let mut guard = self.actor_handle.lock().await;
             if let Some(join) = guard.take() {
-                let _ = join.await;
+                drop(join.await);
             }
             drop(guard);
             self.shutdown_plugin_host().await;
@@ -735,7 +735,7 @@ impl Drop for EneHandle {
     /// an explicit timeout before dropping the handle.
     fn drop(&mut self) {
         if Arc::strong_count(&self.cmd_tx) == 1 {
-            let _ = self.cmd_tx.send(EneCommand::Shutdown);
+            drop(self.cmd_tx.send(EneCommand::Shutdown));
             // Last handle clone: shut down the plugin host (#247). `Drop` is
             // synchronous, so spawn the async shutdown on the runtime when one
             // is available; `SupervisedPlugin::drop` kills the processes as a
@@ -830,9 +830,9 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let _ = config.set_section(&plugins);
+        drop(config.set_section(&plugins));
         let ai = ene_ai::AiConfig::default();
-        let _ = config.set_section(&ai);
+        drop(config.set_section(&ai));
         config
     }
 
@@ -852,11 +852,11 @@ mod tests {
 
         // Send 1025 events to exceed the buffer capacity of 1024
         for i in 0..1025 {
-            let _ = handle.event_tx.send(EneEvent::TextDelta {
+            drop(handle.event_tx.send(EneEvent::TextDelta {
                 turn: TurnId::new(),
                 origin: crate::types::TurnOrigin::User,
                 delta: format!("delta {i}"),
-            });
+            }));
         }
 
         // Try to receive and it should return RecvError::Lagged
@@ -900,12 +900,14 @@ mod tests {
 
         // Send 257 events to exceed the buffer capacity of 256
         for i in 0..257 {
-            let _ = handle
-                .diag_tx
-                .send(crate::diagnostics::DiagnosticEvent::PipelinePhase {
-                    turn: TurnId::new(),
-                    phase: format!("phase {i}"),
-                });
+            drop(
+                handle
+                    .diag_tx
+                    .send(crate::diagnostics::DiagnosticEvent::PipelinePhase {
+                        turn: TurnId::new(),
+                        phase: format!("phase {i}"),
+                    }),
+            );
         }
 
         // Try to receive and it should return RecvError::Lagged
@@ -918,7 +920,7 @@ mod tests {
             "Expected RecvError::Lagged for diagnostics channel overflow, got {res:?}"
         );
 
-        let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 
     #[tokio::test]
@@ -1061,7 +1063,7 @@ mod tests {
             "expected DiagnosticEvent::ActorPanic {{ component: \"command\", .. }}"
         );
 
-        let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 
     /// Regression test for #271: a read-only session query must not queue
@@ -1079,7 +1081,7 @@ mod tests {
         if let Some(default_provider) = ai.providers.get_mut("default") {
             default_provider.base_url = "http://127.0.0.1:1".to_string();
         }
-        let _ = config.set_section(&ai);
+        drop(config.set_section(&ai));
 
         let handle = EneHandle::open(config, test_card())
             .await
@@ -1102,7 +1104,7 @@ mod tests {
         // resolves to an error — what matters here is *how fast* it resolves.
         assert!(result.is_err(), "memory store is disabled in this config");
 
-        let _ = handle.cancel(&turn);
-        let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+        drop(handle.cancel(&turn));
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 }

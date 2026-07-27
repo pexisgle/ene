@@ -280,12 +280,12 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                         message,
                     } if err_rid == rid => {
                         completed_clone.store(true, std::sync::atomic::Ordering::Release);
-                        let _ = tx.send(Err(LlmProviderError::Provider(message))).await;
+                        drop(tx.send(Err(LlmProviderError::Provider(message))).await);
                         break;
                     }
                     PluginIpcResponse::Error { message, .. } => {
                         completed_clone.store(true, std::sync::atomic::Ordering::Release);
-                        let _ = tx.send(Err(LlmProviderError::Provider(message))).await;
+                        drop(tx.send(Err(LlmProviderError::Provider(message))).await);
                         break;
                     }
                     _ => {

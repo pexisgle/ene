@@ -6,6 +6,11 @@
     clippy::indexing_slicing,
     reason = "CLI command parsers index into argv and message buffers"
 )]
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "ene-cli is a terminal REPL; stdout/stderr are its user-facing output, not library logging"
+)]
 #![cfg_attr(
     test,
     expect(clippy::expect_used, reason = "unit tests use expect for assertions")

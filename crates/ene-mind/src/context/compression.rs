@@ -137,7 +137,7 @@ pub fn spawn_compression_task(
 
     tokio::spawn(async move {
         let result = run_compression(store, provider, input).await;
-        let _ = tx.send(result);
+        drop(tx.send(result));
     });
 }
 

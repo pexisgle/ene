@@ -157,17 +157,24 @@ impl TerminalBackend for RealBackend {
     }
 
     fn clear_current_line(&mut self) {
-        let _ = queue!(self.stderr, MoveToColumn(0), Clear(ClearType::CurrentLine));
+        drop(queue!(
+            self.stderr,
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        ));
     }
 
     fn move_cursor_up(&mut self, n: usize) {
         if n > 0 {
-            let _ = queue!(self.stderr, MoveUp(u16::try_from(n).unwrap_or(u16::MAX)));
+            drop(queue!(
+                self.stderr,
+                MoveUp(u16::try_from(n).unwrap_or(u16::MAX))
+            ));
         }
     }
 
     fn move_to_column0(&mut self) {
-        let _ = queue!(self.stderr, MoveToColumn(0));
+        drop(queue!(self.stderr, MoveToColumn(0)));
     }
 
     fn is_interactive(&self) -> bool {

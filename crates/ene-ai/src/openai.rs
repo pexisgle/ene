@@ -445,7 +445,7 @@ impl LlmProvider for OpenAiProvider {
             )
             .await
             {
-                let _ = tx.send(Err(e)).await;
+                drop(tx.send(Err(e)).await);
             }
         });
 
@@ -980,12 +980,13 @@ async fn run_direct_sse_stream(
         }
 
         if text_delta.is_some() || tool_calls_delta.is_some() {
-            let _ = tx
-                .send(Ok(LlmResponseChunk {
+            drop(
+                tx.send(Ok(LlmResponseChunk {
                     text_delta,
                     tool_calls_delta,
                 }))
-                .await;
+                .await,
+            );
         }
     }
 

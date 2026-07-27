@@ -266,6 +266,10 @@ mod tests {
     /// ```
     #[tokio::test]
     #[ignore = "requires a local GGUF path via ENE_SMOKE_GGUF"]
+    #[expect(
+        clippy::print_stderr,
+        reason = "manual smoke test run with --nocapture to inspect model output"
+    )]
     async fn smoke_gguf_load_and_grammar() {
         let path = std::env::var("ENE_SMOKE_GGUF").expect("ENE_SMOKE_GGUF");
         let mmproj = std::env::var("ENE_SMOKE_MMPROJ").ok();

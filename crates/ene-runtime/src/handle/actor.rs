@@ -313,10 +313,11 @@ impl TurnActor {
                             deferred_candidates,
                         }) => {
                             if deferred_candidates > 0 {
-                                let _ =
-                                    lifecycle_tx.send(LifecycleEvent::PendingCandidateAvailable {
+                                drop(lifecycle_tx.send(
+                                    LifecycleEvent::PendingCandidateAvailable {
                                         count: deferred_candidates,
-                                    });
+                                    },
+                                ));
                             }
                         }
                         Ok(ene_mind::MemoryWriteOutcome::Failed {
@@ -343,14 +344,14 @@ impl TurnActor {
                             } else {
                                 "failed"
                             };
-                            let _ = diag_tx.send(DiagnosticEvent::MemoryWrite {
+                            drop(diag_tx.send(DiagnosticEvent::MemoryWrite {
                                 character_id,
                                 status: status.to_string(),
                                 message,
                                 pending_id,
                                 pending_count,
                                 permanent_count,
-                            });
+                            }));
                         }
                         Err(e) => {
                             tracing::error!(
@@ -358,14 +359,14 @@ impl TurnActor {
                                 error = %e,
                                 "Deferred memory-writer task panicked"
                             );
-                            let _ = diag_tx.send(DiagnosticEvent::MemoryWrite {
+                            drop(diag_tx.send(DiagnosticEvent::MemoryWrite {
                                 character_id: String::new(),
                                 status: "failed".to_string(),
                                 message: format!("memory writer task panicked: {e}"),
                                 pending_id: None,
                                 pending_count: None,
                                 permanent_count: None,
-                            });
+                            }));
                         }
                     }
                 });
@@ -419,9 +420,9 @@ impl TurnActor {
                         self.active_turn = None;
                         self.active_origin = crate::types::TurnOrigin::User;
                         self.turn_gate.end();
-                        let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+                        drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                             status: EneStatus::Idle,
-                        });
+                        }));
                     }
                 }
             } else {
@@ -679,9 +680,9 @@ impl TurnActor {
         use crate::public_api::PublicApiError;
 
         if self.stream_handle.is_some() || self.proactive_decision_rx.is_some() {
-            let _ = reply.send(Err(PublicApiError::Internal {
+            drop(reply.send(Err(PublicApiError::Internal {
                 message: "runtime busy".to_string(),
-            }));
+            })));
             return;
         }
 
@@ -694,39 +695,39 @@ impl TurnActor {
             );
 
         if let Err(e) = self.ensure_proactive_llm().await {
-            let _ = reply.send(Err(e));
+            drop(reply.send(Err(e)));
             return;
         }
         let Some(handles) = self.proactive_llm.as_ref() else {
-            let _ = reply.send(Err(PublicApiError::Internal {
+            drop(reply.send(Err(PublicApiError::Internal {
                 message: "proactive LLM handles missing after ensure".to_string(),
-            }));
+            })));
             return;
         };
         let Some(local) = handles.local().cloned() else {
-            let _ = reply.send(Err(PublicApiError::Internal {
+            drop(reply.send(Err(PublicApiError::Internal {
                 message: format!(
                     "local proactive model is not available (decision_backend={:?})",
                     handles.decision_kind
                 ),
-            }));
+            })));
             return;
         };
         if !local.supports_vision() {
-            let _ = reply.send(Err(PublicApiError::Internal {
+            drop(reply.send(Err(PublicApiError::Internal {
                 message: "local model has no vision mmproj loaded".to_string(),
-            }));
+            })));
             return;
         }
 
         let prompts = ene_config::PromptLibrary::load(&prompt_language);
         let system = prompts.proactive().screen_summary_system.trim().to_string();
         let user = prompts.proactive().render_screen_summary_user(&app_label);
-        let _ = reply.send(Ok(VisionPrepared {
+        drop(reply.send(Ok(VisionPrepared {
             local,
             system,
             user,
-        }));
+        })));
     }
 
     async fn maybe_spawn_proactive_decision(&mut self) {
@@ -797,7 +798,7 @@ impl TurnActor {
                 prompt_language,
             )
             .await;
-            let _ = tx.send(result);
+            drop(tx.send(result));
         });
         self.proactive_decision_handle = Some(handle);
     }
@@ -878,9 +879,9 @@ impl TurnActor {
         self.terminal_emitted = Arc::new(AtomicBool::new(false));
         self.active_turn = Some(turn.clone());
         self.active_origin = crate::types::TurnOrigin::Proactive;
-        let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+        drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
             status: EneStatus::Running,
-        });
+        }));
         let generation_timeout =
             std::time::Duration::from_secs(mind.proactive.generation_timeout_seconds.max(1));
         self.start_stream(
@@ -916,9 +917,9 @@ impl TurnActor {
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
                 self.active_turn = Some(turn.clone());
                 self.active_origin = crate::types::TurnOrigin::User;
-                let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+                drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Running,
-                });
+                }));
                 self.start_stream(
                     input,
                     turn,
@@ -961,7 +962,7 @@ impl TurnActor {
                         }
                         () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
                             handle.as_mut().abort();
-                            let _ = handle.await;
+                            drop(handle.await);
                             // Try to recover the session even on hard abort:
                             // if the stream had already reached a terminal state
                             // and called session_tx.send() before being killed,
@@ -1001,17 +1002,17 @@ impl TurnActor {
                     )
                     .is_ok()
                 {
-                    let _ = self.event_tx.send(EneEvent::Terminal {
+                    drop(self.event_tx.send(EneEvent::Terminal {
                         turn: cancelled_turn,
                         origin: self.active_origin,
                         reason: TerminalReason::Cancelled,
-                    });
+                    }));
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
-                let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+                drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
-                });
+                }));
                 true
             }
             EneCommand::Shutdown => {
@@ -1030,7 +1031,7 @@ impl TurnActor {
                 *self.card_name.lock() = self.session.card_name().to_string();
                 self.proactive.reset_session();
                 self.abort_proactive_decision();
-                let _ = reply.send(Ok(()));
+                drop(reply.send(Ok(())));
                 true
             }
             EneCommand::UpdateProactiveObservation { observation } => {
@@ -1049,7 +1050,7 @@ impl TurnActor {
             EneCommand::UpdateProactiveSettings { mind } => {
                 if let Ok(mut mind_cfg) = self.config.get_section::<ene_mind::MindConfig>() {
                     mind_cfg.proactive = mind;
-                    let _ = self.config.set_section(&mind_cfg);
+                    drop(self.config.set_section(&mind_cfg));
                 }
                 self.abort_proactive_decision();
                 true
@@ -1067,10 +1068,10 @@ impl TurnActor {
                     .unwrap_or_default();
                 let plugins_changed = plugin_enable_set_changed(&prev_plugins, &plugins);
 
-                let _ = self.config.set_section(&mind);
-                let _ = self.config.set_section(&store);
-                let _ = self.config.set_section(&plugins);
-                let _ = self.config.set_section(&rag);
+                drop(self.config.set_section(&mind));
+                drop(self.config.set_section(&store));
+                drop(self.config.set_section(&plugins));
+                drop(self.config.set_section(&rag));
                 self.abort_proactive_decision();
 
                 if plugins_changed {
@@ -1097,6 +1098,14 @@ impl TurnActor {
             } => {
                 let mut guard = self.pending_permissions.lock().await;
                 if let Some(tx) = guard.remove(&request_id) {
+                    // A oneshot `Sender<PermissionDecision>::send` error is
+                    // `Copy` (it's just the unsent value), so `drop()` would
+                    // itself trip `clippy::dropping_copy_types`; a dropped
+                    // receiver just means the caller stopped waiting.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                    )]
                     let _ = tx.send(decision);
                 }
                 drop(guard);
@@ -1104,7 +1113,7 @@ impl TurnActor {
             }
             EneCommand::ListPermissions { reply } => {
                 let scopes = self.permission_scopes.lock().await.clone();
-                let _ = reply.send(scopes);
+                drop(reply.send(scopes));
                 true
             }
             EneCommand::RevokePermission { id, reply } => {
@@ -1121,6 +1130,14 @@ impl TurnActor {
                         .revoke_pattern(&scope.action, &scope.target_pattern)
                         .await;
                 }
+                // A oneshot send error is `Copy` here (it's just the unsent
+                // `bool`), so `drop()` would itself trip
+                // `clippy::dropping_copy_types`; a dropped receiver just
+                // means the caller stopped waiting.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
                 let _ = reply.send(found);
                 true
             }
@@ -1135,12 +1152,20 @@ impl TurnActor {
                         .revoke_pattern(&scope.action, &scope.target_pattern)
                         .await;
                 }
+                // A oneshot send error is `Copy` here (it's just the unsent
+                // `usize`), so `drop()` would itself trip
+                // `clippy::dropping_copy_types`; a dropped receiver just
+                // means the caller stopped waiting.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
                 let _ = reply.send(count);
                 true
             }
             EneCommand::Undo { reply } => {
                 let report = self.handle_undo().await;
-                let _ = reply.send(report);
+                drop(reply.send(report));
                 true
             }
             EneCommand::UserInputResponse {
@@ -1149,14 +1174,14 @@ impl TurnActor {
             } => {
                 let mut guard = self.pending_user_inputs.lock().await;
                 if let Some(tx) = guard.remove(&request_id) {
-                    let _ = tx.send(response);
+                    drop(tx.send(response));
                 }
                 drop(guard);
                 true
             }
             EneCommand::ManualSplit { reply } => {
                 let result = self.handle_manual_split().await;
-                let _ = reply.send(result);
+                drop(reply.send(result));
                 true
             }
             EneCommand::GetSnapshot { reply } => {
@@ -1178,13 +1203,13 @@ impl TurnActor {
                     current_turn_count: self.session.current_turn_count() as u32,
                     session_started_at: self.session.session_started_at(),
                 };
-                let _ = reply.send(snapshot);
+                drop(reply.send(snapshot));
                 true
             }
             EneCommand::ListTools { reply } => {
                 let mut tools = self.registry.list_tools();
                 tools.push(crate::streaming::search_tools_spec());
-                let _ = reply.send(tools);
+                drop(reply.send(tools));
                 true
             }
             EneCommand::SearchTools { query, reply } => {
@@ -1209,7 +1234,7 @@ impl TurnActor {
                             })
                             .collect()
                     };
-                    let _ = reply.send(result);
+                    drop(reply.send(result));
                 });
                 true
             }
@@ -1246,7 +1271,7 @@ impl TurnActor {
                             .map(|r| r.text_for_llm())
                             .map_err(EneRuntimeError::from)
                     };
-                    let _ = reply.send(result);
+                    drop(reply.send(result));
                 });
                 true
             }
@@ -1260,7 +1285,14 @@ impl TurnActor {
                     registry.cancel_deferred(&tool_name, &task_id).await;
                     // The tool-side cancel is best-effort; report success
                     // optimistically since we cannot distinguish "cancelled"
-                    // from "already finished" without a follow-up poll.
+                    // from "already finished" without a follow-up poll. A
+                    // oneshot send error is `Copy` here (it's just the
+                    // unsent `bool`), so `drop()` would itself trip
+                    // `clippy::dropping_copy_types`.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                    )]
                     let _ = reply.send(true);
                 });
                 true
@@ -1271,6 +1303,14 @@ impl TurnActor {
             }
             EneCommand::SetCcv3MemoryHash { hash, reply } => {
                 self.session.memory.ccv3_memory_hash = Some(hash);
+                // A oneshot send error is `Copy` here (it's just the unsent
+                // `()`), so `drop()` would itself trip
+                // `clippy::dropping_copy_types`; a dropped receiver just
+                // means the caller stopped waiting.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
                 let _ = reply.send(());
                 true
             }
@@ -1333,19 +1373,19 @@ impl TurnActor {
                     )
                     .is_ok()
                 {
-                    let _ = self.event_tx.send(EneEvent::Terminal {
+                    drop(self.event_tx.send(EneEvent::Terminal {
                         turn,
                         origin,
                         reason: TerminalReason::Failed {
                             message: e.to_string(),
                         },
-                    });
+                    }));
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
-                let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
+                drop(self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
-                });
+                }));
                 return;
             }
         };
@@ -1383,10 +1423,10 @@ impl TurnActor {
         let partial_text = Arc::clone(&self.stream_partial_text);
         self.active_origin = origin;
 
-        let _ = self.event_tx.send(EneEvent::TurnStarted {
+        drop(self.event_tx.send(EneEvent::TurnStarted {
             turn: turn_for_stream.clone(),
             origin,
-        });
+        }));
 
         let (session_tx, session_rx) = oneshot::channel();
         self.stream_session_rx = Some(session_rx);
@@ -1422,7 +1462,7 @@ impl TurnActor {
                 partial_text,
             })
             .await;
-            let _ = session_tx.send(outcome);
+            drop(session_tx.send(outcome));
         });
         self.stream_handle = Some(handle);
     }
@@ -1461,12 +1501,12 @@ impl TurnActor {
         // Emit a health diagnostic for every probed candidate so the UI can
         // show per-provider status without polling.
         for report in self.health_monitor.all_reports() {
-            let _ = self.diag_tx.send(DiagnosticEvent::ProviderHealth {
+            drop(self.diag_tx.send(DiagnosticEvent::ProviderHealth {
                 provider: report.provider.clone(),
                 status: report.status.status_code().to_string(),
                 latency_ms: report.latency_ms,
                 detail: report.error.clone(),
-            });
+            }));
         }
 
         if selection.fell_back {
@@ -1476,13 +1516,15 @@ impl TurnActor {
                 .map(|(p, r)| format!("{p}: {r}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            let _ = self.diag_tx.send(DiagnosticEvent::ProviderFallback {
-                from: candidates
-                    .first()
-                    .map_or_else(String::new, |c| c.provider.clone()),
-                to: selection.candidate.provider.clone(),
-                reason,
-            });
+            drop(
+                self.diag_tx.send(DiagnosticEvent::ProviderFallback {
+                    from: candidates
+                        .first()
+                        .map_or_else(String::new, |c| c.provider.clone()),
+                    to: selection.candidate.provider.clone(),
+                    reason,
+                }),
+            );
         }
 
         let resolved = selection.candidate.to_resolved();
@@ -1693,10 +1735,10 @@ where
                 error = %message,
                 "task panicked; contained by supervisor"
             );
-            let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
+            drop(diag_tx.send(DiagnosticEvent::ActorPanic {
                 component: component.to_string(),
                 message: message.clone(),
-            });
+            }));
             Err(message)
         }
     }
@@ -1716,10 +1758,10 @@ fn reap_join_set(
         if let Err(e) = joined {
             tracing::error!(component = %component, error = %e, "{message}");
             if e.is_panic() {
-                let _ = diag_tx.send(DiagnosticEvent::ActorPanic {
+                drop(diag_tx.send(DiagnosticEvent::ActorPanic {
                     component: component.to_string(),
                     message: e.to_string(),
-                });
+                }));
             }
         }
     }
@@ -1754,27 +1796,27 @@ async fn poll_deferred_task(
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
             DeferredStatus::Completed { result } => {
-                let _ = lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
+                drop(lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
                     tool_name: task.tool_name.clone(),
                     task_id: task.task_id.clone(),
                     status: DeferredStatus::Completed { result },
-                });
+                }));
                 return;
             }
             DeferredStatus::Failed { error } => {
-                let _ = lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
+                drop(lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
                     tool_name: task.tool_name.clone(),
                     task_id: task.task_id.clone(),
                     status: DeferredStatus::Failed { error },
-                });
+                }));
                 return;
             }
             DeferredStatus::Cancelled => {
-                let _ = lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
+                drop(lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
                     tool_name: task.tool_name.clone(),
                     task_id: task.task_id.clone(),
                     status: DeferredStatus::Cancelled,
-                });
+                }));
                 return;
             }
             DeferredStatus::Unknown => {
@@ -1949,7 +1991,7 @@ pub(super) fn spawn_db_ipc_servers(
             let mut token_out = [0u8; 16];
             let mut reader = hasher.finalize_xof();
             use std::io::Read;
-            let _ = reader.read_exact(&mut token_out);
+            drop(reader.read_exact(&mut token_out));
             let auth_token = format!("ene-db-{:x}", u128::from_le_bytes(token_out));
 
             db_tokens.insert(name.clone(), auth_token.clone());

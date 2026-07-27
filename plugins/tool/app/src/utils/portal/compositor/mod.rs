@@ -90,6 +90,13 @@ fn js_string_literal(s: &str) -> String {
                 '\u{2029}' => escaped.push_str("\\u2029"),
                 c if c.is_control() => {
                     use std::fmt::Write;
+                    // `fmt::Error` is `Copy`, so `drop()` would itself trip
+                    // `clippy::dropping_copy_types`; writing into a `String`
+                    // via `fmt::Write` never actually fails.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "fmt::Write to a String is infallible in practice"
+                    )]
                     let _ = write!(escaped, "\\u{:04x}", c as u32);
                 }
                 c => escaped.push(c),

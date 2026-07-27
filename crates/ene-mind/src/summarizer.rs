@@ -6,6 +6,15 @@
 //! Prompt templates are loaded from the `PromptLibrary` so all user-facing strings
 //! stay out of compiled code and can be localised without recompilation.
 
+// `fmt::Error` is `Copy`, so `drop()` would itself trip
+// `clippy::dropping_copy_types`; every `write!`/`writeln!` in this module
+// targets a local `String` buffer via `fmt::Write`, which never actually
+// fails.
+#![expect(
+    clippy::let_underscore_must_use,
+    reason = "fmt::Write to a String is infallible in practice"
+)]
+
 use std::fmt::Write;
 
 use ene_config::PromptLibrary;

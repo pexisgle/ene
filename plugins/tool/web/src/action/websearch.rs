@@ -152,6 +152,13 @@ impl WebSearchAction {
         );
         for (i, result) in results.iter().enumerate() {
             let snippet = result.snippet.as_deref().unwrap_or("");
+            // `fmt::Error` is `Copy`, so `drop()` would itself trip
+            // `clippy::dropping_copy_types`; writing into a `String` via
+            // `fmt::Write` never actually fails.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "fmt::Write to a String is infallible in practice"
+            )]
             let _ = write!(
                 output,
                 "{}. {}\n   {snippet}\n   URL: {}\n\n",

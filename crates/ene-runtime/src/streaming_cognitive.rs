@@ -218,7 +218,7 @@ fn spawn_interrupted_memory_work(
         provider.clone(),
         embedder.cloned(),
     );
-    let _ = memory_writer_tx.send(handle);
+    drop(memory_writer_tx.send(handle));
 }
 
 /// Mutates `messages` in-place for a proactive turn: strips trailing empty
@@ -955,11 +955,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             // hard-aborted turn can recover its partial response
                             // for interruption recording (#H5).
                             partial_text.lock().push_str(&text);
-                            let _ = event_tx.send(EneEvent::TextDelta {
+                            drop(event_tx.send(EneEvent::TextDelta {
                                 turn: turn.clone(),
                                 origin,
                                 delta: text.clone(),
-                            });
+                            }));
                             if let Some(ref tx) = tts_tx {
                                 tts_sentence_buf.push_str(&text);
                                 tts_sentence_buf_chars =
@@ -971,7 +971,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                                     let sentence: String = tts_sentence_buf.drain(..end).collect();
                                     tts_sentence_buf_chars = tts_sentence_buf_chars
                                         .saturating_sub(sentence.chars().count());
-                                    let _ = tx.send(sentence);
+                                    drop(tx.send(sentence));
                                 }
                             }
                         }
@@ -1079,12 +1079,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 let (cues, sources): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
                 let primary_source = sources.into_iter().max_by_key(|s| cue_source_priority(*s));
                 if let Some(source) = primary_source {
-                    let _ = event_tx.send(EneEvent::Performance {
+                    drop(event_tx.send(EneEvent::Performance {
                         turn: turn.clone(),
                         origin,
                         cues,
                         source,
-                    });
+                    }));
                 }
             }
 
@@ -1157,7 +1157,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     provider.clone(),
                     embedder.clone(),
                 );
-                let _ = memory_writer_tx.send(memory_writer_handle);
+                drop(memory_writer_tx.send(memory_writer_handle));
             }
 
             if !is_proactive
@@ -1264,14 +1264,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 // A send failure means the actor has shut down; the
                 // classifier task runs as a detached orphan until
                 // completion, which is acceptable at shutdown.
-                let _ = classifier_tx.send(classifier_handle);
+                drop(classifier_tx.send(classifier_handle));
             }
 
             // Flush any remaining TTS buffer before Terminal.
             if let Some(ref tx) = tts_tx
                 && !tts_sentence_buf.trim().is_empty()
             {
-                let _ = tx.send(tts_sentence_buf.clone());
+                drop(tx.send(tts_sentence_buf.clone()));
             }
             drop(tts_tx);
 

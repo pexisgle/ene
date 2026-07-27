@@ -263,17 +263,19 @@ impl std::fmt::Debug for EneEventReceiver {
 
 impl EneEventReceiver {
     fn note_lag(&self, skipped: u64) {
-        let _ = self
-            .diag_tx
-            .send(crate::diagnostics::DiagnosticEvent::Lagged {
-                channel: "events".to_string(),
-                skipped,
-            });
-        let _ = self
-            .diag_tx
-            .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
-                channel: "events".to_string(),
-            });
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::Lagged {
+                    channel: "events".to_string(),
+                    skipped,
+                }),
+        );
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
+                    channel: "events".to_string(),
+                }),
+        );
     }
 
     /// Non-blocking poll of the event stream.
@@ -351,17 +353,19 @@ impl std::fmt::Debug for LifecycleReceiver {
 
 impl LifecycleReceiver {
     fn note_lag(&self, skipped: u64) {
-        let _ = self
-            .diag_tx
-            .send(crate::diagnostics::DiagnosticEvent::Lagged {
-                channel: "lifecycle".to_string(),
-                skipped,
-            });
-        let _ = self
-            .diag_tx
-            .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
-                channel: "lifecycle".to_string(),
-            });
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::Lagged {
+                    channel: "lifecycle".to_string(),
+                    skipped,
+                }),
+        );
+        drop(
+            self.diag_tx
+                .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
+                    channel: "lifecycle".to_string(),
+                }),
+        );
     }
 
     /// Non-blocking poll of the lifecycle stream.

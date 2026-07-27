@@ -724,7 +724,7 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(delta)));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::TextDelta(delta))));
             }
             Ok(EneEvent::Performance {
                 turn,
@@ -740,29 +740,29 @@ async fn pump_events(
                         ene_mind::PerfKind::Motion => {
                             let layer = cue.motion_layer.unwrap_or(ene_config::MotionLayer::Full);
                             let priority = cue_source_to_u8(source);
-                            let _ = event_tx.send(AppEvent::MotionCue {
+                            drop(event_tx.send(AppEvent::MotionCue {
                                 name: cue.name,
                                 layer,
                                 priority,
                                 duration: 0.0,
-                            });
+                            }));
                         }
                         ene_mind::PerfKind::Expression => {
                             let weight = cue.weight.unwrap_or(1.0);
                             let hold_secs = cue.hold_secs.unwrap_or(4.0);
-                            let _ = event_tx.send(AppEvent::ExpressionCue {
+                            drop(event_tx.send(AppEvent::ExpressionCue {
                                 name: cue.name,
                                 weight,
                                 hold_secs,
-                            });
+                            }));
                         }
                         ene_mind::PerfKind::Cancel => {
-                            let _ = event_tx.send(AppEvent::CancelCue { scope: cue.name });
+                            drop(event_tx.send(AppEvent::CancelCue { scope: cue.name }));
                         }
                         ene_mind::PerfKind::LookAt => {
-                            let _ = event_tx.send(AppEvent::LookAtCue {
+                            drop(event_tx.send(AppEvent::LookAtCue {
                                 target: cue.name.clone(),
-                            });
+                            }));
                         }
                     }
                 }
@@ -776,10 +776,10 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallStart {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallStart {
                     name,
                     arguments,
-                }));
+                })));
             }
             Ok(EneEvent::ToolCallResult {
                 turn,
@@ -790,10 +790,10 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallResult {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::ToolCallResult {
                     name,
                     result,
-                }));
+                })));
             }
             Ok(EneEvent::PermissionRequired {
                 turn,
@@ -806,12 +806,12 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::PermissionRequired {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::PermissionRequired {
                     request_id,
                     action,
                     target,
                     description,
-                }));
+                })));
             }
             Ok(EneEvent::UserInputRequired {
                 turn,
@@ -822,10 +822,10 @@ async fn pump_events(
                 if !turn_matches(&active_turn, &turn) {
                     continue;
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::UserInputRequired {
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::UserInputRequired {
                     request_id,
                     prompt,
-                }));
+                })));
             }
             Ok(EneEvent::ContextCompressed { .. }) => {}
             Ok(EneEvent::TurnStarted { turn, origin: _ }) => {
@@ -871,7 +871,7 @@ async fn pump_events(
                         );
                     }
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished)));
             }
             Ok(EneEvent::Terminal {
                 turn,
@@ -903,7 +903,7 @@ async fn pump_events(
                     }
                 }
                 let user_message = crate::runtime_error::user_message_from_turn(&message);
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(user_message)));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::Error(user_message))));
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(
@@ -940,7 +940,7 @@ async fn pump_events(
                         tracing::warn!("[Ene] Lagged cancel failed: {e}");
                     }
                 }
-                let _ = event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished));
+                drop(event_tx.send(AppEvent::Ai(AiStreamUpdate::Finished)));
             }
             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                 tracing::error!(
@@ -950,11 +950,11 @@ async fn pump_events(
                 processing.store(false, Ordering::Relaxed);
                 let shutdown_handle = handle.clone();
                 tokio::spawn(async move {
-                    let _ = shutdown_handle
+                    drop(shutdown_handle
                         .shutdown(std::time::Duration::from_secs(2))
-                        .await;
+                        .await);
                 });
-                let _ = event_tx.send(AppEvent::RuntimeDisconnected);
+                drop(event_tx.send(AppEvent::RuntimeDisconnected));
                 break;
             }
         },
@@ -964,7 +964,7 @@ async fn pump_events(
         // elsewhere (diagnostics / background tool UI) or not yet wired.
         lifecycle_event = lifecycle_receiver.recv() => match lifecycle_event {
             Ok(LifecycleEvent::PendingCandidateAvailable { count }) => {
-                let _ = event_tx.send(AppEvent::PendingCandidatesCount(count));
+                drop(event_tx.send(AppEvent::PendingCandidatesCount(count)));
             }
             Ok(LifecycleEvent::StatusChanged { .. } | LifecycleEvent::ToolBackgroundCompleted { .. }) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

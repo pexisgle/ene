@@ -301,7 +301,7 @@ impl WaylandInputRegionContext {
 
         surface.commit();
         if let Some(conn) = self.connection.as_ref() {
-            let _ = conn.flush();
+            drop(conn.flush());
         }
     }
 
