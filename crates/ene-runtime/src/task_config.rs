@@ -97,11 +97,6 @@ ene_config::define_config!(
 );
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "unit tests use unwrap/expect for concise assertions"
-)]
 mod tests {
     use super::ToolRuntimeConfig;
     use ene_config::EneConfig;

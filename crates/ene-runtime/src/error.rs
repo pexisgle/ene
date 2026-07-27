@@ -33,6 +33,15 @@ pub enum EneRuntimeError {
     /// Bootstrap misconfiguration or internal failure.
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),
+    /// The actor rejected admission of a new background task because its
+    /// bounded `JoinSet` was already at capacity (Stage 8). Mirrors
+    /// `ene_infer::EngineError::Busy` and [`ene_ai::LlmProviderError::Busy`]:
+    /// a full queue fails fast rather than blocking or growing without bound.
+    #[error("actor task queue is full (capacity {queue_depth}); try again shortly")]
+    Busy {
+        /// The configured capacity that was exceeded.
+        queue_depth: usize,
+    },
 }
 
 impl From<ene_ai::LlmProviderError> for EneRuntimeError {
