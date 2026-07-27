@@ -32,10 +32,19 @@ use super::descriptor::{ResourceBudgets, ResourceClass};
 ///   serialize; a single in-flight job per device is the safe default until
 ///   an operator opts into more, having confirmed their VRAM budget allows
 ///   it.
-/// - [`ResourceClass::Cpu`]: **1**. Matches
-///   [`crate::local_engine::ConcurrencyHint::default`] — CPU-bound local
-///   inference is conservatively assumed single-flight unless configured
-///   otherwise.
+/// - [`ResourceClass::Cpu`]: **the number of logical CPUs**, per
+///   [`std::thread::available_parallelism`] (falling back to 1 if the
+///   platform cannot report it). Every CPU-bound local engine shares this
+///   one class (see the type docs on [`ResourceClass::Cpu`] for why), so
+///   this is a genuine capacity budget rather than a per-engine identity:
+///   independently-authored CPU engines (whisper, Kokoro, a future one) may
+///   run concurrently up to this many at once before further submissions
+///   wait on [`ResourceRegistry::acquire`]. This is a heuristic upper bound,
+///   not a guarantee against CPU oversubscription — a single job may itself
+///   use more than one thread internally (whisper.cpp, ONNX Runtime's own
+///   intra-op parallelism), so this only bounds how many independent *engine
+///   jobs* run at once, not total OS thread count. Operators with tighter
+///   constraints should override via [`ResourceRegistry::configure_all`].
 /// - [`ResourceClass::Network`]: **4**. A network-attached engine (e.g. a
 ///   local sidecar process) is not constrained by host GPU/CPU capacity the
 ///   same way; a small amount of headroom avoids needlessly serializing what
@@ -43,7 +52,10 @@ use super::descriptor::{ResourceBudgets, ResourceClass};
 #[must_use]
 pub fn default_permits(class: ResourceClass) -> usize {
     match class {
-        ResourceClass::Gpu { .. } | ResourceClass::Cpu { .. } => 1,
+        ResourceClass::Gpu { .. } => 1,
+        ResourceClass::Cpu => {
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+        }
         ResourceClass::Network => 4,
     }
 }
@@ -142,8 +154,21 @@ mod tests {
     #[test]
     fn default_permits_matches_documented_values() {
         assert_eq!(default_permits(ResourceClass::Gpu { device: 0 }), 1);
-        assert_eq!(default_permits(ResourceClass::Cpu { threads: 4 }), 1);
+        let expected_cpu =
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(default_permits(ResourceClass::Cpu), expected_cpu);
         assert_eq!(default_permits(ResourceClass::Network), 4);
+    }
+
+    #[tokio::test]
+    async fn cpu_class_default_budget_matches_available_parallelism() {
+        // `ResourceClass::Cpu` is a single, process-wide value shared by
+        // every CPU-bound engine (see its type docs) — this is the one test
+        // in this crate that touches its real semaphore, so no other test's
+        // expectations about its permit count can collide with this one.
+        let expected = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let sem = ResourceRegistry::semaphore(ResourceClass::Cpu);
+        assert_eq!(sem.available_permits(), expected);
     }
 
     #[tokio::test]
@@ -172,7 +197,11 @@ mod tests {
 
     #[tokio::test]
     async fn configure_all_overrides_default_before_first_use() {
-        let class = ResourceClass::Cpu { threads: 104 };
+        // A unique `Gpu` device index, not `Cpu`, so this test's override
+        // cannot collide with `ResourceClass::Cpu`'s own dedicated test
+        // above or with any other test's expectations about the shared,
+        // process-wide `Cpu` class.
+        let class = ResourceClass::Gpu { device: 104 };
         ResourceRegistry::configure_all(&ResourceBudgets::new().with_permits(class, 3));
         let sem = ResourceRegistry::semaphore(class);
         assert_eq!(sem.available_permits(), 3);
@@ -180,7 +209,7 @@ mod tests {
 
     #[tokio::test]
     async fn configure_all_after_first_use_is_ignored() {
-        let class = ResourceClass::Cpu { threads: 105 };
+        let class = ResourceClass::Gpu { device: 105 };
         // Establish the semaphore at the default (1 permit) first.
         let sem = ResourceRegistry::semaphore(class);
         assert_eq!(sem.available_permits(), 1);

@@ -305,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn chat_completion_echoes_text() {
         let provider = engine(
-            ResourceClass::Cpu { threads: 201 },
+            ResourceClass::Gpu { device: 201 },
             CapabilitySet::empty().with(Capability::Chat),
             EngineConfig::default(),
         );
@@ -319,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn create_chat_stream_rejects_tools_when_not_declared() {
         let provider = engine(
-            ResourceClass::Cpu { threads: 202 },
+            ResourceClass::Gpu { device: 202 },
             CapabilitySet::empty().with(Capability::Chat),
             EngineConfig::default(),
         );
@@ -340,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn create_chat_stream_allows_tools_when_declared() {
         let provider = engine(
-            ResourceClass::Cpu { threads: 203 },
+            ResourceClass::Gpu { device: 203 },
             CapabilitySet::empty()
                 .with(Capability::Chat)
                 .with(Capability::Tools),
@@ -365,7 +365,7 @@ mod tests {
     #[tokio::test]
     async fn chat_completion_rejects_vision_when_not_declared() {
         let provider = engine(
-            ResourceClass::Cpu { threads: 204 },
+            ResourceClass::Gpu { device: 204 },
             CapabilitySet::empty().with(Capability::Chat),
             EngineConfig::default(),
         );
@@ -379,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn chat_completion_model_error_maps_to_local_llm() {
         let provider = engine(
-            ResourceClass::Cpu { threads: 205 },
+            ResourceClass::Gpu { device: 205 },
             CapabilitySet::empty().with(Capability::Chat),
             EngineConfig::default(),
         );
@@ -393,7 +393,7 @@ mod tests {
     #[tokio::test]
     async fn chat_completion_deadline_maps_to_timeout() {
         let provider = engine(
-            ResourceClass::Cpu { threads: 206 },
+            ResourceClass::Gpu { device: 206 },
             CapabilitySet::empty().with(Capability::Chat),
             EngineConfig::new(4, Duration::from_millis(20)),
         );
@@ -409,7 +409,7 @@ mod tests {
         // Generous resource budget so the shared semaphore is never this
         // test's bottleneck — only the engine's own bounded queue
         // (`queue_depth: 1`) should produce `Busy`.
-        let resource = ResourceClass::Cpu { threads: 207 };
+        let resource = ResourceClass::Gpu { device: 207 };
         crate::local_engine::resource::ResourceRegistry::configure_all(
             &crate::local_engine::descriptor::ResourceBudgets::new().with_permits(resource, 8),
         );
@@ -467,7 +467,7 @@ mod tests {
         // must still serialize against each other via the shared semaphore
         // — this is the scenario the whole registry exists for (e.g. a
         // decision LLM and a vision mmproj model both offloading to GPU 0).
-        let resource = ResourceClass::Cpu { threads: 208 }; // unconfigured: default_permits == 1
+        let resource = ResourceClass::Gpu { device: 208 }; // unconfigured: default_permits == 1
         let engine_a = engine(
             resource,
             CapabilitySet::empty().with(Capability::Chat),

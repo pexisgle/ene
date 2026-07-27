@@ -182,6 +182,13 @@ mod tests {
         Silence(usize),
         Slow(Duration),
         Fail,
+        /// Scripted for `ene_infer::conformance::run_all` (see
+        /// `ConformanceRequest` below) — distinct from `Slow`/`Fail` because
+        /// the battery needs to script an optional panic too.
+        Scripted {
+            run_for: Duration,
+            then_panic: bool,
+        },
     }
 
     impl From<TtsSynthesisRequest> for MockTtsRequest {
@@ -194,9 +201,28 @@ mod tests {
         }
     }
 
+    impl ene_infer::conformance::ConformanceRequest for MockTtsRequest {
+        fn scripted(run_for: Duration, then_panic: bool) -> Self {
+            Self::Scripted {
+                run_for,
+                then_panic,
+            }
+        }
+    }
+
+    impl Default for MockTtsRequest {
+        /// Required by `ConformanceRequest: Default`; never actually run
+        /// with this value (the battery always builds requests via
+        /// `scripted`), so any variant works.
+        fn default() -> Self {
+            Self::Silence(0)
+        }
+    }
+
     #[derive(Debug)]
     struct MockTtsResponse {
         samples: usize,
+        resets_seen: usize,
     }
 
     impl From<MockTtsResponse> for TtsSynthesisResponse {
@@ -208,8 +234,16 @@ mod tests {
         }
     }
 
+    impl ene_infer::conformance::ConformanceResponse for MockTtsResponse {
+        fn resets_seen(&self) -> usize {
+            self.resets_seen
+        }
+    }
+
     #[derive(Debug, Default)]
-    struct MockTtsModel;
+    struct MockTtsModel {
+        resets_seen: usize,
+    }
 
     impl LocalModel for MockTtsModel {
         type Request = MockTtsRequest;
@@ -230,7 +264,10 @@ mod tests {
             ctx: &JobContext,
         ) -> Result<Self::Response, Self::Error> {
             match req {
-                MockTtsRequest::Silence(samples) => Ok(MockTtsResponse { samples }),
+                MockTtsRequest::Silence(samples) => Ok(MockTtsResponse {
+                    samples,
+                    resets_seen: self.resets_seen,
+                }),
                 MockTtsRequest::Fail => Err(MockTtsError("scripted failure".to_string())),
                 MockTtsRequest::Slow(run_for) => {
                     let start = Instant::now();
@@ -244,9 +281,37 @@ mod tests {
                         }
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Ok(MockTtsResponse { samples: 100 })
+                    Ok(MockTtsResponse {
+                        samples: 100,
+                        resets_seen: self.resets_seen,
+                    })
+                }
+                MockTtsRequest::Scripted {
+                    run_for,
+                    then_panic,
+                } => {
+                    assert!(!then_panic, "scripted panic for conformance testing");
+                    let start = Instant::now();
+                    loop {
+                        if ctx.should_stop().is_some() {
+                            return Err(MockTtsError("stopped".to_string()));
+                        }
+                        ctx.tick();
+                        if start.elapsed() >= run_for {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Ok(MockTtsResponse {
+                        samples: 0,
+                        resets_seen: self.resets_seen,
+                    })
                 }
             }
+        }
+
+        fn reset(&mut self) {
+            self.resets_seen += 1;
         }
     }
 
@@ -255,7 +320,7 @@ mod tests {
         cfg: EngineConfig,
         chunk_samples: usize,
     ) -> LocalTtsEngine<MockTtsModel> {
-        let handle = ene_infer::EngineHandle::spawn(|| Ok(MockTtsModel), cfg);
+        let handle = ene_infer::EngineHandle::spawn(|| Ok(MockTtsModel::default()), cfg);
         let descriptor = EngineDescriptor::new(
             "mock-tts",
             crate::local_engine::descriptor::CapabilitySet::empty()
@@ -268,7 +333,7 @@ mod tests {
     #[tokio::test]
     async fn synthesize_stream_slices_pcm_into_fixed_chunks() {
         let p = provider(
-            ResourceClass::Cpu { threads: 301 },
+            ResourceClass::Gpu { device: 301 },
             EngineConfig::default(),
             4,
         );
@@ -293,7 +358,7 @@ mod tests {
     #[tokio::test]
     async fn synthesize_stream_model_error_maps_to_provider() {
         let p = provider(
-            ResourceClass::Cpu { threads: 302 },
+            ResourceClass::Gpu { device: 302 },
             EngineConfig::default(),
             super::DEFAULT_CHUNK_SAMPLES,
         );
@@ -308,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn synthesize_stream_deadline_maps_to_timeout() {
         let p = provider(
-            ResourceClass::Cpu { threads: 303 },
+            ResourceClass::Gpu { device: 303 },
             EngineConfig::new(4, Duration::from_millis(20)),
             super::DEFAULT_CHUNK_SAMPLES,
         );
@@ -322,7 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn independent_engines_sharing_a_resource_class_serialize() {
-        let resource = ResourceClass::Cpu { threads: 304 }; // unconfigured: default 1 permit
+        let resource = ResourceClass::Gpu { device: 304 }; // unconfigured: default 1 permit
         let a = provider(
             resource,
             EngineConfig::default(),
@@ -373,5 +438,16 @@ mod tests {
             map_engine_error(model),
             AudioProviderError::Provider(_)
         ));
+    }
+
+    /// Runs the generic queueing/cancellation/panic-recovery/reset battery
+    /// against `MockTtsModel` itself (the `LocalModel`, not the
+    /// `LocalTtsEngine` adapter around it) — this is what keeps this
+    /// blanket adapter's assumptions about `ene_infer::LocalModel` correct
+    /// as new `LocalModel` implementations (voice engines, future
+    /// providers) land beside it.
+    #[tokio::test]
+    async fn mock_tts_model_passes_conformance_battery() {
+        ene_infer::conformance::run_all(MockTtsModel::default).await;
     }
 }
