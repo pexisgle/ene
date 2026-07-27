@@ -1458,8 +1458,8 @@ impl TurnActor {
             let panic_terminal_emitted = Arc::clone(&terminal_emitted);
             let panic_turn = turn_for_stream.clone();
             let stream_turn = panic_turn.clone();
-            let outcome = match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                async {
+            let outcome =
+                match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(async {
                     streaming::run_stream_cognitive(streaming::StreamContext {
                         config,
                         session,
@@ -1490,42 +1490,41 @@ impl TurnActor {
                         partial_text,
                     })
                     .await
-                },
-            ))
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    // The stream task panicked. `EneActor::run_command_isolated`
-                    // (#268) already contains the actor's own panic isolation,
-                    // but that only protects the command loop from panics in
-                    // *command handlers* — this is a separately spawned task,
-                    // so its panic needs its own catch_unwind or a hard-aborted
-                    // turn would otherwise hang forever waiting for `Terminal`.
-                    let msg = if let Some(s) = e.downcast_ref::<String>() {
-                        s.clone()
-                    } else if let Some(s) = e.downcast_ref::<&str>() {
-                        (*s).to_string()
-                    } else {
-                        "unknown panic".to_string()
-                    };
-                    tracing::error!(
-                        component = "StreamTask",
-                        error = %msg,
-                        "Stream task panicked; emitting fallback Terminal"
-                    );
-                    streaming::emit_terminal(
-                        &panic_event_tx,
-                        &panic_terminal_emitted,
-                        &panic_turn,
-                        origin,
-                        TerminalReason::Failed {
-                            message: format!("stream task panicked: {msg}"),
-                        },
-                    );
-                    return;
-                }
-            };
+                }))
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        // The stream task panicked. `EneActor::run_command_isolated`
+                        // (#268) already contains the actor's own panic isolation,
+                        // but that only protects the command loop from panics in
+                        // *command handlers* — this is a separately spawned task,
+                        // so its panic needs its own catch_unwind or a hard-aborted
+                        // turn would otherwise hang forever waiting for `Terminal`.
+                        let msg = if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = e.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        tracing::error!(
+                            component = "StreamTask",
+                            error = %msg,
+                            "Stream task panicked; emitting fallback Terminal"
+                        );
+                        streaming::emit_terminal(
+                            &panic_event_tx,
+                            &panic_terminal_emitted,
+                            &panic_turn,
+                            origin,
+                            TerminalReason::Failed {
+                                message: format!("stream task panicked: {msg}"),
+                            },
+                        );
+                        return;
+                    }
+                };
             drop(session_tx.send(outcome));
         });
         self.stream_handle = Some(handle);
