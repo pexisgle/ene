@@ -598,20 +598,14 @@ fn load_voice_embedding(
 /// already present (see [`prefetch_if_configured`], called from the
 /// runtime's async bootstrap path before providers are constructed).
 ///
-/// [`ene_infer::EngineHandle::spawn`] calls its factory on a background
-/// worker thread, not synchronously here, so building a [`KokoroModel`]
-/// eagerly (below) is the only way to keep this function's own fail-fast
-/// contract — otherwise a missing model file would silently defer to the
-/// first [`TtsProvider::synthesize_stream`] call instead of failing at
-/// provider construction, which is when the runtime bootstrap path expects
-/// to see it (and log a clear warning). The eagerly-built instance is handed
-/// to the factory for its first call via a `RefCell`, so the model is not
-/// loaded from disk twice; the `RefCell` is safe here (not the mutex-take
-/// pattern this migration removes elsewhere) because the factory is `Fn`,
-/// invoked by exactly one thread, one call at a time, never concurrently —
-/// there is no possible race to guard against, only a single sequential
-/// hand-off from this function to the worker thread's first `factory()`
-/// call.
+/// [`EngineHandle::try_spawn`] (not [`EngineHandle::spawn`]) builds the first
+/// [`KokoroModel`] synchronously here rather than deferring that first
+/// `factory()` call to the worker thread, so a missing model file or a bad
+/// ONNX session fails right here with [`AudioProviderError::Init`] instead
+/// of being silently deferred to the first
+/// [`TtsProvider::synthesize_stream`] call reporting an opaque `EngineDown`
+/// — which is when the runtime bootstrap path expects to see this error
+/// (and log a clear warning), not on first use.
 #[cfg(feature = "local-tts")]
 fn open(
     model_path: &std::path::Path,
@@ -626,21 +620,7 @@ fn open(
     let model_path = model_path.to_path_buf();
     let voices_path = voices_path.to_path_buf();
     let voice_name = voice_name.to_string();
-
-    let first = KokoroModel::new(
-        &model_path,
-        &voices_path,
-        &voice_name,
-        speed,
-        language.clone(),
-    )
-    .map_err(|e| AudioProviderError::Init(e.to_string()))?;
-    let first = std::cell::RefCell::new(Some(first));
-
     let factory = move || {
-        if let Some(model) = first.borrow_mut().take() {
-            return Ok(model);
-        }
         KokoroModel::new(
             &model_path,
             &voices_path,
@@ -653,17 +633,20 @@ fn open(
     if let Some(stall) = TTS_STALL_TIMEOUT {
         cfg = cfg.with_stall_timeout(stall);
     }
-    let handle = EngineHandle::spawn(factory, cfg);
+    let handle = EngineHandle::try_spawn(factory, cfg)
+        .map_err(|e| AudioProviderError::Init(e.to_string()))?;
 
     let descriptor = EngineDescriptor::new(
         PROVIDER_NAME,
         CapabilitySet::empty().with(Capability::Tts),
         // Kokoro-82M runs CPU-only in this workspace today (the `ort`
-        // dependency enables no GPU execution provider feature). Distinct
-        // thread-count identity from whisper's `ResourceClass` (see
-        // `local_stt.rs`) so STT and TTS jobs don't unnecessarily serialize
-        // against each other.
-        ResourceClass::Cpu { threads: 2 },
+        // dependency enables no GPU execution provider feature).
+        // `ResourceClass::Cpu` is shared by every CPU-bound local engine
+        // (see its type docs in `ene_ai`) — Kokoro and whisper
+        // (`local_stt.rs`) may run concurrently up to `ResourceRegistry`'s
+        // shared CPU budget, not because either engine picked a
+        // distinguishing number.
+        ResourceClass::Cpu,
     );
     Ok(LocalTtsEngine::new(handle, descriptor))
 }

@@ -324,8 +324,11 @@ impl LocalModel for WhisperModel {
 ///
 /// # Errors
 ///
-/// Returns [`AudioProviderError::Init`] when the model file is missing or
-/// whisper.cpp fails to initialize a context. Once the handle is returned,
+/// Returns [`AudioProviderError::Init`] when the model file is missing,
+/// whisper.cpp fails to initialize a context, or the first
+/// [`whisper_rs::WhisperState`] fails to allocate ([`EngineHandle::try_spawn`]
+/// builds it synchronously here, so this failure is not deferred to the
+/// first [`SttProvider::transcribe`] call). Once the handle is returned,
 /// per-job failures surface through [`SttProvider::transcribe`] instead.
 #[cfg(feature = "local-stt")]
 fn open(
@@ -356,19 +359,25 @@ fn open(
     if let Some(stall) = STT_STALL_TIMEOUT {
         cfg = cfg.with_stall_timeout(stall);
     }
-    let handle = EngineHandle::spawn(factory, cfg);
+    // `try_spawn` (not `spawn`) builds the first `WhisperModel` synchronously
+    // here rather than deferring that first `factory()` call to the worker
+    // thread, so a `WhisperError::StateInit` failure surfaces as this
+    // function's own `AudioProviderError::Init` instead of a deferred
+    // `EngineDown` on the first `transcribe` call.
+    let handle = EngineHandle::try_spawn(factory, cfg)
+        .map_err(|e| AudioProviderError::Init(e.to_string()))?;
 
     let descriptor = EngineDescriptor::new(
         PROVIDER_NAME,
         CapabilitySet::empty().with(Capability::Stt),
         // whisper.cpp runs CPU-only in this workspace today (no GPU feature
         // is enabled for `whisper-rs`, so `WhisperContextParameters::default()`
-        // leaves `use_gpu` false). A distinct thread-count identity from
-        // Kokoro's TTS engine (see `local_tts.rs`) means the two do not
-        // unnecessarily serialize against each other even though both are
-        // CPU-bound: they are independent models with no reason to share an
-        // admission budget.
-        ResourceClass::Cpu { threads: 4 },
+        // leaves `use_gpu` false). `ResourceClass::Cpu` is shared by every
+        // CPU-bound local engine (see its type docs in `ene_ai`) — whisper
+        // and Kokoro (`local_tts.rs`) may run concurrently up to
+        // `ResourceRegistry`'s shared CPU budget, not because either engine
+        // picked a distinguishing number.
+        ResourceClass::Cpu,
     );
     Ok(LocalSttEngine::new(handle, descriptor))
 }
