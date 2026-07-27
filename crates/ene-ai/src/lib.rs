@@ -36,6 +36,12 @@ pub mod health;
 pub mod local_engine;
 /// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
+/// Shared, safe model-file downloader (`ModelFetcher`) used by
+/// `ene-ai-local` (GGUF) and `ene-voice` (Kokoro ONNX / `voices.bin`):
+/// in-flight coalescing, `.part` + atomic rename, RAII partial cleanup,
+/// HTTPS-only enforcement, pluggable post-download validation, and progress
+/// reporting.
+pub mod model_fetch;
 /// OpenAI-compatible provider implementation.
 pub mod openai;
 /// Provider resolution from configuration.
@@ -64,6 +70,10 @@ pub use local_engine::{
     TtsSynthesisResponse,
 };
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
+pub use model_fetch::{
+    MagicBytesValidator, ModelFetchError, ModelFetcher, ModelValidator, PrefixPredicateValidator,
+    SizeMultipleValidator, sanitize_basename, strip_url_path, validate_https_url,
+};
 pub use openai::{
     AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
     create_chat_provider_from_resolved, create_task_chat_provider,
