@@ -74,16 +74,45 @@ pub enum LlmProviderError {
     /// Local llama.cpp load / inference failure (#165 / #171).
     #[error("local LLM error: {0}")]
     LocalLlm(String),
+
+    /// A local engine's bounded job queue was full
+    /// (`ene_infer::EngineError::Busy`). Enqueue contention only — the
+    /// engine itself is fine.
+    #[error("engine busy: queue depth {queue_depth} exceeded")]
+    Busy {
+        /// The engine's configured queue depth at the time of the call.
+        queue_depth: usize,
+    },
+
+    /// A local engine's job timed out (`ene_infer::EngineError::Timeout`).
+    /// Distinct from [`Self::Truncated`], which is a *model* truncating its
+    /// own output — this is the framework giving up on a job that never
+    /// finished.
+    #[error("local engine job timed out")]
+    Timeout,
+
+    /// A local engine's job was cancelled (`ene_infer::EngineError::Cancelled`),
+    /// either by an explicit cancellation or because the caller went away.
+    #[error("local engine job cancelled")]
+    Cancelled,
 }
 
 impl LlmProviderError {
     /// Whether this error is transient and may succeed on retry.
     ///
-    /// `RateLimit` (429) and `Network` errors are retryable; `Auth`,
-    /// `ContentFilter`, `Truncated`, and `Provider` errors are not.
+    /// `RateLimit` (429), `Network`, `Busy`, and `Timeout` errors are
+    /// retryable — a full queue drains and a slow-but-alive engine may
+    /// succeed given a fresh deadline. `Auth`, `ContentFilter`, `Truncated`,
+    /// and `Provider` errors are not. `Cancelled` reflects caller intent,
+    /// not engine health, so retrying is the caller's call, not something
+    /// this method encourages — conservatively reported as not retryable,
+    /// mirroring `ene_infer::EngineError::is_retryable`.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
-        matches!(self, Self::RateLimit(_) | Self::Network(_))
+        matches!(
+            self,
+            Self::RateLimit(_) | Self::Network(_) | Self::Busy { .. } | Self::Timeout
+        )
     }
 
     /// Extracts a `Retry-After` hint (seconds) embedded in a `RateLimit`

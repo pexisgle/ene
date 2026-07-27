@@ -84,7 +84,17 @@ fn user_message_from_ai(error: &ene_ai::AiError) -> String {
             ),
             ene_ai::LlmProviderError::ContentFilter(_)
             | ene_ai::LlmProviderError::Truncated { .. }
-            | ene_ai::LlmProviderError::Provider(_) => i18n_embed_fl::fl!(
+            | ene_ai::LlmProviderError::Provider(_)
+            // `Busy`/`Timeout`/`Cancelled` originate from a local
+            // `ene-infer` engine (queue admission, cooperative deadline,
+            // cancellation) rather than a cloud provider; no dedicated
+            // Fluent copy exists yet for these framework-level conditions,
+            // so they fold into the same generic provider-error bucket
+            // pending a later stage that surfaces retry/cancel state to the
+            // user directly (see `LlmProviderError::is_retryable`).
+            | ene_ai::LlmProviderError::Busy { .. }
+            | ene_ai::LlmProviderError::Timeout
+            | ene_ai::LlmProviderError::Cancelled => i18n_embed_fl::fl!(
                 crate::i18n::loader(),
                 "runtime-error-ai-provider",
                 detail = err.to_string()
