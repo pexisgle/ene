@@ -33,7 +33,9 @@
 
 use super::TurnGate;
 use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
-use super::event::{EneEvent, EneStateSnapshot, EneStatus, TerminalReason};
+use super::event::{
+    AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, TerminalReason,
+};
 use crate::diagnostics::{DiagnosticEvent, MemoryQueryHandle, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
@@ -66,6 +68,13 @@ static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 pub(super) struct TurnActor {
     cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
     event_tx: broadcast::Sender<EneEvent>,
+    /// Lifecycle bus sender (#272): `StatusChanged` / `PendingCandidateAvailable`
+    /// / `ToolBackgroundCompleted` — kept off the chat `event_tx` broadcast.
+    lifecycle_tx: broadcast::Sender<LifecycleEvent>,
+    /// Audio channel sender (#272): bounded `mpsc`, cloned into each stream
+    /// task's [`crate::streaming::StreamContext`] so TTS chunks never ride
+    /// the chat broadcast bus.
+    audio_tx: mpsc::Sender<AudioChunk>,
     diag_tx: broadcast::Sender<DiagnosticEvent>,
     turn_gate: Arc<TurnGate>,
     config: EneConfig,
@@ -94,7 +103,7 @@ pub(super) struct TurnActor {
     search_tasks: tokio::task::JoinSet<()>,
     /// In-flight deferred (background) tool tasks (#196). Each task polls
     /// its owning tool until the task reaches a terminal state, then emits
-    /// [`EneEvent::ToolBackgroundCompleted`]. Reaped so panics are not lost.
+    /// [`LifecycleEvent::ToolBackgroundCompleted`]. Reaped so panics are not lost.
     deferred_tool_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx:
@@ -150,9 +159,18 @@ pub(super) struct TurnActor {
 
 impl TurnActor {
     /// Constructs a ready `TurnActor`. Called once from [`crate::EneHandle::open`].
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "single internal constructor call site (EneHandle::open); the #272 \
+                  event-bus split added two channel senders (lifecycle_tx, audio_tx) \
+                  pushing this from 15 to 17 — grouping into a config struct is a \
+                  larger refactor out of scope here"
+    )]
     pub(super) fn new(
         cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
         event_tx: broadcast::Sender<EneEvent>,
+        lifecycle_tx: broadcast::Sender<LifecycleEvent>,
+        audio_tx: mpsc::Sender<AudioChunk>,
         diag_tx: broadcast::Sender<DiagnosticEvent>,
         diag_rx: broadcast::Receiver<DiagnosticEvent>,
         turn_gate: Arc<TurnGate>,
@@ -173,6 +191,8 @@ impl TurnActor {
         Self {
             cmd_rx,
             event_tx,
+            lifecycle_tx,
+            audio_tx,
             diag_tx,
             turn_gate,
             config,
@@ -285,7 +305,7 @@ impl TurnActor {
             // Drain deferred memory-writer JoinHandles sent from the stream.
             while let Ok(handle) = self.memory_writer_rx.try_recv() {
                 let diag_tx = self.diag_tx.clone();
-                let event_tx = self.event_tx.clone();
+                let lifecycle_tx = self.lifecycle_tx.clone();
                 let store = self.session.memory.memory_store.clone();
                 self.memory_writer_tasks.spawn(async move {
                     match handle.await {
@@ -293,9 +313,10 @@ impl TurnActor {
                             deferred_candidates,
                         }) => {
                             if deferred_candidates > 0 {
-                                let _ = event_tx.send(EneEvent::PendingCandidateAvailable {
-                                    count: deferred_candidates,
-                                });
+                                let _ =
+                                    lifecycle_tx.send(LifecycleEvent::PendingCandidateAvailable {
+                                        count: deferred_candidates,
+                                    });
                             }
                         }
                         Ok(ene_mind::MemoryWriteOutcome::Failed {
@@ -354,10 +375,10 @@ impl TurnActor {
             // Spawn a polling task for each that awaits completion.
             while let Ok(task) = self.deferred_tool_rx.try_recv() {
                 let registry = Arc::clone(&self.registry);
-                let event_tx = self.event_tx.clone();
+                let lifecycle_tx = self.lifecycle_tx.clone();
                 let max_polls = self.deferred_max_polls;
                 self.deferred_tool_tasks.spawn(async move {
-                    poll_deferred_task(registry, event_tx, task, max_polls).await;
+                    poll_deferred_task(registry, lifecycle_tx, task, max_polls).await;
                 });
             }
 
@@ -398,7 +419,7 @@ impl TurnActor {
                         self.active_turn = None;
                         self.active_origin = crate::types::TurnOrigin::User;
                         self.turn_gate.end();
-                        let _ = self.event_tx.send(EneEvent::StatusChanged {
+                        let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                             status: EneStatus::Idle,
                         });
                     }
@@ -857,7 +878,7 @@ impl TurnActor {
         self.terminal_emitted = Arc::new(AtomicBool::new(false));
         self.active_turn = Some(turn.clone());
         self.active_origin = crate::types::TurnOrigin::Proactive;
-        let _ = self.event_tx.send(EneEvent::StatusChanged {
+        let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
             status: EneStatus::Running,
         });
         let generation_timeout =
@@ -895,7 +916,7 @@ impl TurnActor {
                 self.terminal_emitted = Arc::new(AtomicBool::new(false));
                 self.active_turn = Some(turn.clone());
                 self.active_origin = crate::types::TurnOrigin::User;
-                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Running,
                 });
                 self.start_stream(
@@ -988,7 +1009,7 @@ impl TurnActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
-                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
                 });
                 true
@@ -1296,7 +1317,7 @@ impl TurnActor {
                 }
                 self.active_turn = None;
                 self.turn_gate.end();
-                let _ = self.event_tx.send(EneEvent::StatusChanged {
+                let _ = self.lifecycle_tx.send(LifecycleEvent::StatusChanged {
                     status: EneStatus::Idle,
                 });
                 return;
@@ -1317,6 +1338,7 @@ impl TurnActor {
         let registry = self.registry.clone();
         let tool_rag = self.tool_rag.clone();
         let event_tx = self.event_tx.clone();
+        let audio_tx = self.audio_tx.clone();
         let diag_tx = self.diag_tx.clone();
         let cancel_token = self.cancel_token.clone();
         let pending_permissions = self.pending_permissions.clone();
@@ -1353,6 +1375,7 @@ impl TurnActor {
                 tool_rag,
                 provider,
                 event_tx,
+                audio_tx,
                 diag_tx,
                 cancel_token,
                 pending_permissions,
@@ -1678,8 +1701,10 @@ fn reap_join_set(
 
 /// Polls a deferred (background) tool task until it reaches a terminal state (#196).
 ///
-/// Emits [`EneEvent::ToolBackgroundCompleted`] when the task completes, fails,
-/// or is cancelled. Runs as a background task in the actor's `deferred_tool_tasks`
+/// Emits [`LifecycleEvent::ToolBackgroundCompleted`] on the lifecycle bus
+/// (not the chat bus) when the task completes, fails, or is cancelled — it
+/// fires asynchronously after the originating turn has already completed
+/// (#272). Runs as a background task in the actor's `deferred_tool_tasks`
 /// `JoinSet`.
 ///
 /// `max_polls` controls how many poll iterations (at 100ms each) before the task
@@ -1687,7 +1712,7 @@ fn reap_join_set(
 /// (default: 600 = 60s).
 async fn poll_deferred_task(
     registry: Arc<dyn ToolRegistry>,
-    event_tx: broadcast::Sender<EneEvent>,
+    lifecycle_tx: broadcast::Sender<LifecycleEvent>,
     task: DeferredToolTask,
     max_polls: u32,
 ) {
@@ -1703,7 +1728,7 @@ async fn poll_deferred_task(
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
             DeferredStatus::Completed { result } => {
-                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                let _ = lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
                     tool_name: task.tool_name.clone(),
                     task_id: task.task_id.clone(),
                     status: DeferredStatus::Completed { result },
@@ -1711,7 +1736,7 @@ async fn poll_deferred_task(
                 return;
             }
             DeferredStatus::Failed { error } => {
-                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                let _ = lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
                     tool_name: task.tool_name.clone(),
                     task_id: task.task_id.clone(),
                     status: DeferredStatus::Failed { error },
@@ -1719,7 +1744,7 @@ async fn poll_deferred_task(
                 return;
             }
             DeferredStatus::Cancelled => {
-                let _ = event_tx.send(EneEvent::ToolBackgroundCompleted {
+                let _ = lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
                     tool_name: task.tool_name.clone(),
                     task_id: task.task_id.clone(),
                     status: DeferredStatus::Cancelled,

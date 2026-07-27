@@ -136,6 +136,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
             extraction_delay: Duration::from_secs(2),
         }),
         event_tx,
+        audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

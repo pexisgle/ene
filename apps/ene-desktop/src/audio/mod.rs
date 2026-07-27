@@ -10,8 +10,9 @@
 //!
 //! - **Capture** ([`capture`]): `cpal` input stream → `VadEngine` →
 //!   `SttProvider::transcribe` → [`AiBridge::run`](crate::ai_bridge::AiBridge::run).
-//! - **Playback** ([`playback`]): [`EneEvent::AudioChunk`](ene_runtime::EneEvent::AudioChunk)
-//!   → `rodio` sink + [`VisemeDriver`](viseme_driver::VisemeDriver).
+//! - **Playback** ([`playback`]): [`AudioChunk`](ene_runtime::AudioChunk)
+//!   (from the dedicated audio channel, #272) → `rodio` sink +
+//!   [`VisemeDriver`](viseme_driver::VisemeDriver).
 //! - **Viseme** ([`viseme_driver`]): smoothed mouth-shape weights read
 //!   once per render frame and applied to the VRM expression layer.
 //!
@@ -32,8 +33,8 @@ use std::sync::Arc;
 /// A decoded TTS audio chunk forwarded from the AI bridge pump to the
 /// playback subsystem.
 ///
-/// Mirrors the payload of [`ene_runtime::EneEvent::AudioChunk`] minus
-/// the turn / origin metadata the playback path does not need.
+/// Mirrors the payload of [`ene_runtime::AudioChunk`] minus the turn /
+/// origin metadata the playback path does not need.
 #[cfg_attr(
     not(feature = "voice"),
     expect(

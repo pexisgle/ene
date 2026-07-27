@@ -33,7 +33,9 @@ use tokio::sync::oneshot;
 ///
 /// Created when a background-capable tool accepts a deferred call and
 /// returns a `task_id`. The actor polls the owning tool until the task
-/// reaches a terminal state, then emits [`super::event::EneEvent::ToolBackgroundCompleted`].
+/// reaches a terminal state, then emits
+/// [`super::event::LifecycleEvent::ToolBackgroundCompleted`] on the
+/// lifecycle bus (#272).
 #[derive(Debug, Clone)]
 pub struct DeferredToolTask {
     /// The tool name that owns the background task.

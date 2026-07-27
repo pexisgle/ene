@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use ene_config::EneConfig;
 use ene_runtime::{
-    EneEvent, EneEventReceiver, EneHandle, EneRuntimeError, PermissionDecision, RunError, TurnId,
-    UserInputResponse, open_with_config,
+    AudioChunk, AudioStreamReceiver, EneEvent, EneEventReceiver, EneHandle, EneRuntimeError,
+    LifecycleEvent, LifecycleReceiver, PermissionDecision, RunError, TurnId, UserInputResponse,
+    open_with_config,
 };
 
 #[cfg(not(feature = "voice"))]
@@ -157,6 +158,14 @@ impl AiBridge {
             .unwrap_or_default();
         let handle = bootstrap_handle.block_on(open_with_config(config))?;
         let receiver = handle.subscribe();
+        let lifecycle_receiver = handle.subscribe_lifecycle();
+        // Claim the audio channel up front regardless of the `voice` feature
+        // or whether a playback sender was supplied: the audio channel is
+        // bounded and single-consumer (#272), so this bridge must always be
+        // the one consumer that drains it, or a sustained TTS stream could
+        // eventually stall waiting to deliver a final marker (see
+        // `send_audio_chunk` in ene-runtime).
+        let audio_stream = handle.take_audio_stream();
         let processing = Arc::new(AtomicBool::new(false));
         let active_turn = Arc::new(Mutex::new(None));
         let proactive_observe = spawn_proactive_observer(bootstrap_handle, handle.clone(), &mind);
@@ -170,6 +179,8 @@ impl AiBridge {
 
         bootstrap_handle.spawn(pump_events(
             receiver,
+            lifecycle_receiver,
+            audio_stream,
             event_tx,
             handle,
             processing,
@@ -608,8 +619,86 @@ fn turn_matches(active_turn: &Mutex<Option<TurnId>>, event_turn: &TurnId) -> boo
     }
 }
 
+/// Awaits the next audio chunk, or never resolves when no audio stream was
+/// claimed (`take_audio_stream` returned `None`) or it has since closed.
+///
+/// Used as a `tokio::select!` branch in [`pump_events`] so the absence of an
+/// audio stream degrades to "this branch never fires" instead of a busy
+/// loop. Once the underlying `mpsc::Receiver` reports closed (`None`), the
+/// `Option` is cleared so subsequent polls also degrade to pending rather
+/// than immediately resolving with `None` again and again.
+async fn recv_audio_chunk(stream: &mut Option<AudioStreamReceiver>) -> Option<AudioChunk> {
+    match stream {
+        Some(rx) => {
+            if let Some(chunk) = rx.recv().await {
+                Some(chunk)
+            } else {
+                *stream = None;
+                std::future::pending().await
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Forwards one audio chunk to the desktop playback subsystem, applying the
+/// same turn-ownership gate the pre-#272 chat-bus path used (H1).
+///
+/// Without the `voice` feature there is no playback subsystem, so the
+/// chunk is dropped.
+fn forward_audio_chunk(
+    chunk: AudioChunk,
+    audio_turn: &mut Option<TurnId>,
+    audio_tx: Option<&AudioChunkSender>,
+) {
+    #[cfg(feature = "voice")]
+    {
+        let AudioChunk {
+            turn,
+            origin: _,
+            pcm,
+            sample_rate,
+            is_final,
+        } = chunk;
+        // Track the turn that owns the in-flight TTS audio separately from
+        // `active_turn`: the fire-and-forget TTS worker keeps emitting
+        // chunks after `Terminal` clears `active_turn`, so filtering on
+        // `active_turn` would drop the tail of the utterance (H1).
+        if !route_audio_chunk(audio_turn, &turn, is_final) {
+            return;
+        }
+        if let Some(tx) = audio_tx {
+            // `try_send` avoids blocking the async pump when the bounded
+            // playback channel is full (L10); a full buffer means the sink
+            // is behind and the dropped chunk is preferable to stalling all
+            // event routing. The natural TTS final marker never aborts
+            // playback.
+            if let Err(e) = tx.try_send(AudioChunkPayload {
+                pcm,
+                sample_rate,
+                is_final,
+                abort: false,
+            }) {
+                tracing::warn!(
+                    component = "AiBridge",
+                    error = %e,
+                    "playback channel full; dropping audio chunk"
+                );
+            }
+        }
+    }
+    #[cfg(not(feature = "voice"))]
+    {
+        let _audio_turn = audio_turn;
+        let _audio_tx = audio_tx;
+        let _chunk = chunk;
+    }
+}
+
 async fn pump_events(
     mut receiver: EneEventReceiver,
+    mut lifecycle_receiver: LifecycleReceiver,
+    mut audio_stream: Option<AudioStreamReceiver>,
     event_tx: AppEventSender,
     handle: EneHandle,
     processing: Arc<AtomicBool>,
@@ -620,11 +709,13 @@ async fn pump_events(
     // `active_turn` because the fire-and-forget TTS worker keeps emitting
     // chunks after `Terminal` clears `active_turn` (H1). Only cleared by
     // the `is_final` marker or a playback reset on broadcast lag (M2).
-    #[cfg(feature = "voice")]
+    // Always defined (not `#[cfg(feature = "voice")]`) because it is now
+    // threaded through `forward_audio_chunk`'s signature unconditionally.
     let mut audio_turn: Option<TurnId> = None;
 
     loop {
-        match receiver.recv().await {
+        tokio::select! {
+        chat_event = receiver.recv() => match chat_event {
             Ok(EneEvent::TextDelta {
                 turn,
                 origin: _,
@@ -737,61 +828,6 @@ async fn pump_events(
                 }));
             }
             Ok(EneEvent::ContextCompressed { .. }) => {}
-            Ok(EneEvent::AudioChunk {
-                turn,
-                origin: _,
-                pcm,
-                sample_rate,
-                is_final,
-            }) => {
-                // Audio chunks are forwarded to the playback subsystem
-                // regardless of the active turn so TTS audio for the
-                // current utterance plays even after the text stream
-                // has finished. Without the `voice` feature there is no
-                // playback subsystem, so the chunk is dropped.
-                #[cfg(feature = "voice")]
-                {
-                    // Track the turn that owns the in-flight TTS audio
-                    // separately from `active_turn`: the fire-and-forget
-                    // TTS worker keeps emitting chunks after `Terminal`
-                    // clears `active_turn`, so filtering on `active_turn`
-                    // would drop the tail of the utterance (H1).
-                    if !route_audio_chunk(&mut audio_turn, &turn, is_final) {
-                        continue;
-                    }
-                    if let Some(tx) = &audio_tx {
-                        // `try_send` avoids blocking the async pump when the
-                        // bounded playback channel is full (L10); a full
-                        // buffer means the sink is behind and the dropped
-                        // chunk is preferable to stalling all event routing.
-                        // The natural TTS final marker never aborts playback.
-                        if let Err(e) = tx.try_send(AudioChunkPayload {
-                            pcm,
-                            sample_rate,
-                            is_final,
-                            abort: false,
-                        }) {
-                            tracing::warn!(
-                                component = "AiBridge",
-                                error = %e,
-                                "playback channel full; dropping audio chunk"
-                            );
-                        }
-                    }
-                }
-                #[cfg(not(feature = "voice"))]
-                {
-                    let _audio_tx = &audio_tx;
-                    let _turn = turn;
-                    let _pcm = pcm;
-                    let _sample_rate = sample_rate;
-                    let _is_final = is_final;
-                }
-            }
-            Ok(EneEvent::PendingCandidateAvailable { count }) => {
-                let _ = event_tx.send(AppEvent::PendingCandidatesCount(count));
-            }
-            Ok(EneEvent::StatusChanged { .. } | EneEvent::ToolBackgroundCompleted { .. }) => {}
             Ok(EneEvent::TurnStarted { turn, origin: _ }) => {
                 if let Ok(mut guard) = active_turn.lock() {
                     *guard = Some(turn);
@@ -921,6 +957,32 @@ async fn pump_events(
                 let _ = event_tx.send(AppEvent::RuntimeDisconnected);
                 break;
             }
+        },
+        // Lifecycle bus (#272): turn-independent, low-frequency. Only
+        // `PendingCandidateAvailable` currently drives UI state here;
+        // `StatusChanged` / `ToolBackgroundCompleted` are observed
+        // elsewhere (diagnostics / background tool UI) or not yet wired.
+        lifecycle_event = lifecycle_receiver.recv() => match lifecycle_event {
+            Ok(LifecycleEvent::PendingCandidateAvailable { count }) => {
+                let _ = event_tx.send(AppEvent::PendingCandidatesCount(count));
+            }
+            Ok(LifecycleEvent::StatusChanged { .. } | LifecycleEvent::ToolBackgroundCompleted { .. }) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!("[Ene] Dropped {n} lifecycle events (broadcast lag)");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // The actor is gone; the chat-bus `Closed` arm above already
+                // handles the shutdown/reconnect flow, so this is a no-op.
+            }
+        },
+        // Audio channel (#272): bounded mpsc, single-consumer. Chunks are
+        // forwarded regardless of `active_turn` (H1) — see
+        // `forward_audio_chunk`.
+        chunk = recv_audio_chunk(&mut audio_stream) => {
+            if let Some(chunk) = chunk {
+                forward_audio_chunk(chunk, &mut audio_turn, audio_tx.as_ref());
+            }
+        }
         }
     }
 }

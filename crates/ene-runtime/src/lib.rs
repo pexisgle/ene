@@ -71,9 +71,17 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 
 // ── Actor types ──
 /// Actor handle, events, status, and state snapshot.
+///
+/// The event bus is split into three channels (#272): [`EneEvent`] /
+/// [`EneEventReceiver`] (chat bus, via [`EneHandle::subscribe`]),
+/// [`AudioChunk`] / [`AudioStreamReceiver`] (audio channel, via
+/// [`EneHandle::take_audio_stream`]), and [`LifecycleEvent`] /
+/// [`LifecycleReceiver`] (lifecycle bus, via
+/// [`EneHandle::subscribe_lifecycle`]).
 pub use handle::{
-    ActorDeadError, DeferredToolTask, EneEvent, EneEventReceiver, EneHandle, EneStateSnapshot,
-    EneStatus, FeatureSettingsUpdate, ShutdownTimeout, TerminalReason,
+    ActorDeadError, AudioChunk, AudioStreamReceiver, DeferredToolTask, EneEvent, EneEventReceiver,
+    EneHandle, EneStateSnapshot, EneStatus, FeatureSettingsUpdate, LifecycleEvent,
+    LifecycleReceiver, ShutdownTimeout, TerminalReason,
 };
 
 // ── Read-only query / vision handles (#271) ──
@@ -91,11 +99,13 @@ pub use diagnostics::{
 };
 
 // ── Public API v1 ──
-/// Public API version constant, JSON chat-event mirrors, session DTOs, and
-/// the unified [`public_api::PublicApiError`] category (#269).
+/// Public API version constant, JSON chat/lifecycle-event mirrors, session
+/// DTOs, and the unified [`public_api::PublicApiError`] category (#269,
+/// #272).
 pub use public_api::{
-    API_VERSION, PublicApiError, PublicChatEvent, PublicExportedMessage, PublicPerfCue,
-    PublicSessionMeta, redact_text, redact_tool_arguments, redact_tool_arguments_json,
+    API_VERSION, PublicApiError, PublicChatEvent, PublicExportedMessage, PublicLifecycleEvent,
+    PublicPerfCue, PublicSessionMeta, redact_text, redact_tool_arguments,
+    redact_tool_arguments_json,
 };
 
 // ── Config types ──

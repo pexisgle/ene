@@ -27,6 +27,14 @@ impl EneHandle {
     /// リアルタイムチャットイベントストリーム (TokenStream, Performance, Terminal) を購読します。
     pub fn subscribe(&self) -> broadcast::Receiver<EneEvent>;
 
+    /// ライフサイクルイベントストリーム (StatusChanged, PendingCandidateAvailable,
+    /// ToolBackgroundCompleted) を購読します。
+    pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent>;
+
+    /// 音声 (TTS PCM) ストリームの所有権を取得します。単一コンシューマ専用で、
+    /// 2回目以降の呼び出しは `None` を返します。
+    pub fn take_audio_stream(&self) -> Option<mpsc::Receiver<AudioChunk>>;
+
     /// 非同期診断・検査用ハンドルを取得します。
     pub fn diagnostics(&self) -> DiagnosticsHandle;
 
@@ -35,19 +43,25 @@ impl EneHandle {
 }
 ```
 
-### `EneEvent`
-ターン実行中にブロードキャストされるチャットイベント：
+### イベントバス: トラフィックの性質ごとに3系統のチャネルへ分離
 
-```rust
-pub enum EneEvent {
-    TurnStarted { turn_id: TurnId },
-    TokenStream { chunk: String },
-    Performance { cue: PerformanceCue },
-    ToolCallStarted { tool_name: String },
-    ToolCallFinished { tool_name: String },
-    Terminal { turn_id: TurnId, status: TurnStatus },
-}
-```
+`ene-runtime` のイベントは3系統の専用チャネルに分離されており、一方のバーストが他方の subscriber を lag させたり飢餓状態にしたりすることはありません。
+
+- **チャットバス** (`EneEvent`、`subscribe` 経由) — 軽量・順序保証付き・ターンスコープのチャットイベントを流す `broadcast` チャネル：
+
+  ```rust
+  pub enum EneEvent {
+      TurnStarted { turn_id: TurnId },
+      TokenStream { chunk: String },
+      Performance { cue: PerformanceCue },
+      ToolCallStarted { tool_name: String },
+      ToolCallFinished { tool_name: String },
+      Terminal { turn_id: TurnId, status: TurnStatus },
+  }
+  ```
+
+- **音声チャネル** (`AudioChunk`、`take_audio_stream` 経由) — 合成された TTS PCM を流す、bounded かつ単一コンシューマ専用の `mpsc` チャネル。重量級の PCM ペイロードがチャットsubscriberの `broadcast` バッファを膨張させないよう、チャットバスから分離しています。
+- **ライフサイクルバス** (`LifecycleEvent`、`subscribe_lifecycle` 経由) — `StatusChanged` / `PendingCandidateAvailable` / `ToolBackgroundCompleted` といったターン非依存の通知を流す、小容量の `broadcast` チャネル。
 
 ---
 

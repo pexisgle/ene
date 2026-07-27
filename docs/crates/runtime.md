@@ -27,6 +27,14 @@ impl EneHandle {
     /// Subscribes to the live chat event stream (TokenStream, Performance, Terminal).
     pub fn subscribe(&self) -> broadcast::Receiver<EneEvent>;
 
+    /// Subscribes to the lifecycle event stream (StatusChanged,
+    /// PendingCandidateAvailable, ToolBackgroundCompleted).
+    pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<LifecycleEvent>;
+
+    /// Takes ownership of the audio (TTS PCM) stream. Single-consumer:
+    /// returns `None` on every call after the first.
+    pub fn take_audio_stream(&self) -> Option<mpsc::Receiver<AudioChunk>>;
+
     /// Obtains async diagnostics inspection interface.
     pub fn diagnostics(&self) -> DiagnosticsHandle;
 
@@ -35,19 +43,32 @@ impl EneHandle {
 }
 ```
 
-### `EneEvent`
-Live chat events broadcast during a turn:
+### Event bus: three channels by traffic class
 
-```rust
-pub enum EneEvent {
-    TurnStarted { turn_id: TurnId },
-    TokenStream { chunk: String },
-    Performance { cue: PerformanceCue },
-    ToolCallStarted { tool_name: String },
-    ToolCallFinished { tool_name: String },
-    Terminal { turn_id: TurnId, status: TurnStatus },
-}
-```
+`ene-runtime`'s events are split across three dedicated channels so a burst
+on one never lags or starves consumers of another:
+
+- **Chat bus** (`EneEvent`, via `subscribe`) — a `broadcast` channel
+  carrying lightweight, ordered, turn-scoped chat events:
+
+  ```rust
+  pub enum EneEvent {
+      TurnStarted { turn_id: TurnId },
+      TokenStream { chunk: String },
+      Performance { cue: PerformanceCue },
+      ToolCallStarted { tool_name: String },
+      ToolCallFinished { tool_name: String },
+      Terminal { turn_id: TurnId, status: TurnStatus },
+  }
+  ```
+
+- **Audio channel** (`AudioChunk`, via `take_audio_stream`) — a bounded,
+  single-consumer `mpsc` channel carrying synthesized TTS PCM. Kept off the
+  chat bus because heavyweight PCM payloads would otherwise inflate every
+  chat subscriber's `broadcast` buffer.
+- **Lifecycle bus** (`LifecycleEvent`, via `subscribe_lifecycle`) — a
+  small-capacity `broadcast` channel for turn-independent notifications
+  (`StatusChanged`, `PendingCandidateAvailable`, `ToolBackgroundCompleted`).
 
 ---
 

@@ -15,18 +15,23 @@
 - 進行中の LLM トークン生成を停止するには、ホストは `EneHandle::cancel(turn_id)` を呼び出します。
 
 ### イベントバス構造
-実行中、 `ene-runtime` はクリーンでユーザー向けのイベントをチャネル (`EneEvent`) 経由でブロードキャストします：
+`ene-runtime` はトラフィックの性質ごとに3系統の専用チャネルへイベントを分離しており、一方のチャネルのバーストが他方の subscriber を lag させたり飢餓状態にしたりすることはありません。
 
-```text
-EneEvent::TurnStarted { turn_id }
-  │
-  ├── EneEvent::TokenStream { chunk }        (LLM ストリーミングトークン)
-  ├── EneEvent::Performance { cue }           (アバターの表情・動作演出)
-  ├── EneEvent::ToolCallStarted { tool_name } (ツール呼び出し開始)
-  ├── EneEvent::ToolCallFinished { tool_name }
-  │
-  └── EneEvent::Terminal { turn_id, status } (ターン完了、セッション更新完了)
-```
+- **チャットバス** (`EneEvent`、`EneHandle::subscribe` 経由) — 軽量・順序保証付き・ターンスコープのチャットイベントを流す `broadcast` チャネル（容量1024）。複数 subscriber を許容します。以下は1ターン分のチャットバスのイベント順序です（この図のバリアント名は説明用であり、現行の正確なバリアント一覧は [`ene-runtime` のクレートドキュメント](../crates/runtime.md) を参照してください）。
+
+  ```text
+  EneEvent::TurnStarted { turn_id }
+    │
+    ├── EneEvent::TokenStream { chunk }        (LLM ストリーミングトークン)
+    ├── EneEvent::Performance { cue }           (アバターの表情・動作演出)
+    ├── EneEvent::ToolCallStarted { tool_name } (ツール呼び出し開始)
+    ├── EneEvent::ToolCallFinished { tool_name }
+    │
+    └── EneEvent::Terminal { turn_id, status } (ターン完了、セッション更新完了)
+  ```
+
+- **音声チャネル** (`AudioChunk`、`EneHandle::take_audio_stream` 経由) — 合成された TTS PCM を流す bounded `mpsc` チャネル。単一コンシューマ専用で、最初の呼び出しで receiver の所有権が移譲され、以降の呼び出しはすべて `None` を返します。PCM ペイロードはチャットイベントに比べて重量級であり、同居させると全チャットsubscriberの `broadcast` バッファを膨張させてしまうため、チャットバスから分離しています。
+- **ライフサイクルバス** (`LifecycleEvent`、`EneHandle::subscribe_lifecycle` 経由) — `StatusChanged` / `PendingCandidateAvailable` / `ToolBackgroundCompleted` といったターン非依存の通知を流す、小容量の `broadcast` チャネル。チャットバスと同様に複数 subscriber を許容します。
 
 ---
 

@@ -19,11 +19,25 @@
 //! `tests::public_dto_fields_are_primitive_only` below for a compile-time
 //! check.
 //!
-//! `EneHandle` methods *not* listed above (e.g. `subscribe`, `diagnostics`,
+//! `EneHandle` methods *not* listed above (e.g. `subscribe`,
+//! `subscribe_lifecycle`, `take_audio_stream`, `diagnostics`,
 //! `update_feature_settings`) are host-internal wiring between
 //! `ene-runtime` and its embedders (`ene-cli`, `ene-desktop`) and are
 //! explicitly out of contract, same as `streaming` / `message_builder`.
 //! They may freely take or return internal crate types.
+//!
+//! ## Three-channel event bus (#272)
+//!
+//! [`PublicChatEvent`] mirrors only the chat bus ([`EneEvent`]). Lifecycle
+//! notifications (`StatusChanged`, `PendingCandidateAvailable`,
+//! `ToolBackgroundCompleted`) now ride a separate lifecycle bus
+//! ([`LifecycleEvent`]) and are mirrored by [`PublicLifecycleEvent`]
+//! instead. The audio channel ([`crate::handle::AudioChunk`]) has no
+//! `Public*` mirror: it is a heavyweight, single-consumer, in-process
+//! streaming path (obtained via `EneHandle::take_audio_stream`) that has
+//! never been exposed as external JSON, unlike the chat/lifecycle buses
+//! which [`PublicChatEvent`] / [`PublicLifecycleEvent`] exist to mirror for
+//! exactly that purpose.
 //!
 //! Internal `From<...>` conversions inside this module (e.g.
 //! `From<ene_store::EneMemoryError> for PublicApiError`) necessarily name
@@ -40,7 +54,7 @@
 //! double-nested inside `Result<Result<T, E>, ActorDeadError>`. This module
 //! now mirrors the event-side pattern for those methods.
 
-use crate::handle::{ActorDeadError, EneEvent, EneStatus, TerminalReason};
+use crate::handle::{ActorDeadError, EneEvent, EneStatus, LifecycleEvent, TerminalReason};
 use crate::types::TurnOrigin;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -240,9 +254,11 @@ impl From<ene_store::EneMemoryError> for PublicApiError {
 /// Stable JSON mirror of the chat [`EneEvent`] bus (#189).
 ///
 /// Tagged with `type` in `snake_case`, aligned with the CLI JSONL schema and
-/// extended with fields the host contract documents (`origin`, background
-/// tool completion, gates). Prefer this type over serializing [`EneEvent`]
-/// directly when exposing events outside the process.
+/// extended with fields the host contract documents (`origin`, gates).
+/// Prefer this type over serializing [`EneEvent`] directly when exposing
+/// events outside the process. Turn-independent lifecycle notifications
+/// (`StatusChanged`, `PendingCandidateAvailable`, `ToolBackgroundCompleted`)
+/// are not part of this type — see [`PublicLifecycleEvent`] (#272).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicChatEvent {
@@ -296,15 +312,6 @@ pub enum PublicChatEvent {
         /// Tool output (may be truncated / redacted).
         result: String,
     },
-    /// A deferred background tool task reached a terminal state.
-    ToolBackgroundCompleted {
-        /// Tool name.
-        tool_name: String,
-        /// Background task id.
-        task_id: String,
-        /// Terminal status string (`completed`, `failed`, `cancelled`, …).
-        status: String,
-    },
     /// A destructive operation requires approval.
     PermissionRequired {
         /// Turn id.
@@ -352,6 +359,17 @@ pub enum PublicChatEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
+}
+
+/// Stable JSON mirror of the lifecycle [`LifecycleEvent`] bus (#272).
+///
+/// Tagged with `type` in `snake_case`, mirroring [`PublicChatEvent`]'s
+/// conventions. Covers the turn-independent notifications that used to live
+/// on [`PublicChatEvent`] before the event bus was split by traffic class:
+/// `StatusChanged`, `PendingCandidateAvailable`, `ToolBackgroundCompleted`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PublicLifecycleEvent {
     /// Actor status changed.
     StatusChanged {
         /// `idle`, `running`, or `error`.
@@ -362,18 +380,14 @@ pub enum PublicChatEvent {
         /// Number of pending candidates currently awaiting review.
         count: usize,
     },
-    /// A chunk of synthesized PCM audio from the TTS pipeline.
-    AudioChunk {
-        /// Turn id.
-        turn: String,
-        /// Who initiated the turn.
-        origin: String,
-        /// Number of PCM samples in this chunk.
-        pcm_len: usize,
-        /// Sample rate in Hz.
-        sample_rate: u32,
-        /// Whether this is the final audio chunk for the turn.
-        is_final: bool,
+    /// A deferred background tool task reached a terminal state.
+    ToolBackgroundCompleted {
+        /// Tool name.
+        tool_name: String,
+        /// Background task id.
+        task_id: String,
+        /// Terminal status string (`completed`, `failed`, `cancelled`, …).
+        status: String,
     },
 }
 
@@ -436,15 +450,6 @@ impl PublicChatEvent {
                 name: name.clone(),
                 result: redact_text(result),
             },
-            EneEvent::ToolBackgroundCompleted {
-                tool_name,
-                task_id,
-                status,
-            } => Self::ToolBackgroundCompleted {
-                tool_name: tool_name.clone(),
-                task_id: task_id.clone(),
-                status: format!("{status:?}").to_ascii_lowercase(),
-            },
             EneEvent::PermissionRequired {
                 turn,
                 origin,
@@ -499,29 +504,35 @@ impl PublicChatEvent {
                     message,
                 }
             }
-            EneEvent::StatusChanged { status } => Self::StatusChanged {
+        }
+    }
+}
+
+impl PublicLifecycleEvent {
+    /// Convert an internal lifecycle event into the stable public mirror
+    /// (#272).
+    #[must_use]
+    pub fn from_lifecycle_event(event: &LifecycleEvent) -> Self {
+        match event {
+            LifecycleEvent::StatusChanged { status } => Self::StatusChanged {
                 status: match status {
                     EneStatus::Idle => "idle".to_string(),
                     EneStatus::Running => "running".to_string(),
                     EneStatus::Error => "error".to_string(),
                 },
             },
-            EneEvent::AudioChunk {
-                turn,
-                origin,
-                pcm,
-                sample_rate,
-                is_final,
-            } => Self::AudioChunk {
-                turn: turn.to_string(),
-                origin: origin_label(*origin).to_string(),
-                pcm_len: pcm.len(),
-                sample_rate: *sample_rate,
-                is_final: *is_final,
-            },
-            EneEvent::PendingCandidateAvailable { count } => {
+            LifecycleEvent::PendingCandidateAvailable { count } => {
                 Self::PendingCandidatesAvailable { count: *count }
             }
+            LifecycleEvent::ToolBackgroundCompleted {
+                tool_name,
+                task_id,
+                status,
+            } => Self::ToolBackgroundCompleted {
+                tool_name: tool_name.clone(),
+                task_id: task_id.clone(),
+                status: format!("{status:?}").to_ascii_lowercase(),
+            },
         }
     }
 }
@@ -750,9 +761,11 @@ mod tests {
 
     #[test]
     fn pending_candidate_available_maps_to_dedicated_event() {
-        let event = EneEvent::PendingCandidateAvailable { count: 3 };
-        let public = PublicChatEvent::from_ene_event(&event);
-        let PublicChatEvent::PendingCandidatesAvailable { count } = public else {
+        // #272: PendingCandidateAvailable lives on the lifecycle bus, not
+        // the chat bus, so it mirrors through PublicLifecycleEvent now.
+        let event = LifecycleEvent::PendingCandidateAvailable { count: 3 };
+        let public = PublicLifecycleEvent::from_lifecycle_event(&event);
+        let PublicLifecycleEvent::PendingCandidatesAvailable { count } = public else {
             panic!("expected PendingCandidatesAvailable");
         };
         assert_eq!(count, 3);
@@ -761,5 +774,24 @@ mod tests {
         let value = serde_json::to_value(&public).expect("serializable");
         assert_eq!(value["type"], "pending_candidates_available");
         assert_eq!(value["count"], 3);
+    }
+
+    /// #272: `ToolBackgroundCompleted` moved off `PublicChatEvent` onto the
+    /// dedicated `PublicLifecycleEvent` mirror, since it fires asynchronously
+    /// after the originating turn has already completed.
+    #[test]
+    fn tool_background_completed_maps_to_lifecycle_event() {
+        let event = LifecycleEvent::ToolBackgroundCompleted {
+            tool_name: "background.sleep".to_string(),
+            task_id: "task-456".to_string(),
+            status: ene_plugin_proto::DeferredStatus::Completed {
+                result: ene_plugin_proto::ToolResult::text("done"),
+            },
+        };
+        let public = PublicLifecycleEvent::from_lifecycle_event(&event);
+        let value = serde_json::to_value(&public).expect("serializable");
+        assert_eq!(value["type"], "tool_background_completed");
+        assert_eq!(value["tool_name"], "background.sleep");
+        assert_eq!(value["task_id"], "task-456");
     }
 }

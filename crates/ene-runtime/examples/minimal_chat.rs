@@ -11,8 +11,8 @@
 
 use ene_config::{load_character_card, load_config};
 use ene_runtime::{
-    CueSource, EneEvent, EneHandle, EneStatus, MultiAnswer, PermissionDecision, TerminalReason,
-    UserInputResponse,
+    CueSource, EneEvent, EneHandle, EneStatus, LifecycleEvent, MultiAnswer, PermissionDecision,
+    TerminalReason, UserInputResponse,
 };
 use std::io::{self, Write};
 
@@ -37,6 +37,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[Setup] Runtime ready.\n");
 
     let mut rx = handle.subscribe();
+
+    // Lifecycle notifications (status changes, pending memory candidates,
+    // background tool completions) ride a separate bus from chat events
+    // (#272) — drain them on their own task.
+    let mut lifecycle_rx = handle.subscribe_lifecycle();
+    tokio::spawn(async move {
+        while let Ok(event) = lifecycle_rx.recv().await {
+            if let LifecycleEvent::StatusChanged { status } = event
+                && status == EneStatus::Error
+            {
+                eprintln!("\n[Status: Error]");
+            }
+        }
+    });
 
     let snapshot = handle.diagnostics().get_snapshot().await?;
     if let Some(card) = &snapshot.character_card {
@@ -110,15 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             EneEvent::ContextCompressed { level, .. } => {
                 println!("\n[ContextCompressed: {level}]");
             }
-            EneEvent::StatusChanged { status } => {
-                if status == EneStatus::Error {
-                    eprintln!("\n[Status: Error]");
-                }
-            }
-            EneEvent::TurnStarted { .. }
-            | EneEvent::ToolBackgroundCompleted { .. }
-            | EneEvent::AudioChunk { .. }
-            | EneEvent::PendingCandidateAvailable { .. } => {}
+            EneEvent::TurnStarted { .. } => {}
             EneEvent::Terminal {
                 turn: t,
                 origin: _,
