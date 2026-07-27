@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ene_plugin_proto::{
-    CallContext, DeferredOutcome, DeferredStatus, IpcStream, PLUGIN_IPC_PROTOCOL_VERSION,
-    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
-    ToolResult, VersionRange, read_plugin_response, write_plugin_request,
+    CallContext, DeferredOutcome, DeferredStatus, IpcStream, PluginCapabilities, PluginIpcRequest,
+    PluginIpcResponse, SandboxConfigData, ToolError, ToolResult, VersionRange,
+    read_plugin_response, write_plugin_request,
 };
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, oneshot};
@@ -33,21 +33,12 @@ fn next_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// The oldest plugin IPC protocol version this host can still interoperate
-/// with. The host advertises the range `[HOST_PROTOCOL_VERSION_MIN,
-/// PLUGIN_IPC_PROTOCOL_VERSION]` during the handshake and accepts any
-/// negotiated version within it, so a plugin that only speaks an older (but
-/// still supported) version can connect at the highest mutually-supported
-/// version rather than being rejected outright.
-const HOST_PROTOCOL_VERSION_MIN: u32 = 3;
-
-/// The range of plugin IPC protocol versions this host supports.
-fn host_version_range() -> VersionRange {
-    VersionRange {
-        min: HOST_PROTOCOL_VERSION_MIN,
-        max: PLUGIN_IPC_PROTOCOL_VERSION,
-    }
-}
+/// Protocol version at which [`PluginIpcRequest::CancelStream`] was
+/// introduced (see the `PLUGIN_IPC_PROTOCOL_VERSION` docs in
+/// `ene-plugin-proto`). Plugins that negotiated an older version do not know
+/// this message variant; sending it to them would fail to deserialize on
+/// their end.
+const CANCEL_STREAM_MIN_VERSION: u32 = 4;
 
 /// Shared routing state for the single reader task (H-12).
 ///
@@ -196,6 +187,12 @@ pub struct IpcPluginConnection {
     /// Write half of the IPC stream. The read half is owned by the reader task.
     writer: Option<WriteHalf<IpcStream>>,
     capabilities: PluginCapabilities,
+    /// The protocol version negotiated with the plugin during the handshake
+    /// (see [`VersionRange::negotiate`]). Used to gate host behavior that
+    /// depends on a message variant introduced after v3 — see
+    /// [`supports_cancel_stream`](Self::supports_cancel_stream) for the
+    /// documented pattern to follow when adding another gate.
+    negotiated_version: u32,
     timeout: Duration,
     /// Shared routing state for the reader task.
     router: Arc<Router>,
@@ -225,7 +222,7 @@ impl IpcPluginConnection {
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
-                version: host_version_range(),
+                version: VersionRange::host_supported(),
                 sandbox: sandbox.clone(),
                 plugin_config: plugin_config.clone(),
             },
@@ -243,7 +240,7 @@ impl IpcPluginConnection {
             }
         })?;
 
-        let capabilities = match resp {
+        let (negotiated_version, capabilities) = match resp {
             Some(PluginIpcResponse::HandshakeAck {
                 version,
                 capabilities,
@@ -251,19 +248,29 @@ impl IpcPluginConnection {
                 // The plugin picks the highest mutually-supported version, so
                 // accept any negotiated version inside our advertised range
                 // rather than requiring an exact match.
-                if !host_version_range().contains(version) {
+                let host_range = VersionRange::host_supported();
+                if !host_range.contains(version) {
                     return Err(PluginHostError::ProtocolMismatch {
                         name,
-                        expected: PLUGIN_IPC_PROTOCOL_VERSION,
+                        host_min: host_range.min,
+                        host_max: host_range.max,
                         got: version,
                     });
                 }
-                capabilities
+                (version, capabilities)
             }
             Some(PluginIpcResponse::Error { message, .. }) => {
+                // The plugin's version ranges did not overlap with the
+                // host's; the plugin's diagnostic message already includes
+                // both ranges (see `dispatch_request` in `ene-plugin`'s
+                // `server.rs`), so it is preserved verbatim here.
                 return Err(PluginHostError::HandshakeFailed {
                     name,
-                    reason: message,
+                    reason: format!(
+                        "{message} (host supports protocol {}..={})",
+                        VersionRange::host_supported().min,
+                        VersionRange::host_supported().max
+                    ),
                 });
             }
             _ => {
@@ -284,6 +291,7 @@ impl IpcPluginConnection {
             plugin_config,
             writer: Some(writer),
             capabilities,
+            negotiated_version,
             timeout: DEFAULT_TIMEOUT,
             router,
             reader_task: Some(reader_task),
@@ -293,6 +301,37 @@ impl IpcPluginConnection {
     /// Returns the capabilities advertised by the plugin during the handshake.
     pub const fn capabilities(&self) -> &PluginCapabilities {
         &self.capabilities
+    }
+
+    /// Returns the protocol version negotiated with the plugin during the
+    /// handshake.
+    ///
+    /// Falls within [`VersionRange::host_supported`] (currently
+    /// `PLUGIN_IPC_MIN_SUPPORTED_VERSION..=PLUGIN_IPC_PROTOCOL_VERSION`).
+    /// Feature gates that depend on a message variant introduced in a later
+    /// protocol version should compare against this value — see
+    /// [`supports_cancel_stream`](Self::supports_cancel_stream) for the
+    /// pattern to follow.
+    pub const fn negotiated_version(&self) -> u32 {
+        self.negotiated_version
+    }
+
+    /// Returns whether the negotiated protocol version supports explicit
+    /// stream cancellation via [`PluginIpcRequest::CancelStream`].
+    ///
+    /// `CancelStream` was introduced in protocol v4 (see the
+    /// `PLUGIN_IPC_PROTOCOL_VERSION` docs in `ene-plugin-proto`). A plugin
+    /// that negotiated v3 does not know this message variant, so
+    /// [`cancel_stream`](Self::cancel_stream) skips sending it and relies on
+    /// the caller's existing timeout-based fallback to end the stream
+    /// instead.
+    ///
+    /// This is the pattern to follow for any future version-gated feature:
+    /// add a `const fn supports_x(&self) -> bool` here that compares
+    /// `self.negotiated_version` against the version the feature was
+    /// introduced in, and branch on it wherever the feature is used.
+    pub const fn supports_cancel_stream(&self) -> bool {
+        self.negotiated_version >= CANCEL_STREAM_MIN_VERSION
     }
 
     /// Sends a `ListTools` request and returns the actual tool specs.
@@ -516,7 +555,23 @@ impl IpcPluginConnection {
     }
 
     /// Cancels an in-progress chat stream by its `request_id`.
+    ///
+    /// A no-op when the negotiated protocol version does not support
+    /// [`PluginIpcRequest::CancelStream`] (see
+    /// [`supports_cancel_stream`](Self::supports_cancel_stream)) — the
+    /// caller must rely on its existing timeout-based fallback to end the
+    /// stream on such plugins rather than requiring the new message.
     pub async fn cancel_stream(&mut self, request_id: &str) -> Result<(), PluginHostError> {
+        if !self.supports_cancel_stream() {
+            tracing::debug!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version,
+                request_id,
+                "plugin negotiated a version below CancelStream support; \
+                 relying on timeout-based fallback instead of sending CancelStream"
+            );
+            return Ok(());
+        }
         let resp = self
             .do_request(PluginIpcRequest::CancelStream {
                 request_id: String::new(),
@@ -637,7 +692,7 @@ impl IpcPluginConnection {
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
-                version: host_version_range(),
+                version: VersionRange::host_supported(),
                 sandbox: self.sandbox.clone(),
                 plugin_config: self.plugin_config.clone(),
             },
@@ -662,19 +717,26 @@ impl IpcPluginConnection {
             }) => {
                 // Accept any negotiated version inside our advertised range
                 // (the plugin picks the highest mutually-supported version).
-                if !host_version_range().contains(version) {
+                let host_range = VersionRange::host_supported();
+                if !host_range.contains(version) {
                     return Err(PluginHostError::ProtocolMismatch {
                         name,
-                        expected: PLUGIN_IPC_PROTOCOL_VERSION,
+                        host_min: host_range.min,
+                        host_max: host_range.max,
                         got: version,
                     });
                 }
                 self.capabilities = capabilities;
+                self.negotiated_version = version;
             }
             Some(PluginIpcResponse::Error { message, .. }) => {
                 return Err(PluginHostError::HandshakeFailed {
                     name,
-                    reason: message,
+                    reason: format!(
+                        "{message} (host supports protocol {}..={})",
+                        VersionRange::host_supported().min,
+                        VersionRange::host_supported().max
+                    ),
                 });
             }
             _ => {

@@ -48,6 +48,23 @@ impl VersionRange {
     pub const fn contains(&self, version: u32) -> bool {
         version >= self.min && version <= self.max
     }
+
+    /// Returns the range of protocol versions the host advertises during the
+    /// handshake: `[PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION]`.
+    ///
+    /// The host is the side responsible for maintaining backward
+    /// compatibility (N-1 support policy — see the module docs), so it is
+    /// the only side that should construct a multi-version range. A plugin
+    /// binary should keep declaring the single version it was built against
+    /// via `VersionRange { min: N, max: N }`; this concentrates the
+    /// compatibility burden in the host rather than pushing it onto every
+    /// plugin author.
+    pub const fn host_supported() -> Self {
+        Self {
+            min: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+            max: PLUGIN_IPC_PROTOCOL_VERSION,
+        }
+    }
 }
 
 /// Plugin IPC protocol version.
@@ -63,7 +80,36 @@ impl VersionRange {
 /// - Streaming LLM messages (`CreateChatStream`, `StreamChunk`, `StreamEnd`,
 ///   `StreamError`)
 /// - `ChatCompletion` / `EmbedBatch` for non-streaming provider calls
+///
+/// ## Versioning policy (N-1 backward compatibility)
+///
+/// Plugins ship as separate out-of-process binaries (`plugins/tool/*`,
+/// `plugins/provider/*`), so bumping this constant does not recompile
+/// already-installed plugin binaries. The host therefore maintains
+/// **one version of backward compatibility**: it always advertises
+/// `[PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION]` during
+/// the handshake (see [`VersionRange::host_supported`]) rather than a single
+/// pinned value, so a plugin built against the previous protocol version can
+/// still connect. A plugin binary is *not* required to support a range; it
+/// may keep declaring `VersionRange { min: N, max: N }` for whatever version
+/// it was built against.
+///
+/// When bumping `PLUGIN_IPC_PROTOCOL_VERSION`, also bump
+/// [`PLUGIN_IPC_MIN_SUPPORTED_VERSION`] by the same amount, which drops
+/// support for the oldest previously-supported version. A version bump is
+/// only needed for: changing the meaning of an existing message, adding a
+/// required field, or removing/renaming an enum variant. New fields should
+/// use `#[serde(default)]` so older/newer peers stay wire-compatible without
+/// a version bump.
 pub const PLUGIN_IPC_PROTOCOL_VERSION: u32 = 4;
+
+/// The oldest plugin IPC protocol version the host still accepts.
+///
+/// Always `PLUGIN_IPC_PROTOCOL_VERSION - 1` (N-1 support policy — see the
+/// [`PLUGIN_IPC_PROTOCOL_VERSION`] docs). A plugin binary built against this
+/// version can still complete the handshake and connect, even though the
+/// host has moved on to a newer protocol version.
+pub const PLUGIN_IPC_MIN_SUPPORTED_VERSION: u32 = PLUGIN_IPC_PROTOCOL_VERSION - 1;
 
 /// Default audio format used when none is specified.
 fn default_audio_format() -> String {
@@ -572,10 +618,7 @@ mod tests {
     #[tokio::test]
     async fn request_handshake_roundtrip() {
         let req = PluginIpcRequest::Handshake {
-            version: VersionRange {
-                min: PLUGIN_IPC_PROTOCOL_VERSION,
-                max: PLUGIN_IPC_PROTOCOL_VERSION,
-            },
+            version: VersionRange::host_supported(),
             sandbox: SandboxConfigData::default(),
             plugin_config: Some(serde_json::json!({"api_key": "sk-test"})),
         };
@@ -1046,6 +1089,39 @@ mod tests {
         assert!(r.contains(3));
         assert!(r.contains(4));
         assert!(!r.contains(5));
+    }
+
+    #[test]
+    fn min_supported_version_is_exactly_one_behind_current() {
+        // N-1 support policy: the host maintains exactly one version of
+        // backward compatibility.
+        assert_eq!(
+            PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+            PLUGIN_IPC_PROTOCOL_VERSION - 1
+        );
+    }
+
+    #[test]
+    fn host_supported_spans_min_to_current() {
+        let range = VersionRange::host_supported();
+        assert_eq!(range.min, PLUGIN_IPC_MIN_SUPPORTED_VERSION);
+        assert_eq!(range.max, PLUGIN_IPC_PROTOCOL_VERSION);
+        // A plugin built against the previous protocol version must still
+        // be able to negotiate a connection.
+        let old_plugin = VersionRange {
+            min: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+            max: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+        };
+        assert_eq!(
+            range.negotiate(&old_plugin),
+            Some(PLUGIN_IPC_MIN_SUPPORTED_VERSION)
+        );
+        // A plugin two versions behind is outside the supported window.
+        let ancient_plugin = VersionRange {
+            min: PLUGIN_IPC_MIN_SUPPORTED_VERSION - 1,
+            max: PLUGIN_IPC_MIN_SUPPORTED_VERSION - 1,
+        };
+        assert_eq!(range.negotiate(&ancient_plugin), None);
     }
 
     #[tokio::test]
