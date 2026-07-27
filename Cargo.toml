@@ -112,6 +112,7 @@ ene-ai = { path = "crates/ene-ai" }
 ene-ai-local = { path = "crates/ene-ai-local" }
 ene-config = { path = "crates/ene-config" }
 ene-core = { path = "crates/ene-core" }
+ene-infer = { path = "crates/ene-infer" }
 ene-mind = { path = "crates/ene-mind" }
 ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-db = { path = "crates/ene-plugin-db" }

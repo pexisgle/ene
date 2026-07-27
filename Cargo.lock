@@ -2616,6 +2616,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-infer"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "ene-mind"
 version = "0.1.0"
 dependencies = [
