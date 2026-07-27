@@ -110,11 +110,15 @@ impl ConcurrencyLimiter {
         let mut current = self.waiting.load(Ordering::Acquire);
         loop {
             if current >= self.queue_depth {
-                return Err(LlmProviderError::Busy(format!(
-                    "provider '{kind}' is at its concurrency limit \
-                     (max_in_flight reached, queue_depth={} full)",
-                    self.queue_depth
-                )));
+                tracing::debug!(
+                    component = "ConcurrencyLimiter",
+                    provider_kind = %kind,
+                    queue_depth = self.queue_depth,
+                    "provider at its concurrency limit; rejecting request"
+                );
+                return Err(LlmProviderError::Busy {
+                    queue_depth: self.queue_depth as usize,
+                });
             }
             match self.waiting.compare_exchange_weak(
                 current,
@@ -512,7 +516,8 @@ fn parse_tool_call_delta(value: &serde_json::Value, index: usize) -> LlmToolCall
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,
-    reason = "unit tests use unwrap/expect for concise failure messages"
+    clippy::panic,
+    reason = "unit tests use unwrap/expect/panic for concise failure messages"
 )]
 mod concurrency_limiter_tests {
     use std::time::Duration;
@@ -540,7 +545,7 @@ mod concurrency_limiter_tests {
         // Both in-flight slots are held; a third caller with no queue depth
         // must fail fast rather than block.
         let err = limiter.acquire("test").await.unwrap_err();
-        assert!(matches!(err, LlmProviderError::Busy(_)));
+        assert!(matches!(err, LlmProviderError::Busy { .. }));
     }
 
     #[tokio::test]
@@ -554,8 +559,10 @@ mod concurrency_limiter_tests {
             .acquire("test")
             .await
             .expect_err("second caller must be rejected: no in-flight slot, no queue depth");
-        assert!(matches!(err, LlmProviderError::Busy(_)));
-        assert!(err.to_string().contains("test"));
+        match err {
+            LlmProviderError::Busy { queue_depth } => assert_eq!(queue_depth, 0),
+            other => panic!("expected Busy, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -602,7 +609,7 @@ mod concurrency_limiter_tests {
         // A second caller, beyond max_in_flight + queue_depth, must be
         // rejected immediately rather than growing the wait queue further.
         let err = limiter.acquire("test").await.unwrap_err();
-        assert!(matches!(err, LlmProviderError::Busy(_)));
+        assert!(matches!(err, LlmProviderError::Busy { .. }));
 
         queued.abort();
     }
