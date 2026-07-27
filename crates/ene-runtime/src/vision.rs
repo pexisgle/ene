@@ -93,9 +93,10 @@ impl VisionHandle {
                 "Failed to stash screen frame for generation; continuing text-only"
             );
         }
-        let _ = self
-            .cmd_tx
-            .send(EneCommand::StashProactiveScreenImage { data_uri: stash });
+        drop(
+            self.cmd_tx
+                .send(EneCommand::StashProactiveScreenImage { data_uri: stash }),
+        );
 
         // The actual (potentially multi-second) inference call happens
         // here, entirely outside the actor's command loop.

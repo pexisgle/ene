@@ -86,14 +86,14 @@ impl Router {
             | PluginIpcResponse::StreamEnd { request_id }
             | PluginIpcResponse::StreamError { request_id, .. } => {
                 if let Some(tx) = self.streams.lock().get(request_id) {
-                    let _ = tx.try_send(resp);
+                    drop(tx.try_send(resp));
                 }
             }
             // Request/response: correlate by `request_id`.
             _ => {
                 let rid = response_request_id(&resp).unwrap_or_default();
                 if let Some(tx) = self.waiters.lock().remove(rid) {
-                    let _ = tx.send(resp);
+                    drop(tx.send(resp));
                 }
             }
         }
@@ -664,7 +664,7 @@ impl IpcPluginConnection {
 
     /// Sends a graceful `Shutdown` request (best-effort; ignores errors).
     pub async fn shutdown(&mut self) {
-        let _ = self.send_request(&PluginIpcRequest::Shutdown).await;
+        drop(self.send_request(&PluginIpcRequest::Shutdown).await);
     }
 
     /// Reconnects to the plugin binary, re-performing the handshake.

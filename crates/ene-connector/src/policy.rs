@@ -253,6 +253,13 @@ impl RateLimitCounter {
     /// Uses a compare-exchange loop so the counter can never underflow to
     /// `u64::MAX` (which would make [`is_exhausted`](Self::is_exhausted)
     /// permanently false).
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "Result<u64, u64> is Copy, so `drop()` would itself trip \
+                  clippy::dropping_copy_types; `Err` here just means the \
+                  counter was already at zero (closure returned `None`), \
+                  which is exactly the saturating no-op this method wants"
+    )]
     pub fn decrement(&self) {
         let _ = self
             .remaining

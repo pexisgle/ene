@@ -52,6 +52,13 @@ fn format_user_response(questions: &[QuestionItem], answers: &[MultiAnswer]) -> 
         let rendered = answers
             .get(i)
             .map_or_else(|| "(no answer)".to_string(), format_answer);
+        // `fmt::Error` is `Copy`, so `drop()` would itself trip
+        // `clippy::dropping_copy_types`; writing into a `String` via
+        // `fmt::Write` never actually fails.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "fmt::Write to a String is infallible in practice"
+        )]
         let _ = writeln!(out, "{}. {} -> {}", i + 1, q.question, rendered);
     }
     out

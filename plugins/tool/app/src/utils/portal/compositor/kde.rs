@@ -136,7 +136,7 @@ fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolE
         })?;
 
     if !output.status.success() {
-        let _ = std::fs::remove_file(&script_path);
+        drop(std::fs::remove_file(&script_path));
         return Err(ToolError::execution_failed(format!(
             "{label} loadScript failed: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -149,7 +149,7 @@ fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolE
     })?;
 
     if script_id < 0 {
-        let _ = std::fs::remove_file(&script_path);
+        drop(std::fs::remove_file(&script_path));
         return Err(ToolError::execution_failed(
             "KWin loadScript returned negative ID".to_string(),
         ));
@@ -181,7 +181,7 @@ fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolE
         tracing::warn!("Failed to unload KWin script ({label}): {e}");
     }
 
-    let _ = std::fs::remove_file(&script_path);
+    drop(std::fs::remove_file(&script_path));
 
     if !run_output.status.success() {
         return Err(ToolError::execution_failed(format!(

@@ -19,7 +19,9 @@
     clippy::type_complexity,
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
-    reason = "diagnostic example parses glb/vrm bytes with manual offsets"
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "diagnostic example parses glb/vrm bytes with manual offsets and prints results to the terminal by design"
 )]
 
 use std::path::PathBuf;

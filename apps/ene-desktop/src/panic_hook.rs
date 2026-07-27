@@ -39,6 +39,10 @@ fn log_dir() -> PathBuf {
     ene_config::app_data_dir()
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "last-resort fallback when no GUI dialog backend is available while the process is already panicking"
+)]
 fn show_fatal_dialog(title: &str, body: &str) {
     #[cfg(target_os = "linux")]
     {

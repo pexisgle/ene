@@ -54,7 +54,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
         .changed()
     {
         memory.enabled = memory_enabled;
-        let _ = settings.ai.ai.set_section(&memory);
+        drop(settings.ai.ai.set_section(&memory));
         settings.mark_dirty();
         sync_features(settings, ai);
     }
@@ -183,7 +183,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
 }
 
 fn persist_mind(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, mind: &ene_mind::MindConfig) {
-    let _ = settings.ai.ai.set_section(mind);
+    drop(settings.ai.ai.set_section(mind));
     settings.mark_dirty();
     sync_features(settings, ai);
 }
@@ -248,7 +248,7 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
             .changed()
         {
             rag.enabled = rag_enabled;
-            let _ = settings.ai.ai.set_section(&rag);
+            drop(settings.ai.ai.set_section(&rag));
             settings.mark_dirty();
             sync_features(settings, ai);
         }
@@ -291,8 +291,8 @@ fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &P
         .ai
         .get_section::<ToolRagConfig>()
         .unwrap_or_default();
-    let _ = settings.ai.ai.set_section(tools);
-    let _ = settings.ai.ai.set_section(&rag);
+    drop(settings.ai.ai.set_section(tools));
+    drop(settings.ai.ai.set_section(&rag));
     settings.mark_dirty();
     sync_features(settings, ai);
 }
@@ -371,7 +371,7 @@ fn render_audio(
     });
 
     if changed {
-        let _ = settings.ai.ai.set_section(&ai_cfg);
+        drop(settings.ai.ai.set_section(&ai_cfg));
         settings.mark_dirty();
     }
 

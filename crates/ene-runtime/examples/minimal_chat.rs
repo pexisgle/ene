@@ -9,6 +9,12 @@
 //! ENE_PROVIDER__API_KEY=sk-xxx direnv exec . rtk cargo run -p ene-runtime --example minimal_chat
 //! ```
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "example binary prints turn/session output to the terminal by design"
+)]
+
 use ene_config::{load_character_card, load_config};
 use ene_runtime::{
     CueSource, EneEvent, EneHandle, EneStatus, LifecycleEvent, MultiAnswer, PermissionDecision,
@@ -110,16 +116,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 println!("\n[Permission] {description}");
-                let _ = handle.decide_permission(request_id, PermissionDecision::Deny);
+                drop(handle.decide_permission(request_id, PermissionDecision::Deny));
             }
             EneEvent::UserInputRequired {
                 request_id, prompt, ..
             } => {
                 println!("\n[User input] {} item(s)", prompt.items.len());
-                let _ = handle.submit_user_input(
+                drop(handle.submit_user_input(
                     request_id,
                     UserInputResponse::Multi(vec![MultiAnswer::Skip; prompt.items.len()]),
-                );
+                ));
             }
             EneEvent::ContextCompressed { level, .. } => {
                 println!("\n[ContextCompressed: {level}]");
@@ -145,6 +151,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     Ok(())
 }

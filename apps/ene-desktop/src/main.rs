@@ -18,6 +18,13 @@
     clippy::unnecessary_wraps,
     reason = "desktop UI/render loop favors local clarity; graphics math uses intentional arithmetic"
 )]
+#![expect(
+    clippy::mem_forget,
+    reason = "bevy_ecs's Commands::spawn uses an internal mem::forget-on-Drop \
+              move trick (bevy_ptr::MovingPtr) that clippy attributes to our \
+              bundle-spawning call sites; this is bevy_ecs's implementation \
+              detail, not a leak in our code"
+)]
 #![cfg_attr(
     test,
     expect(

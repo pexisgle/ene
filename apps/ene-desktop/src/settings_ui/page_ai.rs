@@ -102,7 +102,7 @@ pub fn render(
             );
             if response.changed() {
                 ai_cfg.tasks.chat.model = Some(input.ai_chat_model.trim().to_string());
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                drop(settings.ai.ai.set_section(&ai_cfg));
                 settings.mark_dirty();
             }
         });
@@ -129,7 +129,7 @@ pub fn render(
                         );
                     }
                 }
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                drop(settings.ai.ai.set_section(&ai_cfg));
                 settings.mark_dirty();
             }
         });
@@ -159,7 +159,7 @@ pub fn render(
                 {
                     def.api_key.source = current_source;
                 }
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                drop(settings.ai.ai.set_section(&ai_cfg));
                 settings.mark_dirty();
             }
         });
@@ -177,7 +177,7 @@ pub fn render(
                         && def.is_openai_compatible()
                     {
                         def.api_key.env = input.ai_api_key_env.trim().to_string();
-                        let _ = settings.ai.ai.set_section(&ai_cfg);
+                        drop(settings.ai.ai.set_section(&ai_cfg));
                         settings.mark_dirty();
                     }
                 }
@@ -196,7 +196,7 @@ pub fn render(
                         && def.is_openai_compatible()
                     {
                         def.api_key.inline = input.ai_api_key.trim().to_string();
-                        let _ = settings.ai.ai.set_section(&ai_cfg);
+                        drop(settings.ai.ai.set_section(&ai_cfg));
                         settings.mark_dirty();
                     }
                 }
@@ -296,7 +296,7 @@ pub fn render(
                         .dimensions
                         .map_or_else(|| "1536".to_string(), |d| d.to_string());
                 }
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                drop(settings.ai.ai.set_section(&ai_cfg));
                 settings.mark_dirty();
             }
         });
@@ -309,7 +309,7 @@ pub fn render(
             );
             if response.changed() {
                 ai_cfg.tasks.embedding.model = Some(input.ai_embedding_model.trim().to_string());
-                let _ = settings.ai.ai.set_section(&ai_cfg);
+                drop(settings.ai.ai.set_section(&ai_cfg));
                 settings.mark_dirty();
             }
         });
@@ -330,7 +330,7 @@ pub fn render(
                     && let Ok(dims) = input.ai_embedding_dimensions.parse::<usize>()
                 {
                     ai_cfg.tasks.embedding.dimensions = Some(dims);
-                    let _ = settings.ai.ai.set_section(&ai_cfg);
+                    drop(settings.ai.ai.set_section(&ai_cfg));
                     settings.mark_dirty();
                 }
             }

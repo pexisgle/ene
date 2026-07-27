@@ -101,12 +101,12 @@ fn build_menu() -> Menu {
     let settings_item = MenuItem::with_id(SETTINGS_MENU_ID, settings_label, true, None);
     let chat_item = MenuItem::with_id(CHAT_MENU_ID, chat_label, true, None);
     let quit_item = MenuItem::with_id(QUIT_MENU_ID, quit_label, true, None);
-    let _ = menu.append_items(&[
+    drop(menu.append_items(&[
         &settings_item,
         &chat_item,
         &PredefinedMenuItem::separator(),
         &quit_item,
-    ]);
+    ]));
     menu
 }
 
@@ -227,6 +227,10 @@ fn install_event_pump(event_tx: AppEventSender) {
                 .build()
                 .expect("tray icon must build on Windows");
             pump_win32_messages();
+            #[expect(
+                clippy::mem_forget,
+                reason = "keeps the tray icon HWND alive for the life of the message-pump thread; see comment above"
+            )]
             std::mem::forget(_tray_icon);
         });
         std::thread::spawn(move || {
@@ -276,7 +280,7 @@ fn pump_tray_events(event_tx: &AppEventSender) {
                     ..
                 } = event
                 {
-                    let _ = event_tx.send(AppEvent::Tray(TrayAction::OpenSettings { page: None }));
+                    drop(event_tx.send(AppEvent::Tray(TrayAction::OpenSettings { page: None })));
                 }
             }
             recv(menu_rx) -> event => {
@@ -288,7 +292,7 @@ fn pump_tray_events(event_tx: &AppEventSender) {
                     _ => None,
                 };
                 if let Some(action) = action {
-                    let _ = event_tx.send(AppEvent::Tray(action));
+                    drop(event_tx.send(AppEvent::Tray(action)));
                 }
             }
         }

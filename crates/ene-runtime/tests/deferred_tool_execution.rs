@@ -306,11 +306,13 @@ async fn deferred_tool_execution_emits_completion_event() {
                 .await
             {
                 ene_plugin_proto::DeferredStatus::Completed { result } => {
-                    let _ = poll_lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
-                        tool_name: task.tool_name,
-                        task_id: task.task_id,
-                        status: ene_plugin_proto::DeferredStatus::Completed { result },
-                    });
+                    drop(
+                        poll_lifecycle_tx.send(LifecycleEvent::ToolBackgroundCompleted {
+                            tool_name: task.tool_name,
+                            task_id: task.task_id,
+                            status: ene_plugin_proto::DeferredStatus::Completed { result },
+                        }),
+                    );
                     break;
                 }
                 ene_plugin_proto::DeferredStatus::Pending => {

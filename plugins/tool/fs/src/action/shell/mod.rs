@@ -81,6 +81,13 @@ pub async fn shell_exec(
     }
 
     if truncated.truncated {
+        // `fmt::Error` is `Copy`, so `drop()` would itself trip
+        // `clippy::dropping_copy_types`; writing into a `String` via
+        // `fmt::Write` never actually fails.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "fmt::Write to a String is infallible in practice"
+        )]
         let _ = write!(
             output_text,
             "\n\n(Shell output was truncated. Full output: {} bytes, {} lines)",

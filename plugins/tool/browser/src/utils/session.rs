@@ -176,7 +176,7 @@ impl BrowserSessionStore {
         let page = browser.new_page("about:blank").await.map_err(|e| {
             // Clean up the half-launched user-data-dir
             // on the failure path so it does not leak.
-            let _ = std::fs::remove_dir_all(&user_data_dir);
+            drop(std::fs::remove_dir_all(&user_data_dir));
             ToolError::execution_failed(format!("Failed to create page: {e}"))
         })?;
 
@@ -221,10 +221,10 @@ impl BrowserSessionStore {
         let existed = if let Some((_, session_arc)) = self.sessions.remove(session_id) {
             let mut session = session_arc.lock().await;
             session.handler_task.abort();
-            let _ = session.browser.close().await;
+            drop(session.browser.close().await);
             let dir = session.user_data_dir.clone();
             drop(session);
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+            drop(tokio::fs::remove_dir_all(&dir).await);
             true
         } else {
             false
@@ -250,9 +250,9 @@ impl BrowserSessionStore {
             if let Some((_, session_arc)) = self.sessions.remove(&key) {
                 let mut session = session_arc.lock().await;
                 session.handler_task.abort();
-                let _ = session.browser.close().await;
+                drop(session.browser.close().await);
                 let dir = session.user_data_dir.clone();
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                drop(tokio::fs::remove_dir_all(&dir).await);
             }
         }
         self.creation_locks.clear();

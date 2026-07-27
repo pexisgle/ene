@@ -135,7 +135,7 @@ async fn run_prompt(
             if let Ok(code) = tokio::time::timeout(duration, fut).await {
                 code
             } else {
-                let _ = ctx.handle.cancel(&turn);
+                drop(ctx.handle.cancel(&turn));
                 if format.is_structured() {
                     output::print_jsonl(&StreamEvent::Terminal {
                         turn: turn.to_string(),
@@ -303,7 +303,7 @@ async fn process_turn(
                     continue;
                 }
                 if yes {
-                    let _ = handle.decide_permission(request_id, PermissionDecision::AllowOnce);
+                    drop(handle.decide_permission(request_id, PermissionDecision::AllowOnce));
                 } else {
                     denied_permission = true;
                     if format == OutputFormat::Jsonl {
@@ -313,7 +313,7 @@ async fn process_turn(
                             target: target.clone(),
                         })?;
                     }
-                    let _ = handle.decide_permission(request_id, PermissionDecision::Deny);
+                    drop(handle.decide_permission(request_id, PermissionDecision::Deny));
                 }
             }
             EneEvent::UserInputRequired {
@@ -325,7 +325,7 @@ async fn process_turn(
                     continue;
                 }
                 // No interactive prompt is available in non-interactive mode.
-                let _ = handle.submit_user_input(request_id, UserInputResponse::Cancel);
+                drop(handle.submit_user_input(request_id, UserInputResponse::Cancel));
             }
             EneEvent::Terminal {
                 turn: t, reason, ..
@@ -401,8 +401,8 @@ fn print_text_delta(delta: &str) {
     use std::io::Write;
     let stdout = std::io::stdout();
     let mut lock = stdout.lock();
-    let _ = lock.write_all(delta.as_bytes());
-    let _ = lock.flush();
+    drop(lock.write_all(delta.as_bytes()));
+    drop(lock.flush());
 }
 
 /// Map a [`PerfKind`] to its stable string label.

@@ -122,7 +122,7 @@ async fn capture_wayland_portal(
     let uri = response.uri();
     let path = uri.as_str().strip_prefix("file://").unwrap_or(uri.as_str());
     let image = image::open(path).map_err(|e| format!("failed to open screenshot file: {e}"))?;
-    let _ = std::fs::remove_file(path);
+    drop(std::fs::remove_file(path));
     Ok(resize_image(image, scale_percent))
 }
 

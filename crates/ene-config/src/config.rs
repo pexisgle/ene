@@ -16,7 +16,9 @@ pub fn update_global_config(config: EneConfig) {
     if let Some(lock) = GLOBAL_CONFIG.get() {
         *lock.write() = config;
     } else {
-        let _ = GLOBAL_CONFIG.set(parking_lot::RwLock::new(config));
+        // If another thread raced us and set it first, that write already
+        // landed, so a failed `set` here is a no-op we can safely discard.
+        drop(GLOBAL_CONFIG.set(parking_lot::RwLock::new(config)));
     }
 }
 

@@ -70,9 +70,10 @@ impl MicHandle {
     pub fn stop(&mut self) {
         if self.stream.take().is_some() {
             self.mic_active.store(false, Ordering::Relaxed);
-            let _ = self
-                .event_tx
-                .send(AppEvent::MicStateChanged { active: false });
+            drop(
+                self.event_tx
+                    .send(AppEvent::MicStateChanged { active: false }),
+            );
         }
     }
 }
@@ -423,7 +424,7 @@ pub fn start_mic_capture(
                 // Device disconnect recovery (M1): clear the active flag
                 // and notify the UI so the mic indicator resets.
                 err_mic_active.store(false, Ordering::Relaxed);
-                let _ = err_event_tx.send(AppEvent::MicStateChanged { active: false });
+                drop(err_event_tx.send(AppEvent::MicStateChanged { active: false }));
             },
             Some(Duration::from_secs(5)),
         )
@@ -434,7 +435,7 @@ pub fn start_mic_capture(
         .map_err(|e| CaptureError::BuildStream(e.to_string()))?;
 
     audio_state.mic_active.store(true, Ordering::Relaxed);
-    let _ = event_tx.send(AppEvent::MicStateChanged { active: true });
+    drop(event_tx.send(AppEvent::MicStateChanged { active: true }));
     tracing::info!(
         component = "MicCapture",
         device = %device.description().map_or_else(|_| "unknown".to_string(), |d| d.name().to_string()),

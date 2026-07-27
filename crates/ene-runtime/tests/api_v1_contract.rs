@@ -26,9 +26,9 @@ fn test_config_memory_off() -> EneConfig {
     config.set_section(&store).expect("store config merges");
     let mut tools = ene_plugin_host::PluginConfig::default();
     tools.enabled = false;
-    let _ = config.set_section(&tools);
+    drop(config.set_section(&tools));
     let ai = ene_ai::AiConfig::default();
-    let _ = config.set_section(&ai);
+    drop(config.set_section(&ai));
     config
 }
 
@@ -50,7 +50,7 @@ async fn open_returns_ready_handle() {
         snapshot.character_card.as_ref().unwrap().data.name,
         "ContractTest"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -67,7 +67,7 @@ async fn second_run_returns_busy() {
     );
 
     // Free the gate.
-    let _ = handle.cancel(&turn1);
+    drop(handle.cancel(&turn1));
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
     // After cancel, a new run should be accepted (may immediately Terminal).
@@ -77,10 +77,10 @@ async fn second_run_returns_busy() {
         "unexpected error: {turn2:?}"
     );
     if let Ok(t) = turn2 {
-        let _ = handle.cancel(&t);
+        drop(handle.cancel(&t));
     }
 
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -94,7 +94,7 @@ async fn cancel_wrong_turn_returns_mismatch() {
         matches!(err, Err(CancelError::TurnMismatch)),
         "expected TurnMismatch, got {err:?}"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -132,7 +132,7 @@ async fn cancel_emits_terminal_exactly_once_with_matching_turn() {
     let err = handle.cancel(&turn);
     assert!(matches!(err, Err(CancelError::TurnMismatch)));
 
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -143,10 +143,10 @@ async fn memory_enabled_without_embedder_fails_closed_on_open() {
     config.set_section(&store).unwrap();
     let mut tools = ene_plugin_host::PluginConfig::default();
     tools.enabled = false;
-    let _ = config.set_section(&tools);
+    drop(config.set_section(&tools));
     // Cloud embedder with no base URL → init fails → open fails closed.
     let ai = ene_ai::AiConfig::default();
-    let _ = config.set_section(&ai);
+    drop(config.set_section(&ai));
 
     let err = EneHandle::open(config, test_card()).await;
     assert!(err.is_err(), "expected open to fail closed, got {err:?}");
@@ -207,7 +207,7 @@ async fn store_off_run_emits_terminal() {
         saw_terminal,
         "store.enabled=false must complete a turn with Terminal Done or Failed"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -223,7 +223,7 @@ async fn snapshot_history_is_history_entry() {
     // Type-level: Vec<HistoryEntry> — compile-time check via annotation.
     let _: &Vec<ene_mind::HistoryEntry> = &snapshot.history;
     assert!(snapshot.history.is_empty());
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -232,7 +232,7 @@ async fn open_accepts_default_mind_compression() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
         .expect("open initializes handle with default compression");
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -251,7 +251,7 @@ async fn cancel_frees_gate_for_next_run() {
         match handle.run("second") {
             Ok(t) => {
                 accepted = true;
-                let _ = handle.cancel(&t);
+                drop(handle.cancel(&t));
                 break;
             }
             Err(RunError::Busy) => {
@@ -264,7 +264,7 @@ async fn cancel_frees_gate_for_next_run() {
         accepted,
         "cancel must free the turn gate for a subsequent run"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -278,7 +278,7 @@ async fn diagnostics_search_tools_returns_empty_when_no_tools() {
         .await
         .expect("search tools succeeds");
     assert!(result.is_empty(), "expected empty list, got {result:?}");
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -297,7 +297,7 @@ async fn diagnostics_list_tools_includes_system_search_tool() {
             .any(|t| t.name.as_str() == "system.search_tools"),
         "expected system.search_tools in diagnostics tool list"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -317,7 +317,7 @@ async fn diagnostics_call_tool_intercepts_system_search_tool() {
         result.contains("No matching tools found."),
         "expected search tool response, got: {result}"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[test]
@@ -342,7 +342,7 @@ async fn list_sessions_with_store_disabled_returns_public_api_error() {
         matches!(err, ene_runtime::PublicApiError::Internal { .. }),
         "expected Internal for a disabled store, got {err:?}"
     );
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
@@ -355,7 +355,7 @@ async fn archive_session_with_store_disabled_returns_public_api_error() {
         .set_archived("missing-session", true)
         .await;
     assert!(result.is_err(), "expected an error with memory disabled");
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[test]
