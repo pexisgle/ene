@@ -114,6 +114,82 @@ impl TurnGate {
     }
 }
 
+/// RAII guard that triggers graceful shutdown when the last handle clone drops.
+///
+/// Each [`EneHandle`] and its clones share a single `Arc<HandleShutdownGuard>`.
+/// When the last clone of `EneHandle` is dropped, the guard's `Drop` sends
+/// [`EneCommand::Shutdown`] and spawns async plugin-host shutdown on the
+/// current tokio runtime.
+///
+/// This replaces the previous approach of checking
+/// `Arc::strong_count(&cmd_tx) == 1`, which was unreachable because
+/// `EneHandle` internally holds three independent `Arc` clones of `cmd_tx`
+/// (self, diagnostics, vision).
+struct HandleShutdownGuard {
+    /// Bare sender clone for the shutdown command. The guard holds its own
+    /// clone so it can send even after all `EneHandle` fields are dropped.
+    cmd_tx: mpsc::UnboundedSender<EneCommand>,
+    /// Keeps the actor's `JoinHandle` alive until after the guard sends
+    /// `Shutdown`, preventing premature task detach when `EneHandle`'s
+    /// own `actor_handle` field (declared earlier) drops first.
+    #[expect(
+        dead_code,
+        reason = "held to keep the Arc<Mutex<Option<JoinHandle>>> alive until \
+                  after Shutdown is sent; not read directly in Drop"
+    )]
+    actor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
+    health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+impl Drop for HandleShutdownGuard {
+    fn drop(&mut self) {
+        tracing::info!(
+            component = "EneHandle",
+            "Last handle dropped; initiating graceful shutdown"
+        );
+
+        // Send shutdown command to the actor. If the channel is closed
+        // (actor already exited or explicit shutdown consumed it), this
+        // is a silent no-op.
+        drop(self.cmd_tx.send(EneCommand::Shutdown));
+
+        // Shut down the plugin host and abort the health bridge. `Drop`
+        // is synchronous, so spawn on the tokio runtime when one is
+        // available; `SupervisedPlugin::drop` kills the child processes
+        // as a synchronous backstop regardless.
+        let plugin_host = Arc::clone(&self.plugin_host);
+        let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
+        let shutdown = async move {
+            let mut guard = plugin_host.lock().await;
+            if let Some(mut host) = guard.take() {
+                host.shutdown().await;
+            }
+            drop(guard);
+
+            // Abort the health → diagnostics bridge so it does not
+            // outlive the host whose events it forwards (#238).
+            let mut bridge = health_bridge_handle.lock().await;
+            if let Some(handle) = bridge.take() {
+                handle.abort();
+            }
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(shutdown);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    component = "EneHandle",
+                    "No tokio runtime available for plugin host shutdown; \
+                     relying on process-kill backstop"
+                );
+            }
+        }
+    }
+}
+
 /// Thread-safe handle to the ready actor.
 ///
 /// Constructed only via [`EneHandle::open`], which initializes provider, store,
@@ -160,6 +236,13 @@ pub struct EneHandle {
     candidates: crate::query::candidates::MemoryCandidateHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox (#271).
     vision: crate::vision::VisionHandle,
+    /// RAII guard that triggers graceful shutdown when the last handle clone
+    /// drops. Shared via `Arc` across all handle clones so the guard's `Drop`
+    /// fires exactly once — when the last clone is released. Declared as the
+    /// last field so all command-sending fields (`cmd_tx`, `diagnostics`,
+    /// `vision`) are dropped before it; the guard holds its own sender clone,
+    /// so field order is not critical for correctness but makes intent clear.
+    shutdown_guard: Arc<HandleShutdownGuard>,
 }
 
 impl std::fmt::Debug for EneHandle {
@@ -190,6 +273,7 @@ impl Clone for EneHandle {
             sessions: self.sessions.clone(),
             candidates: self.candidates.clone(),
             vision: self.vision.clone(),
+            shutdown_guard: Arc::clone(&self.shutdown_guard),
         }
     }
 }
@@ -473,6 +557,14 @@ impl EneHandle {
         );
         let join = tokio::spawn(actor.run());
 
+        let actor_handle = Arc::new(tokio::sync::Mutex::new(Some(join)));
+        let shutdown_guard = Arc::new(HandleShutdownGuard {
+            cmd_tx: (*cmd_tx).clone(),
+            actor_handle: Arc::clone(&actor_handle),
+            plugin_host: Arc::clone(&plugin_host),
+            health_bridge_handle: Arc::clone(&health_bridge_handle),
+        });
+
         Ok(Self {
             cmd_tx,
             event_tx,
@@ -482,12 +574,13 @@ impl EneHandle {
             diag_tx,
             diagnostics,
             turn_gate,
-            actor_handle: Arc::new(tokio::sync::Mutex::new(Some(join))),
+            actor_handle,
             plugin_host,
             health_bridge_handle,
             sessions,
             candidates,
             vision,
+            shutdown_guard,
         })
     }
 
@@ -626,11 +719,12 @@ impl EneHandle {
 
     /// Gracefully shuts down the plugin host if it is still alive (#247).
     ///
-    /// Called from [`EneHandle::shutdown`] after the actor drains and from
-    /// [`Drop`] when the last handle clone is released. Only the first caller
-    /// performs the shutdown; subsequent calls are no-ops. Also aborts the
-    /// plugin health → diagnostics bridge task so it does not outlive the
-    /// host whose events it forwards (#238).
+    /// Called from [`EneHandle::shutdown`] after the actor drains. The
+    /// [`HandleShutdownGuard`] performs an equivalent shutdown on last-handle
+    /// drop; both paths `.take()` from the same `Arc<Mutex<Option<…>>>`, so
+    /// only the first caller performs the shutdown — subsequent calls are
+    /// no-ops. Also aborts the plugin health → diagnostics bridge task so it
+    /// does not outlive the host whose events it forwards (#238).
     async fn shutdown_plugin_host(&self) {
         let mut guard = self.plugin_host.lock().await;
         if let Some(mut host) = guard.take() {
@@ -747,55 +841,6 @@ impl EneHandle {
                 settings: Box::new(settings),
             })
             .map_err(|_| ActorDeadError)
-    }
-}
-
-impl Drop for EneHandle {
-    /// Sends a graceful `Shutdown` command when the last handle clone is dropped.
-    ///
-    /// Because `Drop` is synchronous, the actor may still be running after this
-    /// returns. Background tasks spawned by the actor (classifiers, memory
-    /// writers, deferred tool tasks) become detached tokio tasks. Callers that
-    /// need a clean shutdown guarantee should use [`EneHandle::shutdown`] with
-    /// an explicit timeout before dropping the handle.
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.cmd_tx) == 1 {
-            drop(self.cmd_tx.send(EneCommand::Shutdown));
-            // Last handle clone: shut down the plugin host (#247). `Drop` is
-            // synchronous, so spawn the async shutdown on the runtime when one
-            // is available; `SupervisedPlugin::drop` kills the processes as a
-            // synchronous backstop regardless.
-            if Arc::strong_count(&self.plugin_host) == 1 {
-                let plugin_host = Arc::clone(&self.plugin_host);
-                let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
-                let shutdown = async move {
-                    let mut guard = plugin_host.lock().await;
-                    if let Some(mut host) = guard.take() {
-                        host.shutdown().await;
-                    }
-                    drop(guard);
-
-                    // Abort the health → diagnostics bridge so it does not
-                    // outlive the host whose events it forwards (#238).
-                    let mut bridge = health_bridge_handle.lock().await;
-                    if let Some(handle) = bridge.take() {
-                        handle.abort();
-                    }
-                };
-                match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => {
-                        handle.spawn(shutdown);
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            component = "EneHandle",
-                            "No tokio runtime available for plugin host shutdown; \
-                             relying on process-kill backstop"
-                        );
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -946,6 +991,104 @@ mod tests {
         );
 
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
+    /// Regression test for #396: the old `Drop` for `EneHandle` gated
+    /// shutdown on `Arc::strong_count(&cmd_tx) == 1`, which was never true
+    /// because a single handle holds three independent `Arc` clones of
+    /// `cmd_tx` (self, diagnostics, vision). The [`HandleShutdownGuard`]
+    /// is shared via one `Arc` across all handle clones, so its `Drop` must
+    /// fire exactly once — when the *last* clone is released. Dropping an
+    /// intermediate clone must leave the actor alive; dropping the last
+    /// clone must make it exit.
+    #[tokio::test]
+    async fn drop_last_handle_clone_shuts_down_actor_exactly_once() {
+        let handle = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+
+        // Probe sender held outside the handle: the guard no longer depends
+        // on `cmd_tx`'s strong count, so an extra sender clone must not
+        // defer shutdown (the exact #396 trap the old code fell into).
+        let probe = Arc::clone(&handle.cmd_tx);
+
+        let clone = handle.clone();
+        drop(handle);
+
+        // Dropping one of two clones must not shut the actor down: a mailbox
+        // round-trip still completes.
+        let scopes = clone
+            .list_permissions()
+            .await
+            .expect("actor must stay alive while one handle clone remains");
+        assert!(
+            scopes.is_empty(),
+            "no permissions granted in a fresh runtime"
+        );
+
+        // Dropping the last clone fires `HandleShutdownGuard::drop`, which
+        // sends `EneCommand::Shutdown`. The actor processes it, exits its
+        // command loop, and drops its receiver, after which probe sends fail.
+        drop(clone);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let (reply, _rx) = oneshot::channel();
+            if probe.send(EneCommand::ListPermissions { reply }).is_err() {
+                break; // receiver dropped -> actor exited
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "actor still running after the last handle clone dropped; \
+                 HandleShutdownGuard did not send Shutdown"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Regression test for #396: an explicit [`EneHandle::shutdown`] before
+    /// drop must leave the guard's `Drop` a silent no-op — the command
+    /// channel is closed and the shutdown mutexes already emptied, so no
+    /// double shutdown or panic occurs.
+    #[tokio::test]
+    async fn explicit_shutdown_before_drop_is_idempotent() {
+        let handle = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+
+        handle
+            .shutdown(std::time::Duration::from_secs(5))
+            .await
+            .expect("explicit shutdown drains the actor");
+
+        // Guard `Drop` runs here: every cleanup action is a no-op because
+        // the actor already consumed its receiver and `shutdown_plugin_host`
+        // already `.take()`-ed the host and bridge. Passes if it neither
+        // panics nor hangs.
+        drop(handle);
+    }
+
+    /// Regression test for #396: explicit shutdown on one clone while a
+    /// sibling clone is still live. The shared guard fires only when the
+    /// last clone releases it — by which point every resource it touches
+    /// has already been consumed by the explicit shutdown.
+    #[tokio::test]
+    async fn explicit_shutdown_with_live_clone_then_drop_last() {
+        let handle = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+        let clone = handle.clone();
+
+        handle
+            .shutdown(std::time::Duration::from_secs(5))
+            .await
+            .expect("explicit shutdown drains the actor");
+
+        // `clone` still references the guard, so it has not dropped yet.
+        // These drops bring the guard's refcount to zero and run its `Drop`
+        // against already-emptied state. Passes if it neither panics nor
+        // hangs.
+        drop(clone);
+        drop(handle);
     }
 
     #[tokio::test]
