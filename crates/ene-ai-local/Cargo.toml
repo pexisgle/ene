@@ -6,7 +6,6 @@ description = "Local GGUF model providers (llama.cpp) for the ene AI character p
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-build = "build.rs"
 
 [features]
 default = ["local"]
@@ -25,6 +24,7 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+regex = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
@@ -34,9 +34,6 @@ image = { workspace = true, features = ["png", "jpeg"] }
 base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
 rand = { workspace = true }
-
-[build-dependencies]
-cc = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
