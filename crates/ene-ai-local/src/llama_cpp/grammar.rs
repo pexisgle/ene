@@ -982,7 +982,7 @@ impl SchemaConverter {
                 if !first {
                     out.push_str(" | ");
                 }
-                out.push_str("[^\"]");
+                out.push_str("[^\"");
                 out.push_str(&rejects);
                 out.push(']');
                 out.push(' ');
@@ -1634,5 +1634,32 @@ mod tests {
         let grammar = json_schema_to_grammar(schema).expect("grammar conversion");
         assert!(grammar.contains("root ::= "), "{grammar}");
         assert!(grammar.contains("[a-z]"), "{grammar}");
+    }
+
+    /// Regression test: `not_strings`'s reject-character-class builder used to
+    /// close its `[^"...]` bracket expression one character too early
+    /// (`out.push_str("[^\"]")` instead of `"[^\""`), producing a malformed
+    /// GBNF terminal like `[^"]ab]` for any object schema that both declares
+    /// named properties and allows additional ones. `LlamaSampler::grammar`
+    /// panics on invalid GBNF (see `llama_cpp/generate.rs`), so this was a
+    /// guaranteed break for a common schema shape, not a cosmetic issue.
+    #[test]
+    fn additional_properties_key_rejection_is_a_single_bracket_expression() {
+        let schema = r#"{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}},"required":["a"],"additionalProperties":true}"#;
+        let grammar = json_schema_to_grammar(schema).expect("grammar conversion");
+        assert!(grammar.contains("[^\"ab]"), "{grammar}");
+        assert!(!grammar.contains("]a]"), "{grammar}");
+        assert!(!grammar.contains("]b]"), "{grammar}");
+    }
+
+    /// Same bug, single-property + object-valued `additionalProperties`
+    /// (rather than `additionalProperties: true`) — a second, distinct call
+    /// site that reaches the same `not_strings` code path.
+    #[test]
+    fn additional_properties_schema_key_rejection_is_a_single_bracket_expression() {
+        let schema = r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":{"type":"integer"}}"#;
+        let grammar = json_schema_to_grammar(schema).expect("grammar conversion");
+        assert!(grammar.contains("[^\"a]"), "{grammar}");
+        assert!(!grammar.contains("]a]"), "{grammar}");
     }
 }
