@@ -9,8 +9,8 @@
 //!
 //! Every actor `JoinSet` that accepts new background work is capped: once
 //! full, admission is rejected rather than left to grow without bound (see
-//! `crates/ene-runtime/src/handle/actor.rs`'s `admit_task`). The five caps
-//! below are independently tunable because the five task sets have very
+//! `crates/ene-runtime/src/handle/actor.rs`'s `admit_task`). The six caps
+//! below are independently tunable because the six task sets have very
 //! different risk profiles:
 //!
 //! - `call_tool_cap` — interactive `EneCommand::CallTool` /
@@ -30,6 +30,10 @@
 //!   rejected admission only means the actor stops supervising it for
 //!   panics, not that the work itself is cancelled.
 //! - `search_cap` — `EneCommand::SearchTools` / tool-search jobs.
+//! - `bg_command_cap` — heavy command-handler work (GGUF model load,
+//!   plugin host restart) spawned off the actor's main loop to prevent
+//!   head-of-line blocking (#397). Low default because these operations
+//!   are infrequent.
 
 const fn default_call_tool_cap() -> usize {
     64
@@ -49,6 +53,10 @@ const fn default_memory_writer_cap() -> usize {
 
 const fn default_search_cap() -> usize {
     16
+}
+
+const fn default_bg_command_cap() -> usize {
+    4
 }
 
 const fn default_deferred_max_polls() -> u32 {
@@ -83,6 +91,11 @@ ene_config::define_config!(
         /// (`ENE_TOOLS__SEARCH_CAP`).
         #[serde(default = "default_search_cap")]
         pub search_cap: usize = default_search_cap(),
+        /// Max concurrently in-flight heavy command-handler background
+        /// tasks — GGUF model loads, plugin host restarts (#397)
+        /// (`ENE_TOOLS__BG_COMMAND_CAP`).
+        #[serde(default = "default_bg_command_cap")]
+        pub bg_command_cap: usize = default_bg_command_cap(),
         /// Maximum poll iterations (at 100ms each) before a deferred
         /// (background) tool task is considered timed out (default 600 =
         /// 60s). Previously read directly from the
@@ -109,6 +122,7 @@ mod tests {
         assert_eq!(cfg.classifier_cap, 16);
         assert_eq!(cfg.memory_writer_cap, 16);
         assert_eq!(cfg.search_cap, 16);
+        assert_eq!(cfg.bg_command_cap, 4);
         assert_eq!(cfg.deferred_max_polls, 600);
     }
 
@@ -121,6 +135,7 @@ mod tests {
             classifier_cap: 1,
             memory_writer_cap: 1,
             search_cap: 1,
+            bg_command_cap: 2,
             deferred_max_polls: 10,
         };
         config.set_section(&custom).expect("set_section succeeds");
@@ -132,6 +147,7 @@ mod tests {
         assert_eq!(read_back.classifier_cap, 1);
         assert_eq!(read_back.memory_writer_cap, 1);
         assert_eq!(read_back.search_cap, 1);
+        assert_eq!(read_back.bg_command_cap, 2);
         assert_eq!(read_back.deferred_max_polls, 10);
     }
 

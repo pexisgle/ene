@@ -454,6 +454,7 @@ impl EneHandle {
 
         let actor = actor::TurnActor::new(
             cmd_rx,
+            (*cmd_tx).clone(),
             event_tx.clone(),
             lifecycle_tx.clone(),
             audio_tx.clone(),
@@ -1170,7 +1171,7 @@ mod tests {
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,
         task_caps: &crate::task_config::ToolRuntimeConfig,
     ) -> (actor::TurnActor, broadcast::Receiver<DiagnosticEvent>) {
-        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, _event_rx) = broadcast::channel(16);
         let (lifecycle_tx, _lifecycle_rx) = broadcast::channel(16);
         let (audio_tx, _audio_rx) = mpsc::channel(8);
@@ -1183,6 +1184,7 @@ mod tests {
             ene_ai::ProviderHealthMonitor::new(std::time::Duration::from_secs(1), 8);
         let actor = actor::TurnActor::new(
             cmd_rx,
+            cmd_tx,
             event_tx,
             lifecycle_tx,
             audio_tx,
