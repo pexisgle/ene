@@ -57,6 +57,9 @@ pub mod query;
 #[doc(hidden)]
 pub mod streaming;
 mod streaming_cognitive;
+/// Bounded-task admission config for the turn actor's background
+/// `JoinSet`s (Stage 8).
+pub mod task_config;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
 /// Actor-native undo stack and metadata (#178).
@@ -112,6 +115,8 @@ pub use public_api::{
 /// Top-level application configuration (re-exported from `ene-config`).
 #[doc(no_inline)]
 pub use ene_config::EneConfig;
+/// Bounded-task admission caps for the turn actor (`tools.*`, Stage 8).
+pub use task_config::ToolRuntimeConfig;
 
 // ── Provider types ──
 /// AI provider registry and task routing config.

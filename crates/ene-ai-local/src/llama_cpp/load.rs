@@ -2,8 +2,11 @@
 
 use super::backend::with_backend;
 use super::map_llama_err;
+use ene_ai::ResourceClass;
 use ene_ai::config::ProactiveAcceleration;
 use ene_ai::error::LlmProviderError;
+use llama_cpp_4::context::LlamaContext;
+use llama_cpp_4::context::params::LlamaContextParams;
 use llama_cpp_4::llama_backend::LlamaBackend;
 use llama_cpp_4::model::LlamaModel;
 use llama_cpp_4::model::params::LlamaModelParams;
@@ -104,6 +107,23 @@ pub(crate) fn resolve_gpu_offload(
     }
 }
 
+/// The [`ResourceClass`] a model loaded with `spec` contends on.
+///
+/// `with_main_gpu: true` means `load_with_backend` below called
+/// `.with_main_gpu(0)` — the same physical device index every other
+/// GPU-offloaded local engine in this crate uses, so this always returns
+/// device `0` (there is no per-model device selection today; see this
+/// crate's docs on `ResourceRegistry` for why sharing that one class across
+/// independently-constructed engines is exactly the point).
+pub(crate) fn resource_class_for(spec: &LoadSpec) -> Result<ResourceClass, LlmProviderError> {
+    let offload = resolve_gpu_offload(spec.acceleration, &spec.gpu_layers)?;
+    Ok(if offload.use_main_gpu {
+        ResourceClass::Gpu { device: 0 }
+    } else {
+        ResourceClass::Cpu
+    })
+}
+
 fn parse_gpu_layers(raw: &str) -> u32 {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
@@ -139,6 +159,47 @@ impl LoadedModel {
     #[must_use]
     pub(crate) fn supports_vision(&self) -> bool {
         self.mtmd.as_ref().is_some_and(MtmdContext::supports_vision)
+    }
+
+    /// Builds a [`LlamaContext`] for this model with its borrow unsafely
+    /// widened from `&self`'s real lifetime to `'static`.
+    ///
+    /// # Why this exists
+    ///
+    /// `LlamaContext<'a>` borrows `&'a LlamaModel`. This crate's worker
+    /// models (`LlamaChatModel`, `LlamaEmbedModel`) want to cache one
+    /// `LlamaContext` alongside the `LoadedModel` it was built from —
+    /// reused across jobs instead of rebuilt per request — which is a
+    /// self-referential struct and not expressible with a checked lifetime.
+    ///
+    /// # Safety
+    ///
+    /// The caller must:
+    /// - box (or otherwise heap-pin) the `LoadedModel` this is called on, so
+    ///   its address stays fixed regardless of how the *caller's own*
+    ///   struct is moved — the returned context's `'static` claim is a lie
+    ///   that is only true for as long as `self`'s address does not change;
+    /// - drop the returned context before `self` is dropped or replaced
+    ///   (e.g. put the `Option<LlamaContext<'static>>` field ahead of the
+    ///   `Box<LoadedModel>` field, or clear it explicitly in a manual `Drop`
+    ///   impl before the model can go away).
+    ///
+    /// Both worker models in this crate satisfy this: `self` is a boxed
+    /// field never moved or replaced while a cached context exists, and each
+    /// clears its `ctx` field before ever touching `loaded` again.
+    pub(crate) unsafe fn new_context_unbounded(
+        &self,
+        backend: &LlamaBackend,
+        params: LlamaContextParams,
+    ) -> Result<LlamaContext<'static>, LlmProviderError> {
+        let ctx = self
+            .model
+            .new_context(backend, params)
+            .map_err(|e| map_llama_err("failed to create llama context", e))?;
+        // SAFETY: widening `LlamaContext<'_>` (tied to `&self.model`, i.e.
+        // `&'_ self`) to `'static`. Sound exactly when this function's own
+        // safety contract (see doc comment above) is upheld by the caller.
+        Ok(unsafe { std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(ctx) })
     }
 }
 

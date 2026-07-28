@@ -63,7 +63,9 @@ pub mod tool_types;
 pub mod transport;
 
 /// Capability and provider spec types.
-pub use capabilities::{LlmProviderSpec, PluginCapabilities, SttProviderSpec, TtsProviderSpec};
+pub use capabilities::{
+    ConcurrencyHint, LlmProviderSpec, PluginCapabilities, SttProviderSpec, TtsProviderSpec,
+};
 /// Plugin error type.
 pub use error::PluginError;
 /// Plugin IPC message types, protocol version, and framing helpers.

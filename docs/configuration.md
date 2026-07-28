@@ -122,6 +122,38 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
 }
 ```
 
+### `tools.*` — Tool-Execution Runtime Behavior
+
+Distinct from `plugins.*` (which manages the plugin *process*/IPC layer):
+`tools.*` covers tool-invocation runtime knobs owned by `ene-runtime` and
+`ene-tool-rag`. `tools.rag` configures the Tool RAG selection pipeline
+(`ene_tool_rag::ToolRagConfig`); the fields shown below
+(`ene_runtime::ToolRuntimeConfig`) cap how many background tasks the turn
+actor keeps in flight at once and bound the deferred-tool poll budget. Once
+a cap is reached, admission is rejected (fails fast) rather than queued
+without bound — `CallTool`/`CancelDeferredTool` and `SearchTools` calls get
+back an actionable "busy" error; the post-turn classifier, memory-writer,
+and deferred-tool-poller admission points have no reply channel of their
+own, so a rejection there only shows up as a `TaskRejected` diagnostic
+event:
+
+```json
+{
+  "tools": {
+    "call_tool_cap": 64,
+    "deferred_tool_cap": 32,
+    "classifier_cap": 16,
+    "memory_writer_cap": 16,
+    "search_cap": 16,
+    "deferred_max_polls": 600,
+    "rag": {
+      "enabled": true,
+      "top_k": 12
+    }
+  }
+}
+```
+
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 
 Controls display language, graphics render parameters, and microphone input device:
