@@ -106,6 +106,11 @@ New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name
 declare side effects / sandbox needs. Verify with `/tool list` and update both
 `docs/concepts/plugins-and-mcp.md` and its `docs/ja/` counterpart.
 
+Plugin crates are **binary-only** — no `[lib]` target (see `plugins/tool/fs`,
+`plugins/provider/anthropic`). Size is not a reason to add one: `#[cfg(test)]` modules run
+normally in a bin crate. Add `[lib]` only when an integration test under `tests/` or another
+workspace crate must link the logic directly.
+
 IPC starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4, length-prefixed JSON). The
 host advertises a range via `VersionRange::host_supported()` and keeps N-1 compatibility, so
 `PLUGIN_IPC_MIN_SUPPORTED_VERSION = PLUGIN_IPC_PROTOCOL_VERSION - 1`. Prefer adding
