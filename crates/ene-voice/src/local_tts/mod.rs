@@ -88,13 +88,19 @@ impl TtsProviderFactory for LocalTtsProviderFactory {
     }
 }
 
-/// Register the local Kokoro TTS factory at startup.
+/// Register the local Kokoro TTS factory.
 ///
-/// Registered unconditionally; the factory fails fast at `create_provider`
-/// time when the `local-tts` feature is disabled.
-#[ctor::ctor(unsafe)]
-fn register_local_tts() {
+/// Called once from [`crate::register_providers`] during runtime bootstrap,
+/// rather than via a `#[ctor::ctor]` that would run before `main` (and before
+/// `tracing` is initialized). Registered unconditionally; the factory fails
+/// fast at `create_provider` time when the `local-tts` feature is disabled.
+pub(crate) fn register() {
     AudioProviderRegistry::register_tts(std::sync::Arc::new(LocalTtsProviderFactory));
+    tracing::debug!(
+        component = "ene-voice",
+        provider = PROVIDER_NAME,
+        "registered local TTS provider factory"
+    );
 }
 
 /// Runs `ene_infer::conformance::run_all` against a test-only stand-in for

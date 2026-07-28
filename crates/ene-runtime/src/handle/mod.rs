@@ -211,6 +211,16 @@ impl EneHandle {
 
         LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
 
+        // Register the local whisper/kokoro/silero factories with
+        // `ene_ai::AudioProviderRegistry` before anything below (this
+        // function's own TTS provider resolution, or a later
+        // caller-initiated STT/VAD lookup such as the desktop app's mic
+        // toggle) can look one up by name. Previously each factory
+        // registered itself via a `#[ctor::ctor]` that ran before `main`
+        // and before `tracing` was initialized; doing it here, after
+        // `tracing` is up, makes registration observable.
+        ene_voice::register_providers();
+
         let mind = config.get_section::<ene_mind::MindConfig>()?;
         ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
 
