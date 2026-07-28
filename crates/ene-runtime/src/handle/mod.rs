@@ -1122,4 +1122,241 @@ mod tests {
         drop(handle.cancel(&turn));
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
+
+    // ── Stage 8: bounded actor task admission ──
+
+    /// A `ToolRegistry` with no tools, whose `call_tool` always succeeds.
+    /// Good enough for admission-cap tests below, which only care about how
+    /// many times a `JoinSet` was asked to admit a task, not about real tool
+    /// behavior.
+    struct EmptyRegistry;
+
+    #[async_trait::async_trait]
+    impl ene_plugin_host::ToolRegistry for EmptyRegistry {
+        fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+            Vec::new()
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: &str,
+            _context: Option<&ene_plugin_proto::CallContext>,
+        ) -> Result<ene_plugin_proto::ToolResult, ene_plugin_host::PluginHostError> {
+            Ok(ene_plugin_proto::ToolResult::text("done"))
+        }
+    }
+
+    /// Builds a bare `TurnActor` directly, bypassing `EneHandle::open`'s
+    /// plugin-host / DB / embedder bootstrapping entirely, so admission-cap
+    /// tests can drive [`actor::TurnActor::handle_command`] one call at a
+    /// time with no `run()` loop (and therefore no `reap_join_set` calls)
+    /// racing in between. That matters because a `JoinSet`'s `len()` only
+    /// ever shrinks when something reaps it; calling `handle_command`
+    /// directly means the length seen by `admit_task` across two successive
+    /// calls in a test is fully deterministic regardless of how fast the
+    /// mock tool call actually completes.
+    fn build_bare_actor(
+        registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+        task_caps: &crate::task_config::ToolRuntimeConfig,
+    ) -> (actor::TurnActor, broadcast::Receiver<DiagnosticEvent>) {
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = broadcast::channel(16);
+        let (lifecycle_tx, _lifecycle_rx) = broadcast::channel(16);
+        let (audio_tx, _audio_rx) = mpsc::channel(8);
+        let (diag_tx, diag_rx) = broadcast::channel(64);
+        let mut config = EneConfig::default();
+        config
+            .set_section(task_caps)
+            .expect("set_section(ToolRuntimeConfig) succeeds");
+        let health_monitor =
+            ene_ai::ProviderHealthMonitor::new(std::time::Duration::from_secs(1), 8);
+        let actor = actor::TurnActor::new(
+            cmd_rx,
+            event_tx,
+            lifecycle_tx,
+            audio_tx,
+            diag_tx.clone(),
+            diag_tx.subscribe(),
+            Arc::new(TurnGate::new()),
+            config,
+            ConversationSession::new(),
+            registry,
+            None,
+            health_monitor,
+            None,
+            Vec::new(),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(parking_lot::Mutex::new(String::new())),
+        );
+        (actor, diag_rx)
+    }
+
+    /// Pure test of the shared admission mechanism (`actor::admit_task`),
+    /// used identically by all five of `TurnActor`'s bounded `JoinSet`s:
+    /// under cap it must allow admission silently, and right at cap it must
+    /// reject and emit a `TaskRejected` diagnostic with the offending
+    /// component/cap/detail. Covers the classifier / memory-writer /
+    /// deferred-tool drain sites (which have no reply channel of their own)
+    /// by exercising the exact function they all call.
+    #[tokio::test]
+    async fn admit_task_allows_up_to_cap_then_rejects_with_diagnostic() {
+        let (diag_tx, mut diag_rx) = broadcast::channel(16);
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+        assert!(actor::admit_task(&set, 2, "TestSet", None, &diag_tx));
+        set.spawn(async {});
+        assert!(actor::admit_task(&set, 2, "TestSet", None, &diag_tx));
+        set.spawn(async {});
+        assert!(!actor::admit_task(
+            &set,
+            2,
+            "TestSet",
+            Some("detail".to_string()),
+            &diag_tx
+        ));
+
+        let ev = diag_rx
+            .try_recv()
+            .expect("expected a TaskRejected diagnostic");
+        match ev {
+            DiagnosticEvent::TaskRejected {
+                component,
+                cap,
+                detail,
+            } => {
+                assert_eq!(component, "TestSet");
+                assert_eq!(cap, 2);
+                assert_eq!(detail.as_deref(), Some("detail"));
+            }
+            other => panic!("expected TaskRejected, got {other:?}"),
+        }
+    }
+
+    /// End-to-end (through `EneCommand::CallTool`, not just the bare
+    /// `admit_task` helper): with `call_tool_cap` set to 1, a second
+    /// `CallTool` sent while the first is still occupying the `JoinSet`'s
+    /// only slot must be rejected with `EneRuntimeError::Busy` on its own
+    /// reply channel *and* a `TaskRejected` diagnostic, while the first call
+    /// is admitted and completes normally.
+    #[tokio::test]
+    async fn call_tool_admission_rejects_busy_once_at_cap() {
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            call_tool_cap: 1,
+            ..Default::default()
+        };
+        let (mut actor, mut diag_rx) = build_bare_actor(registry, &task_caps);
+
+        let (tx1, rx1) = oneshot::channel();
+        assert!(
+            actor
+                .handle_command(EneCommand::CallTool {
+                    name: "anything".into(),
+                    arguments: "{}".into(),
+                    turn: None,
+                    reply: tx1,
+                })
+                .await,
+            "handle_command must not signal shutdown"
+        );
+
+        let (tx2, rx2) = oneshot::channel();
+        assert!(
+            actor
+                .handle_command(EneCommand::CallTool {
+                    name: "anything".into(),
+                    arguments: "{}".into(),
+                    turn: None,
+                    reply: tx2,
+                })
+                .await
+        );
+
+        let res2 = rx2.await.expect("reply channel not dropped");
+        assert!(
+            matches!(res2, Err(EneRuntimeError::Busy { queue_depth: 1 })),
+            "expected Busy{{queue_depth:1}} for the second call, got {res2:?}"
+        );
+
+        let mut saw_rejected = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            if let DiagnosticEvent::TaskRejected { component, cap, .. } = ev
+                && component == "CallTool"
+                && cap == 1
+            {
+                saw_rejected = true;
+            }
+        }
+        assert!(
+            saw_rejected,
+            "expected a TaskRejected diagnostic for CallTool"
+        );
+
+        let res1 = rx1.await.expect("reply channel not dropped");
+        assert_eq!(
+            res1.expect("first call must be admitted and succeed"),
+            "done"
+        );
+    }
+
+    /// Same shape as the `CallTool` test above, for `EneCommand::SearchTools`
+    /// and `search_cap`.
+    #[tokio::test]
+    async fn search_tools_admission_rejects_busy_once_at_cap() {
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            search_cap: 1,
+            ..Default::default()
+        };
+        let (mut actor, mut diag_rx) = build_bare_actor(registry, &task_caps);
+
+        let (tx1, rx1) = oneshot::channel();
+        assert!(
+            actor
+                .handle_command(EneCommand::SearchTools {
+                    query: "anything".into(),
+                    reply: tx1,
+                })
+                .await
+        );
+
+        let (tx2, rx2) = oneshot::channel();
+        assert!(
+            actor
+                .handle_command(EneCommand::SearchTools {
+                    query: "anything".into(),
+                    reply: tx2,
+                })
+                .await
+        );
+
+        let res2 = rx2.await.expect("reply channel not dropped");
+        assert!(
+            matches!(res2, Err(EneRuntimeError::Busy { queue_depth: 1 })),
+            "expected Busy{{queue_depth:1}} for the second search, got {res2:?}"
+        );
+
+        let mut saw_rejected = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            if let DiagnosticEvent::TaskRejected { component, cap, .. } = ev
+                && component == "SearchTools"
+                && cap == 1
+            {
+                saw_rejected = true;
+            }
+        }
+        assert!(
+            saw_rejected,
+            "expected a TaskRejected diagnostic for SearchTools"
+        );
+
+        let res1 = rx1.await.expect("reply channel not dropped");
+        assert!(
+            res1.expect("first search must be admitted and succeed")
+                .is_empty(),
+            "expected the empty registry's tool list to filter to nothing"
+        );
+    }
 }

@@ -143,9 +143,13 @@ pub(super) struct TurnActor {
     active_origin: crate::types::TurnOrigin,
     /// Provider health monitor for failover routing (#175).
     health_monitor: ene_ai::ProviderHealthMonitor,
-    /// Maximum poll iterations for deferred (background) tool tasks (#196).
-    /// Configurable via `ENE_TOOLS__DEFERRED_MAX_POLLS` env var (default: 600 = 60s).
-    deferred_max_polls: u32,
+    /// Bounded-task admission caps for the five `JoinSet`s above, plus the
+    /// deferred (background) tool poll budget (Stage 8). Loaded once at
+    /// construction from the `tools.*` config section (see
+    /// [`crate::task_config::ToolRuntimeConfig`]); a config hot-reload does
+    /// not currently re-read it (mirrors `deferred_max_polls`'s prior
+    /// once-at-startup behavior).
+    task_caps: crate::task_config::ToolRuntimeConfig,
     /// Resolved TTS provider for streaming audio synthesis (None when TTS is disabled).
     tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
     /// Plugin-contributed tool registries, re-merged when the tool registry is
@@ -198,6 +202,9 @@ impl TurnActor {
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
         let (deferred_tool_tx, deferred_tool_rx) = mpsc::unbounded_channel();
+        let task_caps = config
+            .get_section::<crate::task_config::ToolRuntimeConfig>()
+            .unwrap_or_default();
         Self {
             cmd_rx,
             event_tx,
@@ -239,10 +246,7 @@ impl TurnActor {
             proactive_llm: None,
             active_origin: crate::types::TurnOrigin::User,
             health_monitor,
-            deferred_max_polls: std::env::var("ENE_TOOLS__DEFERRED_MAX_POLLS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(600),
+            task_caps,
             tts_provider,
             plugin_tool_registries,
             plugin_host,
@@ -266,9 +270,13 @@ impl TurnActor {
 
     pub(super) async fn run(mut self) {
         loop {
-            // Reap completed background tasks so the JoinSets
-            // do not grow without bound. Call-tool volume is
-            // bounded by interactive `EneCommand::CallTool` rate.
+            // Reap completed background tasks so the JoinSets shrink again
+            // once work finishes. Reaping alone only bounds steady-state
+            // size, not the *rate* of admission during a burst — each
+            // `JoinSet` also has an explicit cap enforced at its spawn
+            // site(s) via `admit_task` (Stage 8), so a burst that arrives
+            // faster than tasks complete is rejected rather than queued
+            // without bound.
             reap_join_set(
                 &mut self.call_tool_tasks,
                 "CallToolReaper",
@@ -302,6 +310,21 @@ impl TurnActor {
 
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {
+                if !admit_task(
+                    &self.classifier_tasks,
+                    self.task_caps.classifier_cap,
+                    "Classifier",
+                    None,
+                    &self.diag_tx,
+                ) {
+                    // The classifier itself is already running detached
+                    // (tokio::spawn'd by the stream task before its
+                    // JoinHandle reached us); dropping `handle` here without
+                    // awaiting it only stops *our* panic supervision of it —
+                    // it does not cancel the task (quality loss, not a
+                    // correctness bug; #Stage8).
+                    continue;
+                }
                 self.classifier_tasks.spawn(async move {
                     if let Err(e) = handle.await {
                         tracing::error!(
@@ -315,6 +338,19 @@ impl TurnActor {
 
             // Drain deferred memory-writer JoinHandles sent from the stream.
             while let Ok(handle) = self.memory_writer_rx.try_recv() {
+                if !admit_task(
+                    &self.memory_writer_tasks,
+                    self.task_caps.memory_writer_cap,
+                    "MemoryWriter",
+                    None,
+                    &self.diag_tx,
+                ) {
+                    // Same reasoning as the classifier drain above: the
+                    // memory write itself already runs detached, so a
+                    // rejected admission only loses panic supervision, not
+                    // the write.
+                    continue;
+                }
                 let diag_tx = self.diag_tx.clone();
                 let lifecycle_tx = self.lifecycle_tx.clone();
                 let store = self.session.memory.memory_store.clone();
@@ -386,9 +422,25 @@ impl TurnActor {
             // Drain deferred tool tasks accepted by the stream (#196).
             // Spawn a polling task for each that awaits completion.
             while let Ok(task) = self.deferred_tool_rx.try_recv() {
+                if !admit_task(
+                    &self.deferred_tool_tasks,
+                    self.task_caps.deferred_tool_cap,
+                    "DeferredTool",
+                    Some(format!("{}:{}", task.tool_name, task.task_id)),
+                    &self.diag_tx,
+                ) {
+                    // Unlike the classifier/memory-writer drains, there is no
+                    // detached task already running here: the underlying
+                    // plugin-side tool call keeps executing regardless, but
+                    // nothing will poll it to completion, so no
+                    // `ToolBackgroundCompleted` lifecycle event will ever
+                    // fire for this task. The `TaskRejected` diagnostic above
+                    // is the only signal a consumer gets.
+                    continue;
+                }
                 let registry = Arc::clone(&self.registry);
                 let lifecycle_tx = self.lifecycle_tx.clone();
-                let max_polls = self.deferred_max_polls;
+                let max_polls = self.task_caps.deferred_max_polls;
                 self.deferred_tool_tasks.spawn(async move {
                     poll_deferred_task(registry, lifecycle_tx, task, max_polls).await;
                 });
@@ -939,7 +991,11 @@ impl TurnActor {
         .await;
     }
 
-    async fn handle_command(&mut self, cmd: EneCommand) -> bool {
+    /// `pub(super)` (rather than private) solely so `handle::tests` can drive
+    /// individual commands directly — e.g. to test Stage 8 task-admission
+    /// caps deterministically without racing the run loop's reap timing
+    /// against a mock tool's completion speed.
+    pub(super) async fn handle_command(&mut self, cmd: EneCommand) -> bool {
         match cmd {
             EneCommand::Run { input, turn } => {
                 // Single-flight: Busy is enforced on the handle via TurnGate.
@@ -1262,6 +1318,18 @@ impl TurnActor {
                 true
             }
             EneCommand::SearchTools { query, reply } => {
+                if !admit_task(
+                    &self.search_tasks,
+                    self.task_caps.search_cap,
+                    "SearchTools",
+                    Some(query.clone()),
+                    &self.diag_tx,
+                ) {
+                    drop(reply.send(Err(EneRuntimeError::Busy {
+                        queue_depth: self.task_caps.search_cap,
+                    })));
+                    return true;
+                }
                 let registry = self.registry.clone();
                 let tool_rag = self.tool_rag.clone();
                 self.search_tasks.spawn(async move {
@@ -1283,7 +1351,7 @@ impl TurnActor {
                             })
                             .collect()
                     };
-                    drop(reply.send(result));
+                    drop(reply.send(Ok(result)));
                 });
                 true
             }
@@ -1293,6 +1361,18 @@ impl TurnActor {
                 turn,
                 reply,
             } => {
+                if !admit_task(
+                    &self.call_tool_tasks,
+                    self.task_caps.call_tool_cap,
+                    "CallTool",
+                    Some(name.clone()),
+                    &self.diag_tx,
+                ) {
+                    drop(reply.send(Err(EneRuntimeError::Busy {
+                        queue_depth: self.task_caps.call_tool_cap,
+                    })));
+                    return true;
+                }
                 let registry = self.registry.clone();
                 let tool_rag = self.tool_rag.clone();
                 let session_id = self.session.memory.session_id.to_string();
@@ -1329,6 +1409,25 @@ impl TurnActor {
                 task_id,
                 reply,
             } => {
+                if !admit_task(
+                    &self.call_tool_tasks,
+                    self.task_caps.call_tool_cap,
+                    "CallTool",
+                    Some(format!("cancel:{tool_name}:{task_id}")),
+                    &self.diag_tx,
+                ) {
+                    // Best-effort like the success path below: report "not
+                    // cancelled" rather than growing the queue. A oneshot
+                    // send error is `Copy` here (it's just the unsent
+                    // `bool`), so `drop()` would itself trip
+                    // `clippy::dropping_copy_types`.
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                    )]
+                    let _ = reply.send(false);
+                    return true;
+                }
                 let registry = self.registry.clone();
                 self.call_tool_tasks.spawn(async move {
                     registry.cancel_deferred(&tool_name, &task_id).await;
@@ -1857,6 +1956,46 @@ fn reap_join_set(
     }
 }
 
+/// Checks whether `set` has room for one more task under `cap` (Stage 8).
+///
+/// Returns `true` when the caller should proceed to `set.spawn(...)`.
+/// Returns `false` when `set` is already at capacity: logs a warning and
+/// emits [`DiagnosticEvent::TaskRejected`] so the rejection is observable
+/// even for admission points with no reply channel of their own (mirrors
+/// [`reap_join_set`]'s diag-reporting pattern). Callers with a reply
+/// channel additionally send back [`crate::error::EneRuntimeError::Busy`]
+/// so the rejection fails fast for the caller too, matching
+/// `ene_infer::EngineError::Busy` / [`ene_ai::LlmProviderError::Busy`]
+/// semantics.
+pub(super) fn admit_task(
+    set: &tokio::task::JoinSet<()>,
+    cap: usize,
+    component: &str,
+    detail: Option<String>,
+    diag_tx: &broadcast::Sender<DiagnosticEvent>,
+) -> bool {
+    let queue_depth = set.len();
+    if queue_depth < cap {
+        return true;
+    }
+    tracing::warn!(
+        component = %component,
+        cap,
+        queue_depth,
+        detail = detail.as_deref().unwrap_or(""),
+        "background task rejected: JoinSet at capacity (Stage 8)"
+    );
+    emit_diag(
+        diag_tx,
+        DiagnosticEvent::TaskRejected {
+            component: component.to_string(),
+            cap,
+            detail,
+        },
+    );
+    false
+}
+
 /// Polls a deferred (background) tool task until it reaches a terminal state (#196).
 ///
 /// Emits [`LifecycleEvent::ToolBackgroundCompleted`] on the lifecycle bus
@@ -1866,8 +2005,9 @@ fn reap_join_set(
 /// `JoinSet`.
 ///
 /// `max_polls` controls how many poll iterations (at 100ms each) before the task
-/// is considered timed out. Override via the `ENE_TOOLS__DEFERRED_MAX_POLLS` env var
-/// (default: 600 = 60s).
+/// is considered timed out. Configurable via `tools.deferred_max_polls`
+/// (env `ENE_TOOLS__DEFERRED_MAX_POLLS`, default: 600 = 60s) — see
+/// [`crate::task_config::ToolRuntimeConfig`].
 async fn poll_deferred_task(
     registry: Arc<dyn ToolRegistry>,
     lifecycle_tx: broadcast::Sender<LifecycleEvent>,

@@ -376,6 +376,7 @@ runtime-error-config = Configuration error: { $detail }
 runtime-error-memory = Memory store error: { $detail }
 runtime-error-mind = Mind engine error: { $detail }
 runtime-error-tool = Tool error: { $detail }
+runtime-error-actor-busy = Ene is busy handling other requests right now. Try again in a moment.
 runtime-error-ai-auth = AI provider authentication failed. Check your API key.
 runtime-error-ai-rate-limit = AI provider rate limit exceeded. Try again later.
 runtime-error-ai-network = Could not reach the AI provider. Check your network connection.

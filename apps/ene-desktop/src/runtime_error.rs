@@ -47,6 +47,13 @@ pub fn user_message(error: &EneRuntimeError) -> String {
             detail = err.to_string()
         ),
         EneRuntimeError::Ai(err) => user_message_from_ai(err),
+        // The actor rejected a background task (direct tool call / search)
+        // because its bounded queue was already full (Stage 8) — the
+        // request was never attempted, so retrying shortly is the right
+        // user action, same framing as the AI-provider `Busy` copy above.
+        EneRuntimeError::Busy { .. } => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-error-actor-busy")
+        }
     }
 }
 
