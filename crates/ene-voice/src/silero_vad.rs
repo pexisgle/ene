@@ -327,11 +327,17 @@ impl VadFactory for SileroVadFactory {
     }
 }
 
-/// Register the local Silero VAD factory at startup.
+/// Register the local Silero VAD factory.
 ///
-/// Registered unconditionally; the factory fails fast at `create_engine` time
-/// when the `silero-vad` feature is disabled.
-#[ctor::ctor(unsafe)]
-fn register_silero_vad() {
+/// Called once from [`crate::register_providers`] during runtime bootstrap,
+/// rather than via a `#[ctor::ctor]` that would run before `main` (and before
+/// `tracing` is initialized). Registered unconditionally; the factory fails
+/// fast at `create_engine` time when the `silero-vad` feature is disabled.
+pub(crate) fn register() {
     AudioProviderRegistry::register_vad(std::sync::Arc::new(SileroVadFactory));
+    tracing::debug!(
+        component = "ene-voice",
+        provider = PROVIDER_NAME,
+        "registered local VAD engine factory"
+    );
 }

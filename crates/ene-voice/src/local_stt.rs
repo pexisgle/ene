@@ -420,13 +420,19 @@ impl SttProviderFactory for LocalSttProviderFactory {
     }
 }
 
-/// Register the local whisper STT factory at startup.
+/// Register the local whisper STT factory.
 ///
-/// Registered unconditionally; the factory fails fast at `create_provider`
-/// time when the `local-stt` feature is disabled.
-#[ctor::ctor(unsafe)]
-fn register_local_stt() {
+/// Called once from [`crate::register_providers`] during runtime bootstrap,
+/// rather than via a `#[ctor::ctor]` that would run before `main` (and before
+/// `tracing` is initialized). Registered unconditionally; the factory fails
+/// fast at `create_provider` time when the `local-stt` feature is disabled.
+pub(crate) fn register() {
     AudioProviderRegistry::register_stt(std::sync::Arc::new(LocalSttProviderFactory));
+    tracing::debug!(
+        component = "ene-voice",
+        provider = PROVIDER_NAME,
+        "registered local STT provider factory"
+    );
 }
 
 #[cfg(all(test, feature = "local-stt"))]
