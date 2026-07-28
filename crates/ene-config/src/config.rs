@@ -661,7 +661,7 @@ pub fn load_config_from(
     load_full_config_from(assets_dir, config_path)
 }
 
-/// Fully loads the config file. Also auto-updates the schema file on startup.
+/// Fully loads the config file.
 ///
 /// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
 pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
@@ -683,7 +683,7 @@ pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
 /// because `get_section::<AiConfig>()` looks up `T::path() = ["ai"]`
 /// (lowercase).
 pub fn load_full_config_from(
-    assets_dir: &Path,
+    _assets_dir: &Path,
     config_path: &Path,
 ) -> Result<EneConfig, EneConfigError> {
     use figment::{
@@ -705,14 +705,6 @@ pub fn load_full_config_from(
     let config: EneConfig = figment.extract().map_err(|e| {
         EneConfigError::GenericConfigError(format!("configuration extract failed: {e}"))
     })?;
-
-    // Ensure schema directory exists
-    let schema_dir = assets_dir.join("schema");
-    if let Err(e) = std::fs::create_dir_all(&schema_dir) {
-        tracing::error!(component = "Config", path = %schema_dir.display(), error = %e, "Failed to create schema directory");
-    }
-
-    write_schemas(assets_dir);
 
     update_global_config(config.clone());
     Ok(config)
@@ -747,7 +739,51 @@ pub fn write_schemas(assets_dir: &Path) {
     }
 }
 
-/// Saves the config file in a type-safe manner
+/// Atomically writes `contents` to `path` by first writing to a temporary
+/// file in the same directory, then renaming over the target.
+///
+/// The rename is atomic on POSIX when source and destination reside on the
+/// same filesystem, which is guaranteed by placing the temp file in the
+/// target's parent directory. This prevents partial or corrupt config files
+/// if the process crashes mid-write (#325).
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<(), EneConfigError> {
+    use std::io::Write;
+
+    let dir = path.parent().ok_or_else(|| {
+        EneConfigError::GenericConfigError(format!("no parent directory for {}", path.display()))
+    })?;
+    std::fs::create_dir_all(dir).map_err(EneConfigError::IoError)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("config");
+    let tmp_path = dir.join(format!(".{file_name}.tmp"));
+
+    let mut file = std::fs::File::create(&tmp_path).map_err(EneConfigError::IoError)?;
+    file.write_all(contents.as_bytes())
+        .map_err(EneConfigError::IoError)?;
+
+    // Best-effort fsync: ensure bytes reach stable storage before the
+    // rename makes them visible. Failure is non-fatal — the rename is
+    // still atomic, we just lose the durability guarantee on exotic
+    // filesystems.
+    if let Err(e) = file.sync_all() {
+        tracing::debug!(
+            component = "Config",
+            path = %tmp_path.display(),
+            error = %e,
+            "best-effort fsync before rename failed (non-fatal)"
+        );
+    }
+
+    drop(file);
+    std::fs::rename(&tmp_path, path).map_err(EneConfigError::IoError)?;
+    Ok(())
+}
+
+/// Saves the config file in a type-safe manner, using an atomic
+/// temp-file-then-rename strategy to avoid partial writes (#325).
 pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
@@ -755,7 +791,7 @@ pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
         std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
     }
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(config_path, json).map_err(EneConfigError::IoError)?;
+    atomic_write(&config_path, &json)?;
     Ok(())
 }
 

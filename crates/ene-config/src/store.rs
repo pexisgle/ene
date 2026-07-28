@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::config::atomic_write;
 use crate::{CharacterConfig, EneConfig, EneConfigError, save_full_config};
 
 /// Centralized configuration store with dirty tracking for auto-save.
@@ -129,6 +130,11 @@ impl ConfigStore {
 
     /// Gives mutable access to the per-character config.
     /// Automatically marks it as dirty.
+    ///
+    /// **Note:** this always marks dirty regardless of whether the closure
+    /// actually changed anything. If called in a hot loop, prefer
+    /// [`set_character_config`](Self::set_character_config) which performs
+    /// an equality check first.
     pub fn with_character_config_mut(&self, f: impl FnOnce(&mut CharacterConfig)) {
         f(&mut self.character_config.write());
         self.character_dirty.store(true, Ordering::Release);
@@ -157,8 +163,16 @@ impl ConfigStore {
     }
 
     /// Replaces the per-character config and marks dirty.
+    ///
+    /// If `config` is equal to the current value, the dirty flag is **not**
+    /// set and the method returns early. This prevents spurious disk writes
+    /// when called every frame with an unchanged state (see #325).
     pub fn set_character_config(&self, config: CharacterConfig) {
-        *self.character_config.write() = config;
+        let mut guard = self.character_config.write();
+        if *guard == config {
+            return;
+        }
+        *guard = config;
         self.character_dirty.store(true, Ordering::Release);
     }
 
@@ -208,11 +222,8 @@ impl ConfigStore {
             if let Some(name) = character_name {
                 let char_config = self.character_config.read();
                 let path = crate::character_settings_path(name);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
-                }
                 let json = serde_json::to_string_pretty(&*char_config)?;
-                std::fs::write(&path, json).map_err(EneConfigError::IoError)?;
+                atomic_write(&path, &json)?;
                 drop(char_config);
             }
             self.character_dirty.store(false, Ordering::Release);

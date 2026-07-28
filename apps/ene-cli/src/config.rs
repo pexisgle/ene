@@ -15,6 +15,9 @@ pub struct InitOptions {
 pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
     tracing::info!("[Runtime] Initializing AI runtime...");
 
+    // Write JSON schemas once at startup rather than on every config load (#325).
+    ene_config::write_schemas(ene_config::assets_dir());
+
     let mut config = match &opts.config_path {
         Some(path) => load_config_from_path(path)?,
         None => ConfigStore::try_load()?.config(),
