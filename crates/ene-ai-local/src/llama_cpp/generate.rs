@@ -12,7 +12,7 @@ use super::load::LoadedModel;
 use super::map_llama_err;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, UserMessagePart};
-use ene_infer::JobContext;
+use ene_infer::{ChunkSink, JobContext};
 use llama_cpp_4::context::LlamaContext;
 use llama_cpp_4::llama_batch::LlamaBatch;
 use llama_cpp_4::model::{AddBos, LlamaChatMessage, LlamaModel, Special};
@@ -25,21 +25,28 @@ const MAX_VISION_TOKENS: i32 = 256;
 
 /// Generate a completion for `messages` on the caller's cached `ctx`,
 /// optionally constrained by JSON schema grammar.
+///
+/// `sink`, when `Some`, receives each detokenized piece as it is sampled (see
+/// [`sample_tokens`]) in addition to the full text still being returned —
+/// `None` reproduces this function's pre-streaming behavior exactly, used by
+/// [`crate::local_llm::model::LlamaChatModel::run`]'s one-shot path.
 pub(crate) fn generate_chat(
     loaded: &LoadedModel,
     ctx: &mut LlamaContext<'_>,
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
+    sink: Option<&ChunkSink<String, LlmProviderError>>,
 ) -> Result<String, LlmProviderError> {
     if messages_have_images(messages) {
-        return generate_chat_vision(loaded, ctx, messages, json_schema, job);
+        return generate_chat_vision(loaded, ctx, messages, json_schema, job, sink);
     }
-    generate_chat_text(loaded, ctx, messages, json_schema, job)
+    generate_chat_text(loaded, ctx, messages, json_schema, job, sink)
 }
 
 /// Vision completion from raw RGB8 pixels (desktop screen summary), on the
-/// caller's cached `ctx`.
+/// caller's cached `ctx`. `sink` is threaded through exactly like
+/// [`generate_chat`]'s.
 pub(crate) fn generate_vision(
     loaded: &LoadedModel,
     ctx: &mut LlamaContext<'_>,
@@ -49,6 +56,7 @@ pub(crate) fn generate_vision(
     height: u32,
     rgb: &[u8],
     job: &JobContext,
+    sink: Option<&ChunkSink<String, LlmProviderError>>,
 ) -> Result<String, LlmProviderError> {
     // Fold system into a single user turn; Image part alone inserts the mtmd marker.
     let mut text = String::new();
@@ -67,7 +75,15 @@ pub(crate) fn generate_vision(
             },
         ],
     }];
-    generate_chat_vision_with_bitmaps(loaded, ctx, &messages, &[(width, height, rgb)], None, job)
+    generate_chat_vision_with_bitmaps(
+        loaded,
+        ctx,
+        &messages,
+        &[(width, height, rgb)],
+        None,
+        job,
+        sink,
+    )
 }
 
 fn generate_chat_text(
@@ -76,6 +92,7 @@ fn generate_chat_text(
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
+    sink: Option<&ChunkSink<String, LlmProviderError>>,
 ) -> Result<String, LlmProviderError> {
     let prompt = apply_messages_template(loaded, messages, false)?;
     let tokens = loaded
@@ -131,6 +148,7 @@ fn generate_chat_text(
         job,
         MAX_DECISION_TOKENS,
         n_cur,
+        sink,
     )
 }
 
@@ -140,16 +158,17 @@ fn generate_chat_vision(
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
+    sink: Option<&ChunkSink<String, LlmProviderError>>,
 ) -> Result<String, LlmProviderError> {
     let bitmaps = extract_rgb_images(messages)?;
     if bitmaps.is_empty() {
-        return generate_chat_text(loaded, ctx, messages, json_schema, job);
+        return generate_chat_text(loaded, ctx, messages, json_schema, job, sink);
     }
     let refs: Vec<(u32, u32, &[u8])> = bitmaps
         .iter()
         .map(|(w, h, data)| (*w, *h, data.as_slice()))
         .collect();
-    generate_chat_vision_with_bitmaps(loaded, ctx, messages, &refs, json_schema, job)
+    generate_chat_vision_with_bitmaps(loaded, ctx, messages, &refs, json_schema, job, sink)
 }
 
 fn generate_chat_vision_with_bitmaps(
@@ -159,6 +178,7 @@ fn generate_chat_vision_with_bitmaps(
     images: &[(u32, u32, &[u8])],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
+    sink: Option<&ChunkSink<String, LlmProviderError>>,
 ) -> Result<String, LlmProviderError> {
     let mtmd = loaded.mtmd.as_ref().ok_or_else(|| {
         LlmProviderError::LocalLlm(
@@ -209,9 +229,22 @@ fn generate_chat_vision_with_bitmaps(
         job,
         MAX_VISION_TOKENS,
         n_past,
+        sink,
     )
 }
 
+/// Samples tokens one at a time until an end-of-generation token or
+/// `max_tokens` is reached, always returning the full accumulated text.
+///
+/// `sink`, when `Some`, additionally receives each non-empty detokenized
+/// piece as it is produced — this is the only change this stage makes to a
+/// loop that already checked `should_stop`/called `tick` per token; a
+/// caller passing `None` (every existing call site via
+/// [`crate::local_llm::model::LlamaChatModel::run`]) sees no behavior change
+/// at all. `ChunkSink::send` reports a stop condition (deadline,
+/// cancellation, or a dropped consumer) the exact same way `should_stop`
+/// does elsewhere in this loop, so it is handled identically: give up and
+/// return promptly.
 fn sample_tokens(
     loaded: &LoadedModel,
     ctx: &mut LlamaContext<'_>,
@@ -220,6 +253,7 @@ fn sample_tokens(
     job: &JobContext,
     max_tokens: i32,
     mut n_cur: i32,
+    sink: Option<&ChunkSink<String, LlmProviderError>>,
 ) -> Result<String, LlmProviderError> {
     let sampler = build_sampler(&loaded.model, json_schema)?;
     let mut detok = StreamDetokenizer::new(&loaded.model, Special::Plaintext);
@@ -254,6 +288,14 @@ fn sample_tokens(
         let piece = detok
             .push(token)
             .map_err(|e| map_llama_err("detokenize", e))?;
+        if let Some(sink) = sink
+            && !piece.is_empty()
+            && sink.send(piece.clone(), job).is_err()
+        {
+            return Err(LlmProviderError::LocalLlm(
+                "generation stopped while streaming a chunk".to_string(),
+            ));
+        }
         output.push_str(&piece);
 
         batch.clear();
@@ -269,6 +311,14 @@ fn sample_tokens(
     let tail = detok
         .finish()
         .map_err(|e| map_llama_err("detokenize finish", e))?;
+    if let Some(sink) = sink
+        && !tail.is_empty()
+        && sink.send(tail.clone(), job).is_err()
+    {
+        return Err(LlmProviderError::LocalLlm(
+            "generation stopped while streaming the final chunk".to_string(),
+        ));
+    }
     output.push_str(&tail);
 
     Ok(output)

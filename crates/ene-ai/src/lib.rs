@@ -64,10 +64,10 @@ pub use health::{
     ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
 pub use local_engine::{
-    Capability, CapabilitySet, ConcurrencyHint, EngineDescriptor, EngineId, LlmChatRequest,
-    LlmChatResponse, LocalLlmEngine, LocalSttEngine, LocalTtsEngine, ResourceBudgets,
-    ResourceClass, ResourceRegistry, SttTranscribeRequest, TtsSynthesisRequest,
-    TtsSynthesisResponse,
+    Capability, CapabilitySet, ConcurrencyHint, DEFAULT_CHUNK_BUFFER, EngineDescriptor, EngineId,
+    LlmChatRequest, LlmChatResponse, LocalLlmEngine, LocalSttEngine, LocalTtsEngine,
+    ResourceBudgets, ResourceClass, ResourceRegistry, StreamingLocalLlmEngine,
+    SttTranscribeRequest, TtsSynthesisRequest, TtsSynthesisResponse,
 };
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use model_fetch::{

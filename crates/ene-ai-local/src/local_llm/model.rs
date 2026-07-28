@@ -1,19 +1,20 @@
 //! Worker-owned llama.cpp chat/vision model — the [`ene_infer::LocalModel`]
-//! `LocalLlamaCppProvider` wraps in [`ene_ai::LocalLlmEngine`].
+//! (and [`ene_infer::StreamingLocalModel`]) `LocalLlamaCppProvider` wraps in
+//! [`ene_ai::StreamingLocalLlmEngine`].
 
 use ene_ai::error::LlmProviderError;
 use ene_ai::{LlmChatRequest, LlmChatResponse};
-use ene_infer::{JobContext, LocalModel};
+use ene_infer::{ChunkSink, JobContext, LocalModel, StreamingLocalModel};
 use llama_cpp_4::context::LlamaContext;
 use llama_cpp_4::context::params::LlamaContextParams;
 
 use crate::llama_cpp::{self, LoadSpec, LoadedModel};
 
 /// This crate's [`ene_infer::LocalModel::Request`] for [`LlamaChatModel`]:
-/// either an ordinary chat turn (routed through [`ene_ai::LocalLlmEngine`]'s
-/// blanket `LlmProvider` impl via `From<LlmChatRequest>`) or a raw-RGB
-/// vision summarization, submitted directly through
-/// [`ene_ai::LocalLlmEngine::handle`] — see
+/// either an ordinary chat turn (routed through
+/// [`ene_ai::StreamingLocalLlmEngine`]'s blanket `LlmProvider` impl via
+/// `From<LlmChatRequest>`) or a raw-RGB vision summarization, submitted
+/// directly through [`ene_ai::StreamingLocalLlmEngine::handle`] — see
 /// `LocalLlamaCppProvider::summarize_rgb_with_cancel` in `super`, which does
 /// not fit `LlmChatRequest`'s message-based shape (it takes raw RGB8 pixels
 /// plus width/height, not a base64 data-URI image part).
@@ -183,6 +184,7 @@ impl LocalModel for LlamaChatModel {
                 &chat.messages,
                 chat.json_schema.as_ref(),
                 job,
+                None,
             )?,
             LlamaCppRequest::Vision {
                 system,
@@ -191,7 +193,7 @@ impl LocalModel for LlamaChatModel {
                 height,
                 rgb,
             } => llama_cpp::generate_vision(
-                loaded_ref, ctx, &system, &user, width, height, &rgb, job,
+                loaded_ref, ctx, &system, &user, width, height, &rgb, job, None,
             )?,
         };
         Ok(LlamaCppResponse { text })
@@ -201,6 +203,67 @@ impl LocalModel for LlamaChatModel {
         if let Some(ctx) = self.ctx.as_mut() {
             ctx.clear_kv_cache();
         }
+    }
+}
+
+impl StreamingLocalModel for LlamaChatModel {
+    /// One detokenized text piece, exactly as `llama_cpp::generate::sample_tokens`
+    /// already produces per token internally — this trait just gives that
+    /// existing per-token loop somewhere to push each piece to.
+    type Chunk = String;
+
+    fn run_streaming(
+        &mut self,
+        req: Self::Request,
+        job: &JobContext,
+        sink: &ChunkSink<Self::Chunk, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        if job.should_stop().is_some() {
+            return Err(LlmProviderError::LocalLlm(
+                "job stopped before llama.cpp inference started".to_string(),
+            ));
+        }
+        job.tick();
+        self.ensure_context()?;
+
+        let Self { ctx, loaded } = self;
+        let ctx = ctx.as_mut().ok_or_else(|| {
+            LlmProviderError::LocalLlm("llama context missing after lazy init".to_string())
+        })?;
+        let loaded_ref: &LoadedModel = loaded.as_ref();
+
+        match req {
+            LlamaCppRequest::Chat(chat) => {
+                llama_cpp::generate_chat(
+                    loaded_ref,
+                    ctx,
+                    &chat.messages,
+                    chat.json_schema.as_ref(),
+                    job,
+                    Some(sink),
+                )?;
+            }
+            LlamaCppRequest::Vision {
+                system,
+                user,
+                width,
+                height,
+                rgb,
+            } => {
+                llama_cpp::generate_vision(
+                    loaded_ref,
+                    ctx,
+                    &system,
+                    &user,
+                    width,
+                    height,
+                    &rgb,
+                    job,
+                    Some(sink),
+                )?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -223,13 +286,22 @@ impl LocalModel for LlamaChatModel {
 mod conformance_tests {
     use std::time::{Duration, Instant};
 
-    use ene_infer::conformance::{ConformanceRequest, ConformanceResponse};
-    use ene_infer::{JobContext, LocalModel};
+    use ene_infer::conformance::{
+        ConformanceRequest, ConformanceResponse, ConformanceStreamingRequest,
+    };
+    use ene_infer::{ChunkSink, JobContext, LocalModel, StreamingLocalModel};
 
     #[derive(Debug, Clone, Default)]
     struct ScriptedLlamaRequest {
         run_for: Duration,
         then_panic: bool,
+        /// `run_streaming`-only scripting (see [`ConformanceStreamingRequest`]),
+        /// inert for every [`ConformanceRequest::scripted`] request — those
+        /// only ever run via [`LocalModel::run`], mirroring the equivalent
+        /// fields on `ene_infer::conformance`'s own `MockRequest`.
+        stream_chunks: usize,
+        stream_pause: Duration,
+        stream_fail_after: Option<usize>,
     }
 
     impl ConformanceRequest for ScriptedLlamaRequest {
@@ -237,6 +309,25 @@ mod conformance_tests {
             Self {
                 run_for,
                 then_panic,
+                stream_chunks: 0,
+                stream_pause: Duration::ZERO,
+                stream_fail_after: None,
+            }
+        }
+    }
+
+    impl ConformanceStreamingRequest for ScriptedLlamaRequest {
+        fn scripted_stream(
+            chunk_count: usize,
+            pause_before_each: Duration,
+            fail_after: Option<usize>,
+        ) -> Self {
+            Self {
+                run_for: Duration::ZERO,
+                then_panic: false,
+                stream_chunks: chunk_count,
+                stream_pause: pause_before_each,
+                stream_fail_after: fail_after,
             }
         }
     }
@@ -301,8 +392,45 @@ mod conformance_tests {
         }
     }
 
+    impl StreamingLocalModel for ScriptedLlamaModel {
+        /// A stand-in for the detokenized `String` pieces the real
+        /// [`super::LlamaChatModel`] streams — the chunk's actual type
+        /// doesn't matter for validating queueing/backpressure/cancellation,
+        /// only that it travels through the sink in order.
+        type Chunk = usize;
+
+        fn run_streaming(
+            &mut self,
+            req: Self::Request,
+            ctx: &JobContext,
+            sink: &ChunkSink<Self::Chunk, Self::Error>,
+        ) -> Result<(), Self::Error> {
+            for i in 0..req.stream_chunks {
+                if ctx.should_stop().is_some() {
+                    return Err(ScriptedLlamaError);
+                }
+                ctx.tick();
+                if !req.stream_pause.is_zero() {
+                    std::thread::sleep(req.stream_pause);
+                }
+                if sink.send(i, ctx).is_err() {
+                    return Err(ScriptedLlamaError);
+                }
+                if req.stream_fail_after == Some(i + 1) {
+                    return Err(ScriptedLlamaError);
+                }
+            }
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn llama_cpp_engine_wiring_passes_conformance_battery() {
         ene_infer::conformance::run_all(ScriptedLlamaModel::default).await;
+    }
+
+    #[tokio::test]
+    async fn llama_cpp_engine_streaming_wiring_passes_conformance_battery() {
+        ene_infer::conformance::run_all_streaming(ScriptedLlamaModel::default).await;
     }
 }
