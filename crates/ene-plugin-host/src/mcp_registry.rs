@@ -88,6 +88,20 @@ impl McpToolRegistry {
         args: &[&str],
     ) -> Result<(), PluginHostError> {
         let cmd = Command::new(command).configure(|c| {
+            // Harden: clear inherited environment and forward only essentials.
+            c.env_clear();
+            for var in ["PATH", "HOME", "TMPDIR", "LANG"] {
+                if let Ok(val) = std::env::var(var) {
+                    c.env(var, val);
+                }
+            }
+            if let Ok(tz) = std::env::var("TZ") {
+                c.env("TZ", tz);
+            }
+            #[cfg(target_os = "linux")]
+            if let Ok(val) = std::env::var("LD_LIBRARY_PATH") {
+                c.env("LD_LIBRARY_PATH", val);
+            }
             for arg in args {
                 c.arg(arg);
             }

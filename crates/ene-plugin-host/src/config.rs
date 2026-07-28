@@ -30,9 +30,18 @@ pub struct PluginEntry {
     pub enable: bool,
     /// Expected SHA-256 checksum of the plugin binary (hex-encoded).
     /// When set, the binary is verified before launch.
-    /// When absent, a one-time warning is logged on first launch.
+    /// When absent, the checksum is computed on first activation and
+    /// recorded back to configuration (trust-on-first-use).
     #[serde(default)]
     pub checksum: Option<String>,
+    /// Environment variable names to pass through from the host process
+    /// to the plugin child process. All other inherited environment
+    /// variables are cleared for security (`env_clear()`).
+    ///
+    /// This is an interim mechanism until a proper credential service
+    /// is implemented (#412/#413).
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
     /// Plugin-specific configuration (flattened into the parent).
     #[serde(flatten)]
     pub config: serde_json::Value,
@@ -43,6 +52,7 @@ impl Default for PluginEntry {
         Self {
             enable: true,
             checksum: None,
+            env_passthrough: Vec::new(),
             config: serde_json::Value::Object(serde_json::Map::default()),
         }
     }
