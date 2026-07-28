@@ -1,6 +1,6 @@
 //! Shared types for deterministic and LLM-based memory extraction.
 
-use ene_store::typed_memory::MemoryKind;
+use ene_core::MemoryKind;
 use serde::{Deserialize, Serialize};
 
 /// Language locale for extraction pattern selection.

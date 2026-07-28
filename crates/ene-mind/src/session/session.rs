@@ -7,7 +7,7 @@ use ene_ai::Role;
 use ene_config::{CharacterCardV3, ResolvedExpression, resolve_expressions};
 
 use crate::lifecycle::HistoryEntry;
-use ene_store::MemoryStore;
+use ene_core::MemoryPort;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ pub struct DisplayState {
 #[derive(Clone)]
 pub struct MemoryContext {
     /// Optional memory store.
-    pub memory_store: Option<Arc<MemoryStore>>,
+    pub memory_store: Option<Arc<dyn MemoryPort>>,
     /// Optional embedding provider.
     pub embedding_provider: Option<Arc<dyn EmbeddingProvider>>,
     /// The current session ID.
@@ -166,7 +166,11 @@ impl ConversationSession {
     }
 
     /// Attaches a memory store and embedding provider for long-term memory.
-    pub fn init_memory(&mut self, store: Arc<MemoryStore>, embedder: Arc<dyn EmbeddingProvider>) {
+    pub fn init_memory(
+        &mut self,
+        store: Arc<dyn MemoryPort>,
+        embedder: Arc<dyn EmbeddingProvider>,
+    ) {
         self.memory.memory_store = Some(store);
         self.memory.embedding_provider = Some(embedder);
     }
@@ -376,11 +380,11 @@ impl ConversationSession {
 
     /// Previous expression and elapsed time for arbiter hysteresis.
     ///
-    /// Falls back to persisted [`ene_store::AffectState::last_expression`] and
+    /// Falls back to persisted [`ene_core::AffectState::last_expression`] and
     /// `updated_at` when the in-session tracker is empty (e.g. after restart).
     pub fn expression_context<'a>(
         &'a self,
-        affect: &'a ene_store::AffectState,
+        affect: &'a ene_core::AffectState,
     ) -> (Cow<'a, str>, Option<std::time::Duration>) {
         if !self.state.last_resolved_expression.is_empty() {
             return (

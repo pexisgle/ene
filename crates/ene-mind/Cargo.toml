@@ -21,7 +21,6 @@ parking_lot = { workspace = true }
 
 ene-config = { workspace = true }
 ene-core = { workspace = true }
-ene-store = { workspace = true }
 ene-ai = { workspace = true }
 
 chrono = { workspace = true }
@@ -36,6 +35,7 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 ene-plugin-proto = { workspace = true }
+ene-store = { workspace = true }
 chrono = { workspace = true }
 
 [lints]

@@ -1,4 +1,4 @@
-use ene_store::{
+use ene_core::{
     MemoryCandidateSource, MemoryItem, MemoryKind, MemoryScoreBreakdown, MemorySource, ScoredMemory,
 };
 use serde::{Deserialize, Serialize};

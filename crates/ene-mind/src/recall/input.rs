@@ -1,4 +1,4 @@
-use ene_store::{ActiveCommitmentPrompt, AffectState};
+use ene_core::{ActiveCommitmentPrompt, AffectState};
 
 /// A recent conversation turn available to the recall planner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,11 +1,12 @@
 //! Typed-memory, memory-embedding, memory-span, and pending-write queries.
 
 use super::{
-    ActiveSceneSummaryRow, EneMemoryError, MemoryStore, NaturalDecayReport, NewMemorySpan,
-    cosine_similarity_expr, cosine_similarity_filter, embedding_to_bytes, validate_embedding,
+    EneMemoryError, MemoryStore, NaturalDecayReport, NewMemorySpan, cosine_similarity_expr,
+    cosine_similarity_filter, embedding_to_bytes, validate_embedding,
 };
 use crate::entities;
 use chrono::{DateTime, Utc};
+use ene_core::{ActiveSceneSummaryRow, PendingMemoryWrite, PendingMemoryWriteStatus};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
@@ -167,7 +168,7 @@ impl MemoryStore {
         payload_json: impl Into<String>,
         last_error: impl Into<String>,
     ) -> Result<i64, EneMemoryError> {
-        use entities::pending_memory_writes::{ActiveModel, PendingMemoryWriteStatus};
+        use entities::pending_memory_writes::ActiveModel;
         use sea_orm::ActiveModelTrait;
         use sea_orm::ActiveValue::Set;
 
@@ -196,7 +197,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
         limit: usize,
-    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, EneMemoryError> {
+    ) -> Result<Vec<PendingMemoryWrite>, EneMemoryError> {
         use entities::pending_memory_writes::{Column, Entity};
         use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
@@ -214,7 +215,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
     ) -> Result<(usize, usize), EneMemoryError> {
-        use entities::pending_memory_writes::{Column, Entity, PendingMemoryWriteStatus};
+        use entities::pending_memory_writes::{Column, Entity};
         use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
         let pending = Entity::find()
@@ -238,7 +239,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
     ) -> Result<usize, EneMemoryError> {
-        use entities::pending_memory_writes::{Column, Entity, PendingMemoryWriteStatus};
+        use entities::pending_memory_writes::{Column, Entity};
         use sea_orm::{EntityTrait, QueryFilter};
 
         let now = Utc::now();
@@ -257,10 +258,8 @@ impl MemoryStore {
     pub async fn take_due_pending_memory_writes(
         &self,
         limit: usize,
-    ) -> Result<Vec<entities::pending_memory_writes::PendingMemoryWrite>, EneMemoryError> {
-        use entities::pending_memory_writes::{
-            ActiveModel, Column, Entity, PendingMemoryWriteStatus,
-        };
+    ) -> Result<Vec<PendingMemoryWrite>, EneMemoryError> {
+        use entities::pending_memory_writes::{ActiveModel, Column, Entity};
         use sea_orm::{
             ActiveModelTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait,
         };
@@ -306,8 +305,8 @@ impl MemoryStore {
         &self,
         id: i64,
         last_error: impl Into<String>,
-    ) -> Result<entities::pending_memory_writes::PendingMemoryWrite, EneMemoryError> {
-        use entities::pending_memory_writes::{ActiveModel, Entity, PendingMemoryWriteStatus};
+    ) -> Result<PendingMemoryWrite, EneMemoryError> {
+        use entities::pending_memory_writes::{ActiveModel, Entity};
         use sea_orm::{ActiveModelTrait, EntityTrait};
 
         let Some(model) = Entity::find_by_id(id).one(&self.db).await? else {

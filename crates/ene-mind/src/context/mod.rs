@@ -19,7 +19,7 @@ pub use tokens::{estimate_tokens, tokens_to_chars, truncate_to_tokens};
 use std::sync::Arc;
 
 use ene_ai::LlmProvider;
-use ene_store::MemoryStore;
+use ene_core::MemoryPort;
 
 use crate::config::ContextConfig;
 use crate::error::CognitionError;
@@ -72,7 +72,7 @@ impl ContextManager {
         session_id: &str,
         character_name: &str,
         user_name: &str,
-        store: Arc<MemoryStore>,
+        store: Arc<dyn MemoryPort>,
         provider: Arc<dyn LlmProvider>,
     ) {
         if self.pending_compression.is_some() {
@@ -115,7 +115,7 @@ impl ContextManager {
 
     /// Execute compression synchronously (for manual triggers).
     pub async fn execute_manual(
-        store: Arc<MemoryStore>,
+        store: Arc<dyn MemoryPort>,
         provider: Arc<dyn LlmProvider>,
         input: CompressionTaskInput,
     ) -> Result<CompressionResult, CognitionError> {
@@ -124,7 +124,7 @@ impl ContextManager {
 
     /// Spawn a background chapter rollup task if scene span thresholds are exceeded.
     pub fn spawn_chapter_rollup(
-        store: Arc<MemoryStore>,
+        store: Arc<dyn MemoryPort>,
         provider: Arc<dyn LlmProvider>,
         session_id: String,
         character_name: String,

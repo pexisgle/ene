@@ -147,7 +147,7 @@ pub struct MindMemoryConfig {
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_source_diversity_bonus: f32,
     /// Hybrid scoring component weights (product defaults live here; store only applies them).
-    pub hybrid_weights: ene_store::HybridSearchWeights,
+    pub hybrid_weights: ene_core::HybridSearchWeights,
     /// Score boost when a candidate is sourced from an active commitment.
     pub commitment_boost: f32,
     /// Maximum pure-recent fallback candidates gathered during hybrid search.
@@ -239,7 +239,7 @@ impl Default for MindMemoryConfig {
             mmr_min_slots_user_profile: 1,
             mmr_min_slots_commitment: 1,
             mmr_source_diversity_bonus: 0.05,
-            hybrid_weights: ene_store::HybridSearchWeights::default(),
+            hybrid_weights: ene_core::HybridSearchWeights::default(),
             commitment_boost: 0.25,
             recent_fallback_limit: 5,
             journal_candidate_pool_size: 64,

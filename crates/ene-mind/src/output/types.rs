@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use ene_config::ResolvedExpression;
-use ene_store::AffectState;
+use ene_core::AffectState;
 
 /// Source of the resolved expression decision.
 #[derive(Debug, Clone, PartialEq, Eq)]

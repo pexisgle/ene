@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use ene_config::{CharacterCardV3, PromptLibrary};
-use ene_store::MemoryStore;
+use ene_core::MemoryPort;
 use tracing::Instrument;
 
 use crate::character::CharacterProcessor;
@@ -133,7 +133,7 @@ impl CognitionEngine {
         let mut affect = store
             .get_affect_state(ctx.character_id)
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
 
         let mut classifier_expression_hint = None;
 
@@ -167,7 +167,7 @@ impl CognitionEngine {
             if let Some(pending) = store
                 .take_pending_affect_proposal(ctx.character_id, ctx.user_name)
                 .await
-                .map_err(CognitionError::Memory)?
+                .map_err(CognitionError::MemoryPort)?
             {
                 if pending.source_turn_id >= current_user_turn {
                     tracing::warn!(
@@ -323,7 +323,7 @@ impl CognitionEngine {
         let Some(store) = ctx.store else {
             return Ok(PreTurnOutput {
                 recall_plan,
-                affect: ene_store::AffectState::neutral(ctx.character_id),
+                affect: ene_core::AffectState::neutral(ctx.character_id),
                 recalled: Vec::new(),
                 commitments: Vec::new(),
                 classifier_expression_hint: None,
@@ -333,7 +333,7 @@ impl CognitionEngine {
         let affect = store
             .get_affect_state(ctx.character_id)
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
 
         let commitment_rows =
             match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
@@ -362,13 +362,13 @@ impl CognitionEngine {
 
     /// Persist affect state after pre-turn update (survives stream cancel/failure).
     pub async fn persist_affect_snapshot(
-        store: &MemoryStore,
-        affect: &ene_store::AffectState,
+        store: &dyn MemoryPort,
+        affect: &ene_core::AffectState,
     ) -> Result<(), CognitionError> {
         store
             .upsert_affect_state(affect)
             .await
-            .map_err(CognitionError::Memory)
+            .map_err(CognitionError::MemoryPort)
     }
 
     /// Compose a sectioned prompt packet into LLM messages.
@@ -503,7 +503,7 @@ impl CognitionEngine {
     /// Post-turn: memory extraction, forgetting lifecycle, affect persistence.
     pub async fn after_turn(
         &self,
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         config: &MindConfig,
         input: PostTurnInput<'_>,
         providers: crate::memory_writer::MemoryWriteProviders<'_>,
@@ -516,7 +516,7 @@ impl CognitionEngine {
     /// Forgetting runs on the deferred path via [`Self::spawn_deferred_memory_work`].
     pub async fn finalize_turn(
         &self,
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         config: &MindConfig,
         input: &PostTurnInput<'_>,
     ) -> Result<(), CognitionError> {
@@ -525,10 +525,10 @@ impl CognitionEngine {
 
     /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
     ///
-    /// On failure, enqueues a [`ene_store::PendingMemoryWrite`] for later retry (#240).
+    /// On failure, enqueues a [`ene_core::PendingMemoryWrite`] for later retry (#240).
     /// Returns the task handle so callers can track or abort it.
     pub fn spawn_deferred_memory_work(
-        store: std::sync::Arc<MemoryStore>,
+        store: std::sync::Arc<dyn MemoryPort>,
         config: MindConfig,
         input: crate::lifecycle::OwnedPostTurnInput,
         llm: std::sync::Arc<dyn ene_ai::LlmProvider>,
@@ -628,7 +628,7 @@ impl CognitionEngine {
 
     /// Retry due pending memory writes from the persistent queue (#240).
     pub async fn drain_pending_memory_writes(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         config: &MindConfig,
         llm: &dyn ene_ai::LlmProvider,
         embedder: Option<&dyn ene_ai::EmbeddingProvider>,
@@ -643,7 +643,7 @@ impl CognitionEngine {
             else {
                 drop(
                     store
-                        .fail_pending_memory_write(row.id, "invalid payload JSON")
+                        .fail_pending_memory_write(row.id, "invalid payload JSON".to_string())
                         .await,
                 );
                 continue;
@@ -700,12 +700,12 @@ impl CognitionEngine {
         &self,
         config: &MindConfig,
         card: &CharacterCardV3,
-        affect: &ene_store::AffectState,
+        affect: &ene_core::AffectState,
         response_text: &str,
         llm_proposal: Option<&str>,
         previous_expression: &str,
         elapsed_since_change: Option<Duration>,
-    ) -> (crate::output::ExpressionDecision, ene_store::AffectState) {
+    ) -> (crate::output::ExpressionDecision, ene_core::AffectState) {
         use ene_config::resolve_expressions;
 
         let expressions = resolve_expressions(card);
@@ -744,7 +744,7 @@ fn build_behavior_contract(card: &CharacterCardV3, user_name: &str) -> Option<St
 }
 
 fn pending_to_affect_proposal(
-    pending: ene_store::PendingAffectProposal,
+    pending: ene_core::PendingAffectProposal,
 ) -> crate::emotion::AffectProposal {
     crate::emotion::AffectProposal {
         user_emotion: pending.user_emotion,
@@ -793,7 +793,7 @@ pub struct ClassifierAffectSnapshot {
 
 impl ClassifierAffectSnapshot {
     /// Build a compact snapshot from persistent affect state.
-    pub fn from_affect_state(affect: &ene_store::AffectState) -> Self {
+    pub fn from_affect_state(affect: &ene_core::AffectState) -> Self {
         Self {
             valence: affect.valence,
             arousal: affect.arousal,
@@ -830,7 +830,7 @@ pub struct ClassifierContext {
 pub fn build_classifier_context(
     history: &[crate::lifecycle::HistoryEntry],
     current_assistant: &str,
-    affect: &ene_store::AffectState,
+    affect: &ene_core::AffectState,
     max_turns: usize,
 ) -> ClassifierContext {
     let max_entries = max_turns.saturating_mul(2).max(2);
@@ -879,7 +879,7 @@ mod turn_id_tests {
 
     #[test]
     fn build_classifier_context_includes_history_and_assistant() {
-        use ene_store::AffectState;
+        use ene_core::AffectState;
 
         let history = vec![
             HistoryEntry {
@@ -908,7 +908,7 @@ mod turn_id_tests {
         use crate::lifecycle::{ComposePrefetch, PreTurnOutput};
         use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
         use ene_config::CharacterCardV3;
-        use ene_store::AffectState;
+        use ene_core::AffectState;
 
         let engine = CognitionEngine::new();
         let config = MindConfig::default();

@@ -237,6 +237,7 @@ async fn deferred_tool_execution_emits_completion_event() {
         deferred_tool_tx,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        concrete_store: None,
     };
 
     // Run the streaming loop in a separate task so we can poll events.

@@ -1,6 +1,6 @@
 //! Expression resolution: affect mapping, LLM hints, hysteresis (#89).
 
-use ene_store::AffectState;
+use ene_core::AffectState;
 
 use super::types::{ExpressionDecision, ExpressionInput, ExpressionSource};
 use crate::config::EmotionConfig;
@@ -185,7 +185,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 mod tests {
     use super::*;
     use ene_config::ResolvedExpression;
-    use ene_store::AffectState;
+    use ene_core::AffectState;
 
     fn default_available() -> Vec<ResolvedExpression> {
         ["neutral", "happy", "sad", "angry", "relaxed", "surprised"]

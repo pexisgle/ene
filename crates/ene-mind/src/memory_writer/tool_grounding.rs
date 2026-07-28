@@ -2,7 +2,7 @@
 
 use crate::config::ToolGroundingConfig;
 use crate::memory_writer::candidate::{MemoryCandidate, ToolResultSummary};
-use ene_store::typed_memory::MemoryKind;
+use ene_core::MemoryKind;
 
 const SCREENSHOT_SENTINEL: &str = "[Screenshot successfully captured and sent to vision system]";
 

@@ -84,6 +84,12 @@ pub(super) struct TurnActor {
     turn_gate: Arc<TurnGate>,
     config: EneConfig,
     session: ConversationSession,
+    /// Concrete store for IPC server (`connection()`) and `ToolRag` (#309).
+    ///
+    /// `session.memory.memory_store` holds the same store as `Arc<dyn MemoryPort>`
+    /// for `ene-mind`; this field keeps the concrete type for callers that need
+    /// `MemoryStore`-specific methods not on the trait.
+    concrete_store: Option<Arc<ene_store::MemoryStore>>,
     registry: Arc<dyn ToolRegistry>,
     tool_rag: Option<Arc<ToolRag>>,
     cancel_token: CancellationToken,
@@ -234,6 +240,7 @@ impl TurnActor {
         turn_gate: Arc<TurnGate>,
         config: EneConfig,
         session: ConversationSession,
+        concrete_store: Option<Arc<ene_store::MemoryStore>>,
         registry: Arc<dyn ToolRegistry>,
         tool_rag: Option<Arc<ToolRag>>,
         health_monitor: ene_ai::ProviderHealthMonitor,
@@ -259,6 +266,7 @@ impl TurnActor {
             turn_gate,
             config,
             session,
+            concrete_store,
             registry,
             tool_rag,
             cancel_token: CancellationToken::new(),
@@ -408,7 +416,7 @@ impl TurnActor {
                 }
                 let diag_tx = self.diag_tx.clone();
                 let lifecycle_tx = self.lifecycle_tx.clone();
-                let store = self.session.memory.memory_store.clone();
+                let store = self.concrete_store.clone();
                 self.memory_writer_tasks.spawn(async move {
                     match handle.await {
                         Ok(ene_mind::MemoryWriteOutcome::Ok {
@@ -703,7 +711,7 @@ impl TurnActor {
         }
 
         let config = self.config.clone();
-        let memory_store = self.session.memory.memory_store.clone();
+        let memory_store = self.concrete_store.clone();
         let plugin_host = Arc::clone(&self.plugin_host);
         let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
         let diag_tx = self.diag_tx.clone();
@@ -1429,7 +1437,7 @@ impl TurnActor {
                     session_id: self.session.memory.session_id.clone(),
                     card_name: CardName::from(self.session.card_name()),
                     memory: MemoryQueryHandle::new(
-                        self.session.memory.memory_store.clone(),
+                        self.concrete_store.clone(),
                         self.session.memory.embedding_provider.clone(),
                         self.config
                             .get_section::<ene_mind::MindConfig>()
@@ -1736,6 +1744,7 @@ impl TurnActor {
         let (session_tx, session_rx) = oneshot::channel();
         self.stream_session_rx = Some(session_rx);
 
+        let concrete_store_for_stream = self.concrete_store.clone();
         let handle = tokio::spawn(async move {
             let panic_event_tx = event_tx.clone();
             let panic_terminal_emitted = Arc::clone(&terminal_emitted);
@@ -1771,6 +1780,7 @@ impl TurnActor {
                         deferred_tool_tx,
                         tts_provider,
                         partial_text,
+                        concrete_store: concrete_store_for_stream,
                     })
                     .await
                 }))
@@ -2744,7 +2754,7 @@ pub(super) async fn init_memory_store(
 pub(super) fn init_tool_rag(
     config: &EneConfig,
     embedder: &Arc<dyn ene_ai::EmbeddingProvider>,
-    session: &ConversationSession,
+    concrete_store: Option<Arc<ene_store::MemoryStore>>,
 ) -> Result<Option<Arc<ToolRag>>, EneRuntimeError> {
     let rag_config = config.get_section::<ToolRagConfig>()?;
 
@@ -2752,7 +2762,7 @@ pub(super) fn init_tool_rag(
         return Ok(None);
     }
 
-    let store = session.memory.memory_store.clone();
+    let store = concrete_store;
     let opts = ToolRagOptions::from_config(rag_config)?;
     Ok(Some(Arc::new(ToolRag::new(embedder.clone(), store, opts))))
 }

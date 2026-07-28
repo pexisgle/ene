@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ene_ai::LlmProvider;
-use ene_store::{ActiveCommitmentPrompt, AffectState};
+use ene_core::{ActiveCommitmentPrompt, AffectState};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ProactiveConfig;

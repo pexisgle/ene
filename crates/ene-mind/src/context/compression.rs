@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ene_ai::LlmProvider;
 use ene_config::PromptLibrary;
-use ene_store::{MemoryStore, NewMemorySpan};
+use ene_core::{MemoryPort, NewMemorySpan};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 
@@ -118,7 +118,7 @@ pub struct PendingCompressionTask {
 
 /// Execute compression synchronously (for manual triggers and tests).
 pub async fn execute_compression(
-    store: Arc<MemoryStore>,
+    store: Arc<dyn MemoryPort>,
     provider: Arc<dyn LlmProvider>,
     input: CompressionTaskInput,
 ) -> Result<CompressionResult, CognitionError> {
@@ -128,7 +128,7 @@ pub async fn execute_compression(
 /// Spawn a background compression task.
 pub fn spawn_compression_task(
     pending: &mut Option<PendingCompressionTask>,
-    store: Arc<MemoryStore>,
+    store: Arc<dyn MemoryPort>,
     provider: Arc<dyn LlmProvider>,
     input: CompressionTaskInput,
 ) {
@@ -182,13 +182,13 @@ pub fn evaluate_compression_trigger(
 
 /// Load the active scene summary for prompt injection.
 pub async fn load_active_scene_summary(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     session_id: &str,
 ) -> Result<Option<ActiveSceneSummary>, CognitionError> {
     let row = store
         .get_active_scene_summary(session_id)
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
     Ok(row.map(|r| ActiveSceneSummary {
         text: r.summary,
         span_id: Some(r.span_id),
@@ -197,7 +197,7 @@ pub async fn load_active_scene_summary(
 }
 
 async fn run_compression(
-    store: Arc<MemoryStore>,
+    store: Arc<dyn MemoryPort>,
     provider: Arc<dyn LlmProvider>,
     input: CompressionTaskInput,
 ) -> Result<CompressionResult, CognitionError> {
@@ -225,7 +225,7 @@ async fn run_compression(
     let span_id = store
         .insert_memory_span(&span)
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
 
     Ok(CompressionResult {
         session_id: input.session_id,
@@ -308,7 +308,7 @@ async fn summarize_span(
 
 /// Roll up scene spans into a chapter summary when thresholds are exceeded.
 pub async fn maybe_roll_up_chapter(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     provider: Arc<dyn LlmProvider>,
     session_id: &str,
     character_name: &str,
@@ -318,7 +318,7 @@ pub async fn maybe_roll_up_chapter(
     let scenes = store
         .list_memory_spans_by_session_and_level(session_id, CompressionLevel::Scene.as_i32())
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
 
     if scenes.len() < config.chapter_span_threshold {
         return Ok(None);
@@ -357,7 +357,7 @@ pub async fn maybe_roll_up_chapter(
     let span_id = store
         .insert_memory_span(&span)
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
 
     Ok(Some(CompressionResult {
         session_id: session_id.to_string(),

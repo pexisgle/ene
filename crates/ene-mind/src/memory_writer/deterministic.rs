@@ -15,7 +15,7 @@ use super::candidate::{Locale, MemoryCandidate, ToolResultSummary, TurnInput};
 use super::tool_grounding;
 use crate::config::ToolGroundingConfig;
 use crate::error::CognitionError;
-use ene_store::typed_memory::MemoryKind;
+use ene_core::MemoryKind;
 
 /// Normalise Unicode with NFKC (fullwidth → ASCII, combined → single).
 fn nfkc(s: &str) -> String {

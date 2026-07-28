@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use ene_ai::{EmbeddingProvider, LlmProvider};
-use ene_store::MemoryStore;
+use ene_core::MemoryPort;
 
 use crate::commitments::{CommitmentLedger, CommitmentSyncContext};
 use crate::config::MindConfig;
@@ -69,7 +69,7 @@ impl MemoryWriter {
     /// Returns the number of memory candidates deferred to the user-approval
     /// queue (#174) during this turn, so callers can notify the UI.
     pub async fn write_memories(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         config: &MindConfig,
         input: &PostTurnInput<'_>,
         providers: MemoryWriteProviders<'_>,
@@ -364,14 +364,14 @@ impl MemoryWriter {
 
     /// Persist affect state only (forgetting runs on the deferred path).
     pub async fn finalize_turn(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         _config: &MindConfig,
         input: &PostTurnInput<'_>,
     ) -> Result<(), CognitionError> {
         store
             .upsert_affect_state(input.affect)
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
         tracing::debug!(
             component = "MemoryWriter",
             event = "affect state updated",
@@ -388,7 +388,7 @@ impl MemoryWriter {
 
     /// Apply natural forgetting lifecycle for the turn scope.
     pub async fn apply_forgetting(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         config: &MindConfig,
         input: &PostTurnInput<'_>,
     ) -> Result<(), CognitionError> {
@@ -403,7 +403,7 @@ impl MemoryWriter {
 
     /// Extract, arbitrate, persist memories, apply forgetting, and update affect.
     pub async fn after_turn(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         config: &MindConfig,
         input: PostTurnInput<'_>,
         providers: MemoryWriteProviders<'_>,
@@ -415,7 +415,7 @@ impl MemoryWriter {
 }
 
 async fn build_semantic_matches(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     embedder: Option<&dyn EmbeddingProvider>,
     config: &crate::config::MindMemoryConfig,
     character_id: &str,
@@ -439,7 +439,7 @@ async fn build_semantic_matches(
         let query_embedding = ene_ai::embed_query(embedder, query_text.trim())
             .await
             .map_err(CognitionError::Embedding)?;
-        let options = ene_store::Query {
+        let options = ene_core::Query {
             query_text: query_text.as_str(),
             embedding: Some(&query_embedding),
             character_id,
@@ -461,7 +461,7 @@ async fn build_semantic_matches(
         let scored = store
             .search(&options)
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
 
         let semantic: Vec<SemanticMatch> = scored
             .into_iter()

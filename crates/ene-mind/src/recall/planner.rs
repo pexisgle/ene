@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use ene_store::{ActiveCommitmentPrompt, AffectAnnotation, AffectState, Query, ScoredMemory};
+use ene_core::{ActiveCommitmentPrompt, AffectAnnotation, AffectState, Query, ScoredMemory};
 
 use super::input::RecallPlannerInput;
 use super::intent::{RecallIntent, infer_intents, kinds_for_intents};

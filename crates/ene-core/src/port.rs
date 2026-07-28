@@ -22,9 +22,12 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-use crate::commitment::Commitment;
+use crate::affect::{AffectState, PendingAffectProposal};
+use crate::commitment::{Commitment, NewCommitment};
 use crate::memory::{MemoryItem, MemoryKind, MemoryStatus, NewMemoryItem, Query, ScoredMemory};
 use crate::pending::{NaturalDecayReport, PendingCandidate};
+use crate::pending_write::PendingMemoryWrite;
+use crate::span::{ActiveSceneSummaryRow, NewMemorySpan};
 
 /// Error type for [`MemoryPort`] operations.
 ///
@@ -150,4 +153,86 @@ pub trait MemoryPort: Send + Sync {
         user_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Commitment>, MemoryPortError>;
+
+    // ── Affect state (#309) ────────────────────────────────────────────────
+
+    /// Load affect state for a character.
+    async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError>;
+
+    /// Persist affect state.
+    async fn upsert_affect_state(&self, affect: &AffectState) -> Result<(), MemoryPortError>;
+
+    /// Fetch and consume a pending post-turn classifier proposal.
+    async fn take_pending_affect_proposal(
+        &self,
+        character_id: &str,
+        user_name: &str,
+    ) -> Result<Option<PendingAffectProposal>, MemoryPortError>;
+
+    // ── Commitment CRUD (#309) ─────────────────────────────────────────────
+
+    /// Insert a new commitment ledger row and return its assigned ID.
+    async fn insert_commitment(&self, new: &NewCommitment) -> Result<i64, MemoryPortError>;
+
+    /// Supersede an active commitment's description and due label.
+    async fn supersede_commitment(
+        &self,
+        id: i64,
+        description: &str,
+        due_label: Option<&str>,
+    ) -> Result<bool, MemoryPortError>;
+
+    /// Mark a commitment as done.
+    async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryPortError>;
+
+    /// Mark a commitment as cancelled.
+    async fn cancel_commitment(&self, id: i64) -> Result<bool, MemoryPortError>;
+
+    /// Mark overdue active commitments as stale; returns the count updated.
+    async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryPortError>;
+
+    // ── Pending memory writes (#309) ───────────────────────────────────────
+
+    /// Enqueue a failed memory write for later retry (#240).
+    async fn enqueue_pending_memory_write(
+        &self,
+        character_id: &str,
+        user_id: &str,
+        payload: String,
+        error_message: String,
+    ) -> Result<i64, MemoryPortError>;
+
+    /// Take up to `limit` due pending memory writes.
+    async fn take_due_pending_memory_writes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingMemoryWrite>, MemoryPortError>;
+
+    /// Mark a pending write as completed (deletes the row).
+    async fn complete_pending_memory_write(&self, id: i64) -> Result<(), MemoryPortError>;
+
+    /// Record another failed attempt; may transition to permanent (#240).
+    async fn fail_pending_memory_write(
+        &self,
+        id: i64,
+        error_message: String,
+    ) -> Result<PendingMemoryWrite, MemoryPortError>;
+
+    // ── Memory spans / compression (#309) ──────────────────────────────────
+
+    /// Insert a new compressed memory span.
+    async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, MemoryPortError>;
+
+    /// Get the active scene summary for a session.
+    async fn get_active_scene_summary(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ActiveSceneSummaryRow>, MemoryPortError>;
+
+    /// List memory spans for a session at a specific compression level.
+    async fn list_memory_spans_by_session_and_level(
+        &self,
+        session_id: &str,
+        level: i32,
+    ) -> Result<Vec<NewMemorySpan>, MemoryPortError>;
 }
