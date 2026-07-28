@@ -88,8 +88,8 @@ pub async fn ensure_mmproj_available(
 
 /// Cache path for a URL-derived `{stem}.gguf` (no hash), used for legacy/manual weights.
 fn unhashed_cache_path_from_url(url: &str) -> Result<PathBuf, LlmProviderError> {
-    download::validate_https_url(url)?;
-    let path = download::strip_url_path(url);
+    ene_ai::validate_https_url(url)?;
+    let path = ene_ai::model_fetch::strip_url_path(url);
     let segment = path
         .rsplit('/')
         .next()
@@ -97,7 +97,7 @@ fn unhashed_cache_path_from_url(url: &str) -> Result<PathBuf, LlmProviderError> 
         .ok_or_else(|| {
             LlmProviderError::Provider(format!("cannot derive GGUF filename from URL: {url}"))
         })?;
-    let stem = download::sanitize_basename(segment)?;
+    let stem = ene_ai::model_fetch::sanitize_basename(segment)?;
     Ok(gguf_cache_dir().join(format!("{stem}.gguf")))
 }
 

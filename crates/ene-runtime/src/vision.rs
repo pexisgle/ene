@@ -29,8 +29,8 @@
 use crate::handle::{ActorDeadError, EneCommand};
 use crate::public_api::PublicApiError;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 /// Maximum accepted pixel count for a screen capture (1920x1080).
 const MAX_PIXELS: u64 = 1920 * 1080;
@@ -45,13 +45,14 @@ pub struct VisionPrepared {
     pub system: String,
     /// Rendered user prompt (includes the privacy-safe app label).
     pub user: String,
-    /// Cancellation flag for this specific vision request. The actor mints
-    /// a fresh flag per [`EneCommand::PrepareVisionSummary`] reply and
-    /// flips it when a new user turn starts, so a long-running vision
+    /// Cancellation token for this specific vision request. The actor mints
+    /// a fresh token per [`EneCommand::PrepareVisionSummary`] reply and
+    /// cancels it when a new user turn starts, so a long-running vision
     /// inference does not keep the local model busy behind a request the
-    /// user has already moved past. Checked periodically by the underlying
-    /// `summarize_rgb_with_cancel` call, not by this actor's mailbox.
-    pub cancel: Arc<AtomicBool>,
+    /// user has already moved past. Threaded into `ene_infer::JobContext`
+    /// (via `summarize_rgb_with_cancel`'s `EngineHandle::submit` call) and
+    /// checked cooperatively by the worker, not by this actor's mailbox.
+    pub cancel: CancellationToken,
 }
 
 /// Handle for screen-image vision summarization.
@@ -117,7 +118,7 @@ impl VisionHandle {
                 rgb,
                 &prepared.system,
                 &prepared.user,
-                Some(prepared.cancel),
+                prepared.cancel,
             )
             .await
             .map_err(|e| PublicApiError::Internal {

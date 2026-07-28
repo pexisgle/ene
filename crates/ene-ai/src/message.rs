@@ -65,6 +65,18 @@ pub struct LlmResponseChunk {
     pub tool_calls_delta: Option<Vec<LlmToolCallChunk>>,
 }
 
+impl From<String> for LlmResponseChunk {
+    /// The common case for a [`crate::local_engine::llm::StreamingLocalLlmEngine`]-wrapped
+    /// model whose `Chunk` is a plain detokenized text piece (e.g. llama.cpp's
+    /// `LlamaChatModel`): one text delta, no tool call data.
+    fn from(text_delta: String) -> Self {
+        Self {
+            text_delta: Some(text_delta),
+            tool_calls_delta: None,
+        }
+    }
+}
+
 /// Generic representation of a tool call fragment in a stream.
 #[derive(Debug, Clone)]
 pub struct LlmToolCallChunk {

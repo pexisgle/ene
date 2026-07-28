@@ -122,8 +122,9 @@ pub enum EneCommand {
     SearchTools {
         /// The query to search for.
         query: String,
-        /// Reply channel for the matching tools.
-        reply: oneshot::Sender<Vec<ToolSpec>>,
+        /// Reply channel for the matching tools. `Err(EneRuntimeError::Busy)`
+        /// when the actor's `search_tasks` `JoinSet` is at capacity (Stage 8).
+        reply: oneshot::Sender<Result<Vec<ToolSpec>, EneRuntimeError>>,
     },
     /// Call a tool by name with JSON-encoded arguments.
     CallTool {

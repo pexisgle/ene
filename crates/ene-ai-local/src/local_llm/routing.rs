@@ -185,12 +185,34 @@ async fn start_local(
 ) -> Result<LocalLlamaCppProvider, LlmProviderError> {
     let cfg = params.clone();
     let load_timeout = Duration::from_secs(LOCAL_STARTUP_TIMEOUT_SECS.max(1));
-    let join = tokio::task::spawn_blocking(move || LocalLlamaCppProvider::load(&cfg));
-    match tokio::time::timeout(load_timeout, join).await {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // A dedicated `std::thread`, not `tokio::task::spawn_blocking`: GGUF
+    // load is a one-time, non-cancellable synchronous call, and running it
+    // on tokio's shared blocking pool is exactly the hazard this stage
+    // removes from the per-request inference path — a `spawn_blocking` here
+    // would let a hung load linger on a shared pool slot indefinitely if
+    // this future is ever raced against a timeout (below) and abandoned. A
+    // dedicated thread has no such shared-resource blast radius: if the
+    // timeout fires, dropping `rx` just means nobody is listening anymore,
+    // and the thread still runs to completion (or hangs) on its own,
+    // without holding a slot other `spawn_blocking` callers across the repo
+    // depend on.
+    let spawned = std::thread::Builder::new()
+        .name("ene-ai-local-gguf-load".to_string())
+        .spawn(move || {
+            let result = LocalLlamaCppProvider::load(&cfg);
+            drop(tx.send(result));
+        });
+    if let Err(e) = spawned {
+        return Err(LlmProviderError::LocalLlm(format!(
+            "failed to spawn GGUF load thread: {e}"
+        )));
+    }
+    match tokio::time::timeout(load_timeout, rx).await {
         Ok(Ok(result)) => result,
-        Ok(Err(e)) => Err(LlmProviderError::LocalLlm(format!(
-            "local model load join error: {e}"
-        ))),
+        Ok(Err(_recv_error)) => Err(LlmProviderError::LocalLlm(
+            "GGUF load thread ended without a result".to_string(),
+        )),
         Err(_) => Err(LlmProviderError::LocalLlm(format!(
             "local model load timed out after {load_timeout:?}"
         ))),

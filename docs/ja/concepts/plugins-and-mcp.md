@@ -34,7 +34,7 @@ Ene ホストアプリケーション (ene-runtime)
 - **フレーミング**: すべてのパケットは 4 バイトのリトルエンディアン `u32` パケットサイズで始まり、UTF-8 JSON ペイロードが続きます。
 - **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 3, max: 4 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。
 - **リクエスト相関**: 非同期リクエストおよびレスポンスはすべて必須の `request_id` (`Uuid`) を保持します。
-- **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`) を宣伝します。
+- **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`) を宣伝し、各プロバイダ仕様はさらに `concurrency: ConcurrencyHint` を宣言します ([§3](#3-プロバイダの並行度-concurrencyhint) 参照)。
 
 ### バージョニングポリシー（N-1 後方互換）
 
@@ -49,7 +49,71 @@ Ene ホストアプリケーション (ene-runtime)
 
 ---
 
-## 3. 組み込みプラグインカタログ
+## 3. プロバイダの並行度 (`ConcurrencyHint`)
+
+プロセス境界は「ホスト」を不正なプロバイダプラグインから守ります——不正なプラグインがホストの tokio ブロッキングプールを枯渇させることはできません。しかし、それだけでは「プラグイン自身」は守られません。ホストが単一のプラグインバイナリに対して無制限に同時リクエストを送ることを妨げるものは何もなく、また「自分はローカルモデルなので一度に一件ずつ実行してほしい」とプラグインが表明する手段もありませんでした。`ConcurrencyHint` はこのギャップを埋めます。
+
+`PluginCapabilities` の各エントリ——`LlmProviderSpec`、`TtsProviderSpec`、`SttProviderSpec`——は `concurrency: ConcurrencyHint` フィールドを持ちます。
+
+```rust
+pub struct ConcurrencyHint {
+    /// Max jobs this provider can run at once.
+    pub max_in_flight: u32,
+    /// Extra jobs to queue before rejecting.
+    pub queue_depth: u32,
+}
+```
+
+### デフォルトは意図的に直列
+
+`ConcurrencyHint::default()` は `max_in_flight: 1, queue_depth: 2` ——一度に1ジョブのみ、その後ろに浅いキューを1つ、です。これは見落としではなく、設計上の要となる決定です。並行性についてまったく考えていないプラグイン作者は、考えていない「からこそ」保守的で安全な挙動を得られます。より高い並行度を求めるプラグイン——典型的にはクラウド API へのステートレスな HTTP プロキシで、多数のリクエストを安全に同時処理できるもの——は `concurrency` を明示的に設定する必要があり、そう設定すること自体が、作者がこの問題を検討した証拠になります。組み込みの Anthropic プラグインはまさにこれを行っています。
+
+```rust
+fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+    vec![LlmProviderSpec {
+        kind: "anthropic".to_string(),
+        // ...
+        concurrency: ConcurrencyHint { max_in_flight: 8, queue_depth: 16 },
+    }]
+}
+```
+
+このフィールドは、v3 以降にこのワイヤープロトコルへ追加された他のすべてのフィールドと同様に `#[serde(default)]` です——上記の[バージョニングポリシー](#バージョニングポリシーn-1-後方互換)を参照してください。`ConcurrencyHint` が存在する前にビルドされたプラグインバイナリは単にこのフィールドをワイヤー上で省略しますが、ホストはフィールドが欠けている場合、ハンドシェイクを失敗させたり無制限の並行度を既定にしたりするのではなく、安全な直列デフォルトとしてデシリアライズします。追加にあたってプロトコルバージョンのバンプは不要でした。
+
+### ホスト側での強制
+
+`ene-plugin-host` の `IpcLlmProvider` (`crates/ene-plugin-host/src/ipc_provider.rs`) は、宣言されたヒントを `ConcurrencyLimiter` で強制します: `max_in_flight` にサイズを合わせた `tokio::sync::Semaphore` と、パーミットを待てる呼び出し元を最大 `queue_depth` 件まで許容する仕組みです。両方の上限を超えたリクエストは、待ちキューを無制限に伸ばすのではなく `LlmProviderError::Busy` で即座に失敗します——`ene-infer` がローカル推論側で適用しているのと同じ「無限にキューイングするより早く失敗させる」規律を、プラグイン IPC 境界にも適用したものです。このリミッタは (プラグイン, プロバイダ種別) のペアごとに `IpcLlmProviderFactory` の中で一度だけ構築され、そのペアに対して以降作成されるすべてのプロバイダインスタンスで共有されます。呼び出しのたびに新しい `IpcLlmProvider` が作られるためです。ストリーミングリクエストの場合、取得したパーミットはストリームの生存期間中ずっと保持され、ストリームが自然に完了したか途中でキャンセルされたかにかかわらず、ストリームが drop された時点で自動的に解放されます。
+
+### ローカル推論プラグイン作者向け: プロセス内でも同じ規律を
+
+`ConcurrencyHint` が制限できるのは「ホスト」がプラグインに対して一度に送るリクエスト数だけです。自前でローカル推論を行うプラグイン (llama.cpp、whisper.cpp、ローカル TTS エンジンなど) は、それでも「自分自身のプロセス内」で並行性を正しく扱う必要があります——ホストは、そのプラグインのコードが到着したジョブをどう捌くかを見ることも制御することもできません。そのために、`ene-plugin` の `prelude` モジュールに依存してください。これは `ene-infer` のワーカースレッドフレームワーク (`EngineConfig`、`EngineError`、`EngineHandle`、`JobContext`、`LocalModel`、`StopReason`) を、通常のプラグイン作成用の型と並べて再エクスポートしています。
+
+```rust
+use ene_plugin::prelude::*;
+
+struct MyLocalModel { /* ... */ }
+
+impl LocalModel for MyLocalModel {
+    type Request = MyRequest;
+    type Response = MyResponse;
+    type Error = MyModelError;
+
+    fn engine_name(&self) -> &str { "my-local-model" }
+
+    fn run(&mut self, req: Self::Request, ctx: &JobContext) -> Result<Self::Response, Self::Error> {
+        // Cooperatively check `ctx.should_stop()` at natural interruption points.
+        // ...
+    }
+}
+
+let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::default());
+```
+
+`EngineHandle` は専用のワーカースレッド上でモデルを所有し、無制限に増え続けるのではなく境界のあるキューから即座に失敗する (`EngineError::Busy`) ジョブ実行を行い、パニックしたジョブからはモデルを再構築して復旧します——ホスト自身が依拠しているのと同じ保証を、`use` 一行で得られます。これがなければ、自前で書いた `spawn_blocking`/`block_in_place` による並行処理は、結局プロセス境界の向こう側にバグを移すだけになってしまいます。
+
+---
+
+## 4. 組み込みプラグインカタログ
 
 | プラグインバイナリ | ネームスペース | 説明 | ステートフル？ |
 |---|---|---|---|
@@ -62,7 +126,7 @@ Ene ホストアプリケーション (ene-runtime)
 
 ---
 
-## 4. MCP (Model Context Protocol) 連携
+## 5. MCP (Model Context Protocol) 連携
 
 `ene-connector` および `ene-plugin-host` は外部 MCP サーバーをシームレスに統合します：
 
@@ -72,7 +136,7 @@ Ene ホストアプリケーション (ene-runtime)
 
 ---
 
-## 5. カスタムツールプラグインの開発
+## 6. カスタムツールプラグインの開発
 
 開発者は `ene-tool-sdk` の `#[derive(ToolAction)]` と `ene-plugin` のサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-tool-macros --open` を参照してください：
 

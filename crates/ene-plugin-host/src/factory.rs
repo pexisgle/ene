@@ -19,11 +19,12 @@ use std::sync::Arc;
 use ene_ai::error::LlmProviderError;
 use ene_ai::traits::{LlmProvider, LlmProviderFactory};
 use ene_ai::{AiProviderDef, TaskRef};
+use ene_plugin_proto::ConcurrencyHint;
 use tokio::sync::Mutex;
 
 use crate::config::PluginConfig;
 use crate::ipc_plugin::IpcPluginConnection;
-use crate::ipc_provider::IpcLlmProvider;
+use crate::ipc_provider::{ConcurrencyLimiter, IpcLlmProvider};
 
 /// Factory that creates [`IpcLlmProvider`] instances for a specific
 /// provider kind served by a plugin binary.
@@ -37,6 +38,11 @@ pub struct IpcLlmProviderFactory {
     /// [`builtin_plugins_dir`](ene_config::builtin_plugins_dir). Built-in
     /// plugins are always trusted to receive credentials.
     builtin: bool,
+    /// Shared across every [`IpcLlmProvider`] this factory creates, since a
+    /// fresh provider instance is built per call
+    /// (`create_task_chat_provider`) — see `ipc_provider`'s module docs for
+    /// why the limiter must outlive any single provider instance.
+    limiter: Arc<ConcurrencyLimiter>,
 }
 
 impl IpcLlmProviderFactory {
@@ -46,17 +52,24 @@ impl IpcLlmProviderFactory {
     /// `plugin_name` and `builtin` drive the API key trust gate: credentials
     /// are only forwarded when `builtin` is `true` or the plugin has an
     /// explicit entry in `plugins.list` (see [`Self::create_provider`]).
+    ///
+    /// `concurrency` is the [`ConcurrencyHint`] the plugin declared for this
+    /// provider kind during the handshake (or the safe serial default if it
+    /// declared none); it is built into a single [`ConcurrencyLimiter`]
+    /// shared by every provider instance this factory subsequently creates.
     pub fn new(
         kind: String,
         conn: Arc<Mutex<IpcPluginConnection>>,
         plugin_name: String,
         builtin: bool,
+        concurrency: ConcurrencyHint,
     ) -> Self {
         Self {
             kind,
             conn,
             plugin_name,
             builtin,
+            limiter: Arc::new(ConcurrencyLimiter::new(concurrency)),
         }
     }
 
@@ -126,6 +139,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
             max_tokens,
             provider_config,
             retry_policy,
+            Arc::clone(&self.limiter),
         );
 
         Ok(Box::new(provider))

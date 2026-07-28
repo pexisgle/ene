@@ -16,10 +16,12 @@ cuda = ["dep:llama-cpp-4", "llama-cpp-4/cuda"]
 [dependencies]
 ene-ai = { workspace = true }
 ene-config = { workspace = true }
+ene-infer = { workspace = true }
 ene-plugin-proto = { workspace = true }
 llama-cpp-4 = { workspace = true, optional = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
@@ -27,14 +29,15 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+once_cell = { workspace = true }
 image = { workspace = true, features = ["png", "jpeg"] }
-base64 = { workspace = true, features = ["alloc"] }
+base64 = { workspace = true, features = ["std"] }
 blake3 = { workspace = true }
 rand = { workspace = true }
-reqwest = { workspace = true, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ene-infer = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

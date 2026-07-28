@@ -164,8 +164,15 @@ pub fn render(
                         ))
                         .clicked()
                 {
-                    std::thread::spawn(move || {
-                        let res = ene_voice::ensure_kokoro_files_exist(&model_path, &voices_path);
+                    // `ensure_kokoro_files_exist` is now async (it performs
+                    // network I/O); spawn it on the tokio runtime rather than
+                    // a bare OS thread. `Handle::current()` works here because
+                    // this is called from the UI thread, which holds a live
+                    // `runtime.enter()` guard for the whole process (see
+                    // `main.rs`) even though it is not itself a worker thread.
+                    tokio::runtime::Handle::current().spawn(async move {
+                        let res =
+                            ene_voice::ensure_kokoro_files_exist(&model_path, &voices_path).await;
                         let mut lock = download_status()
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -29,8 +29,19 @@ pub mod config;
 pub mod error;
 /// Provider health monitoring and failover routing.
 pub mod health;
+/// Blanket async-provider adapters over `ene-infer::EngineHandle`
+/// (`LocalLlmEngine`, `LocalTtsEngine`, `LocalSttEngine`), plus
+/// `EngineDescriptor` capability/concurrency/resource declarations and the
+/// process-wide `ResourceRegistry` admission budget.
+pub mod local_engine;
 /// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
+/// Shared, safe model-file downloader (`ModelFetcher`) used by
+/// `ene-ai-local` (GGUF) and `ene-voice` (Kokoro ONNX / `voices.bin`):
+/// in-flight coalescing, `.part` + atomic rename, RAII partial cleanup,
+/// HTTPS-only enforcement, pluggable post-download validation, and progress
+/// reporting.
+pub mod model_fetch;
 /// OpenAI-compatible provider implementation.
 pub mod openai;
 /// Provider resolution from configuration.
@@ -52,7 +63,17 @@ pub use health::{
     FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
     ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
+pub use local_engine::{
+    Capability, CapabilitySet, ConcurrencyHint, DEFAULT_CHUNK_BUFFER, EngineDescriptor, EngineId,
+    LlmChatRequest, LlmChatResponse, LocalLlmEngine, LocalSttEngine, LocalTtsEngine,
+    ResourceBudgets, ResourceClass, ResourceRegistry, StreamingLocalLlmEngine,
+    SttTranscribeRequest, TtsSynthesisRequest, TtsSynthesisResponse,
+};
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
+pub use model_fetch::{
+    MagicBytesValidator, ModelFetchError, ModelFetcher, ModelValidator, PrefixPredicateValidator,
+    SizeMultipleValidator, sanitize_basename, strip_url_path, validate_https_url,
+};
 pub use openai::{
     AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
     create_chat_provider_from_resolved, create_task_chat_provider,

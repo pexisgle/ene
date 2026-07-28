@@ -356,6 +356,24 @@ pub enum DiagnosticEvent {
         /// Channel that requires resync: `events` or `diagnostics`.
         channel: String,
     },
+    /// A background task was refused admission because its actor-owned
+    /// `JoinSet` was already at its configured capacity (Stage 8).
+    ///
+    /// Emitted alongside (not instead of) an [`EneRuntimeError::Busy`] reply
+    /// when the rejected command has a reply channel (`CallTool`,
+    /// `SearchTools`); for fire-and-forget admission points (deferred tool
+    /// pollers, post-turn classifier/memory-writer supervisors) this is the
+    /// only signal that the task was dropped rather than tracked.
+    TaskRejected {
+        /// Which task set rejected the task (e.g. `"CallTool"`,
+        /// `"DeferredTool"`, `"Classifier"`, `"MemoryWriter"`,
+        /// `"SearchTools"`).
+        component: String,
+        /// The configured capacity that was already reached.
+        cap: usize,
+        /// Optional human-readable detail (e.g. tool name / task id).
+        detail: Option<String>,
+    },
 }
 
 /// Extracts a human-readable message from a caught panic payload.
@@ -483,12 +501,17 @@ impl EneDiagnostics {
     }
 
     /// Search tools in the registry using RAG if available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EneRuntimeError::Busy`] when the actor's tool-search task
+    /// set is at capacity (Stage 8).
     pub async fn search_tools(&self, query: String) -> Result<Vec<ToolSpec>, EneRuntimeError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::SearchTools { query, reply: tx })
             .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
     /// Call a tool directly by name with arguments.

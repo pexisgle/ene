@@ -17,21 +17,18 @@ voice = ["local-stt", "local-tts", "silero-vad"]
 [dependencies]
 ene-ai = { workspace = true }
 ene-config = { workspace = true }
+ene-infer = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-parking_lot = { workspace = true }
-ctor = { workspace = true }
 whisper-rs = { workspace = true, optional = true }
 ort = { workspace = true, optional = true, features = ["std", "ndarray", "load-dynamic", "api-24"] }
-reqwest = { workspace = true, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ene-infer = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

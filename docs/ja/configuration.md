@@ -122,6 +122,28 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 }
 ```
 
+### `tools.*` — ツール実行ランタイムの挙動
+
+`plugins.*`（プラグインの プロセス／IPC 層を管理）とは別に、`tools.*` は
+`ene-runtime` と `ene-tool-rag` が所有するツール呼び出しランタイムの設定を扱います。`tools.rag` は Tool RAG 選択パイプライン (`ene_tool_rag::ToolRagConfig`) を設定し、以下のフィールド (`ene_runtime::ToolRuntimeConfig`) はアクターが同時に保持するバックグラウンドタスク数の上限と、遅延ツールのポーリング予算を制御します。上限に達すると、無制限にキューイングされるのではなく、admission（受け入れ）が拒否されます（フェイルファスト）。`CallTool`/`CancelDeferredTool` および `SearchTools` の呼び出し元には具体的な "busy" エラーが返りますが、ポストターンの分類器・メモリライター・遅延ツールのポーラーには返信チャンネルがないため、そこでの拒否は `TaskRejected` 診断イベントとしてのみ観測できます：
+
+```json
+{
+  "tools": {
+    "call_tool_cap": 64,
+    "deferred_tool_cap": 32,
+    "classifier_cap": 16,
+    "memory_writer_cap": 16,
+    "search_cap": 16,
+    "deferred_max_polls": 600,
+    "rag": {
+      "enabled": true,
+      "top_k": 12
+    }
+  }
+}
+```
+
 ### `desktop.*` — デスクトップ GUI およびグラフィックスパラメータ
 
 表示言語、グラフィックス描画パラメータ、およびマイク入力デバイスを制御します：

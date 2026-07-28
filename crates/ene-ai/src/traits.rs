@@ -349,6 +349,32 @@ pub enum AudioProviderError {
     /// An underlying I/O operation failed (file read, dylib load).
     #[error("audio I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// A local engine's bounded job queue was full
+    /// (`ene_infer::EngineError::Busy`). Enqueue contention only — the
+    /// engine itself is fine.
+    #[error("engine busy: queue depth {queue_depth} exceeded")]
+    Busy {
+        /// The engine's configured queue depth at the time of the call.
+        queue_depth: usize,
+    },
+    /// A local engine's job was cancelled (`ene_infer::EngineError::Cancelled`),
+    /// either by an explicit cancellation or because the caller went away.
+    #[error("local engine job cancelled")]
+    Cancelled,
+}
+
+impl AudioProviderError {
+    /// Whether this error is transient and may succeed on retry.
+    ///
+    /// `Busy` and `Timeout` are retryable, mirroring
+    /// `ene_infer::EngineError::is_retryable`. `Cancelled` reflects caller
+    /// intent, not engine health, so it is conservatively reported as not
+    /// retryable. All other variants are deterministic or provider-specific
+    /// and not retried.
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Busy { .. } | Self::Timeout)
+    }
 }
 
 /// A chunk of synthesized PCM audio from a TTS provider.
