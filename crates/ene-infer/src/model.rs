@@ -1,6 +1,7 @@
 //! The synchronous, exclusively-owned trait local inference providers implement.
 
 use crate::context::JobContext;
+use crate::stream::ChunkSink;
 
 /// A local inference model, owned by exactly one worker thread for its
 /// entire lifetime.
@@ -73,4 +74,57 @@ pub trait LocalModel: Send + 'static {
     /// the primary mechanism and this is only for cases that need an
     /// explicit, orderly shutdown step before the drop glue runs.
     fn shutdown(&mut self) {}
+}
+
+/// Opt-in extension of [`LocalModel`] for models that can hand back partial
+/// results while a job is still executing, instead of only a single
+/// completed [`LocalModel::Response`] when `run` returns.
+///
+/// Additive by design: implementing this trait changes nothing about an
+/// existing [`LocalModel`] impl, and a model with no incremental output
+/// (whisper, Kokoro, GGUF embedding, ...) simply never implements it — every
+/// existing `LocalModel` keeps compiling and behaving exactly as before.
+/// [`crate::EngineHandle::submit_stream`] is only available for `M:
+/// StreamingLocalModel`, via a second, separate `impl` block (see that
+/// method's docs); [`crate::EngineHandle::submit`] keeps working for every
+/// `LocalModel`, streaming-capable or not.
+pub trait StreamingLocalModel: LocalModel {
+    /// One incremental unit of output (a detokenized text piece, a PCM
+    /// slice, ...). Typically small and owned, like [`LocalModel::Request`]
+    /// — it travels across a channel to the async side.
+    type Chunk: Send + 'static;
+
+    /// Run one job to completion, synchronously, pushing zero or more
+    /// [`Self::Chunk`]s through `sink` as they become available.
+    ///
+    /// Everything [`LocalModel::run`]'s docs say about cooperative
+    /// cancellation applies here identically: check
+    /// [`JobContext::should_stop`] at every natural interruption point and
+    /// return as soon as possible once it fires, and call
+    /// [`JobContext::tick`] at the same points. [`ChunkSink::send`] itself
+    /// already consults `should_stop` (a full sink blocks the caller here
+    /// until the consumer drains it, the deadline passes, or the consumer
+    /// goes away — whichever comes first) and returns
+    /// [`crate::StopReason`] instead of pushing forever, but that check does
+    /// not substitute for this method's own `should_stop` calls at points
+    /// that do not send a chunk (e.g. while preparing input before the
+    /// first one).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Self::Error` for a model-level failure, exactly like
+    /// [`LocalModel::run`] — including after some chunks were already sent
+    /// successfully. The framework surfaces that as the final item of the
+    /// stream returned by [`crate::EngineHandle::submit_stream`] (mapped to
+    /// the precise [`crate::EngineError`] reason if a stop condition fired),
+    /// it does not silently truncate. As with `run`, do not attempt to
+    /// encode timeout/cancellation/caller-gone as a variant of this type —
+    /// return whatever is convenient once `should_stop` fires or
+    /// `ChunkSink::send` reports a stop.
+    fn run_streaming(
+        &mut self,
+        req: Self::Request,
+        ctx: &JobContext,
+        sink: &ChunkSink<Self::Chunk, Self::Error>,
+    ) -> Result<(), Self::Error>;
 }

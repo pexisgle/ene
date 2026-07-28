@@ -29,7 +29,9 @@ use crate::config::EngineConfig;
 use crate::context::JobContext;
 use crate::error::EngineError;
 use crate::handle::EngineHandle;
-use crate::model::LocalModel;
+use crate::model::{LocalModel, StreamingLocalModel};
+#[cfg(test)]
+use crate::stream::ChunkSink;
 
 /// Lets the conformance battery script a [`crate::LocalModel::Request`]
 /// generically: how long to run, and whether to panic partway through.
@@ -52,6 +54,55 @@ pub trait ConformanceResponse: std::fmt::Debug + Send + 'static {
     /// confirm `reset` actually ran after a cancelled/timed-out job, not
     /// just after successful ones.
     fn resets_seen(&self) -> usize;
+}
+
+/// Lets the streaming conformance battery
+/// ([`run_all_streaming`]) script a [`crate::StreamingLocalModel`]-producing
+/// [`crate::LocalModel::Request`] generically, the streaming counterpart of
+/// [`ConformanceRequest`].
+pub trait ConformanceStreamingRequest: Default + Send + 'static {
+    /// Builds a request that, when run via
+    /// [`crate::StreamingLocalModel::run_streaming`], pushes `chunk_count`
+    /// chunks through the sink one at a time (sleeping `pause_before_each`
+    /// before every send — pass [`Duration::ZERO`] for "as fast as the sink
+    /// allows"). If `fail_after` is `Some(k)`, returns a model error
+    /// immediately after the `k`-th chunk is sent instead of completing
+    /// normally; `k` must be `<= chunk_count`.
+    fn scripted_stream(
+        chunk_count: usize,
+        pause_before_each: Duration,
+        fail_after: Option<usize>,
+    ) -> Self;
+}
+
+/// Runs the streaming battery against engines built from `factory` — the
+/// streaming counterpart of [`run_all`], covering
+/// [`crate::EngineHandle::submit_stream`] specifically: incremental
+/// delivery, a dropped consumer, a mid-stream model error, and backpressure.
+/// Run this *in addition to*, not instead of, [`run_all`] — a
+/// [`crate::StreamingLocalModel`] is still a [`crate::LocalModel`] and
+/// [`crate::EngineHandle::submit`] must keep working on it exactly as it
+/// does on any other.
+///
+/// `factory` must build a *fresh* model each time it is called, same as
+/// [`run_all`].
+///
+/// # Panics
+///
+/// Panics (via `assert!`) with a descriptive message on the first check that
+/// fails. This is a test utility, not a library function with recoverable
+/// errors — call it from your own `#[tokio::test]`.
+pub async fn run_all_streaming<M>(factory: impl Fn() -> M + Clone + Send + 'static)
+where
+    M: StreamingLocalModel,
+    M::Request: ConformanceRequest + ConformanceStreamingRequest,
+    M::Response: ConformanceResponse,
+    M::Chunk: std::fmt::Debug,
+{
+    chunks_arrive_incrementally(factory.clone()).await;
+    dropped_stream_consumer_stops_promptly_and_engine_stays_available(factory.clone()).await;
+    mid_stream_model_error_surfaces(factory.clone()).await;
+    backpressure_blocks_a_fast_producer_against_a_slow_consumer(factory).await;
 }
 
 /// Runs the full battery against engines built from `factory`.
@@ -353,6 +404,211 @@ where
     );
 }
 
+/// Chunks are delivered as they are produced, not buffered until the job
+/// completes: the first chunk arrives after roughly one `pause`, and the
+/// full drain takes roughly `chunk_count - 1` further pauses — a model that
+/// (incorrectly) accumulated everything internally and only sent it all at
+/// the very end would make the first chunk arrive just as late as the last.
+async fn chunks_arrive_incrementally<M>(factory: impl Fn() -> M + Send + 'static)
+where
+    M: StreamingLocalModel,
+    M::Request: ConformanceStreamingRequest,
+    M::Chunk: std::fmt::Debug,
+{
+    let engine = spawn_engine(factory, EngineConfig::new(4, Duration::from_secs(10)));
+    let pause = Duration::from_millis(40);
+    let chunk_count = 4_usize;
+    let mut stream = engine.submit_stream(
+        M::Request::scripted_stream(chunk_count, pause, None),
+        CancellationToken::new(),
+        8,
+    );
+
+    let started = Instant::now();
+    let first = stream
+        .recv()
+        .await
+        .expect("stream ended before its first chunk");
+    let first_latency = started.elapsed();
+    assert!(first.is_ok(), "expected a chunk first, got {first:?}");
+    assert!(
+        first_latency < pause * 3,
+        "first chunk took {first_latency:?} to arrive; expected close to one pause ({pause:?}), \
+         not something proportional to all {chunk_count} chunks"
+    );
+
+    let mut received = 1_usize;
+    while let Some(item) = stream.recv().await {
+        assert!(item.is_ok(), "expected only chunks, got {item:?}");
+        received += 1;
+    }
+    assert_eq!(
+        received, chunk_count,
+        "expected exactly {chunk_count} chunks"
+    );
+
+    let total = started.elapsed();
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "chunk_count is a small test-scripted constant, never near u32::MAX"
+    )]
+    let remaining_pauses = (chunk_count - 1) as u32;
+    let floor = pause * remaining_pauses;
+    assert!(
+        total >= floor,
+        "draining all {chunk_count} chunks took only {total:?}, expected at least {floor:?} if \
+         the model genuinely paced them one at a time instead of producing them all upfront"
+    );
+}
+
+/// Dropping the stream (the consumer going away) stops the worker promptly
+/// via the same `JobContext::should_stop` → `StopReason::CallerGone` path
+/// `EngineHandle::submit`'s dropped-caller case uses, and the engine accepts
+/// its next job immediately afterward instead of staying wedged on a
+/// streaming job nobody is listening to anymore.
+async fn dropped_stream_consumer_stops_promptly_and_engine_stays_available<M>(
+    factory: impl Fn() -> M + Send + 'static,
+) where
+    M: StreamingLocalModel,
+    M::Request: ConformanceRequest + ConformanceStreamingRequest,
+    M::Response: ConformanceResponse,
+    M::Chunk: std::fmt::Debug,
+{
+    let engine = spawn_engine(factory, EngineConfig::new(4, Duration::from_secs(10)));
+    let pause = Duration::from_millis(50);
+
+    {
+        // Many more chunks than we intend to read: if dropping the stream
+        // did not stop the worker, it would keep producing (and blocking on
+        // a full, now-abandoned sink) for a long time after this scope ends.
+        let mut stream = engine.submit_stream(
+            M::Request::scripted_stream(200, pause, None),
+            CancellationToken::new(),
+            1,
+        );
+        let first = stream.recv().await;
+        assert!(
+            first.is_some_and(|item| item.is_ok()),
+            "expected at least one chunk before dropping the stream"
+        );
+    } // `stream` dropped here: its `DropGuard` cancels `caller_gone`.
+
+    let accept_started = Instant::now();
+    let next = engine
+        .submit(
+            M::Request::scripted(Duration::ZERO, false),
+            CancellationToken::new(),
+        )
+        .await;
+    let accept_latency = accept_started.elapsed();
+    assert!(
+        next.is_ok(),
+        "expected the engine to accept the next job after a dropped stream consumer, got {next:?}"
+    );
+    assert!(
+        accept_latency < pause * 3,
+        "engine did not accept the next job promptly after a dropped stream consumer \
+         ({accept_latency:?}); the streaming job likely kept running past the drop"
+    );
+}
+
+/// A model error partway through a stream surfaces as a terminal `Err` after
+/// the chunks that were already sent, rather than the stream silently
+/// truncating with no explanation.
+async fn mid_stream_model_error_surfaces<M>(factory: impl Fn() -> M + Send + 'static)
+where
+    M: StreamingLocalModel,
+    M::Request: ConformanceStreamingRequest,
+    M::Chunk: std::fmt::Debug,
+{
+    let engine = spawn_engine(factory, EngineConfig::new(4, Duration::from_secs(10)));
+    let mut stream = engine.submit_stream(
+        M::Request::scripted_stream(5, Duration::ZERO, Some(3)),
+        CancellationToken::new(),
+        8,
+    );
+
+    let mut ok_count = 0_usize;
+    let mut saw_terminal_error = false;
+    while let Some(item) = stream.recv().await {
+        match item {
+            Ok(_chunk) => {
+                assert!(
+                    !saw_terminal_error,
+                    "received a chunk after the stream's terminal error"
+                );
+                ok_count += 1;
+            }
+            Err(err) => {
+                assert!(
+                    matches!(err, EngineError::Model(_)),
+                    "expected a mapped model error after the scripted mid-stream failure, got {err:?}"
+                );
+                saw_terminal_error = true;
+            }
+        }
+    }
+    assert_eq!(
+        ok_count, 3,
+        "expected exactly 3 chunks before the scripted failure, got {ok_count}"
+    );
+    assert!(
+        saw_terminal_error,
+        "expected a terminal model error after 3 chunks, the stream ended without one"
+    );
+}
+
+/// A full sink genuinely blocks the worker thread rather than buffering
+/// unboundedly: with a `chunk_buffer` of 1 and a producer scripted to send
+/// as fast as the sink allows, a job that is never drained cannot finish —
+/// it blocks inside its second `send` call until
+/// [`crate::EngineConfig::job_timeout`] fires — which occupies the engine's
+/// one worker thread for roughly that whole deadline, provably delaying a
+/// job queued behind it.
+async fn backpressure_blocks_a_fast_producer_against_a_slow_consumer<M>(
+    factory: impl Fn() -> M + Send + 'static,
+) where
+    M: StreamingLocalModel,
+    M::Request: ConformanceRequest + ConformanceStreamingRequest,
+    M::Response: ConformanceResponse,
+    M::Chunk: std::fmt::Debug,
+{
+    let job_timeout = Duration::from_millis(200);
+    let engine = spawn_engine(factory, EngineConfig::new(4, job_timeout));
+
+    // Never drained: the assertions below run before this is read from or
+    // dropped, so the only way the streaming job can end on its own is its
+    // own deadline — which it can only reach if `send` actually blocks.
+    let stream = engine.submit_stream(
+        M::Request::scripted_stream(20, Duration::ZERO, None),
+        CancellationToken::new(),
+        1,
+    );
+
+    let started = Instant::now();
+    let queued = engine
+        .submit(
+            M::Request::scripted(Duration::ZERO, false),
+            CancellationToken::new(),
+        )
+        .await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        queued.is_ok(),
+        "expected the job queued behind the streaming one to eventually succeed, got {queued:?}"
+    );
+    let floor = job_timeout * 3 / 4;
+    assert!(
+        elapsed >= floor,
+        "the queued follow-up job ran after only {elapsed:?}; expected it to wait out roughly the \
+         streaming job's {job_timeout:?} deadline, which only happens if the sink genuinely \
+         blocked the producer instead of buffering every chunk unboundedly"
+    );
+
+    drop(stream);
+}
+
 // ---------------------------------------------------------------------
 // A trivial in-crate mock model, used both to self-test `run_all` above
 // and by this crate's own unit tests (see `src/tests.rs`). `#[cfg(test)]`
@@ -372,6 +628,13 @@ pub(crate) struct MockRequest {
     /// engines are expected to always tick, so this is a `src/tests.rs`-only
     /// escape hatch, not something the generic battery scripts.
     no_tick: bool,
+    /// `run_streaming`-only scripting (see [`ConformanceStreamingRequest`]),
+    /// inert (`stream_chunks: 0`) for every [`ConformanceRequest::scripted`]
+    /// request — those are only ever run via [`LocalModel::run`], which
+    /// never reads these fields.
+    stream_chunks: usize,
+    stream_pause: Duration,
+    stream_fail_after: Option<usize>,
 }
 
 #[cfg(test)]
@@ -383,6 +646,9 @@ impl MockRequest {
             run_for,
             then_panic: false,
             no_tick: true,
+            stream_chunks: 0,
+            stream_pause: Duration::ZERO,
+            stream_fail_after: None,
         }
     }
 }
@@ -394,6 +660,27 @@ impl ConformanceRequest for MockRequest {
             run_for,
             then_panic,
             no_tick: false,
+            stream_chunks: 0,
+            stream_pause: Duration::ZERO,
+            stream_fail_after: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ConformanceStreamingRequest for MockRequest {
+    fn scripted_stream(
+        chunk_count: usize,
+        pause_before_each: Duration,
+        fail_after: Option<usize>,
+    ) -> Self {
+        Self {
+            run_for: Duration::ZERO,
+            then_panic: false,
+            no_tick: false,
+            stream_chunks: chunk_count,
+            stream_pause: pause_before_each,
+            stream_fail_after: fail_after,
         }
     }
 }
@@ -477,12 +764,53 @@ impl LocalModel for MockModel {
     }
 }
 
+/// [`MockModel`]'s streaming counterpart, scripted by
+/// [`MockRequest`]'s `stream_chunks`/`stream_pause`/`stream_fail_after`
+/// fields (see [`ConformanceStreamingRequest::scripted_stream`]). Chunks are
+/// just the 0-based index of each one, sent in order.
+#[cfg(test)]
+impl StreamingLocalModel for MockModel {
+    type Chunk = usize;
+
+    fn run_streaming(
+        &mut self,
+        req: Self::Request,
+        ctx: &JobContext,
+        sink: &ChunkSink<Self::Chunk, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        for i in 0..req.stream_chunks {
+            if ctx.should_stop().is_some() {
+                return Err(MockError);
+            }
+            ctx.tick();
+            if !req.stream_pause.is_zero() {
+                std::thread::sleep(req.stream_pause);
+            }
+            if sink.send(i, ctx).is_err() {
+                // `should_stop` fired (or the channel closed) while trying
+                // to deliver this chunk — stop exactly like a real model
+                // would on any other cooperative stop signal.
+                return Err(MockError);
+            }
+            if req.stream_fail_after == Some(i + 1) {
+                return Err(MockError);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod self_test {
-    use super::{MockModel, run_all};
+    use super::{MockModel, run_all, run_all_streaming};
 
     #[tokio::test]
     async fn run_all_passes_against_the_bundled_mock() {
         run_all(MockModel::new).await;
+    }
+
+    #[tokio::test]
+    async fn run_all_streaming_passes_against_the_bundled_mock() {
+        run_all_streaming(MockModel::new).await;
     }
 }

@@ -13,7 +13,9 @@ use ene_ai::config::ProactiveAcceleration;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, LlmResponseChunk};
 use ene_ai::traits::LlmProvider;
-use ene_ai::{Capability, CapabilitySet, EngineDescriptor, LocalLlmEngine, ResourceRegistry};
+use ene_ai::{
+    Capability, CapabilitySet, EngineDescriptor, ResourceRegistry, StreamingLocalLlmEngine,
+};
 use ene_infer::{EngineConfig, EngineError, EngineHandle};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -86,16 +88,18 @@ fn map_engine_error(err: EngineError<LlmProviderError>) -> LlmProviderError {
 
 /// Local decision provider backed by an in-process llama.cpp model.
 ///
-/// Wraps a [`LocalLlmEngine`] (this crate's only consumer of `ene-ai`'s
-/// blanket `LlmProvider` adapter) for ordinary chat completion, plus a
-/// second call path — [`Self::summarize_rgb_with_cancel`] — that submits
-/// directly through [`LocalLlmEngine::handle`] for raw-RGB vision
-/// summarization, a request shape [`ene_ai::LlmChatRequest`] cannot express.
-/// Both paths run on the *same* worker/model instance and therefore
+/// Wraps a [`StreamingLocalLlmEngine`] (this crate's only consumer of
+/// `ene-ai`'s blanket `LlmProvider` adapters) for ordinary chat completion —
+/// real, token-by-token streaming for [`LlmProvider::create_chat_stream`],
+/// since [`LlamaChatModel`] implements [`ene_infer::StreamingLocalModel`] —
+/// plus a second call path — [`Self::summarize_rgb_with_cancel`] — that
+/// submits directly through [`StreamingLocalLlmEngine::handle`] for raw-RGB
+/// vision summarization, a request shape [`ene_ai::LlmChatRequest`] cannot
+/// express. Both paths run on the *same* worker/model instance and therefore
 /// naturally serialize against each other (one dedicated worker thread per
 /// [`ene_infer::EngineHandle`]).
 pub struct LocalLlamaCppProvider {
-    engine: LocalLlmEngine<LlamaChatModel>,
+    engine: StreamingLocalLlmEngine<LlamaChatModel>,
 }
 
 impl LocalLlamaCppProvider {
@@ -154,13 +158,14 @@ impl LocalLlamaCppProvider {
 
         let mut caps = CapabilitySet::empty()
             .with(Capability::Chat)
-            .with(Capability::Grammar);
+            .with(Capability::Grammar)
+            .with(Capability::Streaming);
         if vision_detected.load(std::sync::atomic::Ordering::Relaxed) {
             caps = caps.with(Capability::Vision);
         }
         let descriptor = EngineDescriptor::new(PROVIDER_NAME, caps, resource);
         Ok(Self {
-            engine: LocalLlmEngine::new(handle, descriptor),
+            engine: StreamingLocalLlmEngine::new(handle, descriptor),
         })
     }
 
@@ -254,11 +259,14 @@ impl LlmProvider for LocalLlamaCppProvider {
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
     > {
-        // `LocalLlmEngine::create_chat_stream` already rejects non-empty
-        // `tools` when `Capability::Tools` is not declared — this engine's
-        // descriptor never declares it (the local decision provider has
-        // never allowed tool calls), so that rejection reproduces the old
-        // hand-written check without duplicating it here.
+        // `StreamingLocalLlmEngine::create_chat_stream` already rejects
+        // non-empty `tools` when `Capability::Tools` is not declared — this
+        // engine's descriptor never declares it (the local decision provider
+        // has never allowed tool calls), so that rejection reproduces the
+        // old hand-written check without duplicating it here. Unlike before
+        // this stage, this now delivers real token-by-token chunks (see
+        // `model::LlamaChatModel`'s `StreamingLocalModel` impl), not a
+        // single item wrapping the whole reply.
         self.engine.create_chat_stream(messages, tools).await
     }
 
@@ -437,6 +445,69 @@ mod tests {
         assert!(
             !out.trim().is_empty(),
             "expected non-empty grammar completion"
+        );
+    }
+
+    /// Manual smoke: confirm `create_chat_stream` delivers *incremental*
+    /// chunks against a real llama.cpp model, not one item wrapping the
+    /// whole reply — the thing this stage's streaming adapter exists to
+    /// prove. Run alongside `smoke_gguf_load_and_grammar`, same GGUF.
+    ///
+    /// ```text
+    /// ENE_SMOKE_GGUF=assets/models/gguf/gemma-4-E4B-it-Q4_0.gguf \
+    ///   cargo test -p ene-ai-local -- --ignored smoke_gguf_streaming --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "requires a local GGUF path via ENE_SMOKE_GGUF"]
+    #[expect(
+        clippy::print_stderr,
+        reason = "manual smoke test run with --nocapture to inspect model output"
+    )]
+    async fn smoke_gguf_streaming() {
+        use tokio_stream::StreamExt;
+
+        let path = std::env::var("ENE_SMOKE_GGUF").expect("ENE_SMOKE_GGUF");
+        let mmproj = std::env::var("ENE_SMOKE_MMPROJ").ok();
+        let provider = LocalLlamaCppProvider::load(&LocalGgufLoadParams {
+            model_path: path,
+            mmproj_path: mmproj,
+            acceleration: ProactiveAcceleration::Cpu,
+            gpu_layers: "0".to_string(),
+            context_size: 2048,
+            request_timeout_seconds: 120,
+        })
+        .expect("load GGUF");
+
+        let messages = [LlmMessage::User {
+            parts: vec![ene_ai::message::UserMessagePart::Text {
+                text: "Count from one to five, one number per line.".into(),
+            }],
+        }];
+        let mut stream = provider
+            .create_chat_stream(&messages, &[])
+            .await
+            .expect("create_chat_stream");
+
+        let mut chunk_count = 0_usize;
+        let mut full_text = String::new();
+        while let Some(item) = stream.next().await {
+            let chunk = item.expect("chunk ok");
+            if let Some(delta) = chunk.text_delta {
+                eprintln!("smoke stream chunk {chunk_count}: {delta:?}");
+                full_text.push_str(&delta);
+            }
+            chunk_count += 1;
+        }
+        eprintln!("smoke stream full text: {full_text:?}");
+        assert!(
+            chunk_count > 1,
+            "expected more than one chunk from a real streaming model, got {chunk_count} \
+             (a single chunk would mean this is still the one-item fallback, not real \
+             token-by-token streaming)"
+        );
+        assert!(
+            !full_text.trim().is_empty(),
+            "expected non-empty text assembled from streamed chunks"
         );
     }
 }

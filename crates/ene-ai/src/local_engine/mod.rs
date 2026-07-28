@@ -21,7 +21,13 @@
 //! etc., written exactly once here so no future provider author writes
 //! `spawn_blocking` again:
 //!
-//! - [`llm::LocalLlmEngine`] — blanket [`crate::LlmProvider`].
+//! - [`llm::LocalLlmEngine`] — blanket [`crate::LlmProvider`] for any
+//!   [`ene_infer::LocalModel`], wrapping a single completed reply.
+//! - [`llm::StreamingLocalLlmEngine`] — sibling blanket [`crate::LlmProvider`]
+//!   for any [`ene_infer::StreamingLocalModel`], delivering real
+//!   token-by-token chunks through [`ene_infer::EngineHandle::submit_stream`]
+//!   instead. See that type's docs for why this had to be a separate type
+//!   rather than a second `impl` on [`llm::LocalLlmEngine`] itself.
 //! - [`tts::LocalTtsEngine`] — blanket [`crate::TtsProvider`].
 //! - [`stt::LocalSttEngine`] — blanket [`crate::SttProvider`].
 //! - [`descriptor::EngineDescriptor`] — declared capability, concurrency,
@@ -36,21 +42,45 @@
 //!
 //! # Where this does *not* fully work
 //!
-//! [`ene_infer::LocalModel::run`] is a one-shot synchronous call: it hands
-//! back exactly one `Response` when it returns, with no channel for partial
-//! progress. That is fine for [`crate::TtsProvider::synthesize_stream`] (see
-//! [`tts`]'s docs) and for embeddings, but it means
-//! [`crate::LlmProvider::create_chat_stream`] can never deliver *real*
-//! token-by-token streaming through this adapter — only a single completed
-//! reply wrapped in a one-item `Stream`, same as
-//! `LocalLlamaCppProvider::create_chat_stream` does today. A local chat
-//! engine that wants genuine incremental delivery has no way to get it from
-//! [`llm::LocalLlmEngine`]; the only way out today is to *not* use this
-//! adapter and hand-roll an async impl again — reopening exactly the
-//! concurrency hazards this crate exists to close. Closing that gap
-//! properly is a `ene-infer` change (e.g. a callback/channel the worker can
-//! push partial results through while `run` is still executing), out of
-//! scope for this stage.
+//! [`ene_infer::LocalModel::run`] is still a one-shot synchronous call: it
+//! hands back exactly one `Response` when it returns, with no channel for
+//! partial progress. That remains fine for
+//! [`crate::TtsProvider::synthesize_stream`] (see [`tts`]'s docs) and for
+//! embeddings — neither wants mid-job incremental delivery through this
+//! adapter layer — and it is still what [`llm::LocalLlmEngine`] wraps for a
+//! chat model that only implements plain [`ene_infer::LocalModel`].
+//!
+//! The actual gap this section used to describe — a local chat engine
+//! wanting genuine token-by-token delivery had no way to get it without
+//! bypassing this crate's discipline and hand-rolling `spawn_blocking` again
+//! — is closed: [`ene_infer::StreamingLocalModel`] is an additive extension
+//! of [`ene_infer::LocalModel`] (implementing it changes nothing about an
+//! existing model), [`ene_infer::EngineHandle::submit_stream`] delivers
+//! chunks through a bounded channel with the same cooperative
+//! cancellation/deadline/caller-gone handling `submit` already had, and
+//! [`llm::StreamingLocalLlmEngine`] is the [`crate::LlmProvider`] adapter
+//! over it. `crates/ene-ai-local`'s `LlamaChatModel` implements
+//! [`ene_infer::StreamingLocalModel`] by pushing each detokenized piece
+//! `llama_cpp::generate::sample_tokens`'s existing per-token loop already
+//! produces into the sink, and `LocalLlamaCppProvider` wraps it in
+//! [`llm::StreamingLocalLlmEngine`] — real streaming end to end, proven
+//! against real llama.cpp inference by
+//! `crates/ene-ai-local/src/local_llm/mod.rs`'s `smoke_gguf_streaming` (a
+//! manual, `--ignored` smoke test; automated coverage runs the same
+//! streaming battery this crate's own mock model does, against a
+//! `StreamingLocalModel` stand-in shaped like `LlamaChatModel`, in
+//! `crates/ene-ai-local/src/local_llm/model.rs`'s `conformance_tests`).
+//!
+//! What remains out of scope: only [`llm::StreamingLocalLlmEngine`] itself
+//! is provided — a chat model still has to *implement*
+//! [`ene_infer::StreamingLocalModel`] to benefit from it (whisper, Kokoro,
+//! and GGUF embedding have no reason to: none of them produce incremental
+//! partial output today), and grammar-constrained (JSON-schema) chat
+//! completion is deliberately never routed through the streaming path —
+//! [`crate::LlmProvider::create_chat_stream`] does not accept a
+//! `json_schema` argument at all, so a caller that needs one complete JSON
+//! document uses [`crate::LlmProvider::chat_completion`] instead, which
+//! still returns it as a single value, not fragments to reassemble.
 
 pub mod descriptor;
 pub mod llm;
@@ -62,7 +92,9 @@ pub use descriptor::{
     Capability, CapabilitySet, ConcurrencyHint, EngineDescriptor, EngineId, ResourceBudgets,
     ResourceClass,
 };
-pub use llm::{LlmChatRequest, LlmChatResponse, LocalLlmEngine};
+pub use llm::{
+    DEFAULT_CHUNK_BUFFER, LlmChatRequest, LlmChatResponse, LocalLlmEngine, StreamingLocalLlmEngine,
+};
 pub use resource::{ResourceRegistry, default_permits};
 pub use stt::{LocalSttEngine, SttTranscribeRequest};
 pub use tts::{DEFAULT_CHUNK_SAMPLES, LocalTtsEngine, TtsSynthesisRequest, TtsSynthesisResponse};
