@@ -1795,3 +1795,157 @@ async fn pending_candidates_are_isolated_per_store_instance() {
         .expect("list B");
     assert!(in_b.is_empty());
 }
+
+// ── #419: PRAGMAs must reach every pooled connection ──
+
+/// Regression test for #419: the per-connection PRAGMAs must set
+/// `foreign_keys=ON` (and the other safety PRAGMAs) on **every**
+/// connection in the pool, not just the first one. A file-backed
+/// store uses a pool of eight connections; we issue the PRAGMA
+/// check sixteen times so the pool cycles through multiple distinct
+/// connections (probabilistic but overwhelmingly likely to cover
+/// all eight).
+#[tokio::test]
+async fn pragmas_apply_to_all_pool_connections() {
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+    let store = MemoryStore::open(&path, 4).await.expect("open");
+
+    for _ in 0..16 {
+        let row = store
+            .connection()
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA foreign_keys".to_string(),
+            ))
+            .await
+            .expect("query PRAGMA foreign_keys")
+            .expect("row");
+        let fk_on: i32 = row.try_get_by_index(0).expect("value");
+        assert_eq!(
+            fk_on, 1,
+            "foreign_keys must report 1 (ON) for every pool connection"
+        );
+    }
+}
+
+// ── #421: FK cascade and unique index correctness ──
+
+/// Builds a minimal [`crate::NewMemoryItem`] for test use.
+fn test_memory_item(title: &str, content: &str) -> crate::NewMemoryItem {
+    crate::NewMemoryItem {
+        scope: crate::MemoryScope::Character,
+        character_id: "ene".into(),
+        user_id: String::new(),
+        kind: crate::MemoryKind::Semantic,
+        title: title.into(),
+        content: content.into(),
+        source: crate::MemorySource::Conversation,
+        source_ref: None,
+        confidence: crate::MemoryConfidence::default(),
+        salience: crate::MemorySalience::default(),
+        affect: crate::AffectAnnotation::default(),
+        relationship_impact: 0.0,
+        valid_from: None,
+        valid_until: None,
+        status: crate::MemoryStatus::Active,
+        supersedes_id: None,
+        pinned: false,
+        created_at: None,
+        commitment_id: None,
+    }
+}
+
+/// Deleting a `typed_memories` row must cascade-delete its
+/// `memory_embeddings` rows now that `foreign_keys=ON` is
+/// enforced on every pooled connection (#419).
+#[tokio::test]
+async fn delete_typed_memory_cascades_to_embeddings() {
+    use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+    let store = MemoryStore::open(&path, 4).await.expect("open");
+
+    let item = test_memory_item("cascade test", "content to embed");
+    let id = store.insert_typed_memory(&item).await.expect("insert");
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &[0.1, 0.2, 0.3, 0.4])
+        .await
+        .expect("upsert embedding");
+
+    let count_before = crate::entities::memory_embeddings::Entity::find()
+        .filter(crate::entities::memory_embeddings::Column::MemoryItemId.eq(id))
+        .count(store.connection())
+        .await
+        .expect("count before");
+    assert_eq!(count_before, 1, "embedding must exist before delete");
+
+    // Delete the parent row directly; the FK ON DELETE CASCADE must fire.
+    store
+        .connection()
+        .execute_unprepared(&format!("DELETE FROM typed_memories WHERE id = {id}"))
+        .await
+        .expect("delete parent");
+
+    let count_after = crate::entities::memory_embeddings::Entity::find()
+        .filter(crate::entities::memory_embeddings::Column::MemoryItemId.eq(id))
+        .count(store.connection())
+        .await
+        .expect("count after");
+    assert_eq!(count_after, 0, "embedding must be cascade-deleted");
+}
+
+/// The unique index `uniq_memory_embedding` must prevent duplicate
+/// rows for the same `(memory_item_id, model_name, field)` triple.
+/// A second upsert must update the existing row, not insert a new one.
+#[tokio::test]
+async fn upsert_memory_embedding_does_not_create_duplicates() {
+    use sea_orm::{DbBackend, Statement};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+    let store = MemoryStore::open(&path, 4).await.expect("open");
+
+    let item = test_memory_item("dedup test", "content to embed");
+    let id = store.insert_typed_memory(&item).await.expect("insert");
+
+    let emb1: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &emb1)
+        .await
+        .expect("first upsert");
+
+    let emb2: Vec<f32> = vec![0.5, 0.6, 0.7, 0.8];
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &emb2)
+        .await
+        .expect("second upsert (update, not insert)");
+
+    let rows = store
+        .connection()
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!(
+                "SELECT embedding FROM memory_embeddings \
+                 WHERE memory_item_id = {id} AND model_name = 'test-model' AND field = 'content'"
+            ),
+        ))
+        .await
+        .expect("query embeddings");
+
+    assert_eq!(
+        rows.len(),
+        1,
+        "unique index must prevent duplicate (memory_item_id, model_name, field)"
+    );
+
+    let stored_bytes: Vec<u8> = rows[0].try_get_by_index(0).expect("embedding bytes");
+    assert_eq!(
+        stored_bytes,
+        embedding_to_bytes(&emb2),
+        "stored embedding must be the second (updated) value"
+    );
+}

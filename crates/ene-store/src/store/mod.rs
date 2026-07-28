@@ -203,32 +203,33 @@ pub struct MemoryStore {
     pending_candidates: parking_lot::Mutex<Vec<PendingCandidate>>,
 }
 
-/// Applies the `SQLite` PRAGMAs the store depends on to the
-/// given connection. Idempotent and safe to call from both
-/// `open` and `open_in_memory`.
+/// Applies the required `SQLite` PRAGMAs to the `sqlx` connect options
+/// so that **every** new connection in the pool receives them.
 ///
-/// * `journal_mode=WAL` lets readers proceed concurrently
-///   with a writer. WAL is a no-op for in-memory databases
-///   (`SQLite` returns `memory`), so it is safe to issue
-///   unconditionally.
-/// * `busy_timeout=5000` (5 seconds) makes concurrent
-///   writers wait for the lock instead of failing with
-///   `database is locked` immediately.
-/// * `foreign_keys=ON` enables enforcement of foreign-key
-///   constraints declared in migrations.
-async fn apply_pragmas(db: &DatabaseConnection) -> Result<(), EneMemoryError> {
-    const STATEMENTS: &[&str] = &[
-        "PRAGMA journal_mode = WAL",
-        "PRAGMA busy_timeout = 5000",
-        "PRAGMA foreign_keys = ON",
-        "PRAGMA synchronous = NORMAL",
-    ];
-    for stmt in STATEMENTS {
-        db.execute_unprepared(stmt).await.map_err(|e| {
-            EneMemoryError::MemoryStoreConnectionError(format!("failed to apply `{stmt}`: {e}"))
-        })?;
-    }
-    Ok(())
+/// This is the fix for #419: the previous approach called
+/// `execute_unprepared` on the pool handle once after
+/// `Database::connect`, which only reached one of the pooled
+/// connections. `SqliteConnectOptions::pragma` bakes the PRAGMAs into
+/// the connection establishment path, so all eight (or one, for
+/// `:memory:`) connections receive the same settings.
+///
+/// * `journal_mode=WAL` lets readers proceed concurrently with a
+///   writer. WAL is a no-op for in-memory databases (`SQLite` returns
+///   `memory`), so it is safe to issue unconditionally.
+/// * `busy_timeout=5000` (5 seconds) makes concurrent writers wait for
+///   the lock instead of failing with `database is locked` immediately.
+/// * `foreign_keys=ON` enables enforcement of foreign-key constraints
+///   declared in migrations (sqlx already defaults to ON; stated
+///   explicitly for clarity).
+/// * `synchronous=NORMAL` reduces fsync frequency while remaining safe
+///   under WAL.
+fn sqlite_connect_pragmas(
+    opts: sea_orm::sqlx::sqlite::SqliteConnectOptions,
+) -> sea_orm::sqlx::sqlite::SqliteConnectOptions {
+    opts.pragma("journal_mode", "WAL")
+        .pragma("busy_timeout", "5000")
+        .pragma("foreign_keys", "ON")
+        .pragma("synchronous", "NORMAL")
 }
 
 /// Read applied `SeaORM` migration names from `seaql_migrations`.
@@ -329,9 +330,8 @@ impl MemoryStore {
         init_sqlite_vec();
         let mut opt = ConnectOptions::new(format!("sqlite:{path_str}?mode=rwc"));
         opt.max_connections(8);
+        opt.map_sqlx_sqlite_opts(sqlite_connect_pragmas);
         let db = Database::connect(opt).await?;
-
-        apply_pragmas(&db).await?;
 
         if options.integrity_check_on_open {
             crate::backup::check_integrity(&db).await?;
@@ -412,9 +412,8 @@ impl MemoryStore {
         init_sqlite_vec();
         let mut opt = ConnectOptions::new("sqlite::memory:");
         opt.max_connections(1);
+        opt.map_sqlx_sqlite_opts(sqlite_connect_pragmas);
         let db = Database::connect(opt).await?;
-
-        apply_pragmas(&db).await?;
 
         Migrator::up(&db, None).await?;
 
