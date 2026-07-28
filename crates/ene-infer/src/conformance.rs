@@ -96,6 +96,7 @@ pub async fn run_all_streaming<M>(factory: impl Fn() -> M + Clone + Send + 'stat
 where
     M: StreamingLocalModel,
     M::Request: ConformanceRequest + ConformanceStreamingRequest,
+    M::Response: ConformanceResponse,
     M::Chunk: std::fmt::Debug,
 {
     chunks_arrive_incrementally(factory.clone()).await;
@@ -470,6 +471,7 @@ async fn dropped_stream_consumer_stops_promptly_and_engine_stays_available<M>(
 ) where
     M: StreamingLocalModel,
     M::Request: ConformanceRequest + ConformanceStreamingRequest,
+    M::Response: ConformanceResponse,
     M::Chunk: std::fmt::Debug,
 {
     let engine = spawn_engine(factory, EngineConfig::new(4, Duration::from_secs(10)));
@@ -568,6 +570,7 @@ async fn backpressure_blocks_a_fast_producer_against_a_slow_consumer<M>(
 ) where
     M: StreamingLocalModel,
     M::Request: ConformanceRequest + ConformanceStreamingRequest,
+    M::Response: ConformanceResponse,
     M::Chunk: std::fmt::Debug,
 {
     let job_timeout = Duration::from_millis(200);
@@ -761,12 +764,53 @@ impl LocalModel for MockModel {
     }
 }
 
+/// [`MockModel`]'s streaming counterpart, scripted by
+/// [`MockRequest`]'s `stream_chunks`/`stream_pause`/`stream_fail_after`
+/// fields (see [`ConformanceStreamingRequest::scripted_stream`]). Chunks are
+/// just the 0-based index of each one, sent in order.
+#[cfg(test)]
+impl StreamingLocalModel for MockModel {
+    type Chunk = usize;
+
+    fn run_streaming(
+        &mut self,
+        req: Self::Request,
+        ctx: &JobContext,
+        sink: &ChunkSink<Self::Chunk, Self::Error>,
+    ) -> Result<(), Self::Error> {
+        for i in 0..req.stream_chunks {
+            if ctx.should_stop().is_some() {
+                return Err(MockError);
+            }
+            ctx.tick();
+            if !req.stream_pause.is_zero() {
+                std::thread::sleep(req.stream_pause);
+            }
+            if sink.send(i, ctx).is_err() {
+                // `should_stop` fired (or the channel closed) while trying
+                // to deliver this chunk — stop exactly like a real model
+                // would on any other cooperative stop signal.
+                return Err(MockError);
+            }
+            if req.stream_fail_after == Some(i + 1) {
+                return Err(MockError);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod self_test {
-    use super::{MockModel, run_all};
+    use super::{MockModel, run_all, run_all_streaming};
 
     #[tokio::test]
     async fn run_all_passes_against_the_bundled_mock() {
         run_all(MockModel::new).await;
+    }
+
+    #[tokio::test]
+    async fn run_all_streaming_passes_against_the_bundled_mock() {
+        run_all_streaming(MockModel::new).await;
     }
 }
