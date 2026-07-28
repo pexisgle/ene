@@ -21,6 +21,15 @@ use crate::stream::{ChunkReceiver, ChunkSink, send_terminal};
 type Reply<M> =
     oneshot::Sender<Result<<M as LocalModel>::Response, EngineError<<M as LocalModel>::Error>>>;
 
+/// A streaming job's type-erased body, built by [`EngineHandle::submit_stream`]
+/// (which knows `M::Chunk`) and invoked by [`worker_loop`] (which only knows
+/// `M: LocalModel`) — see [`JobKind::Streaming`].
+type StreamRunner<M> = Box<dyn FnOnce(&mut M, &JobContext) + Send>;
+
+/// A streaming job's `EngineDown` notifier, used only if [`StreamRunner`]
+/// itself panics — see [`JobKind::Streaming`].
+type EngineDownNotifier = Box<dyn FnOnce(String) + Send>;
+
 /// What a [`Job`] asks the worker to do, and how to report the outcome.
 ///
 /// Both variants travel through the exact same bounded queue as
@@ -46,8 +55,8 @@ enum JobKind<M: LocalModel> {
     /// handle, is dropped mid-unwind along with everything else it
     /// captured — this one survives because it was never moved into `run`).
     Streaming {
-        run: Box<dyn FnOnce(&mut M, &JobContext) + Send>,
-        notify_engine_down: Box<dyn FnOnce(String) + Send>,
+        run: StreamRunner<M>,
+        notify_engine_down: EngineDownNotifier,
     },
 }
 
@@ -366,14 +375,14 @@ impl<M: StreamingLocalModel> EngineHandle<M> {
         let enqueue_result_tx = tx.clone();
         let sink = ChunkSink::new(tx);
 
-        let run: Box<dyn FnOnce(&mut M, &JobContext) + Send> = Box::new(move |model, ctx| {
+        let run: StreamRunner<M> = Box::new(move |model, ctx| {
             if let Err(model_err) = model.run_streaming(req, ctx, &sink) {
                 let stop = ctx.should_stop();
                 let elapsed = ctx.elapsed();
                 sink.notify_terminal(map_stop_to_error(model_err, stop, elapsed));
             }
         });
-        let notify_engine_down: Box<dyn FnOnce(String) + Send> = Box::new(move |reason| {
+        let notify_engine_down: EngineDownNotifier = Box::new(move |reason| {
             send_terminal(&notify_tx, EngineError::EngineDown { reason });
         });
 

@@ -50,12 +50,13 @@ where
     let mut item = Err(err);
     for _ in 0..TERMINAL_SEND_ATTEMPTS {
         match tx.try_send(item) {
-            Ok(()) => return,
             Err(mpsc::error::TrySendError::Full(returned)) => {
                 item = returned;
                 std::thread::sleep(SEND_POLL_INTERVAL);
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => return,
+            // Delivered, or nobody is listening anymore — either way there
+            // is nothing left to retry.
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => return,
         }
     }
     tracing::warn!(
