@@ -143,19 +143,13 @@ impl Connector for McpConnector {
                 url,
                 auth_header: config_auth,
             } => {
-                // WS7 SSRF protection: validate URL scheme and refuse link-local/loopback
-                let url_str = url.clone();
-                if let Err(e) = validate_mcp_http_url(&url_str) {
-                    return Err(ConnectorError::transport(format!(
-                        "MCP HTTP URL validation failed: {e}"
-                    )));
-                }
-
                 // WS7 auth unification: single explicit source, fail-closed on malformed headers
                 let auth = resolve_auth_header(credentials, config_auth.as_deref())?;
 
+                // SSRF validation now lives inside `connect_http` (mcp_registry.rs);
+                // `false` keeps this (dead) path on the secure default until it is removed.
                 self.registry
-                    .connect_http(&name, &url_str, auth.as_deref())
+                    .connect_http(&name, url, auth.as_deref(), false)
                     .await
                     .map_err(|e| ConnectorError::transport(e.to_string()))
             }
@@ -195,71 +189,6 @@ impl Connector for McpConnector {
     fn rate_limiter(&self) -> Option<&ene_connector::RateLimiter> {
         None
     }
-}
-
-/// Validates an MCP HTTP URL for SSRF protection.
-///
-/// Enforces:
-/// - HTTPS-only (or explicit allowlist in the future)
-/// - Refuses link-local addresses (`169.254.0.0/16`, `fe80::/10`)
-/// - Refuses loopback addresses (`127.0.0.0/8`, `::1`)
-///
-/// Returns `Ok(())` if the URL is safe, or an error message if validation fails.
-fn validate_mcp_http_url(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
-
-    // Enforce HTTPS-only (or explicit allowlist in the future)
-    match parsed.scheme() {
-        "https" => {}
-        "http" => {
-            return Err(
-                "HTTP is not allowed for MCP servers; use HTTPS or configure an explicit allowlist"
-                    .to_string(),
-            );
-        }
-        scheme => {
-            return Err(format!(
-                "unsupported URL scheme '{scheme}'; only HTTPS is allowed"
-            ));
-        }
-    }
-
-    // Check for link-local and loopback addresses
-    if let Some(host) = parsed.host_str() {
-        // Try to parse as IP address
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            match ip {
-                std::net::IpAddr::V4(ipv4) => {
-                    // Refuse loopback (127.0.0.0/8)
-                    if ipv4.is_loopback() {
-                        return Err("loopback addresses (127.0.0.0/8) are not allowed".to_string());
-                    }
-                    // Refuse link-local (169.254.0.0/16)
-                    if ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254 {
-                        return Err(
-                            "link-local addresses (169.254.0.0/16) are not allowed".to_string()
-                        );
-                    }
-                }
-                std::net::IpAddr::V6(ipv6) => {
-                    // Refuse loopback (::1)
-                    if ipv6.is_loopback() {
-                        return Err("loopback address (::1) is not allowed".to_string());
-                    }
-                    // Refuse link-local (fe80::/10)
-                    if ipv6.segments()[0] & 0xffc0 == 0xfe80 {
-                        return Err("link-local addresses (fe80::/10) are not allowed".to_string());
-                    }
-                }
-            }
-        }
-        // For hostnames, we could do DNS resolution and check the resolved IPs,
-        // but that's expensive and can be bypassed with DNS rebinding.
-        // A production implementation should use a DNS resolver that validates
-        // resolved IPs, or require IP addresses only.
-    }
-
-    Ok(())
 }
 
 /// Resolves the authentication header from credentials and config.

@@ -839,7 +839,12 @@ impl PluginHostManager {
                              this path may fail if the server is unreachable or incompatible"
                         );
                         if let Err(err) = registry
-                            .connect_http(&server.name, url, auth_header.as_deref())
+                            .connect_http(
+                                &server.name,
+                                url,
+                                auth_header.as_deref(),
+                                plugin_config.mcp_allow_insecure_urls,
+                            )
                             .await
                         {
                             tracing::warn!(
