@@ -140,12 +140,16 @@ impl CharacterConfig {
         })
     }
 
-    /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
+    /// Serialise and merge a sub-section into the `extra` map using the type's associated path.
     ///
     /// Serialisation goes through [`section_to_value`](crate::config::section_to_value)
     /// to avoid the f32→f64 widening artefact (#329).
     ///
-    /// Reuses [`set_nested`](crate::config::set_nested) for direct `BTreeMap` mutation
+    /// Only the section's *declared* fields are written; unknown sub-keys
+    /// already present beneath the section path are preserved (#327).
+    ///
+    /// Reuses [`merge_section`](crate::config::merge_section) and
+    /// [`set_nested`](crate::config::set_nested) for direct map mutation
     /// instead of rebuilding the entire map from a JSON `Value`.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
     where
@@ -153,13 +157,17 @@ impl CharacterConfig {
     {
         debug_assert_eq!(T::TARGET, ConfigTarget::Character);
         let val = crate::config::section_to_value(section)?;
-        crate::config::set_nested(&mut self.extra, T::path(), val)?;
+        let path = T::path();
+        let merged =
+            crate::config::merge_section(crate::config::read_at_path(&self.extra, path), &val);
+        crate::config::set_nested(&mut self.extra, path, merged)?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{CharacterConfig, ConfigTarget, HasConfigKey};
     use super::MotionLayer;
 
     #[test]
@@ -173,5 +181,51 @@ mod tests {
     fn motion_layer_from_label_rejects_unknown() {
         assert_eq!(MotionLayer::from_label("sideways"), None);
         assert_eq!(MotionLayer::from_label(""), None);
+    }
+
+    /// A test-only character section used to exercise `set_section` without
+    /// pulling in another workspace crate.
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    struct TestCharacterSection {
+        intensity: f32,
+    }
+
+    impl HasConfigKey for TestCharacterSection {
+        const KEY: &'static str = "motion";
+        const TARGET: ConfigTarget = ConfigTarget::Character;
+        fn path() -> &'static [&'static str] {
+            &["motion"]
+        }
+    }
+
+    /// Regression for #327: writing a character section must merge its declared
+    /// fields into the existing subtree, preserving unknown sibling sub-keys.
+    #[test]
+    fn set_section_preserves_unknown_subkeys() {
+        let mut config = CharacterConfig::default();
+        config.extra.insert(
+            "motion".to_string(),
+            serde_json::json!({ "custom_key": "keep-me", "intensity": 0.25 }),
+        );
+
+        config
+            .set_section(&TestCharacterSection { intensity: 0.5 })
+            .expect("set_section succeeds");
+
+        let motion = config
+            .extra
+            .get("motion")
+            .and_then(serde_json::Value::as_object)
+            .expect("motion object present");
+        assert_eq!(
+            motion.get("intensity"),
+            Some(&serde_json::json!(0.5)),
+            "declared field must be updated"
+        );
+        assert_eq!(
+            motion.get("custom_key"),
+            Some(&serde_json::json!("keep-me")),
+            "unknown sibling sub-key must survive the section write"
+        );
     }
 }

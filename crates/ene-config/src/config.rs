@@ -232,7 +232,12 @@ impl EneConfig {
         })
     }
 
-    /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
+    /// Serialise and merge a sub-section into the `extra` map using the type's associated path.
+    ///
+    /// Only the section's *declared* fields are written; unknown sub-keys
+    /// already present beneath the section path are preserved (#327). This
+    /// replaces the previous whole-subtree replacement, which silently wiped
+    /// sibling keys such as `plugins.rag` when writing `PluginConfig`.
     ///
     /// Serialisation goes through [`section_to_value`] to avoid the f32→f64
     /// widening artefact that `serde_json::to_value` introduces (#329).
@@ -253,24 +258,16 @@ impl EneConfig {
             )));
         }
         let val = section_to_value(section)?;
-        // Skip the write if the serialised value is already identical
-        // to what sits at this path. This avoids redundant BTreeMap
-        // mutations and prevents unnecessary dirty-flag flips.
         let path = T::path();
-        let mut current: Option<&serde_json::Value> = None;
-        for (i, key) in path.iter().enumerate() {
-            if i == 0 {
-                current = self.extra.get(*key);
-            } else {
-                current = current
-                    .and_then(|v| v.as_object())
-                    .and_then(|o| o.get(*key));
-            }
-        }
-        if current.is_some_and(|existing| *existing == val) {
+        // Merge the declared fields over the existing subtree so unknown
+        // sub-keys survive, then skip the write when the merged result is
+        // identical to what already sits at this path. This avoids redundant
+        // map mutations and prevents unnecessary dirty-flag flips.
+        let merged = merge_section(read_at_path(&self.extra, path), &val);
+        if read_at_path(&self.extra, path).is_some_and(|existing| existing == &merged) {
             return Ok(());
         }
-        set_nested(&mut self.extra, path, val)?;
+        set_nested(&mut self.extra, path, merged)?;
         Ok(())
     }
 
@@ -343,16 +340,59 @@ pub(crate) fn section_to_value<T: serde::Serialize>(
     })
 }
 
+/// Reads the value at a nested `path` under `extra`, descending one object
+/// level per key. Returns `None` when any key is absent or a non-object is
+/// encountered before the final key.
+pub(crate) fn read_at_path<'a>(
+    extra: &'a BTreeMap<String, serde_json::Value>,
+    path: &[&str],
+) -> Option<&'a serde_json::Value> {
+    let mut current: Option<&serde_json::Value> = None;
+    for (i, key) in path.iter().enumerate() {
+        if i == 0 {
+            current = extra.get(*key);
+        } else {
+            current = current
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get(*key));
+        }
+    }
+    current
+}
+
+/// Merges a serialised section (`incoming`) over the existing subtree at the
+/// section path (#327).
+///
+/// When both sides are JSON objects, the section's declared fields are layered
+/// on top of the existing object so unknown sibling sub-keys survive; the
+/// section struct only ever serialises its declared fields, so a shallow merge
+/// is exactly "write declared fields, keep everything else". In every other
+/// case (no existing value, or a non-object on either side) the incoming value
+/// replaces the subtree outright.
+pub(crate) fn merge_section(
+    existing: Option<&serde_json::Value>,
+    incoming: &serde_json::Value,
+) -> serde_json::Value {
+    match (existing, incoming) {
+        (Some(serde_json::Value::Object(base)), serde_json::Value::Object(overlay)) => {
+            let mut merged = base.clone();
+            for (key, value) in overlay {
+                merged.insert(key.clone(), value.clone());
+            }
+            serde_json::Value::Object(merged)
+        }
+        _ => incoming.clone(),
+    }
+}
+
 pub(crate) fn set_nested(
     extra: &mut BTreeMap<String, serde_json::Value>,
     path: &[&str],
     value: serde_json::Value,
 ) -> Result<(), EneConfigError> {
-    // Descend through the BTreeMap, mutating the path
-    // in place. The previous form rebuilt the entire
-    // `extra` map into a JSON object (O(n) on every
-    // write) and silently dropped the write if `cur`
-    // ever landed on a non-object leaf.
+    // Descend through the map, mutating the path in place. The previous form
+    // rebuilt the entire `extra` map into a JSON object (O(n) on every write)
+    // and silently dropped the write if `cur` ever landed on a non-object leaf.
     let Some((head, rest)) = path.split_first() else {
         return Err(EneConfigError::GenericConfigError(
             "Empty path for nested config".to_string(),
@@ -1102,6 +1142,67 @@ mod tests {
             .expect("set_path");
         let value = config.get_path("ai.tasks.chat.model").expect("get_path");
         assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
+    }
+
+    /// A test-only settings section used to exercise `set_section` without
+    /// pulling in another workspace crate (whose `define_config!` impl would
+    /// be for a different copy of the `HasConfigKey` trait).
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    struct TestSection {
+        enabled: bool,
+    }
+
+    impl HasConfigKey for TestSection {
+        const KEY: &'static str = "plugins";
+        const TARGET: ConfigTarget = ConfigTarget::Settings;
+        fn path() -> &'static [&'static str] {
+            &["plugins"]
+        }
+    }
+
+    /// Regression for #327: writing a section must merge its declared fields
+    /// into the existing subtree rather than replacing it, so unknown sibling
+    /// sub-keys (here `plugins.rag`, which `PluginConfig` does not declare)
+    /// survive the write.
+    #[test]
+    fn set_section_preserves_unknown_subkeys() {
+        let mut config = EneConfig::default();
+        config
+            .set_path("plugins.rag.enabled", "true")
+            .expect("seed unknown sibling sub-key");
+        config
+            .set_path("plugins.enabled", "false")
+            .expect("seed declared field");
+
+        config
+            .set_section(&TestSection { enabled: true })
+            .expect("set_section succeeds");
+
+        assert_eq!(
+            config.get_path("plugins.enabled"),
+            Some(serde_json::Value::Bool(true)),
+            "declared field must be updated"
+        );
+        assert_eq!(
+            config.get_path("plugins.rag.enabled"),
+            Some(serde_json::Value::Bool(true)),
+            "unknown sibling sub-key must survive the section write"
+        );
+    }
+
+    /// Regression for #327: re-writing an identical section must be a no-op so
+    /// the "skip if unchanged" guard still holds after the merge change.
+    #[test]
+    fn set_section_identical_write_is_noop() {
+        let mut config = EneConfig::default();
+        config
+            .set_section(&TestSection { enabled: true })
+            .expect("first write");
+        let before = config.extra.clone();
+        config
+            .set_section(&TestSection { enabled: true })
+            .expect("second write");
+        assert_eq!(before, config.extra, "identical write must not mutate");
     }
 
     /// `atomic_write` must leave the target with exactly the requested
