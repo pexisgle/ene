@@ -26,7 +26,6 @@ ene-plugin-proto = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls", "json", "stream"] }
-ctor = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

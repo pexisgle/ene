@@ -84,7 +84,7 @@ impl ToolName {
     /// Construct a new `ToolName` from a string, returning an error on invalid input.
     ///
     /// Use this for all input that crosses a trust boundary:
-    /// - IPC tool names (`HostRegistry::call_tool`)
+    /// - IPC tool names (the plugin dispatch loop's tool-call path)
     /// - MCP server tool names
     /// - Names loaded from the config file or env vars
     /// - Names loaded from the DB (`tool_*` rows)

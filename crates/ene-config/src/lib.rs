@@ -67,6 +67,12 @@ pub use store::ConfigStore;
 
 // Re-export serde / schemars / ctor for sub-crates
 pub use ctor::ctor;
+// The `ctor` proc-macro emits `<crate_path>::__support::ctor_parse!`, so the
+// `define_config!`/`define_tool_config!` macros can redirect their generated
+// constructor at this crate (via `crate_path = $crate`) instead of leaking a
+// hard `::ctor` dependency into every downstream caller.
+#[doc(hidden)]
+pub use ctor::__support;
 pub use schemars;
 pub use serde;
 
@@ -132,7 +138,7 @@ macro_rules! define_config {
             ///
             /// Called by `ctor` before `main`. Only safe registration code
             /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
-            #[ctor::ctor(unsafe)]
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
                 $crate::register_config_schema::<$name>($crate::ConfigTarget::Settings, None);
             }
@@ -184,7 +190,7 @@ macro_rules! define_config {
             ///
             /// Called by `ctor` before `main`. Only safe registration code
             /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
-            #[ctor::ctor(unsafe)]
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
                 $crate::register_config_schema::<$name>($crate::ConfigTarget::Character, None);
             }
@@ -242,7 +248,7 @@ macro_rules! define_config {
             ///
             /// Called by `ctor` before `main`. Only safe registration code
             /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
-            #[ctor::ctor(unsafe)]
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
                 $crate::register_config_schema::<$name>(
                     <$parent as $crate::HasConfigKey>::TARGET,
@@ -292,7 +298,7 @@ macro_rules! define_tool_config {
             ///
             /// Called by `ctor` before `main`. Only safe registration code
             /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
-            #[ctor::ctor(unsafe)]
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
                 $crate::register_tool_schema::<$name>($tool_name);
             }

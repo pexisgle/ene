@@ -164,15 +164,15 @@ pub enum ToolError {
     },
     /// The tool name supplied by the caller was invalid (empty,
     /// contained illegal characters, or had leading/trailing
-    /// dots). Returned by `HostRegistry::call_tool` and other
-    /// IPC entry points instead of panicking on malformed input.
+    /// dots). Returned by tool-call entry points (e.g. the plugin
+    /// dispatch loop) instead of panicking on malformed input.
     InvalidName {
         /// Why the name was rejected.
         reason: String,
     },
     /// Two providers exposed the same public tool name.
     ///
-    /// Name collision is a hard error at `HostRegistry::add_provider`
+    /// Name collision is a hard error at provider registration
     /// time — first-wins silent overwrite is not allowed (#135).
     DuplicateName {
         /// Colliding tool name.

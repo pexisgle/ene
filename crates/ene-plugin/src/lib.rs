@@ -45,17 +45,12 @@
 
 /// Compatibility adapter for wrapping legacy [`ToolProvider`] as [`ToolPlugin`].
 pub mod compat;
-/// Composite registry that aggregates multiple `ToolProvider` instances.
-pub mod host_registry;
 /// Plugin trait and streaming chunk types.
 pub mod plugin;
 /// Plugin IPC server and dispatch loop.
 pub mod server;
-/// Server helper for running a tool provider over IPC.
-pub mod tool_server;
 
 pub use compat::ToolProviderPlugin;
-pub use host_registry::HostRegistry;
 pub use plugin::{
     EmbedPlugin, LlmPlugin, PluginStream, PluginStreamChunk, SttPlugin, ToolPlugin,
     ToolPluginCapabilities, TtsPlugin,

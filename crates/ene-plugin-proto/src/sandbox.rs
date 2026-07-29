@@ -1,3 +1,6 @@
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 fn default_blocked_commands() -> Vec<String> {
     vec![
         r"rm\s+-rf\s+/".to_string(),
@@ -28,39 +31,55 @@ const fn default_max_shell_output_lines() -> usize {
     2000
 }
 
-ene_config::define_tool_config!(
-    "fs",
-    #[derive(PartialEq, Eq)]
-    /// Serializable sandbox configuration data (POD).
-    pub struct SandboxConfigData {
-        /// Whether the sandbox is enabled.
-        pub enabled: bool = true,
-        /// Directories allowed for read access.
-        pub allowed_directories: Vec<String> = vec![".".to_string()],
-        /// Directories allowed for write access.
-        pub writable_directories: Vec<String> = vec![".".to_string()],
-        /// Regex patterns for blocked shell commands.
-        pub blocked_commands: Vec<String> = default_blocked_commands(),
-        /// Maximum bytes per read operation.
-        pub max_read_bytes: usize = default_max_read_bytes(),
-        /// Maximum bytes per write operation.
-        pub max_write_bytes: usize = default_max_write_bytes(),
-        /// Shell command timeout in milliseconds.
-        pub shell_timeout_ms: u64 = default_shell_timeout_ms(),
-        /// Maximum bytes in shell output.
-        pub max_shell_output_bytes: usize = default_max_shell_output_bytes(),
-        /// Maximum lines in shell output.
-        pub max_shell_output_lines: usize = default_max_shell_output_lines(),
-        /// Path to the per-plugin DB socket. Plugin binaries connect to this
-        /// Unix socket to access the core DB server for typed CRUD operations.
-        pub db_socket: Option<String> = None,
-        /// Pre-shared auth token for the per-plugin DB IPC server. The
-        /// plugin binary must present this token in a [`ene_plugin_db::DbRequest::Handshake`]
-        /// before any other request. `None` disables DB access for
-        /// this plugin.
-        pub db_auth_token: Option<String> = None,
+/// Serializable sandbox configuration data (POD).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", default)]
+pub struct SandboxConfigData {
+    /// Whether the sandbox is enabled.
+    pub enabled: bool,
+    /// Directories allowed for read access.
+    pub allowed_directories: Vec<String>,
+    /// Directories allowed for write access.
+    pub writable_directories: Vec<String>,
+    /// Regex patterns for blocked shell commands.
+    pub blocked_commands: Vec<String>,
+    /// Maximum bytes per read operation.
+    pub max_read_bytes: usize,
+    /// Maximum bytes per write operation.
+    pub max_write_bytes: usize,
+    /// Shell command timeout in milliseconds.
+    pub shell_timeout_ms: u64,
+    /// Maximum bytes in shell output.
+    pub max_shell_output_bytes: usize,
+    /// Maximum lines in shell output.
+    pub max_shell_output_lines: usize,
+    /// Path to the per-plugin DB socket. Plugin binaries connect to this
+    /// Unix socket to access the core DB server for typed CRUD operations.
+    pub db_socket: Option<String>,
+    /// Pre-shared auth token for the per-plugin DB IPC server. The
+    /// plugin binary must present this token in a [`ene_plugin_db::DbRequest::Handshake`]
+    /// before any other request. `None` disables DB access for
+    /// this plugin.
+    pub db_auth_token: Option<String>,
+}
+
+impl Default for SandboxConfigData {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_directories: vec![".".to_string()],
+            writable_directories: vec![".".to_string()],
+            blocked_commands: default_blocked_commands(),
+            max_read_bytes: default_max_read_bytes(),
+            max_write_bytes: default_max_write_bytes(),
+            shell_timeout_ms: default_shell_timeout_ms(),
+            max_shell_output_bytes: default_max_shell_output_bytes(),
+            max_shell_output_lines: default_max_shell_output_lines(),
+            db_socket: None,
+            db_auth_token: None,
+        }
     }
-);
+}
 
 impl SandboxConfigData {
     /// Enforce safe floors for tool sandbox settings.

@@ -30,7 +30,6 @@ ene-core = { workspace = true }
 ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
 serde = { workspace = true }
-ctor = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

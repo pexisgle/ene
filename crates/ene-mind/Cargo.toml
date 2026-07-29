@@ -27,7 +27,6 @@ ene-ai = { workspace = true }
 chrono = { workspace = true }
 
 schemars = { workspace = true }
-ctor = { workspace = true }
 regex = { workspace = true }
 unicode-normalization = { workspace = true }
 blake3 = { workspace = true }

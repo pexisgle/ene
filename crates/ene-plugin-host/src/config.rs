@@ -70,6 +70,21 @@ impl Default for PluginEntry {
     }
 }
 
+// Re-register the `fs` sandbox tool schema that was previously emitted by
+// `define_tool_config!` inside `ene-plugin-proto`. The proto crate is wire-ABI
+// only and no longer depends on `ene-config`, so the host crate (which links
+// both) takes over the registration.
+const _: () = {
+    /// # Safety
+    ///
+    /// Called by `ctor` before `main`. Only safe registration code
+    /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
+    #[ene_config::ctor(unsafe, crate_path = ene_config)]
+    fn register_fs_sandbox_schema() {
+        ene_config::register_tool_schema::<ene_plugin_proto::SandboxConfigData>("fs");
+    }
+};
+
 ene_config::define_config!(
     settings,
     "plugins",
@@ -97,3 +112,28 @@ ene_config::define_config!(
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig> = Vec::new(),
     }
 );
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "unit tests use Result::expect for concise assertions"
+)]
+mod tests {
+    /// Smoke-test that the `#[ctor]` registration of the `fs` sandbox schema
+    /// does not break schema generation. The full injection into
+    /// `ToolConfig.properties.list.properties.fs` requires the complete app
+    /// link (verified by `ene-runtime` integration tests); here we only assert
+    /// that `generate_schema_json` succeeds with the ctor-registered entry
+    /// present in the registry.
+    #[test]
+    fn fs_sandbox_schema_registration_does_not_break_generation() {
+        let schema_json =
+            ene_config::generate_schema_json().expect("schema generation should succeed");
+        let value: serde_json::Value =
+            serde_json::from_str(&schema_json).expect("schema output must be valid JSON");
+        assert!(
+            value.get("properties").is_some(),
+            "settings schema must expose top-level properties"
+        );
+    }
+}
