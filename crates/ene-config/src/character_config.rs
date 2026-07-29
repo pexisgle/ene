@@ -1,6 +1,6 @@
 use crate::error::EneConfigError;
 use crate::{ConfigTarget, HasConfigKey};
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
 
 /// Motion body layer classification.
 #[derive(
@@ -85,9 +85,13 @@ pub struct CharacterConfig {
     pub default_expression: String,
 
     /// Catch-all for extra configurations.
+    ///
+    /// An [`IndexMap`] so the user's section order is preserved across a save
+    /// (#331); its order-insensitive `PartialEq` keeps the dirty-tracking
+    /// equality guard behaving as before.
     #[serde(flatten)]
     #[schemars(skip)]
-    pub extra: BTreeMap<String, serde_json::Value>,
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl Default for CharacterConfig {
@@ -98,7 +102,7 @@ impl Default for CharacterConfig {
             look_at_strength: 0.6,
             default_motion: String::new(),
             default_expression: "neutral".to_string(),
-            extra: BTreeMap::new(),
+            extra: IndexMap::new(),
         }
     }
 }
@@ -106,7 +110,7 @@ impl Default for CharacterConfig {
 impl CharacterConfig {
     /// Deserialise a sub-section from the `extra` map using the type's associated path.
     ///
-    /// Walks the `BTreeMap` directly, descending into nested objects one level at a time,
+    /// Walks the map directly, descending into nested objects one level at a time,
     /// instead of rebuilding the entire `extra` map into a JSON `Value` on every call.
     pub fn get_section<T>(&self) -> Result<T, EneConfigError>
     where

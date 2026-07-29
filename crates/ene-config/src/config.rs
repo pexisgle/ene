@@ -1,8 +1,16 @@
 use crate::character_card::UserPersona;
 use crate::error::EneConfigError;
+use indexmap::IndexMap;
 use schemars::JsonSchema;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Relative `$schema` pointer auto-filled into `settings.json` on save (#331).
+///
+/// Matches the on-disk convention and the `schema/settings.schema.json` layout
+/// produced by [`write_schemas`], so editors resolve completions without the
+/// user hand-writing the key.
+pub const DEFAULT_SETTINGS_SCHEMA: &str = "./schema/settings.schema.json";
 
 /// Global singleton holding the active [`EneConfig`].
 ///
@@ -147,6 +155,13 @@ fn runtime_rules_is_default(rules: &str) -> bool {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct EneConfig {
+    /// JSON Schema pointer for editor tooling.
+    ///
+    /// Declared first so it always serialises at the top of `settings.json`
+    /// (ahead of `version`), and skipped while empty so in-memory defaults
+    /// carry no bogus path. [`save_full_config`] auto-fills it on save (#331).
+    #[serde(rename = "$schema", default, skip_serializing_if = "String::is_empty")]
+    pub schema: String,
     /// Schema version number.
     pub version: u32,
     /// Character card name or path.
@@ -165,18 +180,24 @@ pub struct EneConfig {
     #[serde(flatten)]
     #[schemars(skip)]
     /// Catch-all for provider, tool, and other sub-configurations.
-    pub extra: BTreeMap<String, serde_json::Value>,
+    ///
+    /// An [`IndexMap`] so the user's hand-arranged section order is preserved
+    /// across a save and newly added sections append at the end (#331). Its
+    /// `PartialEq` is order-insensitive, so the "skip if unchanged" guards keep
+    /// their previous behaviour.
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl Default for EneConfig {
     fn default() -> Self {
         Self {
+            schema: String::new(),
             version: 1,
             character: "Alicia".to_string(),
             user_name: "User".to_string(),
             runtime_rules: DEFAULT_RUNTIME_RULES.to_string(),
             user_persona: None,
-            extra: BTreeMap::new(),
+            extra: IndexMap::new(),
         }
     }
 }
@@ -201,12 +222,11 @@ impl EneConfig {
                 T::KEY
             )));
         }
-        // Walk the path directly through the
-        // BTreeMap, descending into nested objects one
-        // level at a time. The previous form rebuilt
-        // the entire `extra` map into a JSON object
-        // on every call (O(n) per read) and required
-        // cloning every value.
+        // Walk the path directly through the map,
+        // descending into nested objects one level at a
+        // time. The previous form rebuilt the entire
+        // `extra` map into a JSON object on every call
+        // (O(n) per read) and required cloning every value.
         let mut current: Option<&serde_json::Value> = None;
         for (i, key) in T::path().iter().enumerate() {
             if i == 0 {
@@ -295,7 +315,7 @@ impl EneConfig {
 
     /// Read a value at a dotted JSON path under `extra` (#241).
     ///
-    /// Walks the `BTreeMap` directly instead of serialising the entire `extra`
+    /// Walks the map directly instead of serialising the entire `extra`
     /// map into a JSON `Value` tree.
     pub fn get_path(&self, dotted_path: &str) -> Option<serde_json::Value> {
         let keys: Vec<&str> = dotted_path.split('.').filter(|s| !s.is_empty()).collect();
@@ -344,7 +364,7 @@ pub(crate) fn section_to_value<T: serde::Serialize>(
 /// level per key. Returns `None` when any key is absent or a non-object is
 /// encountered before the final key.
 pub(crate) fn read_at_path<'a>(
-    extra: &'a BTreeMap<String, serde_json::Value>,
+    extra: &'a IndexMap<String, serde_json::Value>,
     path: &[&str],
 ) -> Option<&'a serde_json::Value> {
     let mut current: Option<&serde_json::Value> = None;
@@ -386,7 +406,7 @@ pub(crate) fn merge_section(
 }
 
 pub(crate) fn set_nested(
-    extra: &mut BTreeMap<String, serde_json::Value>,
+    extra: &mut IndexMap<String, serde_json::Value>,
     path: &[&str],
     value: serde_json::Value,
 ) -> Result<(), EneConfigError> {
@@ -937,15 +957,33 @@ fn fsync_dir(dir: &Path) {
     }
 }
 
+/// Serialises `config` for persistence, auto-filling `$schema` when it is
+/// empty (#331).
+///
+/// Operates on a clone so the caller's in-memory config — and the global
+/// snapshot / dirty tracking — is left untouched; only the on-disk file is
+/// guaranteed to carry the schema pointer. Users therefore never need to
+/// hand-write `$schema`.
+fn serialize_for_save(config: &EneConfig) -> Result<String, serde_json::Error> {
+    let mut to_save = config.clone();
+    if to_save.schema.is_empty() {
+        to_save.schema = DEFAULT_SETTINGS_SCHEMA.to_string();
+    }
+    serde_json::to_string_pretty(&to_save)
+}
+
 /// Saves the config file in a type-safe manner, using an atomic
 /// temp-file-then-rename strategy to avoid partial writes (#325).
+///
+/// `$schema` is auto-filled on the serialised copy when empty so the persisted
+/// file always leads with the schema pointer (#331).
 pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
     }
-    let json = serde_json::to_string_pretty(config)?;
+    let json = serialize_for_save(config)?;
     atomic_write(&config_path, &json)?;
     Ok(())
 }
@@ -1109,7 +1147,7 @@ mod tests {
     /// Now the write returns a typed error.
     #[test]
     fn set_nested_through_non_object_leaf_errors() {
-        let mut extra: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let mut extra: IndexMap<String, serde_json::Value> = IndexMap::new();
         // Pre-populate a leaf where the path expects an
         // object.
         extra.insert(
@@ -1203,6 +1241,99 @@ mod tests {
             .set_section(&TestSection { enabled: true })
             .expect("second write");
         assert_eq!(before, config.extra, "identical write must not mutate");
+    }
+
+    /// Regression for #331: `$schema` is the first declared field, so it must
+    /// serialise ahead of `version` (which is second).
+    #[test]
+    fn schema_is_first_and_version_second() {
+        let mut config = EneConfig::default();
+        config.schema = DEFAULT_SETTINGS_SCHEMA.to_string();
+        let value = serde_json::to_value(&config).expect("config serialises");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("config is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys.first().copied(),
+            Some("$schema"),
+            "$schema must be the first key, got {keys:?}"
+        );
+        assert_eq!(
+            keys.get(1).copied(),
+            Some("version"),
+            "version must be the second key, got {keys:?}"
+        );
+    }
+
+    /// Regression for #331: an empty `$schema` is auto-filled on save so users
+    /// never hand-write it, and the caller's config is left untouched.
+    #[test]
+    fn save_autofills_schema_without_mutating_caller() {
+        let config = EneConfig::default();
+        assert!(config.schema.is_empty(), "default schema starts empty");
+
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            parsed.get("$schema").and_then(serde_json::Value::as_str),
+            Some(DEFAULT_SETTINGS_SCHEMA),
+            "saved JSON must carry the auto-filled $schema"
+        );
+        assert!(
+            config.schema.is_empty(),
+            "the caller's config must not be mutated by save"
+        );
+    }
+
+    /// Regression for #331: a non-empty `$schema` provided by the user is
+    /// preserved verbatim on save (auto-fill only applies when empty).
+    #[test]
+    fn save_preserves_user_schema() {
+        let mut config = EneConfig::default();
+        config.schema = "./custom.schema.json".to_string();
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            parsed.get("$schema").and_then(serde_json::Value::as_str),
+            Some("./custom.schema.json")
+        );
+    }
+
+    /// Regression for #331: the user's hand-arranged top-level section order is
+    /// preserved across a save (IndexMap, not alphabetical BTreeMap).
+    #[test]
+    fn section_order_preserved_on_save() {
+        let mut config = EneConfig::default();
+        // Insert in a deliberately non-alphabetical order.
+        for section in ["store", "ai", "mind", "desktop"] {
+            config.extra.insert(
+                section.to_string(),
+                serde_json::Value::Object(serde_json::Map::new()),
+            );
+        }
+
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let keys: Vec<&str> = parsed
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // Declared fields lead; then the flattened sections in insertion order.
+        let section_keys: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|k| matches!(*k, "store" | "ai" | "mind" | "desktop"))
+            .collect();
+        assert_eq!(
+            section_keys,
+            vec!["store", "ai", "mind", "desktop"],
+            "section order must survive the save, got {section_keys:?}"
+        );
     }
 
     /// `atomic_write` must leave the target with exactly the requested

@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -104,8 +105,12 @@ pub struct Extensions {
     #[serde(default)]
     pub ene: Option<EneExtension>,
     /// Catch-all for other extension keys.
+    ///
+    /// An [`IndexMap`] (not `HashMap`) so iteration order is deterministic:
+    /// `HashMap` reseeds per process, which made saving the same card twice
+    /// produce different bytes (#331).
     #[serde(flatten)]
-    pub extra: HashMap<String, serde_json::Value>,
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl schemars::JsonSchema for Extensions {
@@ -660,5 +665,47 @@ mod tests {
         let out = persona().render_lines("- ");
         assert!(out.contains("- Name: Alice"));
         assert!(out.contains("- Notes: Prefers concise answers"));
+    }
+
+    /// Regression for #331: `Extensions.extra` is an `IndexMap`, so serialising
+    /// the same card twice yields byte-identical output. With the previous
+    /// `HashMap`, per-process random seeding made the two saves differ.
+    #[test]
+    fn card_save_is_deterministic() {
+        let mut card = CharacterCardV3::default();
+        card.data.extensions.extra.insert(
+            "zeta".to_string(),
+            serde_json::Value::String("last".to_string()),
+        );
+        card.data.extensions.extra.insert(
+            "alpha".to_string(),
+            serde_json::Value::String("first".to_string()),
+        );
+        card.data
+            .extensions
+            .extra
+            .insert("mid".to_string(), serde_json::json!({ "nested": true }));
+
+        let first = serde_json::to_string_pretty(&card).expect("serialise card");
+        let second = serde_json::to_string_pretty(&card).expect("serialise card again");
+        assert_eq!(
+            first, second,
+            "saving the same card twice must produce identical bytes"
+        );
+
+        // The insertion order (not alphabetical) is what survives.
+        let value: serde_json::Value = serde_json::from_str(&first).expect("valid JSON");
+        let ext = value
+            .pointer("/data/extensions")
+            .and_then(serde_json::Value::as_object)
+            .expect("extensions object");
+        let keys: Vec<&str> = ext.keys().map(String::as_str).collect();
+        // `ene` is a declared field (serialised first), then flattened extras
+        // in insertion order.
+        assert_eq!(
+            keys,
+            vec!["ene", "zeta", "alpha", "mid"],
+            "extension key order must be preserved, got {keys:?}"
+        );
     }
 }
