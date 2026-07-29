@@ -831,7 +831,7 @@ impl CharacterSettings {
 
     pub fn load_from_file(&mut self) {
         let path = ene_config::config_file_path();
-        let full = match ene_config::load_config_from(&self.assets_dir, &path) {
+        let full = match ene_config::load_config_from(&path) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("[Settings] Failed to load config: {e}, falling back to defaults");

@@ -46,10 +46,9 @@ pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
 }
 
 fn load_config_from_path(path: &Path) -> Result<ene_config::EneConfig, EneRuntimeError> {
-    let assets_dir = path.parent().filter(|p| !p.as_os_str().is_empty());
-    let config = match assets_dir {
-        Some(dir) => ene_config::load_config_from(dir, path)?,
-        None => ene_config::load_config_from(Path::new("."), path)?,
-    };
+    // Schemas are written to the global assets dir in `init` above; the
+    // `--config-path` override only affects where `settings.json` is read
+    // from (#325), so no per-path assets directory is threaded through here.
+    let config = ene_config::load_config_from(path)?;
     Ok(config)
 }

@@ -253,3 +253,64 @@ impl ConfigStore {
         self.global_dirty.store(true, Ordering::Release);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for #325: pushing an unchanged [`CharacterConfig`] (the
+    /// desktop does this every frame) must not flip the dirty flag, or the
+    /// store would rewrite `character_settings.json` on every flush cycle.
+    #[test]
+    fn set_character_config_unchanged_value_does_not_mark_dirty() {
+        let store = ConfigStore::from_config(EneConfig::default());
+        assert!(!store.is_dirty(), "fresh store starts clean");
+
+        let config = CharacterConfig::default();
+        store.set_character_config(config.clone());
+        assert!(
+            !store.is_dirty(),
+            "setting the same value must not mark the store dirty"
+        );
+    }
+
+    /// A genuinely different [`CharacterConfig`] must still mark dirty so
+    /// the change is persisted on the next flush.
+    #[test]
+    fn set_character_config_changed_value_marks_dirty() {
+        let store = ConfigStore::from_config(EneConfig::default());
+
+        let config = CharacterConfig {
+            model_scale: 2.5,
+            ..CharacterConfig::default()
+        };
+        store.set_character_config(config.clone());
+
+        assert!(
+            store.is_dirty(),
+            "a changed value must mark the store dirty"
+        );
+        assert_eq!(store.character_config(), config);
+    }
+
+    /// The equality guard must consider the flattened `extra` map too, so a
+    /// change that only touches a nested section is still persisted.
+    #[test]
+    fn set_character_config_extra_change_marks_dirty() {
+        let store = ConfigStore::from_config(EneConfig::default());
+
+        let config = CharacterConfig {
+            extra: std::collections::BTreeMap::from([(
+                "motion".to_string(),
+                serde_json::Value::String("wave".to_string()),
+            )]),
+            ..CharacterConfig::default()
+        };
+        store.set_character_config(config);
+
+        assert!(
+            store.is_dirty(),
+            "an `extra`-only change must mark the store dirty"
+        );
+    }
+}
