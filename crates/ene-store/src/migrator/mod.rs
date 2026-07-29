@@ -1,5 +1,8 @@
 #![expect(missing_docs, reason = "sea-orm migration modules are schema-internal")]
 
+mod embeddings_cleanup;
+
+use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
 use sea_orm_migration::prelude::*;
 
 pub struct Migrator;
@@ -11,6 +14,7 @@ impl MigratorTrait for Migrator {
             Box::new(Migration),
             Box::new(PendingMemoryWritesMigration),
             Box::new(SourceRefIndexMigration),
+            Box::new(EmbeddingsCleanupIndexMigration),
         ]
     }
 }
