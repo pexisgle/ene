@@ -28,7 +28,6 @@ regex = { workspace = true }
 tracing = { workspace = true }
 ene-config = { workspace = true }
 ene-core = { workspace = true }
-ctor = { workspace = true }
 ene-store = { workspace = true }
 blake3 = { workspace = true }
 uuid = { workspace = true }

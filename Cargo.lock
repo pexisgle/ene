@@ -2436,7 +2436,6 @@ version = "0.1.0"
 dependencies = [
  "async-openai",
  "async-trait",
- "ctor",
  "ene-config",
  "ene-infer",
  "ene-plugin-proto",
@@ -2572,7 +2571,6 @@ dependencies = [
  "bytemuck",
  "cpal",
  "crossbeam-channel",
- "ctor",
  "device_query",
  "egui",
  "egui-wgpu",
@@ -2635,7 +2633,6 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
- "ctor",
  "ene-ai",
  "ene-config",
  "ene-core",
@@ -2773,7 +2770,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
- "ctor",
  "dashmap",
  "ene-ai",
  "ene-config",
@@ -2800,8 +2796,6 @@ name = "ene-plugin-proto"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "ctor",
- "ene-config",
  "schemars",
  "serde",
  "serde_json",
@@ -2858,7 +2852,6 @@ dependencies = [
  "blake3",
  "cargo-husky",
  "chrono",
- "ctor",
  "ene-ai",
  "ene-ai-local",
  "ene-config",
@@ -2891,7 +2884,6 @@ dependencies = [
  "async-trait",
  "blake3",
  "chrono",
- "ctor",
  "ene-config",
  "ene-core",
  "ene-plugin-db",

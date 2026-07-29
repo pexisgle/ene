@@ -9,8 +9,6 @@ publish.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-ctor = { workspace = true }
-ene-config = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
