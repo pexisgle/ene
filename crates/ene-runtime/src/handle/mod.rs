@@ -125,6 +125,25 @@ impl TurnGate {
 /// `Arc::strong_count(&cmd_tx) == 1`, which was unreachable because
 /// `EneHandle` internally holds three independent `Arc` clones of `cmd_tx`
 /// (self, diagnostics, vision).
+///
+/// ## Drop shutdown is best-effort
+///
+/// `Drop` is synchronous, so it can only *initiate* shutdown, not await it:
+///
+/// - The actor may still be running after `Drop` returns — the guard sends
+///   [`EneCommand::Shutdown`] but the actor drains asynchronously. Background
+///   tasks spawned by the actor (classifiers, memory writers, deferred tool
+///   tasks) become detached tokio tasks.
+/// - The plugin-host shutdown is spawned onto the current runtime via
+///   [`tokio::runtime::Handle::try_current`]. If the last handle drops during
+///   process teardown — no live runtime, or one that is already shutting
+///   down — the spawned task may never run to completion. The plugin host's
+///   `SupervisedPlugin::drop` killing and reaping the child processes is the
+///   synchronous backstop for that case.
+///
+/// Callers that need a clean shutdown guarantee should call
+/// [`EneHandle::shutdown`] with an explicit timeout while the runtime is
+/// still alive, before dropping the handle.
 struct HandleShutdownGuard {
     /// Bare sender clone for the shutdown command. The guard holds its own
     /// clone so it can send even after all `EneHandle` fields are dropped.
@@ -242,6 +261,10 @@ pub struct EneHandle {
     /// last field so all command-sending fields (`cmd_tx`, `diagnostics`,
     /// `vision`) are dropped before it; the guard holds its own sender clone,
     /// so field order is not critical for correctness but makes intent clear.
+    ///
+    /// Drop-initiated shutdown is best-effort (see [`HandleShutdownGuard`]):
+    /// callers needing a hard guarantee should call [`EneHandle::shutdown`]
+    /// before dropping the handle.
     shutdown_guard: Arc<HandleShutdownGuard>,
 }
 
