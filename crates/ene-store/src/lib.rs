@@ -107,10 +107,6 @@ pub use backup::{OpenOptions, list_backups, restore_database};
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Store feature toggle configuration.
 pub use config::StoreConfig;
-/// `MemoryPort` trait and its error type, re-exported from `ene-core` for convenience.
-pub use ene_core::{MemoryPort, MemoryPortError};
-/// Pending deferred memory-write queue types (#240), re-exported from `ene-core` (#309).
-pub use ene_core::{PendingMemoryWrite, PendingMemoryWriteStatus};
 /// Memory error type.
 pub use error::EneMemoryError;
 /// Session export format types (#176).
