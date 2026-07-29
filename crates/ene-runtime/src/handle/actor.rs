@@ -54,9 +54,10 @@ use ene_plugin_host::{CompositeToolRegistry, PluginHealthEvent, PluginHostError,
 #[cfg(any(unix, windows))]
 use ene_store::db_server::DbIpcServer;
 use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
+use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -67,6 +68,10 @@ static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 
 pub(super) struct TurnActor {
     cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
+    /// Clone of the command sender so background tasks spawned by the actor
+    /// can send internal commands (e.g. [`EneCommand::PluginHostReconfigured`])
+    /// back through the mailbox (#397).
+    cmd_tx: mpsc::UnboundedSender<EneCommand>,
     event_tx: broadcast::Sender<EneEvent>,
     /// Lifecycle bus sender (#272): `StatusChanged` / `PendingCandidateAvailable`
     /// / `ToolBackgroundCompleted` — kept off the chat `event_tx` broadcast.
@@ -115,6 +120,10 @@ pub(super) struct TurnActor {
     /// its owning tool until the task reaches a terminal state, then emits
     /// [`LifecycleEvent::ToolBackgroundCompleted`]. Reaped so panics are not lost.
     deferred_tool_tasks: tokio::task::JoinSet<()>,
+    /// Heavy command-handler work spawned to avoid head-of-line blocking
+    /// (#397): GGUF model loads, plugin host restarts. Reaped alongside the
+    /// other `JoinSet`s so panics surface as diagnostics.
+    bg_command_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx:
         mpsc::UnboundedReceiver<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
@@ -138,7 +147,40 @@ pub(super) struct TurnActor {
     /// Join handle for the in-flight decision task (aborted on user turn / shutdown).
     proactive_decision_handle: Option<tokio::task::JoinHandle<()>>,
     /// Local / cloud decision provider handles (lazy).
-    proactive_llm: Option<ene_ai_local::ProactiveLlmHandles>,
+    ///
+    /// Shared via `Arc` so background init tasks can populate it without
+    /// blocking the actor loop (#397). The `OnceCell` guarantees at-most-once
+    /// initialization; `proactive_llm_init_spawned` prevents duplicate
+    /// background spawns.
+    proactive_llm: Arc<OnceCell<ene_ai_local::ProactiveLlmHandles>>,
+    /// Guards against spawning multiple background init tasks for
+    /// [`Self::proactive_llm`] (#397). Set to `true` when a background load
+    /// is spawned; reset to `false` if that load *fails* so a later call can
+    /// retry — a single transient failure must not permanently disable
+    /// proactive features for the process lifetime. On success the `OnceCell`
+    /// is populated, so the `get().is_some()` fast-path short-circuits before
+    /// this flag is consulted again. Shared via `Arc` so the background init
+    /// task can reset it on failure.
+    proactive_llm_init_spawned: Arc<AtomicBool>,
+    /// Guards against invoking [`ene_ai_local::ProactiveLlmHandles::shutdown`]
+    /// more than once (#397). Both the `EneCommand::Shutdown` arm and the
+    /// post-loop cleanup in [`Self::run`] run on every normal teardown;
+    /// previously `Option::take` made the second of those a no-op, but
+    /// `Arc<OnceCell>` cannot be taken through a shared reference. This flag
+    /// restores the at-most-once guarantee so a future `shutdown()` with real
+    /// side effects (unloading GGUF weights, releasing GPU memory) cannot be
+    /// double-invoked from the two unsynchronized call sites.
+    proactive_llm_shutdown: AtomicBool,
+    /// Guards against spawning duplicate `PrepareVisionSummary` slow-path
+    /// pollers (#397). The screen-capture-driven proactive vision flow can
+    /// fire `PrepareVisionSummary` several times during the multi-second GGUF
+    /// loading window; without deduplication each call would spawn a fresh
+    /// up-to-five-minute poller into `bg_command_tasks` (default cap 4),
+    /// exhausting the cap and starving unrelated background work (e.g. a
+    /// concurrent `PluginHostReconfigure`). Set while a poller is in flight;
+    /// the poller clears it just before exiting. Shared via `Arc` so the
+    /// background poller can clear it.
+    vision_slow_path_active: Arc<AtomicBool>,
     /// Origin of the active stream turn (for cancel Terminal).
     active_origin: crate::types::TurnOrigin,
     /// Provider health monitor for failover routing (#175).
@@ -177,11 +219,13 @@ impl TurnActor {
         clippy::too_many_arguments,
         reason = "single internal constructor call site (EneHandle::open); the #272 \
                   event-bus split added two channel senders (lifecycle_tx, audio_tx) \
-                  pushing this from 15 to 17 — grouping into a config struct is a \
-                  larger refactor out of scope here"
+                  and #397 added cmd_tx for internal command feedback, pushing this \
+                  from 17 to 18 — grouping into a config struct is a larger refactor \
+                  out of scope here"
     )]
     pub(super) fn new(
         cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
+        cmd_tx: mpsc::UnboundedSender<EneCommand>,
         event_tx: broadcast::Sender<EneEvent>,
         lifecycle_tx: broadcast::Sender<LifecycleEvent>,
         audio_tx: mpsc::Sender<AudioChunk>,
@@ -207,6 +251,7 @@ impl TurnActor {
             .unwrap_or_default();
         Self {
             cmd_rx,
+            cmd_tx,
             event_tx,
             lifecycle_tx,
             audio_tx,
@@ -232,6 +277,7 @@ impl TurnActor {
             memory_writer_tasks: tokio::task::JoinSet::new(),
             search_tasks: tokio::task::JoinSet::new(),
             deferred_tool_tasks: tokio::task::JoinSet::new(),
+            bg_command_tasks: tokio::task::JoinSet::new(),
             classifier_rx,
             memory_writer_rx,
             deferred_tool_rx,
@@ -243,7 +289,10 @@ impl TurnActor {
             proactive: crate::proactive::ProactiveScheduler::default(),
             proactive_decision_rx: None,
             proactive_decision_handle: None,
-            proactive_llm: None,
+            proactive_llm: Arc::new(OnceCell::new()),
+            proactive_llm_init_spawned: Arc::new(AtomicBool::new(false)),
+            proactive_llm_shutdown: AtomicBool::new(false),
+            vision_slow_path_active: Arc::new(AtomicBool::new(false)),
             active_origin: crate::types::TurnOrigin::User,
             health_monitor,
             task_caps,
@@ -305,6 +354,12 @@ impl TurnActor {
                 &mut self.deferred_tool_tasks,
                 "DeferredToolReaper",
                 "Deferred tool task panicked",
+                &self.diag_tx,
+            );
+            reap_join_set(
+                &mut self.bg_command_tasks,
+                "BgCommandReaper",
+                "Background command task panicked",
                 &self.diag_tx,
             );
 
@@ -576,15 +631,14 @@ impl TurnActor {
         if let Some(handle) = self.stream_handle.take() {
             handle.abort();
         }
-        if let Some(handles) = self.proactive_llm.take() {
-            handles.shutdown().await;
-        }
+        self.shutdown_proactive_llm_once().await;
         // Abort any in-flight direct CallTool, classifier, and memory-writer tasks,
         // and clear any pending prompt oneshot senders.
         self.classifier_tasks.abort_all();
         self.memory_writer_tasks.abort_all();
         self.call_tool_tasks.abort_all();
         self.search_tasks.abort_all();
+        self.bg_command_tasks.abort_all();
         self.drain_pending().await;
     }
 
@@ -609,13 +663,20 @@ impl TurnActor {
         self.proactive_decision_rx = None;
     }
 
-    /// Restarts the plugin host to apply a changed enabled-plugin set (E1).
+    /// Restarts the plugin host to apply a changed enabled-plugin set (E1),
+    /// running the heavy I/O in `bg_command_tasks` so the actor loop is never
+    /// blocked (#397).
     ///
     /// Shuts down the live host (stopping disabled plugins), spawns fresh DB
     /// IPC servers for the newly-detected plugin set, starts a new host with
     /// the updated configuration, re-registers any plugin-provided LLM
     /// factories, re-bridges health events into diagnostics, and rebuilds the
     /// tool registry from the new host.
+    ///
+    /// The shared `plugin_host` and `health_bridge_handle` mutexes are updated
+    /// directly by the background task. The actor-only fields (`self.registry`,
+    /// `self.plugin_tool_registries`) are updated when the background task
+    /// sends [`EneCommand::PluginHostReconfigured`] back through the mailbox.
     ///
     /// Remaining limitations:
     /// - Plugin-provided LLM factories are re-registered into the global
@@ -626,131 +687,127 @@ impl TurnActor {
     ///   new set replaces them on the same per-plugin socket paths (the stale
     ///   socket file is removed before re-binding), so at most one live server
     ///   serves each plugin.
-    async fn reconfigure_plugin_host(&mut self) {
-        // Stop the previous host (and its health bridge) first.
-        {
-            let mut guard = self.plugin_host.lock().await;
-            if let Some(mut host) = guard.take() {
-                host.shutdown().await;
-            }
-            drop(guard);
-
-            let mut bridge = self.health_bridge_handle.lock().await;
-            if let Some(handle) = bridge.take() {
-                handle.abort();
-            }
+    fn spawn_reconfigure_plugin_host(&mut self) {
+        if !admit_task(
+            &self.bg_command_tasks,
+            self.task_caps.bg_command_cap,
+            "BgCommand",
+            Some("PluginHostReconfigure".to_string()),
+            &self.diag_tx,
+        ) {
+            tracing::warn!(
+                component = "TurnActor",
+                "Plugin host reconfiguration rejected: background task capacity exhausted"
+            );
+            return;
         }
 
-        // Spawn DB IPC servers for the (possibly changed) plugin set.
-        let db_tokens =
-            match spawn_db_ipc_servers(&self.config, self.session.memory.memory_store.as_ref()) {
-                Ok(tokens) => tokens,
-                Err(e) => {
-                    tracing::warn!(
-                        component = "TurnActor",
-                        error = %e,
-                        "Failed to spawn DB IPC servers during plugin reconfiguration; \
-                         continuing without plugin DB access"
-                    );
-                    HashMap::new()
-                }
-            };
+        let config = self.config.clone();
+        let memory_store = self.session.memory.memory_store.clone();
+        let plugin_host = Arc::clone(&self.plugin_host);
+        let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
+        let diag_tx = self.diag_tx.clone();
+        let cmd_tx = self.cmd_tx.clone();
 
-        // Start the new host with the updated configuration.
-        let mut new_host =
-            match ene_plugin_host::PluginHostManager::start(&self.config, db_tokens).await {
-                Ok(host) => Some(host),
-                Err(e) => {
-                    tracing::warn!(
-                        component = "TurnActor",
-                        error = %e,
-                        "Plugin host failed to restart after Features update; \
-                         continuing without plugins"
-                    );
-                    None
-                }
-            };
-
-        // Re-register plugin-provided LLM factories (replaces prior entries).
-        if let Some(host) = new_host.as_ref() {
-            for (kind, factory) in host.llm_factories() {
-                tracing::info!(
-                    component = "TurnActor",
-                    kind = %kind,
-                    "Re-registered plugin-provided LLM provider factory after Features update"
-                );
-                LlmProviderRegistry::register(Arc::clone(factory));
-            }
-        }
-
-        // Re-bridge health events into diagnostics with a fresh task.
-        let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
-        if let Some(host) = new_host.as_mut()
-            && let Some(mut health_rx) = host.take_health_receiver()
-        {
-            let diag_tx = self.diag_tx.clone();
-            bridge_handle = Some(tokio::spawn(async move {
-                while let Some(event) = health_rx.recv().await {
-                    emit_diag(&diag_tx, plugin_health_event_to_diag(event));
-                }
-            }));
-        }
-
-        // Rebuild the tool registry from the new host's registries.
-        let registries = new_host
-            .as_ref()
-            .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
-        let registry_count = registries.len();
-        match CompositeToolRegistry::try_new(registries.clone()) {
-            Ok(composite) => {
-                self.registry = Arc::new(composite);
-                self.plugin_tool_registries = registries;
-                tracing::info!(
-                    component = "TurnActor",
-                    tool_registries = registry_count,
-                    "Plugin host reconfigured and tool registry rebuilt after Features update"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    component = "TurnActor",
-                    error = %e,
-                    "Failed to rebuild tool registry after plugin reconfiguration"
-                );
-            }
-        }
-
-        // Publish the new host and bridge handle to the shared slots so the
-        // handle's shutdown path tears down the live instances.
-        *self.plugin_host.lock().await = new_host;
-        *self.health_bridge_handle.lock().await = bridge_handle;
+        self.bg_command_tasks.spawn(async move {
+            reconfigure_plugin_host_bg(
+                config,
+                memory_store,
+                plugin_host,
+                health_bridge_handle,
+                diag_tx,
+                cmd_tx,
+            )
+            .await;
+        });
     }
 
-    async fn ensure_proactive_llm(&mut self) -> Result<(), crate::public_api::PublicApiError> {
-        if self.proactive_llm.is_some() {
-            return Ok(());
+    /// Kicks off proactive LLM initialization in the background if it has
+    /// not already been started (#397).
+    ///
+    /// Returns immediately in all cases — the actor loop is never blocked
+    /// on a GGUF model load. Callers that need the handles should check
+    /// `self.proactive_llm.get()` after calling this method.
+    fn ensure_proactive_llm_non_blocking(&mut self) {
+        if self.proactive_llm.get().is_some() {
+            return; // Already loaded.
         }
-        let ai_cfg = self.config.get_section::<ene_ai::AiConfig>().map_err(|e| {
-            crate::public_api::PublicApiError::Internal {
-                message: format!("AI config unavailable: {e}"),
-            }
-        })?;
-        match ene_ai_local::build_proactive_llm_handles(&ai_cfg).await {
-            Ok(handles) => {
-                tracing::info!(
+        if self.proactive_llm_init_spawned.swap(true, Ordering::AcqRel) {
+            return; // Init already in progress.
+        }
+
+        let ai_cfg = match self.config.get_section::<ene_ai::AiConfig>() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // Reset so a later call (e.g. after a config hot-reload fixes
+                // the section) can retry rather than being permanently stuck.
+                self.proactive_llm_init_spawned
+                    .store(false, Ordering::Release);
+                tracing::warn!(
                     component = "Proactive",
-                    decision_backend = ?handles.decision_kind,
-                    vision = handles
-                        .local()
-                        .is_some_and(|l| l.capabilities().contains(ene_ai::Capability::Vision)),
-                    "Proactive decision provider ready"
+                    error = %e,
+                    "Cannot init proactive LLM: config error"
                 );
-                self.proactive_llm = Some(handles);
-                Ok(())
+                return;
             }
-            Err(e) => Err(crate::public_api::PublicApiError::Internal {
-                message: format!("Failed to start proactive decision provider: {e}"),
-            }),
+        };
+        if !admit_task(
+            &self.bg_command_tasks,
+            self.task_caps.bg_command_cap,
+            "BgCommand",
+            Some("ProactiveLlmInit".to_string()),
+            &self.diag_tx,
+        ) {
+            // No capacity right now; allow a later call to retry once a slot
+            // frees up instead of leaving the flag latched forever.
+            self.proactive_llm_init_spawned
+                .store(false, Ordering::Release);
+            return;
+        }
+        let cell = Arc::clone(&self.proactive_llm);
+        let init_spawned = Arc::clone(&self.proactive_llm_init_spawned);
+        self.bg_command_tasks.spawn(async move {
+            match ene_ai_local::build_proactive_llm_handles(&ai_cfg).await {
+                Ok(handles) => {
+                    tracing::info!(
+                        component = "Proactive",
+                        decision_backend = ?handles.decision_kind,
+                        vision = handles
+                            .local()
+                            .is_some_and(|l| l.capabilities().contains(ene_ai::Capability::Vision)),
+                        "Proactive decision provider ready (background)"
+                    );
+                    drop(cell.set(handles));
+                }
+                Err(e) => {
+                    // A single transient failure must not permanently disable
+                    // proactive features: reset the spawn guard so a later
+                    // call retries. (On success the populated `OnceCell`
+                    // short-circuits before this flag is ever consulted.)
+                    init_spawned.store(false, Ordering::Release);
+                    tracing::error!(
+                        component = "Proactive",
+                        error = %e,
+                        "Failed to init proactive LLM in background"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Shuts down the proactive LLM handles at most once (#397).
+    ///
+    /// Both the `EneCommand::Shutdown` arm and the post-loop cleanup in
+    /// [`Self::run`] call this on every normal teardown; the
+    /// `proactive_llm_shutdown` flag guarantees the underlying
+    /// [`ene_ai_local::ProactiveLlmHandles::shutdown`] runs only on the first
+    /// of the two, restoring the at-most-once guarantee the old
+    /// `Option::take` provided before the `Arc<OnceCell>` conversion.
+    async fn shutdown_proactive_llm_once(&self) {
+        if let Some(handles) = self.proactive_llm.get()
+            && !self.proactive_llm_shutdown.swap(true, Ordering::AcqRel)
+        {
+            handles.shutdown().await;
         }
     }
 
@@ -759,7 +816,14 @@ impl TurnActor {
     /// handler used to do, minus the raw RGB buffer and the actual
     /// (expensive) model call — both of which now live entirely in
     /// [`crate::vision::VisionHandle`], outside this actor.
-    async fn prepare_vision_summary(
+    ///
+    /// Split into a fast path (handles already loaded → synchronous reply)
+    /// and a slow path (handles still loading → background wait) so the
+    /// actor loop is never blocked on a GGUF model load (#397). The slow
+    /// path is deduplicated: at most one background poller runs at a time
+    /// (guarded by `vision_slow_path_active`), so a burst of concurrent
+    /// requests during the loading window cannot exhaust `bg_command_cap`.
+    fn prepare_vision_summary(
         &mut self,
         app_label: String,
         reply: oneshot::Sender<Result<VisionPrepared, crate::public_api::PublicApiError>>,
@@ -781,47 +845,99 @@ impl TurnActor {
                 |m| m.emotion.classifier_language.clone(),
             );
 
-        if let Err(e) = self.ensure_proactive_llm().await {
-            drop(reply.send(Err(e)));
+        // Kick off background initialization if not already loaded/loading.
+        self.ensure_proactive_llm_non_blocking();
+
+        // Fast path: handles already loaded — complete synchronously.
+        if let Some(handles) = self.proactive_llm.get() {
+            let result = finish_vision_prep(handles, &prompt_language, &app_label);
+            if result.is_ok() {
+                // Mint a fresh cancel token for this request; a new user turn
+                // cancels and replaces `self.vision_cancel` (see `EneCommand::Run`),
+                // so an older, already-handed-out token being left cancelled from a
+                // prior turn can never pre-cancel this new request.
+                self.vision_cancel = CancellationToken::new();
+                let cancel = self.vision_cancel.clone();
+                drop(reply.send(result.map(|mut vp| {
+                    vp.cancel = cancel;
+                    vp
+                })));
+            } else {
+                drop(reply.send(result));
+            }
             return;
         }
-        let Some(handles) = self.proactive_llm.as_ref() else {
+
+        // Slow path: handles still loading — hand off to bg_command_tasks.
+        // Deduplicate concurrent slow-path requests (#397): the screen-capture
+        // driven proactive flow can fire `PrepareVisionSummary` several times
+        // during the GGUF loading window, and each call would otherwise spawn
+        // a fresh up-to-five-minute poller. With `bg_command_cap` defaulting
+        // to 4, that would exhaust the cap and starve unrelated background
+        // work (e.g. a concurrent `PluginHostReconfigure`). Only one poller
+        // runs at a time; concurrent callers fail fast and retry on the next
+        // capture cycle once the model is loaded.
+        if self.vision_slow_path_active.load(Ordering::Acquire) {
             drop(reply.send(Err(PublicApiError::Internal {
-                message: "proactive LLM handles missing after ensure".to_string(),
+                message: "runtime busy: vision preparation already in progress".to_string(),
             })));
             return;
-        };
-        let Some(local) = handles.local().cloned() else {
+        }
+        if !admit_task(
+            &self.bg_command_tasks,
+            self.task_caps.bg_command_cap,
+            "BgCommand",
+            Some("PrepareVisionSummary".to_string()),
+            &self.diag_tx,
+        ) {
             drop(reply.send(Err(PublicApiError::Internal {
-                message: format!(
-                    "local proactive model is not available (decision_backend={:?})",
-                    handles.decision_kind
-                ),
-            })));
-            return;
-        };
-        if !local.capabilities().contains(ene_ai::Capability::Vision) {
-            drop(reply.send(Err(PublicApiError::Internal {
-                message: "local model has no vision mmproj loaded".to_string(),
+                message: "runtime busy: background task capacity exhausted".to_string(),
             })));
             return;
         }
 
-        let prompts = ene_config::PromptLibrary::load(&prompt_language);
-        let system = prompts.proactive().screen_summary_system.trim().to_string();
-        let user = prompts.proactive().render_screen_summary_user(&app_label);
-        // Mint a fresh cancel token for this request; a new user turn
-        // cancels and replaces `self.vision_cancel` (see `EneCommand::Run`),
-        // so an older, already-handed-out token being left cancelled from a
-        // prior turn can never pre-cancel this new request.
+        // Mint the cancel token on the actor so `Run` can cancel it via
+        // `self.vision_cancel` even though the reply is sent from a
+        // background task (#397).
         self.vision_cancel = CancellationToken::new();
         let cancel = self.vision_cancel.clone();
-        drop(reply.send(Ok(VisionPrepared {
-            local,
-            system,
-            user,
-            cancel,
-        })));
+        let cell = Arc::clone(&self.proactive_llm);
+        let slow_path_active = Arc::clone(&self.vision_slow_path_active);
+        // Set only after admission succeeds, so a rejected admission does not
+        // latch the flag and permanently block future slow-path requests.
+        slow_path_active.store(true, Ordering::Release);
+        self.bg_command_tasks.spawn(async move {
+            // Poll until the OnceCell is populated (init is already running)
+            // or the cancel token fires (a new user turn started).
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(5);
+            loop {
+                if cancel.is_cancelled() {
+                    slow_path_active.store(false, Ordering::Release);
+                    drop(reply.send(Err(PublicApiError::Internal {
+                        message: "vision preparation cancelled".to_string(),
+                    })));
+                    return;
+                }
+                if let Some(handles) = cell.get() {
+                    let result =
+                        finish_vision_prep(handles, &prompt_language, &app_label).map(|mut vp| {
+                            vp.cancel = cancel;
+                            vp
+                        });
+                    slow_path_active.store(false, Ordering::Release);
+                    drop(reply.send(result));
+                    return;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    slow_path_active.store(false, Ordering::Release);
+                    drop(reply.send(Err(PublicApiError::Internal {
+                        message: "proactive LLM init timed out".to_string(),
+                    })));
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
     }
 
     async fn maybe_spawn_proactive_decision(&mut self) {
@@ -841,10 +957,18 @@ impl TurnActor {
             return;
         }
 
-        if let Err(e) = self.ensure_proactive_llm().await {
-            tracing::warn!(component = "Proactive", error = %e, "Failed to start proactive decision provider");
+        // Kick off background init if not already done/loading (#397).
+        self.ensure_proactive_llm_non_blocking();
+
+        // If handles aren't ready yet, skip this tick — the next interval
+        // will retry once the background load completes.
+        let Some(handles) = self.proactive_llm.get() else {
+            tracing::debug!(
+                component = "Proactive",
+                "Proactive decision deferred: LLM handles not yet loaded"
+            );
             return;
-        }
+        };
 
         tracing::info!(
             component = "Proactive",
@@ -853,7 +977,7 @@ impl TurnActor {
             "Proactive decision started"
         );
 
-        let decision_provider = self.proactive_llm.as_ref().map(|h| Arc::clone(&h.decision));
+        let decision_provider = Some(Arc::clone(&handles.decision));
         let epoch = self.proactive.epoch;
         let user_turn_busy = self.stream_handle.is_some()
             || !self.pending_permissions.lock().await.is_empty()
@@ -1124,10 +1248,9 @@ impl TurnActor {
                 self.classifier_tasks.abort_all();
                 self.memory_writer_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
+                self.bg_command_tasks.abort_all();
                 self.abort_proactive_decision();
-                if let Some(handles) = self.proactive_llm.take() {
-                    handles.shutdown().await;
-                }
+                self.shutdown_proactive_llm_once().await;
                 self.drain_pending().await;
                 false
             }
@@ -1183,18 +1306,26 @@ impl TurnActor {
                     // The enabled plugin set changed: restart the plugin host
                     // so newly-enabled plugins are spawned and disabled ones
                     // are stopped, then rebuild the tool registry from the new
-                    // host (E1). The previous behavior rebuilt a static list of
-                    // already-live registries, which was effectively a no-op.
-                    self.reconfigure_plugin_host().await;
+                    // host (E1). Runs in bg_command_tasks so the actor loop is
+                    // never blocked on process I/O (#397).
+                    self.spawn_reconfigure_plugin_host();
                 }
                 true
             }
             EneCommand::PrepareVisionSummary { app_label, reply } => {
-                self.prepare_vision_summary(app_label, reply).await;
+                self.prepare_vision_summary(app_label, reply);
                 true
             }
             EneCommand::StashProactiveScreenImage { data_uri } => {
                 self.proactive.last_screen_image_data_uri = data_uri;
+                true
+            }
+            EneCommand::PluginHostReconfigured {
+                registry,
+                plugin_tool_registries,
+            } => {
+                self.registry = registry;
+                self.plugin_tool_registries = plugin_tool_registries;
                 true
             }
             EneCommand::PermissionDecision {
@@ -1487,6 +1618,32 @@ impl TurnActor {
                     vec!["/test/path".to_string()],
                 );
                 panic!("induced panic after mutating shared actor state (#268 regression test)");
+            }
+            #[cfg(test)]
+            EneCommand::TestSpawnSlowBgTask { reply } => {
+                // Admit a long-running task into `bg_command_tasks` to
+                // simulate a heavy background command (GGUF load / plugin
+                // host restart) being in flight (#397). The actor loop must
+                // keep processing subsequent commands while this sleeps.
+                if admit_task(
+                    &self.bg_command_tasks,
+                    self.task_caps.bg_command_cap,
+                    "BgCommand",
+                    Some("TestSlowBgTask".to_string()),
+                    &self.diag_tx,
+                ) {
+                    self.bg_command_tasks.spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    });
+                }
+                // A oneshot `Sender<()>::send` error is `Copy` (the unsent
+                // `()`), so `drop()` would trip `clippy::dropping_copy_types`.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(());
+                true
             }
         }
     }
@@ -1897,6 +2054,159 @@ impl TurnActor {
     fn mind_history_entries(&self) -> Vec<MindHistoryEntry> {
         self.session.history().to_vec()
     }
+}
+
+/// Completes vision preparation from loaded handles: validates the local
+/// model, checks vision capability, and renders prompts (#397).
+///
+/// Shared by the fast path (handles already loaded, reply sent synchronously
+/// in the actor) and the slow path (handles loaded in background, reply sent
+/// from `bg_command_tasks`). The `cancel` token is set by the caller after
+/// this function returns `Ok`.
+fn finish_vision_prep(
+    handles: &ene_ai_local::ProactiveLlmHandles,
+    prompt_language: &str,
+    app_label: &str,
+) -> Result<VisionPrepared, crate::public_api::PublicApiError> {
+    use crate::public_api::PublicApiError;
+
+    let Some(local) = handles.local().cloned() else {
+        return Err(PublicApiError::Internal {
+            message: format!(
+                "local proactive model is not available (decision_backend={:?})",
+                handles.decision_kind
+            ),
+        });
+    };
+    if !local.capabilities().contains(ene_ai::Capability::Vision) {
+        return Err(PublicApiError::Internal {
+            message: "local model has no vision mmproj loaded".to_string(),
+        });
+    }
+
+    let prompts = ene_config::PromptLibrary::load(prompt_language);
+    let system = prompts.proactive().screen_summary_system.trim().to_string();
+    let user = prompts.proactive().render_screen_summary_user(app_label);
+    Ok(VisionPrepared {
+        local,
+        system,
+        user,
+        cancel: CancellationToken::new(), // Replaced by caller.
+    })
+}
+
+/// Background plugin host reconfiguration (#397).
+///
+/// Performs the heavy I/O (host shutdown, DB IPC spawn, host start, health
+/// bridge) off the actor loop. Updates the shared `plugin_host` and
+/// `health_bridge_handle` mutexes directly, then sends
+/// [`EneCommand::PluginHostReconfigured`] back through the mailbox so the
+/// actor can update its own `registry` and `plugin_tool_registries` fields.
+async fn reconfigure_plugin_host_bg(
+    config: EneConfig,
+    memory_store: Option<Arc<ene_store::MemoryStore>>,
+    plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
+    health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    diag_tx: broadcast::Sender<DiagnosticEvent>,
+    cmd_tx: mpsc::UnboundedSender<EneCommand>,
+) {
+    // Stop the previous host (and its health bridge) first.
+    {
+        let mut guard = plugin_host.lock().await;
+        if let Some(mut host) = guard.take() {
+            host.shutdown().await;
+        }
+        drop(guard);
+
+        let mut bridge = health_bridge_handle.lock().await;
+        if let Some(handle) = bridge.take() {
+            handle.abort();
+        }
+    }
+
+    // Spawn DB IPC servers for the (possibly changed) plugin set.
+    let db_tokens = match spawn_db_ipc_servers(&config, memory_store.as_ref()) {
+        Ok(tokens) => tokens,
+        Err(e) => {
+            tracing::warn!(
+                component = "TurnActor",
+                error = %e,
+                "Failed to spawn DB IPC servers during plugin reconfiguration; \
+                 continuing without plugin DB access"
+            );
+            HashMap::new()
+        }
+    };
+
+    // Start the new host with the updated configuration.
+    let mut new_host = match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
+        Ok(host) => Some(host),
+        Err(e) => {
+            tracing::warn!(
+                component = "TurnActor",
+                error = %e,
+                "Plugin host failed to restart after Features update; \
+                 continuing without plugins"
+            );
+            None
+        }
+    };
+
+    // Re-register plugin-provided LLM factories (replaces prior entries).
+    if let Some(host) = new_host.as_ref() {
+        for (kind, factory) in host.llm_factories() {
+            tracing::info!(
+                component = "TurnActor",
+                kind = %kind,
+                "Re-registered plugin-provided LLM provider factory after Features update"
+            );
+            LlmProviderRegistry::register(Arc::clone(factory));
+        }
+    }
+
+    // Re-bridge health events into diagnostics with a fresh task.
+    let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if let Some(host) = new_host.as_mut()
+        && let Some(mut health_rx) = host.take_health_receiver()
+    {
+        let diag_tx = diag_tx.clone();
+        bridge_handle = Some(tokio::spawn(async move {
+            while let Some(event) = health_rx.recv().await {
+                emit_diag(&diag_tx, plugin_health_event_to_diag(event));
+            }
+        }));
+    }
+
+    // Rebuild the tool registry from the new host's registries.
+    let registries = new_host
+        .as_ref()
+        .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
+    let registry_count = registries.len();
+    match CompositeToolRegistry::try_new(registries.clone()) {
+        Ok(composite) => {
+            tracing::info!(
+                component = "TurnActor",
+                tool_registries = registry_count,
+                "Plugin host reconfigured and tool registry rebuilt after Features update"
+            );
+            drop(cmd_tx.send(EneCommand::PluginHostReconfigured {
+                registry: Arc::new(composite),
+                plugin_tool_registries: registries,
+            }));
+        }
+        Err(e) => {
+            tracing::warn!(
+                component = "TurnActor",
+                error = %e,
+                "Failed to rebuild tool registry after plugin reconfiguration"
+            );
+        }
+    }
+
+    // Publish the new host and bridge handle to the shared slots so the
+    // handle's shutdown path tears down the live instances.
+    *plugin_host.lock().await = new_host;
+    *health_bridge_handle.lock().await = bridge_handle;
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a

@@ -2871,6 +2871,7 @@ dependencies = [
  "ene-voice",
  "futures",
  "image",
+ "once_cell",
  "parking_lot",
  "regex",
  "serde",

@@ -27,6 +27,7 @@ use chrono::{DateTime, Utc};
 use ene_config::CharacterCardV3;
 use ene_mind::SplitResult;
 use ene_plugin_proto::ToolSpec;
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 /// A deferred (background) tool task tracked by the actor (#196).
@@ -202,6 +203,19 @@ pub enum EneCommand {
         /// Encoded frame, or `None` on encode failure.
         data_uri: Option<String>,
     },
+    /// Internal: background plugin host reconfiguration completed (#397).
+    ///
+    /// Sent from a `bg_command_tasks` task back to the actor after the
+    /// expensive `PluginHostManager::start` I/O finishes. The shared
+    /// `plugin_host` and `health_bridge_handle` mutexes have already been
+    /// updated by the background task; this command carries the registry
+    /// state that only the actor may update on its own fields.
+    PluginHostReconfigured {
+        /// Rebuilt composite tool registry from the new host.
+        registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+        /// Per-plugin tool registries for future re-merges.
+        plugin_tool_registries: Vec<Arc<dyn ene_plugin_host::ToolRegistry>>,
+    },
     /// Test-only (#268 regression coverage): mutates `pending_permissions`,
     /// `permission_scopes`, and `undo_stack` — the three fields #268 called
     /// out for post-panic consistency scrutiny — then panics, so the panic
@@ -217,6 +231,18 @@ pub enum EneCommand {
         /// the test resolves it afterward via [`crate::EneHandle::decide_permission`]
         /// to prove the map entry survived intact.
         permission_tx: oneshot::Sender<PermissionDecision>,
+    },
+    /// Test-only (#397 regression coverage): occupies one `bg_command_tasks`
+    /// slot with a long-sleeping task, then replies on `reply`. Used to
+    /// simulate a heavy background command (GGUF load / plugin host restart)
+    /// being in flight so a follow-up command can be asserted to still be
+    /// processed promptly — i.e. the actor loop is not head-of-line blocked.
+    /// Compiled only under `cfg(test)`; not reachable from production code.
+    #[cfg(test)]
+    TestSpawnSlowBgTask {
+        /// Reply channel; fired once the slow background task has been
+        /// admitted and spawned, so the test knows the slot is occupied.
+        reply: oneshot::Sender<()>,
     },
 }
 

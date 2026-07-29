@@ -561,6 +561,7 @@ impl EneHandle {
 
         let actor = actor::TurnActor::new(
             cmd_rx,
+            (*cmd_tx).clone(),
             event_tx.clone(),
             lifecycle_tx.clone(),
             audio_tx.clone(),
@@ -1336,7 +1337,7 @@ mod tests {
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,
         task_caps: &crate::task_config::ToolRuntimeConfig,
     ) -> (actor::TurnActor, broadcast::Receiver<DiagnosticEvent>) {
-        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, _event_rx) = broadcast::channel(16);
         let (lifecycle_tx, _lifecycle_rx) = broadcast::channel(16);
         let (audio_tx, _audio_rx) = mpsc::channel(8);
@@ -1349,6 +1350,7 @@ mod tests {
             ene_ai::ProviderHealthMonitor::new(std::time::Duration::from_secs(1), 8);
         let actor = actor::TurnActor::new(
             cmd_rx,
+            cmd_tx,
             event_tx,
             lifecycle_tx,
             audio_tx,
@@ -1534,5 +1536,56 @@ mod tests {
                 .is_empty(),
             "expected the empty registry's tool list to filter to nothing"
         );
+    }
+
+    // ── #397: no head-of-line blocking in the command loop ──
+
+    /// Regression test for #397: a heavy command whose work has been moved
+    /// off the actor loop into `bg_command_tasks` must not block subsequent
+    /// commands. Before the fix, handlers such as the GGUF model load and
+    /// the plugin-host restart awaited their heavy I/O *inline*, stalling the
+    /// entire mailbox (including `Cancel`) for the duration.
+    ///
+    /// This drives a live actor through its real `run()` loop: it occupies a
+    /// `bg_command_tasks` slot with a long-sleeping task (simulating an
+    /// in-flight heavy command), then asserts a follow-up command is still
+    /// answered promptly rather than queueing behind the background work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn command_loop_not_blocked_by_in_flight_bg_task() {
+        let handle = EneHandle::open(test_config_memory_off(), test_card())
+            .await
+            .expect("open initializes handle");
+
+        // Occupy a background slot with a slow task, and wait until the actor
+        // confirms it has been spawned. `cmd_tx` is an unbounded FIFO mpsc, so
+        // the reply arriving guarantees the slot is occupied before we proceed.
+        let (spawned_tx, spawned_rx) = oneshot::channel();
+        handle
+            .cmd_tx
+            .send(EneCommand::TestSpawnSlowBgTask { reply: spawned_tx })
+            .expect("actor mailbox open");
+        spawned_rx.await.expect("slow bg task spawn acknowledged");
+
+        // A follow-up command must be processed promptly even though the
+        // background task is still "in flight". If the actor loop were
+        // head-of-line blocked on the heavy work, this would not return until
+        // that work finished (30s here) and the tight timeout would fire.
+        let started = std::time::Instant::now();
+        let scopes =
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle.list_permissions())
+                .await
+                .expect("follow-up command must not queue behind an in-flight bg task")
+                .expect("actor must still be alive and answer ListPermissions");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "follow-up command took {elapsed:?}; the actor loop appears head-of-line blocked"
+        );
+        assert!(
+            scopes.is_empty(),
+            "no permissions granted in this test config"
+        );
+
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 }
