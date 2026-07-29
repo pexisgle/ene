@@ -44,10 +44,18 @@ pub enum PluginHealthEvent {
         /// Plugin name.
         plugin: String,
     },
-    /// A plugin exceeded its restart budget and is disabled.
+    /// A plugin was permanently disabled and will not be restarted again.
+    ///
+    /// Emitted when the restart budget is exhausted or when a restart-time
+    /// binary checksum verification fails (the on-disk binary changed since
+    /// it was last verified). The plugin stays stopped; the user must
+    /// intervene. `reason` is a stable English code.
     Disabled {
         /// Plugin name.
         plugin: String,
+        /// Stable reason code: `"restart_budget_exhausted"` or
+        /// `"checksum_mismatch"`.
+        reason: String,
     },
 }
 
@@ -61,7 +69,7 @@ impl PluginHealthEvent {
             | Self::Recovered { plugin }
             | Self::CircuitOpened { plugin, .. }
             | Self::CircuitClosed { plugin }
-            | Self::Disabled { plugin } => plugin,
+            | Self::Disabled { plugin, .. } => plugin,
         }
     }
 }

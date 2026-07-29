@@ -44,11 +44,22 @@ struct SupervisedPlugin {
     child: std::process::Child,
     socket_path: PathBuf,
     binary_path: PathBuf,
+    /// Expected SHA-256 checksum (hex) of the binary, verified on every
+    /// restart. Populated from the configured checksum or, when none was
+    /// configured, the trust-on-first-use checksum recorded at startup.
+    /// `None` disables restart-time verification (matching start-time
+    /// semantics when no checksum is known).
+    expected_checksum: Option<String>,
     sandbox: ene_plugin_proto::SandboxConfigData,
     plugin_config: Option<serde_json::Value>,
     /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
     restart_count: usize,
+    /// Set once the plugin is permanently disabled (restart budget exhausted
+    /// or a restart-time checksum mismatch). The health probe loop skips
+    /// disabled plugins so it does not keep restarting or re-emitting
+    /// `PluginHealthEvent::Disabled` for them.
+    disabled: bool,
 }
 
 impl SupervisedPlugin {
@@ -70,6 +81,18 @@ impl SupervisedPlugin {
                 ),
             });
         }
+
+        // Verify the binary checksum BEFORE killing the running process or
+        // spawning a replacement. The currently-running process was verified
+        // when it was spawned; if the on-disk binary has since been swapped
+        // we must neither destroy the good process nor launch the bad one.
+        // A mismatch aborts the restart and is surfaced by the caller as a
+        // `PluginHealthEvent::Disabled` diagnostic (#429).
+        verify_plugin_checksum(
+            &self.name,
+            &self.binary_path,
+            self.expected_checksum.as_deref(),
+        )?;
 
         drop(self.child.kill());
         drop(self.child.wait());
@@ -920,15 +943,23 @@ impl PluginHostManager {
             IpcPluginConnection::connect(&socket_path, sandbox.clone(), plugin_config.clone())
                 .await?;
 
+        // The effective expected checksum for restart-time verification: the
+        // configured checksum when present, otherwise the trust-on-first-use
+        // checksum just recorded. Either way the binary that was verified at
+        // startup is pinned and re-verified on every restart (#429).
+        let effective_checksum = expected_checksum.or(tofu_checksum.clone());
+
         let plugin = SupervisedPlugin {
             name: name.to_string(),
             child,
             socket_path: socket_path.clone(),
             binary_path: binary_path.clone(),
+            expected_checksum: effective_checksum,
             sandbox,
             plugin_config,
             env_passthrough,
             restart_count: 0,
+            disabled: false,
         };
 
         Ok((
@@ -1082,6 +1113,13 @@ async fn health_probe_loop(
     loop {
         ticker.tick().await;
         for (plugin, conn) in plugins.iter().zip(connections.iter()) {
+            // Permanently disabled plugins (restart budget exhausted or a
+            // restart-time checksum mismatch) are left stopped; skip them so
+            // the probe does not keep restarting or re-emitting `Disabled`.
+            if plugin.lock().await.disabled {
+                continue;
+            }
+
             let ping_ok = {
                 let mut c = conn.lock().await;
                 c.ping().await.is_ok()
@@ -1114,14 +1152,18 @@ async fn health_probe_loop(
             );
 
             // Restart the plugin process and reconnect.
-            let p = plugin.lock().await;
+            let mut p = plugin.lock().await;
             if p.restart_count >= MAX_RESTARTS {
                 tracing::error!(
                     component = "PluginHostManager",
                     plugin = %name,
                     "Plugin exceeded max restarts; disabled"
                 );
-                drop(health_tx.send(PluginHealthEvent::Disabled { plugin: name }));
+                p.disabled = true;
+                drop(health_tx.send(PluginHealthEvent::Disabled {
+                    plugin: name,
+                    reason: "restart_budget_exhausted".to_string(),
+                }));
                 continue;
             }
 
@@ -1137,12 +1179,30 @@ async fn health_probe_loop(
 
             let mut p = plugin.lock().await;
             if let Err(e) = p.restart() {
-                tracing::error!(
-                    component = "PluginHostManager",
-                    plugin = %name,
-                    error = %e,
-                    "Failed to restart plugin"
-                );
+                // A checksum mismatch means the on-disk binary changed since
+                // it was last verified. Do NOT silently retry: disable the
+                // plugin and tell the user via a diagnostic (#429).
+                if matches!(e, PluginHostError::ChecksumMismatch { .. }) {
+                    tracing::error!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Plugin binary checksum mismatch on restart; \
+                         binary changed since last verification; disabling plugin"
+                    );
+                    p.disabled = true;
+                    drop(health_tx.send(PluginHealthEvent::Disabled {
+                        plugin: name,
+                        reason: "checksum_mismatch".to_string(),
+                    }));
+                } else {
+                    tracing::error!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Failed to restart plugin"
+                    );
+                }
                 continue;
             }
 
@@ -1180,35 +1240,56 @@ async fn health_probe_loop(
     }
 }
 
-/// Verifies the plugin binary checksum and computes a TOFU checksum when
-/// none is recorded yet.
+/// Computes the SHA-256 checksum of a plugin binary, hex-encoded.
 ///
-/// When `expected` is `Some`, computes the SHA-256 hash of the binary and
-/// returns [`PluginHostError::ChecksumMismatch`] if it doesn't match.
-/// When `expected` is `None`, computes the checksum and returns it as
-/// `Ok(Some(checksum))` for the caller to persist (trust-on-first-use).
-fn verify_and_record_checksum(
+/// The file is hashed in fixed-size chunks via a [`std::io::BufReader`] so
+/// the entire binary is never held in memory at once — llama-linked plugin
+/// binaries can exceed 100MB, and this runs on every restart (#429).
+fn compute_binary_checksum(
     plugin_name: &str,
     path: &std::path::Path,
-    expected: Option<&str>,
-) -> Result<Option<String>, PluginHostError> {
-    let contents = std::fs::read(path).map_err(|e| PluginHostError::SpawnFailed {
+) -> Result<String, PluginHostError> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).map_err(|e| PluginHostError::SpawnFailed {
         name: plugin_name.to_string(),
         reason: format!("cannot read binary for checksum verification: {e}"),
     })?;
-    let actual = hex::encode(sha2::Sha256::digest(&contents));
+    let mut reader = std::io::BufReader::new(file);
 
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|e| PluginHostError::SpawnFailed {
+                name: plugin_name.to_string(),
+                reason: format!("cannot read binary for checksum verification: {e}"),
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Verifies a plugin binary against an expected checksum.
+///
+/// When `expected` is `Some`, computes the streaming SHA-256 hash of the
+/// binary and returns [`PluginHostError::ChecksumMismatch`] if it doesn't
+/// match. When `expected` is `None`, verification is a no-op (no checksum is
+/// known to compare against).
+fn verify_plugin_checksum(
+    plugin_name: &str,
+    path: &std::path::Path,
+    expected: Option<&str>,
+) -> Result<(), PluginHostError> {
     let Some(expected) = expected else {
-        // Trust-on-first-use: record the checksum for future verification.
-        tracing::info!(
-            component = "PluginHostManager",
-            plugin = %plugin_name,
-            checksum = %actual,
-            "Recording plugin binary checksum (trust-on-first-use)"
-        );
-        return Ok(Some(actual));
+        return Ok(());
     };
 
+    let actual = compute_binary_checksum(plugin_name, path)?;
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(PluginHostError::ChecksumMismatch {
             name: plugin_name.to_string(),
@@ -1221,6 +1302,34 @@ fn verify_and_record_checksum(
         plugin = %plugin_name,
         "Plugin binary checksum verified"
     );
+    Ok(())
+}
+
+/// Verifies the plugin binary checksum and computes a TOFU checksum when
+/// none is recorded yet.
+///
+/// When `expected` is `Some`, verifies via [`verify_plugin_checksum`] and
+/// returns `Ok(None)`. When `expected` is `None`, computes the checksum and
+/// returns it as `Ok(Some(checksum))` for the caller to persist
+/// (trust-on-first-use).
+fn verify_and_record_checksum(
+    plugin_name: &str,
+    path: &std::path::Path,
+    expected: Option<&str>,
+) -> Result<Option<String>, PluginHostError> {
+    let Some(expected) = expected else {
+        // Trust-on-first-use: record the checksum for future verification.
+        let actual = compute_binary_checksum(plugin_name, path)?;
+        tracing::info!(
+            component = "PluginHostManager",
+            plugin = %plugin_name,
+            checksum = %actual,
+            "Recording plugin binary checksum (trust-on-first-use)"
+        );
+        return Ok(Some(actual));
+    };
+
+    verify_plugin_checksum(plugin_name, path, Some(expected))?;
     Ok(None)
 }
 
@@ -1306,6 +1415,10 @@ mod tests {
         hasher.update(b"fake plugin binary contents");
         let real = hex::encode(hasher.finalize());
 
+        // The streaming helper must produce the same digest as the in-memory
+        // reference hash (it reads in chunks, never the whole file).
+        assert_eq!(compute_binary_checksum("fake", &bin_path).unwrap(), real);
+
         // Matching checksum passes, no TOFU recording.
         assert!(verify_and_record_checksum("fake", &bin_path, Some(&real)).is_ok());
         assert_eq!(
@@ -1327,6 +1440,97 @@ mod tests {
         // No checksum configured → trust-on-first-use, returns computed hash.
         let tofu = verify_and_record_checksum("fake", &bin_path, None).unwrap();
         assert_eq!(tofu, Some(real));
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    /// Builds a [`SupervisedPlugin`] for restart-verification tests.
+    ///
+    /// `binary_path` points at a file in a fresh temp dir and `child` is a
+    /// trivial real process (`/bin/true`) so `restart()` has something to
+    /// kill/reap. Returns the plugin and the binary path.
+    #[cfg(unix)]
+    fn supervised_plugin_with(binary_path: PathBuf) -> SupervisedPlugin {
+        let child = std::process::Command::new("/bin/true").spawn().unwrap();
+        let socket_path = binary_path.parent().unwrap().join("test.sock");
+
+        SupervisedPlugin {
+            name: "fake".to_string(),
+            child,
+            socket_path,
+            binary_path,
+            expected_checksum: None,
+            sandbox: ene_plugin_proto::SandboxConfigData::default(),
+            plugin_config: None,
+            env_passthrough: Vec::new(),
+            restart_count: 0,
+            disabled: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn temp_plugin_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ene-restart-checksum-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restart_verifies_checksum_when_matching() {
+        // `binary_path` is a genuine executable (a copy of `/bin/true`) so the
+        // matching-checksum path can actually re-spawn it without depending on
+        // a script interpreter being present.
+        let dir = temp_plugin_dir("match");
+        let binary_path = dir.join("ene-plugin-fake");
+        std::fs::copy("/bin/true", &binary_path).unwrap();
+
+        let mut plugin = supervised_plugin_with(binary_path.clone());
+        let real = compute_binary_checksum("fake", &binary_path).unwrap();
+        plugin.expected_checksum = Some(real);
+
+        // Matching checksum: verification passes and the plugin is respawned.
+        assert!(plugin.restart().is_ok());
+        assert_eq!(plugin.restart_count, 1);
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restart_rejects_tampered_binary() {
+        use std::io::Write;
+
+        // Here `binary_path` is a plain data file (not executed), so it can be
+        // freely rewritten to simulate a binary swap; `restart()` aborts on the
+        // mismatch before ever trying to spawn it.
+        let dir = temp_plugin_dir("tamper");
+        let binary_path = dir.join("ene-plugin-fake");
+        std::fs::write(&binary_path, b"original plugin binary contents").unwrap();
+
+        let mut plugin = supervised_plugin_with(binary_path.clone());
+
+        // Pin the checksum of the original binary.
+        let real = compute_binary_checksum("fake", &binary_path).unwrap();
+        plugin.expected_checksum = Some(real);
+
+        // Tamper with the binary on disk after the checksum was recorded.
+        {
+            let mut f = std::fs::File::create(&binary_path).unwrap();
+            f.write_all(b"tampered binary contents that differ from the original")
+                .unwrap();
+        }
+
+        // Restart must abort with a checksum mismatch...
+        let result = plugin.restart();
+        assert!(matches!(
+            result,
+            Err(PluginHostError::ChecksumMismatch { .. })
+        ));
+        // ...without having spawned the tampered binary: verification happens
+        // before killing/spawning, so the original child is untouched.
+        assert_eq!(plugin.restart_count, 1);
 
         drop(std::fs::remove_dir_all(&dir));
     }

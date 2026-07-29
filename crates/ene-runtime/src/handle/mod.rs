@@ -897,11 +897,14 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
             Some(format!("{consecutive_failures} consecutive failures")),
         ),
         PluginHealthEvent::CircuitClosed { plugin } => (plugin, "circuit_closed", None),
-        PluginHealthEvent::Disabled { plugin } => (
-            plugin,
-            "disabled",
-            Some("restart budget exhausted".to_string()),
-        ),
+        PluginHealthEvent::Disabled { plugin, reason } => {
+            // `status` stays the stable `"disabled"`; the detail explains why.
+            let detail = match reason.as_str() {
+                "checksum_mismatch" => "binary checksum mismatch on restart",
+                _ => "restart budget exhausted",
+            };
+            (plugin, "disabled", Some(detail.to_string()))
+        }
     };
     DiagnosticEvent::ToolHealth {
         tool,
