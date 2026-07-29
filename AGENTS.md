@@ -167,3 +167,20 @@ Before submitting a PR or finishing a coding task, verify the following:
 ## 9. Further Reading
 
 See `docs/guide/` and `docs/reference/` (and `docs/ja/guide/` / `docs/ja/reference/`) for developer guides and deep dives into Architecture, Memory, Tools (RAG, SDK, Sandbox), and Runtime (Streaming, Prompting).
+
+## Cursor Cloud specific instructions
+
+The Cloud Agent VM is provisioned **without Nix/direnv**. Ignore §3's `direnv exec . cargo` (and the `rtk cargo` user rule) here: `cargo` is on `PATH` (rustup stable toolchain). Just run `cargo <cmd>` directly from the repo root. Standard commands are unchanged: `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo run -p ene-cli`, `cargo run -p ene-desktop` (see `README.md` / §0).
+
+Environment notes (dependencies are already installed in the VM image; the startup script only refreshes them):
+
+- **Toolchain:** edition 2024 requires Rust ≥ 1.85; the VM uses rustup `stable`. The old system `rustc` (1.83) is too old — do not pin to it.
+- **C/C++ toolchain (do not revert):** `cc`/`c++` are set (via `update-alternatives`) to **GCC**, not Clang. Clang 18 here cannot find libstdc++ headers (`cstdint`) or `-lstdc++`, which breaks `esaxx-rs`/tokenizers compilation and final linking. If a build suddenly fails with those errors, run `sudo update-alternatives --set cc /usr/bin/gcc && sudo update-alternatives --set c++ /usr/bin/g++`.
+- **No custom env vars needed to build.** Do NOT set `RUSTFLAGS`/`CC`/`CXX` for normal builds — changing them invalidates the whole cache and forces a ~10+ min full workspace rebuild.
+
+Running the apps:
+
+- **`ene-cli` boots the entire runtime even for `--help`** (there is no arg parsing; it always initializes and drops into the REPL). First launch downloads a **~1.2 GB local GGUF embedding model** into `assets/models/` (gitignored) and warms the Tool RAG index (~40 s). Later boots are a few seconds (cached). Embeddings run **locally/offline** (`provider.embedding.backend = "local"`), so no network/API key is needed for memory/recall.
+- **Chat requires an LLM endpoint.** `assets/settings.json` points `provider.base_url` at OpenRouter with model `xiaomi/mimo-v2.5` and an empty inline key, so out-of-the-box chat returns HTTP 401. Override at runtime with `ENE_`-prefixed env vars (figment, `__` = nesting), e.g. `ENE_PROVIDER__BASE_URL`, `ENE_PROVIDER__MODEL`, `ENE_PROVIDER__API_KEY__INLINE`. In debug builds the key also falls back to the `API_TOKEN` env var. To test chat **fully offline**, point `ENE_PROVIDER__BASE_URL` at a local OpenAI-compatible mock (`POST {base}/chat/completions`, SSE `data:` chunks + `data: [DONE]`).
+- **The REPL needs a real TTY** (`dialoguer`). Piping into stdin hits EOF and exits immediately; drive it through a PTY for scripted interaction.
+- **Desktop (`ene-desktop`)** runs headless via **software Vulkan (lavapipe)**: launch with `DISPLAY=:1 WGPU_BACKEND=vulkan`. It needs `libxkbcommon-x11`. It renders the Alicia VRM + an egui chat panel.
