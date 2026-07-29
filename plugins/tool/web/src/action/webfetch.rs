@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use ene_tool_sdk::prelude::*;
+use ene_plugin::prelude::*;
 
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;

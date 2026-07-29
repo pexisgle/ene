@@ -1,4 +1,4 @@
-use ene_tool_sdk::prelude::*;
+use ene_plugin::prelude::*;
 use enigo::{Axis, Mouse};
 
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema, ToolAction)]

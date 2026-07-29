@@ -1,6 +1,6 @@
 use crate::utils::sandbox::Sandbox;
 use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
-use ene_tool_sdk::prelude::*;
+use ene_plugin::prelude::*;
 use std::path::Path;
 
 pub async fn delete(path: &Path, recursive: bool, sandbox: &Sandbox) -> Result<String, ToolError> {

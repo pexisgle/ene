@@ -19,7 +19,7 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 ene-plugin-proto = { workspace = true }
-ene-tool-sdk = { workspace = true }
+ene-plugin = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
 async-trait = { workspace = true }

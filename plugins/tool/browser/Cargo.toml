@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 ene-plugin = { workspace = true }
 ene-plugin-proto = { workspace = true }
-ene-tool-sdk = { workspace = true }
 ene-util = { workspace = true, features = ["html"] }
 chromiumoxide = "0.9"
 base64 = { workspace = true, features = ["std"] }

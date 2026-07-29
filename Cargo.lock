@@ -2662,7 +2662,9 @@ dependencies = [
  "base64 0.23.0",
  "ene-infer",
  "ene-plugin-proto",
+ "ene-tool-macros",
  "parking_lot",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2697,7 +2699,6 @@ dependencies = [
  "base64 0.23.0",
  "ene-plugin",
  "ene-plugin-proto",
- "ene-tool-sdk",
  "enigo",
  "image",
  "pipewire",
@@ -2719,7 +2720,6 @@ dependencies = [
  "dashmap",
  "ene-plugin",
  "ene-plugin-proto",
- "ene-tool-sdk",
  "ene-util",
  "regex",
  "schemars",
@@ -2753,7 +2753,6 @@ dependencies = [
  "ene-plugin",
  "ene-plugin-db",
  "ene-plugin-proto",
- "ene-tool-sdk",
  "ene-util",
  "flate2",
  "glob",
@@ -2817,7 +2816,6 @@ dependencies = [
  "ene-plugin",
  "ene-plugin-db",
  "ene-plugin-proto",
- "ene-tool-sdk",
  "parking_lot",
  "schemars",
  "serde",
@@ -2835,7 +2833,6 @@ dependencies = [
  "async-trait",
  "ene-plugin",
  "ene-plugin-proto",
- "ene-tool-sdk",
  "ene-util",
  "quick-xml 0.41.0",
  "reqwest",
@@ -2914,8 +2911,8 @@ name = "ene-tool-macros"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "ene-plugin",
  "ene-plugin-proto",
- "ene-tool-sdk",
  "proc-macro2",
  "quote",
  "schemars",
@@ -2940,21 +2937,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ene-tool-sdk"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "ene-plugin",
- "ene-plugin-proto",
- "ene-tool-macros",
- "schemars",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
 ]

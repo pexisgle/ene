@@ -122,7 +122,6 @@ ene-runtime = { path = "crates/ene-runtime" }
 ene-store = { path = "crates/ene-store" }
 ene-tool-macros = { path = "crates/ene-tool-macros" }
 ene-tool-rag = { path = "crates/ene-tool-rag" }
-ene-tool-sdk = { path = "crates/ene-tool-sdk" }
 ene-util = { path = "crates/ene-util" }
 ene-voice = { path = "crates/ene-voice" }
 ene-vrm = { path = "crates/ene-vrm" }

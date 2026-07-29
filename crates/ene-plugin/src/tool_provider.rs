@@ -20,9 +20,9 @@
 //! methods with their own task management. The default trait implementations
 //! fall back to synchronous execution, so existing tools are unaffected.
 
-use crate::ToolAction;
+use crate::action::ToolAction;
+use crate::{ToolPlugin, ToolPluginCapabilities};
 use async_trait::async_trait;
-use ene_plugin::{ToolPlugin, ToolPluginCapabilities};
 use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolRagProfile, ToolSpec};
 
 type SetCallContextHook = Box<dyn Fn(&str, Option<&str>) + Send + Sync>;

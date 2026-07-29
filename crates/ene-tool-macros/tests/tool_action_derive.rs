@@ -5,9 +5,9 @@
 )]
 
 use async_trait::async_trait;
+use ene_plugin::ToolAction as _;
 use ene_plugin_proto::ToolError;
 use ene_tool_macros::{ToolAction, ToolSpec, tool_action};
-use ene_tool_sdk::ToolAction as _;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -147,7 +147,7 @@ pub struct GreetAction;
 
 #[tool_action(args = GreetArgs)]
 #[async_trait]
-impl ene_tool_sdk::ToolAction for GreetAction {
+impl ene_plugin::ToolAction for GreetAction {
     async fn execute(&self, arguments: &str) -> Result<String, ToolError> {
         let args: GreetArgs =
             serde_json::from_str(arguments).map_err(|e| ToolError::InvalidArguments {

@@ -1,4 +1,4 @@
-use ene_tool_sdk::prelude::*;
+use ene_plugin::prelude::*;
 
 #[cfg(target_os = "linux")]
 mod wayland;

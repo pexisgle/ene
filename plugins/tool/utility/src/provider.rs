@@ -1,8 +1,8 @@
 use crate::action;
 use crate::todo_store::TodoStore;
 use async_trait::async_trait;
+use ene_plugin::{ActionSetProvider, ToolAction};
 use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolSpec};
-use ene_tool_sdk::{ActionSetProvider, ToolAction};
 use std::sync::Arc;
 
 /// Shared state for the todo actions.

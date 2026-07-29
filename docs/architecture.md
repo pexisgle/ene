@@ -62,8 +62,7 @@ flowchart TD
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
-  ToolSdk[crates/ene-tool-sdk] --> Tool
-  ToolSdk --> Macros[crates/ene-tool-macros]
+  Tool --> Macros[crates/ene-tool-macros]
 
   ToolHost -.spawns IPC.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.spawns IPC.-> ToolApp[plugins/tool/app]
@@ -141,8 +140,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-connector` | Platform connectors (Discord, Telegram, Slack, Webhook) and MCP client/server bridge |
 | `ene-plugin-host` | Plugin process supervision, MCP server discovery, health checks, circuit breaker |
 | `ene-plugin-proto` | IPC Protocol v4 wire messages, versioning, framing, tool types |
-| `ene-plugin` | Plugin authoring SDK & `ToolPluginAdapter` facade |
-| `ene-tool-sdk` | Tool plugin authoring SDK (`ToolAction`, `ActionSetProvider`, prelude) |
+| `ene-plugin` | Plugin authoring SDK: `ToolPlugin`/`LlmPlugin` facade, `ToolAction`/`ActionSetProvider`, prelude |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
 | `ene-tool-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
 | `ene-tool-rag` | Retrieval-augmented tool selection and reranking |
