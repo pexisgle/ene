@@ -44,9 +44,6 @@ flowchart TD
   ToolHost --> Connector[crates/ene-connector]
   ToolHost --> Proto
 
-  Connector --> Config
-  Connector --> Proto
-
   AiLocal --> Ai
   AiLocal --> Config
 
@@ -139,7 +136,7 @@ flowchart TD
 | `ene-ai` | `AiProvider` トレイト、OpenAI プロバイダ、Anthropic IPC アダプタ、プロバイダファクトリ |
 | `ene-ai-local` | `llama-cpp-4` によるローカル GGUF LLM 推論 |
 | `ene-voice` | ローカル STT (Whisper)、TTS、VAD (Silero ONNX)、cpal オーディオ I/O |
-| `ene-connector` | プラットフォーム連携 (Discord, Telegram, Slack, Webhook) および MCP クライアント/サーバーブリッジ |
+| `ene-connector` | 外部サービスの認証情報権威 (OAuth2/API キー保管、コネクタアイデンティティ、許可スコープ)。`ene-plugin-host` が利用 |
 | `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
 | `ene-plugin-proto` | IPC Protocol v4 ワイヤーメッセージ、バージョン定義、フレーミング |
 | `ene-plugin` | プラグイン開発 SDK: `ToolPlugin`/`LlmPlugin` ファサード、`ToolAction`/`ActionSetProvider`、prelude |

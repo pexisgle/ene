@@ -122,6 +122,12 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
 }
 ```
 
+HTTP MCP endpoints validate their URL before connecting (HTTPS-only by default;
+loopback and cloud-metadata/link-local addresses refused). Set
+`"mcp_allow_insecure_urls": true` inside `plugins` to permit plain-`http://` and
+loopback URLs for local development; link-local addresses stay refused. See
+[Plugins & MCP](concepts/plugins-and-mcp.md).
+
 ### `tools.*` — Tool-Execution Runtime Behavior
 
 Distinct from `plugins.*` (which manages the plugin *process*/IPC layer):

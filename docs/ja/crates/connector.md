@@ -1,22 +1,22 @@
 # `ene-connector`
 
-> **クレート**: `ene-connector` | **役割**: 汎用的な外部サービスコネクタフレームワーク
+> **クレート**: `ene-connector` | **役割**: 外部サービスコネクタの認証情報とアイデンティティの権威
 
-`ene-connector` は外部サービスへのコネクタを構築するための再利用可能なフレームワークを提供します: コネクタのアイデンティティと認証済みアカウント、OAuth トークン/API キーの記憶域 (シークレットはドロップ時に消記され、ログに出力されることもありません)、および再利用可能なポリシー (バックオフ付きリトライ、レート制限、タイムアウト、ページネーション)。このクレート自体は特定の外部サービスを実装しません — 具体的なコネクタはこのフレームワークの上に構築されます。例えば Model Context Protocol (MCP) ブリッジは、このフレームワークの利用者として `ene-plugin-host` 側 (`McpConnector`、`McpToolRegistry`) に実装されており、`ene-connector` 自体の内部にはありません。
-
-注意: このクレートは開発中です (`lib.rs` の `#![expect(missing_docs, ...)]`)。ここで説明する他のクレートよりも公開 API が変わりやすい点に留意してください。
+`ene-connector` は外部サービスへ接続する際の*認証情報*側を担います: 安全な OAuth2 / API キーの記憶域 (シークレットは `Debug`/`Serialize` から秘匿され、ドロップ時に消記され、ログに出力されることもありません)、安定したコネクタ識別子 (`ConnectorId`)、OAuth 許可スコープ、および表示用メタデータ (`ConnectorIdentity`)。特定の外部サービスを実装せず、接続ライフサイクルも担いません — プロセス監督、再起動、ヘルスプローブは `ene-plugin-host` にあり、これらの型を利用する唯一のクレートです。MCP ブリッジ (SSRF URL 検証を含む) もこちらではなく `ene-plugin-host` 側に実装されています。
 
 ---
 
 ## アーキテクチャ境界
 
-- `ene-connector` は `Connector` ライフサイクルトレイト、`ConnectorRegistry`、`CredentialStore`、およびポリシー型 (`RetryPolicy`、`RateLimiter`、`TimeoutPolicy`、`PaginationCursor`) を定義します。MCP 固有やツール変換のロジックは持ちません。
-- 具体的な統合 (現時点では MCP ブリッジ) は `ene-connector` のトレイトを利用するクレート側に実装され、`ene-connector` 自体には実装されません — これによりフレームワークを特定の外部プロトコルから切り離しています。
+- `ene-connector` は `CredentialStore` / `CredentialData` / `AccountCredentials`、`ConnectorId`、`PermissionScope`、`ConnectorIdentity`、`ConnectorError` を定義します。MCP 固有、ツール変換、プロセス監督のロジックは持ちません。
+- 具体的な統合は利用側のクレート (`ene-plugin-host`) に実装され、このフレームワークを特定の外部プロトコルから切り離しています。
+- **依存の向き**: `ene-connector` は意図的に `ene-config` や `ene-plugin-proto` に**依存しません** (#308)。認証情報の型を通じてその重量を露出させると、それらを参照するすべてのプラグインへ波及してしまいます。代わりに `ene-plugin-host` が connector と proto の両方を知るクレートです (#412)。
 
 ## 設計思想
 
-- **なぜ統合ごとの使い捨てクライアントコードではなく共有コネクタフレームワークか**: アイデンティティ/認証情報管理、リトライ/バックオフ、レート制限、ページネーションは、それ以外は無関係な外部サービス間でも同じ形をしています。ここに集約することで、新しいコネクタは `Connector` ライフサイクルトレイトを実装するだけで済み、ポリシー処理を再発明する必要がありません。
-- **なぜ認証情報をドロップ時に消記するか**: `CredentialStore` は OAuth トークンや API キーを保持しますが、使用後にプロセスメモリやログに残留してはいけません。
+- **なぜ認証情報を秘匿しドロップ時に消記するか**: `CredentialStore` は OAuth トークンと API キーを保持しますが、これらはプロセスメモリ、ログ、あるいは誤ったシリアライズに残留してはいけません。生の素材へは明示的で監査可能な `expose_for_persistence()` 経路を通じてのみ到達できます。
+- **なぜ `Connector` ライフサイクル層を撤去したか (#416)**: 以前の版には `Connector` トレイトと `ConnectorRegistry` がありましたが、本番の MCP 経路に一度も配線されず、`ene-plugin-host` が既に提供する監督機構と二重化していました。これらは削除され、MCP ブリッジの SSRF URL 検証は `ene-plugin-host` の `mcp_registry` へ移設されました。
+- **ポリシー型の行き先**: かつての `policy.rs` (リトライ / レート制限 / タイムアウト) はライフサイクル層とともに削除されました。クライアント側の認証情報ポリシーは #413 のもと `ene-plugin` に再導入され、認証情報の保管庫 (vault) と OAuth フローは #415 でここに実装されます。
 
 ## API リファレンス
 
@@ -26,7 +26,7 @@
 cargo doc -p ene-connector --open
 ```
 
-`Connector` トレイトと `ConnectorRegistry` から始めてください。
+`CredentialStore` と `ConnectorId` から始めてください。
 
 ---
 

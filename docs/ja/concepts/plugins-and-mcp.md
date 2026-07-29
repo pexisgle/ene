@@ -21,7 +21,7 @@ Ene ホストアプリケーション (ene-runtime)
         │     ├── ene-plugin-utility   (電卓 & TODO 管理ツール)
         │     └── ene-plugin-web       (Web 検索 & スクレイパーツール)
         │
-        └── Model Context Protocol (MCP) ブリッジ (ene-connector)
+        └── Model Context Protocol (MCP) ブリッジ (ene-plugin-host)
               └── 外部 MCP サーバー (Node.js / Python / Go などの MCP プロセス)
 ```
 
@@ -198,11 +198,51 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
 
 ## 6. MCP (Model Context Protocol) 連携
 
-`ene-connector` および `ene-plugin-host` は外部 MCP サーバーをシームレスに統合します：
+`ene-plugin-host` は外部 MCP サーバーを統合します (かつての `ene-connector`
+ブリッジ層は #416 で撤去されました — 接続ライフサイクルはすべてプラグインホスト内にあります)：
 
 1. **発見と起動**: ホストは `plugins.mcp_servers` 設定を読み込み、 `stdio` または HTTP/SSE 経由で対象の MCP サーバーバイナリを起動します。
 2. **ツール変換**: MCP ツールは自動的に `ToolSpec` アイテムに変換され、 `CompositeToolRegistry` に登録されます。
 3. **実行ルーティング**: LLM から生成されたツール呼び出しは MCP ブリッジを経由してルーティングされ、 `ene-runtime` に返却されます。
+
+サーバー名はルーティングとツール名前空間にそのまま使用され、文字種の検証は
+行われないため、 `github-mcp` のようなハイフン入り名前も他の名前と同様に接続
+できます (#417)。
+
+### HTTP URL 検証 (SSRF 対策)
+
+HTTP の MCP エンドポイント (`transport.type = "http"`) は、接続を試みる**前に**
+`McpToolRegistry::connect_http` によって URL を検証されます。既定は拒否です：
+
+- **HTTPS のみ。** `http://` URL は拒否されます。
+- **ループバック拒否。** `127.0.0.0/8` と `::1` は拒否されます。
+- **リンクローカルは常に拒否。** クラウドメタデータエンドポイント
+  `169.254.169.254` を含む `169.254.0.0/16` と `fe80::/10` は、いかなる設定でも
+  拒否されます。
+
+拒否は tracing ログと返却されるエラー (`PluginHostError::McpHandshake`) の
+両方に、サーバー名と理由を含めて報告されます。
+
+ローカル開発向けに、 `plugins.mcp_allow_insecure_urls` (既定 `false`) で
+プレーン `http://` URL とループバックエンドポイントを許可できます：
+
+```jsonc
+// settings.json (抜粋)
+{
+  "plugins": {
+    "mcp_allow_insecure_urls": true,
+    "mcp_servers": [
+      { "name": "local-dev", "enabled": true,
+        "transport": { "type": "http", "url": "http://127.0.0.1:8080/mcp" } }
+    ]
+  }
+}
+```
+
+このオプトインはリンクローカルのブロックを緩和しません。DNS リバインディング
+(内部アドレスに解決されるホスト名) はスコープ外です：検査されるのは IP リテラルの
+ホストのみです。これは、本番の接続経路で検証を一切行っていなかった以前の挙動より
+弱くなることはありません。
 
 ---
 
