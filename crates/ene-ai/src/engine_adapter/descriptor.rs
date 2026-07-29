@@ -147,7 +147,7 @@ impl Default for ConcurrencyHint {
 }
 
 /// The physical resource an engine contends on, and the key
-/// [`crate::local_engine::resource::ResourceRegistry`] uses to share an
+/// [`crate::engine_adapter::resource::ResourceRegistry`] uses to share an
 /// admission budget across engines that contend on the same one.
 ///
 /// Two engines that declare `==` `ResourceClass` values share one semaphore:
@@ -166,8 +166,8 @@ impl Default for ConcurrencyHint {
 /// with. All CPU-bound local engines now declare the same `Cpu` value and
 /// share one process-wide budget; how large that budget is (whether two
 /// independent CPU engines may run concurrently at all) is controlled by
-/// [`crate::local_engine::resource::default_permits`] /
-/// [`crate::local_engine::resource::ResourceRegistry::configure_all`], not
+/// [`crate::engine_adapter::resource::default_permits`] /
+/// [`crate::engine_adapter::resource::ResourceRegistry::configure_all`], not
 /// by this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceClass {
@@ -232,14 +232,14 @@ impl EngineDescriptor {
 ///
 /// A thin, explicit alternative to hidden global mutable state: callers that
 /// want non-default budgets build one of these and hand it to
-/// [`crate::local_engine::resource::ResourceRegistry::configure_all`] once,
+/// [`crate::engine_adapter::resource::ResourceRegistry::configure_all`] once,
 /// rather than reaching for ambient configuration.
 #[derive(Debug, Clone, Default)]
 pub struct ResourceBudgets(pub(crate) HashMap<ResourceClass, usize>);
 
 impl ResourceBudgets {
     /// An empty override set — every class uses
-    /// [`crate::local_engine::resource::default_permits`].
+    /// [`crate::engine_adapter::resource::default_permits`].
     #[must_use]
     pub fn new() -> Self {
         Self(HashMap::new())

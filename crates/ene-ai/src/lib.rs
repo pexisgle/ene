@@ -25,15 +25,15 @@
 
 /// Configuration types for AI providers, tasks, and retry policies.
 pub mod config;
-/// Error types for the AI provider layer.
-pub mod error;
-/// Provider health monitoring and failover routing.
-pub mod health;
 /// Blanket async-provider adapters over `ene-infer::EngineHandle`
 /// (`LocalLlmEngine`, `LocalTtsEngine`, `LocalSttEngine`), plus
 /// `EngineDescriptor` capability/concurrency/resource declarations and the
 /// process-wide `ResourceRegistry` admission budget.
-pub mod local_engine;
+pub mod engine_adapter;
+/// Error types for the AI provider layer.
+pub mod error;
+/// Provider health monitoring and failover routing.
+pub mod health;
 /// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
 /// Shared, safe model-file downloader (`ModelFetcher`) used by
@@ -58,16 +58,16 @@ pub use config::{
     LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
     TtsConfig, VadConfig, is_builtin_kind, kind_typo_suggestion,
 };
-pub use error::{AiError, LlmProviderError};
-pub use health::{
-    FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
-    ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
-};
-pub use local_engine::{
+pub use engine_adapter::{
     Capability, CapabilitySet, ConcurrencyHint, DEFAULT_CHUNK_BUFFER, EngineDescriptor, EngineId,
     LlmChatRequest, LlmChatResponse, LocalLlmEngine, LocalSttEngine, LocalTtsEngine,
     ResourceBudgets, ResourceClass, ResourceRegistry, StreamingLocalLlmEngine,
     SttTranscribeRequest, TtsSynthesisRequest, TtsSynthesisResponse,
+};
+pub use error::{AiError, LlmProviderError};
+pub use health::{
+    FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
+    ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
 pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
 pub use model_fetch::{

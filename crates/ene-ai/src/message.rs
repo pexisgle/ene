@@ -66,7 +66,7 @@ pub struct LlmResponseChunk {
 }
 
 impl From<String> for LlmResponseChunk {
-    /// The common case for a [`crate::local_engine::llm::StreamingLocalLlmEngine`]-wrapped
+    /// The common case for a [`crate::engine_adapter::llm::StreamingLocalLlmEngine`]-wrapped
     /// model whose `Chunk` is a plain detokenized text piece (e.g. llama.cpp's
     /// `LlamaChatModel`): one text delta, no tool call data.
     fn from(text_delta: String) -> Self {
