@@ -154,10 +154,33 @@ pub(super) struct TurnActor {
     /// background spawns.
     proactive_llm: Arc<OnceCell<ene_ai_local::ProactiveLlmHandles>>,
     /// Guards against spawning multiple background init tasks for
-    /// [`Self::proactive_llm`] (#397). Set to `true` when the first
-    /// background load is spawned; never reset (a failed load is logged
-    /// and not retried until the next actor restart).
-    proactive_llm_init_spawned: AtomicBool,
+    /// [`Self::proactive_llm`] (#397). Set to `true` when a background load
+    /// is spawned; reset to `false` if that load *fails* so a later call can
+    /// retry — a single transient failure must not permanently disable
+    /// proactive features for the process lifetime. On success the `OnceCell`
+    /// is populated, so the `get().is_some()` fast-path short-circuits before
+    /// this flag is consulted again. Shared via `Arc` so the background init
+    /// task can reset it on failure.
+    proactive_llm_init_spawned: Arc<AtomicBool>,
+    /// Guards against invoking [`ene_ai_local::ProactiveLlmHandles::shutdown`]
+    /// more than once (#397). Both the `EneCommand::Shutdown` arm and the
+    /// post-loop cleanup in [`Self::run`] run on every normal teardown;
+    /// previously `Option::take` made the second of those a no-op, but
+    /// `Arc<OnceCell>` cannot be taken through a shared reference. This flag
+    /// restores the at-most-once guarantee so a future `shutdown()` with real
+    /// side effects (unloading GGUF weights, releasing GPU memory) cannot be
+    /// double-invoked from the two unsynchronized call sites.
+    proactive_llm_shutdown: AtomicBool,
+    /// Guards against spawning duplicate `PrepareVisionSummary` slow-path
+    /// pollers (#397). The screen-capture-driven proactive vision flow can
+    /// fire `PrepareVisionSummary` several times during the multi-second GGUF
+    /// loading window; without deduplication each call would spawn a fresh
+    /// up-to-five-minute poller into `bg_command_tasks` (default cap 4),
+    /// exhausting the cap and starving unrelated background work (e.g. a
+    /// concurrent `PluginHostReconfigure`). Set while a poller is in flight;
+    /// the poller clears it just before exiting. Shared via `Arc` so the
+    /// background poller can clear it.
+    vision_slow_path_active: Arc<AtomicBool>,
     /// Origin of the active stream turn (for cancel Terminal).
     active_origin: crate::types::TurnOrigin,
     /// Provider health monitor for failover routing (#175).
@@ -267,7 +290,9 @@ impl TurnActor {
             proactive_decision_rx: None,
             proactive_decision_handle: None,
             proactive_llm: Arc::new(OnceCell::new()),
-            proactive_llm_init_spawned: AtomicBool::new(false),
+            proactive_llm_init_spawned: Arc::new(AtomicBool::new(false)),
+            proactive_llm_shutdown: AtomicBool::new(false),
+            vision_slow_path_active: Arc::new(AtomicBool::new(false)),
             active_origin: crate::types::TurnOrigin::User,
             health_monitor,
             task_caps,
@@ -606,9 +631,7 @@ impl TurnActor {
         if let Some(handle) = self.stream_handle.take() {
             handle.abort();
         }
-        if let Some(handles) = self.proactive_llm.get() {
-            handles.shutdown().await;
-        }
+        self.shutdown_proactive_llm_once().await;
         // Abort any in-flight direct CallTool, classifier, and memory-writer tasks,
         // and clear any pending prompt oneshot senders.
         self.classifier_tasks.abort_all();
@@ -716,6 +739,10 @@ impl TurnActor {
         let ai_cfg = match self.config.get_section::<ene_ai::AiConfig>() {
             Ok(cfg) => cfg,
             Err(e) => {
+                // Reset so a later call (e.g. after a config hot-reload fixes
+                // the section) can retry rather than being permanently stuck.
+                self.proactive_llm_init_spawned
+                    .store(false, Ordering::Release);
                 tracing::warn!(
                     component = "Proactive",
                     error = %e,
@@ -731,9 +758,14 @@ impl TurnActor {
             Some("ProactiveLlmInit".to_string()),
             &self.diag_tx,
         ) {
+            // No capacity right now; allow a later call to retry once a slot
+            // frees up instead of leaving the flag latched forever.
+            self.proactive_llm_init_spawned
+                .store(false, Ordering::Release);
             return;
         }
         let cell = Arc::clone(&self.proactive_llm);
+        let init_spawned = Arc::clone(&self.proactive_llm_init_spawned);
         self.bg_command_tasks.spawn(async move {
             match ene_ai_local::build_proactive_llm_handles(&ai_cfg).await {
                 Ok(handles) => {
@@ -748,6 +780,11 @@ impl TurnActor {
                     drop(cell.set(handles));
                 }
                 Err(e) => {
+                    // A single transient failure must not permanently disable
+                    // proactive features: reset the spawn guard so a later
+                    // call retries. (On success the populated `OnceCell`
+                    // short-circuits before this flag is ever consulted.)
+                    init_spawned.store(false, Ordering::Release);
                     tracing::error!(
                         component = "Proactive",
                         error = %e,
@@ -758,6 +795,22 @@ impl TurnActor {
         });
     }
 
+    /// Shuts down the proactive LLM handles at most once (#397).
+    ///
+    /// Both the `EneCommand::Shutdown` arm and the post-loop cleanup in
+    /// [`Self::run`] call this on every normal teardown; the
+    /// `proactive_llm_shutdown` flag guarantees the underlying
+    /// [`ene_ai_local::ProactiveLlmHandles::shutdown`] runs only on the first
+    /// of the two, restoring the at-most-once guarantee the old
+    /// `Option::take` provided before the `Arc<OnceCell>` conversion.
+    async fn shutdown_proactive_llm_once(&self) {
+        if let Some(handles) = self.proactive_llm.get()
+            && !self.proactive_llm_shutdown.swap(true, Ordering::AcqRel)
+        {
+            handles.shutdown().await;
+        }
+    }
+
     /// Handles [`EneCommand::PrepareVisionSummary`] (#271): the busy-check
     /// and lazy local-model init the legacy inline `SummarizeScreenImage`
     /// handler used to do, minus the raw RGB buffer and the actual
@@ -766,7 +819,10 @@ impl TurnActor {
     ///
     /// Split into a fast path (handles already loaded → synchronous reply)
     /// and a slow path (handles still loading → background wait) so the
-    /// actor loop is never blocked on a GGUF model load (#397).
+    /// actor loop is never blocked on a GGUF model load (#397). The slow
+    /// path is deduplicated: at most one background poller runs at a time
+    /// (guarded by `vision_slow_path_active`), so a burst of concurrent
+    /// requests during the loading window cannot exhaust `bg_command_cap`.
     fn prepare_vision_summary(
         &mut self,
         app_label: String,
@@ -813,6 +869,20 @@ impl TurnActor {
         }
 
         // Slow path: handles still loading — hand off to bg_command_tasks.
+        // Deduplicate concurrent slow-path requests (#397): the screen-capture
+        // driven proactive flow can fire `PrepareVisionSummary` several times
+        // during the GGUF loading window, and each call would otherwise spawn
+        // a fresh up-to-five-minute poller. With `bg_command_cap` defaulting
+        // to 4, that would exhaust the cap and starve unrelated background
+        // work (e.g. a concurrent `PluginHostReconfigure`). Only one poller
+        // runs at a time; concurrent callers fail fast and retry on the next
+        // capture cycle once the model is loaded.
+        if self.vision_slow_path_active.load(Ordering::Acquire) {
+            drop(reply.send(Err(PublicApiError::Internal {
+                message: "runtime busy: vision preparation already in progress".to_string(),
+            })));
+            return;
+        }
         if !admit_task(
             &self.bg_command_tasks,
             self.task_caps.bg_command_cap,
@@ -832,12 +902,17 @@ impl TurnActor {
         self.vision_cancel = CancellationToken::new();
         let cancel = self.vision_cancel.clone();
         let cell = Arc::clone(&self.proactive_llm);
+        let slow_path_active = Arc::clone(&self.vision_slow_path_active);
+        // Set only after admission succeeds, so a rejected admission does not
+        // latch the flag and permanently block future slow-path requests.
+        slow_path_active.store(true, Ordering::Release);
         self.bg_command_tasks.spawn(async move {
             // Poll until the OnceCell is populated (init is already running)
             // or the cancel token fires (a new user turn started).
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(5);
             loop {
                 if cancel.is_cancelled() {
+                    slow_path_active.store(false, Ordering::Release);
                     drop(reply.send(Err(PublicApiError::Internal {
                         message: "vision preparation cancelled".to_string(),
                     })));
@@ -849,10 +924,12 @@ impl TurnActor {
                             vp.cancel = cancel;
                             vp
                         });
+                    slow_path_active.store(false, Ordering::Release);
                     drop(reply.send(result));
                     return;
                 }
                 if tokio::time::Instant::now() >= deadline {
+                    slow_path_active.store(false, Ordering::Release);
                     drop(reply.send(Err(PublicApiError::Internal {
                         message: "proactive LLM init timed out".to_string(),
                     })));
@@ -1173,9 +1250,7 @@ impl TurnActor {
                 self.call_tool_tasks.abort_all();
                 self.bg_command_tasks.abort_all();
                 self.abort_proactive_decision();
-                if let Some(handles) = self.proactive_llm.get() {
-                    handles.shutdown().await;
-                }
+                self.shutdown_proactive_llm_once().await;
                 self.drain_pending().await;
                 false
             }
@@ -1543,6 +1618,32 @@ impl TurnActor {
                     vec!["/test/path".to_string()],
                 );
                 panic!("induced panic after mutating shared actor state (#268 regression test)");
+            }
+            #[cfg(test)]
+            EneCommand::TestSpawnSlowBgTask { reply } => {
+                // Admit a long-running task into `bg_command_tasks` to
+                // simulate a heavy background command (GGUF load / plugin
+                // host restart) being in flight (#397). The actor loop must
+                // keep processing subsequent commands while this sleeps.
+                if admit_task(
+                    &self.bg_command_tasks,
+                    self.task_caps.bg_command_cap,
+                    "BgCommand",
+                    Some("TestSlowBgTask".to_string()),
+                    &self.diag_tx,
+                ) {
+                    self.bg_command_tasks.spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    });
+                }
+                // A oneshot `Sender<()>::send` error is `Copy` (the unsent
+                // `()`), so `drop()` would trip `clippy::dropping_copy_types`.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(());
+                true
             }
         }
     }

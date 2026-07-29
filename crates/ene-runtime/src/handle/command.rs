@@ -232,6 +232,18 @@ pub enum EneCommand {
         /// to prove the map entry survived intact.
         permission_tx: oneshot::Sender<PermissionDecision>,
     },
+    /// Test-only (#397 regression coverage): occupies one `bg_command_tasks`
+    /// slot with a long-sleeping task, then replies on `reply`. Used to
+    /// simulate a heavy background command (GGUF load / plugin host restart)
+    /// being in flight so a follow-up command can be asserted to still be
+    /// processed promptly — i.e. the actor loop is not head-of-line blocked.
+    /// Compiled only under `cfg(test)`; not reachable from production code.
+    #[cfg(test)]
+    TestSpawnSlowBgTask {
+        /// Reply channel; fired once the slow background task has been
+        /// admitted and spawned, so the test knows the slot is occupied.
+        reply: oneshot::Sender<()>,
+    },
 }
 
 /// Payload for [`EneCommand::UpdateFeatureSettings`].
