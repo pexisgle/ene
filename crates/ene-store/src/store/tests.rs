@@ -1801,29 +1801,46 @@ async fn pending_candidates_are_isolated_per_store_instance() {
 /// Regression test for #419: the per-connection PRAGMAs must set
 /// `foreign_keys=ON` (and the other safety PRAGMAs) on **every**
 /// connection in the pool, not just the first one. A file-backed
-/// store uses a pool of eight connections; we issue the PRAGMA
-/// check sixteen times so the pool cycles through multiple distinct
-/// connections (probabilistic but overwhelmingly likely to cover
-/// all eight).
+/// store uses a pool of eight connections; we deterministically
+/// exercise all of them by opening eight concurrent transactions
+/// (each holds a distinct pool connection) behind a barrier so
+/// they are all live simultaneously before checking the PRAGMA.
 #[tokio::test]
 async fn pragmas_apply_to_all_pool_connections() {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+    use std::sync::Arc;
+    use tokio::sync::Barrier;
+
+    const POOL_SIZE: usize = 8;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("memory.db");
     let store = MemoryStore::open(&path, 4).await.expect("open");
 
-    for _ in 0..16 {
-        let row = store
-            .connection()
-            .query_one_raw(Statement::from_string(
-                DbBackend::Sqlite,
-                "PRAGMA foreign_keys".to_string(),
-            ))
-            .await
-            .expect("query PRAGMA foreign_keys")
-            .expect("row");
-        let fk_on: i32 = row.try_get_by_index(0).expect("value");
+    let barrier = Arc::new(Barrier::new(POOL_SIZE));
+    let mut handles = Vec::with_capacity(POOL_SIZE);
+    for _ in 0..POOL_SIZE {
+        let barrier = Arc::clone(&barrier);
+        let db = store.connection().clone();
+        handles.push(tokio::spawn(async move {
+            let txn = db.begin().await.expect("begin txn");
+            barrier.wait().await;
+            let row = txn
+                .query_one_raw(Statement::from_string(
+                    DbBackend::Sqlite,
+                    "PRAGMA foreign_keys".to_string(),
+                ))
+                .await
+                .expect("query PRAGMA foreign_keys")
+                .expect("row");
+            let fk_on: i32 = row.try_get_by_index(0).expect("value");
+            txn.commit().await.expect("commit");
+            fk_on
+        }));
+    }
+
+    for handle in handles {
+        let fk_on = handle.await.expect("task panicked");
         assert_eq!(
             fk_on, 1,
             "foreign_keys must report 1 (ON) for every pool connection"

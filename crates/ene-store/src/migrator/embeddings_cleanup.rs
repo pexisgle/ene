@@ -88,6 +88,12 @@ impl MigrationTrait for EmbeddingsCleanupIndexMigration {
         let db = manager.get_connection();
         db.execute_unprepared("DROP INDEX IF EXISTS idx_memory_embeddings_item_id")
             .await?;
+        // Note: `uniq_memory_embedding` was originally created by the base
+        // migration. Dropping it here is safe only when migrations are
+        // reverted in order (the base migration's `down()` drops the table
+        // entirely). If this migration were rolled back in isolation, the
+        // unique constraint backing the ON CONFLICT upsert path in
+        // `store/memory.rs` would be lost until the base migration re-runs.
         db.execute_unprepared("DROP INDEX IF EXISTS uniq_memory_embedding")
             .await?;
         Ok(())
