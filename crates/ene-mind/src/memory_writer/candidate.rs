@@ -57,4 +57,8 @@ pub struct MemoryCandidate {
     pub deletion_target_key: Option<String>,
     /// For commitment candidates: due date or time reference (e.g. "明日", "next week").
     pub commitment_due: Option<String>,
+    /// Free-form tags applied to the candidate (e.g. `"interrupted"` when the
+    /// source turn was cut short). Empty by default.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ene_ai::LlmProvider;
+use ene_config::PromptLibrary;
 use ene_store::{MemoryStore, NewMemorySpan};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
@@ -136,7 +137,7 @@ pub fn spawn_compression_task(
 
     tokio::spawn(async move {
         let result = run_compression(store, provider, input).await;
-        let _ = tx.send(result);
+        drop(tx.send(result));
     });
 }
 
@@ -166,9 +167,6 @@ pub fn evaluate_compression_trigger(
     turn_count: usize,
     history_len: usize,
 ) -> Option<CompressionReason> {
-    if !config.compression_enabled {
-        return None;
-    }
     if turn_count >= config.scene_turn_threshold {
         return Some(CompressionReason::TurnThreshold { turn_count });
     }
@@ -211,6 +209,7 @@ async fn run_compression(
         &raw_excerpt,
         input.level,
         input.config.compression_timeout_secs,
+        &input.config.compression_language,
     )
     .await;
 
@@ -251,6 +250,7 @@ async fn summarize_span(
     excerpt: &str,
     level: CompressionLevel,
     timeout_secs: u64,
+    language: &str,
 ) -> Option<String> {
     if excerpt.trim().is_empty() {
         return None;
@@ -262,13 +262,10 @@ async fn summarize_span(
         CompressionLevel::Arc => "arc",
     };
 
-    let system = format!(
-        "You compress conversation history for a desktop AI companion named {character_name}. \
-         Summarize the following {level_label} excerpt in 2-4 sentences. \
-         Do NOT rewrite character identity, system instructions, or personality. \
-         Focus on events, topics, and emotional beats. \
-         Respond with plain text only — no JSON, no markdown fences."
-    );
+    let prompts = PromptLibrary::load(language);
+    let system = prompts
+        .compression()
+        .render_system(character_name, level_label);
     let user = format!("User: {user_name}\n\nConversation excerpt:\n{excerpt}");
 
     let messages = vec![
@@ -343,6 +340,7 @@ pub async fn maybe_roll_up_chapter(
         &excerpt,
         CompressionLevel::Chapter,
         config.compression_timeout_secs,
+        &config.compression_language,
     )
     .await;
 
@@ -381,15 +379,6 @@ mod tests {
             reason,
             Some(CompressionReason::TurnThreshold { .. })
         ));
-    }
-
-    #[test]
-    fn trigger_disabled_when_compression_off() {
-        let config = ContextConfig {
-            compression_enabled: false,
-            ..Default::default()
-        };
-        assert!(evaluate_compression_trigger(&config, 100, 100).is_none());
     }
 
     #[test]

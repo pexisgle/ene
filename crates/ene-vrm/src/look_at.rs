@@ -179,6 +179,7 @@ impl LookAtRangeMapSet {
 /// the `serde` rename style but model the two values as enum
 /// variants so the consumer side stays typed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LookAtType {
     /// Drive the humanoid `head` / `leftEye` / `rightEye` bone
     /// rotations. Spec default.
@@ -297,6 +298,7 @@ pub struct LookAtExpressionOutput {
 /// variant matches the model's `look_at_type`; a model with
 /// `type = "bone"` only ever produces `Bone`, and vice versa.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum LookAtOutput {
     /// Per-bone deltas for `"bone"`-type models.
     Bone(LookAtBoneOutput),

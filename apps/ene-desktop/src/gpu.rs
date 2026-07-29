@@ -9,6 +9,22 @@ use wgpu::{
     TextureFormat,
 };
 
+/// Errors that can occur during GPU context creation.
+#[derive(Debug, thiserror::Error)]
+pub enum GpuError {
+    #[error("Failed to request wgpu adapter: {0}")]
+    RequestAdapter(String),
+    #[error("Failed to request wgpu device: {0}")]
+    RequestDevice(String),
+}
+
+/// Errors that can occur during window surface creation.
+#[derive(Debug, thiserror::Error)]
+pub enum WindowSurfaceError {
+    #[error("Failed to create wgpu surface: {0}")]
+    CreateSurface(String),
+}
+
 /// Owned handle to the wgpu globals.
 pub struct GpuContext {
     pub instance: Instance,
@@ -18,7 +34,7 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
-    pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn new() -> Result<Self, GpuError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: {
                 #[cfg(target_os = "windows")]
@@ -43,7 +59,7 @@ impl GpuContext {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|e| format!("Failed to request wgpu adapter: {e}"))?;
+            .map_err(|e| GpuError::RequestAdapter(e.to_string()))?;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -64,7 +80,7 @@ impl GpuContext {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .map_err(|e| format!("Failed to request wgpu device: {e}"))?;
+            .map_err(|e| GpuError::RequestDevice(e.to_string()))?;
 
         Ok(Self {
             instance,

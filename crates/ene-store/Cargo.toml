@@ -2,13 +2,17 @@
 name = "ene-store"
 version.workspace = true
 edition.workspace = true
-description = "Persistence-only SQLite-vec store with vector similarity search, key facts, and conversation history"
+description = "SQLite-vec store with vector similarity search, key facts, conversation history, and per-tool DB IPC server"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["lib"]
 
 [dependencies]
-tokio = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "fs"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 sea-orm = { workspace = true }
@@ -18,10 +22,17 @@ libsqlite3-sys = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+blake3 = { workspace = true }
+parking_lot = { workspace = true }
 
 ene-config = { workspace = true }
+ene-core = { workspace = true }
+ene-plugin-db = { workspace = true }
+ene-plugin-proto = { workspace = true }
 serde = { workspace = true }
-ctor = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

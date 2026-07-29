@@ -1,28 +1,40 @@
 [package]
 name = "ene-cli"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Interactive CLI REPL for chatting with AI characters, testing tools, and managing memory/sessions"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
+ene-ai = { workspace = true }
+ene-ai-local = { workspace = true }
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
 ene-config = { workspace = true }
 ene-store = { workspace = true }
-ene-tool-host = { workspace = true }
-tokio = { workspace = true, features = ["signal"] }
+ene-plugin-host = { workspace = true }
+tokio = { workspace = true, features = ["signal", "fs"] }
 tokio-stream = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+clap = { workspace = true }
 dialoguer = "0.12"
 console = "0.16.3"
+crossterm = { workspace = true }
 futures-core = "0.3"
+parking_lot = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rust-embed = "8.11"
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
 thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ene-ai-local = { workspace = true, features = ["vulkan"] }
 
 [lints]
 workspace = true

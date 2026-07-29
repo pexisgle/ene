@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use ene_store::ActiveCommitmentPrompt;
 
-use crate::character::{IdentityKernel, StyleExample};
+use ene_config::UserPersona;
+
+use crate::character::{AuthorsNote, IdentityKernel, StyleExample, apply_authors_note};
 use crate::config::ContextConfig;
 use crate::error::CognitionError;
 use crate::lifecycle::HistoryEntry;
@@ -22,13 +24,13 @@ pub struct ContextBudget {
     /// Total prompt token ceiling.
     pub total_tokens: usize,
     /// Per-section dynamic budgets.
-    pub section_budgets: [usize; 12],
+    pub section_budgets: [usize; 13],
 }
 
 impl ContextBudget {
     /// Build a budget from [`ContextConfig`].
     pub const fn from_config(config: &ContextConfig) -> Self {
-        let mut section_budgets = [0usize; 12];
+        let mut section_budgets = [0usize; 13];
         section_budgets[PromptSectionKind::SceneState as usize] = config.scene_summary_tokens;
         section_budgets[PromptSectionKind::SemanticContext as usize] =
             config.semantic_budget_tokens;
@@ -104,18 +106,18 @@ pub struct PackInput {
     pub history: Vec<HistoryEntry>,
     /// Expression PHI / output contract block.
     pub output_contract: Option<String>,
+    /// Note about a previously interrupted response (#206).
+    pub interruption_note: Option<String>,
+    /// Author's note: depth-based instruction injection (roleplay enhancement).
+    pub authors_note: Option<AuthorsNote>,
+    /// Optional structured user persona for `{{user_persona}}` macro expansion.
+    pub user_persona: Option<UserPersona>,
     /// Current user input.
     pub user_input: String,
 }
 
 /// Validate that configured sub-budgets do not exceed the total ceiling.
 pub fn validate_context_config(config: &ContextConfig) -> Result<(), CognitionError> {
-    if !config.compression_enabled {
-        return Err(CognitionError::Other(
-            "mind.context.compression_enabled must be true (hard session split is not a product path)"
-                .into(),
-        ));
-    }
     let dynamic_sum = config.scene_summary_tokens
         + config.memory_budget_tokens
         + config.semantic_budget_tokens
@@ -130,7 +132,8 @@ pub fn validate_context_config(config: &ContextConfig) -> Result<(), CognitionEr
 }
 
 /// Drop priority for dynamic sections (lowest index = dropped first).
-const DROP_ORDER: [PromptSectionKind; 6] = [
+const DROP_ORDER: [PromptSectionKind; 7] = [
+    PromptSectionKind::InterruptionNote,
     PromptSectionKind::StyleExamples,
     PromptSectionKind::EpisodicMemories,
     PromptSectionKind::SemanticContext,
@@ -169,23 +172,56 @@ fn set_section_body(sections: &mut [PromptSection], kind: PromptSectionKind, bod
     }
 }
 
+/// Token cost of a single history entry (content estimate + per-message overhead).
+fn history_entry_tokens(entry: &HistoryEntry) -> usize {
+    estimate_tokens(&entry.content).saturating_add(4)
+}
+
 fn estimate_history_tokens(history: &[HistoryEntry]) -> usize {
-    history
-        .iter()
-        .map(|entry| estimate_tokens(&entry.content).saturating_add(4))
-        .sum()
+    history.iter().map(history_entry_tokens).sum()
 }
 
 /// Minimum history messages kept when trimming for token budget (one exchange).
 const MIN_HISTORY_MESSAGES: usize = 2;
 
+/// Token budget for the advisory interruption note (#M10). Non-zero so the
+/// section participates in per-section truncation, and it is listed in
+/// [`DROP_ORDER`] so it can be dropped entirely when over budget.
+const INTERRUPTION_NOTE_BUDGET_TOKENS: usize = 200;
+
 fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) -> usize {
-    let mut dropped = 0usize;
-    while history.len() > MIN_HISTORY_MESSAGES && estimate_history_tokens(history) > max_tokens {
-        history.remove(0);
-        dropped += 1;
+    // Measure each entry once and build a suffix-sum table so the binary
+    // search below accumulates cached counts instead of re-scanning the full
+    // message text on every probe.
+    let suffix = {
+        let mut suffix = vec![0usize; history.len() + 1];
+        for (i, entry) in history.iter().enumerate().rev() {
+            suffix[i] = suffix[i + 1].saturating_add(history_entry_tokens(entry));
+        }
+        suffix
+    };
+    let remaining_tokens = |start: usize| suffix[start.min(history.len())];
+
+    // Binary search for the minimum number of front elements to drain
+    // so the remaining history fits within max_tokens.
+    let mut lo = 0usize;
+    let mut hi = history.len().saturating_sub(MIN_HISTORY_MESSAGES);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if remaining_tokens(mid) > max_tokens {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
     }
-    dropped
+    // `lo` is the smallest drop count where the remainder fits; ensure we actually needed trimming.
+    if lo == 0 && remaining_tokens(0) <= max_tokens {
+        return 0;
+    }
+    // If even dropping to MIN_HISTORY_MESSAGES doesn't fit, drop everything above minimum.
+    let drop_count = lo;
+    history.drain(0..drop_count);
+    drop_count
 }
 
 fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSection> {
@@ -242,12 +278,27 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         ));
     }
 
-    if !profile.is_empty() {
+    if !profile.is_empty() || input.user_persona.is_some() {
         let mut profile_owned: Vec<RecalledMemory> = profile.iter().map(|m| (*m).clone()).collect();
         sort_memories_for_drop(&mut profile_owned);
+
+        // Build the section body: prepend user_persona info then append recalled profile memories
+        let mut body_parts = Vec::new();
+
+        // Add structured user persona as a block at the top of the UserProfile section
+        if let Some(ref persona) = input.user_persona {
+            body_parts.push(persona.render_lines("- "));
+        }
+
+        // Append recalled profile/preference/relationship memories
+        if !profile_owned.is_empty() {
+            body_parts.push(memory_section_body(&profile_owned));
+        }
+
+        let body = body_parts.join("\n");
         sections.push(PromptSection::new(
             PromptSectionKind::UserProfile,
-            memory_section_body(&profile_owned),
+            body,
             budget.budget_for(PromptSectionKind::UserProfile),
         ));
     }
@@ -285,6 +336,14 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         ));
     }
 
+    if let Some(text) = &input.interruption_note {
+        sections.push(PromptSection::new(
+            PromptSectionKind::InterruptionNote,
+            text.clone(),
+            INTERRUPTION_NOTE_BUDGET_TOKENS,
+        ));
+    }
+
     if let Some(text) = &input.output_contract {
         sections.push(PromptSection::new(
             PromptSectionKind::OutputContract,
@@ -313,10 +372,6 @@ fn apply_section_budget(section: &mut PromptSection) {
     }
 }
 
-fn section_token_total(sections: &[PromptSection]) -> usize {
-    sections.iter().map(|s| estimate_tokens(&s.content)).sum()
-}
-
 /// Pack a prompt packet under the configured token budget.
 #[must_use]
 pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
@@ -329,8 +384,15 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         apply_section_budget(section);
     }
 
-    let mut total =
-        section_token_total(&sections).saturating_add(estimate_history_tokens(&input.history));
+    // Cache each section's estimated token count so later drop passes adjust
+    // the running total without re-scanning every section body.
+    let mut section_tokens_cache: Vec<usize> = sections
+        .iter()
+        .map(|s| estimate_tokens(&s.content))
+        .collect();
+    let mut section_tokens_sum: usize = section_tokens_cache.iter().sum();
+
+    let mut total = section_tokens_sum.saturating_add(estimate_history_tokens(&input.history));
 
     if total > budget.total_tokens {
         let mut drop_set = HashSet::new();
@@ -339,8 +401,10 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
                 break;
             }
             if let Some(idx) = sections.iter().position(|s| s.kind == kind) {
-                let removed_tokens = estimate_tokens(&sections[idx].content);
+                let removed_tokens = section_tokens_cache[idx];
                 sections[idx].content.clear();
+                section_tokens_cache[idx] = 0;
+                section_tokens_sum = section_tokens_sum.saturating_sub(removed_tokens);
                 drop_set.insert(kind);
                 total = total.saturating_sub(removed_tokens);
             }
@@ -360,19 +424,34 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
                 let removed = memories.remove(0);
                 let removed_tokens =
                     estimate_tokens(&memory_section_body(std::slice::from_ref(&removed)));
-                set_section_body(&mut sections, kind, memory_section_body(memories));
+                let body = memory_section_body(memories);
+                set_section_body(&mut sections, kind, body);
+                if let Some(idx) = sections.iter().position(|s| s.kind == kind) {
+                    let new_tokens = estimate_tokens(&sections[idx].content);
+                    section_tokens_sum =
+                        section_tokens_sum.saturating_sub(section_tokens_cache[idx]);
+                    section_tokens_cache[idx] = new_tokens;
+                    section_tokens_sum = section_tokens_sum.saturating_add(new_tokens);
+                }
                 total = total.saturating_sub(removed_tokens);
             }
         }
     }
 
-    let section_tokens = section_token_total(&sections);
+    let section_tokens = section_tokens_sum;
     let mut history = input.history;
     let mut history_messages_dropped = 0usize;
     if total > budget.total_tokens {
         let history_budget = budget.total_tokens.saturating_sub(section_tokens);
         history_messages_dropped = trim_history_to_budget(&mut history, history_budget);
         total = section_tokens.saturating_add(estimate_history_tokens(&history));
+    }
+
+    // Apply author's note after history trimming so the depth is relative to
+    // the post-trim history length. This is done after trimming to ensure the
+    // note is injected at the correct position in the final history.
+    if let Some(ref note) = input.authors_note {
+        apply_authors_note(&mut history, note);
     }
 
     let packed_tokens = total;
@@ -469,11 +548,11 @@ mod tests {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
-            compression_enabled: true,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
+            compression_language: "en".into(),
         };
         let budget = ContextBudget::from_config(&config);
         let kernel = IdentityKernel {
@@ -498,6 +577,9 @@ mod tests {
             scene_summary: Some("scene".repeat(200)),
             history: vec![],
             output_contract: Some("PHI".into()),
+            interruption_note: None,
+            authors_note: None,
+            user_persona: None,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -534,20 +616,11 @@ mod tests {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
-            compression_enabled: true,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
-        };
-        assert!(validate_context_config(&config).is_err());
-    }
-
-    #[test]
-    fn validate_context_config_requires_compression() {
-        let config = ContextConfig {
-            compression_enabled: false,
-            ..Default::default()
+            compression_language: "en".into(),
         };
         assert!(validate_context_config(&config).is_err());
     }
@@ -563,11 +636,11 @@ mod tests {
             memory_budget_tokens: 1_800,
             semantic_budget_tokens: 1_200,
             style_example_budget_tokens: 600,
-            compression_enabled: true,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,
+            compression_language: "en".into(),
         };
         let budget = ContextBudget::from_config(&config);
         let kernel = IdentityKernel {
@@ -603,6 +676,9 @@ mod tests {
                 },
             ],
             output_contract: None,
+            interruption_note: None,
+            authors_note: None,
+            user_persona: None,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -624,5 +700,61 @@ mod tests {
         let budget = ContextBudget::from_config_and_hints(&config, &hints);
         assert_eq!(budget.budget_for(PromptSectionKind::EpisodicMemories), 999);
         assert_eq!(budget.budget_for(PromptSectionKind::SemanticContext), 888);
+    }
+
+    #[test]
+    fn interruption_note_is_dropped_when_over_budget() {
+        // The advisory interruption note is not required and is listed first in
+        // DROP_ORDER, so a tight budget drops it before the identity kernel (#M10).
+        let config = ContextConfig {
+            max_prompt_tokens: 30,
+            recent_turns: 4,
+            scene_summary_tokens: 800,
+            memory_budget_tokens: 1_800,
+            semantic_budget_tokens: 1_200,
+            style_example_budget_tokens: 600,
+            scene_turn_threshold: 12,
+            chapter_span_threshold: 5,
+            arc_span_threshold: 3,
+            compression_timeout_secs: 60,
+            compression_language: "en".into(),
+        };
+        let budget = ContextBudget::from_config(&config);
+        let kernel = IdentityKernel {
+            name: "Ene".into(),
+            text: "KERNEL".into(),
+            post_history_instructions: None,
+        };
+        let input = PackInput {
+            platform_contract: None,
+            identity_kernel: kernel,
+            behavior_contract: Some("rules ".repeat(40)),
+            style_examples: vec![],
+            recalled: vec![],
+            commitments: vec![],
+            affect_summary: None,
+            scene_summary: None,
+            history: vec![],
+            output_contract: None,
+            interruption_note: Some("your previous reply was cut off mid-sentence".repeat(4)),
+            authors_note: None,
+            user_persona: None,
+            user_input: "hello".into(),
+        };
+        let packed = pack_prompt(input, &budget);
+        assert!(
+            packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::InterruptionNote),
+            "interruption note should be dropped under a tight budget, dropped={:?}",
+            packed.meta.dropped
+        );
+        // The required identity kernel must survive.
+        let kernel_section = packed
+            .packet
+            .section(PromptSectionKind::IdentityKernel)
+            .expect("identity kernel present");
+        assert!(kernel_section.content.contains("KERNEL"));
     }
 }

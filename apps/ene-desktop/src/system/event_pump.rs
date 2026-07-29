@@ -12,10 +12,9 @@ use bevy_ecs::prelude::*;
 
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
-#[cfg(target_os = "linux")]
 use crate::event::lifecycle::TickGtk;
 use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
@@ -45,6 +44,8 @@ pub fn pump_legacy_events(
     mut open_settings: MessageWriter<OpenSettings>,
     mut open_chat: MessageWriter<OpenChat>,
     #[cfg(target_os = "linux")] mut tick_gtk: MessageWriter<TickGtk>,
+    mut runtime_disconnected: MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
+    mut pending_candidates: MessageWriter<PendingCandidatesCount>,
 ) {
     while let Ok(event) = channels.rx.try_recv() {
         translate_event(
@@ -61,6 +62,8 @@ pub fn pump_legacy_events(
             &mut cancel,
             &mut open_settings,
             &mut open_chat,
+            &mut runtime_disconnected,
+            &mut pending_candidates,
         );
     }
     // Phase 7.5: publish a `TickGtk` every frame on Linux so the
@@ -85,10 +88,15 @@ fn translate_event(
     cancel: &mut MessageWriter<CancelCommand>,
     open_settings: &mut MessageWriter<OpenSettings>,
     open_chat: &mut MessageWriter<OpenChat>,
+    runtime_disconnected: &mut MessageWriter<crate::event::lifecycle::RuntimeDisconnected>,
+    pending_candidates: &mut MessageWriter<PendingCandidatesCount>,
 ) {
     match event {
         AppEvent::Quit | AppEvent::Tray(crate::events::TrayAction::Quit) => {
             exit.0 = true;
+        }
+        AppEvent::RuntimeDisconnected => {
+            runtime_disconnected.write(crate::event::lifecycle::RuntimeDisconnected);
         }
         AppEvent::Tray(crate::events::TrayAction::OpenSettings { page }) => {
             open_settings.write(OpenSettings { page });
@@ -161,6 +169,20 @@ fn translate_event(
                 "LookAt cue received (gaze system pending)"
             );
         }
+        #[cfg(feature = "voice")]
+        AppEvent::MicStateChanged { active } => {
+            // The chat UI reads `AudioState::is_mic_active` directly each
+            // frame (egui polls continuously); this event exists so future
+            // consumers (e.g. a tray indicator) can react to mic toggles.
+            tracing::debug!(
+                component = "Audio",
+                active,
+                "microphone capture state changed"
+            );
+        }
+        AppEvent::PendingCandidatesCount(count) => {
+            pending_candidates.write(PendingCandidatesCount(count));
+        }
     }
 }
 
@@ -202,6 +224,8 @@ mod tests {
         world.init_resource::<Messages<CancelCommand>>();
         world.init_resource::<Messages<OpenSettings>>();
         world.init_resource::<Messages<OpenChat>>();
+        world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
+        world.init_resource::<Messages<PendingCandidatesCount>>();
         #[cfg(target_os = "linux")]
         world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
         (world, tx)

@@ -3,6 +3,9 @@ name = "ene-runtime"
 version.workspace = true
 edition.workspace = true
 description = "Unified runtime facade integrating LLM streaming, tool orchestration, long-term memory, and session management"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["lib"]
@@ -10,8 +13,12 @@ crate-type = ["lib"]
 [dependencies]
 ene-mind = { workspace = true }
 ene-ai = { workspace = true }
+ene-ai-local = { workspace = true }
+ene-voice = { workspace = true }
+futures = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
+parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio-util = { workspace = true }
@@ -20,27 +27,23 @@ chrono = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
 ene-config = { workspace = true }
+ene-core = { workspace = true }
 ene-store = { workspace = true }
-ene-tool-db = { workspace = true }
-sea-orm = { workspace = true }
 blake3 = { workspace = true }
 uuid = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
+image = { workspace = true, features = ["jpeg"] }
 
-ene-tool-host = { workspace = true }
+once_cell = { workspace = true }
 ene-tool-rag = { workspace = true }
-ene-tool-proto = { workspace = true }
+ene-plugin-proto = { workspace = true }
+ene-plugin-host = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
-ene-tool-proto = { workspace = true }
 tracing-subscriber = { workspace = true }
-ene-config = { workspace = true }
-ene-store = { workspace = true }
-ene-ai = { workspace = true }
-ene-tool-host = { workspace = true }
-ene-mind = { workspace = true }
 
 [lints]
 workspace = true

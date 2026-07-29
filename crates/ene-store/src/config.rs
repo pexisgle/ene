@@ -2,6 +2,10 @@ const fn default_string() -> String {
     String::new()
 }
 
+const fn default_max_backups() -> usize {
+    5
+}
+
 ene_config::define_config!(
     settings,
     "store",
@@ -9,7 +13,15 @@ ene_config::define_config!(
     pub struct StoreConfig {
         /// Whether the store is enabled.
         pub enabled: bool = false,
+        /// Create a file backup before applying pending migrations (#239).
+        pub backup_on_migrate: bool = true,
+        /// Maximum number of `{db}.bak.*` backups to retain (#239).
+        pub max_backups: usize = default_max_backups(),
+        /// Run `PRAGMA integrity_check` when opening the database (#239).
+        pub integrity_check_on_open: bool = false,
         /// Database path.
+        #[serde(skip_deserializing, default, skip_serializing)]
+        #[schemars(skip)]
         pub db_path: String = default_string(),
     }
 );

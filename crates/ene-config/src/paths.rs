@@ -33,9 +33,11 @@ fn resolve_assets_dir_impl() -> PathBuf {
 
 /// In debug builds the source-tree `assets/` is used; in release builds
 /// the app data directory is returned.
-pub fn assets_dir() -> PathBuf {
+///
+/// Returns a `&'static Path` to avoid cloning the cached `PathBuf` on every call.
+pub fn assets_dir() -> &'static std::path::Path {
     static CACHED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    CACHED.get_or_init(resolve_assets_dir_impl).clone()
+    CACHED.get_or_init(resolve_assets_dir_impl).as_path()
 }
 
 /// VRM model assets directory.
@@ -91,6 +93,34 @@ pub fn user_tools_dir() -> PathBuf {
 /// Temporary socket directory for tools
 pub fn tool_socket_dir() -> PathBuf {
     std::env::temp_dir().join(format!("{APP_ID}.tools"))
+}
+
+/// Directory for built-in plugin binaries.
+/// Same directory as the executable (debug) or its `plugins/` subdirectory (release).
+pub fn builtin_plugins_dir() -> PathBuf {
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+    {
+        if cfg!(debug_assertions) {
+            exe_dir
+        } else {
+            exe_dir.join("plugins")
+        }
+    } else {
+        PathBuf::from("plugins")
+    }
+}
+
+/// Directory for user-added plugins.
+/// `app_data_dir()/plugins`/
+pub fn user_plugins_dir() -> PathBuf {
+    app_data_dir().join("plugins")
+}
+
+/// Temporary socket directory for plugins.
+pub fn plugin_socket_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("{APP_ID}.plugins"))
 }
 
 /// Gets the path to the character-specific settings file

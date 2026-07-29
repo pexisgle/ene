@@ -37,10 +37,18 @@ ene_config::define_label_enum!(
     }
 );
 
-#[derive(Debug, Clone, Serialize, Deserialize, ene_config::schemars::JsonSchema)]
-#[serde(default)]
-#[schemars(crate = "::ene_config::schemars")]
-pub struct GraphicsSection {
+ene_config::define_label_enum!(
+    pub enum GraphicsQuality {
+        Low => "Low",
+        #[default]
+        Medium => "Medium",
+        High => "High",
+    }
+);
+
+/// Resolved per-knob graphics settings derived from [`GraphicsQuality`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphicsResolved {
     pub mask_render_downsample: u32,
     pub target_fps: u32,
     pub shadow_quality: ShadowQuality,
@@ -48,15 +56,48 @@ pub struct GraphicsSection {
     pub debug_fps: u32,
 }
 
-impl Default for GraphicsSection {
-    fn default() -> Self {
-        Self {
-            mask_render_downsample: DEFAULT_MASK_RENDER_DOWNSAMPLE,
-            target_fps: DEFAULT_TARGET_FPS,
-            shadow_quality: DEFAULT_SHADOW_QUALITY,
-            antialiasing_mode: DEFAULT_ANTIALIASING_MODE,
-            debug_fps: DEFAULT_DEBUG_FPS,
+impl GraphicsQuality {
+    /// Maps a quality preset to concrete renderer settings.
+    #[must_use]
+    pub const fn resolved(self) -> GraphicsResolved {
+        match self {
+            Self::Low => GraphicsResolved {
+                mask_render_downsample: 8,
+                target_fps: 30,
+                shadow_quality: ShadowQuality::Low,
+                antialiasing_mode: AntialiasingMode::Off,
+                debug_fps: 15,
+            },
+            Self::Medium => GraphicsResolved {
+                mask_render_downsample: 6,
+                target_fps: 60,
+                shadow_quality: ShadowQuality::Medium,
+                antialiasing_mode: AntialiasingMode::Fxaa,
+                debug_fps: 30,
+            },
+            Self::High => GraphicsResolved {
+                mask_render_downsample: 4,
+                target_fps: 120,
+                shadow_quality: ShadowQuality::High,
+                antialiasing_mode: AntialiasingMode::Taa,
+                debug_fps: 60,
+            },
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ene_config::schemars::JsonSchema)]
+#[serde(default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct GraphicsSection {
+    pub quality: GraphicsQuality,
+}
+
+impl GraphicsSection {
+    /// Resolves the quality preset into concrete renderer knobs.
+    #[must_use]
+    pub fn resolved(&self) -> GraphicsResolved {
+        self.quality.resolved()
     }
 }
 
@@ -87,6 +128,10 @@ ene_config::define_config!(
         pub graphics: GraphicsSection,
         #[serde(default)]
         pub language: Language,
+        /// Selected microphone device name for voice capture, or `None`
+        /// for the OS default input device.
+        #[serde(default)]
+        pub mic_device: Option<String>,
     }
 );
 
@@ -112,74 +157,48 @@ pub const WINDOW_WIDTH: u32 = 560;
     reason = "legacy window constants retained for transitional callers"
 )]
 pub const WINDOW_HEIGHT: u32 = 980;
-pub const MASK_RENDER_DOWNSAMPLE_CHOICES: [u32; 3] = [4, 6, 8];
-pub const DEFAULT_MASK_RENDER_DOWNSAMPLE: u32 = 8;
-pub const TARGET_FPS_CHOICES: [u32; 5] = [15, 30, 60, 120, 0];
-pub const DEFAULT_TARGET_FPS: u32 = 60;
-pub const SHADOW_QUALITY_CHOICES: [ShadowQuality; 3] = [
-    ShadowQuality::Low,
-    ShadowQuality::Medium,
-    ShadowQuality::High,
+pub const GRAPHICS_QUALITY_CHOICES: [GraphicsQuality; 3] = [
+    GraphicsQuality::Low,
+    GraphicsQuality::Medium,
+    GraphicsQuality::High,
 ];
-pub const DEFAULT_SHADOW_QUALITY: ShadowQuality = ShadowQuality::Medium;
-pub const ANTIALIASING_MODE_CHOICES: [AntialiasingMode; 4] = [
-    AntialiasingMode::Off,
-    AntialiasingMode::Fxaa,
-    AntialiasingMode::Smaa,
-    AntialiasingMode::Taa,
-];
-pub const DEFAULT_ANTIALIASING_MODE: AntialiasingMode = AntialiasingMode::Fxaa;
-pub const DEBUG_FPS_CHOICES: [u32; 4] = [15, 30, 60, 0];
-pub const DEFAULT_DEBUG_FPS: u32 = 30;
+
+pub fn cycle_graphics_quality(current: GraphicsQuality, step: isize) -> GraphicsQuality {
+    cycle_choice(&GRAPHICS_QUALITY_CHOICES, current, step)
+}
+
+pub fn graphics_quality_label(lang: Language, quality: GraphicsQuality) -> String {
+    let _ = lang;
+    match quality {
+        GraphicsQuality::Low => i18n_embed_fl::fl!(crate::i18n::loader(), "low"),
+        GraphicsQuality::Medium => i18n_embed_fl::fl!(crate::i18n::loader(), "medium"),
+        GraphicsQuality::High => i18n_embed_fl::fl!(crate::i18n::loader(), "high"),
+    }
+}
+
 pub const LANGUAGE_CHOICES: [Language; 2] = [Language::En, Language::Ja];
 
 pub fn cycle_language(current: Language, step: isize) -> Language {
     cycle_choice(&LANGUAGE_CHOICES, current, step)
 }
 
-pub fn cycle_mask_render_downsample(current: u32, step: isize) -> u32 {
-    cycle_choice(&MASK_RENDER_DOWNSAMPLE_CHOICES, current, step)
-}
-
-pub fn cycle_target_fps(current: u32, step: isize) -> u32 {
-    cycle_choice(&TARGET_FPS_CHOICES, current, step)
-}
-
-pub fn cycle_debug_fps(current: u32, step: isize) -> u32 {
-    cycle_choice(&DEBUG_FPS_CHOICES, current, step)
-}
-
 pub fn debug_fps_label(lang: Language, debug_fps: u32) -> String {
     let _ = lang;
     if debug_fps == 0 {
-        crate::i18n::match_window()
+        i18n_embed_fl::fl!(crate::i18n::loader(), "match-window")
     } else {
         format!("{debug_fps} FPS")
     }
 }
 
-pub fn cycle_shadow_quality(current: ShadowQuality, step: isize) -> ShadowQuality {
-    cycle_choice(&SHADOW_QUALITY_CHOICES, current, step)
-}
-
-pub fn cycle_antialiasing_mode(current: AntialiasingMode, step: isize) -> AntialiasingMode {
-    cycle_choice(&ANTIALIASING_MODE_CHOICES, current, step)
-}
-
 fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> T {
-    let index = choices.iter().position(|c| *c == current).unwrap_or(1);
+    if choices.is_empty() {
+        return current;
+    }
+    let index = choices.iter().position(|c| *c == current).unwrap_or(0);
     let len = choices.len() as isize;
     let next = (index as isize + step).rem_euclid(len) as usize;
     choices[next]
-}
-
-pub fn target_fps_label(lang: Language, target_fps: u32) -> String {
-    let _ = lang;
-    if target_fps == 0 {
-        crate::i18n::unlimited()
-    } else {
-        format!("{target_fps} FPS")
-    }
 }
 
 // ── CLI parsing ──
@@ -253,6 +272,8 @@ impl Default for CharacterState {
 }
 
 #[derive(Clone, Debug, Default)]
+// TODO(M2): Decompose UiState into per-page sub-structs (MemoryJournalState,
+// PermissionState, SessionState, etc.) to reduce the flat 40+ field struct.
 pub struct UiState {
     pub settings_window_visible: bool,
     /// Page the settings window should jump to when it next
@@ -283,6 +304,10 @@ pub struct UiState {
     pub memory_journal_rows: Vec<MemoryJournalRow>,
     /// Cached active commitments for desktop debug UX (#93).
     pub memory_journal_commitments: Vec<String>,
+    /// Cached structured commitment data for the commitments tab (#223).
+    pub memory_journal_commitments_cache: Vec<ene_store::Commitment>,
+    /// Cached pending memory candidates for the approval tab (#223).
+    pub memory_journal_pending_candidates: Vec<ene_runtime::handle::PendingCandidateSummary>,
     /// Cached affect-state snapshot for memory journal UX (#93).
     pub memory_journal_affect: MemoryJournalAffect,
     /// Last journal operation status/error message.
@@ -295,10 +320,113 @@ pub struct UiState {
     pub memory_journal_show_superseded: bool,
     /// Browse vs recall-debug mode for the memory journal.
     pub memory_journal_recall_debug: bool,
+    /// Tab mode for the memory journal page (#223).
+    pub memory_journal_mode: MemoryPageMode,
+    /// Number of pending candidates awaiting user approval (#223).
+    pub memory_journal_pending_count: usize,
+    /// Commitment list filter (#223).
+    pub memory_journal_commitment_filter: CommitmentFilter,
     /// Recall-debug query text.
     pub memory_journal_recall_query: String,
     /// Cached recall-debug rows.
     pub memory_journal_recall_rows: Vec<MemoryJournalRecallRow>,
+    /// Pending deferred memory-write retries (#240).
+    pub memory_journal_pending_writes: usize,
+    /// Permanent deferred memory-write failures (#240).
+    pub memory_journal_permanent_writes: usize,
+    /// Pending tool-permission approvals awaiting a user decision
+    /// (#177). Accumulated by the permission-center consumer system
+    /// from `AiPermissionRequested` messages; a request is removed
+    /// once the user answers it from the Permission Center page.
+    pub permission_requests: Vec<PendingPermission>,
+    /// Standing session-wide permission grants listed from the actor
+    /// (#177). Refreshed after every decision / revocation.
+    pub permission_grants: Vec<ene_runtime::PermissionScope>,
+    /// Last permission-center operation status/error message.
+    pub permission_message: Option<String>,
+    /// Cached session metadata rows for the sessions page (#176).
+    /// Lazy-loaded the first time the page is shown and refreshed
+    /// after every archive / import action.
+    pub session_rows: Vec<ene_store::SessionMeta>,
+    /// Whether `session_rows` has been populated at least once, so an
+    /// empty store is not mistaken for "not yet loaded".
+    pub sessions_loaded: bool,
+    /// Search query text for the sessions page (#176).
+    pub session_search_query: String,
+    /// Cached search-result rows for the sessions page (#176).
+    pub session_search_rows: Vec<SessionSearchRow>,
+    /// File path typed for a session import (#176).
+    pub session_import_path: String,
+    /// Whether archived sessions are included in the list (#176).
+    /// Defaults to `false`, matching the initial lazy load.
+    pub session_show_archived: bool,
+    /// Last sessions-page operation status/error message.
+    pub session_message: Option<String>,
+    /// First-run onboarding banner when the chat API key is missing (#241).
+    pub show_onboarding: bool,
+    /// Localized startup failure when the runtime actor could not open (#242).
+    pub runtime_startup_error: Option<String>,
+    /// Actor broadcast channel closed; show reconnect banner (#242).
+    pub runtime_disconnected: bool,
+    /// Whether the single reconnect attempt has already been used (#242).
+    pub reconnect_attempted: bool,
+    /// Set by the reconnect banner; consumed by the winit runtime (#242).
+    pub reconnect_requested: bool,
+    /// Dismiss the fatal startup dialog until the next failure (#242).
+    pub fatal_startup_dismissed: bool,
+
+    // ── Spotlight quick launcher (#218) ──
+    /// Whether the spotlight (Alt+Space) command palette is visible.
+    pub spotlight_visible: bool,
+    /// Current search text typed into the spotlight input.
+    pub spotlight_input: String,
+    /// Index of the currently highlighted spotlight action.
+    pub spotlight_selection: usize,
+
+    // ── Floating caption overlay (#218) ──
+    /// Whether the floating caption overlay is visible.
+    pub caption_visible: bool,
+    /// Text shown inside the caption overlay.
+    pub caption_text: String,
+    /// Top-left position (logical points) of the caption window; the
+    /// overlay persists the user's drag position here.
+    pub caption_position: (f32, f32),
+
+    // ── Character card editor (#218) ──
+    /// Whether the editor has loaded the on-disk card into the buffers
+    /// at least once since the page was opened.
+    pub character_editor_loaded: bool,
+    /// Whether the in-memory buffers differ from the on-disk card.
+    pub character_editor_modified: bool,
+    /// Validation errors from the last `ValidateCharacterCard` action.
+    pub character_editor_validation_errors: Vec<String>,
+    /// Editable `data.name` buffer.
+    pub character_editor_name: String,
+    /// Editable `data.description` buffer.
+    pub character_editor_description: String,
+    /// Editable `data.personality` buffer.
+    pub character_editor_personality: String,
+    /// Editable `data.scenario` buffer.
+    pub character_editor_scenario: String,
+    /// Editable `data.system_prompt` buffer.
+    pub character_editor_system_prompt: String,
+    /// Editable `data.mes_example` buffer.
+    pub character_editor_mes_example: String,
+    /// Editable `data.first_mes` buffer.
+    pub character_editor_first_mes: String,
+    /// Editable `data.post_history_instructions` buffer.
+    pub character_editor_post_history: String,
+}
+
+/// A single session message search hit shown on the sessions page (#176).
+#[derive(Clone, Debug)]
+pub struct SessionSearchRow {
+    /// Logical session key the message belongs to.
+    pub session_id: String,
+    /// Role that produced the message (e.g. `user`, `assistant`).
+    pub role: String,
+    /// Message content, truncated for display.
+    pub content: String,
 }
 
 #[derive(Clone, Debug)]
@@ -315,7 +443,7 @@ pub struct PendingPermission {
 #[derive(Clone, Debug)]
 pub struct PendingUserInput {
     pub request_id: ene_runtime::RequestId,
-    pub prompt: ene_tool_proto::UserInputPrompt,
+    pub prompt: ene_plugin_proto::UserInputPrompt,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -356,9 +484,32 @@ pub struct MemoryJournalAffect {
     pub trust: f32,
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct AiConfig {
-    pub ai: ene_config::EneConfig,
+/// Tab mode for the memory journal page (#223).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryPageMode {
+    /// Browse cached memories.
+    #[default]
+    Browse,
+    /// Recall-debug search mode.
+    RecallSearch,
+    /// Pending memory candidate approval.
+    PendingApproval,
+    /// Active commitment management.
+    Commitments,
+}
+
+/// Filter for commitment list display (#223).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommitmentFilter {
+    /// Only active commitments.
+    #[default]
+    Active,
+    /// All commitments regardless of status.
+    All,
+    /// Only completed commitments.
+    Completed,
+    /// Only cancelled commitments.
+    Cancelled,
 }
 
 // ── Top-level settings (the runtime's single source of truth) ──
@@ -366,11 +517,7 @@ pub struct AiConfig {
 pub struct CharacterSettings {
     pub assets_dir: PathBuf,
     pub characters: Vec<CharacterEntry>,
-    pub graphics: GraphicsSettings,
-    pub language: Language,
     pub character_state: CharacterState,
-    pub ai: AiConfig,
-    /// Dirty-tracked config store shared with the settings UI for persistence.
     pub store: Arc<RwLock<ene_config::ConfigStore>>,
 }
 
@@ -379,10 +526,7 @@ impl std::fmt::Debug for CharacterSettings {
         f.debug_struct("CharacterSettings")
             .field("assets_dir", &self.assets_dir)
             .field("characters", &self.characters)
-            .field("graphics", &self.graphics)
-            .field("language", &self.language)
             .field("character_state", &self.character_state)
-            .field("ai", &self.ai)
             .finish_non_exhaustive()
     }
 }
@@ -427,24 +571,21 @@ impl CharacterSettings {
             })
             .unwrap_or(0);
 
+        let initial_config = ene_config::EneConfig {
+            character: format!("{}/{}", assets_dir.display(), selected_card),
+            ..Default::default()
+        };
+
         let mut settings = Self {
             assets_dir: assets_dir.to_path_buf(),
             characters,
-            graphics: GraphicsSettings::default(),
-            language: Language::default(),
             character_state: CharacterState {
                 selected_character,
                 selected_motion,
                 ..Default::default()
             },
-            ai: AiConfig {
-                ai: ene_config::EneConfig {
-                    character: format!("{}/{}", assets_dir.display(), selected_card),
-                    ..Default::default()
-                },
-            },
             store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
-                ene_config::EneConfig::default(),
+                initial_config,
             ))),
         };
         settings.load_from_file();
@@ -476,7 +617,7 @@ impl CharacterSettings {
             self.assets_dir.display(),
             self.current_character_card()
         );
-        self.ai.ai.character = path;
+        self.with_config_mut(|c| c.character = path);
     }
 
     pub fn clamp_runtime_values(&mut self) {
@@ -489,14 +630,87 @@ impl CharacterSettings {
             self.character_state.character_position.z.clamp(-4.0, 3.0);
         self.character_state.look_at_strength =
             self.character_state.look_at_strength.clamp(0.0, 1.0);
-        self.graphics.mask_render_downsample =
-            cycle_mask_render_downsample(self.graphics.mask_render_downsample, 0);
-        self.graphics.target_fps = cycle_target_fps(self.graphics.target_fps, 0);
-        self.graphics.debug_fps = cycle_debug_fps(self.graphics.debug_fps, 0);
+        let current_quality = self.graphics().quality;
+        let clamped = cycle_graphics_quality(current_quality, 0);
+        self.set_graphics(GraphicsSettings { quality: clamped });
+    }
+
+    // ── Config accessors (read from / write through the store) ──
+
+    /// Returns a snapshot of the current global config.
+    pub fn config(&self) -> ene_config::EneConfig {
+        self.store.read().config()
+    }
+
+    /// Returns a new `EneConfig` by value. Use this where a move/clone is needed.
+    pub fn config_clone(&self) -> ene_config::EneConfig {
+        self.store.read().config()
+    }
+
+    /// Get a typed section from the global config.
+    pub fn config_section<T>(&self) -> T
+    where
+        T: serde::de::DeserializeOwned + Default + ene_config::HasConfigKey,
+    {
+        self.store.read().get_section::<T>()
+    }
+
+    /// Write a typed section into the global config.
+    pub fn set_config_section<T>(&self, section: &T)
+    where
+        T: serde::Serialize + ene_config::HasConfigKey,
+    {
+        self.store.read().set_section(section);
+    }
+
+    /// Mutate the global config.
+    pub fn with_config_mut(&self, f: impl FnOnce(&mut ene_config::EneConfig)) {
+        self.store.read().with_config_mut(f);
+    }
+
+    // ── Desktop-section accessors ─────────────────────────────────
+
+    pub fn graphics(&self) -> GraphicsSettings {
+        self.config_section::<DesktopSection>().graphics
+    }
+
+    pub fn language(&self) -> Language {
+        self.config_section::<DesktopSection>().language
+    }
+
+    pub fn mic_device(&self) -> Option<String> {
+        self.config_section::<DesktopSection>().mic_device
+    }
+
+    pub fn set_graphics(&self, graphics: GraphicsSettings) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.graphics = graphics;
+                drop(c.set_section(&d));
+            }
+        });
+    }
+
+    pub fn set_language(&self, language: Language) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.language = language;
+                drop(c.set_section(&d));
+            }
+        });
+    }
+
+    pub fn set_mic_device(&self, mic_device: Option<String>) {
+        self.store.read().with_config_mut(|c| {
+            if let Ok(mut d) = c.get_section::<DesktopSection>() {
+                d.mic_device = mic_device;
+                drop(c.set_section(&d));
+            }
+        });
     }
 
     pub fn save_per_character_settings(&self) {
-        self.sync_to_store();
+        self.sync_character_state_to_store();
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
         if let Err(e) = store.flush(Some(&char_name)) {
@@ -559,7 +773,7 @@ impl CharacterSettings {
     }
 
     pub fn save(&self) {
-        self.sync_to_store();
+        self.sync_character_state_to_store();
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
         if let Err(e) = store.flush(Some(&char_name)) {
@@ -568,13 +782,15 @@ impl CharacterSettings {
     }
 
     pub fn mark_dirty(&self) {
-        self.sync_to_store();
+        let store = self.store.read();
+        store.mark_dirty();
     }
 
     /// Called once per frame by the runtime; flushes the
     /// underlying `ConfigStore` to disk only if anything was
     /// changed since the last flush.
     pub fn flush_if_dirty(&self) {
+        self.sync_character_state_to_store();
         let char_name = self.current_entry().name.clone();
         let store = self.store.read();
         if let Err(e) = store.flush_if_dirty(Some(&char_name)) {
@@ -582,19 +798,10 @@ impl CharacterSettings {
         }
     }
 
-    fn sync_to_store(&self) {
-        let mut config = self.ai.ai.clone();
-        config.version = 1;
-        let desktop = DesktopSection {
-            graphics: self.graphics.clone(),
-            language: self.language,
-        };
-        if let Err(e) = config.set_section(&desktop) {
-            tracing::warn!("[Config] Failed to set desktop section: {e}");
-        }
+    /// Sync the in-memory character state into the store's per-character
+    /// config so it gets flushed to disk on the next save.
+    fn sync_character_state_to_store(&self) {
         let store = self.store.read();
-        store.set_config(config);
-
         let entry = self.current_entry();
         let default_motion_name = entry
             .motion_names
@@ -624,7 +831,7 @@ impl CharacterSettings {
 
     pub fn load_from_file(&mut self) {
         let path = ene_config::config_file_path();
-        let full = match ene_config::load_config_from(&self.assets_dir, &path) {
+        let full = match ene_config::load_config_from(&path) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!("[Settings] Failed to load config: {e}, falling back to defaults");
@@ -632,48 +839,40 @@ impl CharacterSettings {
             }
         };
 
-        self.ai.ai = full.clone();
         *self.store.write() = ene_config::ConfigStore::from_config(full.clone());
 
         // Resolve `full.character` (a card name or full path) to
         // a card path on disk.
         let card_path = ene_config::resolve_character_path(&full.character);
-        if !card_path.is_empty() {
-            let path = Path::new(&card_path);
-            if let Some(parent) = path.parent()
-                && let Some(name_os) = parent.file_name()
-            {
-                let name = name_os.to_string_lossy();
-                if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
-                    self.character_state.selected_character = idx;
-                }
+        if let Some(parent) = card_path.parent()
+            && let Some(name_os) = parent.file_name()
+        {
+            let name = name_os.to_string_lossy();
+            if let Some(idx) = self.characters.iter().position(|c| c.name == name) {
+                self.character_state.selected_character = idx;
             }
-        }
-
-        if let Ok(desktop) = full.get_section::<DesktopSection>() {
-            self.graphics = desktop.graphics;
-            self.language = desktop.language;
         }
 
         self.sync_classifier_language_from_ui();
 
-        crate::i18n::select_language(self.language);
+        crate::i18n::select_language(self.language());
 
         self.clamp_runtime_values();
         self.load_per_character_settings();
     }
 
     /// Keep cognitive prompt language aligned with the desktop UI language.
-    pub fn sync_classifier_language_from_ui(&mut self) {
-        let lang = match self.language {
+    pub fn sync_classifier_language_from_ui(&self) {
+        let lang = match self.language() {
             Language::En => "en",
             Language::Ja => "ja",
         };
-        if let Ok(mut mind) = self.ai.ai.get_section::<ene_mind::MindConfig>() {
-            mind.emotion.classifier_language = lang.into();
-            let _ = self.ai.ai.set_section(&mind);
-            *self.store.write() = ene_config::ConfigStore::from_config(self.ai.ai.clone());
-        }
+        self.with_config_mut(|c| {
+            if let Ok(mut mind) = c.get_section::<ene_mind::MindConfig>() {
+                mind.emotion.classifier_language = lang.into();
+                drop(c.set_section(&mind));
+            }
+        });
     }
 }
 
@@ -685,7 +884,14 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
     let Ok(dir) = std::fs::read_dir(&characters_dir) else {
         return out;
     };
-    for entry in dir.flatten() {
+    for entry in dir {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to read character directory entry");
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -712,7 +918,14 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
 
         let mut vrm_paths = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&path) {
-            for file in entries.flatten() {
+            for file in entries {
+                let file = match file {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = %path.display(), "Failed to read file in character dir");
+                        continue;
+                    }
+                };
                 let file_path = file.path();
                 if file_path.is_dir() {
                     continue;
@@ -739,7 +952,14 @@ fn discover_characters(assets_dir: &Path) -> Vec<CharacterEntry> {
         } else {
             let motions_dir = path.join("motions");
             if let Ok(entries) = std::fs::read_dir(&motions_dir) {
-                for file in entries.flatten() {
+                for file in entries {
+                    let file = match file {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::warn!(error = %e, path = %motions_dir.display(), "Failed to read motion file");
+                            continue;
+                        }
+                    };
                     let file_path = file.path();
                     if file_path.is_dir() {
                         continue;
@@ -811,7 +1031,8 @@ fn read_character_json_meta(
     let motions = (|| {
         let extensions = v.get("data")?.get("extensions")?;
         let ene = extensions.get("ene")?;
-        let motions_val = ene.get("motions")?;
+        let catalog = ene.get("motion_catalog")?;
+        let motions_val = catalog.get("motions")?;
         let motions: Vec<ene_config::MotionEntry> =
             serde_json::from_value(motions_val.clone()).ok()?;
         Some(motions)

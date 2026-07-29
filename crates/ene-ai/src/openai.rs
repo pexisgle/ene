@@ -1,14 +1,17 @@
 use async_openai::{Client, config::OpenAIConfig};
 use async_trait::async_trait;
 use std::pin::Pin;
-use std::sync::OnceLock;
+use std::time::Duration;
 use tokio_stream::{Stream, StreamExt};
 
-use crate::config::ProviderConfig;
+use crate::config::{AiConfig, TaskRef};
 use crate::error::{LlmProviderError, map_openai_error};
 use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
+use crate::resolve::ResolvedChat;
+use crate::retry::RetryPolicy;
 use crate::traits::{
     EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
+    LlmProviderRegistry,
 };
 
 /// Builds an OpenAI-compatible client with the given base URL and API key.
@@ -137,11 +140,19 @@ fn convert_message(msg: &LlmMessage) -> Result<ChatCompletionRequestMessage, Llm
 }
 
 fn sanitize_tool_name(name: &str) -> String {
-    name.replace('.', "_")
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn convert_tools(
-    tools: &[ene_tool_proto::ToolSpec],
+    tools: &[ene_plugin_proto::ToolSpec],
 ) -> Vec<async_openai::types::chat::ChatCompletionTools> {
     let mut res = Vec::new();
     for t in tools {
@@ -168,6 +179,22 @@ pub struct OpenAiProvider {
     chat_max_tokens: Option<u32>,
     /// Disable `MiMo` / reasoning-model thinking so JSON lands in `content`.
     thinking_disabled: bool,
+    /// Retry policy for transient failures (#237).
+    retry_policy: RetryPolicy,
+}
+
+impl std::fmt::Debug for OpenAiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiProvider")
+            .field("api_base", &self.api_base)
+            .field("api_key", &"[REDACTED]")
+            .field("model", &self.model)
+            .field("chat_max_tokens", &self.chat_max_tokens)
+            .field("thinking_disabled", &self.thinking_disabled)
+            .field("retry_policy", &self.retry_policy)
+            .field("client", &"<async-openai Client>")
+            .finish()
+    }
 }
 
 impl OpenAiProvider {
@@ -180,6 +207,7 @@ impl OpenAiProvider {
             model: model.to_string(),
             chat_max_tokens: None,
             thinking_disabled: false,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -196,8 +224,18 @@ impl OpenAiProvider {
         self.thinking_disabled = disabled;
         self
     }
+
+    /// Override the retry policy for transient failures.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
+    }
 }
 
+/// Heuristic: models whose name contains "mimo" (case-insensitive) fill
+/// `reasoning_content` instead of `content` unless thinking is disabled.
+/// Extend the match if other reasoning models exhibit the same behavior.
 fn model_wants_thinking_disabled(model: &str) -> bool {
     model.to_ascii_lowercase().contains("mimo")
 }
@@ -270,49 +308,73 @@ fn text_from_delta_value(delta: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn byot_http_client() -> Result<&'static reqwest::Client, LlmProviderError> {
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_mins(2))
-                .build()
-                .map_err(|e| e.to_string())
-        })
-        .as_ref()
+fn byot_http_client(timeout: Duration) -> Result<reqwest::Client, LlmProviderError> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
         .map_err(|e| LlmProviderError::Provider(format!("HTTP client init failed: {e}")))
+}
+
+/// Maps a non-success HTTP status and response body to a typed
+/// [`LlmProviderError`], so retry logic can distinguish transient
+/// failures (429 / network) from permanent ones (401 / 400).
+fn http_status_error(status: reqwest::StatusCode, body: &str) -> LlmProviderError {
+    let snippet: String = body.chars().take(280).collect();
+    match status.as_u16() {
+        401 | 403 => LlmProviderError::Auth(snippet),
+        429 => LlmProviderError::RateLimit(snippet),
+        _ => LlmProviderError::Provider(format!("HTTP {status}: {snippet}")),
+    }
+}
+
+/// Parses a `Retry-After` response header (seconds) if present and valid.
+fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
 }
 
 /// Non-stream BYOT chat completion via direct HTTP.
 ///
 /// `async-openai`'s `create_byot` can hang on `OpenRouter` `MiMo` with `thinking: disabled`;
 /// a plain POST matches the reliable direct-HTTP path used in classifier benchmarks.
+///
+/// Returns the parsed JSON body plus an optional `Retry-After` hint (seconds)
+/// captured from a 429 response, so callers can honor it in backoff (#237).
 async fn post_chat_byot_via_http(
     api_base: &str,
     api_key: &str,
     body: serde_json::Value,
+    timeout: Duration,
 ) -> Result<serde_json::Value, LlmProviderError> {
     let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    let response = byot_http_client()?
+    let response = byot_http_client(timeout)?
         .post(url)
         .bearer_auth(api_key)
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
         .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat completion HTTP failed: {e}")))?;
+        .map_err(|e| LlmProviderError::Network(format!("chat completion HTTP failed: {e}")))?;
 
     let status = response.status();
+    let retry_after = retry_after_secs(&response);
     let raw = response
         .text()
         .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat completion read failed: {e}")))?;
+        .map_err(|e| LlmProviderError::Network(format!("chat completion read failed: {e}")))?;
 
     if !status.is_success() {
-        return Err(LlmProviderError::Provider(format!(
-            "chat completion HTTP {status}: {}",
-            raw.chars().take(200).collect::<String>()
-        )));
+        let mut err = http_status_error(status, &raw);
+        if let (LlmProviderError::RateLimit(_), Some(secs)) = (&err, retry_after) {
+            err = LlmProviderError::RateLimit(format!(
+                "{raw} [retry-after: {secs}s]",
+                raw = raw.chars().take(200).collect::<String>()
+            ));
+        }
+        return Err(err);
     }
 
     serde_json::from_str(&raw)
@@ -328,7 +390,7 @@ impl LlmProvider for OpenAiProvider {
     async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        tools: &[ene_tool_proto::ToolSpec],
+        tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -344,10 +406,14 @@ impl LlmProvider for OpenAiProvider {
             Some(convert_tools(tools))
         };
 
-        let mut name_mapping = std::collections::HashMap::new();
-        for t in tools {
-            name_mapping.insert(sanitize_tool_name(t.name.as_str()), t.name.to_string());
-        }
+        let name_mapping: std::collections::HashMap<String, String> = if tools.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            tools
+                .iter()
+                .map(|t| (sanitize_tool_name(t.name.as_str()), t.name.to_string()))
+                .collect()
+        };
 
         let mut req_builder = async_openai::types::chat::CreateChatCompletionRequestArgs::default();
         req_builder.model(self.model.clone()).messages(oa_messages);
@@ -365,13 +431,21 @@ impl LlmProvider for OpenAiProvider {
         let body = merge_request_body(request, true, self.thinking_disabled)?;
         let api_base = self.api_base.clone();
         let api_key = self.api_key.clone();
+        let retry_policy = self.retry_policy.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(100);
 
         tokio::spawn(async move {
-            if let Err(e) =
-                run_direct_sse_stream(&api_base, &api_key, body, name_mapping, tx.clone()).await
+            if let Err(e) = run_direct_sse_stream(
+                &api_base,
+                &api_key,
+                body,
+                name_mapping,
+                tx.clone(),
+                &retry_policy,
+            )
+            .await
             {
-                let _ = tx.send(Err(e)).await;
+                drop(tx.send(Err(e)).await);
             }
         });
 
@@ -398,12 +472,16 @@ impl LlmProvider for OpenAiProvider {
         req_builder.model(self.model.clone()).messages(oa_messages);
 
         if let Some(schema) = json_schema {
+            // Accept either a raw JSON Schema object or a `{ "schema": ... }` wrapper.
+            let schema = schema.get("schema").cloned().unwrap_or(schema);
             req_builder.response_format(async_openai::types::chat::ResponseFormat::JsonSchema {
                 json_schema: async_openai::types::chat::ResponseFormatJsonSchema {
                     description: Some("Structured output".to_string()),
                     name: "StructuredOutput".to_string(),
                     schema,
-                    strict: Some(true),
+                    // Not all OpenAI-compatible providers support `strict: true`;
+                    // omit it for broader compatibility (OpenRouter, etc.).
+                    strict: None,
                 },
             });
         }
@@ -417,7 +495,17 @@ impl LlmProvider for OpenAiProvider {
 
         if self.thinking_disabled {
             let body = merge_request_body(request, false, true)?;
-            let response = post_chat_byot_via_http(&self.api_base, &self.api_key, body).await?;
+            let api_base = self.api_base.clone();
+            let api_key = self.api_key.clone();
+            let timeout = self.retry_policy.timeout;
+            let response = self
+                .retry_policy
+                .run_with_retry_after(
+                    LlmProviderError::is_retryable,
+                    LlmProviderError::retry_after_secs,
+                    || post_chat_byot_via_http(&api_base, &api_key, body.clone(), timeout),
+                )
+                .await?;
 
             let message = response
                 .get("choices")
@@ -432,11 +520,22 @@ impl LlmProvider for OpenAiProvider {
         }
 
         let response = self
-            .client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| map_openai_error(&e))?;
+            .retry_policy
+            .run_with_retry_after(
+                LlmProviderError::is_retryable,
+                LlmProviderError::retry_after_secs,
+                || {
+                    let request = request.clone();
+                    async move {
+                        self.client
+                            .chat()
+                            .create(request)
+                            .await
+                            .map_err(|e| map_openai_error(&e))
+                    }
+                },
+            )
+            .await?;
 
         let choice = response.choices.first().ok_or_else(|| {
             tracing::warn!(component = "OpenAI", "Chat completion returned no choices");
@@ -462,7 +561,7 @@ impl LlmProvider for OpenAiProvider {
             }
         }
 
-        let content = choice.message.content.as_deref().unwrap_or("").to_string();
+        let content = choice.message.content.clone().unwrap_or_default();
 
         Ok(content)
     }
@@ -470,6 +569,17 @@ impl LlmProvider for OpenAiProvider {
 
 /// Factory for the default `OpenAI` provider.
 pub struct OpenAiProviderFactory;
+
+/// Cognitive task kinds that map to [`AiConfig::tasks`] entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiTaskKind {
+    /// Main conversation chat.
+    Chat,
+    /// Post-turn affect classifier.
+    Classifier,
+    /// Proactive speech generation.
+    Proactive,
+}
 
 impl LlmProviderFactory for OpenAiProviderFactory {
     fn provider_name(&self) -> &'static str {
@@ -479,54 +589,77 @@ impl LlmProviderFactory for OpenAiProviderFactory {
     fn create_provider(
         &self,
         config: &ene_config::EneConfig,
+        task: &TaskRef,
     ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-        let provider_config = config.get_section::<ProviderConfig>().map_err(|e| {
-            LlmProviderError::Provider(format!("Failed to parse provider config: {e}"))
-        })?;
-
-        let base_url = provider_config
-            .resolve_base_url()
-            .map_err(|e| LlmProviderError::Provider(format!("Failed to resolve base URL: {e}")))?;
-
-        let api_key = provider_config.resolve_api_key();
-
-        Ok(Box::new(new_openai_chat_provider(
-            &base_url,
-            &api_key,
-            &provider_config.model,
-            provider_config.max_tokens,
-        )))
+        let ai_config = config
+            .get_section::<AiConfig>()
+            .map_err(|e| LlmProviderError::Provider(format!("Failed to parse AI config: {e}")))?;
+        // Honor the task's own model / max_tokens overrides rather than always
+        // resolving the `tasks.chat` defaults (#C1).
+        let resolved = ai_config.resolve_chat_task(Some(task))?;
+        let provider = create_chat_provider_from_resolved(&resolved)
+            .with_retry_policy(ai_config.retry.to_policy());
+        Ok(Box::new(provider))
     }
 }
 
-/// Create an OpenAI-compatible chat provider, optionally overriding the model name.
+/// Build an OpenAI-compatible chat provider from resolved settings.
+#[must_use]
+pub fn create_chat_provider_from_resolved(resolved: &ResolvedChat) -> OpenAiProvider {
+    let max_tokens = resolved.max_tokens.unwrap_or(0);
+    new_openai_chat_provider(
+        &resolved.base_url,
+        &resolved.api_key,
+        &resolved.model,
+        max_tokens,
+    )
+}
+
+/// Build a chat provider for a named cognitive task.
 ///
-/// Used by the post-turn affect classifier so it can target a faster/cheaper model
-/// than the main conversation stream.
-pub fn create_openai_compatible_chat_provider(
+/// OpenAI-compatible providers resolve to the native HTTP client. Any other
+/// provider kind (e.g. plugin-provided `"anthropic"`) falls back to the global
+/// [`LlmProviderRegistry`], which routes to a plugin-registered factory (#247).
+pub fn create_task_chat_provider(
     config: &ene_config::EneConfig,
-    model_override: Option<&str>,
-    max_tokens: Option<u32>,
+    task: AiTaskKind,
 ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-    let provider_config = config
-        .get_section::<ProviderConfig>()
-        .map_err(|e| LlmProviderError::Provider(format!("Failed to parse provider config: {e}")))?;
+    let ai_config = config
+        .get_section::<AiConfig>()
+        .map_err(|e| LlmProviderError::Provider(format!("Failed to parse AI config: {e}")))?;
 
-    let base_url = provider_config
-        .resolve_base_url()
-        .map_err(|e| LlmProviderError::Provider(format!("Failed to resolve base URL: {e}")))?;
+    let task_ref = match task {
+        AiTaskKind::Chat => &ai_config.tasks.chat,
+        AiTaskKind::Classifier => ai_config
+            .tasks
+            .classifier
+            .as_ref()
+            .unwrap_or(&ai_config.tasks.chat),
+        AiTaskKind::Proactive => ai_config
+            .tasks
+            .proactive
+            .as_ref()
+            .unwrap_or(&ai_config.tasks.chat),
+    };
 
-    let api_key = provider_config.resolve_api_key();
-    let model = model_override
-        .filter(|name| !name.trim().is_empty())
-        .unwrap_or(provider_config.model.as_str());
+    // Non-OpenAI-compatible kinds (plugin providers) resolve via the global
+    // registry instead of the OpenAI HTTP path (#247). The task's own
+    // model / max_tokens overrides are forwarded so plugin providers honor
+    // task-specific config instead of the `tasks.chat` defaults (#C1).
+    if !crate::config::AiConfig::is_local_provider(&task_ref.provider)
+        && let Ok(resolved_ref) = ai_config.resolve_task_ref(task_ref)
+        && !resolved_ref.provider.is_openai_compatible()
+    {
+        return LlmProviderRegistry::create_provider(&resolved_ref.provider.kind, config, task_ref);
+    }
 
-    // Classifier/other overrides win when set; otherwise honor provider.max_tokens.
-    let effective_max = max_tokens
-        .filter(|&n| n > 0)
-        .unwrap_or(provider_config.max_tokens);
-    let provider = new_openai_chat_provider(&base_url, &api_key, model, effective_max);
-
+    let resolved = match task {
+        AiTaskKind::Chat => ai_config.resolve_chat()?,
+        AiTaskKind::Classifier => ai_config.resolve_classifier()?,
+        AiTaskKind::Proactive => ai_config.resolve_proactive_generation()?,
+    };
+    let provider = create_chat_provider_from_resolved(&resolved)
+        .with_retry_policy(ai_config.retry.to_policy());
     Ok(Box::new(provider))
 }
 
@@ -537,6 +670,8 @@ pub struct CloudEmbeddingProvider {
     embedding_dimensions: usize,
     query_prefix: Option<String>,
     hyde_model: Option<String>,
+    /// Retry policy for transient failures (#237).
+    retry_policy: RetryPolicy,
 }
 
 impl CloudEmbeddingProvider {
@@ -554,6 +689,7 @@ impl CloudEmbeddingProvider {
             embedding_dimensions,
             query_prefix,
             hyde_model: None,
+            retry_policy: RetryPolicy::default(),
         }
     }
 
@@ -562,6 +698,13 @@ impl CloudEmbeddingProvider {
     #[must_use]
     pub fn with_hyde_model(mut self, model: String) -> Self {
         self.hyde_model = Some(model);
+        self
+    }
+
+    /// Override the retry policy for transient failures.
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.retry_policy = policy;
         self
     }
 
@@ -648,11 +791,18 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
             .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
 
         let response = self
-            .client
-            .embeddings()
-            .create(request)
-            .await
-            .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
+            .retry_policy
+            .run(EmbeddingError::is_retryable, || {
+                let request = request.clone();
+                async move {
+                    self.client
+                        .embeddings()
+                        .create(request)
+                        .await
+                        .map_err(|e| EmbeddingError::Provider(e.to_string()))
+                }
+            })
+            .await?;
 
         // OpenAI returns embeddings in input order. Fail loudly if the count
         // is wrong rather than silently truncating (which used to mask
@@ -686,39 +836,71 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
     }
 }
 
+/// Establish the SSE connection, retrying transient failures (429 / network)
+/// before the stream body starts. Once bytes begin flowing, disconnects are
+/// not retried (the caller treats a mid-stream failure as terminal).
+async fn establish_sse_connection(
+    api_base: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    retry_policy: &RetryPolicy,
+) -> Result<reqwest::Response, LlmProviderError> {
+    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
+
+    retry_policy
+        .run_with_retry_after(
+            LlmProviderError::is_retryable,
+            LlmProviderError::retry_after_secs,
+            || async {
+                let response = byot_http_client(retry_policy.timeout)?
+                    .post(url.clone())
+                    .bearer_auth(api_key)
+                    .header("Content-Type", "application/json")
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        LlmProviderError::Network(format!("chat stream HTTP failed: {e}"))
+                    })?;
+
+                let status = response.status();
+                if status.is_success() {
+                    return Ok(response);
+                }
+
+                let retry_after = retry_after_secs(&response);
+                let raw = response.text().await.unwrap_or_default();
+                if status.as_u16() == 402 {
+                    return Err(LlmProviderError::Provider(format!(
+                        "chat stream HTTP 402 Payment Required (often OpenRouter credit collateral for max_tokens): {}",
+                        raw.chars().take(280).collect::<String>()
+                    )));
+                }
+                let mut err = http_status_error(status, &raw);
+                if let (LlmProviderError::RateLimit(_), Some(secs)) = (&err, retry_after) {
+                    err = LlmProviderError::RateLimit(format!(
+                        "{} [retry-after: {secs}s]",
+                        raw.chars().take(200).collect::<String>()
+                    ));
+                }
+                Err(err)
+            },
+        )
+        .await
+}
+
 async fn run_direct_sse_stream(
     api_base: &str,
     api_key: &str,
     body: serde_json::Value,
     name_mapping: std::collections::HashMap<String, String>,
     tx: tokio::sync::mpsc::Sender<Result<LlmResponseChunk, LlmProviderError>>,
+    retry_policy: &RetryPolicy,
 ) -> Result<(), LlmProviderError> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio_util::io::StreamReader;
 
-    let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-    let response = byot_http_client()?
-        .post(url)
-        .bearer_auth(api_key)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| LlmProviderError::Provider(format!("chat stream HTTP failed: {e}")))?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let raw = response.text().await.unwrap_or_default();
-        if status.as_u16() == 402 {
-            return Err(LlmProviderError::Provider(format!(
-                "chat stream HTTP 402 Payment Required (often OpenRouter credit collateral for max_tokens): {}",
-                raw.chars().take(280).collect::<String>()
-            )));
-        }
-        return Err(LlmProviderError::Provider(format!(
-            "chat stream HTTP {status}: {raw}"
-        )));
-    }
+    let response = establish_sse_connection(api_base, api_key, &body, retry_policy).await?;
 
     let bytes_stream = response
         .bytes_stream()
@@ -743,6 +925,11 @@ async fn run_direct_sse_stream(
             break;
         }
         let Ok(chunk) = serde_json::from_str::<serde_json::Value>(payload) else {
+            tracing::debug!(
+                component = "OpenAI",
+                payload = %payload,
+                "skipping malformed SSE chunk"
+            );
             continue;
         };
 
@@ -793,12 +980,13 @@ async fn run_direct_sse_stream(
         }
 
         if text_delta.is_some() || tool_calls_delta.is_some() {
-            let _ = tx
-                .send(Ok(LlmResponseChunk {
+            drop(
+                tx.send(Ok(LlmResponseChunk {
                     text_delta,
                     tool_calls_delta,
                 }))
-                .await;
+                .await,
+            );
         }
     }
 

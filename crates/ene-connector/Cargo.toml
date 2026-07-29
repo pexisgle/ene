@@ -1,0 +1,30 @@
+[package]
+name = "ene-connector"
+version.workspace = true
+edition.workspace = true
+description = "Shared connector framework for external service integrations (Calendar, MCP, GitHub, etc.)"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+ene-config = { workspace = true }
+ene-plugin-proto = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+chrono = { workspace = true }
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

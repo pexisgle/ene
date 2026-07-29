@@ -1,6 +1,7 @@
-//! AI settings page — provider, embedding, and memory configuration.
+//! AI settings page — chat provider and embedding configuration.
 //!
 //! Chat lives in the dedicated chat window (F2); see #109.
+//! Feature toggles and proactive speech policy live on the Features tab.
 
 use super::input::SettingsInputState;
 use crate::ai_bridge::AiBridge;
@@ -8,34 +9,68 @@ use crate::character_state::AnimationControl;
 use crate::settings::CharacterSettings;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
+use ene_ai::{AiConfig, AiProviderDef, LOCAL_PROVIDER, LocalModelDef};
 use std::sync::Arc;
+
+const DEFAULT_LOCAL_EMBED_MODEL: &str = "jina-v5-small";
+
+fn first_openai_compatible_provider(ai: &AiConfig) -> Option<String> {
+    ai.providers
+        .iter()
+        .find_map(|(name, def)| def.is_openai_compatible().then(|| name.clone()))
+}
+
+fn ensure_local_embedding_provider(ai: &mut AiConfig) {
+    if !ai.local_models.contains_key(DEFAULT_LOCAL_EMBED_MODEL) {
+        ai.local_models.insert(
+            DEFAULT_LOCAL_EMBED_MODEL.to_string(),
+            LocalModelDef {
+                url: "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf".to_string(),
+                quantization: "F16".to_string(),
+                ..LocalModelDef::default()
+            },
+        );
+    }
+    ai.tasks.embedding.provider = LOCAL_PROVIDER.to_string();
+    if ai.tasks.embedding.model.is_none() {
+        ai.tasks.embedding.model = Some(DEFAULT_LOCAL_EMBED_MODEL.to_string());
+    }
+}
+
+fn set_embedding_cloud(ai: &mut AiConfig) {
+    let chat_key = ai.tasks.chat.provider.clone();
+    let provider_key = match ai.providers.get(&chat_key) {
+        Some(def) if def.is_openai_compatible() => chat_key,
+        _ => first_openai_compatible_provider(ai).unwrap_or_else(|| {
+            ai.providers
+                .insert(chat_key.clone(), AiProviderDef::default());
+            chat_key
+        }),
+    };
+    ai.tasks.embedding.provider = provider_key;
+    if ai.tasks.embedding.model.is_none() {
+        ai.tasks.embedding.model = Some("text-embedding-3-small".to_string());
+    }
+    ai.tasks.embedding.dimensions = Some(1536);
+}
 
 pub fn render(
     ui: &mut egui::Ui,
     settings: &mut CharacterSettings,
     _animation: &mut AnimationControl,
-    _ai: &Arc<AiBridge>,
+    ai: &Arc<AiBridge>,
     input: &mut SettingsInputState,
     _world: &mut World,
     _ui_entity: Entity,
 ) {
-    let mut provider = settings
-        .ai
-        .ai
-        .get_section::<ene_runtime::ProviderConfig>()
-        .unwrap_or_default();
-    let mut memory = settings
-        .ai
-        .ai
-        .get_section::<ene_store::StoreConfig>()
-        .unwrap_or_default();
+    let mut ai_cfg = settings.config_section::<ene_runtime::AiConfig>();
 
     ui.vertical(|ui| {
-        ui.weak(crate::i18n::chat_open_hint());
+        ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "chat-open-hint"));
         ui.separator();
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::character_card());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "character-card"));
             ui.add_sized(
                 [220.0, 0.0],
                 egui::Label::new(settings.current_character_card()),
@@ -43,126 +78,176 @@ pub fn render(
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::user_name());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "user-name"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_user_name).desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings.ai.ai.user_name = input.ai_user_name.trim().to_string();
+                settings.with_config_mut(|c| c.user_name = input.ai_user_name.trim().to_string());
                 settings.mark_dirty();
             }
         });
 
+        ui.separator();
+        ui.label("Chat");
+
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::runtime_rules());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
             let response = ui.add(
-                egui::TextEdit::singleline(&mut input.ai_runtime_rules)
-                    .desired_width(f32::INFINITY),
+                egui::TextEdit::singleline(&mut input.ai_chat_model).desired_width(f32::INFINITY),
             );
             if response.changed() {
-                settings
-                    .ai
-                    .ai
-                    .runtime_rules
-                    .clone_from(&input.ai_runtime_rules);
+                ai_cfg.tasks.chat.model = Some(input.ai_chat_model.trim().to_string());
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::provider_name());
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut input.ai_provider_name)
-                    .desired_width(f32::INFINITY),
-            );
-            if response.changed() {
-                provider.name = input.ai_provider_name.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider);
-                settings.mark_dirty();
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::model());
-            let response = ui
-                .add(egui::TextEdit::singleline(&mut input.ai_model).desired_width(f32::INFINITY));
-            if response.changed() {
-                provider.model = input.ai_model.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider);
-                settings.mark_dirty();
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label(crate::i18n::base_url());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "base-url"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_base_url).desired_width(f32::INFINITY),
             );
             if response.changed() {
-                provider.base_url = input.ai_base_url.trim().to_string();
-                let _ = settings.ai.ai.set_section(&provider);
+                let url = input.ai_base_url.trim().to_string();
+                let provider_key = ai_cfg.tasks.chat.provider.clone();
+                match ai_cfg.providers.get_mut(&provider_key) {
+                    Some(def) if def.is_openai_compatible() => {
+                        def.base_url = url;
+                    }
+                    _ => {
+                        ai_cfg.providers.insert(
+                            provider_key,
+                            AiProviderDef {
+                                base_url: url,
+                                ..AiProviderDef::default()
+                            },
+                        );
+                    }
+                }
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::api_key_source());
-            let mut current_source = provider.api_key.source.clone();
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key-source"));
+            let mut current_source = input.ai_api_key_source.clone();
             egui::ComboBox::from_id_salt("api_key_source")
                 .selected_text(current_source.as_str())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut current_source,
                         "inline".to_string(),
-                        crate::i18n::inline_settings(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "inline-settings"),
                     );
                     ui.selectable_value(
                         &mut current_source,
                         "env".to_string(),
-                        crate::i18n::environment(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "environment"),
                     );
                 });
-            if current_source != provider.api_key.source {
-                provider.api_key.source = current_source;
-                let _ = settings.ai.ai.set_section(&provider);
+            if current_source != input.ai_api_key_source {
+                input.ai_api_key_source.clone_from(&current_source);
+                let provider_key = ai_cfg.tasks.chat.provider.clone();
+                if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                    && def.is_openai_compatible()
+                {
+                    def.api_key.source = current_source;
+                }
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
 
-        if provider.api_key.source == "env" {
+        if input.ai_api_key_source == "env" {
             ui.horizontal(|ui| {
-                ui.label(crate::i18n::api_key_env_var());
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key-env-var"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut input.ai_api_key_env)
                         .desired_width(f32::INFINITY),
                 );
                 if response.changed() {
-                    provider.api_key.env = input.ai_api_key_env.trim().to_string();
-                    let _ = settings.ai.ai.set_section(&provider);
-                    settings.mark_dirty();
+                    let provider_key = ai_cfg.tasks.chat.provider.clone();
+                    if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                        && def.is_openai_compatible()
+                    {
+                        def.api_key.env = input.ai_api_key_env.trim().to_string();
+                        settings.set_config_section(&ai_cfg);
+                        settings.mark_dirty();
+                    }
                 }
             });
         } else {
             ui.horizontal(|ui| {
-                ui.label(crate::i18n::api_key());
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "api-key"));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut input.ai_api_key)
                         .password(true)
                         .desired_width(f32::INFINITY),
                 );
                 if response.changed() {
-                    provider.api_key.inline = input.ai_api_key.trim().to_string();
-                    let _ = settings.ai.ai.set_section(&provider);
-                    settings.mark_dirty();
+                    let provider_key = ai_cfg.tasks.chat.provider.clone();
+                    if let Some(def) = ai_cfg.providers.get_mut(&provider_key)
+                        && def.is_openai_compatible()
+                    {
+                        def.api_key.inline = input.ai_api_key.trim().to_string();
+                        settings.set_config_section(&ai_cfg);
+                        settings.mark_dirty();
+                    }
                 }
             });
         }
 
+        // Inline validation + connection test (#241).
+        let issues = ene_ai::validate_settings(&settings.config());
+        if !issues.is_empty() {
+            for issue in &issues {
+                ui.colored_label(egui::Color32::from_rgb(200, 120, 40), issue.message());
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .button(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "ai-test-connection"
+                ))
+                .clicked()
+            {
+                input.ai_validation_message = Some(match ai_cfg.resolve_chat() {
+                    Ok(resolved) => {
+                        match ai.validate_api_key_blocking(&resolved.base_url, &resolved.api_key) {
+                            Ok(()) => {
+                                i18n_embed_fl::fl!(crate::i18n::loader(), "ai-test-connection-ok")
+                            }
+                            Err(e) => format!(
+                                "{}: {e}",
+                                i18n_embed_fl::fl!(
+                                    crate::i18n::loader(),
+                                    "ai-test-connection-error"
+                                )
+                            ),
+                        }
+                    }
+                    Err(e) => format!(
+                        "{}: {e}",
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "ai-test-connection-error")
+                    ),
+                });
+            }
+        });
+        if let Some(message) = input.ai_validation_message.as_deref() {
+            ui.label(message);
+        }
+
         ui.separator();
-        ui.label(crate::i18n::embedding_settings());
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "embedding-settings"
+        ));
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::provider());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider"));
             let mut current_provider = input.ai_embedding_provider.clone();
             egui::ComboBox::from_id_salt("embedding_provider")
                 .selected_text(current_provider.as_str())
@@ -170,67 +255,67 @@ pub fn render(
                     ui.selectable_value(
                         &mut current_provider,
                         "cloud".to_string(),
-                        crate::i18n::cloud_api(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "cloud-api"),
                     );
                     ui.selectable_value(
                         &mut current_provider,
                         "local".to_string(),
-                        crate::i18n::local_gguf(),
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "local-gguf"),
                     );
                 });
             if current_provider != input.ai_embedding_provider {
                 input.ai_embedding_provider.clone_from(&current_provider);
-                provider.embedding.backend.clone_from(&current_provider);
                 if current_provider.as_str() == "local" {
-                    provider.embedding.local.model = "jina-embeddings-v5-text-small".to_string();
-                    input
-                        .ai_embedding_model
-                        .clone_from(&provider.embedding.local.model);
+                    ensure_local_embedding_provider(&mut ai_cfg);
+                    input.ai_embedding_model.clone_from(
+                        ai_cfg
+                            .tasks
+                            .embedding
+                            .model
+                            .as_ref()
+                            .unwrap_or(&String::new()),
+                    );
                     input.ai_embedding_dimensions = "auto".to_string();
                 } else {
-                    provider.embedding.cloud.model = "text-embedding-3-small".to_string();
-                    provider.embedding.cloud.dimensions = 1536;
-                    input
-                        .ai_embedding_model
-                        .clone_from(&provider.embedding.cloud.model);
-                    input.ai_embedding_dimensions = provider.embedding.cloud.dimensions.to_string();
+                    set_embedding_cloud(&mut ai_cfg);
+                    input.ai_embedding_model.clone_from(
+                        ai_cfg
+                            .tasks
+                            .embedding
+                            .model
+                            .as_ref()
+                            .unwrap_or(&String::new()),
+                    );
+                    input.ai_embedding_dimensions = ai_cfg
+                        .tasks
+                        .embedding
+                        .dimensions
+                        .map_or_else(|| "1536".to_string(), |d| d.to_string());
                 }
-                let _ = settings.ai.ai.set_section(&provider);
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::model());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "model"));
             let response = ui.add(
                 egui::TextEdit::singleline(&mut input.ai_embedding_model)
                     .desired_width(f32::INFINITY),
             );
             if response.changed() {
-                if input.ai_embedding_provider == "local" {
-                    provider
-                        .embedding
-                        .local
-                        .model
-                        .clone_from(&input.ai_embedding_model);
-                } else {
-                    provider
-                        .embedding
-                        .cloud
-                        .model
-                        .clone_from(&input.ai_embedding_model);
-                }
-                let _ = settings.ai.ai.set_section(&provider);
+                ai_cfg.tasks.embedding.model = Some(input.ai_embedding_model.trim().to_string());
+                settings.set_config_section(&ai_cfg);
                 settings.mark_dirty();
             }
         });
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::dimensions());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "dimensions"));
             if input.ai_embedding_provider == "local" {
                 ui.add_sized(
                     [100.0, 0.0],
-                    egui::Label::new(crate::i18n::auto_from_model()),
+                    egui::Label::new(i18n_embed_fl::fl!(crate::i18n::loader(), "auto-from-model")),
                 );
             } else {
                 let response = ui.add(
@@ -240,25 +325,88 @@ pub fn render(
                 if response.changed()
                     && let Ok(dims) = input.ai_embedding_dimensions.parse::<usize>()
                 {
-                    provider.embedding.cloud.dimensions = dims;
-                    let _ = settings.ai.ai.set_section(&provider);
+                    ai_cfg.tasks.embedding.dimensions = Some(dims);
+                    settings.set_config_section(&ai_cfg);
                     settings.mark_dirty();
                 }
             }
         });
 
         ui.separator();
-        ui.label(crate::i18n::memory_settings());
+        render_provider_health(ui, ai, &ai_cfg);
+    });
+}
 
-        ui.horizontal(|ui| {
-            let mut checked = input.ai_memory_enabled;
-            ui.checkbox(&mut checked, crate::i18n::enable_long_term_memory());
-            if checked != input.ai_memory_enabled {
-                input.ai_memory_enabled = checked;
-                memory.enabled = checked;
-                let _ = settings.ai.ai.set_section(&memory);
-                settings.mark_dirty();
+/// Provider health and failover status display (#175).
+fn render_provider_health(ui: &mut egui::Ui, ai: &Arc<AiBridge>, ai_cfg: &AiConfig) {
+    ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider-health"));
+
+    if !ai_cfg.fallback.enabled {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "provider-health-failover-disabled"
+        ));
+        return;
+    }
+
+    let reports = ai.provider_health_reports();
+    if reports.is_empty() {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "provider-health-no-reports"
+        ));
+        return;
+    }
+
+    egui::Grid::new("provider_health_grid")
+        .striped(true)
+        .show(ui, |ui| {
+            ui.strong(i18n_embed_fl::fl!(crate::i18n::loader(), "provider"));
+            ui.strong(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "provider-health-status"
+            ));
+            ui.strong(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "provider-health-latency"
+            ));
+            ui.strong(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "provider-health-detail"
+            ));
+            ui.end_row();
+            for report in &reports {
+                ui.label(&report.provider);
+                let status = report.status.status_code();
+                let color = if report.status.is_available() {
+                    egui::Color32::from_rgb(120, 200, 120)
+                } else {
+                    egui::Color32::from_rgb(220, 110, 110)
+                };
+                ui.colored_label(color, status);
+                ui.label(format!("{}ms", report.latency_ms));
+                ui.label(report.error.clone().unwrap_or_default());
+                ui.end_row();
             }
         });
-    });
+
+    let history = ai.provider_fallback_history();
+    ui.add_space(8.0);
+    ui.label(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "provider-health-fallback-history"
+    ));
+    if history.is_empty() {
+        ui.weak(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "provider-health-no-fallbacks"
+        ));
+    } else {
+        for record in history.iter().rev().take(5) {
+            ui.weak(format!(
+                "{} → {} ({})",
+                record.from, record.to, record.reason
+            ));
+        }
+    }
 }

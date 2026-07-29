@@ -1,0 +1,240 @@
+# IPC Plugin System & MCP Integration
+
+This document covers Ene's out-of-process IPC plugin architecture, Protocol v4 wire specs, Model Context Protocol (MCP) server integration, and built-in tool plugins.
+
+---
+
+## 1. Out-of-Process Plugin Architecture
+
+To guarantee process isolation, stability, and security, all external capabilities—tool plugins, custom LLM providers, and MCP servers—run as independent sub-processes managed by `PluginHostManager` (`ene-plugin-host`).
+
+```text
+Ene Host Application (ene-runtime)
+  │
+  └── PluginHostManager (ene-plugin-host)
+        │
+        ├── IPC Protocol v4 (Length-prefixed JSON over stdio)
+        │     ├── ene-plugin-anthropic (Anthropic LLM Provider Plugin)
+        │     ├── ene-plugin-app       (GUI Launcher Tool)
+        │     ├── ene-plugin-browser   (CDP Browser Automation Tool)
+        │     ├── ene-plugin-fs        (Sandboxed Filesystem Tool)
+        │     ├── ene-plugin-utility   (Calculator & Todo Tool)
+        │     └── ene-plugin-web       (Web Search & Scraper Tool)
+        │
+        └── Model Context Protocol (MCP) Bridge (ene-connector)
+              └── External MCP Servers (Node.js / Python / Go MCP processes)
+```
+
+---
+
+## 2. IPC Protocol v4 Specification
+
+Plugins communicate over `stdin`/`stdout` using **IPC Protocol v4**:
+
+- **Framing**: Every packet begins with a 4-byte little-endian `u32` payload size followed by UTF-8 JSON.
+- **Handshake Negotiation**: The host sends `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`, i.e. `VersionRange { min: 3, max: 4 }` — not a single pinned value. The plugin intersects that range with its own supported range via `VersionRange::negotiate` and responds with `HandshakeAck { version, capabilities: PluginCapabilities }`, where `version` is the highest version common to both sides.
+- **Request Correlation**: All async requests and responses include a mandatory `request_id` (`Uuid`).
+- **Capabilities**: Plugins advertise supported capabilities (`tools`, `llm_providers`, `stt_providers`, `tts_providers`), each provider spec also declaring a `concurrency: ConcurrencyHint` (see [§3](#3-provider-concurrency-concurrencyhint)).
+
+### Versioning policy (N-1 backward compatibility)
+
+Tool and provider plugins ship as independent out-of-process binaries. Bumping `PLUGIN_IPC_PROTOCOL_VERSION` does not recompile plugin binaries that are already installed, so the host maintains **one version of backward compatibility**:
+
+- The host always advertises `[PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION]` during the handshake (`VersionRange::host_supported()` in `crates/ene-plugin-proto/src/ipc.rs`), rather than a single pinned version. A plugin built against the previous protocol version can still connect and negotiate at that older version.
+- A plugin binary is not required to support a range — it may keep declaring `VersionRange { min: N, max: N }` for whatever version it was built against. The compatibility responsibility is concentrated in the host, not pushed onto every plugin author.
+- **Bumping the protocol version**: when `PLUGIN_IPC_PROTOCOL_VERSION` is bumped, `PLUGIN_IPC_MIN_SUPPORTED_VERSION` must be bumped by the same amount, dropping support for the oldest previously-supported version.
+- **When a bump is required**: only for changing the meaning of an existing message, adding a required field, or removing/renaming an enum variant. New fields should use `#[serde(default)]` so older/newer peers stay wire-compatible without a version bump.
+- **Feature gating**: the host stores the negotiated version on `IpcPluginConnection` (`ene-plugin-host`) and exposes it via `negotiated_version()`. Behavior that depends on a message introduced after the minimum supported version should gate on it — e.g. `supports_cancel_stream()` gates `PluginIpcRequest::CancelStream` (introduced in v4) so a v3 plugin isn't sent a message it cannot deserialize; the connection falls back to its existing timeout-based stream termination instead.
+- **Negotiation failure diagnostics**: when a plugin's proposed range and the host's supported range do not overlap, the plugin's `HandshakeAck` error and the host's `PluginHostError::HandshakeFailed` / `ProtocolMismatch` both name the ranges on both sides (e.g. "host supports 3..=4, plugin supports 2..=2"), so a developer can tell the plugin binary needs rebuilding rather than seeing a generic handshake failure.
+
+---
+
+## 3. Provider Concurrency (`ConcurrencyHint`)
+
+The process boundary protects the *host* from a misbehaving provider plugin — a bad plugin cannot exhaust the host's tokio blocking pool — but on its own it does nothing to protect the *plugin*: nothing stopped the host from opening unbounded concurrent requests against a single plugin binary, and nothing let a plugin say "I am a local model, run me one at a time." `ConcurrencyHint` closes that gap.
+
+Every entry in `PluginCapabilities` — `LlmProviderSpec`, `TtsProviderSpec`, `SttProviderSpec` — carries a `concurrency: ConcurrencyHint` field:
+
+```rust
+pub struct ConcurrencyHint {
+    /// Max jobs this provider can run at once.
+    pub max_in_flight: u32,
+    /// Extra jobs to queue before rejecting.
+    pub queue_depth: u32,
+}
+```
+
+### The default is deliberately serial
+
+`ConcurrencyHint::default()` is `max_in_flight: 1, queue_depth: 2` — one job at a time, a shallow queue behind it. This is the load-bearing design decision, not an oversight: a plugin author who has not thought about concurrency at all gets conservative, safe behavior *because* they did not think about it. A plugin that wants more — typically a stateless HTTP proxy to a cloud API, which can safely serve many requests at once — must set `concurrency` explicitly, and doing so is itself evidence the author considered the question. The built-in Anthropic plugin does exactly this:
+
+```rust
+fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+    vec![LlmProviderSpec {
+        kind: "anthropic".to_string(),
+        // ...
+        concurrency: ConcurrencyHint { max_in_flight: 8, queue_depth: 16 },
+    }]
+}
+```
+
+The field is `#[serde(default)]`, like every other field added to this wire protocol since v3 — see [Versioning policy](#versioning-policy-n-1-backward-compatibility) above. A plugin binary built before `ConcurrencyHint` existed simply omits the field on the wire; the host deserializes the missing field as the safe serial default rather than failing the handshake or defaulting to unlimited concurrency. No protocol version bump was needed to add it.
+
+### Host-side enforcement
+
+`ene-plugin-host`'s `IpcLlmProvider` (`crates/ene-plugin-host/src/ipc_provider.rs`) enforces the declared hint with a `ConcurrencyLimiter`: a `tokio::sync::Semaphore` sized to `max_in_flight`, plus up to `queue_depth` callers allowed to wait for a permit. A request beyond both bounds fails fast with `LlmProviderError::Busy` rather than growing the wait queue without limit — the same fail-fast-over-queue-forever discipline `ene-infer` applies on the local-inference side, applied here at the plugin IPC boundary. The limiter is built once per (plugin, provider kind) in `IpcLlmProviderFactory` and shared across every provider instance created for that pair, since a fresh `IpcLlmProvider` is built per call. For a streaming request, the acquired permit is held for the stream's entire lifetime and releases automatically when the stream is dropped — whether it completed naturally or was cancelled mid-flight.
+
+### Local-inference plugin authors: the same discipline, in-process
+
+`ConcurrencyHint` only bounds how many requests the *host* sends to a plugin at once. A plugin that does its own local inference (llama.cpp, whisper.cpp, a local TTS engine) still has to get concurrency right *inside its own process* — the host cannot see or control how that plugin's code juggles the jobs once they arrive. For that, depend on `ene-plugin`'s `prelude` module, which re-exports `ene-infer`'s worker-thread framework (`EngineConfig`, `EngineError`, `EngineHandle`, `JobContext`, `LocalModel`, `StopReason`) alongside the usual plugin-authoring types:
+
+```rust
+use ene_plugin::prelude::*;
+
+struct MyLocalModel { /* ... */ }
+
+impl LocalModel for MyLocalModel {
+    type Request = MyRequest;
+    type Response = MyResponse;
+    type Error = MyModelError;
+
+    fn engine_name(&self) -> &str { "my-local-model" }
+
+    fn run(&mut self, req: Self::Request, ctx: &JobContext) -> Result<Self::Response, Self::Error> {
+        // Cooperatively check `ctx.should_stop()` at natural interruption points.
+        // ...
+    }
+}
+
+let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::default());
+```
+
+`EngineHandle` owns the model on a dedicated worker thread, runs jobs off a bounded queue that fails fast (`EngineError::Busy`) instead of growing without limit, and recovers from a panicking job by rebuilding the model — the same guarantees the host itself relies on, reached with one `use` line instead of hand-rolled `spawn_blocking`/`block_in_place` concurrency that would just relocate the bug across the process boundary.
+
+---
+
+## 4. Built-In Plugin Catalog
+
+| Plugin Binary | Namespace | Description | Stateful? |
+|---|---|---|---|
+| `ene-plugin-app` | `app.*` | System application launcher & window control | No |
+| `ene-plugin-browser` | `browser.*` | Headless Chrome/CDP web browser automation | Yes (Session store) |
+| `ene-plugin-fs` | `fs.*` | Sandboxed filesystem operations with undo ledger | Yes (DB IPC socket) |
+| `ene-plugin-utility` | `utility.*` | Calculator, datetime, active todo list manager | Yes (DB IPC socket) |
+| `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
+| `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
+
+All six plugins above are included in the default `plugins.list` and start
+automatically on fresh installs.
+
+---
+
+## 5. Plugin Security Model
+
+### Opt-in discovery
+
+Plugin discovery is **opt-in**: only binaries explicitly listed in
+`plugins.list` with `enable: true` are started. Dropping a binary into the
+plugins directory does **not** cause it to execute — the host logs a warning
+suggesting the user add it to configuration. This prevents a "drop binary →
+auto-execute" attack vector.
+
+```jsonc
+// settings.json (excerpt)
+{
+  "plugins": {
+    "list": {
+      "fs": { "enable": true },
+      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+    }
+  }
+}
+```
+
+### Environment hardening (`env_clear`)
+
+Every plugin and MCP stdio server is spawned with `env_clear()` — the
+inherited environment is wiped and only an explicit whitelist is forwarded:
+
+| Variable | Purpose |
+|---|---|
+| `PATH` | Locating system executables |
+| `HOME` | User config files |
+| `TMPDIR` | Temporary files |
+| `LANG` | Locale-sensitive output |
+| `TZ` | Timezone (only if set) |
+| `LD_LIBRARY_PATH` | Shared library loading (Linux) |
+| `SystemRoot`, `USERPROFILE`, `APPDATA`, `TEMP`, `PATHEXT` | Windows essentials |
+| `ENE_PLUGIN_SOCKET` | IPC channel (plugins only) |
+
+### Per-plugin `env_passthrough`
+
+Plugins that need additional host variables (e.g. API keys) declare them
+explicitly via `env_passthrough` in their `plugins.list` entry. A built-in
+denylist blocks security-sensitive names (`LD_PRELOAD`, `LD_AUDIT`,
+`DYLD_INSERT_LIBRARIES`, `ENE_PLUGIN_SOCKET`, etc.) regardless of
+configuration.
+
+MCP stdio servers support the same `env_passthrough` field in their
+`plugins.mcp_servers` entry for parity.
+
+### Binary checksum verification (TOFU)
+
+On first activation, the host computes the SHA-256 checksum of the plugin
+binary and records it in `plugins.list.<name>.checksum`
+(trust-on-first-use). Subsequent launches verify the binary against the
+recorded checksum and refuse to start if it has changed. Comparison is
+case-insensitive (hex encoding).
+
+---
+
+## 6. MCP (Model Context Protocol) Integration
+
+`ene-connector` and `ene-plugin-host` seamlessly integrate external MCP servers:
+
+1. **Discovery & Launch**: Host reads `plugins.mcp_servers` configuration and spawns target MCP server binaries over `stdio` or HTTP/SSE.
+2. **Tool Translation**: MCP tools are automatically translated into `ToolSpec` items and registered into the `CompositeToolRegistry`.
+3. **Execution Routing**: Tool calls generated by the LLM are routed through the MCP bridge and returned cleanly to `ene-runtime`.
+
+---
+
+## 7. Writing a Custom Tool Plugin
+
+Developers can quickly author new tool plugins using `ene-tool-sdk`'s `#[derive(ToolAction)]` and `ene-plugin`'s server entry point. This sketch is illustrative — see an existing plugin under `plugins/tool/*` (e.g. `plugins/tool/app/src/main.rs`) for the current, compiling pattern, or `cargo doc -p ene-tool-macros --open` for the derive macro's exact requirements:
+
+```rust,ignore
+use ene_tool_sdk::prelude::*;
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
+#[tool(namespace = "custom", name = "greet",
+       summary = "Generates a personalized greeting.", category = "Custom",
+       keywords_primary = "greet, hello")]
+pub struct GreetAction {
+    pub name: String,
+}
+
+impl GreetAction {
+    async fn run(&self) -> Result<String, ToolError> {
+        Ok(format!("Hello, {}!", self.name))
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    use ene_plugin::{PluginDispatch, ToolProviderPlugin, run_plugin_server};
+    use std::sync::Arc;
+
+    let provider = ActionSetProvider::new(vec![Box::new(GreetAction { name: String::new() })]);
+    let dispatch = PluginDispatch::new(
+        Some(Arc::new(ToolProviderPlugin::new(provider))),
+        None,
+        None,
+        None,
+        None,
+    );
+    if let Err(e) = run_plugin_server(dispatch).await {
+        tracing::error!("fatal error: {e}");
+        std::process::exit(1);
+    }
+}
+```

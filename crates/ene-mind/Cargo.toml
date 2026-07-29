@@ -3,6 +3,9 @@ name = "ene-mind"
 version.workspace = true
 edition.workspace = true
 description = "Mind runtime for the ene AI companion — session, memory extraction, recall, emotion, context, and prompt composition"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [lib]
 crate-type = ["lib"]
@@ -14,24 +17,25 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+parking_lot = { workspace = true }
 
 ene-config = { workspace = true }
+ene-core = { workspace = true }
 ene-store = { workspace = true }
 ene-ai = { workspace = true }
 
 chrono = { workspace = true }
 
 schemars = { workspace = true }
-ctor = { workspace = true }
 regex = { workspace = true }
 unicode-normalization = { workspace = true }
-once_cell = { workspace = true }
+blake3 = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
-ene-tool-proto = { workspace = true }
+ene-plugin-proto = { workspace = true }
 chrono = { workspace = true }
 
 [lints]

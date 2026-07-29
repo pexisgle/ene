@@ -12,10 +12,11 @@ use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
+use ene_plugin_host::{PluginHostError, ToolRegistry};
+use ene_plugin_proto::ToolResult;
 use ene_runtime::streaming::{StreamContext, run_stream_cognitive};
 use ene_runtime::{EneEvent, TerminalReason};
 use ene_store::MemoryStore;
-use ene_tool_host::{ToolHostError, ToolRegistry};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -55,7 +56,7 @@ impl LlmProvider for MockLlm {
     async fn create_chat_stream(
         &self,
         messages: &[LlmMessage],
-        _tools: &[ene_tool_proto::ToolSpec],
+        _tools: &[ene_plugin_proto::ToolSpec],
     ) -> Result<
         Pin<Box<dyn Stream<Item = Result<LlmResponseChunk, LlmProviderError>> + Send>>,
         LlmProviderError,
@@ -88,12 +89,17 @@ struct EmptyRegistry;
 
 #[async_trait]
 impl ToolRegistry for EmptyRegistry {
-    fn list_tools(&self) -> Vec<ene_tool_proto::ToolSpec> {
+    fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
         vec![]
     }
 
-    async fn call_tool(&self, _name: &str, _arguments: &str) -> Result<String, ToolHostError> {
-        Err(ToolHostError::ExecutionFailed {
+    async fn call_tool(
+        &self,
+        _name: &str,
+        _arguments: &str,
+        _context: Option<&ene_plugin_proto::CallContext>,
+    ) -> Result<ToolResult, PluginHostError> {
+        Err(PluginHostError::ExecutionFailed {
             message: "not used".into(),
         })
     }
@@ -130,13 +136,27 @@ async fn run_stream_cognitive_path_completes_with_logs() {
             response: "Hi there!".into(),
         }),
         event_tx,
+        audio_tx: tokio::sync::mpsc::channel(8).0,
         diag_tx,
         cancel_token: CancellationToken::new(),
         pending_permissions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         pending_user_inputs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        permission_scopes: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        undo_stack: Arc::new(tokio::sync::Mutex::new(ene_runtime::undo::UndoStack::new(
+            8,
+        ))),
         terminal_emitted,
         turn: turn.clone(),
+        origin: ene_runtime::TurnOrigin::User,
+        allow_tools: true,
+        runtime_directive: None,
+        proactive_screen_image: None,
+        generation_timeout: None,
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
+        memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
+        deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        tts_provider: None,
+        partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
     };
 
     let _session = run_stream_cognitive(ctx).await;
@@ -145,6 +165,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
     while let Ok(event) = event_rx.try_recv() {
         if let EneEvent::Terminal {
             turn: ref t,
+            origin: _,
             reason: TerminalReason::Done,
         } = event
         {
@@ -154,6 +175,9 @@ async fn run_stream_cognitive_path_completes_with_logs() {
     }
     assert!(saw_done, "expected terminal Done event");
 
-    let counts = store.count_legacy_rows("Ene").await.unwrap();
-    assert!(counts.logs >= 2, "user and assistant logs should be saved");
+    let sessions = store.list_session_ids_for_card("Ene").await.unwrap();
+    assert!(!sessions.is_empty(), "conversation logs should be saved");
+    let session_id = sessions.first().expect("non-empty sessions");
+    let logs = store.get_logs_by_session(session_id).await.unwrap();
+    assert!(logs.len() >= 2, "user and assistant logs should be saved");
 }

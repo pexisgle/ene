@@ -1,11 +1,33 @@
 use ene_config::ConfigStore;
-use ene_runtime::{EneHandle, EneRuntimeError, StoreConfig, open_from_disk};
+use ene_runtime::{EneHandle, EneRuntimeError, StoreConfig, open_ready};
+use std::path::Path;
+
+/// Startup overrides sourced from CLI flags.
+#[derive(Debug, Default)]
+pub struct InitOptions {
+    /// Optional explicit path to a `settings.json` file.
+    pub config_path: Option<std::path::PathBuf>,
+    /// Optional character card name or path override.
+    pub character: Option<String>,
+}
 
 /// Initializes the actor via the ready-handle product path.
-pub async fn init() -> Result<EneHandle, EneRuntimeError> {
+pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
     tracing::info!("[Runtime] Initializing AI runtime...");
 
-    let (handle, config) = open_from_disk().await?;
+    // Write JSON schemas once at startup rather than on every config load (#325).
+    ene_config::write_schemas(ene_config::assets_dir());
+
+    let mut config = match &opts.config_path {
+        Some(path) => load_config_from_path(path)?,
+        None => ConfigStore::try_load()?.config(),
+    };
+    if let Some(character) = &opts.character {
+        config.character = character.clone();
+    }
+
+    let card = ene_config::load_character_card(&config.character)?;
+    let handle = open_ready(config.clone(), card).await?;
 
     tracing::info!("[Runtime] AI runtime initialized successfully.");
 
@@ -20,8 +42,13 @@ pub async fn init() -> Result<EneHandle, EneRuntimeError> {
         );
     }
 
-    // Keep ConfigStore load path documented for hosts that need dirty tracking.
-    let _ = ConfigStore::from_config(config);
-
     Ok(handle)
+}
+
+fn load_config_from_path(path: &Path) -> Result<ene_config::EneConfig, EneRuntimeError> {
+    // Schemas are written to the global assets dir in `init` above; the
+    // `--config-path` override only affects where `settings.json` is read
+    // from (#325), so no per-path assets directory is threaded through here.
+    let config = ene_config::load_config_from(path)?;
+    Ok(config)
 }

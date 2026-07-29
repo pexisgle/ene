@@ -1,0 +1,36 @@
+[package]
+name = "ene-plugin-fs"
+version.workspace = true
+edition.workspace = true
+description = "Filesystem tools: read, write, edit, glob, grep, patch, shell execution, and undo with sandbox security"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ene-plugin-fs"
+path = "src/main.rs"
+
+[dependencies]
+ene-plugin = { workspace = true }
+ene-plugin-db = { workspace = true }
+ene-plugin-proto = { workspace = true }
+ene-tool-sdk = { workspace = true }
+tokio = { workspace = true, features = ["fs", "process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+schemars = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+walkdir = "2"
+glob = "0.3"
+strsim = "0.11"
+dashmap = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+flate2 = { version = "1", features = ["rust_backend"] }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

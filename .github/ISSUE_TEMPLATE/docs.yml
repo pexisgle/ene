@@ -1,0 +1,95 @@
+name: ドキュメント (Docs)
+description: ドキュメントの追加・修正・改善
+title: "docs(scope): "
+labels: ["type:docs", "priority:low"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ドキュメント改善の提案ありがとうございます。
+        タイトルは Conventional Commits 形式 (`docs(<scope>): <概要>`) で記入してください。
+        英語ドキュメント (`docs/`) と日本語ドキュメント (`docs/ja/`) は同期が必要です。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 対象エリア (area)
+      description: 関連するクレート・領域を選択してください。
+      multiple: true
+      options:
+        - core (ene-runtime / ene-mind / ene-store)
+        - memory (メモリ・記憶システム)
+        - provider (ene-ai / ene-ai-local / LLMプロバイダー)
+        - tool-system (ene-plugin-host / ene-plugin-*)
+        - connector (外部サービス連携)
+        - embedding (ene-tool-rag / 埋め込み・RAG検索)
+        - voice (音声入出力・STT/TTS)
+        - avatar (ene-vrm / アバター)
+        - desktop (ene-desktop)
+        - cli (ene-cli)
+        - config (ene-config)
+        - security (セキュリティ・パーミッション)
+        - docs (ドキュメント全般)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 優先度 (priority)
+      options:
+        - low (低優先度)
+        - medium (中優先度)
+        - high (高優先度)
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 追加・修正したいドキュメントの内容を説明してください。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: doc-type
+    attributes:
+      label: 種別
+      options:
+        - 新規作成
+        - 内容の修正・更新
+        - 誤字脱字・表記ゆれの修正
+        - 日本語訳の追加
+        - その他
+    validations:
+      required: true
+
+  - type: textarea
+    id: target
+    attributes:
+      label: 対象ファイル
+      description: 追加・修正するファイルパス。
+      placeholder: |
+        - docs/concepts/xxx.md (EN)
+        - docs/ja/concepts/xxx.md (JA)
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受け入れ条件
+      value: |
+        - [ ] EN/JA のドキュメントが同期されている
+        - [ ] 技術的内容が現状のコードと一致している
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 関連
+      placeholder: "#123, https://..."
+    validations:
+      required: false

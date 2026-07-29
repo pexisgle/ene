@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider};
 use ene_config::CharacterCardV3;
-use ene_store::{MemoryItem, MemoryStore, NewMemoryItem};
+use ene_core::{MemoryItem, MemoryPort, NewMemoryItem};
 
 use crate::config::CharacterMemoryConfig;
 use crate::error::CognitionError;
@@ -32,44 +32,29 @@ pub struct CharacterMemorySyncReport {
 
 /// Synchronize lorebook and style indices for a character card.
 pub async fn sync_character_memories(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     embedder: &Arc<dyn EmbeddingProvider>,
     character_id: &str,
     user_name: &str,
     card: &CharacterCardV3,
-    config: &CharacterMemoryConfig,
+    _config: &CharacterMemoryConfig,
     previous_card_memory_hash: Option<u64>,
 ) -> Result<(CharacterMemorySyncReport, u64), CognitionError> {
-    let lore_hash = LorebookIndexer::content_hash(card);
-    let style_hash = style_content_hash(card);
+    let hash = compute_card_memory_hash(card);
 
-    if !config.compile_ccv3_to_semantic_memory && !config.style_retrieval {
+    if previous_card_memory_hash == Some(hash) {
         return Ok((
             CharacterMemorySyncReport {
                 skipped: true,
                 ..Default::default()
             },
-            card_memory_hash_combined(lore_hash, style_hash),
-        ));
-    }
-
-    if previous_card_memory_hash == Some(card_memory_hash_combined(lore_hash, style_hash)) {
-        return Ok((
-            CharacterMemorySyncReport {
-                skipped: true,
-                ..Default::default()
-            },
-            card_memory_hash_combined(lore_hash, style_hash),
+            hash,
         ));
     }
 
     let mut desired: Vec<NewMemoryItem> = Vec::new();
-    if config.compile_ccv3_to_semantic_memory {
-        desired.extend(LorebookIndexer::compile_entries(card, user_name));
-    }
-    if config.style_retrieval {
-        desired.extend(StyleExampleSelector::compile_items(card, user_name));
-    }
+    desired.extend(LorebookIndexer::compile_entries(card, user_name));
+    desired.extend(StyleExampleSelector::compile_items(card, user_name));
 
     let desired_refs: HashSet<String> = desired
         .iter()
@@ -83,7 +68,7 @@ pub async fn sync_character_memories(
             &desired_refs,
         )
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
 
     let mut lorebook_inserted = 0usize;
     let mut lorebook_updated = 0usize;
@@ -109,7 +94,7 @@ pub async fn sync_character_memories(
             match store
                 .get_active_typed_memory_by_source_ref(character_id, source_ref)
                 .await
-                .map_err(CognitionError::Memory)?
+                .map_err(CognitionError::MemoryPort)?
             {
                 Some(existing) if ccv3_item_matches(&existing, &item) => continue,
                 Some(existing) => {
@@ -121,7 +106,7 @@ pub async fn sync_character_memories(
                     let new_id = store
                         .supersede_typed_memory(&item, id)
                         .await
-                        .map_err(CognitionError::Memory)?;
+                        .map_err(CognitionError::MemoryPort)?;
                     if is_lore {
                         lorebook_updated += 1;
                     } else if is_style {
@@ -133,7 +118,7 @@ pub async fn sync_character_memories(
                     let id = store
                         .insert_typed_memory(&item)
                         .await
-                        .map_err(CognitionError::Memory)?;
+                        .map_err(CognitionError::MemoryPort)?;
                     if is_lore {
                         lorebook_inserted += 1;
                     } else if is_style {
@@ -146,7 +131,7 @@ pub async fn sync_character_memories(
             let id = store
                 .insert_typed_memory(&item)
                 .await
-                .map_err(CognitionError::Memory)?;
+                .map_err(CognitionError::MemoryPort)?;
             if is_lore {
                 lorebook_inserted += 1;
             } else if is_style {
@@ -158,7 +143,7 @@ pub async fn sync_character_memories(
         store
             .upsert_memory_embedding(memory_id, embedder.model_name(), &content, &embedding)
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
     }
 
     Ok((
@@ -170,8 +155,19 @@ pub async fn sync_character_memories(
             archived,
             skipped: false,
         },
-        card_memory_hash_combined(lore_hash, style_hash),
+        hash,
     ))
+}
+
+/// Combined content hash for `CCv3` lorebook + style indices.
+///
+/// Used to skip per-turn sync when the session already holds a matching hash.
+#[must_use]
+pub fn compute_card_memory_hash(card: &CharacterCardV3) -> u64 {
+    card_memory_hash_combined(
+        LorebookIndexer::content_hash(card),
+        style_content_hash(card),
+    )
 }
 
 fn ccv3_item_matches(existing: &MemoryItem, desired: &NewMemoryItem) -> bool {
@@ -183,13 +179,70 @@ fn ccv3_item_matches(existing: &MemoryItem, desired: &NewMemoryItem) -> bool {
 }
 
 fn style_content_hash(card: &CharacterCardV3) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    card.data.mes_example.hash(&mut hasher);
-    hasher.finish()
+    let hash = blake3::hash(card.data.mes_example.as_bytes());
+    let bytes = hash.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 const fn card_memory_hash_combined(lore: u64, style: u64) -> u64 {
     lore ^ style.rotate_left(17)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ene_ai::{EmbeddingKind, EmbeddingProvider};
+    use ene_config::CharacterCardV3;
+    use ene_store::MemoryStore;
+
+    use super::*;
+    use crate::config::CharacterMemoryConfig;
+
+    #[test]
+    fn compute_card_memory_hash_is_stable_for_same_card() {
+        let card = CharacterCardV3::default();
+        let a = compute_card_memory_hash(&card);
+        let b = compute_card_memory_hash(&card);
+        assert_eq!(a, b);
+    }
+
+    #[tokio::test]
+    async fn sync_skips_when_previous_hash_matches() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedder: Arc<dyn EmbeddingProvider> = Arc::new(MockEmbedder);
+        let card = CharacterCardV3::default();
+        let config = CharacterMemoryConfig::default();
+        let hash = compute_card_memory_hash(&card);
+
+        let (report, returned) =
+            sync_character_memories(&store, &embedder, "ene", "user", &card, &config, Some(hash))
+                .await
+                .expect("sync");
+
+        assert!(report.skipped);
+        assert_eq!(returned, hash);
+    }
+
+    struct MockEmbedder;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for MockEmbedder {
+        fn model_name(&self) -> &'static str {
+            "mock"
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        async fn embed_batch(
+            &self,
+            items: &[(&str, EmbeddingKind)],
+        ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+            Ok(items.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        }
+    }
 }

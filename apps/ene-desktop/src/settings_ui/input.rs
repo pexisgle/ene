@@ -15,24 +15,36 @@ pub struct SettingsInputState {
     pub character_pos_y: String,
     pub character_pos_z: String,
     pub ai_user_name: String,
-    pub ai_runtime_rules: String,
+    pub ai_chat_model: String,
     pub ai_base_url: String,
+    pub ai_api_key_source: String,
     pub ai_api_key: String,
-    pub ai_memory_enabled: bool,
+    pub ai_api_key_env: String,
     pub ai_embedding_provider: String,
     pub ai_embedding_model: String,
     pub ai_embedding_dimensions: String,
-    pub ai_provider_name: String,
-    pub ai_model: String,
-    pub ai_api_key_env: String,
+    /// Last AI settings validation / connection-test message (#241).
+    pub ai_validation_message: Option<String>,
+    pub tts_provider: String,
+    pub tts_model: String,
+    pub tts_voice: String,
+    pub tts_language: String,
+    pub tts_model_path: String,
+    pub tts_voices_path: String,
+    pub stt_provider: String,
+    pub stt_model: String,
+    pub stt_language: String,
+    pub stt_model_path: String,
 }
 
 impl SettingsInputState {
     pub fn new() -> Self {
         Self {
             ai_embedding_provider: "cloud".to_string(),
-            ai_embedding_model: "jina-embeddings-v5-text-small".to_string(),
-            ai_embedding_dimensions: "auto".to_string(),
+            ai_embedding_model: "text-embedding-3-small".to_string(),
+            ai_embedding_dimensions: "1536".to_string(),
+            ai_api_key_source: "env".to_string(),
+            ai_api_key_env: "OPENAI_API_KEY".to_string(),
             ..Self::default()
         }
     }
@@ -50,36 +62,47 @@ impl SettingsInputState {
         self.character_pos_x = format!("{:+.2}", settings.character_state.character_position.x);
         self.character_pos_y = format!("{:+.2}", settings.character_state.character_position.y);
         self.character_pos_z = format!("{:+.2}", settings.character_state.character_position.z);
-        self.ai_user_name.clone_from(&settings.ai.ai.user_name);
-        self.ai_runtime_rules
-            .clone_from(&settings.ai.ai.runtime_rules);
-        let provider = settings
-            .ai
-            .ai
-            .get_section::<ene_runtime::ProviderConfig>()
-            .unwrap_or_default();
-        self.ai_base_url.clone_from(&provider.base_url);
-        self.ai_api_key.clone_from(&provider.api_key.inline);
-        let mem = settings
-            .ai
-            .ai
-            .get_section::<ene_store::StoreConfig>()
-            .unwrap_or_default();
-        self.ai_memory_enabled = mem.enabled;
-        self.ai_embedding_provider
-            .clone_from(&provider.embedding.backend);
-        self.ai_embedding_model = if provider.embedding.backend == "local" {
-            provider.embedding.local.model.clone()
+        self.ai_user_name.clone_from(&settings.config().user_name);
+        let ai_cfg = settings.config_section::<ene_runtime::AiConfig>();
+        self.ai_chat_model = ai_cfg.tasks.chat.model.clone().unwrap_or_default();
+        if let Some(def) = ai_cfg.providers.get(&ai_cfg.tasks.chat.provider) {
+            self.ai_base_url.clone_from(&def.base_url);
+            self.ai_api_key_source.clone_from(&def.api_key.source);
+            self.ai_api_key.clone_from(&def.api_key.inline);
+            self.ai_api_key_env.clone_from(&def.api_key.env);
         } else {
-            provider.embedding.cloud.model.clone()
-        };
-        self.ai_embedding_dimensions = if provider.embedding.backend == "local" {
+            self.ai_base_url.clear();
+            self.ai_api_key_source = "env".to_string();
+            self.ai_api_key.clear();
+            self.ai_api_key_env = "OPENAI_API_KEY".to_string();
+        }
+        self.ai_embedding_provider =
+            if ene_ai::AiConfig::is_local_provider(&ai_cfg.tasks.embedding.provider) {
+                "local".to_string()
+            } else {
+                "cloud".to_string()
+            };
+        self.ai_embedding_model = ai_cfg.tasks.embedding.model.clone().unwrap_or_default();
+        self.ai_embedding_dimensions = if self.ai_embedding_provider == "local" {
             "auto".to_string()
         } else {
-            provider.embedding.cloud.dimensions.to_string()
+            ai_cfg
+                .tasks
+                .embedding
+                .dimensions
+                .map_or_else(|| "1536".to_string(), |d| d.to_string())
         };
-        self.ai_provider_name.clone_from(&provider.name);
-        self.ai_model.clone_from(&provider.model);
-        self.ai_api_key_env = provider.api_key.env;
+
+        self.tts_provider.clone_from(&ai_cfg.tts.provider);
+        self.tts_model.clone_from(&ai_cfg.tts.model);
+        self.tts_voice.clone_from(&ai_cfg.tts.voice);
+        self.tts_language.clone_from(&ai_cfg.tts.language);
+        self.tts_model_path = ai_cfg.tts.model_path.clone().unwrap_or_default();
+        self.tts_voices_path = ai_cfg.tts.voices_path.clone().unwrap_or_default();
+
+        self.stt_provider.clone_from(&ai_cfg.stt.provider);
+        self.stt_model.clone_from(&ai_cfg.stt.model);
+        self.stt_language.clone_from(&ai_cfg.stt.language);
+        self.stt_model_path = ai_cfg.stt.model_path.clone().unwrap_or_default();
     }
 }

@@ -13,6 +13,15 @@
 //!   [`DEFAULT_EXTRACTION_TIMEOUT_SECS`])
 //! - Markdown wrapper stripping (```json ... ```)
 //! - Confidence capping at 0.9
+
+// `fmt::Error` is `Copy`, so `drop()` would itself trip
+// `clippy::dropping_copy_types`; every `write!`/`writeln!` in this module
+// targets a local `String` buffer via `fmt::Write`, which never actually
+// fails.
+#![expect(
+    clippy::let_underscore_must_use,
+    reason = "fmt::Write to a String is infallible in practice"
+)]
 //! - Unknown `kind` fallback to `Semantic`
 
 use std::fmt::Write;
@@ -333,6 +342,7 @@ fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
         should_persist: raw.should_persist,
         deletion_target_key: raw.deletion_target_key,
         commitment_due: raw.commitment_due,
+        tags: Vec::new(),
     }
 }
 
@@ -395,7 +405,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "mock: not implemented".to_string(),
@@ -423,7 +433,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "timeout: not implemented".to_string(),
@@ -454,7 +464,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "garbage: not implemented".to_string(),
@@ -789,7 +799,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "recording: not implemented".to_string(),
@@ -828,6 +838,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         extract_with_timeout(&provider, &ja_turn("I like coffee"), Locale::En, 5, &[hint])
             .await

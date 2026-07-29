@@ -52,6 +52,7 @@ pub fn extract_tool_candidates(
                 should_persist: true,
                 deletion_target_key: None,
                 commitment_due: None,
+                tags: Vec::new(),
             });
         }
 
@@ -68,6 +69,7 @@ pub fn extract_tool_candidates(
                 should_persist: true,
                 deletion_target_key: None,
                 commitment_due: None,
+                tags: Vec::new(),
             });
         }
 
@@ -86,6 +88,7 @@ pub fn extract_tool_candidates(
                 should_persist: true,
                 deletion_target_key: None,
                 commitment_due: None,
+                tags: Vec::new(),
             });
         }
     }

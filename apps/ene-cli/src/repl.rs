@@ -1,22 +1,16 @@
 use crate::{
     commands::{self, CommandOutcome, SHUTDOWN_TIMEOUT},
     context::AppContext,
+    output::EXIT_INTERRUPTED,
     stream,
+    terminal_ui::{self, TerminalUi},
 };
 
 /// Read a single line of REPL input on a blocking thread. Returns
 /// `None` if stdin reaches EOF (Ctrl-D in a TTY, or the input stream
 /// was closed).
 async fn read_line() -> Option<String> {
-    tokio::task::spawn_blocking(|| {
-        dialoguer::Input::<String>::new()
-            .with_prompt(">")
-            .allow_empty(true)
-            .interact()
-            .ok()
-    })
-    .await
-    .unwrap_or(None)
+    TerminalUi::global().read_line().await
 }
 
 /// Drains the actor and returns the exit code. Used on both `/quit`
@@ -38,6 +32,19 @@ async fn drain_and_exit(ctx: &AppContext, code: i32) -> i32 {
 }
 
 pub async fn run(ctx: &mut AppContext) -> i32 {
+    if let Ok(snapshot) = ctx.handle.diagnostics().get_snapshot().await {
+        let issues = ene_ai::validate_settings(&snapshot.config);
+        if !issues.is_empty() {
+            eprintln!(
+                "{} AI settings look incomplete — use `/config` to review or `/config set` to fix.",
+                crate::style::warning("WARN")
+            );
+            for issue in issues {
+                eprintln!("  - {}", issue.message());
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             biased;
@@ -45,18 +52,19 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
             // Ctrl-C: clean shutdown path. tokio::signal::ctrl_c()
             // resolves on the first SIGINT, including the one a TTY
             // forwards when the user presses Ctrl-C while
-            // `dialoguer::Input::interact()` is blocked.
+            // line editing is blocked.
             ctrl_c_result = tokio::signal::ctrl_c() => {
                 if let Err(e) = ctrl_c_result {
                     tracing::error!(error = %e, "Failed to install Ctrl-C handler");
                 } else {
                     tracing::info!("[Runtime] Ctrl-C received, shutting down...");
                 }
-                return drain_and_exit(ctx, 130).await;
+                terminal_ui::request_read_cancel();
+                return drain_and_exit(ctx, EXIT_INTERRUPTED).await;
             }
 
-            // Normal REPL line input. The blocking dialoguer call
-            // runs on a worker thread; we await its result here.
+            // Normal REPL line input. The blocking editor runs on a
+            // worker thread; we await its result here.
             maybe_input = read_line() => {
                 let Some(input) = maybe_input else {
                     // EOF (Ctrl-D) — treat like /quit so we still
@@ -86,11 +94,15 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                 }
                     Err(ene_runtime::RunError::Busy) => {
                         println!("{}", crate::style::warning(
-                            "[Busy] A turn is already in progress. Wait for it to finish.",
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "busy-warning"),
                         ));
                     }
                     Err(e) => {
-                        println!("{}", crate::style::error(format!("[Run] Failed: {e}")));
+                        println!("{}", crate::style::error(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "run-failed",
+                            error = e.to_string()
+                        )));
                     }
                 }
             }

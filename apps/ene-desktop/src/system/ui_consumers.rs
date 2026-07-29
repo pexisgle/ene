@@ -9,7 +9,7 @@ use crate::component::chat::{ChatStateComponent, ChatWindow};
 use crate::component::ui::{UiStateComponent, UiWindow};
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
 use crate::event::settings::OpenSettings;
@@ -44,6 +44,19 @@ pub fn open_chat_system(
         return;
     };
     chat.0.chat_window_visible = true;
+}
+
+pub fn apply_runtime_disconnected_system(
+    mut events: MessageReader<crate::event::lifecycle::RuntimeDisconnected>,
+    mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,
+) {
+    if events.read().last().is_none() {
+        return;
+    }
+    let Some(mut ui) = ui_query.iter_mut().next() else {
+        return;
+    };
+    ui.0.runtime_disconnected = true;
 }
 
 pub fn apply_ai_text_deltas_system(
@@ -105,6 +118,41 @@ pub fn apply_ai_permission_system(
         },
     });
     chat.0.chat_window_visible = true;
+}
+
+/// Accumulates pending tool-permission approvals into the settings
+/// `UiState` so the Permission Center page can list and answer them
+/// (#177). Runs alongside [`apply_ai_permission_system`], which keeps
+/// the chat-window dialog; the two are independent surfaces over the
+/// same `decide_permission` call. Duplicate `request_id`s are ignored
+/// so a re-broadcast never double-lists a request.
+pub fn collect_permission_requests_system(
+    mut events: MessageReader<AiPermissionRequested>,
+    mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,
+) {
+    let Some(mut ui) = ui_query.iter_mut().next() else {
+        return;
+    };
+    for event in events.read() {
+        let already_present =
+            ui.0.permission_requests
+                .iter()
+                .any(|p| p.request_id == event.request_id);
+        if already_present {
+            continue;
+        }
+        ui.0.permission_requests
+            .push(crate::settings::PendingPermission {
+                request_id: event.request_id.clone(),
+                action: event.action.clone(),
+                target: event.target.clone(),
+                description: if event.description.is_empty() {
+                    None
+                } else {
+                    Some(event.description.clone())
+                },
+            });
+    }
 }
 
 pub fn apply_ai_user_input_system(
@@ -172,6 +220,20 @@ pub fn apply_expression_commands_system(
     }
 }
 
+/// Converts the canonical [`ene_config::MotionLayer`] (carried on performance
+/// cues and cancel scopes) into the rendering-side [`ene_vrm::MotionLayer`].
+///
+/// `ene-vrm` is rendering-only and cannot depend on `ene-config`, and the
+/// orphan rule blocks a cross-crate `From` impl, so the desktop bridges the
+/// two mirrors here by matching variants directly (#133).
+fn to_vrm_layer(layer: ene_config::MotionLayer) -> ene_vrm::MotionLayer {
+    match layer {
+        ene_config::MotionLayer::Upper => ene_vrm::MotionLayer::Upper,
+        ene_config::MotionLayer::Lower => ene_vrm::MotionLayer::Lower,
+        ene_config::MotionLayer::Full => ene_vrm::MotionLayer::Full,
+    }
+}
+
 /// Applies [`CancelCommand`] to clear expression or motion state (#132).
 pub fn apply_cancel_system(
     mut events: MessageReader<CancelCommand>,
@@ -193,12 +255,12 @@ pub fn apply_cancel_system(
                 state.cancel_all_motions();
             }
             scope if scope.starts_with("motion:") => {
-                let layer = match scope.strip_prefix("motion:") {
-                    Some("upper") => ene_config::MotionLayer::Upper,
-                    Some("lower") => ene_config::MotionLayer::Lower,
-                    _ => ene_config::MotionLayer::Full,
-                };
-                state.cancel_motion(layer);
+                let label = scope.strip_prefix("motion:").unwrap_or_default();
+                // Unknown layer labels fall back to `Full` (preempts
+                // everything), matching the pre-typing behavior.
+                let layer = ene_config::MotionLayer::from_label(label)
+                    .unwrap_or(ene_config::MotionLayer::Full);
+                state.cancel_motion(to_vrm_layer(layer));
             }
             _ => {
                 tracing::debug!(
@@ -212,22 +274,37 @@ pub fn apply_cancel_system(
 }
 
 /// Feeds [`MotionCommand`] messages into the [`MotionLayerState`] (#133).
+///
+/// Converts the canonical [`ene_config::MotionLayer`] carried on the command
+/// into the rendering-side [`ene_vrm::MotionLayer`] via [`to_vrm_layer`] — no
+/// string round-trip.
 pub fn apply_motion_commands_system(
     mut events: MessageReader<MotionCommand>,
     mut state: ResMut<MotionLayerState>,
 ) {
     for cmd in events.read() {
-        let layer = match cmd.layer.as_str() {
-            "upper" => ene_config::MotionLayer::Upper,
-            "lower" => ene_config::MotionLayer::Lower,
-            _ => ene_config::MotionLayer::Full,
-        };
+        let layer = to_vrm_layer(cmd.layer);
         let repeat = match layer {
-            ene_config::MotionLayer::Lower => ene_vrm::RepeatMode::Loop,
+            ene_vrm::MotionLayer::Lower => ene_vrm::RepeatMode::Loop,
             _ => ene_vrm::RepeatMode::Once,
         };
         state.accept_motion(cmd.name.clone(), layer, cmd.priority, cmd.duration, repeat);
     }
+}
+
+/// Updates the pending-candidates badge in `UiState` when new candidates
+/// are available (#223).
+pub fn apply_pending_candidates_count_system(
+    mut events: MessageReader<PendingCandidatesCount>,
+    mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,
+) {
+    let Some(last) = events.read().last() else {
+        return;
+    };
+    let Some(mut ui) = ui_query.iter_mut().next() else {
+        return;
+    };
+    ui.0.memory_journal_pending_count = last.0;
 }
 
 #[cfg(test)]

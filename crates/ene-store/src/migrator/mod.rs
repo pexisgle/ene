@@ -1,5 +1,8 @@
 #![expect(missing_docs, reason = "sea-orm migration modules are schema-internal")]
 
+mod embeddings_cleanup;
+
+use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
 use sea_orm_migration::prelude::*;
 
 pub struct Migrator;
@@ -9,17 +12,9 @@ impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
             Box::new(Migration),
-            Box::new(Migration2),
-            Box::new(Migration3),
-            Box::new(Migration4),
-            Box::new(Migration5),
-            Box::new(Migration6),
-            Box::new(Migration7),
-            Box::new(Migration8),
-            Box::new(Migration9),
-            // Migration10 (drop conversation_summaries / conversation_keyfacts)
-            // is deferred until legacy_migration tooling and store unit tests no
-            // longer need those tables on fresh in-memory DBs (#125).
+            Box::new(PendingMemoryWritesMigration),
+            Box::new(SourceRefIndexMigration),
+            Box::new(EmbeddingsCleanupIndexMigration),
         ]
     }
 }
@@ -28,148 +23,14 @@ pub struct Migration;
 
 impl MigrationName for Migration {
     fn name(&self) -> &'static str {
-        "m20250628_000000_initial_schema"
+        "m20260719_000000_initial_schema"
     }
 }
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // 1. conversation_summaries
-        manager
-            .create_table(
-                Table::create()
-                    .table(ConversationSummaries::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(ConversationSummaries::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationSummaries::SessionId)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationSummaries::CardName)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationSummaries::Summary)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationSummaries::Embedding)
-                            .blob()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationSummaries::CreatedAt)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationSummaries::EndedAt)
-                            .string()
-                            .not_null(),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_summary_card")
-                    .table(ConversationSummaries::Table)
-                    .col(ConversationSummaries::CardName)
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_summary_created")
-                    .table(ConversationSummaries::Table)
-                    .col((ConversationSummaries::CreatedAt, IndexOrder::Desc))
-                    .to_owned(),
-            )
-            .await?;
-
-        // 2. conversation_keyfacts
-        manager
-            .create_table(
-                Table::create()
-                    .table(ConversationKeyFacts::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(ConversationKeyFacts::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationKeyFacts::CardName)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationKeyFacts::SummaryId)
-                            .integer()
-                            .null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationKeyFacts::Key)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationKeyFacts::Value)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(ConversationKeyFacts::CreatedAt)
-                            .string()
-                            .not_null(),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_keyfacts_card")
-                    .table(ConversationKeyFacts::Table)
-                    .col(ConversationKeyFacts::CardName)
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_keyfacts_key")
-                    .table(ConversationKeyFacts::Table)
-                    .col(ConversationKeyFacts::CardName)
-                    .col(ConversationKeyFacts::Key)
-                    .to_owned(),
-            )
-            .await?;
-
-        // 3. conversation_logs
+        // conversation_logs
         manager
             .create_table(
                 Table::create()
@@ -218,7 +79,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // 4. tool_embedding_index
+        // tool_embedding_index
         manager
             .create_table(
                 Table::create()
@@ -325,7 +186,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // 5. __tool_schemas
+        // __tool_schemas
         manager
             .create_table(
                 Table::create()
@@ -344,102 +205,7 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(ToolSchemas::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(ToolEmbeddingIndex::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(ConversationLogs::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(ConversationKeyFacts::Table).to_owned())
-            .await?;
-        manager
-            .drop_table(Table::drop().table(ConversationSummaries::Table).to_owned())
-            .await?;
-        Ok(())
-    }
-}
-
-#[derive(DeriveIden)]
-enum ConversationSummaries {
-    Table,
-    Id,
-    SessionId,
-    CardName,
-    Summary,
-    Embedding,
-    CreatedAt,
-    EndedAt,
-}
-
-#[derive(Iden)]
-enum ConversationKeyFacts {
-    #[iden = "conversation_keyfacts"]
-    Table,
-    Id,
-    CardName,
-    SummaryId,
-    Key,
-    Value,
-    CreatedAt,
-}
-
-#[derive(DeriveIden)]
-enum ConversationLogs {
-    Table,
-    Id,
-    SessionId,
-    CardName,
-    Role,
-    Content,
-    CreatedAt,
-}
-
-#[derive(DeriveIden)]
-enum ToolEmbeddingIndex {
-    Table,
-    Id,
-    ToolName,
-    Field,
-    FieldKey,
-    VersionHash,
-    ModelName,
-    SourceText,
-    Embedding,
-    CreatedAt,
-}
-
-#[derive(Iden)]
-enum ToolSchemas {
-    #[iden = "__tool_schemas"]
-    Table,
-    Prefix,
-    SchemaJson,
-    Fingerprint,
-    CreatedAt,
-}
-
-// ── Migration 2: Typed Memory ─────────────────────────────────────────────────
-
-pub struct Migration2;
-
-impl MigrationName for Migration2 {
-    fn name(&self) -> &'static str {
-        "m20250629_000000_typed_memory_schema"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration2 {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // 1. typed_memories
+        // typed_memories
         manager
             .create_table(
                 Table::create()
@@ -526,6 +292,14 @@ impl MigrationTrait for Migration2 {
                             .default("active"),
                     )
                     .col(ColumnDef::new(TypedMemories::SupersedesId).integer().null())
+                    .col(
+                        ColumnDef::new(TypedMemories::Pinned)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(ColumnDef::new(TypedMemories::FadedAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(TypedMemories::CommitmentId).integer().null())
                     .to_owned(),
             )
             .await?;
@@ -564,7 +338,18 @@ impl MigrationTrait for Migration2 {
             )
             .await?;
 
-        // 2. memory_embeddings
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_typed_memories_commitment_id")
+                    .table(TypedMemories::Table)
+                    .col(TypedMemories::CommitmentId)
+                    .to_owned(),
+            )
+            .await?;
+
+        // memory_embeddings
         manager
             .create_table(
                 Table::create()
@@ -628,7 +413,7 @@ impl MigrationTrait for Migration2 {
             )
             .await?;
 
-        // 3. memory_links
+        // memory_links
         manager
             .create_table(
                 Table::create()
@@ -690,7 +475,7 @@ impl MigrationTrait for Migration2 {
             )
             .await?;
 
-        // 4. memory_spans
+        // memory_spans
         manager
             .create_table(
                 Table::create()
@@ -734,7 +519,7 @@ impl MigrationTrait for Migration2 {
             )
             .await?;
 
-        // 5. affect_states
+        // affect_states
         manager
             .create_table(
                 Table::create()
@@ -745,6 +530,12 @@ impl MigrationTrait for Migration2 {
                             .string()
                             .not_null()
                             .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
                     )
                     .col(
                         ColumnDef::new(AffectStates::Valence)
@@ -765,6 +556,48 @@ impl MigrationTrait for Migration2 {
                             .default(0.0),
                     )
                     .col(
+                        ColumnDef::new(AffectStates::Trust)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::Affinity)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::Irritation)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::Curiosity)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::Fatigue)
+                            .float()
+                            .not_null()
+                            .default(0.0),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::MoodLabel)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(AffectStates::LastExpression)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
                         ColumnDef::new(AffectStates::DiscreteEmotions)
                             .string()
                             .not_null()
@@ -775,10 +608,262 @@ impl MigrationTrait for Migration2 {
             )
             .await?;
 
+        // commitments
+        manager
+            .create_table(
+                Table::create()
+                    .table(Commitments::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Commitments::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Commitments::CharacterId).string().not_null())
+                    .col(
+                        ColumnDef::new(Commitments::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(Commitments::Title).string().not_null())
+                    .col(ColumnDef::new(Commitments::Description).string().not_null())
+                    .col(
+                        ColumnDef::new(Commitments::Status)
+                            .string()
+                            .not_null()
+                            .default("active"),
+                    )
+                    .col(ColumnDef::new(Commitments::DueAt).string().null())
+                    .col(ColumnDef::new(Commitments::DueLabel).string().null())
+                    .col(ColumnDef::new(Commitments::CreatedAt).string().not_null())
+                    .col(ColumnDef::new(Commitments::UpdatedAt).string().not_null())
+                    .col(ColumnDef::new(Commitments::CompletedAt).string().null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_commitments_character_status_due")
+                    .table(Commitments::Table)
+                    .col(Commitments::CharacterId)
+                    .col(Commitments::Status)
+                    .col(Commitments::DueAt)
+                    .to_owned(),
+            )
+            .await?;
+
+        // audit_log
+        manager
+            .create_table(
+                Table::create()
+                    .table(AuditLog::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(AuditLog::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::TurnId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(AuditLog::ToolName).string().not_null())
+                    .col(
+                        ColumnDef::new(AuditLog::Action)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::Target)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::Decision)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::Success)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(AuditLog::RedactedArgs)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(AuditLog::CreatedAt).string().not_null())
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_audit_log_created")
+                    .table(AuditLog::Table)
+                    .col((AuditLog::CreatedAt, IndexOrder::Desc))
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_audit_log_tool")
+                    .table(AuditLog::Table)
+                    .col(AuditLog::ToolName)
+                    .to_owned(),
+            )
+            .await?;
+
+        // sessions
+        manager
+            .create_table(
+                Table::create()
+                    .table(Sessions::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(Sessions::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(Sessions::SessionId).string().not_null())
+                    .col(
+                        ColumnDef::new(Sessions::CardName)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(Sessions::Title)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(ColumnDef::new(Sessions::CreatedAt).string().not_null())
+                    .col(ColumnDef::new(Sessions::UpdatedAt).string().not_null())
+                    .col(
+                        ColumnDef::new(Sessions::Archived)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(Sessions::TurnCount)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .unique()
+                    .name("uniq_sessions_session_id")
+                    .table(Sessions::Table)
+                    .col(Sessions::SessionId)
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_sessions_archived_updated")
+                    .table(Sessions::Table)
+                    .col(Sessions::Archived)
+                    .col((Sessions::UpdatedAt, IndexOrder::Desc))
+                    .to_owned(),
+            )
+            .await?;
+
+        // pending_affect_proposals
+        manager
+            .create_table(
+                Table::create()
+                    .table(PendingAffectProposals::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::CharacterId)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::SourceTurnId)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::ProposalJson)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingAffectProposals::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(PendingAffectProposals::CharacterId)
+                            .col(PendingAffectProposals::UserId),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(Sessions::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(AuditLog::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(PendingAffectProposals::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .drop_table(Table::drop().table(Commitments::Table).to_owned())
+            .await?;
         manager
             .drop_table(Table::drop().table(AffectStates::Table).to_owned())
             .await?;
@@ -794,8 +879,52 @@ impl MigrationTrait for Migration2 {
         manager
             .drop_table(Table::drop().table(TypedMemories::Table).to_owned())
             .await?;
+        manager
+            .drop_table(Table::drop().table(ToolSchemas::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(ToolEmbeddingIndex::Table).to_owned())
+            .await?;
+        manager
+            .drop_table(Table::drop().table(ConversationLogs::Table).to_owned())
+            .await?;
         Ok(())
     }
+}
+
+#[derive(DeriveIden)]
+enum ConversationLogs {
+    Table,
+    Id,
+    SessionId,
+    CardName,
+    Role,
+    Content,
+    CreatedAt,
+}
+
+#[derive(DeriveIden)]
+enum ToolEmbeddingIndex {
+    Table,
+    Id,
+    ToolName,
+    Field,
+    FieldKey,
+    VersionHash,
+    ModelName,
+    SourceText,
+    Embedding,
+    CreatedAt,
+}
+
+#[derive(Iden)]
+enum ToolSchemas {
+    #[iden = "__tool_schemas"]
+    Table,
+    Prefix,
+    SchemaJson,
+    Fingerprint,
+    CreatedAt,
 }
 
 #[derive(DeriveIden)]
@@ -884,223 +1013,6 @@ enum AffectStates {
     UpdatedAt,
 }
 
-// ── Migration 3: AffectState relationship fields ────────────────────────────
-
-pub struct Migration3;
-
-impl MigrationName for Migration3 {
-    fn name(&self) -> &'static str {
-        "m20250629_000001_affect_state_fields"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration3 {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if !manager.has_column("affect_states", "user_id").await? {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::UserId)
-                        .string()
-                        .not_null()
-                        .default(""),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        if !manager.has_column("affect_states", "trust").await? {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::Trust)
-                        .float()
-                        .not_null()
-                        .default(0.0),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        if !manager.has_column("affect_states", "affinity").await? {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::Affinity)
-                        .float()
-                        .not_null()
-                        .default(0.0),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        if !manager.has_column("affect_states", "irritation").await? {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::Irritation)
-                        .float()
-                        .not_null()
-                        .default(0.0),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        if !manager.has_column("affect_states", "curiosity").await? {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::Curiosity)
-                        .float()
-                        .not_null()
-                        .default(0.0),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        if !manager.has_column("affect_states", "fatigue").await? {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::Fatigue)
-                        .float()
-                        .not_null()
-                        .default(0.0),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        if !manager.has_column("affect_states", "mood_label").await? {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::MoodLabel)
-                        .string()
-                        .not_null()
-                        .default(""),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        if !manager
-            .has_column("affect_states", "last_expression")
-            .await?
-        {
-            let stmt = Table::alter()
-                .table(AffectStates::Table)
-                .add_column(
-                    ColumnDef::new(AffectStates::LastExpression)
-                        .string()
-                        .not_null()
-                        .default(""),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // SQLite doesn't support DROP COLUMN, so the down migration is a no-op.
-        // The columns remain but are ignored by older code versions.
-        let _ = manager;
-        Ok(())
-    }
-}
-
-// ── Migration 4: Companion Commitment Ledger ────────────────────────────────
-
-pub struct Migration4;
-
-impl MigrationName for Migration4 {
-    fn name(&self) -> &'static str {
-        "m20250703_000000_commitments"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration4 {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(Commitments::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(Commitments::Id)
-                            .integer()
-                            .not_null()
-                            .auto_increment()
-                            .primary_key(),
-                    )
-                    .col(ColumnDef::new(Commitments::CharacterId).string().not_null())
-                    .col(
-                        ColumnDef::new(Commitments::UserId)
-                            .string()
-                            .not_null()
-                            .default(""),
-                    )
-                    .col(ColumnDef::new(Commitments::Title).string().not_null())
-                    .col(ColumnDef::new(Commitments::Description).string().not_null())
-                    .col(
-                        ColumnDef::new(Commitments::Status)
-                            .string()
-                            .not_null()
-                            .default("active"),
-                    )
-                    .col(ColumnDef::new(Commitments::DueAt).string().null())
-                    .col(ColumnDef::new(Commitments::DueLabel).string().null())
-                    .col(ColumnDef::new(Commitments::SourceMemoryId).integer().null())
-                    .col(ColumnDef::new(Commitments::CreatedAt).string().not_null())
-                    .col(ColumnDef::new(Commitments::UpdatedAt).string().not_null())
-                    .col(ColumnDef::new(Commitments::CompletedAt).string().null())
-                    .foreign_key(
-                        ForeignKey::create()
-                            .name("fk_commitments_source_memory")
-                            .from(Commitments::Table, Commitments::SourceMemoryId)
-                            .to(TypedMemories::Table, TypedMemories::Id)
-                            .on_delete(ForeignKeyAction::SetNull),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_commitments_character_status_due")
-                    .table(Commitments::Table)
-                    .col(Commitments::CharacterId)
-                    .col(Commitments::Status)
-                    .col(Commitments::DueAt)
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .unique()
-                    .name("uniq_commitments_source_memory")
-                    .table(Commitments::Table)
-                    .col(Commitments::SourceMemoryId)
-                    .to_owned(),
-            )
-            .await?;
-
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(Commitments::Table).to_owned())
-            .await?;
-        Ok(())
-    }
-}
-
 #[derive(Iden)]
 enum Commitments {
     #[iden = "commitments"]
@@ -1113,224 +1025,9 @@ enum Commitments {
     Status,
     DueAt,
     DueLabel,
-    SourceMemoryId,
     CreatedAt,
     UpdatedAt,
     CompletedAt,
-}
-
-// ── Migration 5: Typed memory pin flag (#76) ────────────────────────────────
-
-pub struct Migration5;
-
-impl MigrationName for Migration5 {
-    fn name(&self) -> &'static str {
-        "m20250705_000000_typed_memory_pinned"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration5 {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if !manager.has_column("typed_memories", "pinned").await? {
-            let stmt = Table::alter()
-                .table(TypedMemories::Table)
-                .add_column(
-                    ColumnDef::new(TypedMemories::Pinned)
-                        .integer()
-                        .not_null()
-                        .default(0),
-                )
-                .to_owned();
-            manager.alter_table(stmt).await?;
-        }
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let _ = manager;
-        Ok(())
-    }
-}
-
-// ── Migration 6: Typed memory faded_at timestamp (#76) ────────────────────────
-
-pub struct Migration6;
-
-impl MigrationName for Migration6 {
-    fn name(&self) -> &'static str {
-        "m20250705_000001_typed_memory_faded_at"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration6 {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        if !manager.has_column("typed_memories", "faded_at").await? {
-            let stmt = Table::alter()
-                .table(TypedMemories::Table)
-                .add_column(ColumnDef::new(TypedMemories::FadedAt).timestamp_with_time_zone())
-                .to_owned();
-            manager.alter_table(stmt).await?;
-
-            // Backfill existing faded rows so archive decay has a stable anchor.
-            let backfill = Query::update()
-                .table(TypedMemories::Table)
-                .value(TypedMemories::FadedAt, Expr::col(TypedMemories::UpdatedAt))
-                .and_where(Expr::col(TypedMemories::Status).eq("faded"))
-                .and_where(Expr::col(TypedMemories::FadedAt).is_null())
-                .to_owned();
-            manager.exec_stmt(backfill).await?;
-        }
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let _ = manager;
-        Ok(())
-    }
-}
-
-// ── Migration 7: Legacy migration metadata (#98) ─────────────────────────────
-
-pub struct Migration7;
-
-impl MigrationName for Migration7 {
-    fn name(&self) -> &'static str {
-        "m20250705_000002_memory_migration_meta"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration7 {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(MemoryMigrationMeta::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(MemoryMigrationMeta::CardName)
-                            .string()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(MemoryMigrationMeta::MigratedAt)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(MemoryMigrationMeta::LegacySummariesCount)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(MemoryMigrationMeta::LegacyKeyfactsCount)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(MemoryMigrationMeta::LegacyLogsCount)
-                            .integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(MemoryMigrationMeta::Strategy)
-                            .string()
-                            .not_null(),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(Table::drop().table(MemoryMigrationMeta::Table).to_owned())
-            .await?;
-        Ok(())
-    }
-}
-
-#[derive(Iden)]
-enum MemoryMigrationMeta {
-    #[iden = "memory_migration_meta"]
-    Table,
-    CardName,
-    MigratedAt,
-    LegacySummariesCount,
-    LegacyKeyfactsCount,
-    LegacyLogsCount,
-    Strategy,
-}
-
-// ── Migration 8: Pending affect proposals (#88 async post-turn) ──────────────
-
-pub struct Migration8;
-
-impl MigrationName for Migration8 {
-    fn name(&self) -> &'static str {
-        "m20260709_000000_pending_affect_proposals"
-    }
-}
-
-#[async_trait::async_trait]
-impl MigrationTrait for Migration8 {
-    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .create_table(
-                Table::create()
-                    .table(PendingAffectProposals::Table)
-                    .if_not_exists()
-                    .col(
-                        ColumnDef::new(PendingAffectProposals::CharacterId)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(PendingAffectProposals::UserId)
-                            .string()
-                            .not_null()
-                            .default(""),
-                    )
-                    .col(
-                        ColumnDef::new(PendingAffectProposals::SourceTurnId)
-                            .big_integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(PendingAffectProposals::ProposalJson)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(PendingAffectProposals::CreatedAt)
-                            .timestamp_with_time_zone()
-                            .not_null(),
-                    )
-                    .primary_key(
-                        Index::create()
-                            .col(PendingAffectProposals::CharacterId)
-                            .col(PendingAffectProposals::UserId),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(
-                Table::drop()
-                    .table(PendingAffectProposals::Table)
-                    .to_owned(),
-            )
-            .await?;
-        Ok(())
-    }
 }
 
 #[derive(Iden)]
@@ -1344,71 +1041,174 @@ enum PendingAffectProposals {
     CreatedAt,
 }
 
-// ── Migration 9: typed_memories.commitment_id (ledger sole SoT, #124) ────────
+#[derive(Iden)]
+enum AuditLog {
+    #[iden = "audit_log"]
+    Table,
+    Id,
+    TurnId,
+    ToolName,
+    Action,
+    Target,
+    Decision,
+    Success,
+    RedactedArgs,
+    CreatedAt,
+}
 
-pub struct Migration9;
+#[derive(Iden)]
+enum Sessions {
+    #[iden = "sessions"]
+    Table,
+    Id,
+    SessionId,
+    CardName,
+    Title,
+    CreatedAt,
+    UpdatedAt,
+    Archived,
+    TurnCount,
+}
 
-impl MigrationName for Migration9 {
+/// Adds the deferred memory-write retry queue (#240).
+pub struct PendingMemoryWritesMigration;
+
+impl MigrationName for PendingMemoryWritesMigration {
     fn name(&self) -> &'static str {
-        "m20260714_000000_typed_memory_commitment_id"
+        "m20260722_000001_pending_memory_writes"
     }
 }
 
 #[async_trait::async_trait]
-impl MigrationTrait for Migration9 {
+impl MigrationTrait for PendingMemoryWritesMigration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
-            .alter_table(
-                Table::alter()
-                    .table(TypedMemories::Table)
-                    .add_column(ColumnDef::new(TypedMemories::CommitmentId).integer().null())
+            .create_table(
+                Table::create()
+                    .table(PendingMemoryWrites::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::Id)
+                            .integer()
+                            .not_null()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::CharacterId)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::UserId)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::PayloadJson)
+                            .string()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::Attempts)
+                            .integer()
+                            .not_null()
+                            .default(0),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::MaxAttempts)
+                            .integer()
+                            .not_null()
+                            .default(5),
+                    )
+                    .col(ColumnDef::new(PendingMemoryWrites::LastError).string())
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::Status)
+                            .string()
+                            .not_null()
+                            .default("pending"),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::NextRetryAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(PendingMemoryWrites::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
-
         manager
             .create_index(
                 Index::create()
                     .if_not_exists()
-                    .name("idx_typed_memories_commitment_id")
-                    .table(TypedMemories::Table)
-                    .col(TypedMemories::CommitmentId)
+                    .name("idx_pending_memory_writes_retry")
+                    .table(PendingMemoryWrites::Table)
+                    .col(PendingMemoryWrites::Status)
+                    .col(PendingMemoryWrites::NextRetryAt)
                     .to_owned(),
             )
             .await?;
+        Ok(())
+    }
 
-        // Backfill: commitments.source_memory_id → typed_memories.commitment_id
-        let db = manager.get_connection();
-        db.execute_unprepared(
-            r"
-            UPDATE typed_memories
-            SET commitment_id = (
-                SELECT c.id FROM commitments c
-                WHERE c.source_memory_id = typed_memories.id
-                LIMIT 1
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(Table::drop().table(PendingMemoryWrites::Table).to_owned())
+            .await?;
+        Ok(())
+    }
+}
+
+#[derive(Iden)]
+enum PendingMemoryWrites {
+    #[iden = "pending_memory_writes"]
+    Table,
+    Id,
+    CharacterId,
+    UserId,
+    PayloadJson,
+    Attempts,
+    MaxAttempts,
+    LastError,
+    Status,
+    CreatedAt,
+    NextRetryAt,
+    UpdatedAt,
+}
+
+/// Adds composite index on `(character_id, source_ref)` for `typed_memories`.
+pub struct SourceRefIndexMigration;
+
+impl MigrationName for SourceRefIndexMigration {
+    fn name(&self) -> &'static str {
+        "m20260722_000002_source_ref_index"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for SourceRefIndexMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_typed_mem_character_source_ref")
+                    .table(TypedMemories::Table)
+                    .col(TypedMemories::CharacterId)
+                    .col(TypedMemories::SourceRef)
+                    .to_owned(),
             )
-            WHERE EXISTS (
-                SELECT 1 FROM commitments c
-                WHERE c.source_memory_id = typed_memories.id
-            )
-            ",
-        )
-        .await?;
-
-        // Fade unlinked typed Commitment bodies (ledger is now SoT).
-        db.execute_unprepared(
-            r"
-            UPDATE typed_memories
-            SET status = 'faded',
-                faded_at = COALESCE(faded_at, CURRENT_TIMESTAMP),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE kind = 'commitment'
-              AND commitment_id IS NULL
-              AND status = 'active'
-            ",
-        )
-        .await?;
-
+            .await?;
         Ok(())
     }
 
@@ -1416,16 +1216,8 @@ impl MigrationTrait for Migration9 {
         manager
             .drop_index(
                 Index::drop()
-                    .name("idx_typed_memories_commitment_id")
+                    .name("idx_typed_mem_character_source_ref")
                     .table(TypedMemories::Table)
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .alter_table(
-                Table::alter()
-                    .table(TypedMemories::Table)
-                    .drop_column(TypedMemories::CommitmentId)
                     .to_owned(),
             )
             .await?;

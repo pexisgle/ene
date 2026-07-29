@@ -1,7 +1,7 @@
 //! MMR diversification for hybrid recall candidates (#78).
 //!
 //! Downstream recall execution calls [`MemoryDiversifyPipeline::diversify`] after
-//! `MemoryStore::search` and before optional LLM reranking.
+//! `MemoryStore::search`.
 //!
 //! The pipeline merges near-duplicate clusters, applies greedy MMR selection,
 //! enforces per-kind minimum slots, and rewards source diversity. Hybrid scores
@@ -16,8 +16,6 @@ use super::plan::RecallPlan;
 /// Runtime options controlling MMR diversification behavior.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MemoryDiversifyOptions {
-    /// Whether MMR diversification is enabled.
-    pub enabled: bool,
     /// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`.
     pub lambda: f32,
     /// Lexical similarity threshold for duplicate cluster merging.
@@ -38,7 +36,6 @@ impl MemoryDiversifyOptions {
     /// Build options from mind memory config.
     pub const fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
-            enabled: config.mmr_enabled,
             lambda: config.mmr_lambda.clamp(0.0, 1.0),
             duplicate_cluster_threshold: config.mmr_duplicate_cluster_threshold.clamp(0.0, 1.0),
             min_slots_semantic: config.mmr_min_slots_semantic,
@@ -56,9 +53,6 @@ pub struct MemoryDiversifyPipeline;
 
 impl MemoryDiversifyPipeline {
     /// Diversify hybrid-search candidates using MMR and kind quotas.
-    ///
-    /// When disabled, returns the top `plan.budget.result_limit` candidates in
-    /// their original score order.
     pub fn diversify(
         candidates: Vec<ScoredMemory>,
         plan: &RecallPlan,
@@ -68,17 +62,6 @@ impl MemoryDiversifyPipeline {
 
         if candidates.is_empty() {
             return candidates;
-        }
-
-        if !options.enabled {
-            tracing::debug!(
-                component = "Recall",
-                stage = "diversify",
-                outcome = "skipped",
-                reason = "disabled",
-                input_count = candidates.len(),
-            );
-            return truncate(candidates, limit);
         }
 
         if candidates.len() <= 1 {
@@ -459,13 +442,11 @@ mod tests {
                 decay_half_life_days: 30.0,
                 query_affect: None,
             },
-            use_hyde: false,
         }
     }
 
     fn default_options() -> MemoryDiversifyOptions {
         MemoryDiversifyOptions {
-            enabled: true,
             lambda: 0.7,
             duplicate_cluster_threshold: 0.75,
             min_slots_semantic: 1,
@@ -660,26 +641,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_passthrough_truncates_only() {
-        let candidates = vec![
-            sample_memory(1, MemoryKind::Semantic, "a", "alpha", 0.9),
-            sample_memory(2, MemoryKind::Semantic, "b", "beta", 0.8),
-            sample_memory(3, MemoryKind::Semantic, "c", "gamma", 0.7),
-        ];
-
-        let plan = default_plan(2);
-        let options = MemoryDiversifyOptions {
-            enabled: false,
-            ..default_options()
-        };
-        let result = MemoryDiversifyPipeline::diversify(candidates, &plan, options);
-
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].item.id, Some(1));
-        assert_eq!(result[1].item.id, Some(2));
-    }
-
-    #[test]
     fn source_diversity_bonus_prefers_new_source() {
         let mut lexical = sample_memory(
             1,
@@ -719,7 +680,6 @@ mod tests {
     fn options_from_config_uses_defaults() {
         let config = MindMemoryConfig::default();
         let options = MemoryDiversifyOptions::from_config(&config);
-        assert!(options.enabled);
         assert!((options.lambda - 0.7).abs() < f32::EPSILON);
         assert_eq!(options.min_slots_commitment, 1);
     }

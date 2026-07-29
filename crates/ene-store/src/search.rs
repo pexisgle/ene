@@ -5,6 +5,7 @@
 
 use crate::typed_memory::{
     AffectAnnotation, MemoryCandidateSource, MemoryItem, MemoryScoreBreakdown, MemoryStatus, Query,
+    TimeRange,
 };
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
@@ -15,6 +16,27 @@ pub(crate) struct GatheredCandidate {
     pub item: MemoryItem,
     pub vector_similarity: f32,
     pub sources: Vec<MemoryCandidateSource>,
+}
+
+/// Whether a memory's `created_at` falls within the optional time range.
+///
+/// Returns `true` when `range` is `None` (no filter) or when the timestamp is
+/// within the inclusive `[start, end]` bounds. Missing bounds are unbounded.
+pub(crate) fn within_time_range(range: Option<&TimeRange>, created_at: DateTime<Utc>) -> bool {
+    let Some(range) = range else {
+        return true;
+    };
+    if let Some(start) = range.start
+        && created_at < start
+    {
+        return false;
+    }
+    if let Some(end) = range.end
+        && created_at > end
+    {
+        return false;
+    }
+    true
 }
 
 /// Tokenize text for lexical overlap (lowercase alphanumeric tokens).
@@ -338,6 +360,7 @@ mod tests {
             candidate_pool_size: 50,
             query_affect: None,
             weights: HybridSearchWeights::default(),
+            time_range: None,
             decay_half_life_days: 30.0,
             now,
             min_score: 0.0,
@@ -383,6 +406,7 @@ mod tests {
             candidate_pool_size: 50,
             query_affect: None,
             weights: HybridSearchWeights::default(),
+            time_range: None,
             decay_half_life_days: 30.0,
             now,
             min_score: 0.0,
@@ -397,5 +421,47 @@ mod tests {
         let breakdown = score_candidate(&options, &candidate);
         assert!(!breakdown.total.is_nan());
         assert!(breakdown.total >= 0.0);
+    }
+
+    #[test]
+    fn within_time_range_filters_by_created_at() {
+        use crate::typed_memory::TimeRange;
+
+        let created = Utc.with_ymd_and_hms(2026, 7, 10, 12, 0, 0).unwrap();
+        let before = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
+        let after = Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap();
+
+        // No range => always included.
+        assert!(within_time_range(None, created));
+
+        // Inclusive bounds.
+        let range = TimeRange {
+            start: Some(before),
+            end: Some(after),
+        };
+        assert!(within_time_range(Some(&range), created));
+        assert!(within_time_range(Some(&range), before));
+        assert!(within_time_range(Some(&range), after));
+
+        // Out of range on both sides.
+        let too_early = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let too_late = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        assert!(!within_time_range(Some(&range), too_early));
+        assert!(!within_time_range(Some(&range), too_late));
+
+        // Open-ended bounds.
+        let start_only = TimeRange {
+            start: Some(before),
+            end: None,
+        };
+        assert!(within_time_range(Some(&start_only), too_late));
+        assert!(!within_time_range(Some(&start_only), too_early));
+
+        let end_only = TimeRange {
+            start: None,
+            end: Some(after),
+        };
+        assert!(within_time_range(Some(&end_only), too_early));
+        assert!(!within_time_range(Some(&end_only), too_late));
     }
 }

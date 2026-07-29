@@ -1,187 +1,153 @@
 # AGENTS.md
 
-## Project Overview
-This project is an AI assistant application written in Rust that merges VTuber-like characters with Agentic AI capabilities.
+This file provides guidance to opencode and Claude Code when working with code in this repository.
 
-## 0. Crucial Behaviors
+## Build environment
 
-* **Check Documentation:** Before planning changes, always read the relevant files in `docs/reference/` (design & API), `docs/guide/` (human workflows), or `crates/` to confirm the current design.
-* **Verify & Complete:** Before declaring a task finished, run `cargo clippy --workspace` and `cargo test --workspace` (on Linux, use the §3 direnv invocation). Finally, check the PR Verification Checklist (§8) to ensure all requirements are met.
-* **Correct Fixes:** If a test or build fails, read the compiler errors carefully. Always clarify the cause and the reason, and create a fix plan before making corrections. If the error is environment-specific, ask the user how to fix it.
-* **Follow the Recipes:** When asked to add tools, configs, or IPC messages, strictly follow the steps in **§6 Common Tasks**.
-* **Handle Hooks Gracefully:** If a git commit fails due to `cargo-husky` pre-commit hooks, read the hook output, fix the formatting or linter errors, and try committing again before resorting to `--no-verify`.
+Native deps (Vulkan, ALSA, OpenSSL, libclang, mold) come from the checked-in Nix flake.
+Run everything from the repo root. If `direnv` is active, plain `cargo` works; otherwise
+prefix with `nix develop --command` (this is what CI does).
 
-## 1. Where to Look
+**Platform support**: Linux is the only supported dev/CI platform (all CI jobs run on
+`ubuntu-latest`). Windows is produced by cross-compiling from Linux to the
+`x86_64-pc-windows-gnu` target via the flake's mingw toolchain — there is no native Windows
+dev shell. macOS is not a supported target.
 
-| Purpose | Reference |
+## Commands
+
+`default-members = ["apps/ene-cli"]`, so **a bare `cargo test` / `cargo clippy` only covers
+the CLI, not the workspace.** Always pass `--workspace` or `-p <package>` explicitly.
+
+| Purpose | Command |
 |---|---|
-| Platform-specific notes | §3 Platform-Specific Notes |
-| Understanding crate layout and architecture | §4 Architecture & Philosophy; `docs/reference/` |
-| Human how-to (run, configure, tools catalog) | `docs/guide/` |
-| Matching project style, error handling, and logging | §5 Code Style & Safety Guidelines |
-| Adding/modifying tools, configurations, or characters | §6 Common Tasks |
-| Submitting a PR / Git Workflow | §8 Git & PR Policy |
+| Format | `cargo fmt --all` (check: `-- --check`) |
+| Focused iteration | `cargo check -p <pkg>` / `cargo test -p <pkg>` |
+| Full lint (CI gate) | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Full tests (CI gate) | `cargo test --workspace` |
+| Run | `cargo run -p ene-cli -- --help` / `cargo run -p ene-desktop` |
 
-## 2. AGENTS.md vs Skills vs docs/
+CI additionally runs `cargo doc --workspace --no-deps`. It is deliberately *not* run with
+`RUSTDOCFLAGS=-D warnings` — pre-existing broken intra-doc links would fail unrelated work.
 
-| Scope | Where it lives |
-|---|---|
-| **Project-specific conventions** | **AGENTS.md** (this file) |
-| **Design & architecture / API (agents)** | `docs/reference/` (EN) and `docs/ja/reference/` (JA) |
-| **Human developer guides** | `docs/guide/` and `docs/ja/guide/` |
-| **End-user quickstart** | `README.md` |
+## Lints are the spec, not a suggestion
 
-## 3. Platform-Specific Notes
+`[workspace.lints.clippy]` in the root `Cargo.toml` denies `all`, `pedantic`, and `cargo` as
+whole groups, plus these individually: `unwrap_used`, `expect_used`, `panic`, `todo`,
+`unimplemented`, `dbg_macro`, `mem_forget`, `let_underscore_must_use`, `print_stdout`,
+`print_stderr`. Clippy failures are build failures.
 
-* **Linux:** Uses `direnv` + Nix flake. Run Cargo from the workspace root (shell cwd is already the repo; do not prefix commands with `cd`). Confirm `cargo` is not on PATH (`command -v cargo`); when it is not, use:
- `direnv exec . cargo <command>`
-* **Windows:** Uses Windows Named Pipes for IPC.
+- No `unwrap`/`expect`/panic paths in production code. Tests opt out per-crate via
+  `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` — see `crates/ene-runtime/src/lib.rs`.
+- `allow_attributes_without_reason` is denied: every exception must be
+  `#[expect(lint, reason = "...")]`, scoped as narrowly as possible. Never widen a lint
+  workspace-wide to make an error go away.
+- `clippy::restriction` is intentionally *not* blanket-enabled; adopt lints from it one at a
+  time with a reason comment.
 
-## 4. Architecture & Philosophy
+## Rust conventions (review-enforced, not caught by clippy)
 
-### 4.1 Crate Splits
-The workspace is highly granularly split to enforce strict boundaries and prevent circular dependencies (API v2).
-* **`ene-runtime`**: Host facade (`EneHandle::open`, `TurnId`, chat events, diagnostics). Ties together mind, store, AI providers, and tool host.
-* **`ene-mind`**: Cognitive turn pipeline (session, recall, affect, Performance arbitration, memory writing). Does **not** depend on `ene-runtime` or `ene-tool-host`.
-* **`ene-store`**: Exclusively owns `sea-orm` SQLite operations. Does **not** depend on `ene-ai` or `ene-mind`.
-* **`ene-ai`**: LLM + embedding providers (absorbs former `ene-provider` / `ene-embedding`).
-* **`ene-tool`**: Facade re-exporting `ene-tool-proto` + `ene-tool-common` + `ene-tool-derive`. Preferred import for new tool binaries. Does **not** depend on runtime / mind / store.
-* **`ene-tool-proto`**: Defines the IPC ABI (Requests/Responses). *Must not contain business or DB logic.*
-* **`ene-tool-db`**: IPC CRUD client for tool binaries → `ene-runtime`'s `DbIpcServer`; replaces direct `ene-store` linkage in stateful tools. Depends only on `ene-tool-proto`.
-* **`ene-tool-host`**: Orchestrates tools and IPC. Depends on the tool ABI crates. Does **not** depend on `ene-ai` or `ene-store` — Tool RAG lives in `ene-tool-rag`.
-* **`ene-tool-rag`**: Tool RAG pipeline — multi-vector embedding, weighted field similarity, optional HyDE, optional LLM rerank. Depends on `ene-ai`, `ene-store`, and `ene-tool-proto`.
-* **`ene-vrm`**: VRM rendering for desktop. Does **not** depend on mind / runtime.
-* **Rule:** Do not merge crates arbitrarily. Tool binaries must be kept extremely lightweight and only link what is absolutely necessary (prefer `ene-tool`, or at most `ene-tool-proto` + `ene-tool-derive`).
-* **Rule: Dependency Centralization:** All external dependencies used by crates under `crates/` must be declared in the root `[workspace.dependencies]` table and referenced via `{ workspace = true }` in each crate's `Cargo.toml`. Do not pin version numbers directly in individual crate manifests.
+- Async is Tokio. Library errors are `thiserror` — never expose `anyhow`, bare `String`, or
+  `Box<dyn Error>` at a library boundary.
+- Diagnostics use structured `tracing`. `print_stdout`/`print_stderr` are re-allowed at the
+  crate level only for `apps/ene-cli`, plugin binaries' fatal-error paths, and examples.
+- Prefer `parking_lot` locks, `OnceLock` for one-time init, and the narrowest visibility
+  (`pub(crate)` by default).
+- Keep deps in root `[workspace.dependencies]` and reference them as `{ workspace = true }`.
+  Don't bump versions as a side effect of unrelated work.
 
-### 4.2 Asset Distribution Strategy
-* **Static Assets** (Default characters, config templates, UI icons): Distributed alongside the executable. On first launch, `ene-config` copies them to the user data directory. To keep the distribution lightweight, `.gitignore`'d resources (such as `assets/models/` and generated `assets/schema/*.schema.json`) **must not be bundled** in the release package.
-* **Dynamic Assets** (User databases, character prompts): Managed by `ene-config` and reside in OS-standard data directories (e.g., `%APPDATA%` on Windows, `~/.config` on Linux). 
-* **Rule:** The workspace root `assets/` directory is for local development and default templates. Heavy binary models or generated schemas must be excluded from distribution.
+## Architecture boundaries
 
-### 4.3 Technology Stack
-* **Backend:** `tokio` (Async), `tracing` (Structured Logging).
-* **GUI (`ene-desktop`):** A custom rendering stack utilizing `winit` (Windowing) + `wgpu` (Graphics) + `egui` (UI). It uniquely relies on `bevy_ecs` purely for state management and scheduling, without the Bevy rendering engine.
-* **Memory System:** `sea-orm` + `sqlite-vec` + `sea-orm-migration`.
-* **Tool Sandbox:** Tools run as separate processes communicating via IPC named pipes (Windows) or Unix Domain Sockets (Linux).
+Violating these is the most common way to break this repo:
 
-## 5. Code Style & Safety Guidelines
+- `ene-runtime` — host/actor facade and bootstrap. `ene-mind` owns session, recall, prompt
+  composition, affect, performance, and memory writing, and **must not depend on runtime or
+  the tool host**.
+- `ene-store` alone owns SQLite/SeaORM connections, schema, migrations, and raw DB access. It
+  must not depend on ai/mind. Plugin binaries reach state through `ene-plugin-db` over IPC.
+- `ene-plugin-proto` is wire ABI only. `ene-plugin` is the authoring facade,
+  `ene-plugin-host` owns process/registry orchestration, `ene-vrm` is rendering-only.
+  Never move business or DB logic into ABI crates.
+- API v1 invariants: every turn has a `TurnId`; `run` is single-flight and returns
+  `RunError::Busy`; `Terminal` follows history commit and synchronous finalization (deferred
+  memory work may continue after it); `Performance` is the presentation event, kept separate
+  from detailed pipeline diagnostics.
+- `release` deliberately omits `panic = "abort"` — `ene-runtime`'s actor relies on
+  `catch_unwind` isolation (`crates/ene-runtime/src/handle/actor.rs`). Do not add it.
 
-* **Async:** `tokio` only. Do not use `async-std` or `smol`.
-* **Error Handling:** 
-  - Use `thiserror` for module-level enums (e.g., `ToolHostError`). Do not use `anyhow` at the library boundary.
-  - **Avoid `unwrap()` and `expect()` outside of tests.** Workspace Clippy denies `unwrap_used` / `expect_used`. Always propagate errors or handle them gracefully using typed errors.
-* **Logging:** 
-  - Use the `tracing` crate (`info!`, `warn!`, `error!`, `debug!`). **Never use `println!`.**
-  - Always include structured context fields when appropriate to maintain machine-readable logs (e.g., `tracing::error!(component = "ToolHost", error = %e, "Failed to start")`).
-* **Concurrency:** Prefer `parking_lot::RwLock` or `parking_lot::Mutex` over standard library primitives to avoid lock poisoning. Use `std::sync::OnceLock` for lazy static initializations.
-* **Events & i18n:** Backend crates (`ene-runtime`, `ene-mind`) must emit events and status messages in **English** (as static constants or Enums). Localization is the responsibility of the frontend/UI layer:
-  - `ene-desktop` translations are managed under `apps/ene-desktop/i18n/`.
-  - `ene-cli` translations are managed locally within the CLI under `apps/ene-cli/i18n/`.
-* **Visibility:** Default to `pub(crate)`. Only use `pub` when external consumers need it.
-* **Comments:** Prefer silence. See §5.1.
-* **Clippy / rustfmt / overflow:** Root `Cargo.toml` denies `all`/`pedantic`/`restriction`/`cargo` (no `nursery`). Style-only lints are `allow`ed there — do not mass-rewrite for those; panic-adjacent ones stay denied. Suppress with `#[expect(..., reason = "...")]` (`reason` required). Release has `overflow-checks = true` (use `wrapping_*` for intentional wrap). `rustfmt.toml` is stable-only — do not add nightly/unstable options.
+## Docs and where truth lives
 
-### 5.1 Comment Policy
+**rustdoc is authoritative for all signatures** (`cargo doc -p <crate> --open`).
+`docs/crates/*.md` intentionally contain no hand-written signatures — they cover role,
+boundaries, and rationale only. Do not transcribe signatures into Markdown.
 
-Comments explain **why**, never **what**. If the code already says it, delete the comment.
+Orientation: `docs/architecture.md`, `docs/configuration.md`, `docs/concepts/`, `docs/apps/`.
+User-facing docs are bilingual: every change under `docs/` needs the matching file under
+`docs/ja/`. UI strings live in `apps/ene-desktop/i18n/{en-US,ja}/` and
+`apps/ene-cli/i18n/{en-US,ja}/` — keep both locales in sync. Backend event and status names
+stay stable English contracts.
 
-* Do not narrate obvious code (`// increment i`, `// return the result`).
-* Do not leave stale comments after a change — update or delete them.
-* Do not leave scratch notes, TODO breadcrumbs for yourself, or step-by-step work logs in committed code.
-* `rustdoc` (`///`) is for public APIs and non-obvious contracts. Re-exports must use `#[doc(no_inline)]`.
+## Configuration
 
-```rust
-// BAD — restates the code
-// Fetch the user by id
-let user = store.get_user(id).await?;
+Precedence is defaults → JSON → `ENE_` env vars, with `__` separating nested keys
+(e.g. `ENE_AI__TASKS__CHAT__MODEL`). Public sections: `ai.*`, `store.*`, `mind.*`,
+`plugins.*`, `desktop.*`; plugin entries are `plugins.list.<name>` with flattened fields.
 
-// BAD — scratch / work log
-// TODO: maybe cache this later? — checking with team
-// HACK: temporary until I finish the refactor
+Add settings at the owning `define_config!` invocation, which often lives outside
+`ene-config` (`ene-ai`, `ene-mind`, `ene-store`, `ene-plugin-host`, `apps/ene-desktop`).
+Schemas regenerate automatically at config init — `assets/schema/*` is gitignored; never
+hand-edit or commit it.
 
-// GOOD — non-obvious constraint
-// sqlite-vec rejects zero-length vectors
-if query.is_empty() {
-    return Ok(Vec::new());
-}
-```
+## Plugins and IPC
 
-## 6. Common Tasks (Recipes)
+New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`. Derive
+`ToolAction`, build on `ene_tool_sdk::{prelude, ActionSetProvider}`, then serve via
+`run_plugin_server(PluginDispatch::new(Some(Arc::new(ToolProviderPlugin::new(provider))), None, None, None, None))`
+(see `plugins/tool/utility/src/main.rs`). Use namespaced `<namespace>.<action>` names and
+declare side effects / sandbox needs. Verify with `/tool list` and update both
+`docs/concepts/plugins-and-mcp.md` and its `docs/ja/` counterpart.
 
-### R1. Add a new tool
-1. **Create:** `cargo new --bin tools/<name>`
-2. **Implement:** `#[derive(ene_tool_derive::ToolSpec)]` on the args struct, then wrap one or more `ToolAction`s in a `ToolProvider` — use `ene_tool::ActionSetProvider` (or `ene_tool::prelude::*`) instead of hand-writing the dispatch loop.
-3. **Wire up:** Call `run_tool_server(Box::new(provider)).await` from `ene-tool` / `ene-tool-proto` inside `main`. This is **not generic** — there is no `run_tool_server::<MyAction>()`; it always takes a boxed `dyn ToolProvider`.
-4. **Document:** Add to a category in `docs/guide/tools/` and `docs/ja/guide/tools/`.
-5. **Verify:** Run `cargo run -p ene-cli` -> `/tool list`.
+Plugin crates are **binary-only** — no `[lib]` target (see `plugins/tool/fs`,
+`plugins/provider/anthropic`). Size is not a reason to add one: `#[cfg(test)]` modules run
+normally in a bin crate. Add `[lib]` only when an integration test under `tests/` or another
+workspace crate must link the logic directly.
 
-### R2. Add a config field
-1. Edit the struct in `crates/ene-config/src/config.rs` (`define_config!` macro).
-2. Run `cargo run -p ene-cli` once to auto-regenerate `assets/settings.schema.json` and `character_settings.schema.json`. *(Note: These JSON files are gitignored. Do not commit or hand-edit them).*
-3. Document in `docs/reference/configuration/settings.md` and `docs/ja/reference/configuration/settings.md`.
+IPC starts at `crates/ene-plugin-proto/src/ipc.rs` (protocol v4, length-prefixed JSON). The
+host advertises a range via `VersionRange::host_supported()` and keeps N-1 compatibility, so
+`PLUGIN_IPC_MIN_SUPPORTED_VERSION = PLUGIN_IPC_PROTOCOL_VERSION - 1`. Prefer adding
+`#[serde(default)]` fields over bumping the version; gate behavior on newer messages via
+`IpcPluginConnection::negotiated_version()` (see `supports_cancel_stream()` for the pattern).
 
-### R3. Add an IPC request/response
-1. Extend `IpcRequest` / `IpcResponse` in `crates/ene-tool-proto/src/ipc.rs`.
-2. Bump `PROTOCOL_VERSION` **only** if the wire format is incompatible.
-3. Handle the added variant in `ene-tool-host` and all tool binaries.
+## Repo etiquette
 
-### R4. Add or modify localization (i18n) strings
-1. **Desktop (`ene-desktop`)**:
-    - Add or edit keys directly in the translation file located under `apps/ene-desktop/i18n/{lang}/ene_desktop.ftl`.
-    - Use the `i18n_embed_fl::fl!(crate::i18n::loader(), "key-name")` macro to retrieve the localized string in your code.
-2. **CLI (`ene-cli`)**:
-   - Add or edit keys directly in the CLI's local Fluent files under `apps/ene-cli/i18n/{lang}/ene_cli.ftl`.
-   - Use the `i18n_embed_fl::fl!(crate::i18n::loader(), "key-name")` macro inside the CLI code.
-
-## 7. Configuration Data Flow
-
-Loaded by `figment` in the following order: 1. Compile-time defaults -> 2. OS-standard User Config (or local `assets/settings.json`) -> 3. `ENE_` env vars.
-
-## 8. Git & PR Policy
-
-> **⚠️ Early Development Phase**
-> The project is currently in the early development stage. **AI agents do not need to create branches or pull requests (PRs) at this time.** Direct commits to `main` are acceptable while the project is in this phase. The policies below (branch naming, PR checklist, etc.) will be enforced once the project transitions to a stable release milestone.
-
-* **Branch Naming:** `<type>/<short-kebab-case>` (e.g., `feat/sandbox-gate`, `fix/cli-race`).
-* **Commits:** Follow Conventional Commits (`feat: ...`, `fix: ...`, etc.).
-* **Documentation:** English (`docs/`) and Japanese (`docs/ja/`) must be kept in sync within the same PR.
-
-### 8.1 Pre-commit Hooks (cargo-husky)
-
-* `cargo-husky` is declared in the workspace (`Cargo.toml` / `.cargo-husky/hooks/`) and auto-installs hooks into `.git/hooks/` on the first `cargo build` that pulls it in.
-* **`pre-commit`** runs `cargo fmt --all` against staged `.rs` files and re-stages the changes. Use `git commit --no-verify` to skip per-commit, or use `HUSKY=0 cargo build` to skip all hooks.
-
-### PR Verification Checklist
-
-Before submitting a PR or finishing a coding task, verify the following:
-
-* [ ] `cargo fmt --all` and `cargo clippy --workspace -- -D warnings` are clean.
-* [ ] `cargo test --workspace` passes.
-* [ ] `sea-orm` migrations (Rust modules) are present, tested, and registered in the Migrator (if schema changed).
-* [ ] Config-field changes do not require manual schema commits (auto-regenerated, gitignored).
-* [ ] Public API or behavior changes have corresponding updates under `docs/`.
-* [ ] Both English (`docs/`) and Japanese (`docs/ja/`) docs are updated for any user-visible change.
-* [ ] Branch name and commit/PR title follow Conventional Commits.
-
-## 9. Further Reading
-
-See `docs/guide/` and `docs/reference/` (and `docs/ja/guide/` / `docs/ja/reference/`) for developer guides and deep dives into Architecture, Memory, Tools (RAG, SDK, Sandbox), and Runtime (Streaming, Prompting).
+- Conventional Commits — `cliff.toml` generates the changelog from them.
+- `cargo-husky` installs a pre-commit hook that runs `cargo fmt --all` (whole tree, not just
+  staged files) and re-stages formatted files. Inspect the resulting diff. Never use
+  `--no-verify` to get past a failing check.
+- Never commit or log secrets, `.env`, `memory.db*`, `undo.db*`, `todo.db*`, model weights,
+  or anything under `assets/models/`.
+- Report the failing package and root cause rather than relaxing a lint. Don't claim a check
+  passed that you didn't run.
 
 ## Cursor Cloud specific instructions
 
-The Cloud Agent VM is provisioned **without Nix/direnv**. Ignore §3's `direnv exec . cargo` (and the `rtk cargo` user rule) here: `cargo` is on `PATH` (rustup stable toolchain). Just run `cargo <cmd>` directly from the repo root. Standard commands are unchanged: `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace -- -D warnings`, `cargo run -p ene-cli`, `cargo run -p ene-desktop` (see `README.md` / §0).
+The Cloud Agent VM has **no Nix and no direnv**, so the "Build environment" flow above does not
+apply as written. `cargo` is on `PATH` via a rustup `stable` toolchain — run `cargo <cmd>`
+directly from the repo root (do not use `direnv exec` / `nix develop`, and ignore the
+`rtk cargo` user rule; those tools are not installed). Native build deps come from the system
+image (apt) instead of the flake and are baked into the VM; the startup script only runs
+`cargo fetch`.
 
-Environment notes (dependencies are already installed in the VM image; the startup script only refreshes them):
-
-- **Toolchain:** edition 2024 requires Rust ≥ 1.85; the VM uses rustup `stable`. The old system `rustc` (1.83) is too old — do not pin to it.
-- **C/C++ toolchain (do not revert):** `cc`/`c++` are set (via `update-alternatives`) to **GCC**, not Clang. Clang 18 here cannot find libstdc++ headers (`cstdint`) or `-lstdc++`, which breaks `esaxx-rs`/tokenizers compilation and final linking. If a build suddenly fails with those errors, run `sudo update-alternatives --set cc /usr/bin/gcc && sudo update-alternatives --set c++ /usr/bin/g++`.
-- **No custom env vars needed to build.** Do NOT set `RUSTFLAGS`/`CC`/`CXX` for normal builds — changing them invalidates the whole cache and forces a ~10+ min full workspace rebuild.
-
-Running the apps:
-
-- **`ene-cli` boots the entire runtime even for `--help`** (there is no arg parsing; it always initializes and drops into the REPL). First launch downloads a **~1.2 GB local GGUF embedding model** into `assets/models/` (gitignored) and warms the Tool RAG index (~40 s). Later boots are a few seconds (cached). Embeddings run **locally/offline** (`provider.embedding.backend = "local"`), so no network/API key is needed for memory/recall.
-- **Chat requires an LLM endpoint.** `assets/settings.json` points `provider.base_url` at OpenRouter with model `xiaomi/mimo-v2.5` and an empty inline key, so out-of-the-box chat returns HTTP 401. Override at runtime with `ENE_`-prefixed env vars (figment, `__` = nesting), e.g. `ENE_PROVIDER__BASE_URL`, `ENE_PROVIDER__MODEL`, `ENE_PROVIDER__API_KEY__INLINE`. In debug builds the key also falls back to the `API_TOKEN` env var. To test chat **fully offline**, point `ENE_PROVIDER__BASE_URL` at a local OpenAI-compatible mock (`POST {base}/chat/completions`, SSE `data:` chunks + `data: [DONE]`).
-- **The REPL needs a real TTY** (`dialoguer`). Piping into stdin hits EOF and exits immediately; drive it through a PTY for scripted interaction.
-- **Desktop (`ene-desktop`)** runs headless via **software Vulkan (lavapipe)**: launch with `DISPLAY=:1 WGPU_BACKEND=vulkan`. It needs `libxkbcommon-x11`. It renders the Alicia VRM + an egui chat panel.
-- **Gotcha:** launching either app persists the *resolved* config (including any `ENE_` overrides) back into the tracked `assets/settings.json` via `ConfigStore`. After running with overrides, restore it with `git checkout -- assets/settings.json` so the change doesn't leak into a commit.
+- **Toolchain:** edition 2024 needs Rust ≥ 1.85; the VM uses rustup `stable` (the old system
+  `rustc` 1.83 is too old — don't pin to it).
+- **C/C++ toolchain (do not revert):** `cc`/`c++` are pinned to **GCC** via
+  `update-alternatives`. Clang 18 here cannot find libstdc++ headers (`cstdint`) or `-lstdc++`,
+  which breaks native C/C++ build deps and final linking. If a build fails with those errors,
+  run `sudo update-alternatives --set cc /usr/bin/gcc && sudo update-alternatives --set c++ /usr/bin/g++`.
+- **Don't set `RUSTFLAGS`/`CC`/`CXX` for normal builds** — changing them invalidates the cache
+  and forces a full (~10+ min) workspace rebuild.
+- **Desktop (`ene-desktop`)** runs headless via **software Vulkan (lavapipe)**: launch with
+  `DISPLAY=:1 WGPU_BACKEND=vulkan`; it also needs `libxkbcommon-x11`.
+- **Live chat needs credentials.** The bundled `assets/settings.json` ships without a usable
+  chat key, so out-of-the-box chat fails; provide credentials via the `ai.*` config
+  (`ENE_AI__…` env overrides, see the Configuration section). Embeddings/local models are
+  fetched to `assets/models/` (gitignored) on first use.

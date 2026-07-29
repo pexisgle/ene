@@ -5,6 +5,9 @@ pub mod candidate;
 pub mod deterministic;
 pub mod forgetting;
 pub mod llm;
+pub mod reflection;
+#[cfg(test)]
+pub mod test_support;
 pub mod tool_grounding;
 
 pub use arbiter::{
@@ -13,6 +16,9 @@ pub use arbiter::{
 };
 pub use candidate::ToolResultSummary;
 pub use forgetting::{ForgettingContext, ForgettingLifecycle, ForgettingReport};
+pub use reflection::{
+    SelfReflectionPipeline, apply_reflection_adjustment, load_reflection_memories,
+};
 
 use std::collections::HashMap;
 
@@ -59,16 +65,15 @@ impl MemoryWriter {
     /// applied as a safety net, even when the LLM owns the turn. On LLM failure,
     /// empty result, or when disabled, remember patterns and configured
     /// tool-grounding fallbacks reach the arbiter.
+    ///
+    /// Returns the number of memory candidates deferred to the user-approval
+    /// queue (#174) during this turn, so callers can notify the UI.
     pub async fn write_memories(
         store: &MemoryStore,
         config: &MindConfig,
         input: &PostTurnInput<'_>,
         providers: MemoryWriteProviders<'_>,
-    ) -> Result<(), CognitionError> {
-        if !config.memory.write_every_turn {
-            return Ok(());
-        }
-
+    ) -> Result<usize, CognitionError> {
         let locale = locale_from_classifier_language(&config.emotion.classifier_language);
         let turn = candidate::TurnInput {
             user_message: input.turn.user_message,
@@ -90,12 +95,11 @@ impl MemoryWriter {
             .into_iter()
             .partition(|c| c.source_quote.is_empty());
 
-        tracing::info!(
+        tracing::debug!(
             component = "MemoryWriter",
             character_id = %input.character_id,
             user_id = %input.user_id,
             locale = ?locale,
-            llm_extraction_enabled = config.memory.llm_extraction_enabled,
             pattern_hint_count = pattern_candidates.len(),
             tool_candidate_count = tool_candidates.len(),
             "Post-turn memory extraction starting"
@@ -104,70 +108,67 @@ impl MemoryWriter {
         let mut batches: Vec<(Vec<candidate::MemoryCandidate>, CandidateProvenance)> = Vec::new();
         let mut used_llm = false;
 
-        if config.memory.llm_extraction_enabled {
-            if let Some(provider) = providers.llm {
-                // Same extraction call judges conversation + tool outcomes.
-                // Soft tool hints include successes even when auto-persist is off.
-                let mut llm_hints = pattern_candidates.clone();
-                let tool_hint_cfg = crate::config::ToolGroundingConfig {
-                    persist_success_procedure: true,
-                    persist_failure_reflection: true,
-                    persist_user_visible_episodic: false,
-                    ..config.memory.tool_grounding.clone()
-                };
-                llm_hints.extend(tool_grounding::extract_tool_candidates(
-                    turn.tool_results,
-                    &tool_hint_cfg,
-                ));
+        if let Some(provider) = providers.llm {
+            // Soft tool hints include successes even when auto-persist is off.
+            let mut llm_hints = pattern_candidates.clone();
+            let tool_hint_cfg = crate::config::ToolGroundingConfig {
+                persist_success_procedure: true,
+                persist_failure_reflection: true,
+                persist_user_visible_episodic: false,
+                ..config.memory.tool_grounding.clone()
+            };
+            llm_hints.extend(tool_grounding::extract_tool_candidates(
+                turn.tool_results,
+                &tool_hint_cfg,
+            ));
 
-                match llm::extract_with_timeout(
-                    provider,
-                    &turn,
-                    locale,
-                    config.memory.extraction_timeout_secs,
-                    &llm_hints,
-                )
-                .await
-                {
-                    Ok(llm_candidates) => {
-                        tracing::info!(
+            match llm::extract_with_timeout(
+                provider,
+                &turn,
+                locale,
+                config.memory.extraction_timeout_secs,
+                &llm_hints,
+            )
+            .await
+            {
+                Ok(llm_candidates) => {
+                    tracing::debug!(
+                        component = "MemoryWriter",
+                        character_id = %input.character_id,
+                        user_id = %input.user_id,
+                        candidate_count = llm_candidates.len(),
+                        pattern_hint_count = pattern_candidates.len(),
+                        "LLM memory extraction completed"
+                    );
+                    if llm_candidates.is_empty() {
+                        // Leave `used_llm` false so remember/forget
+                        // safety-net patterns still reach the arbiter.
+                        tracing::debug!(
                             component = "MemoryWriter",
                             character_id = %input.character_id,
-                            user_id = %input.user_id,
-                            candidate_count = llm_candidates.len(),
-                            pattern_hint_count = pattern_candidates.len(),
-                            "LLM memory extraction completed"
+                            "LLM returned no candidates; will use remember/forget patterns if any"
                         );
-                        if llm_candidates.is_empty() {
-                            // Leave `used_llm` false so remember/forget
-                            // safety-net patterns still reach the arbiter.
-                            tracing::info!(
-                                component = "MemoryWriter",
-                                character_id = %input.character_id,
-                                "LLM returned no candidates; will use remember/forget patterns if any"
-                            );
-                        } else {
-                            used_llm = true;
-                            batches.push((llm_candidates, CandidateProvenance::LlmExtracted));
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            component = "MemoryWriter",
-                            error = %error,
-                            character_id = %input.character_id,
-                            user_id = %input.user_id,
-                            "LLM memory extraction failed; falling back to deterministic candidates"
-                        );
+                    } else {
+                        used_llm = true;
+                        batches.push((llm_candidates, CandidateProvenance::LlmExtracted));
                     }
                 }
-            } else {
-                tracing::warn!(
-                    component = "MemoryWriter",
-                    character_id = %input.character_id,
-                    "LLM memory extraction enabled but no provider available"
-                );
+                Err(error) => {
+                    tracing::warn!(
+                        component = "MemoryWriter",
+                        error = %error,
+                        character_id = %input.character_id,
+                        user_id = %input.user_id,
+                        "LLM memory extraction failed; falling back to deterministic candidates"
+                    );
+                }
             }
+        } else {
+            tracing::warn!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                "No LLM provider available for memory extraction"
+            );
         }
 
         // Remember/forget patterns fall back when LLM did not own the turn.
@@ -181,7 +182,7 @@ impl MemoryWriter {
             .partition(|c| !c.should_persist);
 
         if !forget_candidates.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
                 candidate_count = forget_candidates.len(),
@@ -191,7 +192,7 @@ impl MemoryWriter {
         }
 
         if !used_llm && !other_patterns.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
                 candidate_count = other_patterns.len(),
@@ -208,7 +209,7 @@ impl MemoryWriter {
         }
 
         if !used_llm && !tool_candidates.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
                 candidate_count = tool_candidates.len(),
@@ -225,7 +226,23 @@ impl MemoryWriter {
         }
 
         if batches.is_empty() {
-            return Ok(());
+            return Ok(0);
+        }
+
+        // Tag every candidate from an interrupted (barge-in / cancelled) turn so
+        // downstream consumers can distinguish partial episodes (#206).
+        if input.interrupted {
+            for (candidates, _) in &mut batches {
+                for candidate in candidates.iter_mut() {
+                    if !candidate
+                        .tags
+                        .iter()
+                        .any(|tag| tag == arbiter::INTERRUPTED_TAG)
+                    {
+                        candidate.tags.push(arbiter::INTERRUPTED_TAG.to_string());
+                    }
+                }
+            }
         }
 
         let options = ArbiterOptions::from_config(&config.memory);
@@ -233,31 +250,33 @@ impl MemoryWriter {
             character_id: input.character_id,
             user_id: input.user_id,
         };
+        let mut outcome_summary = ArbiterOutcomeSummary::default();
+        let reflection = config
+            .memory
+            .reflection
+            .enabled
+            .then(|| reflection::SelfReflectionPipeline::new(config.memory.reflection.clone()));
 
         for (candidates, provenance) in batches {
-            let semantic_matches = if config.memory.semantic_dedup_enabled {
-                build_semantic_matches(
-                    store,
-                    providers.embedder,
-                    &config.memory,
-                    input.character_id,
-                    input.user_id,
-                    &candidates,
-                    options.semantic_similarity_threshold,
-                )
-                .await
-                .unwrap_or_else(|error| {
-                    tracing::warn!(
-                        component = "MemoryWriter",
-                        error = %error,
-                        character_id = %input.character_id,
-                        "Semantic dedup lookup failed; continuing without matches"
-                    );
-                    HashMap::new()
-                })
-            } else {
+            let semantic_matches = build_semantic_matches(
+                store,
+                providers.embedder,
+                &config.memory,
+                input.character_id,
+                input.user_id,
+                &candidates,
+                options.semantic_similarity_threshold,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    component = "MemoryWriter",
+                    error = %error,
+                    character_id = %input.character_id,
+                    "Semantic dedup lookup failed; continuing without matches"
+                );
                 HashMap::new()
-            };
+            });
 
             let base_ctx = ArbiterContext {
                 turn: turn.clone(),
@@ -267,6 +286,7 @@ impl MemoryWriter {
                 provenance,
                 options: options.clone(),
                 semantic_matches,
+                affect_valence: input.affect.valence,
             };
 
             let mut regular = Vec::new();
@@ -287,7 +307,12 @@ impl MemoryWriter {
                             &sync_ctx,
                         )
                         .await?;
-                    log_arbiter_outcomes(input, &applied);
+                    record_arbiter_outcomes(
+                        input,
+                        &applied,
+                        &mut outcome_summary,
+                        reflection.as_ref(),
+                    );
                 } else {
                     regular.push(candidate);
                 }
@@ -298,28 +323,53 @@ impl MemoryWriter {
                     store, &regular, &base_ctx, &sync_ctx,
                 )
                 .await?;
-                log_arbiter_outcomes(input, &applied);
+                record_arbiter_outcomes(input, &applied, &mut outcome_summary, reflection.as_ref());
             }
         }
 
-        Ok(())
+        tracing::info!(
+            component = "MemoryWriter",
+            character_id = %input.character_id,
+            user_id = %input.user_id,
+            persisted = outcome_summary.persisted,
+            skipped = outcome_summary.skipped,
+            deferred = outcome_summary.deferred,
+            other = outcome_summary.other,
+            "Post-turn memory arbitration complete"
+        );
+
+        if let Some(pipeline) = reflection
+            && pipeline.should_reflect()
+        {
+            let reflections = pipeline
+                .generate_reflection(
+                    store,
+                    input.character_id,
+                    input.character_id,
+                    input.user_id,
+                    config.memory.reflection.success_boost,
+                    config.memory.reflection.failure_penalty,
+                )
+                .await;
+            tracing::info!(
+                component = "MemoryWriter",
+                character_id = %input.character_id,
+                reflection_count = reflections.len(),
+                "Self-reflection memories generated"
+            );
+        }
+
+        Ok(outcome_summary.deferred)
     }
 
-    /// Apply forgetting lifecycle and persist affect state.
+    /// Persist affect state only (forgetting runs on the deferred path).
     pub async fn finalize_turn(
         store: &MemoryStore,
-        config: &MindConfig,
+        _config: &MindConfig,
         input: &PostTurnInput<'_>,
     ) -> Result<(), CognitionError> {
-        let forgetting_ctx = ForgettingContext {
-            character_id: input.character_id,
-            user_id: Some(input.user_id),
-            now: Utc::now(),
-        };
-        let _report = ForgettingLifecycle::apply(store, &forgetting_ctx, &config.memory).await?;
-
         store
-            .upsert_affect_state(&input.affect)
+            .upsert_affect_state(input.affect)
             .await
             .map_err(CognitionError::Memory)?;
         tracing::debug!(
@@ -336,6 +386,21 @@ impl MemoryWriter {
         Ok(())
     }
 
+    /// Apply natural forgetting lifecycle for the turn scope.
+    pub async fn apply_forgetting(
+        store: &MemoryStore,
+        config: &MindConfig,
+        input: &PostTurnInput<'_>,
+    ) -> Result<(), CognitionError> {
+        let forgetting_ctx = ForgettingContext {
+            character_id: input.character_id,
+            user_id: Some(input.user_id),
+            now: Utc::now(),
+        };
+        let _report = ForgettingLifecycle::apply(store, &forgetting_ctx, &config.memory).await?;
+        Ok(())
+    }
+
     /// Extract, arbitrate, persist memories, apply forgetting, and update affect.
     pub async fn after_turn(
         store: &MemoryStore,
@@ -344,6 +409,7 @@ impl MemoryWriter {
         providers: MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
         Self::write_memories(store, config, &input, providers).await?;
+        Self::apply_forgetting(store, config, &input).await?;
         Self::finalize_turn(store, config, &input).await
     }
 }
@@ -389,6 +455,7 @@ async fn build_semantic_matches(
             min_score: 0.0,
             commitment_boost: 0.0,
             recent_fallback_limit: 0,
+            time_range: None,
         };
 
         let scored = store
@@ -438,15 +505,29 @@ const fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
     }
 }
 
-fn log_arbiter_outcomes(
+#[derive(Default)]
+struct ArbiterOutcomeSummary {
+    persisted: usize,
+    skipped: usize,
+    deferred: usize,
+    other: usize,
+}
+
+fn record_arbiter_outcomes(
     input: &PostTurnInput<'_>,
     applied: &[crate::memory_writer::AppliedDecision],
+    summary: &mut ArbiterOutcomeSummary,
+    reflection: Option<&reflection::SelfReflectionPipeline>,
 ) {
     for outcome in applied {
+        if let Some(pipeline) = reflection {
+            pipeline.record_outcome(outcome);
+        }
         match &outcome.decision.action {
             crate::memory_writer::ArbiterAction::Persist(_)
             | crate::memory_writer::ArbiterAction::Supersede { .. } => {
-                tracing::info!(
+                summary.persisted = summary.persisted.saturating_add(1);
+                tracing::debug!(
                     component = "MemoryWriter",
                     character_id = %input.character_id,
                     user_id = %input.user_id,
@@ -457,9 +538,22 @@ fn log_arbiter_outcomes(
                     "Memory candidate persisted"
                 );
             }
-            crate::memory_writer::ArbiterAction::Ignore
-            | crate::memory_writer::ArbiterAction::AskConfirmationLater => {
-                tracing::info!(
+            crate::memory_writer::ArbiterAction::AskConfirmationLater => {
+                summary.deferred = summary.deferred.saturating_add(1);
+                tracing::debug!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    user_id = %input.user_id,
+                    kind = ?outcome.decision.candidate.kind,
+                    title = %outcome.decision.candidate.title,
+                    reason_code = ?outcome.decision.reason.code,
+                    reason_detail = %outcome.decision.reason.detail,
+                    "Memory candidate deferred to user-approval queue"
+                );
+            }
+            crate::memory_writer::ArbiterAction::Ignore => {
+                summary.skipped = summary.skipped.saturating_add(1);
+                tracing::debug!(
                     component = "MemoryWriter",
                     character_id = %input.character_id,
                     user_id = %input.user_id,
@@ -471,7 +565,8 @@ fn log_arbiter_outcomes(
                 );
             }
             other => {
-                tracing::info!(
+                summary.other = summary.other.saturating_add(1);
+                tracing::debug!(
                     component = "MemoryWriter",
                     character_id = %input.character_id,
                     user_id = %input.user_id,
@@ -523,7 +618,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "mock: not implemented".to_string(),
@@ -550,7 +645,7 @@ mod tests {
         async fn create_chat_stream(
             &self,
             _messages: &[LlmMessage],
-            _tools: &[ene_tool_proto::ToolSpec],
+            _tools: &[ene_plugin_proto::ToolSpec],
         ) -> Result<StreamResult, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "failing: not implemented".to_string(),
@@ -576,10 +671,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finalize_turn_runs_when_write_every_turn_disabled() {
+    async fn finalize_turn_runs() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
-        let mut config = MindConfig::default();
-        config.memory.write_every_turn = false;
+        let config = MindConfig::default();
 
         let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
@@ -588,9 +682,11 @@ mod tests {
                 assistant_message: Some("hi"),
                 tool_results: &[],
             },
-            affect: affect.clone(),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::finalize_turn(&store, &config, &post)
@@ -602,13 +698,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_forgetting_runs() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let config = MindConfig::default();
+
+        let affect = AffectState::neutral("ene");
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "hello",
+                assistant_message: Some("hi"),
+                tool_results: &[],
+            },
+            affect: &affect,
+            character_id: "ene",
+            user_id: "user",
+            interrupted: false,
+            spoken_text: None,
+        };
+
+        MemoryWriter::apply_forgetting(&store, &config, &post)
+            .await
+            .expect("apply_forgetting");
+    }
+
+    #[tokio::test]
     async fn llm_success_with_candidates_skips_deterministic_remember() {
         // Explicit remember would also match, but LLM returns its own candidate
         // → only the LLM item should be persisted (remember is hint-only).
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let json = r#"{
@@ -624,15 +742,18 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -660,20 +781,21 @@ mod tests {
     async fn llm_empty_falls_back_to_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -699,20 +821,21 @@ mod tests {
     async fn llm_empty_does_not_persist_soft_signals_without_remember() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let provider = MockProvider::new(r#"{"candidates": []}"#);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -738,8 +861,6 @@ mod tests {
     async fn llm_success_persists_llm_candidates() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let json = r#"{
@@ -755,15 +876,18 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "I have a presentation today",
                 assistant_message: Some("Good luck!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -791,20 +915,21 @@ mod tests {
     async fn llm_failure_falls_back_to_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let provider = FailingProvider;
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(
@@ -827,22 +952,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_disabled_uses_remember_pattern() {
+    async fn no_llm_provider_uses_remember_pattern() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = false;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Please remember that I like mushrooms",
                 assistant_message: Some("Nice!"),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(&store, &config, &post, MemoryWriteProviders::default())
@@ -857,8 +983,6 @@ mod tests {
     async fn forget_safety_net_applies_when_llm_owns_turn() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
-        config.memory.llm_extraction_enabled = true;
-        config.memory.semantic_dedup_enabled = false;
         config.emotion.classifier_language = "en".into();
 
         let existing_id = store
@@ -900,15 +1024,18 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
+        let affect = AffectState::neutral("ene");
         let post = PostTurnInput {
             turn: TurnInput {
                 user_message: "Forget about project X",
                 assistant_message: Some("Okay, forgotten."),
                 tool_results: &[],
             },
-            affect: AffectState::neutral("ene"),
+            affect: &affect,
             character_id: "ene",
             user_id: "user",
+            interrupted: false,
+            spoken_text: None,
         };
 
         MemoryWriter::write_memories(

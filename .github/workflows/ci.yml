@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  SCCACHE_CACHE_SIZE: 2G
+
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-flakehub: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: "nix develop --command {0}"
+          cache-directories: ~/.cache/sccache
+          cache-on-failure: true
+      - name: Run clippy
+        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-flakehub: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: "nix develop --command {0}"
+          cache-directories: ~/.cache/sccache
+          cache-on-failure: true
+      - name: Run tests
+        run: nix develop --command cargo test --workspace
+
+  docs:
+    name: Doc build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        with:
+          use-flakehub: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: "nix develop --command {0}"
+          cache-directories: ~/.cache/sccache
+          cache-on-failure: true
+      # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
+      # pre-existing broken-intra-doc-link warnings unrelated to #273 (e.g.
+      # ene-ai, ene-voice, apps/ene-desktop). Turning warnings into hard
+      # errors here would fail CI on unrelated debt instead of catching new
+      # breakage. See the #273 PR description for the follow-up.
+      - name: Build docs
+        run: nix develop --command cargo doc --workspace --no-deps
+

@@ -23,6 +23,8 @@ pub struct ChatState {
     pub pending_permission: Option<PendingPermission>,
     pub pending_user_input: Option<PendingUserInput>,
     pub user_input_drafts: Vec<QuestionDraft>,
+    /// Transient status message from the most recent undo action (#178).
+    pub undo_status: Option<String>,
 }
 
 impl ChatState {
@@ -76,20 +78,29 @@ impl ChatState {
     /// End a failed stream, optionally appending an error note to the
     /// in-flight assistant bubble so the user sees why processing stopped.
     pub fn finish_streaming_with_error(&mut self, message: &str) {
+        let prefix = i18n_embed_fl::fl!(crate::i18n::loader(), "chat-error-prefix");
+        let labeled = format!("[{prefix}] {message}");
         if let Some(last) = self.messages.last_mut()
             && last.role == Role::Assistant
             && last.is_streaming
         {
             if last.content.is_empty() {
-                last.content = format!("[Error] {message}");
+                last.content = labeled;
             } else {
-                let _ = write!(last.content, "\n[Error] {message}");
+                // `fmt::Error` is `Copy`, so `drop()` would itself trip
+                // `clippy::dropping_copy_types`; writing into a `String`
+                // via `fmt::Write` never actually fails.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "fmt::Write to a String is infallible in practice"
+                )]
+                let _ = write!(last.content, "\n{labeled}");
             }
             last.is_streaming = false;
         } else {
             self.messages.push(ChatMessage {
                 role: Role::Assistant,
-                content: format!("[Error] {message}"),
+                content: labeled,
                 is_streaming: false,
             });
         }
@@ -129,6 +140,7 @@ impl Default for ChatState {
             pending_permission: None,
             pending_user_input: None,
             user_input_drafts: Vec::new(),
+            undo_status: None,
         }
     }
 }

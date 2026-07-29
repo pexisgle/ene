@@ -18,23 +18,30 @@ pub enum EneRuntimeError {
     /// Mind (cognition / session) error.
     #[error(transparent)]
     Mind(#[from] ene_mind::MindError),
-    /// Tool host error.
+    /// Plugin host error.
     #[error(transparent)]
-    Tool(#[from] ene_tool_host::EneToolHostError),
+    Tool(#[from] ene_plugin_host::PluginHostError),
+    /// Tool RAG pipeline error.
+    #[error(transparent)]
+    ToolRag(#[from] ene_tool_rag::ToolRagError),
     /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,
     /// A required mind-streaming dependency is unavailable.
     #[error("Mind streaming prerequisite missing: {0}")]
     MindPrerequisite(&'static str),
-    /// Context boundary requires compression; hard session split is not a product path.
-    #[error(
-        "Context compression is disabled; enable mind.context.compression_enabled (hard session split is not available)"
-    )]
-    CompressionRequired,
     /// Bootstrap misconfiguration or internal failure.
     #[error("Bootstrap error: {0}")]
     Bootstrap(String),
+    /// The actor rejected admission of a new background task because its
+    /// bounded `JoinSet` was already at capacity (Stage 8). Mirrors
+    /// `ene_infer::EngineError::Busy` and [`ene_ai::LlmProviderError::Busy`]:
+    /// a full queue fails fast rather than blocking or growing without bound.
+    #[error("actor task queue is full (capacity {queue_depth}); try again shortly")]
+    Busy {
+        /// The configured capacity that was exceeded.
+        queue_depth: usize,
+    },
 }
 
 impl From<ene_ai::LlmProviderError> for EneRuntimeError {

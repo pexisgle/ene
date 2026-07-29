@@ -35,6 +35,9 @@
           with pkgs;
           mkShell {
             buildInputs = [
+              git-cliff
+              # sccache — compiler cache to shorten rebuild times
+              sccache
               # Stable Rust compiler and standard library sources
               (rust-bin.stable.latest.default.override {
                 extensions = [ "rust-src" ];
@@ -47,12 +50,15 @@
             ++ lib.optionals (lib.strings.hasInfix "linux" system) [
               mold
               clang
+              cmake
               pkgs.pkgsCross.mingwW64.stdenv.cc
               alsa-lib
               libayatana-appindicator
               mesa
               vulkan-loader
+              vulkan-headers
               vulkan-tools
+              shaderc
               libudev-zero
               libgbm
               libx11
@@ -110,6 +116,8 @@
 
             shellHook = ''
               export CARGO_TARGET_DIR="$PWD/target"
+              export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+              export SCCACHE_DIR="$HOME/.cache/sccache"
             '';
           };
       }

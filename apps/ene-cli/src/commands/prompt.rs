@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
 use async_trait::async_trait;
 use ene_mind::MindConfig;
@@ -20,7 +20,7 @@ impl CliCommand for PromptCommand {
         "/prompt"
     }
 
-    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, _arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let snapshot = ctx
             .handle
             .diagnostics()
@@ -29,7 +29,11 @@ impl CliCommand for PromptCommand {
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
 
         if let Some(card) = &snapshot.character_card {
-            let prompts = ene_config::PromptLibrary::load("en");
+            let lang = crate::i18n::loader()
+                .current_languages()
+                .first()
+                .map_or_else(|| "en".to_string(), |l| l.language.as_str().to_string());
+            let prompts = ene_config::PromptLibrary::load(&lang);
             let sys = ene_runtime::message_builder::build_system_prompt(
                 card,
                 &snapshot.config.runtime_rules,
@@ -116,6 +120,6 @@ impl CliCommand for PromptCommand {
             println!("No character card loaded.");
         }
 
-        Ok(())
+        Ok(CommandOutcome::Continue)
     }
 }

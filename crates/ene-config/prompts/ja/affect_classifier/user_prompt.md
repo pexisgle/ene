@@ -1,7 +1,7 @@
-ターン開始時の感情状態と会話履歴から、会話後のキャラクター感情を推定し、system のスキーマどおり JSON だけを返してください。
+ターン開始時の感情状態と会話履歴から、会話後のキャラクター感情を推定してください。system のスキーマに一致する JSON のみを返してください。
 
-## 現在の感情状態（ターン開始時）
+## Current affect (turn start)
 {current_affect}
 
-## 会話履歴
+## Conversation history
 {conversation}

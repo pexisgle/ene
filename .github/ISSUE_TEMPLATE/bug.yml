@@ -1,0 +1,119 @@
+name: バグ報告 (Bug)
+description: 不具合・予期しない動作の報告
+title: "fix(scope): "
+labels: ["type:bug", "priority:medium"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        バグ報告ありがとうございます。
+        タイトルは Conventional Commits 形式 (`fix(<scope>): <概要>`) で記入してください。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 対象エリア (area)
+      description: 問題が発生しているクレート・領域を選択してください。
+      multiple: true
+      options:
+        - core (ene-runtime / ene-mind / ene-store)
+        - memory (メモリ・記憶システム)
+        - provider (ene-ai / ene-ai-local / LLMプロバイダー)
+        - tool-system (ene-plugin-host / ene-plugin-*)
+        - connector (外部サービス連携)
+        - embedding (ene-tool-rag / 埋め込み・RAG検索)
+        - voice (音声入出力・STT/TTS)
+        - avatar (ene-vrm / アバター)
+        - desktop (ene-desktop)
+        - cli (ene-cli)
+        - config (ene-config)
+        - security (セキュリティ・パーミッション)
+        - infra (インフラ・基盤)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 優先度 (priority)
+      description: 影響度に応じた優先度を選択してください。
+      options:
+        - low (軽微・回避策あり)
+        - medium (通常の不具合)
+        - high (主要機能に影響)
+        - critical (クラッシュ・データ損失・リリースブロッカー)
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 発生している問題を簡潔に説明してください。
+      placeholder: 何が起きているか、1〜2文で。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 再現手順
+      description: 問題を再現する手順を番号付きで記述してください。
+      placeholder: |
+        1. `cargo run -p ene-cli` を起動
+        2. `...` コマンドを実行
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待される動作
+      description: 本来どうなるべきか。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動作
+      description: 実際に何が起きたか。エラーメッセージやログがあれば貼り付けてください。
+      placeholder: |
+        ```
+        エラーログ / スタックトレース
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 環境
+      description: 問題が発生した環境情報。
+      value: |
+        - OS: (例: NixOS 25.05, Windows 11)
+        - Rust: (`rustc --version`)
+        - コミット / バージョン:
+        - アプリ: (ene-cli / ene-desktop)
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 関連
+      description: 関連するissue、PR、ログファイルなど。
+      placeholder: "#123, https://..."
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 確認事項
+      options:
+        - label: 既存issueと重複していないことを確認した
+          required: true
+        - label: 最新のコミットでも再現することを確認した
+          required: false

@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: nixbuild/nix-quick-install-action@v30
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cmd-format: "nix develop --command {0}"
+          cache-directories: ~/.cache/sccache
+
+      - name: Derive version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Build release binaries
+        run: |
+          nix develop --command cargo build --release \
+            -p ene-cli \
+            -p ene-desktop \
+            -p ene-tool-fs \
+            -p ene-tool-web \
+            -p ene-tool-utility \
+            -p ene-tool-app \
+            -p ene-tool-browser
+
+      - name: Package Linux artifacts
+        run: |
+          chmod +x scripts/package-linux-release.sh
+          nix develop --command bash scripts/package-linux-release.sh "$VERSION"
+
+      - name: Generate changelog
+        run: |
+          nix develop --command git cliff --latest --strip header \
+            --config cliff.toml \
+            --output CHANGELOG.release.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "ene v${{ env.VERSION }}"
+          body_path: CHANGELOG.release.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/ene-cli-${{ env.VERSION }}-linux-x86_64.tar.gz
+            dist/ene-desktop_${{ env.VERSION }}_amd64.deb

@@ -76,6 +76,11 @@ pub fn build_system_prompt(
     user_name: &str,
     prompts: &PromptLibrary,
 ) -> String {
+    let runtime_rules = if runtime_rules.trim().is_empty() {
+        ene_config::DEFAULT_RUNTIME_RULES
+    } else {
+        runtime_rules
+    };
     let char_name = card.data.get_character_name();
     let mut parts: Vec<String> = Vec::new();
 
@@ -139,7 +144,7 @@ pub fn build_system_prompt(
 ///
 /// Produces a concise, command-tone instruction with concrete examples
 /// so that even lower-capability models reliably output the `<|perf:expr=NAME|>`
-/// or `<|emo:NAME|>` (shorthand) token in the right position.
+/// token in the right position.
 pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> Option<String> {
     let char_name = card.data.get_character_name();
     let resolved = resolve_expressions(card);
@@ -166,6 +171,7 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
         let examples = [
             &prompts.emotion().example_happy,
             &prompts.emotion().example_sad,
+            &prompts.emotion().example_angry,
             &prompts.emotion().example_neutral,
         ]
         .iter()
@@ -196,7 +202,7 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
 
 /// Builds the natural-dialogue output contract for engine-managed expression (#91).
 ///
-/// Instructs the LLM to respond in plain dialogue without inline emotion tokens.
+/// Instructs the LLM to respond in plain dialogue without inline performance markers.
 /// Expression is resolved by the cognitive runtime Output Arbiter after the turn.
 pub fn build_natural_dialogue_contract(
     card: &CharacterCardV3,
@@ -366,8 +372,8 @@ mod tests {
             "phi should list happy token: {phi}"
         );
         assert!(
-            phi.contains("RULE:"),
-            "phi should contain RULE directive: {phi}"
+            phi.contains("Output contract"),
+            "phi should contain output contract directive: {phi}"
         );
     }
 }

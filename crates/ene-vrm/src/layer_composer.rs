@@ -27,7 +27,34 @@
 use std::collections::HashMap;
 
 use crate::animation::{RepeatMode, VrmaPlayer};
-use ene_config::MotionLayer;
+/// Motion body layer classification (rendering-side mirror).
+///
+/// The canonical definition lives in `ene-config` (`ene_config::MotionLayer`).
+/// `ene-vrm` is a rendering-only crate and must not depend on `ene-config`,
+/// and the orphan rule prevents a cross-crate `From` impl, so this crate
+/// keeps its own mirror with identical variants. Hosts (e.g. `ene-desktop`)
+/// convert between the two by matching variants directly at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MotionLayer {
+    /// Upper-body gesture + expression.
+    Upper,
+    /// Lower-body idle loop.
+    Lower,
+    /// Full-body override (preempts upper/lower).
+    Full,
+}
+
+impl MotionLayer {
+    /// Stable display / log label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Upper => "upper",
+            Self::Lower => "lower",
+            Self::Full => "full",
+        }
+    }
+}
 
 /// A motion slot tracking a playing animation on one layer.
 #[derive(Debug, Clone)]

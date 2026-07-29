@@ -1,138 +1,89 @@
 {
   "version": 1,
   "character": "Alicia",
-  "user_name": "pexisgle",
-  "runtime_rules": "Keep responses relatively short and sweet, suitable for displaying on a screen overlay.",
+  "user_name": "User",
   "$schema": "./schema/settings.schema.json",
-  "desktop": {
-    "graphics": {
-      "mask_render_downsample": 8,
-      "target_fps": 60,
-      "shadow_quality": "medium",
-      "antialiasing_mode": "fxaa",
-      "debug_fps": 30
-    },
-    "language": "ja"
-  },
-  "mind": {
-    "context": {
-      "max_prompt_tokens": 12000,
-      "recent_turns": 8,
-      "scene_summary_tokens": 800,
-      "memory_budget_tokens": 1800,
-      "semantic_budget_tokens": 1200,
-      "style_example_budget_tokens": 600,
-      "compression_enabled": true,
-      "scene_turn_threshold": 12,
-      "chapter_span_threshold": 5,
-      "arc_span_threshold": 3,
-      "compression_timeout_secs": 60
-    },
-    "memory": {
-      "write_every_turn": true,
-      "llm_extraction_enabled": true,
-      "semantic_dedup_enabled": true,
-      "hybrid_search": true,
-      "decay_enabled": true,
-      "default_forgetting_half_life_days": 30.0,
-      "min_confidence_to_persist": 0.65,
-      "extraction_timeout_secs": 30,
-      "tool_grounding": {
-        "enabled": true,
-        "max_summary_chars": 500,
-        "persist_success_procedure": false,
-        "persist_failure_reflection": true,
-        "persist_user_visible_episodic": false,
-        "min_confidence": 0.6000000238418579
+  "ai": {
+    "local_models": {
+      "gemma-4-e2b": {
+        "acceleration": "auto",
+        "context_size": 2048,
+        "gpu_layers": "auto",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
+        "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf"
       },
-      "use_hyde": false,
-      "hyde_blend": 0.6000000238418579,
-      "recall_result_limit": 8,
-      "recall_similarity_threshold": 0.3499999940395355,
-      "recall_min_score": 0.20000000298023224,
-      "rerank_enabled": false,
-      "rerank_candidate_limit": 16,
-      "rerank_timeout_secs": 10,
-      "mmr_enabled": true,
-      "mmr_lambda": 0.699999988079071,
-      "mmr_duplicate_cluster_threshold": 0.75,
-      "mmr_min_slots_semantic": 1,
-      "mmr_min_slots_episodic": 1,
-      "mmr_min_slots_user_profile": 1,
-      "mmr_min_slots_commitment": 1,
-      "mmr_source_diversity_bonus": 0.05000000074505806,
-      "require_migration": false,
-      "hybrid_weights": {
-        "vector": 0.4000000059604645,
-        "lexical": 0.15000000596046448,
-        "recency": 0.10000000149011612,
-        "salience": 0.15000000596046448,
-        "confidence": 0.05000000074505806,
-        "emotional_match": 0.05000000074505806,
-        "relationship": 0.05000000074505806,
-        "access_boost": 0.05000000074505806
+      "gemma-4-e4b": {
+        "acceleration": "auto",
+        "context_size": 2048,
+        "gpu_layers": "auto",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/mmproj-F16.gguf",
+        "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf"
       },
-      "commitment_boost": 0.25,
-      "recent_fallback_limit": 5,
-      "journal_candidate_pool_size": 64,
-      "journal_similarity_threshold": 0.44999998807907104,
-      "journal_min_score": 0.10000000149011612
+      "jina-v5-small": {
+        "acceleration": "auto",
+        "context_size": 2048,
+        "gpu_layers": "auto",
+        "quantization": "F16",
+        "url": "https://huggingface.co/jinaai/jina-embeddings-v5-text-small-retrieval/resolve/main/v5-small-retrieval-F16.gguf"
+      }
     },
-    "emotion": {
-      "enabled": true,
-      "engine": "hybrid",
-      "decay_half_life_minutes": 30.0,
-      "expression_hysteresis_seconds": 4.0,
-      "llm_can_propose_expression": true,
-      "llm_expression_is_advisory": true,
-      "classifier_timeout_secs": 30,
-      "classifier_min_confidence": 0.5,
-      "classifier_language": "ja",
-      "classifier_model": "google/gemini-2.5-flash-lite",
-      "classifier_max_tokens": 0
+    "providers": {
+      "openrouter": {
+        "api_key": {
+          "env": "OPENROUTER_API_KEY",
+          "inline": "",
+          "source": "env"
+        },
+        "base_url": "https://openrouter.ai/api/v1",
+        "kind": "openai_compatible"
+      }
     },
-    "character": {
-      "compile_ccv3_to_semantic_memory": true,
-      "always_include_identity_kernel": true,
-      "style_retrieval": true,
-      "identity_kernel_max_tokens": 400
+    "tasks": {
+      "chat": {
+        "max_tokens": 8192,
+        "model": "openai/gpt-4o-mini",
+        "provider": "openrouter",
+        "supports_vision": true
+      },
+      "classifier": {
+        "model": "google/gemini-2.5-flash-lite",
+        "provider": "openrouter"
+      },
+      "embedding": {
+        "model": "jina-v5-small",
+        "provider": "local"
+      },
+      "proactive": {
+        "model": "gemma-4-e4b",
+        "provider": "local"
+      }
     }
   },
-  "provider": {
-    "api_key": {
-      "env": "OPENAI_API_KEY",
-      "inline": "",
-      "source": "inline"
+  "desktop": {
+    "graphics": {
+      "quality": "medium"
     },
-    "base_url": "https://openrouter.ai/api/v1",
-    "embedding": {
-      "backend": "local",
-      "cloud": {
-        "dimensions": 1536,
-        "model": "text-embedding-3-small"
-      },
-      "local": {
-        "model": "jina-embeddings-v5-text-small",
-        "quantization": "F16"
-      },
-      "query_prefix": null
-    },
-    "max_tokens": 8192,
-    "model": "xiaomi/mimo-v2.5",
-    "name": "openai-compatible"
+    "language": "ja",
+    "mic_device": null
   },
-  "session": {
-    "auto_split": false,
-    "min_turns_before_split": 3,
-    "summarization": {
-      "base_url": "",
-      "model": ""
+  "mind": {
+    "emotion": {
+      "classifier_language": "ja",
+      "enabled": true
     },
-    "timeout_minutes": 30,
-    "topic_similarity_threshold": 0.5
+    "proactive": {
+      "cooldown_seconds": 60,
+      "enabled": true,
+      "interval_seconds": 10,
+      "min_idle_seconds": 20,
+      "sources": {
+        "activity": true,
+        "conversation": true,
+        "screen_summary": true
+      }
+    }
   },
   "store": {
-    "db_path": "",
     "enabled": true
   },
   "tools": {
@@ -157,23 +108,6 @@
         "tavily_api_key": ""
       }
     },
-    "max_rounds": 10,
-    "mcp_servers": [],
-    "rag": {
-      "background_index_on_startup": true,
-      "enabled": true,
-      "final_n": 6,
-      "forced": [
-        "utility.question",
-        "utility.todo_add",
-        "utility.get_current_time"
-      ],
-      "min_similarity": 0.25,
-      "rerank_candidates": 24,
-      "top_k": 12,
-      "use_hyde": false,
-      "use_rerank": false
-    },
-    "timeout_ms": 60000
+    "mcp_servers": []
   }
 }

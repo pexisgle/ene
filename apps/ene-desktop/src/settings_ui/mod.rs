@@ -1,4 +1,4 @@
-//! Settings UI — the 3-page tabbed window that mirrors the legacy
+//! Settings UI — the tabbed window that mirrors the legacy
 //! Bevy `apps/ene-desktop/src/settings_ui/`.
 //!
 //! The runtime owns a single [`SettingsUi`] per `UiWindow`. Each
@@ -7,9 +7,14 @@
 pub mod input;
 pub mod page_ai;
 pub mod page_character;
+pub mod page_character_editor;
 pub mod page_debug;
+pub mod page_features;
 pub mod page_graphics;
 pub mod page_memory;
+pub mod page_permissions;
+pub mod page_sessions;
+pub mod page_voice;
 pub mod widgets;
 
 pub use input::SettingsInputState;
@@ -27,9 +32,15 @@ use bevy_ecs::world::World;
 pub enum PageKind {
     #[default]
     Character,
+    /// Character Card (`CCv3`) editor (#218).
+    CharacterEditor,
     Graphics,
     Ai,
+    Voice,
+    Features,
     Memory,
+    Permissions,
+    Sessions,
     Debug,
 }
 
@@ -64,6 +75,9 @@ impl SettingsUi {
         ui_state: &crate::settings::UiState,
     ) {
         self.input.sync_from_settings(settings, ui_state);
+        if let Some(page) = ui_state.focused_page {
+            self.current_page = page;
+        }
     }
 
     /// Render the full settings window. The caller is expected to
@@ -73,28 +87,208 @@ impl SettingsUi {
         &mut self,
         ui: &mut egui::Ui,
         settings: &mut CharacterSettings,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         ui_entity: Entity,
         now_secs: f64,
     ) {
         apply_egui_visuals(ui.ctx());
 
+        let mut dismiss_fatal = false;
+        let fatal_message = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .and_then(|state| state.0.runtime_startup_error.clone())
+            .filter(|_| {
+                world
+                    .get::<crate::component::ui::UiStateComponent>(ui_entity)
+                    .is_some_and(|state| !state.0.fatal_startup_dismissed)
+            });
+        if let Some(message) = fatal_message {
+            egui::Window::new(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-fatal-title"
+            ))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(i18n_embed_fl::fl!(
+                    crate::i18n::loader(),
+                    "runtime-fatal-body",
+                    message = message
+                ));
+                if ui
+                    .button(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "runtime-fatal-dismiss"
+                    ))
+                    .clicked()
+                {
+                    dismiss_fatal = true;
+                }
+            });
+        }
+        if dismiss_fatal
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            state.0.fatal_startup_dismissed = true;
+        }
+
+        let mut reconnect_requested = false;
+        let show_disconnect_banner = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .is_some_and(|state| state.0.runtime_disconnected);
+        if show_disconnect_banner {
+            let reconnect_attempted = world
+                .get::<crate::component::ui::UiStateComponent>(ui_entity)
+                .is_some_and(|state| state.0.reconnect_attempted);
+            egui::Window::new(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-disconnected-title"
+            ))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 48.0])
+            .show(ui.ctx(), |ui| {
+                ui.colored_label(
+                    egui::Color32::LIGHT_RED,
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-disconnected-body"),
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !reconnect_attempted,
+                            egui::Button::new(i18n_embed_fl::fl!(
+                                crate::i18n::loader(),
+                                "runtime-reconnect"
+                            )),
+                        )
+                        .clicked()
+                    {
+                        reconnect_requested = true;
+                    }
+                });
+                if reconnect_attempted {
+                    ui.weak(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "runtime-reconnect-already-attempted"
+                    ));
+                }
+            });
+        }
+        if reconnect_requested
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            state.0.reconnect_requested = true;
+        }
+
+        let Some(ai) = ai else {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-unavailable"),
+            );
+            return;
+        };
+
+        // First-run onboarding panel (#241).
+        let mut open_ai = false;
+        let mut dismiss = false;
+        let show_onboarding = world
+            .get::<crate::component::ui::UiStateComponent>(ui_entity)
+            .is_some_and(|s| s.0.show_onboarding);
+        if show_onboarding {
+            egui::Window::new(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "onboarding-title"
+            ))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 24.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "onboarding-body"));
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "onboarding-open-settings"
+                        ))
+                        .clicked()
+                    {
+                        open_ai = true;
+                    }
+                    if ui
+                        .button(i18n_embed_fl::fl!(
+                            crate::i18n::loader(),
+                            "onboarding-dismiss"
+                        ))
+                        .clicked()
+                    {
+                        dismiss = true;
+                    }
+                });
+            });
+        }
+        if (open_ai || dismiss)
+            && let Some(mut state) =
+                world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+        {
+            if open_ai {
+                state.0.focused_page = Some(PageKind::Ai);
+                state.0.settings_window_visible = true;
+                state.0.show_onboarding = false;
+            }
+            if dismiss {
+                state.0.show_onboarding = false;
+            }
+        }
+        if open_ai {
+            self.current_page = PageKind::Ai;
+        }
+
+        // Consume a one-shot page focus request from tray / onboarding (#241).
+        if let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
+            && let Some(page) = state.0.focused_page.take()
+        {
+            self.current_page = page;
+        }
+
         // Top-level page tab strip.
         ui.horizontal(|ui| {
             for page in [
                 PageKind::Character,
+                PageKind::CharacterEditor,
                 PageKind::Graphics,
                 PageKind::Ai,
+                PageKind::Voice,
+                PageKind::Features,
                 PageKind::Memory,
+                PageKind::Permissions,
+                PageKind::Sessions,
                 PageKind::Debug,
             ] {
                 let label = match page {
-                    PageKind::Character => crate::i18n::character(),
-                    PageKind::Graphics => crate::i18n::graphics(),
-                    PageKind::Debug => crate::i18n::debug(),
-                    PageKind::Ai => crate::i18n::ai(),
+                    PageKind::Character => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "character")
+                    }
+                    PageKind::CharacterEditor => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "character-card")
+                    }
+                    PageKind::Graphics => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "graphics")
+                    }
+                    PageKind::Debug => i18n_embed_fl::fl!(crate::i18n::loader(), "debug"),
+                    PageKind::Ai => i18n_embed_fl::fl!(crate::i18n::loader(), "ai"),
+                    PageKind::Voice => i18n_embed_fl::fl!(crate::i18n::loader(), "voice"),
+                    PageKind::Features => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "features")
+                    }
                     PageKind::Memory => i18n_embed_fl::fl!(crate::i18n::loader(), "memory"),
+                    PageKind::Permissions => {
+                        i18n_embed_fl::fl!(crate::i18n::loader(), "permissions")
+                    }
+                    PageKind::Sessions => i18n_embed_fl::fl!(crate::i18n::loader(), "sessions"),
                 };
                 if ui
                     .selectable_label(self.current_page == page, label)
@@ -117,6 +311,9 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
+            PageKind::CharacterEditor => {
+                page_character_editor::render(ui, settings, ai, world, ui_entity);
+            }
             PageKind::Graphics => {
                 page_graphics::render(ui, settings, &mut self.animation, ai, world, ui_entity);
             }
@@ -129,7 +326,11 @@ impl SettingsUi {
                 world,
                 ui_entity,
             ),
+            PageKind::Voice => page_voice::render(ui, settings, ai, &mut self.input, world),
+            PageKind::Features => page_features::render(ui, settings, ai, world),
             PageKind::Memory => page_memory::render(ui, ai, world, ui_entity),
+            PageKind::Permissions => page_permissions::render(ui, ai, world, ui_entity),
+            PageKind::Sessions => page_sessions::render(ui, ai, world, ui_entity),
             PageKind::Debug => {
                 page_debug::render(ui, settings, &mut self.animation, ai, world, ui_entity);
             }

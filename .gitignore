@@ -4,11 +4,12 @@
 .vscode
 .opencode
 .fastembed_cache
+.claude/
 
 assets/models/
 
 # Local GGUF model directory (used by the local_embedding example)
-models/
+/models/
 
 # Runtime database files
 **/memory.db*
@@ -20,3 +21,6 @@ models/
 assets/schema/settings.schema.json
 assets/schema/character_settings.schema.json
 assets/schema/character.schema.json
+
+# mdBook generated output
+**/book/

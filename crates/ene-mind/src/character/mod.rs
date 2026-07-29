@@ -1,14 +1,14 @@
 //! Character processing: CCv3 compilation, Identity Kernel, lorebook indexing (#82–#84).
 
+mod authors_note;
 mod compiler;
 mod kernel;
 mod lorebook;
 mod style;
 mod sync;
 
-pub use compiler::{
-    CharacterCompiler, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS, compile_identity_kernel,
-};
+pub use authors_note::{AuthorsNote, apply_authors_note};
+pub use compiler::{CharacterCompiler, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS};
 pub use kernel::IdentityKernel;
 pub use lorebook::{
     LOREBOOK_SOURCE_PREFIX, LorebookIndexer, build_lorebook_scan_text,
@@ -17,13 +17,13 @@ pub use lorebook::{
 pub use style::{
     STYLE_SOURCE_PREFIX, StyleExample, StyleExampleSelector, StyleIntent, infer_style_intent,
 };
-pub use sync::{CharacterMemorySyncReport, sync_character_memories};
+pub use sync::{CharacterMemorySyncReport, compute_card_memory_hash, sync_character_memories};
 
 use std::sync::Arc;
 
 use ene_ai::EmbeddingProvider;
-use ene_config::CharacterCardV3;
-use ene_store::MemoryStore;
+use ene_config::{CharacterCardV3, UserPersona};
+use ene_core::MemoryPort;
 
 use crate::config::CharacterMemoryConfig;
 use crate::error::CognitionError;
@@ -35,22 +35,26 @@ pub struct CharacterProcessor;
 
 impl CharacterProcessor {
     /// Compile the identity kernel for a character card.
+    ///
+    /// `user_persona`, when provided, expands the `{{user_persona}}` CBS macro
+    /// in card-derived fields (#H-3).
     pub fn compile_kernel(
         card: &CharacterCardV3,
         user_name: &str,
+        user_persona: Option<&UserPersona>,
         max_tokens: usize,
     ) -> IdentityKernel {
-        CharacterCompiler::compile(card, user_name, max_tokens)
+        CharacterCompiler::compile(card, user_name, user_persona, max_tokens)
     }
 
     /// Compile the identity kernel using default token budget.
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
-        Self::compile_kernel(card, user_name, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
+        Self::compile_kernel(card, user_name, None, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
     }
 
     /// Synchronize `CCv3` lorebook and style indices into typed memory.
     pub async fn sync_card_memories(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         embedder: &Arc<dyn EmbeddingProvider>,
         character_id: &str,
         user_name: &str,
@@ -76,7 +80,7 @@ impl CharacterProcessor {
         user_name: &str,
         user_input: &str,
         _history: &[HistoryEntry],
-        store: Option<&MemoryStore>,
+        store: Option<&dyn MemoryPort>,
         embedder: Option<&Arc<dyn EmbeddingProvider>>,
         config: &CharacterMemoryConfig,
         max_examples: usize,

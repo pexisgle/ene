@@ -1,11 +1,13 @@
 //! # ene-ai
 //!
-//! Unified LLM and embedding provider layer for the ene AI character platform.
+//! Core LLM and embedding provider layer for the ene AI character platform.
 //!
 //! Defines generic message and streaming types (`LlmMessage`, `LlmResponseChunk`),
 //! provider traits (`LlmProvider`, `EmbeddingProvider`, `LlmProviderFactory`),
-//! a global provider registry, the built-in OpenAI-compatible implementation,
-//! and local GGUF embedding via Candle.
+//! a global provider registry, and the built-in OpenAI-compatible implementation.
+//!
+//! Local providers are in [`ene-ai-local`] (GGUF/llama.cpp) and
+//! [`ene-voice`] (STT/TTS/VAD).
 #![warn(missing_docs)]
 #![expect(
     clippy::option_if_let_else,
@@ -16,42 +18,76 @@
     expect(
         clippy::unwrap_used,
         clippy::expect_used,
-        reason = "unit/integration tests use unwrap/expect for assertions"
+        clippy::panic,
+        reason = "unit/integration tests use unwrap/expect/panic for assertions"
     )
 )]
 
-/// Configuration types for providers and embedding.
+/// Configuration types for AI providers, tasks, and retry policies.
 pub mod config;
-/// Local GGUF quantized embedding provider.
-pub mod embedding;
-/// Typed `LlmProviderError` enum returned at the library boundary.
+/// Error types for the AI provider layer.
 pub mod error;
-/// Hybrid HyDE / rerank helpers (primary embedder + optional LLM).
-pub mod hybrid;
-/// Unified chat message and streaming types.
+/// Provider health monitoring and failover routing.
+pub mod health;
+/// Blanket async-provider adapters over `ene-infer::EngineHandle`
+/// (`LocalLlmEngine`, `LocalTtsEngine`, `LocalSttEngine`), plus
+/// `EngineDescriptor` capability/concurrency/resource declarations and the
+/// process-wide `ResourceRegistry` admission budget.
+pub mod local_engine;
+/// Message and streaming chunk types (`LlmMessage`, `LlmResponseChunk`, etc.).
 pub mod message;
-/// Built-in OpenAI-compatible provider and cloud embedding provider.
+/// Shared, safe model-file downloader (`ModelFetcher`) used by
+/// `ene-ai-local` (GGUF) and `ene-voice` (Kokoro ONNX / `voices.bin`):
+/// in-flight coalescing, `.part` + atomic rename, RAII partial cleanup,
+/// HTTPS-only enforcement, pluggable post-download validation, and progress
+/// reporting.
+pub mod model_fetch;
+/// OpenAI-compatible provider implementation.
 pub mod openai;
-/// Provider traits and registry.
+/// Provider resolution from configuration.
+pub mod resolve;
+/// Retry policy for transient provider errors.
+pub mod retry;
+/// Conversation role enum (User, Assistant, System, Tool).
+pub mod role;
+/// Provider trait definitions (`LlmProvider`, `EmbeddingProvider`, etc.).
 pub mod traits;
 
-pub mod role;
-
 pub use config::{
-    ApiKeyConfig, CloudEmbeddingConfig, EmbeddingConfig, LocalEmbeddingConfig, ProviderConfig,
-};
-pub use embedding::{
-    EneEmbeddingError, GgufEmbeddingProvider, create_local_provider, resolve_gguf_paths,
+    AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, BUILTIN_PROVIDER_KINDS, FallbackConfig,
+    LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
+    TtsConfig, VadConfig, is_builtin_kind, kind_typo_suggestion,
 };
 pub use error::{AiError, LlmProviderError};
-pub use hybrid::{HybridRerankProvider, hyde_document, rerank_tool_specs};
-pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
-pub use openai::{
-    CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
-    create_openai_compatible_chat_provider,
+pub use health::{
+    FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
+    ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
+pub use local_engine::{
+    Capability, CapabilitySet, ConcurrencyHint, DEFAULT_CHUNK_BUFFER, EngineDescriptor, EngineId,
+    LlmChatRequest, LlmChatResponse, LocalLlmEngine, LocalSttEngine, LocalTtsEngine,
+    ResourceBudgets, ResourceClass, ResourceRegistry, StreamingLocalLlmEngine,
+    SttTranscribeRequest, TtsSynthesisRequest, TtsSynthesisResponse,
+};
+pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
+pub use model_fetch::{
+    MagicBytesValidator, ModelFetchError, ModelFetcher, ModelValidator, PrefixPredicateValidator,
+    SizeMultipleValidator, sanitize_basename, strip_url_path, validate_https_url,
+};
+pub use openai::{
+    AiTaskKind, CloudEmbeddingProvider, OpenAiProvider, OpenAiProviderFactory,
+    create_chat_provider_from_resolved, create_task_chat_provider,
+};
+pub use resolve::{
+    ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedStt,
+    ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue, needs_onboarding, resolve_base_url,
+    validate_api_key, validate_provider_kinds, validate_settings,
+};
+pub use retry::RetryPolicy;
 pub use role::Role;
 pub use traits::{
-    EmbeddingError, EmbeddingKind, EmbeddingProvider, LlmProvider, LlmProviderFactory,
-    LlmProviderRegistry, collect_chat_completion, cosine_similarity, embed, embed_query,
+    AudioProviderError, AudioProviderRegistry, EmbeddingError, EmbeddingKind, EmbeddingProvider,
+    LlmProvider, LlmProviderFactory, LlmProviderRegistry, SttProvider, SttProviderFactory,
+    SttResult, TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
+    cosine_similarity, embed, embed_query,
 };

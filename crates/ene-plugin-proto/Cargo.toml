@@ -1,0 +1,19 @@
+[package]
+name = "ene-plugin-proto"
+version.workspace = true
+edition.workspace = true
+description = "Unified plugin IPC protocol: tool wire types, capabilities, LLM streaming, and extended wire messages"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net"] }
+
+[lints]
+workspace = true

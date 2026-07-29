@@ -13,7 +13,11 @@ use bevy_ecs::prelude::*;
 /// `apply_settings_action_system` reads these messages and mutates
 /// the [`SettingsBundle`](crate::component::ui::SettingsUiBundle)'s
 /// components in place.
-#[derive(Message, Debug, Clone, Copy)]
+///
+/// `Clone` but not `Copy` because the character-card editor variants
+/// of [`SettingsAction`](crate::settings_ui::widgets::SettingsAction)
+/// carry an owned path `String`.
+#[derive(Message, Debug, Clone)]
 pub struct SettingsActionEvent {
     #[expect(dead_code, reason = "Read by Phase 6 per-action consumer systems")]
     pub action: crate::settings_ui::widgets::SettingsAction,

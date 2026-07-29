@@ -7,7 +7,7 @@ use crate::component::chat::{ChatStateComponent, ChatUiBundle, ChatWindow};
 use crate::component::ui::{SettingsUiBundle, UiStartedAt, UiStateComponent, UiWindow};
 use crate::event::ai::{
     AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
+    CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
 };
 use crate::event::chat::OpenChat;
 use crate::event::input::PointerMoved;
@@ -26,8 +26,8 @@ use crate::system::ui_consumers::{
     apply_ai_permission_system, apply_ai_stream_finished_system, apply_ai_text_deltas_system,
     apply_ai_user_input_system, open_chat_system, open_settings_system,
 };
+use ene_plugin_proto::UserInputPrompt;
 use ene_runtime::RequestId;
-use ene_tool_proto::UserInputPrompt;
 use tokio::sync::mpsc;
 
 fn spawn_ui(world: &mut World) {
@@ -52,7 +52,9 @@ fn init_messages(world: &mut World) {
     world.init_resource::<Messages<MotionCommand>>();
     world.init_resource::<Messages<ExpressionCommand>>();
     world.init_resource::<Messages<CancelCommand>>();
+    world.init_resource::<Messages<EmoteToken>>();
     world.init_resource::<Messages<PointerMoved>>();
+    world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
 }
 
 fn run_consumers(world: &mut World) {
@@ -221,16 +223,14 @@ fn apply_ai_user_input_allocates_drafts() {
     init_messages(&mut world);
     spawn_chat(&mut world);
 
-    let item = ene_tool_proto::QuestionItem {
+    let item = ene_plugin_proto::QuestionItem {
         question: "Pick a colour".into(),
         options: vec!["red".into(), "blue".into()],
         allow_free_text: true,
     };
     world.write_message(AiUserInputRequested {
         request_id: RequestId::new("req-2"),
-        prompt: UserInputPrompt {
-            items: vec![item.clone(), item.clone(), item],
-        },
+        prompt: UserInputPrompt::new(vec![item.clone(), item.clone(), item]).unwrap(),
     });
     run_consumers(&mut world);
 
@@ -271,6 +271,8 @@ fn emote_token_emits_message_via_pump() {
     world.init_resource::<Messages<CancelCommand>>();
     world.init_resource::<Messages<OpenSettings>>();
     world.init_resource::<Messages<OpenChat>>();
+    world.init_resource::<Messages<PendingCandidatesCount>>();
+    world.init_resource::<Messages<crate::event::lifecycle::RuntimeDisconnected>>();
     #[cfg(target_os = "linux")]
     world.init_resource::<Messages<crate::event::lifecycle::TickGtk>>();
 
@@ -311,14 +313,47 @@ fn platform_plugin_provides_cursor_state_and_pointer_moved_is_reserved() {
 }
 
 #[test]
-fn mark_gtk_tick_removed_in_phase_75() {}
-
-#[test]
 fn question_draft_default_is_blank() {
     let d = QuestionDraft::default();
     assert_eq!(d.text, "");
     assert!(d.selected.is_none());
     assert!(!d.skipped);
+}
+
+#[test]
+fn motion_command_routes_typed_layer_to_vrm() {
+    use crate::resource::motion_layer::MotionLayerState;
+    use crate::system::ui_consumers::apply_motion_commands_system;
+
+    let mut world = World::new();
+    world.init_resource::<MotionLayerState>();
+    world.init_resource::<Messages<MotionCommand>>();
+
+    // A `Lower` motion should land on the VRM lower layer (and loop).
+    world.write_message(MotionCommand {
+        name: "idle".into(),
+        layer: ene_config::MotionLayer::Lower,
+        priority: 3,
+        duration: 0.0,
+    });
+    let mut schedule = Schedule::default();
+    schedule.add_systems(apply_motion_commands_system);
+    schedule.run(&mut world);
+
+    // Cancel the upper layer: the lower motion must survive, proving the
+    // typed `ene_config::MotionLayer::Lower` mapped to `ene_vrm::Lower`.
+    world
+        .resource_mut::<MotionLayerState>()
+        .cancel_motion(ene_vrm::MotionLayer::Upper);
+    let frame = world.resource::<MotionLayerState>().compose();
+    assert_eq!(frame.active_motions, vec!["idle".to_string()]);
+
+    // Cancel the lower layer: the motion is now cleared.
+    world
+        .resource_mut::<MotionLayerState>()
+        .cancel_motion(ene_vrm::MotionLayer::Lower);
+    let frame = world.resource::<MotionLayerState>().compose();
+    assert!(frame.active_motions.is_empty());
 }
 
 #[test]

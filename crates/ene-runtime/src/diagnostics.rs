@@ -7,7 +7,7 @@ use crate::error::EneRuntimeError;
 use crate::handle::{ActorDeadError, EneCommand, EneStateSnapshot};
 use crate::types::TurnId;
 use ene_mind::SplitResult;
-use ene_tool_proto::ToolSpec;
+use ene_plugin_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -71,69 +71,6 @@ impl MemoryQueryHandle {
             .map_err(EneRuntimeError::from)
     }
 
-    /// Count legacy memory rows for a character card.
-    pub async fn count_legacy_rows(
-        &self,
-        card_name: &str,
-    ) -> Result<ene_store::LegacyRowCounts, EneRuntimeError> {
-        let store = self.require_store()?;
-        store
-            .count_legacy_rows(card_name)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// Migration status for a character card.
-    pub async fn migration_status(
-        &self,
-        card_name: &str,
-    ) -> Result<Option<ene_store::MigrationStatus>, EneRuntimeError> {
-        let store = self.require_store()?;
-        store
-            .get_migration_status(card_name)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// Run legacy → typed one-shot migration.
-    pub async fn migrate_legacy(
-        &self,
-        card_name: &str,
-        user_id: &str,
-        dry_run: bool,
-    ) -> Result<ene_store::LegacyMigrationReport, EneRuntimeError> {
-        let store = self.require_store()?;
-        let model = self
-            .embedder
-            .as_ref()
-            .ok_or_else(|| {
-                EneRuntimeError::from(ene_ai::EmbeddingError::Init(
-                    "Embedding provider not available".into(),
-                ))
-            })?
-            .model_name()
-            .to_string();
-        let options = ene_store::LegacyMigrationOptions {
-            card_name: card_name.to_string(),
-            user_id: user_id.to_string(),
-            embedding_model: model,
-            dry_run,
-        };
-        store
-            .migrate_legacy(&options)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
-    /// Destructive legacy memory reset for a character card.
-    pub async fn reset_legacy_memory(&self, card_name: &str) -> Result<(), EneRuntimeError> {
-        let store = self.require_store()?;
-        store
-            .reset_legacy_memory(card_name)
-            .await
-            .map_err(EneRuntimeError::Memory)
-    }
-
     /// List typed memories for the current character.
     pub async fn list_typed_memories(
         &self,
@@ -187,7 +124,7 @@ impl MemoryQueryHandle {
             ))
         })?;
         ene_mind::MemoryJournal::search(
-            store,
+            store.as_ref(),
             embedder.as_ref(),
             &self.mind_memory,
             character_id,
@@ -214,7 +151,7 @@ impl MemoryQueryHandle {
             ))
         })?;
         ene_mind::MemoryJournal::search_explained(
-            store,
+            store.as_ref(),
             embedder.as_ref(),
             &self.mind_memory,
             character_id,
@@ -236,14 +173,14 @@ impl MemoryQueryHandle {
     }
 
     /// Transition typed memory lifecycle status.
-    pub async fn transition_typed_memory_status(
+    pub async fn set_memory_status(
         &self,
         id: i64,
         status: ene_store::MemoryStatus,
     ) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         store
-            .transition_typed_memory_status(id, status)
+            .set_memory_status(id, status)
             .await
             .map_err(EneRuntimeError::Memory)
     }
@@ -313,7 +250,7 @@ impl MemoryQueryHandle {
 
     fn require_store(&self) -> Result<&std::sync::Arc<ene_store::MemoryStore>, EneRuntimeError> {
         self.store.as_ref().ok_or_else(|| {
-            EneRuntimeError::Memory(ene_store::MemoryError::MemoryStoreConnectionError(
+            EneRuntimeError::Memory(ene_store::EneMemoryError::MemoryStoreConnectionError(
                 "Memory store not available".into(),
             ))
         })
@@ -337,10 +274,127 @@ pub enum DiagnosticEvent {
         /// Map of phase names to elapsed time in milliseconds.
         timings: HashMap<String, u64>,
     },
+    /// A panic was caught and contained by the actor supervisor (#236).
+    ///
+    /// The actor loop survives per-command panics; this event surfaces them
+    /// for diagnostics instead of crashing the process or losing the panic.
+    ActorPanic {
+        /// Component that panicked (e.g. `"command"`, `"SearchTools"`).
+        component: String,
+        /// Best-effort panic message.
+        message: String,
+    },
+    /// A tool health/lifecycle event from the tool host supervisor (#238).
+    ///
+    /// Emitted when a tool is detected unhealthy (hung or dead), restarted,
+    /// recovered, paused by the circuit breaker, or disabled. `status` is a
+    /// stable English contract mirroring [`ene_plugin_host::PluginHealthEvent`].
+    ToolHealth {
+        /// Tool name.
+        tool: String,
+        /// Stable status code: `unhealthy`, `restarting`, `restarted`,
+        /// `recovered`, `circuit_open`, `circuit_closed`, or `disabled`.
+        status: String,
+        /// Optional human-readable detail (e.g. unhealthy reason).
+        detail: Option<String>,
+    },
+    /// A provider health-check result (#175).
+    ///
+    /// Emitted after each provider probe so the UI can display the active
+    /// provider's connectivity, latency, and last error without polling.
+    ProviderHealth {
+        /// Provider name (key in `ai.providers`).
+        provider: String,
+        /// Stable status code: `healthy`, `degraded`, `auth_failed`,
+        /// `rate_limited`, `unreachable`, `server_error`, or `unknown`.
+        status: String,
+        /// Measured round-trip latency in milliseconds (0 if unreachable).
+        latency_ms: u64,
+        /// Optional human-readable error detail.
+        detail: Option<String>,
+    },
+    /// A provider failover event (#175).
+    ///
+    /// Emitted when the runtime switches from an unhealthy primary provider
+    /// to a fallback so the user is notified that the conversation is
+    /// continuing on a different backend.
+    ProviderFallback {
+        /// Provider that failed.
+        from: String,
+        /// Provider selected instead.
+        to: String,
+        /// Reason for the fallback.
+        reason: String,
+    },
+    /// A deferred memory-write failure or permanent queue warning (#240).
+    MemoryWrite {
+        /// Character scope for the failed write.
+        character_id: String,
+        /// Stable status: `failed`, `enqueued`, or `permanent`.
+        status: String,
+        /// Human-readable error detail.
+        message: String,
+        /// Optional pending-queue row id.
+        pending_id: Option<i64>,
+        /// Current pending retry count for the character (if known).
+        pending_count: Option<u64>,
+        /// Current permanent failure count for the character (if known).
+        permanent_count: Option<u64>,
+    },
+    /// A broadcast subscriber lagged and skipped events (#189).
+    ///
+    /// Consumers must not treat the stream as gap-free after this; emit
+    /// implies a [`Self::ResyncNeeded`] on the same channel.
+    Lagged {
+        /// Channel that lagged: `events` or `diagnostics`.
+        channel: String,
+        /// Number of messages skipped by the broadcast ring.
+        skipped: u64,
+    },
+    /// Subscriber should resynchronize from a snapshot (#189).
+    ResyncNeeded {
+        /// Channel that requires resync: `events` or `diagnostics`.
+        channel: String,
+    },
+    /// A background task was refused admission because its actor-owned
+    /// `JoinSet` was already at its configured capacity (Stage 8).
+    ///
+    /// Emitted alongside (not instead of) an [`EneRuntimeError::Busy`] reply
+    /// when the rejected command has a reply channel (`CallTool`,
+    /// `SearchTools`); for fire-and-forget admission points (deferred tool
+    /// pollers, post-turn classifier/memory-writer supervisors) this is the
+    /// only signal that the task was dropped rather than tracked.
+    TaskRejected {
+        /// Which task set rejected the task (e.g. `"CallTool"`,
+        /// `"DeferredTool"`, `"Classifier"`, `"MemoryWriter"`,
+        /// `"SearchTools"`).
+        component: String,
+        /// The configured capacity that was already reached.
+        cap: usize,
+        /// Optional human-readable detail (e.g. tool name / task id).
+        detail: Option<String>,
+    },
+}
+
+/// Extracts a human-readable message from a caught panic payload.
+pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
 }
 
 /// Event receiver for [`DiagnosticEvent`].
-pub struct DiagnosticEventReceiver(broadcast::Receiver<DiagnosticEvent>);
+///
+/// On lag, emits [`DiagnosticEvent::Lagged`] / [`DiagnosticEvent::ResyncNeeded`]
+/// onto the same channel before returning the lag error (#189).
+pub struct DiagnosticEventReceiver {
+    inner: broadcast::Receiver<DiagnosticEvent>,
+    diag_tx: broadcast::Sender<DiagnosticEvent>,
+}
 
 impl std::fmt::Debug for DiagnosticEventReceiver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -349,14 +403,36 @@ impl std::fmt::Debug for DiagnosticEventReceiver {
 }
 
 impl DiagnosticEventReceiver {
+    fn note_lag(&self, skipped: u64) {
+        drop(self.diag_tx.send(DiagnosticEvent::Lagged {
+            channel: "diagnostics".to_string(),
+            skipped,
+        }));
+        drop(self.diag_tx.send(DiagnosticEvent::ResyncNeeded {
+            channel: "diagnostics".to_string(),
+        }));
+    }
+
     /// Non-blocking poll.
     pub fn try_recv(&mut self) -> Result<DiagnosticEvent, broadcast::error::TryRecvError> {
-        self.0.try_recv()
+        match self.inner.try_recv() {
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::TryRecvError::Lagged(n))
+            }
+            other => other,
+        }
     }
 
     /// Async receive.
     pub async fn recv(&mut self) -> Result<DiagnosticEvent, broadcast::error::RecvError> {
-        self.0.recv().await
+        match self.inner.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                self.note_lag(n);
+                Err(broadcast::error::RecvError::Lagged(n))
+            }
+            other => other,
+        }
     }
 }
 
@@ -365,6 +441,8 @@ pub struct EneDiagnostics {
     pub(crate) cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     pub(crate) diag_tx: broadcast::Sender<DiagnosticEvent>,
     pub(crate) memory: MemoryQueryHandle,
+    /// Provider health monitor for failover diagnostics (#175).
+    pub(crate) health_monitor: ene_ai::ProviderHealthMonitor,
 }
 
 impl std::fmt::Debug for EneDiagnostics {
@@ -381,9 +459,27 @@ impl EneDiagnostics {
         &self.memory
     }
 
+    /// Provider health monitor for failover diagnostics (#175).
+    pub const fn health_monitor(&self) -> &ene_ai::ProviderHealthMonitor {
+        &self.health_monitor
+    }
+
+    /// Snapshot of all cached provider health reports (#175).
+    pub fn provider_health_reports(&self) -> Vec<ene_ai::ProviderHealthReport> {
+        self.health_monitor.all_reports()
+    }
+
+    /// Snapshot of recent provider fallback events (#175).
+    pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
+        self.health_monitor.fallback_history()
+    }
+
     /// Subscribe to diagnostic events (pipeline phases/metrics).
     pub fn subscribe(&self) -> DiagnosticEventReceiver {
-        DiagnosticEventReceiver(self.diag_tx.subscribe())
+        DiagnosticEventReceiver {
+            inner: self.diag_tx.subscribe(),
+            diag_tx: self.diag_tx.clone(),
+        }
     }
 
     /// Request a snapshot of the current actor state.
@@ -402,6 +498,20 @@ impl EneDiagnostics {
             .send(EneCommand::ListTools { reply: tx })
             .map_err(|_| EneRuntimeError::ChannelClosed)?;
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)
+    }
+
+    /// Search tools in the registry using RAG if available.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EneRuntimeError::Busy`] when the actor's tool-search task
+    /// set is at capacity (Stage 8).
+    pub async fn search_tools(&self, query: String) -> Result<Vec<ToolSpec>, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SearchTools { query, reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
     /// Call a tool directly by name with arguments.
@@ -455,5 +565,5 @@ impl EneDiagnostics {
 }
 
 pub(crate) fn emit_diag(diag_tx: &broadcast::Sender<DiagnosticEvent>, event: DiagnosticEvent) {
-    let _ = diag_tx.send(event);
+    drop(diag_tx.send(event));
 }

@@ -18,6 +18,7 @@
 //! 3. Redraw happens via `request_redraw` from `about_to_wait` and
 //!    is performed in `about_to_wait` to avoid winit 0.30's
 //!    `RedrawRequested` double-fire on Windows.
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,11 +33,21 @@ use crate::acquire_error::AcquireError;
 use crate::ai_bridge::AiBridge;
 use crate::chat_ui::ChatEguiWindow;
 use crate::events::AppEventSender;
-use crate::gpu::pick_format_and_alpha;
+use crate::gpu::{WindowSurfaceError, pick_format_and_alpha};
 use crate::settings::CharacterSettings;
 use crate::settings_ui::{PageKind, SettingsUi, widgets::SettingsAction};
 use crate::state::AppState;
 use device_query::DeviceQuery;
+
+/// Framing margin passed to `Character::auto_fit_scale` when fitting the
+/// avatar to the camera. A value of `0.9` leaves a 10% margin around the
+/// model's normalized bounds so it is not flush against the viewport edges.
+const CHARACTER_AUTO_FIT_MARGIN: f32 = 0.9;
+
+/// Number of frames to defer GPU texture freeing. Must match the
+/// `desired_maximum_frame_latency` to avoid use-after-free on textures
+/// that are still referenced by in-flight frames.
+const TEXTURE_FREE_RING_DEPTH: usize = 3;
 
 /// Top-level runtime. One per process.
 pub struct Runtime {
@@ -67,6 +78,14 @@ pub struct Runtime {
     emotion_clock: Option<Instant>,
     device_state: device_query::DeviceState,
     char_surface_fatal: bool,
+    /// Whether an Alt modifier key is currently held. Tracked from
+    /// `WindowEvent::ModifiersChanged` so the Alt+Space spotlight
+    /// hotkey can be detected on `Space` key presses (#218).
+    alt_held: bool,
+    /// Previous frame's `tts_playing` value, used to detect the
+    /// true→false transition and reset the viseme mouth shape (L11).
+    #[cfg(feature = "voice")]
+    prev_tts_playing: bool,
 }
 
 impl Runtime {
@@ -82,6 +101,22 @@ impl Runtime {
         // runs strictly *after* the first `resumed`.
         state.app.update();
 
+        // First-run onboarding when the chat API key is missing (#241).
+        if ene_ai::needs_onboarding(&state.settings.config()) {
+            let mut ui = state.ui_bevy_state_mut();
+            ui.0.show_onboarding = true;
+            ui.0.focused_page = Some(crate::settings_ui::PageKind::Ai);
+            ui.0.settings_window_visible = true;
+        }
+
+        // Startup runtime failure: surface a fatal dialog in settings (#242).
+        if let Some(error) = state.runtime_startup_error.clone() {
+            let mut ui = state.ui_bevy_state_mut();
+            ui.0.settings_window_visible = true;
+            ui.0.fatal_startup_dismissed = false;
+            ui.0.runtime_startup_error = Some(error);
+        }
+
         Self {
             state,
             event_tx,
@@ -94,6 +129,9 @@ impl Runtime {
             emotion_clock: None,
             device_state: device_query::DeviceState::new(),
             char_surface_fatal: false,
+            alt_held: false,
+            #[cfg(feature = "voice")]
+            prev_tts_playing: false,
         }
     }
 
@@ -152,7 +190,10 @@ impl Runtime {
 
     fn create_chat_window(&mut self, event_loop: &ActiveEventLoop) {
         let mut chat_attrs = WindowAttributes::default()
-            .with_title(crate::i18n::chat_window_title())
+            .with_title(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "chat-window-title"
+            ))
             .with_inner_size(LogicalSize::new(400.0, 600.0))
             .with_resizable(true);
         if let Some(monitor) = event_loop.primary_monitor() {
@@ -287,7 +328,12 @@ impl ApplicationHandler for Runtime {
                         );
                     }
                     if world.resource::<MaskCapture>().0.is_none() {
-                        let downsample = self.state.settings.graphics.mask_render_downsample;
+                        let downsample = self
+                            .state
+                            .settings
+                            .graphics()
+                            .resolved()
+                            .mask_render_downsample;
                         if let Some(cam) =
                             crate::platform::wayland_mask_capture::new_mask_capture_state(
                                 &self.state.gpu.device,
@@ -325,7 +371,10 @@ impl ApplicationHandler for Runtime {
 
                 #[cfg(target_os = "windows")]
                 {
-                    let actual_scale = self.state.character.auto_fit_scale(0.9)
+                    let actual_scale = self
+                        .state
+                        .character
+                        .auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN)
                         * self.state.settings.character_state.model_scale;
                     let specs = self
                         .state
@@ -387,6 +436,12 @@ impl ApplicationHandler for Runtime {
             .as_ref()
             .is_some_and(|w| w.window.id() == window_id);
 
+        // Track the Alt modifier across all windows so the Alt+Space
+        // spotlight hotkey works no matter which window is focused (#218).
+        if let WindowEvent::ModifiersChanged(modifiers) = &event {
+            self.alt_held = modifiers.state().alt_key();
+        }
+
         if is_ui {
             self.handle_ui_window_event(event_loop, event);
         } else if is_chat {
@@ -399,6 +454,8 @@ impl ApplicationHandler for Runtime {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.sync_runtime_to_bevy();
         self.state.app.update();
+        self.state.pull_runtime_health_from_ui();
+        self.handle_runtime_reconnect();
         if self.handle_exit(event_loop) {
             return;
         }
@@ -417,7 +474,7 @@ impl Runtime {
     /// `apply_linux_click_through_system` can read them.
     fn sync_runtime_to_bevy(&mut self) {
         let drag_active = self.state.character.drag.is_dragging();
-        let debug_fps = self.state.settings.graphics.debug_fps;
+        let debug_fps = self.state.settings.graphics().resolved().debug_fps;
         let transparent = self.transparent;
         self.state.app.world_mut().insert_resource(
             crate::system::platform::should_render_debug::DragActive(drag_active),
@@ -431,10 +488,9 @@ impl Runtime {
         let expression_hold_secs = self
             .state
             .settings
-            .ai
-            .ai
-            .get_section::<ene_mind::MindConfig>()
-            .map_or(4.0, |c| c.emotion.expression_hysteresis_seconds);
+            .config_section::<ene_mind::MindConfig>()
+            .emotion
+            .expression_hysteresis_seconds;
         if let Some(mut pipeline) =
             self.state
                 .app
@@ -444,6 +500,33 @@ impl Runtime {
             pipeline.expression_hold_secs = expression_hold_secs;
         }
         self.state.settings.flush_if_dirty();
+        self.state.sync_runtime_health_to_ui();
+    }
+
+    fn handle_runtime_reconnect(&mut self) {
+        if !self.state.take_reconnect_request() {
+            return;
+        }
+        let handle = self
+            .state
+            .app
+            .world()
+            .resource::<crate::resource::tokio::TokioHandle>()
+            .0
+            .clone();
+        match self.state.reconnect_runtime(&self.event_tx, &handle) {
+            Ok(()) => {
+                tracing::info!(component = "AiBridge", "Runtime reconnected");
+            }
+            Err(message) => {
+                tracing::warn!(
+                    component = "AiBridge",
+                    error = %message,
+                    "Runtime reconnect failed"
+                );
+            }
+        }
+        self.state.sync_runtime_health_to_ui();
     }
 
     /// Check the `ExitRequested` bevy resource. Returns `true`
@@ -559,14 +642,14 @@ impl Runtime {
         let Some(chat_entity) = self.state.chat_bevy_entity() else {
             return;
         };
-        let AppState {
-            ref gpu,
-            ref ai,
-            ref mut app,
-            ..
-        } = self.state;
-        let bevy_world = app.world_mut();
-        match cw.render_frame(&gpu.device, &gpu.queue, ai, bevy_world, chat_entity) {
+        let bevy_world = self.state.app.world_mut();
+        match cw.render_frame(
+            &self.state.gpu.device,
+            &self.state.gpu.queue,
+            self.state.ai.as_ref(),
+            bevy_world,
+            chat_entity,
+        ) {
             Ok(()) => {}
             Err(e) => match e {
                 AcquireError::Reconfigure => {
@@ -601,22 +684,15 @@ impl Runtime {
             let Some(ui_entity) = self.state.ui_bevy_entity() else {
                 return;
             };
-            let AppState {
-                ref gpu,
-                ref mut settings,
-                ref ai,
-                ref mut app,
-                ..
-            } = self.state;
-            let bevy_world = app.world_mut();
+            let bevy_world = self.state.app.world_mut();
             let now_secs = self
                 .emotion_clock
                 .map_or(0.0, |t| t.elapsed().as_secs_f64());
             match uw.render_frame(
-                &gpu.device,
-                &gpu.queue,
-                settings,
-                ai,
+                &self.state.gpu.device,
+                &self.state.gpu.queue,
+                &mut self.state.settings,
+                self.state.ai.as_ref(),
                 bevy_world,
                 ui_entity,
                 now_secs,
@@ -655,7 +731,7 @@ impl Runtime {
     /// `settings.graphics.target_fps`. `0` means "poll
     /// continuously".
     fn set_frame_deadline(&mut self, event_loop: &ActiveEventLoop) {
-        let target_fps = self.state.settings.graphics.target_fps;
+        let target_fps = self.state.settings.graphics().resolved().target_fps;
         if target_fps == 0 {
             event_loop.set_control_flow(ControlFlow::Poll);
             return;
@@ -696,7 +772,12 @@ impl Runtime {
                     use crate::resource::platform_state::resources::MaskCapture;
                     let world = self.state.app.world();
                     if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
-                        let downsample = self.state.settings.graphics.mask_render_downsample;
+                        let downsample = self
+                            .state
+                            .settings
+                            .graphics()
+                            .resolved()
+                            .mask_render_downsample;
                         let mut guard = mask.lock();
                         let _ =
                             guard.resize(&gpu.device, new_size.width, new_size.height, downsample);
@@ -797,7 +878,25 @@ impl Runtime {
             }
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(named) = key_pressed(&event) {
-                    if matches!(named, NamedKey::Space) {
+                    if matches!(named, NamedKey::Space) && self.alt_held {
+                        // Alt+Space toggles the spotlight quick launcher (#218).
+                        let next = {
+                            let mut ui_state = self.state.ui_bevy_state_mut();
+                            ui_state.0.spotlight_visible = !ui_state.0.spotlight_visible;
+                            if ui_state.0.spotlight_visible {
+                                ui_state.0.spotlight_input.clear();
+                                ui_state.0.spotlight_selection = 0;
+                                ui_state.0.settings_window_visible = true;
+                            }
+                            ui_state.0.spotlight_visible
+                        };
+                        if next && self.ui_window.is_none() {
+                            self.create_ui_window(event_loop);
+                        }
+                        if let Some(uw) = self.ui_window.as_ref() {
+                            uw.window.request_redraw();
+                        }
+                    } else if matches!(named, NamedKey::Space) {
                         self.transparent = !self.transparent;
                         cw.window.set_decorations(!self.transparent);
                         cw.window.set_transparent(self.transparent);
@@ -898,6 +997,24 @@ impl Runtime {
             )
         };
         let last_raycast_hit = self.state.debug.last_raycast_hit;
+        let motion_playing = {
+            use crate::component::ui::UiAnimation;
+            self.state
+                .ui_bevy_entity()
+                .and_then(|entity| {
+                    self.state
+                        .app
+                        .world()
+                        .get::<UiAnimation>(entity)
+                        .map(|a| a.0.playing)
+                })
+                .or_else(|| {
+                    self.ui_window
+                        .as_ref()
+                        .map(|uw| uw.settings_ui.animation.playing)
+                })
+                .unwrap_or(true)
+        };
         let AppState {
             ref mut character,
             ref mut debug,
@@ -937,8 +1054,8 @@ impl Runtime {
                 #[cfg(target_os = "windows")]
                 {
                     *character_physics_registration = None;
-                    let actual_scale =
-                        character.auto_fit_scale(0.9) * settings.character_state.model_scale;
+                    let actual_scale = character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN)
+                        * settings.character_state.model_scale;
                     let specs = character.build_character_bone_specs(actual_scale);
                     if !specs.is_empty() {
                         let mut physics_res =
@@ -955,68 +1072,29 @@ impl Runtime {
             character.play_motion(&motion_path);
         }
 
-        // Apply pending emotion commands (e.g. from the AI's
-        // `<|emo:happy|>` tokens) to the VRM model. The bevy
-        // `apply_emote_tokens_system` ran during `app.update()`;
-        // here we drain the resulting queue and call
-        // `expressions_mut().set_expression()` with the
-        // computed (name, weight).
-        {
+        // Tick the emotion pipeline early; apply morph weights after
+        // look-at so gaze morphs are composed first and emotion
+        // overrides win on conflicting targets.
+        let applied_emotion = {
             let world = app.world_mut();
             let pipeline =
                 world.get_resource_mut::<crate::resource::emotion_pipeline::EmotionPipelineState>();
             if let Some(mut pipeline) = pipeline {
-                // The producers record `target_time` in their
-                // own clock (settings UI uses
-                // `started_at.elapsed()`). For the AI path the
-                // command's `target_time` is `0.0`, so any
-                // monotonically increasing `now_secs` works.
-                // We use the same clock as the producers: an
-                // f64 of "monotonic seconds since the bevy app
-                // started". `Instant::now()` against a per-app
-                // start time is the cheapest correct option.
                 let now_secs = self
                     .emotion_clock
                     .map_or(0.0, |t| t.elapsed().as_secs_f64());
-                let applied =
-                    crate::resource::emotion_pipeline::tick_emotions(&mut pipeline, now_secs);
-                if !applied.name.is_empty()
-                    && let Some(model) = character.model_mut()
-                {
-                    let expressions_meta = model.expressions_meta.clone();
-                    let layer = model.expressions_mut();
-                    tracing::debug!(
-                        expression = %applied.name,
-                        weight = applied.weight,
-                        "apply emotion"
-                    );
-                    let names = match applied.name.as_str() {
-                        "happy" => vec!["happy", "joy", "fun"],
-                        "sad" => vec!["sad", "sorrow"],
-                        "relaxed" => vec!["relaxed", "fun"],
-                        other => vec![other],
-                    };
-                    // First reset all expression weights so a previous
-                    // expression doesn't linger after a new one starts.
-                    for en in layer.expression_names() {
-                        layer.set_expression(&en, 0.0);
-                    }
-                    for name_str in names {
-                        let name = ene_vrm::ExpressionName::new(name_str.to_string());
-                        layer.set_expression(&name, applied.weight);
-                    }
-                    // Apply_overrides translates the named weights into the
-                    // per-(node, morph_target_index) map that the GPU
-                    // renderer reads via `morph_target_weights`.
-                    // Without this call, set_expression has no visible effect.
-                    layer.apply_overrides(&expressions_meta);
-                }
+                Some(crate::resource::emotion_pipeline::tick_emotions(
+                    &mut pipeline,
+                    now_secs,
+                ))
+            } else {
+                None
             }
-        }
+        };
         self.emotion_clock = self.emotion_clock.or_else(|| Some(Instant::now()));
 
         let cs = &settings.character_state;
-        let actual_scale = character.auto_fit_scale(0.9) * cs.model_scale;
+        let actual_scale = character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN) * cs.model_scale;
         character.update_camera_target(actual_scale);
         let model_uniform = ene_vrm::ModelUniform::from_mat4(
             character.model_matrix(cs.character_position, actual_scale),
@@ -1042,17 +1120,29 @@ impl Runtime {
                 if let Some(motion_name) = frame.active_motions.first() {
                     let should_switch =
                         character.active_motion_name() != Some(motion_name.as_str());
-                    if should_switch && let Err(e) = character.play_motion_by_name(motion_name) {
-                        tracing::warn!(
-                            component = "MotionLayer",
-                            motion = %motion_name,
-                            error = %e,
-                            "Failed to load motion clip"
-                        );
+                    if should_switch {
+                        let entry = settings.current_entry();
+                        let resolved = entry
+                            .motion_names
+                            .iter()
+                            .position(|n| n == motion_name.as_str())
+                            .map(|idx| settings.assets_dir.join(&entry.motion_paths[idx]));
+                        if let Some(path) = resolved {
+                            character.play_motion(&path);
+                        } else if let Err(e) = character.play_motion_by_name(motion_name) {
+                            tracing::warn!(
+                                component = "MotionLayer",
+                                motion = %motion_name,
+                                error = %e,
+                                "Failed to load motion clip"
+                            );
+                        }
                     }
                 }
             }
         }
+
+        character.set_motion_player_playing(motion_playing);
 
         if let Some(palette) = character.update_motion(dt_secs) {
             character.update_skin_palette_gpu(queue, &palette);
@@ -1085,9 +1175,88 @@ impl Runtime {
             );
         }
 
+        if let Some(applied) = applied_emotion
+            && !applied.name.is_empty()
+            && let Some(model) = character.model_mut()
+        {
+            let expressions_meta = model.expressions_meta.clone();
+            let layer = model.expressions_mut();
+            tracing::debug!(
+                expression = %applied.name,
+                weight = applied.weight,
+                "apply emotion"
+            );
+            let names = match applied.name.as_str() {
+                "happy" => vec!["happy", "joy"],
+                "sad" => vec!["sad", "sorrow"],
+                "relaxed" => vec!["relaxed"],
+                other => vec![other],
+            };
+            for preset in [
+                "neutral",
+                "happy",
+                "sad",
+                "angry",
+                "relaxed",
+                "surprised",
+                "joy",
+                "sorrow",
+                "fun",
+            ] {
+                let name = ene_vrm::ExpressionName::new(preset.to_string());
+                layer.set_expression(&name, 0.0);
+            }
+            for name_str in names {
+                let name = ene_vrm::ExpressionName::new(name_str.to_string());
+                layer.set_expression(&name, applied.weight);
+            }
+            layer.apply_overrides(&expressions_meta);
+        }
+
+        // Viseme lip-sync: while TTS audio is playing, read the smoothed
+        // mouth-shape weights from the shared viseme driver and apply them
+        // on top of the current expression, then re-run overrides so the
+        // morph targets uploaded to the GPU reflect the viseme blend.
+        #[cfg(feature = "voice")]
+        {
+            let tts_playing = app
+                .world()
+                .get_resource::<crate::audio::AudioState>()
+                .is_some_and(crate::audio::AudioState::is_tts_playing);
+            // Consume queued PCM up to the current playback position so the
+            // analyzer only sees samples that are actually playing (M4).
+            if tts_playing
+                && let Some(viseme) = app.world().get_resource::<crate::audio::VisemeState>()
+            {
+                viseme.advance();
+            }
+            if tts_playing
+                && let Some(viseme) = app.world().get_resource::<crate::audio::VisemeState>()
+                && let Some(weights) = viseme.analyze_weights()
+                && let Some(model) = character.model_mut()
+            {
+                let expressions_meta = model.expressions_meta.clone();
+                let layer = model.expressions_mut();
+                layer.apply_viseme_weights(&weights);
+                layer.apply_overrides(&expressions_meta);
+            } else if !tts_playing
+                && self.prev_tts_playing
+                && let Some(model) = character.model_mut()
+            {
+                // L11: on the frame where `tts_playing` transitions from
+                // true to false, apply zeroed viseme weights so the mouth
+                // shape resets instead of holding the last phoneme.
+                let expressions_meta = model.expressions_meta.clone();
+                let layer = model.expressions_mut();
+                layer.apply_viseme_weights(&ene_vrm::viseme::VisemeWeights::default());
+                layer.apply_overrides(&expressions_meta);
+            }
+            self.prev_tts_playing = tts_playing;
+        }
+
         let result = cw.with_surface_view(|view| {
             let swapchain_size = (cw.config.width, cw.config.height);
-            let aa_mode = settings.graphics.antialiasing_mode;
+            let aa_mode = settings.graphics().resolved().antialiasing_mode;
             character.render(
                 device,
                 queue,
@@ -1137,72 +1306,14 @@ impl Runtime {
                         );
                     }
                     if let Some(model) = character.model() {
-                        let center = glam::Vec3::from(model.center());
-                        let normalize_scale = model.normalize_scale();
-                        let auto_scale = character.auto_fit_scale(0.9);
-                        let actual_scale = auto_scale * cs.model_scale;
-
-                        for (bone_name, entry) in model.humanoid.iter() {
-                            let parent_pos_raw = model.nodes.world_positions[entry.node];
-                            let parent_world = cs.character_position
-                                + (parent_pos_raw - center) * normalize_scale * actual_scale;
-
-                            if let Some(child_node) =
-                                crate::character::collider::get_humanoid_child_node(
-                                    bone_name.as_str(),
-                                    &model.humanoid,
-                                )
-                            {
-                                let child_pos_raw = model.nodes.world_positions[child_node];
-                                let child_world = cs.character_position
-                                    + (child_pos_raw - center) * normalize_scale * actual_scale;
-
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world,
-                                    b: child_world,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                            } else {
-                                let ext = 0.01 * actual_scale;
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world - glam::Vec3::X * ext,
-                                    b: parent_world + glam::Vec3::X * ext,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world - glam::Vec3::Y * ext,
-                                    b: parent_world + glam::Vec3::Y * ext,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                                lines.push(ene_vrm::DebugLine {
-                                    a: parent_world - glam::Vec3::Z * ext,
-                                    b: parent_world + glam::Vec3::Z * ext,
-                                    color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                });
-                            }
-                        }
-
-                        if let Some(spring_bones) = &model.spring_bones {
-                            for chain in &spring_bones.springs {
-                                for i in 0..chain.joints.len() - 1 {
-                                    let parent_node = chain.joints[i].node;
-                                    let child_node = chain.joints[i + 1].node;
-                                    let parent_pos_raw = model.nodes.world_positions[parent_node];
-                                    let child_pos_raw = model.nodes.world_positions[child_node];
-                                    let parent_world = cs.character_position
-                                        + (parent_pos_raw - center)
-                                            * normalize_scale
-                                            * actual_scale;
-                                    let child_world = cs.character_position
-                                        + (child_pos_raw - center) * normalize_scale * actual_scale;
-                                    lines.push(ene_vrm::DebugLine {
-                                        a: parent_world,
-                                        b: child_world,
-                                        color: glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
-                                    });
-                                }
-                            }
-                        }
+                        let actual_scale =
+                            character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN) * cs.model_scale;
+                        crate::skeleton_debug::build_skeleton_lines(
+                            &mut lines,
+                            model,
+                            cs.character_position,
+                            actual_scale,
+                        );
                     }
                 }
                 if show_mask_gizmo {
@@ -1285,7 +1396,7 @@ impl Runtime {
             let world = self.state.app.world();
             if let Some(mask) = world.resource::<MaskCapture>().0.as_ref() {
                 let mut mask_guard = mask.lock();
-                let downsample = settings.graphics.mask_render_downsample;
+                let downsample = settings.graphics().resolved().mask_render_downsample;
                 let _ = mask_guard.resize(device, cw.config.width, cw.config.height, downsample);
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("mask.encoder"),
@@ -1346,9 +1457,6 @@ impl Runtime {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => {
-                self.hide_settings_window();
-            }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 uw.reconfigure(&self.state.gpu.device, uw.window.inner_size());
                 uw.window.request_redraw();
@@ -1406,6 +1514,9 @@ impl Runtime {
             ref mut app,
             ..
         } = self.state;
+        let Some(ai) = ai.as_ref() else {
+            return;
+        };
         let Some(ui_entity) = app
             .world_mut()
             .query_filtered::<
@@ -1424,7 +1535,9 @@ impl Runtime {
         // because `CharacterSettings` is not a bevy
         // `Resource` yet.
         app.world_mut()
-            .write_message(crate::event::ui_action::SettingsActionEvent { action });
+            .write_message(crate::event::ui_action::SettingsActionEvent {
+                action: action.clone(),
+            });
         let bevy_world = app.world_mut();
         let now_secs = uw.settings_ui.started_at.elapsed().as_secs_f64();
         crate::settings_ui::widgets::apply_action(
@@ -1632,7 +1745,7 @@ const fn key_code_pressed(event: &WindowEvent) -> Option<winit::keyboard::KeyCod
 
 fn window_attributes(transparent: bool, fullscreen: Option<Fullscreen>) -> WindowAttributes {
     let mut attrs = WindowAttributes::default()
-        .with_title("ene v2 (tw-test wgpu port)")
+        .with_title("Ene")
         .with_resizable(true)
         .with_decorations(!transparent)
         .with_transparent(transparent)
@@ -1668,10 +1781,10 @@ impl CharacterWindow {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, WindowSurfaceError> {
         let surface = instance
             .create_surface(window.clone())
-            .map_err(|e| format!("Failed to create wgpu surface: {e}"))?;
+            .map_err(|e| WindowSurfaceError::CreateSurface(e.to_string()))?;
 
         let caps = surface.get_capabilities(adapter);
         let (format, alpha_mode) = pick_format_and_alpha(&caps);
@@ -1738,7 +1851,7 @@ struct UiWindow {
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     settings_ui: SettingsUi,
-    textures_to_free: Vec<Vec<egui::TextureId>>,
+    textures_to_free: VecDeque<Vec<egui::TextureId>>,
 }
 
 impl UiWindow {
@@ -1748,10 +1861,10 @@ impl UiWindow {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, WindowSurfaceError> {
         let surface = instance
             .create_surface(window.clone())
-            .map_err(|e| format!("Failed to create wgpu surface: {e}"))?;
+            .map_err(|e| WindowSurfaceError::CreateSurface(e.to_string()))?;
 
         let caps = surface.get_capabilities(adapter);
         let format = *caps
@@ -1795,7 +1908,7 @@ impl UiWindow {
             egui_state,
             egui_renderer,
             settings_ui: SettingsUi::new(),
-            textures_to_free: vec![Vec::new(), Vec::new(), Vec::new()],
+            textures_to_free: VecDeque::from(vec![Vec::new(); TEXTURE_FREE_RING_DEPTH]),
         })
     }
 
@@ -1813,7 +1926,7 @@ impl UiWindow {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         settings: &mut CharacterSettings,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut bevy_ecs::world::World,
         ui_entity: bevy_ecs::entity::Entity,
         now_secs: f64,
@@ -1849,6 +1962,11 @@ impl UiWindow {
             self.settings_ui
                 .render(ui, settings, ai, world, ui_entity, now_secs);
         });
+
+        // Spotlight quick launcher + floating caption overlays (#218).
+        // Rendered as top-level egui windows inside the settings context.
+        crate::spotlight::render_spotlight_overlay(&self.egui_ctx, ai, world, ui_entity);
+        crate::spotlight::render_caption_overlay(&self.egui_ctx, world, ui_entity);
 
         let full_output = self.egui_ctx.end_pass();
         let platform_output = full_output.platform_output;
@@ -1910,11 +2028,12 @@ impl UiWindow {
                 .chain(std::iter::once(encoder.finish())),
         );
 
-        let to_free_now = self.textures_to_free.remove(0);
+        let to_free_now = self.textures_to_free.pop_front().unwrap_or_default();
         for id in to_free_now {
             self.egui_renderer.free_texture(&id);
         }
-        self.textures_to_free.push(full_output.textures_delta.free);
+        self.textures_to_free
+            .push_back(full_output.textures_delta.free);
 
         frame.present();
         Ok(())

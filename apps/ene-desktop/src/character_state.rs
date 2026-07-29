@@ -6,9 +6,15 @@
 //! `resource::emotion_pipeline` (Phase 7.5).
 use std::collections::VecDeque;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AnimationControl {
     pub playing: bool,
+}
+
+impl Default for AnimationControl {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnimationControl {

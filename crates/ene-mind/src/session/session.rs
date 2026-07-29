@@ -1,13 +1,10 @@
-use super::error::EneSessionError;
-use super::session_split::{
-    PendingSplitTask, SplitResult, SplitTaskInput, generate_session_id, poll_split_result,
-};
+use super::session_split::generate_session_id;
 use super::special_token::split_text_and_special_tokens;
-use super::types::{CardName, SessionId};
+use super::types::SessionId;
 use chrono::{DateTime, Utc};
 use ene_ai::EmbeddingProvider;
 use ene_ai::Role;
-use ene_config::{CharacterCardV3, EneConfig, ResolvedExpression, resolve_expressions};
+use ene_config::{CharacterCardV3, ResolvedExpression, resolve_expressions};
 
 use crate::lifecycle::HistoryEntry;
 use ene_store::MemoryStore;
@@ -59,6 +56,24 @@ pub struct MemoryContext {
     pub ccv3_memory_hash: Option<u64>,
 }
 
+/// Snapshot of a turn that was interrupted mid-response (barge-in / cancel).
+///
+/// Recorded when the user cancels an in-flight turn so the next turn's prompt
+/// can acknowledge the interruption and memory candidates can be tagged.
+/// Turn identifiers are plain strings to keep `ene-mind` free of any
+/// `ene-runtime` dependency (architecture boundary).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InterruptedState {
+    /// Identifier of the interrupted turn.
+    pub turn_id: String,
+    /// Character range of the response that had been spoken before interruption.
+    pub spoken_char_range: std::ops::Range<usize>,
+    /// The partial assistant text that had been produced so far.
+    pub partial_text: String,
+    /// When the interruption was recorded.
+    pub interrupted_at: DateTime<Utc>,
+}
+
 /// Tracks session metadata like embedding and timing.
 #[derive(Clone, Debug, Default)]
 pub struct SessionState {
@@ -68,12 +83,6 @@ pub struct SessionState {
     pub last_message_time: Option<DateTime<Utc>>,
     /// The current conversation turn count.
     pub current_turn_count: usize,
-    /// When a session split is in flight, the length of `conversation_history`
-    /// at the moment the snapshot was taken. The actor uses this to apply the
-    /// split result: it drains everything before the last snapshot entry so
-    /// that the triggering turn and any subsequent user/assistant messages
-    /// added while the split was running are preserved.
-    pub pending_split_snapshot_len: Option<usize>,
     /// Last resolved expression name (in-session hysteresis).
     pub last_resolved_expression: String,
     /// When the last expression change occurred.
@@ -96,6 +105,8 @@ pub struct ConversationSession {
     pub character_card: Option<CharacterCardV3>,
     /// The filesystem path to the current character card.
     current_card_path: String,
+    /// Snapshot of the most recently interrupted turn, if any (#206).
+    interrupted: Option<InterruptedState>,
 }
 
 impl std::fmt::Debug for ConversationSession {
@@ -127,7 +138,7 @@ impl ConversationSession {
         Self {
             history: ConversationHistory {
                 conversation_history: Vec::new(),
-                max_history_turns: 20, // overridden by SessionConfig on first run
+                max_history_turns: 20,
             },
             display: DisplayState {
                 display_buffer: String::new(),
@@ -145,12 +156,12 @@ impl ConversationSession {
                 last_input_embedding: None,
                 last_message_time: None,
                 current_turn_count: 0,
-                pending_split_snapshot_len: None,
                 last_resolved_expression: String::new(),
                 last_expression_changed_at: None,
             },
             character_card: None,
             current_card_path: String::new(),
+            interrupted: None,
         }
     }
 
@@ -200,78 +211,25 @@ impl ConversationSession {
     }
 
     /// Appends a user message and trims history if it exceeds `max_history_turns * 2`.
-    ///
-    /// Trimming is suspended while a session split is pending (see
-    /// [`Self::mark_split_pending`]) so the snapshot boundary recorded for the
-    /// split remains valid until the split is applied.
     pub fn add_user_message(&mut self, input: &str) {
         self.history.conversation_history.push(HistoryEntry {
             role: Role::User,
             content: input.to_string(),
         });
-        if self.state.pending_split_snapshot_len.is_none() {
-            self.history.trim_history();
-        }
+        self.history.trim_history();
     }
 
     /// Appends an assistant message and trims history if it exceeds `max_history_turns * 2`.
-    ///
-    /// Trimming is suspended while a session split is pending — see
-    /// [`Self::add_user_message`].
     pub fn add_assistant_message(&mut self, text: &str) {
         self.history.conversation_history.push(HistoryEntry {
             role: Role::Assistant,
             content: text.to_string(),
         });
-        if self.state.pending_split_snapshot_len.is_none() {
-            self.history.trim_history();
-        }
-    }
-
-    /// Records the current history length as the snapshot boundary for a
-    /// pending session split. The boundary is used by
-    /// [`Self::apply_split_result`] to discard only the entries that were in
-    /// the split snapshot, keeping the triggering turn and any messages
-    /// added while the split was in flight.
-    pub const fn mark_split_pending(&mut self) {
-        self.state.pending_split_snapshot_len = Some(self.history.conversation_history.len());
-    }
-
-    /// Returns `true` if a session split is currently in flight.
-    pub const fn is_split_pending(&self) -> bool {
-        self.state.pending_split_snapshot_len.is_some()
-    }
-
-    /// Clears the split-pending marker without applying a result. Used when
-    /// the split task reports a non-fatal error (e.g. `SplitNotNeeded`) so
-    /// history trimming can resume.
-    pub const fn clear_split_pending(&mut self) {
-        self.state.pending_split_snapshot_len = None;
-    }
-
-    /// Applies a completed split result to the session.
-    ///
-    /// The conversation history is truncated to drop everything *before* the
-    /// last entry of the snapshot that was taken in [`Self::mark_split_pending`]
-    /// (and recorded in `split.snapshot_len`). The last snapshot entry — the
-    /// triggering user turn — and any messages appended to the history while
-    /// the split was running are preserved in the live history. The session
-    /// ID is rotated to the split's `new_session_id` and the split-pending
-    /// marker is cleared.
-    pub fn apply_split_result(&mut self, split: &SplitResult) {
-        let effective = split
-            .snapshot_len
-            .min(self.history.conversation_history.len());
-        if effective > 0 {
-            self.history.conversation_history.drain(0..(effective - 1));
-        }
-        self.memory.session_id = split.new_session_id.clone();
-        self.memory.session_started_at = Utc::now();
-        self.state.pending_split_snapshot_len = None;
+        self.history.trim_history();
     }
 
     /// Processes a streaming text chunk, splitting it into text deltas and special tokens
-    /// (e.g., `<|emo:happy|>`). Appends text to the display buffer.
+    /// (e.g., `<|perf:expr=happy|>`). Appends text to the display buffer.
     ///
     /// Returns `(text_deltas, special_tokens)`.
     pub fn process_delta(&mut self, chunk: &str) -> (Vec<String>, Vec<String>) {
@@ -279,6 +237,14 @@ impl ConversationSession {
             split_text_and_special_tokens(&mut self.display.token_carry, chunk);
         for delta in &text_deltas {
             self.display.display_buffer.push_str(delta);
+        }
+        // Guard against unbounded growth from unclosed special token markers.
+        const MAX_TOKEN_CARRY: usize = 4096;
+        if self.display.token_carry.len() > MAX_TOKEN_CARRY {
+            self.display
+                .display_buffer
+                .push_str(&self.display.token_carry);
+            self.display.token_carry.clear();
         }
         (text_deltas, special_tokens)
     }
@@ -294,7 +260,7 @@ impl ConversationSession {
             Some(t)
         };
 
-        let assistant_text = self.display.display_buffer.clone();
+        let assistant_text = std::mem::take(&mut self.display.display_buffer);
         self.add_assistant_message(&assistant_text);
 
         tail
@@ -304,6 +270,45 @@ impl ConversationSession {
     pub fn reset_display_buffer(&mut self) {
         self.display.display_buffer.clear();
         self.display.token_carry.clear();
+    }
+
+    /// Records that the given turn was interrupted mid-response (#206).
+    ///
+    /// `spoken_text` is the portion of the assistant response that had been
+    /// produced (and typically spoken via TTS) before the interruption, and
+    /// `spoken_chars` is its length in characters. The partial text is also
+    /// committed to history so the exchange is not lost.
+    ///
+    /// The assistant turn count is bumped so user/assistant turn accounting
+    /// stays symmetric with the normal completion path, which calls
+    /// [`record_assistant_response`](Self::record_assistant_response) after
+    /// committing the full response (#L5).
+    pub fn mark_interrupted(&mut self, turn_id: &str, spoken_text: &str, spoken_chars: usize) {
+        let clamped_chars = spoken_chars.min(spoken_text.chars().count());
+        if !spoken_text.is_empty() {
+            self.add_assistant_message(spoken_text);
+        }
+        self.interrupted = Some(InterruptedState {
+            turn_id: turn_id.to_string(),
+            spoken_char_range: 0..clamped_chars,
+            partial_text: spoken_text.to_string(),
+            interrupted_at: Utc::now(),
+        });
+        self.reset_display_buffer();
+        self.record_assistant_response();
+    }
+
+    /// Consumes and clears the pending interruption snapshot, if any (#206).
+    ///
+    /// Called when composing the next turn's prompt so the model can
+    /// acknowledge or resume the interrupted response exactly once.
+    pub fn take_interruption(&mut self) -> Option<InterruptedState> {
+        self.interrupted.take()
+    }
+
+    /// Whether an interruption snapshot is currently pending (#206).
+    pub const fn has_pending_interruption(&self) -> bool {
+        self.interrupted.is_some()
     }
 
     /// Resets all session state (history, display, turn count) and returns a new session ID.
@@ -320,6 +325,7 @@ impl ConversationSession {
         self.state.current_turn_count = 0;
         self.state.last_resolved_expression.clear();
         self.state.last_expression_changed_at = None;
+        self.interrupted = None;
         new_id
     }
 
@@ -438,125 +444,45 @@ impl ConversationSession {
     pub fn session_elapsed_minutes(&self) -> i64 {
         (Utc::now() - self.memory.session_started_at).num_minutes()
     }
-
-    /// Polls for a completed split result and applies it to the session.
-    ///
-    /// If a split has completed, the conversation history is cleared and the
-    /// session ID is updated to the new one from the split result.
-    pub fn apply_pending_split(
-        &mut self,
-        pending_split: &mut Option<PendingSplitTask>,
-    ) -> Option<Result<SplitResult, EneSessionError>> {
-        let result = poll_split_result(pending_split)?;
-        if let Ok(ref split_result) = result {
-            self.reset_session();
-            self.memory.session_id = split_result.new_session_id.clone();
-        }
-        Some(result)
-    }
-
-    /// Builds a [`SplitTaskInput`] from the current session state and settings.
-    ///
-    /// Returns `None` if the memory store or embedding provider has not been initialized.
-    pub fn prepare_split_input(
-        &self,
-        config: &EneConfig,
-        user_input: &str,
-        user_name: &str,
-        provider: Arc<dyn ene_ai::LlmProvider>,
-    ) -> Option<SplitTaskInput> {
-        let store = self.memory.memory_store.clone()?;
-        let embedder = self.memory.embedding_provider.clone()?;
-        let session_config = config
-            .get_section::<super::SessionConfig>()
-            .unwrap_or_default();
-
-        Some(SplitTaskInput {
-            last_input_embedding: self.state.last_input_embedding.clone(),
-            last_message_time: self.state.last_message_time,
-            current_turn_count: self.state.current_turn_count,
-            history_len: self.history.conversation_history.len(),
-            user_input: user_input.to_string(),
-            session_config,
-            provider,
-            history: self.history.conversation_history.clone(),
-            session_id: self.memory.session_id.clone(),
-            card_name: CardName::from(self.card_name()),
-            user_name: user_name.to_string(),
-            store,
-            embedder,
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn split_with_len(new_id: &str, snapshot_len: usize) -> SplitResult {
-        SplitResult {
-            reason: crate::SplitReason::Manual,
-            summary: String::new(),
-            key_facts: Vec::new(),
-            new_session_id: SessionId::from(new_id.to_string()),
-            snapshot_len,
-        }
-    }
-
     #[test]
-    fn apply_split_keeps_triggering_and_subsequent_turns() {
-        let mut s = ConversationSession::default();
-
-        for t in ["turn 1", "turn 2", "turn 3"] {
-            s.add_user_message(t);
-        }
-        s.mark_split_pending();
-
-        // Two more user turns arrive while the split is in flight.
-        s.add_user_message("turn 4");
-        s.add_user_message("turn 5");
-
-        // Sanity: trim is suspended while a split is pending, so the snapshot
-        // boundary is preserved.
-        assert_eq!(s.history().len(), 5);
-
-        s.apply_split_result(&split_with_len("session_new", 3));
-
-        // Triggering turn 3 plus turns 4 and 5 are retained; turns 1 and 2
-        // are dropped.
-        let kept: Vec<&str> = s.history().iter().map(|e| e.content.as_str()).collect();
-        assert_eq!(kept, vec!["turn 3", "turn 4", "turn 5"]);
-        assert_eq!(s.session_id().as_str(), "session_new");
-        assert!(!s.is_split_pending());
-    }
-
-    #[test]
-    fn apply_split_with_no_extra_turns_keeps_triggering_turn() {
-        let mut s = ConversationSession::default();
-        s.add_user_message("turn 1");
-        s.add_user_message("turn 2");
-        s.mark_split_pending();
-
-        s.apply_split_result(&split_with_len("session_new", 2));
-
-        let kept: Vec<&str> = s.history().iter().map(|e| e.content.as_str()).collect();
-        assert_eq!(kept, vec!["turn 2"]);
-    }
-
-    #[test]
-    fn clear_split_pending_resumes_trimming() {
+    fn history_trims_after_max_turns() {
         let mut s = ConversationSession::default();
         s.history.max_history_turns = 1;
         s.add_user_message("turn 1");
         s.add_user_message("turn 2");
-        s.mark_split_pending();
         s.add_user_message("turn 3");
-        s.add_user_message("turn 4");
-        // No trim while pending; all 4 entries present.
-        assert_eq!(s.history().len(), 4);
-        s.clear_split_pending();
-        s.add_user_message("turn 5");
-        // Trim resumed: cap is max_history_turns * 2 = 2 entries.
         assert_eq!(s.history().len(), 2);
+    }
+
+    #[test]
+    fn mark_interrupted_records_and_take_clears() {
+        let mut s = ConversationSession::default();
+        s.mark_interrupted("turn-1", "hello wor", 5);
+
+        let state = s.take_interruption().expect("interruption recorded");
+        assert_eq!(state.turn_id, "turn-1");
+        assert_eq!(state.partial_text, "hello wor");
+        assert_eq!(state.spoken_char_range, 0..5);
+        // Partial text committed to history.
+        assert_eq!(
+            s.history().last().map(|e| e.content.as_str()),
+            Some("hello wor")
+        );
+        // Consumed exactly once.
+        assert!(s.take_interruption().is_none());
+    }
+
+    #[test]
+    fn reset_session_clears_interruption() {
+        let mut s = ConversationSession::default();
+        s.mark_interrupted("turn-1", "partial", 3);
+        s.reset_session();
+        assert!(s.take_interruption().is_none());
     }
 }

@@ -13,6 +13,7 @@
 //! - [`humanoid`] — humanoid bone registry (spec's 55 bones → glTF nodes).
 //! - [`look_at`] — look-at properties + per-frame evaluator.
 //! - [`expression_override`] — expression override semantics.
+//! - [`viseme`] — audio-driven viseme (lip-sync) analysis.
 //! - [`renderer`] — wgpu render pipeline + bind group layouts.
 //! - [`error`] — top-level error type.
 //!
@@ -70,6 +71,7 @@ pub mod post_process;
 pub mod prelude;
 pub mod renderer;
 pub mod spring_bone;
+pub mod viseme;
 
 pub use animation::{
     BoneChannel, ExpressionChannel, Interpolation, LookAtChannel, RepeatMode, Sampler, VrmaAsset,
@@ -98,6 +100,7 @@ pub use humanoid::{
     BoneRestTransform, HUMANOID_BONE_NAMES, HumanoidBoneEntry, HumanoidBoneRegistry, VrmBone,
     canonicalize_bone_name, load_humanoid_bones,
 };
+pub use layer_composer::MotionLayer;
 pub use loader::load_vrm;
 pub use look_at::{
     LookAtBoneDelta, LookAtBoneOutput, LookAtDirection, LookAtEvaluator, LookAtExpressionOutput,
@@ -120,6 +123,7 @@ pub use spring_bone::{
     SpringBoneColliderGroup, SpringBoneJoint, SpringBoneJointState, SpringBoneProperties,
     SpringBoneShape, SpringBoneSimulator, load_spring_bones,
 };
+pub use viseme::{VisemeAnalyzer, VisemeWeights};
 
 /// Returns the crate version. Useful for diagnostics and the `about` panel.
 pub const fn version() -> &'static str {

@@ -133,6 +133,7 @@ fn ja_explicit_remember(
         should_persist: true,
         deletion_target_key: None,
         commitment_due: None,
+        tags: Vec::new(),
     })
 }
 
@@ -163,6 +164,7 @@ fn ja_forget_request(
             should_persist: false,
             deletion_target_key: Some(target),
             commitment_due: None,
+            tags: Vec::new(),
         });
     }
 
@@ -182,6 +184,7 @@ fn ja_forget_request(
             should_persist: false,
             deletion_target_key: Some(target),
             commitment_due: None,
+            tags: Vec::new(),
         })
     })
 }
@@ -219,6 +222,7 @@ fn en_explicit_remember(
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         })
     })
 }
@@ -246,6 +250,7 @@ fn en_forget_request(
             should_persist: false,
             deletion_target_key: Some(target),
             commitment_due: None,
+            tags: Vec::new(),
         }
     })
 }
@@ -518,7 +523,7 @@ mod tests {
     // ── Tool procedure ────────────────────────────────────────────────
 
     #[test]
-    fn tool_success_extracts_procedure_when_enabled() {
+    fn tool_success_extracts_procedure() {
         let tools = vec![ToolResultSummary {
             tool_name: "fs".to_string(),
             success: true,
@@ -531,7 +536,7 @@ mod tests {
         };
         let cfg = ToolGroundingConfig {
             persist_success_procedure: true,
-            ..Default::default()
+            ..ToolGroundingConfig::default()
         };
         let out = extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg)
             .expect("deterministic extraction always succeeds");
@@ -552,10 +557,11 @@ mod tests {
             tool_results: &tools,
         };
         let out =
-            extract(&turn, Locale::Ja, 0.0).expect("deterministic extraction always succeeds");
+            extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &ToolGroundingConfig::default())
+                .expect("deterministic extraction always succeeds");
         assert!(
             out.is_empty(),
-            "default tool grounding must not auto-keep successes: {out:?}"
+            "default tool grounding must not auto-persist successes: {out:?}"
         );
     }
 

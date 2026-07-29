@@ -41,8 +41,8 @@
 //! ## Crate Boundaries
 //!
 //! Enforced by the [Cognitive Runtime ADR](../../docs/reference/architecture/cognitive-runtime.md)
-//! and [AGENTS.md §4.1](../../AGENTS.md); see the
-//! [API v2 ADR](../../docs/reference/architecture/api-v2.md) for the target crate map.
+//! and the architecture boundaries; see the
+//! [API v1 ADR](../../docs/reference/architecture/api-v1.md) for the target crate map.
 //!
 //! - Depends on: `ene-store`, `ene-config`, `ene-ai`
 //! - Does NOT depend on: `ene-runtime` (prevents circular dependencies)
@@ -77,11 +77,13 @@ pub mod memory_writer;
 pub mod output;
 /// Pre-turn input analysis and turn intent classification.
 pub mod pre_turn;
+/// Proactive companion speech decision pipeline (#103).
+pub mod proactive;
 /// Sectioned prompt packet composition with budget-aware assembly.
 pub mod prompt_packet;
 /// Memory recall planning and hybrid search orchestration.
 pub mod recall;
-/// Conversation session state, splitting, and emotion-token parsing.
+/// Conversation session state, splitting, and performance-marker parsing.
 pub mod session;
 /// LLM-driven conversation summarization for session boundaries.
 pub mod summarizer;
@@ -99,8 +101,8 @@ pub mod lifecycle;
 pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 /// Mind configuration section.
 pub use config::{
-    CharacterMemoryConfig, ContextConfig, EmotionConfig, EngineMode, MindConfig, MindMemoryConfig,
-    ToolGroundingConfig,
+    CharacterMemoryConfig, ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig,
+    ProactiveConfig, ProactiveDecisionConfig, ProactiveSourcesConfig, ToolGroundingConfig,
 };
 /// Context budget and compression types.
 #[doc(no_inline)]
@@ -119,12 +121,13 @@ pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
 #[doc(no_inline)]
 pub use ene_store::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Central cognitive engine facade.
-pub use engine::CognitionEngine;
+pub use engine::{CognitionEngine, MemoryWriteOutcome};
 /// Cognitive runtime error type.
 pub use error::{CognitionError, EneCognitionError, MindError};
 /// Turn lifecycle types for streaming integration.
 pub use lifecycle::{
-    ComposedPrompt, HistoryEntry, PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext,
+    ComposePrefetch, ComposedPrompt, HistoryEntry, OwnedPostTurnInput, OwnedTurnInput,
+    PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext, interruption_note,
 };
 /// Journal-style scored memory search (#123).
 #[doc(no_inline)]
@@ -144,30 +147,39 @@ pub use output::{CueSource, MotionLayer, PerfKind, PerformanceCue, cue_source_pr
 pub use output::{
     ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter, PerformanceArbiter,
 };
+/// Proactive companion speech decision types (#103).
+#[doc(no_inline)]
+pub use proactive::{
+    ActivitySnapshot, GateRejectReason, ProactiveContext, ProactiveDecision,
+    ProactiveDecisionOutcome, ProactiveObservation, ProactiveSkipReason, ProactiveSuppressionState,
+    ProactiveUrgency, ScreenSummaryStatus, build_decision_messages, build_proactive_context,
+    decide_proactive_speech, decision_schema, evaluate_deterministic_gates, parse_decision_json,
+};
 /// Prompt packet section types.
 #[doc(no_inline)]
 pub use prompt_packet::{PromptPacket, PromptSection, PromptSectionKind};
 /// Recall planning types.
 #[doc(no_inline)]
 pub use recall::{
-    EMOTIONAL_MATCH_REASON_THRESHOLD, LlmMemoryReranker, MemoryDiversifyOptions,
-    MemoryDiversifyPipeline, MemoryRerankError, MemoryRerankInput, MemoryRerankOptions,
-    MemoryRerankPipeline, MemoryReranker, PassthroughMemoryReranker, RecallBudgetHints, RecallPlan,
-    RecallPlanner, RecallPlannerInput, RecallPlannerOptions, RecallReason, RecallResultMapper,
-    RecallScopeFilter, RecallSearchHints, RecallTurn, RecalledMemory, explain_scored_memories,
-    format_recalled_content, infer_recall_reason, recall_content_qualifier,
+    EMOTIONAL_MATCH_REASON_THRESHOLD, MemoryDiversifyOptions, MemoryDiversifyPipeline,
+    RecallBudgetHints, RecallPlan, RecallPlanner, RecallPlannerInput, RecallPlannerOptions,
+    RecallReason, RecallResultMapper, RecallScopeFilter, RecallSearchHints, RecallTurn,
+    RecalledMemory, explain_scored_memories, format_recalled_content, infer_recall_reason,
+    recall_content_qualifier,
 };
 /// Session types absorbed from the former standalone session crate.
 #[doc(no_inline)]
 pub use session::{
     CardName, CharacterAsset, CharacterCardData, CharacterCardV3, ConversationSession,
-    EneSessionError, ExpressionDefinition, PendingSplitTask, ResolvedExpression, Role,
-    SessionBoundary, SessionConfig, SessionId, SplitReason, SplitResult, SplitScore,
-    SplitScoreWeights, SplitTaskInput, SummarizationConfig, Truncate, check_boundary,
-    compute_split_score, execute_split, expand_cbs_macros, extract_emotion_from_token,
-    generate_session_id, parse_performance_marker, poll_split_result, resolve_expressions,
-    spawn_split_task, split_text_and_special_tokens, strip_markers,
+    EneSessionError, ExpressionDefinition, InterruptedState, ResolvedExpression, Role, SessionId,
+    SplitReason, SplitResult, Truncate, expand_cbs_macros, generate_session_id,
+    parse_performance_marker, resolve_expressions, split_text_and_special_tokens, strip_markers,
 };
 /// Conversation summary result and LLM summarization entry point.
 #[doc(no_inline)]
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
+
+/// Returns `true` if `haystack` contains any of the `needles` as a substring.
+pub(crate) fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| haystack.contains(n))
+}

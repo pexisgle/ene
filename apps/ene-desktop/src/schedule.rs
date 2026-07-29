@@ -29,7 +29,7 @@
 //! Systems that must touch non-`Send` resources (e.g. `wgpu::Surface`,
 //! `egui::Context`) use [`NonSendMut`](bevy_ecs::system::NonSendMut) so the
 //! executor keeps them on the main thread.
-use bevy_app::{App, First, Last, PostUpdate, PreUpdate, Startup, Update};
+use bevy_app::{App, First, Last, PostUpdate, Startup, Update};
 use bevy_ecs::prelude::*;
 
 use crate::system::event_pump::pump_legacy_events;
@@ -62,7 +62,6 @@ pub enum AppSet {
 /// [`App::update`] from `Runtime::about_to_wait`.
 pub fn configure_schedule(app: &mut App) {
     app.configure_sets(First, AppSet::EventDispatch);
-    app.configure_sets(PreUpdate, AppSet::EventDispatch);
     app.configure_sets(
         Update,
         (AppSet::Input, AppSet::Settings, AppSet::Animation).chain(),

@@ -53,7 +53,7 @@ impl EmotionEngine {
 
         input.state.clamp();
         let mood_label = compute_mood_label(input.state);
-        input.state.mood_label.clone_from(&mood_label);
+        input.state.mood_label = mood_label.to_string();
 
         tracing::debug!(
             component = "EmotionEngine",
@@ -76,7 +76,7 @@ impl EmotionEngine {
         }
 
         AffectUpdateResult {
-            mood_label,
+            mood_label: mood_label.to_string(),
             reasons,
         }
     }
@@ -95,16 +95,34 @@ fn merge_classifier_proposal(
     let weight = proposal.confidence.clamp(0.0, 1.0);
     let mut deltas = Vec::new();
 
-    apply_weighted_blend(state, "valence", proposal.valence, weight, &mut deltas);
-    apply_weighted_blend(state, "arousal", proposal.arousal, weight, &mut deltas);
-    apply_weighted_blend(
-        state,
-        "irritation",
-        proposal.irritation,
+    apply_weighted_field(
+        &mut state.valence,
+        proposal.valence,
         weight,
+        "valence",
         &mut deltas,
     );
-    apply_weighted_blend(state, "affinity", proposal.affinity, weight, &mut deltas);
+    apply_weighted_field(
+        &mut state.arousal,
+        proposal.arousal,
+        weight,
+        "arousal",
+        &mut deltas,
+    );
+    apply_weighted_field(
+        &mut state.irritation,
+        proposal.irritation,
+        weight,
+        "irritation",
+        &mut deltas,
+    );
+    apply_weighted_field(
+        &mut state.affinity,
+        proposal.affinity,
+        weight,
+        "affinity",
+        &mut deltas,
+    );
 
     if deltas.is_empty() {
         return None;
@@ -127,95 +145,57 @@ fn merge_classifier_proposal(
     })
 }
 
-fn apply_weighted_blend(
-    state: &mut AffectState,
-    field: &'static str,
+fn apply_weighted_field(
+    current: &mut f32,
     target: f32,
     weight: f32,
+    field: &'static str,
     deltas: &mut Vec<AffectDelta>,
 ) {
     if !target.is_finite() || weight.abs() < f32::EPSILON {
         return;
     }
-    match field {
-        "valence" => {
-            let old = state.valence;
-            state.valence = (target - state.valence).mul_add(weight, state.valence);
-            let applied = state.valence - old;
-            if applied.abs() >= f32::EPSILON {
-                deltas.push(AffectDelta {
-                    field,
-                    delta: applied,
-                });
-            }
-        }
-        "arousal" => {
-            let old = state.arousal;
-            state.arousal = (target - state.arousal).mul_add(weight, state.arousal);
-            let applied = state.arousal - old;
-            if applied.abs() >= f32::EPSILON {
-                deltas.push(AffectDelta {
-                    field,
-                    delta: applied,
-                });
-            }
-        }
-        "irritation" => {
-            let old = state.irritation;
-            state.irritation = (target - state.irritation).mul_add(weight, state.irritation);
-            let applied = state.irritation - old;
-            if applied.abs() >= f32::EPSILON {
-                deltas.push(AffectDelta {
-                    field,
-                    delta: applied,
-                });
-            }
-        }
-        "affinity" => {
-            let old = state.affinity;
-            state.affinity = (target - state.affinity).mul_add(weight, state.affinity);
-            let applied = state.affinity - old;
-            if applied.abs() >= f32::EPSILON {
-                deltas.push(AffectDelta {
-                    field,
-                    delta: applied,
-                });
-            }
-        }
-        _ => {}
+    let old = *current;
+    *current = (target - *current).mul_add(weight, *current);
+    let applied = *current - old;
+    if applied.abs() >= f32::EPSILON {
+        deltas.push(AffectDelta {
+            field,
+            delta: applied,
+        });
     }
 }
 
 /// Derive a human-readable mood label from PAD dimensions.
-pub fn compute_mood_label(state: &AffectState) -> String {
+pub fn compute_mood_label(state: &AffectState) -> &'static str {
     if state.irritation >= 0.6 {
-        return "irritated".into();
+        return "irritated";
     }
     if state.fatigue >= 0.7 {
-        return "tired".into();
+        return "tired";
     }
     if state.valence >= 0.4 && state.arousal >= 0.2 {
-        return "cheerful".into();
+        return "cheerful";
     }
     if state.valence >= 0.3 {
-        return "content".into();
+        return "content";
     }
     if state.valence <= -0.4 && state.arousal >= 0.2 {
-        return "upset".into();
+        return "upset";
     }
     if state.valence <= -0.3 {
-        return "down".into();
+        return "down";
     }
     if state.arousal >= 0.4 {
-        return "alert".into();
+        return "alert";
     }
     if state.arousal <= -0.3 {
-        return "calm".into();
+        return "calm";
     }
     if state.curiosity >= 0.5 {
-        return "curious".into();
+        return "curious";
     }
-    "neutral".into()
+    "neutral"
 }
 
 #[cfg(test)]

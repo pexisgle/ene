@@ -1,11 +1,11 @@
 //! GPU-side data types produced by [`crate::loader::load_vrm`].
 //!
-//! loads **every primitive of every mesh** in the glTF
+//! The loader loads **every primitive of every mesh** in the glTF
 //! document. A VRM 1.0 model like AliciaSolid.vrm has 12 separate
 //! glTF Mesh objects (body, clothes, hair, face, accessories,
 //! etc.) — not one mesh with 12 primitives. Iterating only
 //! `meshes[0]` (this struct) rendered the head/face area only;
-//! fixes this by walking every `Mesh` and every `Primitive`.
+//! the loader fixes this by walking every `Mesh` and every `Primitive`.
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
@@ -56,11 +56,11 @@ pub struct VrmPrimitive {
     /// `alphaMode`. Controls draw order and pipeline selection
     /// in the renderer.
     pub alpha_mode: AlphaMode,
-    /// whether this primitive's material declares
+    /// Whether this primitive's material declares
     /// `KHR_materials_unlit`. Unlit primitives skip all lighting
     /// in the fragment shader and output the base color directly.
     pub unlit: bool,
-    /// parsed `VRMC_materials_mtoon` parameters. `None`
+    /// Parsed `VRMC_materials_mtoon` parameters. `None`
     /// for materials without the extension (the renderer falls
     /// back to the half-Lambert lite shader in that case).
     pub mtoon: Option<MToonMaterial>,
@@ -75,6 +75,7 @@ pub struct VrmPrimitive {
 /// glTF `material.alphaMode`. Controls draw order and pipeline
 /// selection in the renderer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum AlphaMode {
     /// Opaque surface — depth write enabled, no blending.
     #[default]
@@ -352,6 +353,10 @@ pub struct VrmModel {
     /// [`SpringBoneSimulator`](crate::spring_bone::SpringBoneSimulator)
     /// from this to drive hair / cloth sway.
     pub spring_bones: Option<SpringBoneProperties>,
+    /// Reusable skin palette buffer. Stored on the model to
+    /// avoid a per-frame `Vec::with_capacity` allocation in
+    /// [`Self::rebuild_skin_palette`].
+    skin_palette: Vec<Mat4>,
 }
 
 impl VrmModel {
@@ -455,6 +460,7 @@ impl VrmModel {
             expressions_meta,
             node_constraints,
             spring_bones,
+            skin_palette: Vec::new(),
         }
     }
 
@@ -482,20 +488,16 @@ impl VrmModel {
     /// 2. **Apply `LookAt` bone deltas** (this struct): for the
     ///    `head` / `leftEye` / `rightEye` humanoid bones
     ///    whose [`LookAtBoneOutput`] carries a non-identity
-    ///    delta, overwrite the local rotation with
-    ///    `rest_local_rotations[node] * look_at_delta`. The
-    ///    spec defines the `LookAt` delta as a rotation
-    ///    applied to the bone's *rest* rotation, so a
-    ///    LookAt-active head/eye wins over the VRMA's
-    ///    contribution for the same bone (this matches the
-    ///    legacy `bevy_vrm1` "head tracking overrides the
-    ///    active motion" behaviour). Bones missing from
-    ///    the humanoid registry are silently dropped, so
-    ///    the call is a no-op on models without humanoid
-    ///    metadata. The `LookAt` step runs **after** the
-    ///    VRMA step so head/eye bones that the motion also
-    ///    animates end up looking at the cursor rather than
-    ///    blending the two sources.
+    ///    delta, multiply the delta onto the **current** local
+    ///    rotation (`current * look_at_delta`). The `LookAt` step
+    ///    runs **after** the VRMA step so cursor tracking is
+    ///    additive on top of the motion pose — overwriting with
+    ///    `rest * delta` would discard head compensation that
+    ///    body-bowing clips rely on (e.g. `VRMA_02`), leaving the
+    ///    character staring at the floor whenever `LookAt` is
+    ///    active. Bones missing from the humanoid registry are
+    ///    silently dropped, so the call is a no-op on models
+    ///    without humanoid metadata.
     /// 3. **Walk the hierarchy**: `nodes.compute_world_transforms()`
     ///    fills `world_rotations` / `world_positions`.
     /// 4. **Hips translation**: if the frame carries an
@@ -533,17 +535,18 @@ impl VrmModel {
     /// rotations) or when no cursor sample has been
     /// processed yet. `None` makes step 2 a no-op.
     ///
-    /// Returns an empty `Vec` when the model has zero
+    /// Returns an empty slice when the model has zero
     /// skeleton joints — the renderer's identity palette
     /// stays in effect and no GPU write is needed.
     pub fn update_skin_palette(
         &mut self,
         frame: &VrmaFrame,
         look_at: Option<&LookAtBoneOutput>,
-    ) -> Vec<Mat4> {
+    ) -> &[Mat4] {
         let joint_count = self.skeleton.joint_count();
         if joint_count == 0 || self.nodes.is_empty() {
-            return Vec::new();
+            self.skin_palette.clear();
+            return &self.skin_palette;
         }
 
         // 1. Reset to rest. We have to copy from
@@ -578,17 +581,12 @@ impl VrmModel {
         }
 
         // 2.5 apply the LookAt cursor-tracking deltas
-        //    on top of the VRMA pose. The spec defines the
-        //    delta as a rotation applied to the bone's *rest*
-        //    rotation (not a delta on top of the current
-        //    local rotation), so head/eye bones that the
-        //    motion also animates end up looking at the
-        //    cursor rather than blending the two sources.
-        //    Identity deltas are skipped (the rest pose
-        //    would rotate to itself; cheaper to leave the
-        //    VRMA result untouched). Unknown humanoid bone
-        //    names are silently dropped — `by_name` returns
-        //    `None` and the existing local rotation wins.
+        //    on top of the VRMA pose. Multiply onto the current
+        //    local rotation (already VRMA or rest) so body-bowing
+        //    motions keep their head compensation. Identity
+        //    deltas are skipped. Unknown humanoid bone names are
+        //    silently dropped — `by_name` returns `None` and the
+        //    existing local rotation wins.
         if let Some(look_at) = look_at {
             for (bone_name, delta) in [
                 ("head", look_at.head),
@@ -604,50 +602,50 @@ impl VrmModel {
                 if entry.node >= self.nodes.local_rotations.len() {
                     continue;
                 }
-                self.nodes.local_rotations[entry.node] =
-                    self.nodes.rest_local_rotations[entry.node] * delta.delta;
+                self.nodes.local_rotations[entry.node] *= delta.delta;
             }
         }
 
-        // 3. Walk the hierarchy with the new local
-        //    rotations in place.
+        // 3–5. World walk, optional hips cascade, palette.
+        self.rebuild_skin_palette(frame.hips_translation)
+    }
+
+    /// Recompute world transforms from the current `local_*`
+    /// buffers and rebuild the skin palette.
+    ///
+    /// Call after mutating [`NodeHierarchy::local_rotations`]
+    /// post-pose (e.g. spring bones) so the same-frame mesh
+    /// reflects those rotations. `hips_translation` is the
+    /// same rest-relative hips delta [`update_skin_palette`]
+    /// would have applied — pass it again after a local-only
+    /// recompute so locomotion is preserved.
+    pub fn rebuild_skin_palette(&mut self, hips_translation: Option<Vec3>) -> &[Mat4] {
+        let joint_count = self.skeleton.joint_count();
+        if joint_count == 0 || self.nodes.is_empty() {
+            self.skin_palette.clear();
+            return &self.skin_palette;
+        }
+
         self.nodes.compute_world_transforms();
 
-        // 4. Hips translation (post-walk): add the delta
-        //    to the hips node's world position and cascade
-        //    through every descendant. We only re-walk
-        //    descendants of hips to avoid re-doing the
-        //    full tree — the cascade is O(subtree).
-        if let Some(hips_delta) = frame.hips_translation
+        // Hips translation (post-walk): add the delta to the
+        // hips node's world position and cascade through every
+        // descendant. We only re-walk descendants of hips to
+        // avoid re-doing the full tree — the cascade is
+        // O(subtree).
+        if let Some(hips_delta) = hips_translation
             && let Some(hips_entry) = self.humanoid.hips()
         {
             self.nodes.world_positions[hips_entry.node] += hips_delta;
-            let n = self.nodes.local_rotations.len();
-            for i in 0..n {
-                if i == hips_entry.node {
-                    continue;
-                }
-                if self.is_descendant_of(hips_entry.node, i) {
-                    let p = self.nodes.parents[i] as usize;
-                    self.nodes.world_rotations[i] =
-                        self.nodes.world_rotations[p] * self.nodes.local_rotations[i];
-                    self.nodes.world_positions[i] = self.nodes.world_rotations[p]
-                        * self.nodes.local_positions[i]
-                        + self.nodes.world_positions[p];
-                }
-            }
+            self.cascade_hips_descendants(hips_entry.node);
         }
 
-        // 5. Build the palette. The standard glTF skinning
-        //    identity is `joint_world * inverse_bind[j]`,
-        //    which is identity at rest. We previously used
-        //    `joint_world * bind_matrices[j] =
-        //    joint_world * inverse_bind[j]⁻¹`; that was
-        //    wrong on two counts — the static rest pose
-        //    would render displaced by `inverse_bind[j]⁻¹`,
-        //    and the animated pose would double-apply the
-        //    bind transform.
-        let mut palette: Vec<Mat4> = Vec::with_capacity(joint_count);
+        // Build the palette. The standard glTF skinning
+        // identity is `joint_world * inverse_bind[j]`, which
+        // is identity at rest. Reuse the stored buffer to avoid
+        // a per-frame allocation.
+        self.skin_palette.clear();
+        self.skin_palette.reserve(joint_count);
         for j in 0..joint_count {
             let node_idx = self
                 .skeleton
@@ -669,27 +667,38 @@ impl VrmModel {
                 .get(j)
                 .copied()
                 .unwrap_or(Mat4::IDENTITY);
-            palette.push(joint_world * inverse_bind);
+            self.skin_palette.push(joint_world * inverse_bind);
         }
-        palette
+        &self.skin_palette
     }
 
-    /// `true` when `descendant` is reachable from `ancestor`
-    /// via the parent chain (i.e. `ancestor` is on the path
-    /// from the root to `descendant`, including `ancestor`
-    /// itself). Used to cascade a single hips translation
-    /// without re-walking the entire hierarchy.
-    fn is_descendant_of(&self, ancestor: usize, descendant: usize) -> bool {
-        let mut cur = descendant;
-        loop {
-            if cur == ancestor {
-                return true;
+    /// Cascade a hips translation to every descendant of
+    /// `hips_node` in O(n) using a topological walk (parents
+    /// before children). Replaces the previous O(n × h)
+    /// `is_descendant_of` per-node parent-chain walk.
+    fn cascade_hips_descendants(&mut self, hips_node: usize) {
+        let n = self.nodes.local_rotations.len();
+        // `in_subtree[i]` marks nodes reachable from the hips.
+        // glTF guarantees parents appear before children, so a
+        // single forward pass propagates the flag correctly.
+        let mut in_subtree = vec![false; n];
+        in_subtree[hips_node] = true;
+        for i in 0..n {
+            let p = self.nodes.parents[i];
+            if p >= 0 && in_subtree[p as usize] {
+                in_subtree[i] = true;
             }
-            let p = self.nodes.parents[cur];
-            if p < 0 {
-                return false;
+        }
+        for (i, &in_sub) in in_subtree.iter().enumerate() {
+            if i == hips_node || !in_sub {
+                continue;
             }
-            cur = p as usize;
+            let p = self.nodes.parents[i] as usize;
+            self.nodes.world_rotations[i] =
+                self.nodes.world_rotations[p] * self.nodes.local_rotations[i];
+            self.nodes.world_positions[i] = self.nodes.world_rotations[p]
+                * self.nodes.local_positions[i]
+                + self.nodes.world_positions[p];
         }
     }
 }
@@ -1329,7 +1338,7 @@ mod tests {
     /// call `model.update_skin_palette(&frame, look_at)`
     /// directly.
     fn model_palette(mut model: VrmModel, frame: &VrmaFrame) -> (VrmModel, Vec<Mat4>) {
-        let palette = model.update_skin_palette(frame, None);
+        let palette = model.update_skin_palette(frame, None).to_vec();
         (model, palette)
     }
 
@@ -1386,15 +1395,12 @@ mod tests {
         );
     }
 
-    /// The `LookAt` step runs **after** the VRMA step, so a
-    /// frame that animates `head` plus an active `LookAt`
-    /// delta on the same bone must end up with the `LookAt`
-    /// rotation, not the VRMA rotation. This is the
-    /// "head tracking overrides the active motion" rule
-    /// from the spec and is what the user expects when a
-    /// waving VRMA also has the head follow the cursor.
+    /// The `LookAt` step runs **after** the VRMA step and
+    /// multiplies the delta onto the current local rotation, so
+    /// a frame that animates `head` plus an active `LookAt`
+    /// delta ends up with `vrma * look_at` (additive tracking).
     #[test]
-    fn update_skin_palette_look_at_overrides_vrma_for_head() {
+    fn update_skin_palette_look_at_composes_onto_vrma_for_head() {
         let mut humanoid = HumanoidBoneRegistry::new();
         humanoid.insert(
             VrmBone("head".into()),
@@ -1408,31 +1414,27 @@ mod tests {
             single_joint_model(humanoid, single_node_hierarchy(Quat::IDENTITY, Vec3::ZERO));
         let mut frame = VrmaFrame::default();
         // VRMA rotates the head 90° around X.
-        frame.bone_rotations.insert(
-            "head".into(),
-            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-        );
+        let vrma = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        frame.bone_rotations.insert("head".into(), vrma);
         // LookAt rotates the head 90° around Y.
+        let look_delta = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
         let look_at = LookAtBoneOutput {
-            head: LookAtBoneDelta {
-                delta: Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
-            },
+            head: LookAtBoneDelta { delta: look_delta },
             left_eye: LookAtBoneDelta::default(),
             right_eye: LookAtBoneDelta::default(),
         };
-        let palette = model.update_skin_palette(&frame, Some(&look_at));
-        // LookAt wins: +X rotates to -Z (Y rotation), not
-        // to +X (X rotation, identity case).
-        let transformed = palette[0].transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        let _palette = model.update_skin_palette(&frame, Some(&look_at));
+        let expected = vrma * look_delta;
         assert!(
-            (transformed - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5,
-            "LookAt must override VRMA on the head, got {transformed:?}"
+            model.nodes.local_rotations[0].dot(expected).abs() > 1.0 - 1e-5,
+            "head local must be vrma * look_at, got {:?} expected {expected:?}",
+            model.nodes.local_rotations[0]
         );
     }
 
     /// Identity `LookAt` deltas must be a no-op (the
     /// implementation skips them to avoid an unnecessary
-    /// `rest * identity` write). A model whose humanoid
+    /// write). A model whose humanoid
     /// registry has none of `head` / `leftEye` / `rightEye`
     /// must produce a palette identical to the
     /// `None`-`LookAt` case — the call must not panic on
@@ -1460,11 +1462,11 @@ mod tests {
         let look_at = LookAtBoneOutput::default();
         let palette_lookat = {
             let mut m = model_lookat;
-            m.update_skin_palette(&frame, Some(&look_at))
+            m.update_skin_palette(&frame, Some(&look_at)).to_vec()
         };
         let palette_none = {
             let mut m = model_none;
-            m.update_skin_palette(&frame, None)
+            m.update_skin_palette(&frame, None).to_vec()
         };
         assert_eq!(palette_lookat, palette_none);
     }

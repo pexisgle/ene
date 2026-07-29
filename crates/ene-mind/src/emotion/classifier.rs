@@ -52,10 +52,9 @@ pub async fn classify_for_config(
     lang: &str,
 ) -> Result<AffectProposal, CognitionError> {
     let config = config.clone();
-    let model = model_override
+    let model_override = model_override
         .filter(|name| !name.trim().is_empty())
-        .map(str::to_owned)
-        .or_else(|| Some(DEFAULT_CLASSIFIER_MODEL.to_owned()));
+        .map(str::to_owned);
     let current_affect = context.current_affect.to_prompt_json();
     let conversation = context.conversation.clone();
     let lang = lang.to_owned();
@@ -68,8 +67,26 @@ pub async fn classify_for_config(
             } else {
                 None
             });
-            ene_ai::create_openai_compatible_chat_provider(&config, model.as_deref(), cap)
-                .map_err(ClassifierError::Provider)
+            let ai_cfg = config.get_section::<ene_ai::AiConfig>().map_err(|e| {
+                ClassifierError::Provider(ene_ai::LlmProviderError::Provider(format!(
+                    "Failed to parse AI config: {e}"
+                )))
+            })?;
+            let mut resolved = ai_cfg
+                .resolve_classifier()
+                .map_err(ClassifierError::Provider)?;
+            if let Some(override_model) = model_override.as_deref() {
+                resolved.model = override_model.to_string();
+            } else if resolved.model.is_empty() {
+                resolved.model = DEFAULT_CLASSIFIER_MODEL.to_string();
+            }
+            if let Some(max) = cap {
+                resolved.max_tokens = Some(max);
+            }
+            Ok(
+                Box::new(ene_ai::create_chat_provider_from_resolved(&resolved))
+                    as Box<dyn ene_ai::LlmProvider>,
+            )
         },
         &current_affect,
         &conversation,
@@ -102,6 +119,7 @@ fn proposal_json_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
+            "reason": { "type": "string" },
             "user_emotion": { "type": "string" },
             "user_intent": { "type": "string" },
             "valence": { "type": "number" },
@@ -109,10 +127,10 @@ fn proposal_json_schema() -> serde_json::Value {
             "irritation": { "type": "number" },
             "affinity": { "type": "number" },
             "recommended_expression": { "type": "string" },
-            "confidence": { "type": "number" },
-            "reason": { "type": "string" }
+            "confidence": { "type": "number" }
         },
         "required": [
+            "reason",
             "user_emotion",
             "user_intent",
             "valence",
@@ -120,8 +138,7 @@ fn proposal_json_schema() -> serde_json::Value {
             "irritation",
             "affinity",
             "recommended_expression",
-            "confidence",
-            "reason"
+            "confidence"
         ],
         "additionalProperties": false
     })
@@ -230,7 +247,8 @@ async fn call_provider(
             .chat_completion(messages, Some(json_schema.clone()))
             .await
             .map_err(ClassifierError::Provider),
-        ClassifierTransport::Streaming => ene_ai::collect_chat_completion(provider, messages)
+        ClassifierTransport::Streaming => provider
+            .collect_stream_completion(messages)
             .await
             .map_err(ClassifierError::Provider),
     }

@@ -3,8 +3,8 @@
 //! Producers (AI bridge, tray, hotkey handlers) push into a single
 //! `UnboundedSender`. The winit event loop owns the receiver and
 //! drains it on the main thread.
+use ene_plugin_proto::UserInputPrompt;
 use ene_runtime::RequestId;
-use ene_tool_proto::UserInputPrompt;
 use tokio::sync::mpsc;
 
 /// Cheap to clone (`Sender` is `Send + Sync`).
@@ -24,7 +24,7 @@ pub enum AppEvent {
     Ai(AiStreamUpdate),
     /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
     /// Desktop maps this to VRM playback; do not forward `SpecialToken` /
-    /// Expression events (removed in API v2).
+    /// Expression events (removed in API v1).
     #[cfg_attr(
         not(test),
         expect(
@@ -34,9 +34,13 @@ pub enum AppEvent {
     )]
     PerformanceCue(String),
     /// Motion cue with layer routing information (#133).
+    ///
+    /// `layer` carries the canonical [`ene_config::MotionLayer`] from the
+    /// performance cue; the consumer converts it to the rendering-side
+    /// `ene_vrm::MotionLayer` at the boundary.
     MotionCue {
         name: String,
-        layer: String,
+        layer: ene_config::MotionLayer,
         priority: u8,
         duration: f32,
     },
@@ -51,8 +55,17 @@ pub enum AppEvent {
     /// `LookAt` cue — gaze target hint from LLM performance markers.
     /// Forwarded to VRM gaze when the gaze system is implemented.
     LookAtCue { target: String },
+    /// Microphone capture started (`active = true`) or stopped
+    /// (`active = false`). Emitted by the audio capture subsystem so
+    /// the chat UI can refresh its mic-toggle indicator.
+    #[cfg(feature = "voice")]
+    MicStateChanged { active: bool },
     /// Request the event loop to exit.
     Quit,
+    /// The runtime actor broadcast channel closed (#242).
+    RuntimeDisconnected,
+    /// Pending memory candidates available for user approval (#223).
+    PendingCandidatesCount(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

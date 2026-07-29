@@ -32,13 +32,16 @@ pub fn log_empty_response_if_needed(ctx: &EmptyResponseContext<'_>) {
         return;
     }
 
-    let (provider_name, model) = ctx
-        .config
-        .get_section::<ene_ai::ProviderConfig>()
-        .map_or_else(
-            |_| ("unknown".to_string(), "unknown".to_string()),
-            |provider| (provider.name.clone(), provider.model),
-        );
+    let (provider_name, model) = match ctx.config.get_section::<ene_ai::AiConfig>() {
+        Ok(ai) => {
+            let provider = ai.tasks.chat.provider.clone();
+            match ai.resolve_chat() {
+                Ok(chat) => (provider, chat.model),
+                Err(_) => ("unknown".to_string(), "unknown".to_string()),
+            }
+        }
+        Err(_) => ("unknown".to_string(), "unknown".to_string()),
+    };
 
     let (system_chars, system_preview) = system_prompt_excerpt(ctx.messages);
     let outline = message_outline(ctx.messages);
@@ -56,7 +59,7 @@ pub fn log_empty_response_if_needed(ctx: &EmptyResponseContext<'_>) {
         message_count = ctx.messages.len(),
         messages_outline = %outline,
         system_prompt_chars = system_chars,
-        system_prompt_preview = %truncate_for_log(&system_preview, PROMPT_PREVIEW_CHARS),
+        system_prompt_preview = %truncate_for_log(system_preview, PROMPT_PREVIEW_CHARS),
         user_input = %truncate_for_log(ctx.user_input, USER_INPUT_LOG_CHARS),
         raw_content_len = ctx.raw_assistant_content.len(),
         raw_content_preview = %truncate_for_log(
@@ -153,11 +156,11 @@ fn message_outline(messages: &[LlmMessage]) -> String {
         .join(", ")
 }
 
-fn system_prompt_excerpt(messages: &[LlmMessage]) -> (usize, String) {
+fn system_prompt_excerpt(messages: &[LlmMessage]) -> (usize, &str) {
     let Some(LlmMessage::System { content }) = messages.first() else {
-        return (0, String::new());
+        return (0, "");
     };
-    (content.chars().count(), content.clone())
+    (content.chars().count(), content)
 }
 
 #[cfg(test)]

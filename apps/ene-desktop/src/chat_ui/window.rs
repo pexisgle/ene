@@ -1,5 +1,10 @@
 //! wgpu + egui window shell for the dedicated chat window.
+//!
+//! TODO(M3): Extract a shared `EguiWindowShell` struct from this and
+//! `UiWindow` in `runtime.rs` — they share identical surface creation,
+//! egui pass lifecycle, texture free ring-buffer, and error handling.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
@@ -10,6 +15,7 @@ use winit::window::Window;
 use crate::acquire_error::AcquireError;
 use crate::ai_bridge::AiBridge;
 use crate::chat_ui::render::ChatUi;
+use crate::gpu::WindowSurfaceError;
 
 pub struct ChatEguiWindow {
     pub window: Arc<Window>,
@@ -19,7 +25,7 @@ pub struct ChatEguiWindow {
     pub(crate) egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     chat_ui: ChatUi,
-    textures_to_free: Vec<Vec<egui::TextureId>>,
+    textures_to_free: VecDeque<Vec<egui::TextureId>>,
 }
 
 impl ChatEguiWindow {
@@ -29,10 +35,10 @@ impl ChatEguiWindow {
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
         size: PhysicalSize<u32>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, WindowSurfaceError> {
         let surface = instance
             .create_surface(window.clone())
-            .map_err(|e| format!("Failed to create chat wgpu surface: {e}"))?;
+            .map_err(|e| WindowSurfaceError::CreateSurface(e.to_string()))?;
 
         let caps = surface.get_capabilities(adapter);
         let format = *caps
@@ -75,8 +81,8 @@ impl ChatEguiWindow {
             egui_ctx,
             egui_state,
             egui_renderer,
-            chat_ui: ChatUi,
-            textures_to_free: vec![Vec::new(), Vec::new(), Vec::new()],
+            chat_ui: ChatUi::default(),
+            textures_to_free: VecDeque::from(vec![Vec::new(); 3]),
         })
     }
 
@@ -93,7 +99,7 @@ impl ChatEguiWindow {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         chat_entity: Entity,
     ) -> Result<(), AcquireError> {
@@ -189,11 +195,12 @@ impl ChatEguiWindow {
                 .chain(std::iter::once(encoder.finish())),
         );
 
-        let to_free_now = self.textures_to_free.remove(0);
+        let to_free_now = self.textures_to_free.pop_front().unwrap_or_default();
         for id in to_free_now {
             self.egui_renderer.free_texture(&id);
         }
-        self.textures_to_free.push(full_output.textures_delta.free);
+        self.textures_to_free
+            .push_back(full_output.textures_delta.free);
 
         frame.present();
         Ok(())

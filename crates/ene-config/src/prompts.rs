@@ -32,6 +32,10 @@ pub struct PromptLibraryData {
     pub extractor: ExtractorPrompts,
     /// Affect classifier prompts configuration (#88).
     pub affect_classifier: AffectClassifierPrompts,
+    /// Proactive speech / screen-summary prompts.
+    pub proactive: ProactivePrompts,
+    /// Compression summarizer prompts.
+    pub compression: CompressionPrompts,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,6 +52,10 @@ struct RawPromptLibraryData {
     extractor: RawExtractorPrompts,
     #[serde(default)]
     affect_classifier: RawAffectClassifierPrompts,
+    #[serde(default)]
+    proactive: RawProactivePrompts,
+    #[serde(default)]
+    compression: RawCompressionPrompts,
 }
 
 /// Prompt templates for the system prompt.
@@ -312,6 +320,101 @@ impl AffectClassifierPrompts {
     }
 }
 
+/// Prompt templates for proactive speech (decision gate, generation hint, screen summary).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProactivePrompts {
+    /// System prompt for the proactive speak/don't-speak JSON gate.
+    pub decision_system: String,
+    /// Generation hint when the decision has no topic hint.
+    pub generation_hint_idle: String,
+    /// Generation hint template with `{topic}` when a topic hint is present.
+    pub generation_hint_with_topic: String,
+    /// System prompt for local screen-image summarization.
+    pub screen_summary_system: String,
+    /// User prompt for local screen-image summarization.
+    pub screen_summary_user: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "JSON keys mirror on-disk path fields (*_path) for PromptLibrary locale files"
+)]
+struct RawProactivePrompts {
+    #[serde(default = "default_proactive_decision_system_path")]
+    decision_system_path: String,
+    #[serde(default = "default_proactive_generation_hint_idle_path")]
+    generation_hint_idle_path: String,
+    #[serde(default = "default_proactive_generation_hint_with_topic_path")]
+    generation_hint_with_topic_path: String,
+    #[serde(default = "default_proactive_screen_summary_system_path")]
+    screen_summary_system_path: String,
+    #[serde(default = "default_proactive_screen_summary_user_path")]
+    screen_summary_user_path: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[expect(
+    dead_code,
+    reason = "serde intermediate raw structs; fields are only read via destructuring"
+)]
+struct RawCompressionPrompts {
+    #[serde(default = "default_compression_system_path")]
+    system_path: String,
+}
+
+fn default_proactive_decision_system_path() -> String {
+    "en/proactive/decision_system.md".into()
+}
+
+fn default_proactive_generation_hint_idle_path() -> String {
+    "en/proactive/generation_hint_idle.md".into()
+}
+
+fn default_proactive_generation_hint_with_topic_path() -> String {
+    "en/proactive/generation_hint_with_topic.md".into()
+}
+
+fn default_proactive_screen_summary_system_path() -> String {
+    "en/proactive/screen_summary_system.md".into()
+}
+
+fn default_proactive_screen_summary_user_path() -> String {
+    "en/proactive/screen_summary_user.md".into()
+}
+
+fn default_compression_system_path() -> String {
+    "en/compression/system.md".into()
+}
+
+impl ProactivePrompts {
+    /// Renders the generation hint, choosing idle vs topic template.
+    pub fn render_generation_hint(&self, topic_hint: &str) -> String {
+        let topic = topic_hint.trim();
+        if topic.is_empty() {
+            self.generation_hint_idle.trim().to_string()
+        } else {
+            substitute(&self.generation_hint_with_topic, &[("topic", topic)])
+                .trim()
+                .to_string()
+        }
+    }
+
+    /// Renders the vision user prompt with the privacy-safe OS app label.
+    pub fn render_screen_summary_user(&self, app_label: &str) -> String {
+        substitute(
+            &self.screen_summary_user,
+            &[("app_label", app_label.trim())],
+        )
+        .trim()
+        .to_string()
+    }
+}
+
 impl SplitPrompts {
     /// Renders the split reason timeout message.
     pub fn render_reason_timeout(&self, minutes: &str) -> String {
@@ -326,6 +429,26 @@ impl SplitPrompts {
     /// Renders the split reason composite score message.
     pub fn render_reason_composite(&self, score: &str) -> String {
         substitute(&self.reason_composite, &[("score", score)])
+    }
+}
+
+/// Prompt templates for context compression summarization.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompressionPrompts {
+    /// System prompt for the compression summarizer.
+    pub system: String,
+}
+
+impl CompressionPrompts {
+    /// Renders the compression system prompt replacing `{character_name}` and `{level_label}`.
+    pub fn render_system(&self, character_name: &str, level_label: &str) -> String {
+        substitute(
+            &self.system,
+            &[
+                ("character_name", character_name),
+                ("level_label", level_label),
+            ],
+        )
     }
 }
 
@@ -444,6 +567,40 @@ impl PromptLibrary {
                 ))
                 .to_string(),
             },
+            proactive: ProactivePrompts {
+                decision_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/decision_system.md"
+                ))
+                .to_string(),
+                generation_hint_idle: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/generation_hint_idle.md"
+                ))
+                .to_string(),
+                generation_hint_with_topic: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/generation_hint_with_topic.md"
+                ))
+                .to_string(),
+                screen_summary_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/screen_summary_system.md"
+                ))
+                .to_string(),
+                screen_summary_user: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/proactive/screen_summary_user.md"
+                ))
+                .to_string(),
+            },
+            compression: CompressionPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/en/compression/system.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -456,6 +613,10 @@ impl PromptLibrary {
     ///
     /// These are the same strings shipped in `assets/prompts/ja.json` but
     /// embedded at compile time as a fallback.
+    // TODO(M7): `built_in_english` and `built_in_japanese` share ~125 lines of
+    // identical structure, differing only in the language code and `include_str!`
+    // paths. Parameterise by language code (e.g. a `built_in_lang(lang: &str)`
+    // helper or a macro) to eliminate this duplication.
     pub fn built_in_japanese() -> Self {
         // The bundled JSON is checked into the repository and is part of the
         // build artifact. A parse failure here is a release-blocker bug, not
@@ -548,6 +709,40 @@ impl PromptLibrary {
                 ))
                 .to_string(),
             },
+            proactive: ProactivePrompts {
+                decision_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/decision_system.md"
+                ))
+                .to_string(),
+                generation_hint_idle: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/generation_hint_idle.md"
+                ))
+                .to_string(),
+                generation_hint_with_topic: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/generation_hint_with_topic.md"
+                ))
+                .to_string(),
+                screen_summary_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/screen_summary_system.md"
+                ))
+                .to_string(),
+                screen_summary_user: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/proactive/screen_summary_user.md"
+                ))
+                .to_string(),
+            },
+            compression: CompressionPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/ja/compression/system.md"
+                ))
+                .to_string(),
+            },
         };
 
         Self {
@@ -595,6 +790,16 @@ impl PromptLibrary {
     pub const fn affect_classifier(&self) -> &AffectClassifierPrompts {
         &self.data.affect_classifier
     }
+
+    /// Returns reference to proactive speech prompts.
+    pub const fn proactive(&self) -> &ProactivePrompts {
+        &self.data.proactive
+    }
+
+    /// Returns reference to compression summarizer prompts.
+    pub const fn compression(&self) -> &CompressionPrompts {
+        &self.data.compression
+    }
 }
 
 /// Substitutes `{variable_name}` placeholders in `template` with the provided
@@ -632,6 +837,16 @@ mod tests {
         assert!(!lib.system().mascot_context.is_empty());
         assert!(!lib.emotion().header.is_empty());
         assert!(!lib.summarizer().system.is_empty());
+        assert!(!lib.proactive().decision_system.is_empty());
+        assert!(!lib.proactive().screen_summary_system.is_empty());
+    }
+
+    #[test]
+    fn render_screen_summary_user_injects_app_label() {
+        let lib = PromptLibrary::built_in_english();
+        let rendered = lib.proactive().render_screen_summary_user("org.kde.kate");
+        assert!(rendered.contains("org.kde.kate"));
+        assert!(!rendered.contains("{app_label}"));
     }
 
     #[test]
@@ -642,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_variables_validation() {
+    fn prompt_libraries_contain_required_template_variables() {
         // Test compile-time embedded english prompts
         let lib_en = PromptLibrary::built_in_english();
         verify_library_variables(&lib_en, "built-in en");
@@ -688,6 +903,12 @@ mod tests {
         assert!(
             sum_user.contains("{conversation}"),
             "[{source}] summarizer.user_prompt template must contain {{conversation}}"
+        );
+
+        let gen_topic = &lib.proactive().generation_hint_with_topic;
+        assert!(
+            gen_topic.contains("{topic}"),
+            "[{source}] proactive.generation_hint_with_topic must contain {{topic}}"
         );
     }
 }

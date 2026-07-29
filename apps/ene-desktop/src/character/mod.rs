@@ -198,6 +198,11 @@ impl CharacterRenderer {
             .and_then(|s| s.to_str())
     }
 
+    /// Set whether the internal VRMA player advances time.
+    pub fn set_motion_player_playing(&mut self, playing: bool) {
+        self.vrma_player.playing = playing;
+    }
+
     /// Load a `.vrma` from disk and store the asset. Safe to call
     /// before the model is loaded. Errors are logged and the
     /// previous motion is kept.
@@ -234,8 +239,6 @@ impl CharacterRenderer {
     /// [`VrmRenderer::update_skin_palette`]. `None` when there is
     /// no motion, no model, or the player is paused.
     pub fn update_motion(&mut self, dt_secs: f32) -> Option<Vec<glam::Mat4>> {
-        let model = self.model.as_mut()?;
-
         let mut frame = if self.vrma_player.playing {
             if let Some(asset) = &self.vrma
                 && let Some(clip) = asset.clips.first()
@@ -245,11 +248,60 @@ impl CharacterRenderer {
             } else {
                 ene_vrm::VrmaFrame::default()
             }
+        } else if let Some(asset) = &self.vrma
+            && let Some(clip) = asset.clips.first()
+        {
+            // Paused: hold the current pose instead of snapping to rest.
+            evaluate_clip(clip, self.vrma_player.time)
         } else {
             ene_vrm::VrmaFrame::default()
         };
 
-        // Retarget hips translation (convert absolute canonical position to a relative delta)
+        // Retarget bone rotations from the VRMA source rest pose onto the
+        // loaded VRM. Required for clips authored on a different armature
+        // (VRMA_05–07); identity when source/dest rests match (VRMA_01–04).
+        if let (Some(asset), Some(model)) = (self.vrma.as_ref(), self.model.as_ref()) {
+            let dst_world_rots = collect_world_rest_rotations(model);
+            let mut retargeted =
+                std::collections::HashMap::with_capacity(frame.bone_rotations.len());
+            for (bone_name, src_pose) in &frame.bone_rotations {
+                let Some(&src_node) = asset.properties.humanoid_bones.get(bone_name) else {
+                    retargeted.insert(bone_name.clone(), *src_pose);
+                    continue;
+                };
+                let Some(dst_entry) = model.humanoid.by_name(bone_name) else {
+                    continue;
+                };
+                let dst_node = dst_entry.node;
+                let Some(dst_world) = dst_world_rots.get(&dst_node).copied() else {
+                    retargeted.insert(bone_name.clone(), *src_pose);
+                    continue;
+                };
+                if src_node >= asset.node_rest_rotations.len()
+                    || src_node >= asset.node_world_rest_rotations.len()
+                    || dst_node >= model.nodes.rest_local_rotations.len()
+                {
+                    retargeted.insert(bone_name.clone(), *src_pose);
+                    continue;
+                }
+                let pose = ene_vrm::retarget_rotation(
+                    *src_pose,
+                    asset.node_rest_rotations[src_node],
+                    asset.node_world_rest_rotations[src_node],
+                    model.nodes.rest_local_rotations[dst_node],
+                    dst_world,
+                );
+                retargeted.insert(bone_name.clone(), pose);
+            }
+            frame.bone_rotations = retargeted;
+        }
+
+        let model = self.model.as_mut()?;
+
+        // Retarget hips translation (absolute VRMA sample → rest-relative
+        // delta). Height scale must fall back when the VRMA's world-rest
+        // hips Y is near-zero (locomotion clips); otherwise deltas explode
+        // (~180x) and the mesh flies / shakes vertically.
         if let Some(ref mut hips_trans) = frame.hips_translation {
             if let Some(asset) = &self.vrma
                 && let Some(&src_hips_node) = asset.properties.humanoid_bones.get("hips")
@@ -260,10 +312,17 @@ impl CharacterRenderer {
                 let dst_rest_global_y = bone_world_rest_position(model, dst_hips_entry).y;
 
                 let delta = *hips_trans - src_rest_local;
-                let scale = if src_rest_global_y.abs() < 1e-6 {
+                let raw_scale = if src_rest_global_y.abs() < 1e-3 {
                     1.0
                 } else {
                     dst_rest_global_y / src_rest_global_y
+                };
+                // Guard against malformed VRMA rest hierarchies that yield
+                // multi-hundred scale factors (observed on VRMA_05–07).
+                let scale = if raw_scale.is_finite() && (0.25..=4.0).contains(&raw_scale) {
+                    raw_scale
+                } else {
+                    1.0
                 };
                 *hips_trans = delta * scale;
             } else {
@@ -288,18 +347,15 @@ impl CharacterRenderer {
         // `None` for `"expression"`-type models, where the
         // LookAt signal routes into morph weights via
         // `apply_emotions` instead.
-        let palette = model.update_skin_palette(&frame, self.look_at_bone_output.as_ref());
+        let mut palette = model
+            .update_skin_palette(&frame, self.look_at_bone_output.as_ref())
+            .to_vec();
 
-        // Step the spring-bone simulator. The simulator reads
-        // the per-node world transforms the palette update
-        // just produced and writes the updated local
-        // rotations for the affected joints back into
-        // `model.nodes.local_rotations`. The next
-        // `update_skin_palette` call (next frame) picks them
-        // up, so the simulator's effect on the silhouette
-        // lags one frame — a single-frame delay is
-        // imperceptible at 60 Hz and is the standard pattern
-        // for VRMC_springBone in v1 / v0 reference impls.
+        // Step the spring-bone simulator against the posed world
+        // transforms, write updated local rotations, then rebuild
+        // the skin palette so the same-frame mesh reflects sway.
+        // (Writing locals without rebuilding left spring bones
+        // invisible — the next frame resets locals to rest.)
         if let (Some(sim), Some(props)) = (
             self.spring_bone_sim.as_mut(),
             self.spring_bone_props.as_ref(),
@@ -344,6 +400,7 @@ impl CharacterRenderer {
                     model.nodes.local_rotations[node] = rotation;
                 }
             }
+            palette = model.rebuild_skin_palette(frame.hips_translation).to_vec();
         }
 
         if palette.is_empty() {
@@ -650,6 +707,7 @@ impl CharacterRenderer {
             LookAtOutput::Bone(b) => {
                 self.look_at_bone_output = Some(b);
             }
+            _ => {}
         }
 
         smoothed_target
@@ -703,6 +761,10 @@ impl CharacterRenderer {
     /// so it stays stable under animation — the animated world
     /// position would oscillate with an active VRMA motion and
     /// produce a choppy look-at.
+    ///
+    /// The camera stays in viewport-fixed space; the runtime
+    /// applies [`Self::model_matrix`] with `character_position`
+    /// separately when drawing the mesh.
     pub fn update_camera_target(&mut self, model_scale: f32) {
         let mut target = Vec3::ZERO;
 

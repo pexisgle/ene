@@ -2,8 +2,12 @@
 //!
 //! Demonstrates the current typed-memory API: inserting memories via
 //! `NewMemoryItem`, searching via `Query`, and lifecycle management.
-//! The legacy `search_summaries` / `get_all_keyfacts` APIs have been
-//! retired from the product path (#125).
+//! Legacy conversation summaries / keyfacts APIs are unsupported.
+
+#![expect(
+    clippy::print_stdout,
+    reason = "example binary prints query/result output to the terminal by design"
+)]
 
 use chrono::Utc;
 use ene_store::{
@@ -59,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_affect: None,
             weights: HybridSearchWeights::default(),
             decay_half_life_days: 30.0,
+            time_range: None,
             now: Utc::now(),
             min_score: 0.0,
             commitment_boost: 0.0,
@@ -77,9 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Mark the memory as faded (lifecycle transition).
-    store
-        .update_typed_memory_status(id, MemoryStatus::Faded)
-        .await?;
+    store.set_memory_status(id, MemoryStatus::Faded).await?;
     println!("\nMemory {id} marked as faded.");
 
     Ok(())

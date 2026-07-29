@@ -85,6 +85,15 @@ pub struct CharacterCardData {
     /// Unix timestamp of the last modification.
     #[serde(default)]
     pub modification_date: Option<u64>,
+    /// Author's note: persistent instruction injected at a specific depth in the conversation.
+    /// Unlike the system prompt, this sits within the history at depth N from the end,
+    /// keeping the main system prompt clean while enforcing late-session behavior.
+    #[serde(default)]
+    pub authors_note: Option<String>,
+    /// Depth at which to insert the author's note from the end of history.
+    /// 0 = most recent assistant turn.
+    #[serde(default)]
+    pub authors_note_depth: Option<usize>,
 }
 
 /// Typed extension store for character cards.
@@ -106,14 +115,20 @@ impl schemars::JsonSchema for Extensions {
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         let ene_schema = generator.subschema_for::<Option<EneExtension>>();
-        let schema = serde_json::json!({
+        let value = serde_json::json!({
             "type": "object",
             "properties": {
                 "ene": ene_schema
             },
             "additionalProperties": true
         });
-        serde_json::from_value(schema).unwrap_or_default()
+        // The JSON literal above is a known-good object; `from_value` is
+        // infallible for this shape.
+        #[expect(
+            clippy::unwrap_used,
+            reason = "known-good JSON literal constructed inline; cannot fail"
+        )]
+        serde_json::from_value(value).unwrap()
     }
 }
 
@@ -205,6 +220,81 @@ pub struct LorebookEntry {
     /// Where the content is inserted (`"before_char"` or `"after_char"`).
     #[serde(default)]
     pub position: Option<String>,
+    /// NOT keys: entry is suppressed if any of these match the scan text.
+    #[serde(default)]
+    pub not_keys: Vec<String>,
+    /// Sticky: keep entry active for N turns (user messages) after last key match.
+    #[serde(default)]
+    pub sticky_turns: Option<usize>,
+    /// Turns since last key match (runtime state, not serialized).
+    #[serde(skip)]
+    pub turns_since_match: Option<usize>,
+}
+
+/// Structured user persona for roleplay context.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(crate = "crate::serde")]
+#[schemars(crate = "crate::schemars")]
+pub struct UserPersona {
+    /// User's display name.
+    pub name: String,
+    /// Physical description of the user.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Relationship to the character.
+    #[serde(default)]
+    pub relationship: Option<String>,
+    /// Preferred pronouns.
+    #[serde(default)]
+    pub pronouns: Option<String>,
+    /// Custom notes/additional context about the user.
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl Default for UserPersona {
+    fn default() -> Self {
+        Self {
+            name: String::from("User"),
+            description: None,
+            relationship: None,
+            pronouns: None,
+            notes: None,
+        }
+    }
+}
+
+impl UserPersona {
+    /// Render the persona as labeled lines, each prefixed with `line_prefix`.
+    ///
+    /// Single canonical field rendering shared by CBS `{{user_persona}}` macro
+    /// expansion (empty prefix) and prompt-budget injection (`"- "` bullets) so
+    /// the two never diverge. Empty optional fields are omitted.
+    #[must_use]
+    pub fn render_lines(&self, line_prefix: &str) -> String {
+        let mut parts = vec![format!("{line_prefix}Name: {}", self.name)];
+        if let Some(ref desc) = self.description
+            && !desc.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Description: {desc}"));
+        }
+        if let Some(ref rel) = self.relationship
+            && !rel.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Relationship: {rel}"));
+        }
+        if let Some(ref pron) = self.pronouns
+            && !pron.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Pronouns: {pron}"));
+        }
+        if let Some(ref notes) = self.notes
+            && !notes.trim().is_empty()
+        {
+            parts.push(format!("{line_prefix}Notes: {notes}"));
+        }
+        parts.join("\n")
+    }
 }
 
 const fn default_enabled() -> bool {
@@ -252,34 +342,40 @@ pub struct ResolvedExpression {
 
 /// Built-in default expressions. Used when the card has no `extensions.expressions`,
 /// and as the base that card overrides are merged on top of.
-fn default_expressions() -> Vec<ResolvedExpression> {
-    [
-        ("neutral", "Default resting expression", "neutral"),
-        ("happy", "Feeling joyful, excited, or pleased", "happy"),
-        ("sad", "Feeling down, disappointed, or sorrowful", "sad"),
-        ("angry", "Feeling frustrated or upset", "angry"),
-        ("relaxed", "Feeling calm, content, or at ease", "relaxed"),
-        (
-            "surprised",
-            "Feeling shocked or caught off guard",
-            "surprised",
-        ),
-    ]
-    .into_iter()
-    .map(|(name, desc, vrm_key)| ResolvedExpression {
-        name: name.to_string(),
-        description: desc.to_string(),
-        vrm: std::iter::once((vrm_key.to_string(), 1.0f32)).collect(),
-    })
-    .collect()
+///
+/// Uses `LazyLock` to compute the list once and reuse it across calls.
+fn default_expressions() -> &'static [ResolvedExpression] {
+    use std::sync::LazyLock;
+    static DEFAULT: LazyLock<Vec<ResolvedExpression>> = LazyLock::new(|| {
+        [
+            ("neutral", "Default resting expression", "neutral"),
+            ("happy", "Feeling joyful, excited, or pleased", "happy"),
+            ("sad", "Feeling down, disappointed, or sorrowful", "sad"),
+            ("angry", "Feeling frustrated or upset", "angry"),
+            ("relaxed", "Feeling calm, content, or at ease", "relaxed"),
+            (
+                "surprised",
+                "Feeling shocked or caught off guard",
+                "surprised",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, desc, vrm_key)| ResolvedExpression {
+            name: name.to_string(),
+            description: desc.to_string(),
+            vrm: std::iter::once((vrm_key.to_string(), 1.0f32)).collect(),
+        })
+        .collect()
+    });
+    &DEFAULT
 }
 
 /// Merges the built-in defaults with card-level overrides from `extensions.expressions`.
 pub fn resolve_expressions(card: &CharacterCardV3) -> Vec<ResolvedExpression> {
     let overrides = card.data.get_expression_overrides();
     let mut map: indexmap::IndexMap<String, ResolvedExpression> = default_expressions()
-        .into_iter()
-        .map(|e| (e.name.clone(), e))
+        .iter()
+        .map(|e| (e.name.clone(), e.clone()))
         .collect();
 
     for ovr in &overrides {
@@ -342,6 +438,16 @@ impl CharacterCardData {
         };
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
+
+    /// Returns the author's note configuration, or `None` if no note is set.
+    pub fn get_authors_note(&self) -> Option<(&str, usize)> {
+        let note = self.authors_note.as_deref()?;
+        if note.trim().is_empty() {
+            return None;
+        }
+        let depth = self.authors_note_depth.unwrap_or(3);
+        Some((note, depth))
+    }
 }
 
 /// Default expressions for the schema.
@@ -395,10 +501,6 @@ fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
 pub struct EneExtension {
-    /// Motions list (backward-compat; prefer `motion_catalog`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    #[serde(default)]
-    pub motions: Vec<crate::character_config::MotionEntry>,
     /// Structured motion catalog with layer classification (#130).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_catalog: Option<crate::character_config::MotionCatalog>,
@@ -417,6 +519,20 @@ pub struct EneExtension {
 /// - `{{//...}}`, `{{comment:...}}` → removed
 /// - `{{reverse:text}}` → reversed string
 pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String {
+    expand_cbs_macros_with(text, char_name, user_name, None)
+}
+
+/// Expands CBS macros with optional `{{user_persona}}` support.
+///
+/// In addition to the macros supported by [`expand_cbs_macros`], this variant
+/// also expands `{{user_persona}}` into a structured text block describing the
+/// user persona (name, description, relationship, pronouns, notes).
+pub fn expand_cbs_macros_with(
+    text: &str,
+    char_name: &str,
+    user_name: &str,
+    user_persona: Option<&UserPersona>,
+) -> String {
     let mut result = text.to_string();
 
     result = result.replace("{{char}}", char_name);
@@ -424,6 +540,14 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
     result = result.replace("<bot>", char_name);
 
     result = result.replace("{{user}}", user_name);
+
+    // Expand {{user_persona}} if persona data is available
+    if let Some(persona) = user_persona {
+        let rendered = persona.render_lines("");
+        result = result.replace("{{user_persona}}", &rendered);
+    } else {
+        result = result.replace("{{user_persona}}", "");
+    }
 
     fn expand_template_macro(result: &mut String, prefix: &str, handler: impl Fn(&str) -> String) {
         while let Some(start) = result.find(prefix) {
@@ -475,4 +599,66 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
     });
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn persona() -> UserPersona {
+        UserPersona {
+            name: "Alice".to_string(),
+            description: Some("A software engineer".to_string()),
+            relationship: Some("Close friend".to_string()),
+            pronouns: Some("she/her".to_string()),
+            notes: Some("Prefers concise answers".to_string()),
+        }
+    }
+
+    #[test]
+    fn expand_user_persona_macro_with_persona() {
+        let text = "The user is {{user_persona}}.";
+        let out = expand_cbs_macros_with(text, "Ene", "Alice", Some(&persona()));
+        assert!(out.contains("Name: Alice"));
+        assert!(out.contains("Description: A software engineer"));
+        assert!(out.contains("Relationship: Close friend"));
+        assert!(out.contains("Pronouns: she/her"));
+        assert!(out.contains("Notes: Prefers concise answers"));
+        assert!(!out.contains("{{user_persona}}"));
+    }
+
+    #[test]
+    fn expand_user_persona_macro_without_persona_is_removed() {
+        let text = "The user is {{user_persona}}.";
+        let out = expand_cbs_macros_with(text, "Ene", "Alice", None);
+        assert!(!out.contains("{{user_persona}}"));
+        assert!(!out.contains("Name:"));
+    }
+
+    #[test]
+    fn expand_user_and_char_macros() {
+        let text = "{{char}} greets {{user}}.";
+        let out = expand_cbs_macros_with(text, "Ene", "Alice", None);
+        assert_eq!(out, "Ene greets Alice.");
+    }
+
+    #[test]
+    fn render_lines_omits_empty_optional_fields() {
+        let p = UserPersona {
+            name: "Bob".to_string(),
+            description: Some("  ".to_string()),
+            relationship: None,
+            pronouns: Some("he/him".to_string()),
+            notes: None,
+        };
+        let out = p.render_lines("");
+        assert_eq!(out, "Name: Bob\nPronouns: he/him");
+    }
+
+    #[test]
+    fn render_lines_applies_prefix_consistently() {
+        let out = persona().render_lines("- ");
+        assert!(out.contains("- Name: Alice"));
+        assert!(out.contains("- Notes: Prefers concise answers"));
+    }
 }

@@ -15,7 +15,7 @@ pub fn loader() -> &'static FluentLanguageLoader {
     LOADER.get_or_init(|| {
         let loader = fluent_language_loader!();
         // Load default fallback language
-        let _ = loader.load_languages(&Localizations, &[loader.fallback_language().clone()]);
+        drop(loader.load_languages(&Localizations, &[loader.fallback_language().clone()]));
         loader
     })
 }
@@ -30,16 +30,6 @@ pub fn select_language(lang: Language) {
     if let Ok(lang_id) = request_lang.parse() {
         let requested_languages = vec![lang_id];
         let localizer = i18n_embed::DefaultLocalizer::new(loader, &Localizations);
-        let _ = localizer.select(&requested_languages);
+        drop(localizer.select(&requested_languages));
     }
 }
-
-#[expect(
-    dead_code,
-    reason = "generated i18n keys module is referenced via macro expansion"
-)]
-mod __generated_i18n_keys {
-    use super::loader;
-    include!(concat!(env!("OUT_DIR"), "/i18n_keys.rs"));
-}
-pub use __generated_i18n_keys::*;

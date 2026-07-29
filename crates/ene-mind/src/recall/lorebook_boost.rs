@@ -1,7 +1,7 @@
 //! Lorebook recall boosts for constant and key-triggered entries (#83).
 
 use ene_config::CharacterCardV3;
-use ene_store::{MemoryItem, MemoryScoreBreakdown, MemorySource, MemoryStore};
+use ene_core::{MemoryItem, MemoryPort, MemoryScoreBreakdown, MemorySource};
 
 use crate::character::{
     LOREBOOK_SOURCE_PREFIX, build_lorebook_scan_text, compile_lorebook_regex_cache,
@@ -12,7 +12,7 @@ use crate::recall::{RecallReason, RecallTurn, RecalledMemory};
 
 /// Merge pinned and key-triggered lorebook memories into hybrid recall results.
 pub async fn merge_lorebook_recall(
-    store: &MemoryStore,
+    store: &dyn MemoryPort,
     character_id: &str,
     card: Option<&CharacterCardV3>,
     user_input: &str,
@@ -33,7 +33,7 @@ pub async fn merge_lorebook_recall(
     let indexed = store
         .list_typed_memories_by_source_prefix(character_id, LOREBOOK_SOURCE_PREFIX, 128)
         .await
-        .map_err(CognitionError::Memory)?;
+        .map_err(CognitionError::MemoryPort)?;
 
     let mut boosted: Vec<RecalledMemory> = Vec::new();
     let mut seen_ids = recalled
@@ -102,7 +102,7 @@ fn recalled_memory_from_item(item: MemoryItem) -> RecalledMemory {
             commitment_boost: 0.0,
             total: 1.0,
         },
-        sources: vec![ene_store::MemoryCandidateSource::Lexical],
+        sources: vec![ene_core::MemoryCandidateSource::Lexical],
     }
 }
 
@@ -188,6 +188,9 @@ mod tests {
                 selective: None,
                 secondary_keys: None,
                 position: None,
+                not_keys: Vec::new(),
+                sticky_turns: None,
+                turns_since_match: None,
             }],
             ..Default::default()
         };

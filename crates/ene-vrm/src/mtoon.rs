@@ -35,6 +35,7 @@
 
 /// Outline width mode from the spec.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum OutlineWidthMode {
     /// No outline.
     #[default]
@@ -258,8 +259,6 @@ pub fn load_mtoon_materials(gltf: &gltf::Gltf) -> Vec<Option<MToonMaterial>> {
         }
 
         // Emission (from glTF core material)
-        let pbr = material.pbr_metallic_roughness();
-        let _ = pbr;
         mat.emissive_factor = material.emissive_factor();
         if let Some(emissive_tex) = material.emissive_texture() {
             mat.emissive_texture = Some(MToonTextureRef {
@@ -401,20 +400,6 @@ pub mod flags {
 /// loader binds a 1×1 white dummy. The shader gates access via
 /// the `flags_and_mode.x` bitmask.
 pub struct MToonGpuTextures {
-    /// Shade multiply texture bind group.
-    pub shade_multiply: wgpu::BindGroup,
-    /// Shading shift texture bind group.
-    pub shading_shift: wgpu::BindGroup,
-    /// Emissive texture bind group.
-    pub emissive: wgpu::BindGroup,
-    /// `MatCap` texture bind group.
-    pub matcap: wgpu::BindGroup,
-    /// Rim multiply texture bind group.
-    pub rim_multiply: wgpu::BindGroup,
-    /// Outline width multiply texture bind group.
-    pub outline_width: wgpu::BindGroup,
-    /// UV animation mask texture bind group.
-    pub uv_mask: wgpu::BindGroup,
     /// Combined bind group for all `MToon` textures (bind group 6).
     pub combined_bind_group: wgpu::BindGroup,
 }
@@ -553,7 +538,16 @@ impl MToonUniform {
                 0.0,
             ],
             flags_and_mode: [
-                tex_flags as f32,
+                // Safe cast: all texture flag bits (0..=7) are within f32's
+                // 23-bit mantissa. The static assertion below guards against
+                // future flags exceeding bit 23.
+                {
+                    const _: () = assert!(
+                        flags::UV_ANIMATION_MASK_TEXTURE <= (1u32 << 23),
+                        "texture flags exceed f32 precision; use u32 reinterpret in the uniform"
+                    );
+                    tex_flags as f32
+                },
                 match mat.outline_width_mode {
                     OutlineWidthMode::None => 0.0,
                     OutlineWidthMode::WorldCoordinates => 1.0,

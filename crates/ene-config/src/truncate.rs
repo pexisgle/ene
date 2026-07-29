@@ -1,5 +1,7 @@
 //! Smart content truncation helpers (folded from former `ene-common`).
 
+use std::collections::VecDeque;
+
 /// Helper struct for high-performance and detailed string truncation.
 pub struct Truncate;
 
@@ -75,11 +77,11 @@ impl Truncate {
             bytes = bytes.saturating_add(size);
         }
 
-        let removed = if hit_bytes {
-            total_bytes.saturating_sub(bytes)
-        } else {
-            text.len().saturating_sub(out.join("\n").len())
-        };
+        // Account for the trailing newline that `text.lines()` strips:
+        // `text.len()` includes it, but `out.join("\n")` does not.
+        let trailing_newline = usize::from(text.ends_with('\n'));
+        let kept_bytes = bytes.saturating_add(trailing_newline);
+        let removed = total_bytes.saturating_sub(kept_bytes);
 
         let preview = out.join("\n");
         let unit = if hit_bytes { "bytes" } else { "lines" };
@@ -104,7 +106,7 @@ impl Truncate {
             };
         }
 
-        let mut out = Vec::new();
+        let mut out: VecDeque<&str> = VecDeque::new();
         let mut bytes = 0usize;
         let mut hit_bytes = false;
 
@@ -114,17 +116,26 @@ impl Truncate {
                 hit_bytes = true;
                 break;
             }
-            out.insert(0, *line);
+            out.push_front(*line);
             bytes = bytes.saturating_add(size);
         }
 
         let removed = if hit_bytes {
             total_bytes.saturating_sub(bytes)
         } else {
-            text.len().saturating_sub(out.join("\n").len())
+            // Account for the trailing newline that `text.lines()` strips.
+            let trailing_newline = usize::from(text.ends_with('\n'));
+            let kept_bytes = out
+                .iter()
+                .map(|l| l.len())
+                .sum::<usize>()
+                .saturating_add(out.len().saturating_sub(1))
+                .saturating_add(trailing_newline);
+            total_bytes.saturating_sub(kept_bytes)
         };
 
-        let preview = out.join("\n");
+        let preview: Vec<&str> = out.into();
+        let preview = preview.join("\n");
         let unit = if hit_bytes { "bytes" } else { "lines" };
 
         TruncateResult {
@@ -139,22 +150,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_simple_no_truncation() {
+    fn simple_returns_input_under_limit() {
         assert_eq!(Truncate::simple("hello", 10), "hello");
     }
 
     #[test]
-    fn test_simple_truncation() {
+    fn simple_truncates_with_ellipsis_over_limit() {
         assert_eq!(Truncate::simple("hello world", 5), "hello...");
     }
 
     #[test]
-    fn test_detailed_no_truncation() {
+    fn detailed_returns_input_under_limit() {
         assert_eq!(Truncate::detailed("hello", 10), "hello");
     }
 
     #[test]
-    fn test_detailed_truncation() {
+    fn detailed_truncates_with_metadata_over_limit() {
         let truncated = Truncate::detailed("hello world", 5);
         assert!(truncated.starts_with("hello"));
         assert!(truncated.contains("truncated"));
@@ -162,19 +173,19 @@ mod tests {
     }
 
     #[test]
-    fn test_chars_no_truncation() {
+    fn chars_returns_input_under_limit() {
         assert_eq!(Truncate::chars("hello", 10), "hello");
     }
 
     #[test]
-    fn test_chars_truncation() {
+    fn chars_truncates_over_limit() {
         let truncated = Truncate::chars("hello world", 5);
         assert!(truncated.starts_with("hello"));
         assert!(truncated.contains("truncated"));
     }
 
     #[test]
-    fn test_output_no_truncation_needed() {
+    fn output_returns_full_text_when_within_bounds() {
         let text = "line1\nline2\nline3";
         let result = Truncate::output(text, 10, 1000);
         assert!(!result.truncated);
@@ -182,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_by_lines() {
+    fn output_truncates_by_line_count() {
         let text = "line1\nline2\nline3\nline4\nline5";
         let result = Truncate::output(text, 3, 1000);
         assert!(result.truncated);
@@ -193,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_by_bytes() {
+    fn output_truncates_by_byte_size() {
         let text = "this is a very long line that exceeds the byte limit";
         let result = Truncate::output(text, 100, 20);
         assert!(result.truncated);
@@ -201,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tail_no_truncation_needed() {
+    fn tail_returns_full_text_when_within_bounds() {
         let text = "line1\nline2\nline3";
         let result = Truncate::tail(text, 10, 1000);
         assert!(!result.truncated);
@@ -209,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tail_by_lines() {
+    fn tail_keeps_last_n_lines() {
         let text = "line1\nline2\nline3\nline4\nline5";
         let result = Truncate::tail(text, 3, 1000);
         assert!(result.truncated);

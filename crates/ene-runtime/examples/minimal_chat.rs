@@ -1,6 +1,6 @@
 //! # ene-runtime Minimal Chat Example
 //!
-//! Demonstrates the API v2 host path:
+//! Demonstrates the API v1 host path:
 //! 1. Load config + character card via `ene-config`
 //! 2. [`EneHandle::open`] — ready before return
 //! 3. [`EneHandle::run`] → [`TurnId`], subscribe to events, cancel by id
@@ -9,10 +9,16 @@
 //! ENE_PROVIDER__API_KEY=sk-xxx direnv exec . rtk cargo run -p ene-runtime --example minimal_chat
 //! ```
 
+#![expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "example binary prints turn/session output to the terminal by design"
+)]
+
 use ene_config::{load_character_card, load_config};
 use ene_runtime::{
-    CueSource, EneEvent, EneHandle, EneStatus, MultiAnswer, PermissionDecision, TerminalReason,
-    UserInputResponse,
+    CueSource, EneEvent, EneHandle, EneStatus, LifecycleEvent, MultiAnswer, PermissionDecision,
+    TerminalReason, UserInputResponse,
 };
 use std::io::{self, Write};
 
@@ -24,18 +30,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = load_config()?;
     let card = load_character_card(&config.character)?;
-    let provider_cfg = config
-        .get_section::<ene_runtime::ProviderConfig>()
+    let ai_cfg = config
+        .get_section::<ene_runtime::AiConfig>()
         .unwrap_or_default();
+    let model = ai_cfg.tasks.chat.model.as_deref().unwrap_or("unknown");
     println!(
         "[Setup] provider: {}, model: {}",
-        provider_cfg.name, provider_cfg.model,
+        ai_cfg.tasks.chat.provider, model,
     );
 
     let handle = EneHandle::open(config, card).await?;
     println!("[Setup] Runtime ready.\n");
 
     let mut rx = handle.subscribe();
+
+    // Lifecycle notifications (status changes, pending memory candidates,
+    // background tool completions) ride a separate bus from chat events
+    // (#272) — drain them on their own task.
+    let mut lifecycle_rx = handle.subscribe_lifecycle();
+    tokio::spawn(async move {
+        while let Ok(event) = lifecycle_rx.recv().await {
+            if let LifecycleEvent::StatusChanged { status } = event
+                && status == EneStatus::Error
+            {
+                eprintln!("\n[Status: Error]");
+            }
+        }
+    });
 
     let snapshot = handle.diagnostics().get_snapshot().await?;
     if let Some(card) = &snapshot.character_card {
@@ -57,7 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         match rx.recv().await? {
-            EneEvent::TextDelta { delta, turn: t } => {
+            EneEvent::TextDelta {
+                delta,
+                turn: t,
+                origin: _,
+            } => {
                 if t != turn {
                     return Err(format!("unexpected turn id: {t:?}").into());
                 }
@@ -91,26 +116,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             } => {
                 println!("\n[Permission] {description}");
-                let _ = handle.decide_permission(request_id, PermissionDecision::Deny);
+                drop(handle.decide_permission(request_id, PermissionDecision::Deny));
             }
             EneEvent::UserInputRequired {
                 request_id, prompt, ..
             } => {
                 println!("\n[User input] {} item(s)", prompt.items.len());
-                let _ = handle.submit_user_input(
+                drop(handle.submit_user_input(
                     request_id,
                     UserInputResponse::Multi(vec![MultiAnswer::Skip; prompt.items.len()]),
-                );
+                ));
             }
             EneEvent::ContextCompressed { level, .. } => {
                 println!("\n[ContextCompressed: {level}]");
             }
-            EneEvent::StatusChanged { status } => {
-                if status == EneStatus::Error {
-                    eprintln!("\n[Status: Error]");
-                }
-            }
-            EneEvent::Terminal { turn: t, reason } => {
+            EneEvent::TurnStarted { .. } => {}
+            EneEvent::Terminal {
+                turn: t,
+                origin: _,
+                reason,
+            } => {
                 if t != turn {
                     return Err(format!("unexpected turn id: {t:?}").into());
                 }
@@ -126,6 +151,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let _ = handle.shutdown(std::time::Duration::from_secs(2)).await;
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     Ok(())
 }

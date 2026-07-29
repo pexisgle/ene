@@ -106,8 +106,7 @@ pub struct LookAt {
     pub last_cursor_logical: Option<Vec2Wrapper>,
 }
 
-/// Newtype to avoid pulling `glam::Vec2` into a public component
-/// field that is otherwise plain-data.
+/// Newtype wrapper for 3D cursor/position data.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Vec2Wrapper(pub Vec3);
 

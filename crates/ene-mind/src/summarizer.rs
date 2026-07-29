@@ -1,18 +1,27 @@
 //! LLM-driven conversation summarizer.
 //!
 //! Called during session splits to convert raw conversation history into structured summaries
-//! with natural-language descriptions, extracted topics, and user-relevant key facts.
+//! with natural-language descriptions and user-relevant key facts.
 //!
 //! Prompt templates are loaded from the `PromptLibrary` so all user-facing strings
 //! stay out of compiled code and can be localised without recompilation.
 
+// `fmt::Error` is `Copy`, so `drop()` would itself trip
+// `clippy::dropping_copy_types`; every `write!`/`writeln!` in this module
+// targets a local `String` buffer via `fmt::Write`, which never actually
+// fails.
+#![expect(
+    clippy::let_underscore_must_use,
+    reason = "fmt::Write to a String is infallible in practice"
+)]
+
 use std::fmt::Write;
 
 use ene_config::PromptLibrary;
-use ene_store::{KeyFact, MemoryError};
+use ene_store::{EneMemoryError, KeyFact};
 use serde::{Deserialize, Serialize};
 
-/// Structured conversation summary returned by the LLM
+/// Structured conversation summary returned by the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationSummaryResult {
     /// Natural-language conversation summary
@@ -34,7 +43,7 @@ pub async fn summarize_conversation(
     character_name: &str,
     user_name: &str,
     existing_facts: &[KeyFact],
-) -> Result<ConversationSummaryResult, MemoryError> {
+) -> Result<ConversationSummaryResult, EneMemoryError> {
     if history.is_empty() {
         return Ok(ConversationSummaryResult {
             summary: String::new(),
@@ -46,7 +55,27 @@ pub async fn summarize_conversation(
 
     // Build conversation text from message history (tool messages excluded —
     // their content is already attributed to the assistant turn).
-    let mut conversation_text = String::new();
+    let estimated_len = history
+        .iter()
+        .map(|m| match m {
+            ene_ai::LlmMessage::User { parts } => {
+                parts
+                    .iter()
+                    .map(|p| match p {
+                        ene_ai::UserMessagePart::Text { text } => text.len(),
+                        ene_ai::UserMessagePart::Image { .. } => 0,
+                    })
+                    .sum::<usize>()
+                    + 20
+            }
+            ene_ai::LlmMessage::Assistant { content, .. } => {
+                content.as_ref().map_or(0, String::len) + 20
+            }
+            ene_ai::LlmMessage::System { content } => content.len() + 20,
+            ene_ai::LlmMessage::Tool { .. } => 0,
+        })
+        .sum::<usize>();
+    let mut conversation_text = String::with_capacity(estimated_len);
     for message in history {
         match message {
             ene_ai::LlmMessage::User { parts } => {
@@ -104,11 +133,6 @@ pub async fn summarize_conversation(
                 "type": "string",
                 "description": "2–4 sentence summary of the conversation's key events, decisions, and outcomes"
             },
-            "topics": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "1–5 specific keyword phrases representing the main topics discussed"
-            },
             "key_facts": {
                 "type": "array",
                 "items": {
@@ -129,7 +153,7 @@ pub async fn summarize_conversation(
                 "description": "Current and updated facts about the user"
             }
         },
-        "required": ["summary", "topics", "key_facts"],
+        "required": ["summary", "key_facts"],
         "additionalProperties": false
     });
 
@@ -148,23 +172,23 @@ pub async fn summarize_conversation(
     )
     .await
     .map_err(|_| {
-        MemoryError::ApiRequestError(
+        EneMemoryError::MemoryStoreConnectionError(
             "summarization: chat completion timed out after 120s".to_string(),
         )
     })?
-    .map_err(|e| MemoryError::ApiRequestError(format!("summarization: {e}")))?;
+    .map_err(|e| EneMemoryError::MemoryStoreConnectionError(format!("summarization: {e}")))?;
 
     parse_summary_json(&content)
 }
 
 /// Extracts and parses JSON from the LLM response.
 ///
-/// Returns a structured [`MemoryError::ApiRequestError`] when the response
+/// Returns a structured [`EneMemoryError::MemoryStoreConnectionError`] when the response
 /// cannot be parsed. The previous implementation silently stored the raw
 /// LLM text as the summary when JSON parsing failed, which meant a
 /// markdown-wrapped or prose response would be persisted as a "summary" and
 /// surface later in the recalled context as noise.
-fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryError> {
+fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, EneMemoryError> {
     let cleaned = raw
         .trim()
         .trim_start_matches("```json")
@@ -185,7 +209,7 @@ fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, MemoryErro
         }
     }
 
-    Err(MemoryError::ApiRequestError(format!(
+    Err(EneMemoryError::MemoryStoreConnectionError(format!(
         "[Summarizer] LLM response was not valid JSON for the expected summary schema; \
          refusing to persist raw prose as a summary. First 200 chars: {}",
         raw.chars().take(200).collect::<String>()
@@ -197,7 +221,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_summary_json() {
+    fn parse_summary_json_valid_input() {
         let json =
             r#"{"summary": "Test summary.", "key_facts": [{"key": "job", "value": "fact1"}]}"#;
         let result = parse_summary_json(json).unwrap();
@@ -208,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_summary_json_with_code_block() {
+    fn parse_summary_json_strips_markdown_fences() {
         let json = "```json\n{\"summary\": \"test\", \"key_facts\": []}\n```";
         let result = parse_summary_json(json).unwrap();
         assert_eq!(result.summary, "test");
@@ -217,7 +241,7 @@ mod tests {
     /// Regression test: the parser must NOT silently fall back to the raw LLM
     /// prose as a "summary". A non-JSON response is a structured error.
     #[test]
-    fn test_parse_summary_json_non_json_returns_error() {
+    fn parse_summary_json_non_json_input_returns_error() {
         let raw = "This is not valid JSON at all";
         let result = parse_summary_json(raw);
         assert!(result.is_err(), "expected an error, got {result:?}");

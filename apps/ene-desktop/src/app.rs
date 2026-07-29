@@ -18,7 +18,7 @@ use crate::event::chat::OpenChat;
 use crate::event::{
     ai::{
         AiPermissionRequested, AiStreamError, AiStreamFinished, AiTextDelta, AiUserInputRequested,
-        CancelCommand, EmoteToken, ExpressionCommand, MotionCommand,
+        CancelCommand, EmoteToken, ExpressionCommand, MotionCommand, PendingCandidatesCount,
     },
     input::{KeyboardKey, PointerButton, PointerMoved},
     lifecycle::{TickGtk, WindowCloseRequested, WindowResized},
@@ -113,7 +113,9 @@ pub fn build_app(
     app.add_message::<OpenSettings>();
     app.add_message::<OpenChat>();
     app.add_message::<SettingsActionEvent>();
+    app.add_message::<PendingCandidatesCount>();
     app.add_message::<TickGtk>();
+    app.add_message::<crate::event::lifecycle::RuntimeDisconnected>();
     app
 }
 

@@ -7,9 +7,8 @@ pub use section::{PromptSection, PromptSectionKind};
 use ene_ai::{LlmMessage, UserMessagePart};
 use ene_store::{ActiveCommitmentPrompt, MemoryKind, MemorySource};
 
-use crate::character::{IdentityKernel, StyleExample};
 use crate::lifecycle::{HistoryEntry, PromptPacketMeta};
-use crate::recall::{RecallReason, RecalledMemory, format_recalled_content};
+use crate::recall::{RecallReason, RecalledMemory};
 
 /// A sectioned prompt structure with independent logical layers.
 #[derive(Debug, Clone, Default)]
@@ -121,9 +120,66 @@ impl PromptPacket {
 
         (messages, meta)
     }
+}
 
-    /// Build a packet from composed inputs (legacy helper; prefer [`crate::context::pack_prompt`]).
-    pub fn compose(
+/// Split recalled memories into semantic, profile, and episodic buckets.
+pub fn classify_recalled_memories(
+    recalled: &[RecalledMemory],
+) -> (
+    Vec<&RecalledMemory>,
+    Vec<&RecalledMemory>,
+    Vec<&RecalledMemory>,
+) {
+    let mut semantic = Vec::new();
+    let mut profile = Vec::new();
+    let mut episodic = Vec::new();
+
+    for memory in recalled {
+        match memory.item.kind {
+            MemoryKind::UserProfile | MemoryKind::Preference | MemoryKind::Relationship => {
+                profile.push(memory);
+            }
+            MemoryKind::Semantic | MemoryKind::Procedure
+                if memory.reason == RecallReason::CharacterLore
+                    || memory.item.source == MemorySource::Ccv3 =>
+            {
+                semantic.push(memory);
+            }
+            MemoryKind::Commitment => {}
+            _ => episodic.push(memory),
+        }
+    }
+
+    (semantic, profile, episodic)
+}
+
+/// Render active commitments as a bullet list body (without heading).
+pub fn render_commitments_block(commitments: &[ActiveCommitmentPrompt]) -> String {
+    commitments
+        .iter()
+        .map(|c| {
+            if c.description.is_empty() {
+                c.title.clone()
+            } else {
+                format!("{}: {}", c.title, c.description)
+            }
+        })
+        .map(|line| format!("- {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::character::{IdentityKernel, StyleExample, StyleIntent};
+    use crate::format_recalled_content;
+    use ene_store::{
+        AffectAnnotation, MemoryConfidence, MemoryItem, MemorySalience, MemoryScope,
+        MemoryScoreBreakdown, MemoryStatus,
+    };
+
+    fn compose_test_packet(
         kernel: IdentityKernel,
         style_examples: Vec<StyleExample>,
         recalled: &[RecalledMemory],
@@ -134,7 +190,7 @@ impl PromptPacket {
         user_input: impl Into<String>,
         max_prompt_tokens: usize,
         style_example_budget_tokens: usize,
-    ) -> Self {
+    ) -> PromptPacket {
         let (semantic, profile, episodic) = classify_recalled_memories(recalled);
         let mut sections = Vec::new();
 
@@ -229,65 +285,8 @@ impl PromptPacket {
             0,
         ));
 
-        Self { sections, history }
+        PromptPacket { sections, history }
     }
-}
-
-/// Split recalled memories into semantic, profile, and episodic buckets.
-pub fn classify_recalled_memories(
-    recalled: &[RecalledMemory],
-) -> (
-    Vec<&RecalledMemory>,
-    Vec<&RecalledMemory>,
-    Vec<&RecalledMemory>,
-) {
-    let mut semantic = Vec::new();
-    let mut profile = Vec::new();
-    let mut episodic = Vec::new();
-
-    for memory in recalled {
-        match memory.item.kind {
-            MemoryKind::UserProfile | MemoryKind::Preference | MemoryKind::Relationship => {
-                profile.push(memory);
-            }
-            MemoryKind::Semantic | MemoryKind::Procedure
-                if memory.reason == RecallReason::CharacterLore
-                    || memory.item.source == MemorySource::Ccv3 =>
-            {
-                semantic.push(memory);
-            }
-            MemoryKind::Commitment => {}
-            _ => episodic.push(memory),
-        }
-    }
-
-    (semantic, profile, episodic)
-}
-
-/// Render active commitments as a bullet list body (without heading).
-pub fn render_commitments_block(commitments: &[ActiveCommitmentPrompt]) -> String {
-    commitments
-        .iter()
-        .map(|c| {
-            if c.description.is_empty() {
-                c.title.clone()
-            } else {
-                format!("{}: {}", c.title, c.description)
-            }
-        })
-        .map(|line| format!("- {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::character::StyleIntent;
-    use ene_store::{
-        AffectAnnotation, MemoryConfidence, MemoryItem, MemorySalience, MemoryScope,
-        MemoryScoreBreakdown, MemoryStatus,
-    };
 
     #[test]
     fn section_order_is_deterministic() {
@@ -300,7 +299,7 @@ mod tests {
             text: "STYLE_MARKER".into(),
             intent: StyleIntent::Greeting,
         }];
-        let packet = PromptPacket::compose(
+        let packet = compose_test_packet(
             kernel,
             styles,
             &[],
@@ -344,7 +343,7 @@ mod tests {
             text: "KERNEL_MARKER".into(),
             post_history_instructions: None,
         };
-        let packet = PromptPacket::compose(
+        let packet = compose_test_packet(
             kernel,
             vec![],
             &[],
@@ -375,7 +374,7 @@ mod tests {
             role: ene_ai::Role::User,
             content: "prior".into(),
         }];
-        let packet = PromptPacket::compose(
+        let packet = compose_test_packet(
             kernel,
             vec![],
             &[],
@@ -457,7 +456,7 @@ mod tests {
             },
             sources: vec![],
         }];
-        let packet = PromptPacket::compose(
+        let packet = compose_test_packet(
             kernel,
             vec![],
             &recalled,

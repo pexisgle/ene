@@ -1,4 +1,4 @@
-use crate::commands::{CliCommand, CliError};
+use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
 
@@ -22,7 +22,7 @@ impl CliCommand for AffectCommand {
         "/affect <show|reset>"
     }
 
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError> {
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let sub = parse_subcommand(arg);
         let snapshot = ctx
             .handle
@@ -38,14 +38,14 @@ impl CliCommand for AffectCommand {
                         "[Affect] mood={} valence={:.2} arousal={:.2} trust={:.2} affinity={:.2}",
                         state.mood_label, state.valence, state.arousal, state.trust, state.affinity
                     );
-                    Ok(())
+                    Ok(CommandOutcome::Continue)
                 }
                 Err(e) => Err(CliError::ExecutionFailed(format!("Show error: {e}"))),
             },
             "reset" => match snapshot.memory.reset_affect_state(card_name).await {
                 Ok(()) => {
                     println!("{}", style::success("[Affect] Reset to neutral state"));
-                    Ok(())
+                    Ok(CommandOutcome::Continue)
                 }
                 Err(e) => Err(CliError::ExecutionFailed(format!("Reset error: {e}"))),
             },

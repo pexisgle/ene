@@ -5,8 +5,8 @@
 //! `pump_legacy_events` system in the `First` stage and consumed by
 //! the AI consumer systems in the `Update` stage.
 use bevy_ecs::prelude::*;
+use ene_plugin_proto::UserInputPrompt;
 use ene_runtime::RequestId;
-use ene_tool_proto::UserInputPrompt;
 
 #[derive(Message, Debug, Clone)]
 pub struct AiTextDelta(pub String);
@@ -43,10 +43,14 @@ pub use PerformanceCue as EmoteToken;
 
 /// Motion cue routed from [`ene_runtime::EneEvent::Performance`] when
 /// the cue kind is [`PerfKind::Motion`] (#133).
+///
+/// `layer` carries the canonical [`ene_config::MotionLayer`]; the consumer
+/// system converts it to `ene_vrm::MotionLayer` before feeding the
+/// [`MotionLayerState`](crate::resource::motion_layer::MotionLayerState).
 #[derive(Message, Debug, Clone)]
 pub struct MotionCommand {
     pub name: String,
-    pub layer: String,
+    pub layer: ene_config::MotionLayer,
     pub priority: u8,
     pub duration: f32,
 }
@@ -64,3 +68,7 @@ pub struct ExpressionCommand {
 /// is [`PerfKind::Cancel`] (#132).
 #[derive(Message, Debug, Clone)]
 pub struct CancelCommand(pub String);
+
+/// Pending memory candidates count update (#223).
+#[derive(Message, Debug, Clone, Copy)]
+pub struct PendingCandidatesCount(pub usize);

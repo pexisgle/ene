@@ -60,6 +60,7 @@ use crate::humanoid::canonicalize_bone_name;
 /// Interpolation mode for keyframe sampling. Mirrors the glTF
 /// `sampler.interpolation` enum.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Interpolation {
     /// Hold the previous keyframe value until the next.
     Step,
@@ -208,6 +209,7 @@ pub struct VrmaFrame {
 
 /// Repeat mode for playback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RepeatMode {
     /// Play once and stop.
     Once,
@@ -332,8 +334,10 @@ fn sample_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
     }
 }
 
-fn sample_step<T: Clone>(times: &[f32], values: &[T], t: f32) -> T {
-    assert!(!values.is_empty(), "sample_step called with empty values");
+fn sample_step<T: Clone + Default>(times: &[f32], values: &[T], t: f32) -> T {
+    if values.is_empty() {
+        return T::default();
+    }
     if times.is_empty() {
         return values[0].clone();
     }
@@ -363,11 +367,16 @@ fn find_keyframe_index(times: &[f32], t: f32) -> usize {
     times.len().saturating_sub(2)
 }
 
-fn sample_keyframes<T: Clone>(sampler: &Sampler<T>, t: f32, lerp: impl Fn(&T, &T, f32) -> T) -> T {
-    assert!(
-        !sampler.values.is_empty(),
-        "sample_keyframes called with empty sampler values"
-    );
+fn sample_keyframes<
+    T: Clone + Default + std::ops::Add<Output = T> + std::ops::Mul<f32, Output = T>,
+>(
+    sampler: &Sampler<T>,
+    t: f32,
+    lerp: impl Fn(&T, &T, f32) -> T,
+) -> T {
+    if sampler.values.is_empty() {
+        return T::default();
+    }
     if sampler.times.is_empty() {
         return sampler.values[0].clone();
     }
@@ -393,18 +402,19 @@ fn sample_keyframes<T: Clone>(sampler: &Sampler<T>, t: f32, lerp: impl Fn(&T, &T
     }
 }
 
-fn sample_cubic_spline<T: Clone>(
+fn sample_cubic_spline<
+    T: Clone + Default + std::ops::Add<Output = T> + std::ops::Mul<f32, Output = T>,
+>(
     times: &[f32],
     values: &[T],
     t: f32,
-    lerp: &impl Fn(&T, &T, f32) -> T,
+    _lerp: &impl Fn(&T, &T, f32) -> T,
 ) -> T {
-    assert!(
-        !values.is_empty(),
-        "sample_cubic_spline called with empty values"
-    );
+    if values.len() < 3 {
+        return values.first().cloned().unwrap_or_default();
+    }
     if times.is_empty() {
-        return values[0].clone();
+        return values[1].clone();
     }
     let idx = find_keyframe_index(times, t);
     if idx + 1 >= times.len() {
@@ -416,17 +426,16 @@ fn sample_cubic_spline<T: Clone>(
     let s = ((t - t0) / dt).clamp(0.0, 1.0);
     let s2 = s * s;
     let s3 = s2 * s;
-    let h00 = 3.0f32.mul_add(-s2, 2.0 * s3) + 1.0;
-    let h10 = 2.0f32.mul_add(-s2, s3) + s;
-    let h01 = 3.0f32.mul_add(s2, -2.0 * s3);
-    let h11 = s3 - s2;
+    let h00 = 2.0f32.mul_add(s3, -3.0 * s2) + 1.0;
+    let h10 = (s3 - 2.0f32.mul_add(s2, -s)) * dt;
+    let h01 = -2.0 * s3 + 3.0 * s2;
+    let h11 = (s3 - s2) * dt;
     let base = idx * 3;
-    let _ = &values[base + 1];
-    let _ = &values[base];
-    let _ = &values[base + 4];
-    let _ = &values[base + 3];
-    let _ = (h00, h10, h01, h11, dt, lerp);
-    values[base + 1].clone()
+    let v0 = values[base + 1].clone();
+    let m0 = values[base + 2].clone();
+    let v1 = values[base + 4].clone();
+    let m1 = values[base + 3].clone();
+    v0 * h00 + m0 * h10 + v1 * h01 + m1 * h11
 }
 
 fn sample_cubic_spline_quat(sampler: &Sampler<Quat>, t: f32) -> Quat {
@@ -710,29 +719,31 @@ fn compute_node_rest_transforms(gltf: &gltf::Gltf) -> NodeRestTransforms {
     let mut world_positions = vec![Vec3::ZERO; node_count];
 
     for i in 0..node_count {
+        // Walk parent chain root → node. Stop only when parent < 0
+        // (do not special-case node index 0 — it may not be the root).
         let mut chain = Vec::new();
-        let mut cur = i;
-        while cur != 0 && parents[cur] >= 0 {
-            chain.push(cur);
-            cur = parents[cur] as usize;
+        let mut cur = i as i32;
+        loop {
+            chain.push(cur as usize);
+            let p = parents[cur as usize];
+            if p < 0 {
+                break;
+            }
+            cur = p;
         }
-        chain.push(cur);
         chain.reverse();
 
+        // Standard glTF hierarchy:
+        //   world_pos' = world_pos + world_rot * local_pos
+        //   world_rot' = world_rot * local_rot
         let mut wr = Quat::IDENTITY;
         let mut wp = Vec3::ZERO;
         for &n in &chain {
+            wp += wr * local_positions[n];
             wr *= local_rotations[n];
-            wp = wr * local_positions[n] + if n == chain[0] { Vec3::ZERO } else { wp };
         }
-        let mut accumulated_rot = Quat::IDENTITY;
-        let mut accumulated_pos = Vec3::ZERO;
-        for &n in &chain {
-            accumulated_rot *= local_rotations[n];
-            accumulated_pos = accumulated_rot * local_positions[n] + accumulated_pos;
-        }
-        world_rotations[i] = accumulated_rot;
-        world_positions[i] = accumulated_pos;
+        world_rotations[i] = wr;
+        world_positions[i] = wp;
     }
 
     (

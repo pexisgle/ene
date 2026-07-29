@@ -3,21 +3,117 @@
 use ene_ai::LlmToolCallChunk;
 use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
-use ene_mind::{CognitionEngine, EngineMode, HistoryEntry, MindConfig, PostTurnInput, TurnContext};
+use ene_mind::{
+    CognitionEngine, ComposePrefetch, HistoryEntry, MindConfig, OwnedPostTurnInput, OwnedTurnInput,
+    PostTurnInput, TurnContext, character::CharacterProcessor, character::compute_card_memory_hash,
+    interruption_note, load_active_scene_summary,
+};
 use tokio_stream::StreamExt;
+
+use std::sync::Arc;
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::empty_response_log::{EmptyResponseContext, log_empty_response_if_needed};
-use crate::handle::{EneEvent, TerminalReason};
+use crate::handle::{AudioChunk, EneEvent, TerminalReason};
 use crate::message_builder::build_cognitive_output_contract;
 use crate::streaming::{
-    PHASE_CONTEXT_SEARCH, PHASE_EMBEDDING, PHASE_PROMPT_BUILDING, StreamContext,
-    accumulate_tool_calls, emit_terminal, finalize_tool_calls, perform_tool_executions,
-    select_relevant_tools,
+    PHASE_CONTEXT_SEARCH, PHASE_EMBEDDING, PHASE_PROMPT_BUILDING, StreamContext, StreamOutcome,
+    accumulate_tool_calls, finalize_tool_calls, perform_tool_executions, select_relevant_tools,
+    stream_finish,
 };
+use crate::types::TurnOrigin;
+use ene_ai::{LlmMessage, UserMessagePart};
 use ene_mind::{
     CueSource, PerfKind, PerformanceArbiter, PerformanceCue, cue_source_priority, strip_markers,
 };
+use tracing::Instrument;
+
+/// Maximum sentence buffer length before forcing a TTS flush (chars).
+const TTS_MAX_BUFFER_CHARS: usize = 100;
+
+/// Sends a synthesized audio chunk on the dedicated bounded audio channel
+/// (#272).
+///
+/// Back-pressure policy: a full channel means the playback consumer is
+/// falling behind, so non-final chunks are dropped with a warning rather
+/// than stalling the TTS pipeline (and, transitively, the turn). The
+/// terminal `is_final` marker is different — losing it would leave a
+/// consumer's "is TTS still playing" state stuck forever — so it instead
+/// waits (bounded by [`FINAL_CHUNK_SEND_TIMEOUT`]) for capacity to free up
+/// before giving up and logging an error. When the channel is fully closed
+/// (no consumer ever called [`crate::EneHandle::take_audio_stream`], or the
+/// one consumer dropped it) every send is a silent no-op; that shape is a
+/// deliberate, supported way to opt out of audio delivery entirely.
+async fn send_audio_chunk(audio_tx: &tokio::sync::mpsc::Sender<AudioChunk>, chunk: AudioChunk) {
+    use tokio::sync::mpsc::error::TrySendError;
+
+    let is_final = chunk.is_final;
+    match audio_tx.try_send(chunk) {
+        // `Closed` means no consumer ever called `take_audio_stream` (or the
+        // one consumer dropped it) — a deliberate, supported opt-out.
+        Ok(()) | Err(TrySendError::Closed(_)) => {}
+        Err(TrySendError::Full(chunk)) => {
+            if is_final {
+                const FINAL_CHUNK_SEND_TIMEOUT: std::time::Duration =
+                    std::time::Duration::from_millis(500);
+                if tokio::time::timeout(FINAL_CHUNK_SEND_TIMEOUT, audio_tx.send(chunk))
+                    .await
+                    .is_err()
+                {
+                    tracing::error!(
+                        component = "TtsPipeline",
+                        "audio channel still full after {FINAL_CHUNK_SEND_TIMEOUT:?}; \
+                         dropping final PCM marker (#272)"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    component = "TtsPipeline",
+                    "audio channel full; dropping non-final PCM chunk (#272)"
+                );
+            }
+        }
+    }
+}
+
+/// Finds the index just past the first sentence boundary in `buf`.
+///
+/// A boundary is:
+/// - A CJK sentence-ending punctuation character (`。！？`, U+3002 / U+FF01 /
+///   U+FF1F) unconditionally — Japanese text has no trailing whitespace after
+///   these marks.
+/// - An ASCII sentence-ending punctuation character (`.!?`) followed by
+///   whitespace or end-of-buffer.
+/// - The buffer exceeding [`TTS_MAX_BUFFER_CHARS`] characters.
+///
+/// `char_count` is the caller-maintained character count of `buf`, tracked
+/// incrementally to avoid an O(n) rescan on every streaming delta (#L8).
+/// Returns `None` when no boundary is found.
+fn find_tts_sentence_boundary(buf: &str, char_count: usize) -> Option<usize> {
+    if char_count > TTS_MAX_BUFFER_CHARS {
+        return Some(buf.len());
+    }
+    let chars: Vec<(usize, char)> = buf.char_indices().collect();
+    for (i, &(_, ch)) in chars.iter().enumerate() {
+        match ch {
+            // CJK punctuation: boundary unconditionally (no trailing space in Japanese).
+            '。' | '！' | '？' => {
+                let end = chars.get(i + 1).map_or(buf.len(), |&(offset, _)| offset);
+                return Some(end);
+            }
+            // ASCII punctuation: boundary only at end or before whitespace.
+            '.' | '!' | '?' => {
+                let next = chars.get(i + 1).map(|&(_, c)| c);
+                if next.is_none_or(char::is_whitespace) {
+                    let end = chars.get(i + 1).map_or(buf.len(), |&(offset, _)| offset);
+                    return Some(end);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
 
 #[expect(
     clippy::ref_option,
@@ -53,8 +149,121 @@ fn build_turn_context<'a>(
     }
 }
 
+/// Finish a cancelled turn: record the partial response as an interruption so
+/// the next turn can acknowledge/resume it, then emit `TerminalReason::Cancelled` (#206).
+///
+/// When the trimmed partial text is empty (e.g. cancel arrived before any
+/// visible text), the interruption record is skipped entirely — an empty
+/// snapshot carries no useful context for the next turn (#M9).
+fn finish_cancelled(
+    mut session: ene_mind::ConversationSession,
+    event_tx: &tokio::sync::broadcast::Sender<EneEvent>,
+    terminal_emitted: &std::sync::atomic::AtomicBool,
+    turn: &crate::types::TurnId,
+    origin: TurnOrigin,
+    spoken_text: &str,
+) -> StreamOutcome {
+    if !spoken_text.trim().is_empty() {
+        let spoken_chars = spoken_text.chars().count();
+        session.mark_interrupted(&turn.to_string(), spoken_text, spoken_chars);
+    }
+    stream_finish(
+        session,
+        event_tx,
+        terminal_emitted,
+        turn,
+        origin,
+        TerminalReason::Cancelled,
+    )
+}
+
+/// Spawn deferred memory work for an interrupted (barge-in / cancelled) turn (#M7).
+///
+/// Tags the turn as `interrupted` and includes the partial `spoken_text` so
+/// downstream memory extraction can distinguish partial episodes.
+fn spawn_interrupted_memory_work(
+    mem_store: Option<&Arc<ene_store::MemoryStore>>,
+    mind: &MindConfig,
+    provider: &Arc<dyn ene_ai::LlmProvider>,
+    embedder: Option<&Arc<dyn ene_ai::EmbeddingProvider>>,
+    memory_writer_tx: &tokio::sync::mpsc::UnboundedSender<
+        tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>,
+    >,
+    user_input: &str,
+    spoken_text: &str,
+    turn_tool_results: &[ToolResultSummary],
+    turn_affect: &ene_store::AffectState,
+    card_name: &str,
+    user_name: &str,
+) {
+    let Some(store) = mem_store.cloned() else {
+        return;
+    };
+    let deferred_input = OwnedPostTurnInput {
+        turn: OwnedTurnInput {
+            user_message: user_input.to_string(),
+            assistant_message: Some(spoken_text.to_string()),
+            tool_results: turn_tool_results.to_vec(),
+        },
+        affect: turn_affect.clone(),
+        character_id: card_name.to_string(),
+        user_id: user_name.to_string(),
+        interrupted: true,
+        spoken_text: Some(spoken_text.to_string()),
+    };
+    let handle = CognitionEngine::spawn_deferred_memory_work(
+        store,
+        mind.clone(),
+        deferred_input,
+        provider.clone(),
+        embedder.cloned(),
+    );
+    drop(memory_writer_tx.send(handle));
+}
+
+/// Mutates `messages` in-place for a proactive turn: strips trailing empty
+/// user messages, injects the companion directive as a system message, and
+/// appends a synthetic user prompt (with optional screenshot) so the chat
+/// API always ends with a user-role message.
+fn apply_proactive_prompt(
+    messages: &mut Vec<LlmMessage>,
+    directive: Option<&str>,
+    screen_image_data_uri: Option<&str>,
+) {
+    if let Some(ene_ai::LlmMessage::User { parts }) = messages.last() {
+        let empty = parts.iter().all(|p| match p {
+            UserMessagePart::Text { text } => text.trim().is_empty(),
+            UserMessagePart::Image { .. } => true,
+        });
+        if empty {
+            messages.pop();
+        }
+    }
+    if let Some(dir) = directive.filter(|s| !s.trim().is_empty()) {
+        messages.push(LlmMessage::System {
+            content: format!("[Companion directive]\n{dir}"),
+        });
+    }
+    // OpenAI-compatible chat APIs expect the last message to be user-role.
+    // Keep this cue ephemeral (not written to ConversationSession history).
+    let mut parts = vec![UserMessagePart::Text {
+        text: if screen_image_data_uri.is_some() {
+            "(Proactive turn — respond per the companion directive. A screenshot from the decision moment is attached.)"
+                .to_string()
+        } else {
+            "(Proactive turn — respond per the companion directive.)".to_string()
+        },
+    }];
+    if let Some(uri) = screen_image_data_uri.filter(|s| !s.trim().is_empty()) {
+        parts.push(UserMessagePart::Image {
+            base64_image_data: uri.to_string(),
+        });
+    }
+    messages.push(LlmMessage::User { parts });
+}
+
 /// Run the streaming loop using the cognitive runtime lifecycle.
-pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationSession {
+pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let StreamContext {
         config,
         mut session,
@@ -64,39 +273,61 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         tool_rag,
         provider,
         event_tx,
+        audio_tx,
         diag_tx,
         cancel_token,
         pending_permissions,
         pending_user_inputs,
+        permission_scopes,
+        undo_stack,
         terminal_emitted,
         turn,
+        origin,
+        allow_tools,
+        runtime_directive,
+        proactive_screen_image,
+        generation_timeout,
         classifier_tx,
+        memory_writer_tx,
+        deferred_tool_tx,
+        tts_provider,
+        partial_text,
     } = ctx;
+
+    let is_proactive = origin == TurnOrigin::Proactive;
+    if let Some(timeout) = generation_timeout {
+        let token = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            token.cancel();
+        });
+    }
 
     session.reset_display_buffer();
 
     let mind = config.get_section::<MindConfig>().unwrap_or_default();
     let engine = CognitionEngine::new();
 
-    let tool_config = config
-        .get_section::<ene_tool_host::ToolConfig>()
+    let plugin_config = config
+        .get_section::<ene_plugin_host::PluginConfig>()
         .unwrap_or_default();
-    let tool_calling_enabled = tool_config.enabled;
+    let tool_calling_enabled = plugin_config.enabled && allow_tools;
 
     let mem_config = config
         .get_section::<ene_store::StoreConfig>()
         .unwrap_or_default();
 
     let Some(card) = session.character_card.clone() else {
-        emit_terminal(
+        return stream_finish(
+            session,
             &event_tx,
             &terminal_emitted,
             &turn,
+            origin,
             TerminalReason::Failed {
                 message: "No character card loaded".into(),
             },
         );
-        return session;
     };
 
     let card_name = session.card_name().to_string();
@@ -104,6 +335,19 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
     let session_id = session.memory.session_id.clone();
     let mem_store = session.memory.memory_store.clone();
 
+    let history: Vec<HistoryEntry> = session.history().to_vec();
+    let recall_query = if is_proactive {
+        ""
+    } else {
+        user_input.as_str()
+    };
+    let compose_query = recall_query;
+
+    let prompts = PromptLibrary::load(&mind.emotion.classifier_language);
+    let post_history_phi =
+        build_cognitive_output_contract(&card, &prompts, mind.emotion.enabled, &user_name);
+
+    // Phase A: query embedding || CCv3 sync (when hash mismatches).
     emit_diag(
         &diag_tx,
         DiagnosticEvent::PipelinePhase {
@@ -112,57 +356,55 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         },
     );
 
-    let query_embedding = if let Some(emb_prov) = &embedder {
+    let card_hash = compute_card_memory_hash(&card);
+    let sync_needed = !is_proactive
+        && mem_store.is_some()
+        && embedder.is_some()
+        && session.memory.ccv3_memory_hash != Some(card_hash);
+
+    let span_pre_a = tracing::info_span!("pre_turn.phase_a");
+    let embed_span = tracing::info_span!(parent: &span_pre_a, "embedding");
+    let sync_span = tracing::info_span!(parent: &span_pre_a, "ccv3_sync");
+
+    let embed_fut = async {
+        if is_proactive {
+            return Ok::<Option<Vec<f32>>, String>(None);
+        }
+        let Some(emb_prov) = embedder.as_ref() else {
+            return Ok(None);
+        };
         tracing::info!(%turn, "Generating user query embedding...");
         match ene_ai::embed_query(emb_prov.as_ref(), &user_input).await {
             Ok(emb) => {
-                session.set_pending_embedding(emb.clone());
-                session.set_last_input_embedding(emb.clone());
                 tracing::info!(%turn, "User query embedding generated successfully");
-                Some(emb)
+                Ok(Some(emb))
             }
-            Err(e) => {
-                emit_terminal(
-                    &event_tx,
-                    &terminal_emitted,
-                    &turn,
-                    TerminalReason::Failed {
-                        message: format!("Embedding failed: {e}"),
-                    },
-                );
-                return session;
-            }
+            Err(e) => Err(format!("Embedding failed: {e}")),
         }
-    } else {
-        None
-    };
+    }
+    .instrument(embed_span);
 
-    let history: Vec<HistoryEntry> = session.history().to_vec();
-
-    let prompts = PromptLibrary::load(&mind.emotion.classifier_language);
-    let post_history_phi =
-        build_cognitive_output_contract(&card, &prompts, mind.emotion.enabled, &user_name);
-
-    emit_diag(
-        &diag_tx,
-        DiagnosticEvent::PipelinePhase {
-            turn: turn.clone(),
-            phase: PHASE_CONTEXT_SEARCH.to_string(),
-        },
-    );
-
-    if let (Some(_store), Some(embedder)) = (mem_store.as_deref(), embedder.as_ref()) {
+    let sync_fut = async {
+        if !sync_needed {
+            if !is_proactive && session.memory.ccv3_memory_hash == Some(card_hash) {
+                tracing::info!(%turn, "Character card memories already up-to-date");
+            }
+            return None;
+        }
+        let (Some(_store), Some(sync_embedder)) = (mem_store.as_deref(), embedder.as_ref()) else {
+            return None;
+        };
         let sync_ctx = build_turn_context(
             &mind,
             &card,
             &card_name,
             &user_name,
             session_id.as_str(),
-            &user_input,
+            compose_query,
             &history,
             &mem_store,
-            query_embedding.as_deref(),
-            Some(embedder),
+            None,
+            Some(sync_embedder),
             &provider,
             post_history_phi.as_deref(),
         );
@@ -172,7 +414,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             .await
         {
             Ok((report, hash)) => {
-                session.memory.ccv3_memory_hash = Some(hash);
                 if report.skipped {
                     tracing::info!(%turn, "Character card memories already up-to-date");
                 } else {
@@ -196,6 +437,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     archived = report.archived,
                     "CCv3 character memory sync complete"
                 );
+                Some(hash)
             }
             Err(error) => {
                 tracing::warn!(
@@ -203,36 +445,191 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     error = %error,
                     "CCv3 character memory sync failed; continuing turn"
                 );
+                None
             }
         }
     }
+    .instrument(sync_span);
 
-    let turn_ctx = build_turn_context(
-        &mind,
-        &card,
-        &card_name,
-        &user_name,
-        session_id.as_str(),
-        &user_input,
-        &history,
-        &mem_store,
-        query_embedding.as_deref(),
-        embedder.as_ref(),
-        &provider,
-        post_history_phi.as_deref(),
+    let (embed_result, sync_hash) = async {
+        let embed_res = embed_fut.await;
+        let sync_res = if embed_res.is_ok() {
+            sync_fut.await
+        } else {
+            None
+        };
+        (embed_res, sync_res)
+    }
+    .instrument(span_pre_a)
+    .await;
+    let query_embedding = match embed_result {
+        Ok(emb) => {
+            if let Some(ref emb) = emb {
+                session.set_pending_embedding(emb.clone());
+                session.set_last_input_embedding(emb.clone());
+            }
+            emb
+        }
+        Err(message) => {
+            return stream_finish(
+                session,
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Failed { message },
+            );
+        }
+    };
+    if let Some(hash) = sync_hash {
+        session.memory.ccv3_memory_hash = Some(hash);
+    }
+
+    // Phase B: recall || tools || style examples || scene summary.
+    emit_diag(
+        &diag_tx,
+        DiagnosticEvent::PipelinePhase {
+            turn: turn.clone(),
+            phase: PHASE_CONTEXT_SEARCH.to_string(),
+        },
     );
 
     tracing::info!(%turn, "Retrieving memory recall context and selecting relevant tools...");
-    let (pre_turn_result, tools) = tokio::join!(
-        engine.before_turn(turn_ctx),
-        select_relevant_tools(
-            registry.as_ref(),
-            tool_rag.as_deref(),
-            &user_input,
+    let (pre_turn_result, tools, style_examples, scene_summary) = if is_proactive {
+        let span_pre_b = tracing::info_span!("pre_turn.phase_b");
+        let turn_ctx = build_turn_context(
+            &mind,
+            &card,
+            &card_name,
+            &user_name,
+            session_id.as_str(),
+            compose_query,
+            &history,
+            &mem_store,
             query_embedding.as_deref(),
-            tool_calling_enabled,
-        )
-    );
+            embedder.as_ref(),
+            &provider,
+            post_history_phi.as_deref(),
+        );
+        let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
+        let style_span = tracing::info_span!(parent: &span_pre_b, "style_examples");
+        let scene_span = tracing::info_span!(parent: &span_pre_b, "scene_summary");
+        let (pre, style, scene) = async {
+            tokio::join!(
+                async {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_mins(2),
+                        engine.before_proactive_turn(turn_ctx),
+                    )
+                    .instrument(recall_span)
+                    .await
+                    {
+                        Ok(inner) => inner,
+                        Err(_) => Err(ene_mind::error::EneCognitionError::Other(
+                            "before_proactive_turn timed out after 120s".to_string(),
+                        )),
+                    }
+                },
+                CharacterProcessor::select_style_examples(
+                    &card,
+                    &user_name,
+                    compose_query,
+                    &history,
+                    mem_store.as_deref().map(|s| s as &dyn ene_core::MemoryPort),
+                    embedder.as_ref(),
+                    &mind.character,
+                    2,
+                )
+                .instrument(style_span),
+                async {
+                    if let Some(store) = mem_store.as_deref() {
+                        load_active_scene_summary(store, session_id.as_str())
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|s| s.text)
+                    } else {
+                        None
+                    }
+                }
+                .instrument(scene_span),
+            )
+        }
+        .instrument(span_pre_b)
+        .await;
+        (pre, Vec::new(), style, scene)
+    } else {
+        let span_pre_b = tracing::info_span!("pre_turn.phase_b");
+        let turn_ctx = build_turn_context(
+            &mind,
+            &card,
+            &card_name,
+            &user_name,
+            session_id.as_str(),
+            compose_query,
+            &history,
+            &mem_store,
+            query_embedding.as_deref(),
+            embedder.as_ref(),
+            &provider,
+            post_history_phi.as_deref(),
+        );
+        let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
+        let tools_span = tracing::info_span!(parent: &span_pre_b, "tools");
+        let style_span = tracing::info_span!(parent: &span_pre_b, "style_examples");
+        let scene_span = tracing::info_span!(parent: &span_pre_b, "scene_summary");
+        async {
+            tokio::join!(
+                async {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_mins(2),
+                        engine.before_turn(turn_ctx),
+                    )
+                    .instrument(recall_span)
+                    .await
+                    {
+                        Ok(inner) => inner,
+                        Err(_) => Err(ene_mind::error::EneCognitionError::Other(
+                            "before_turn timed out after 120s".to_string(),
+                        )),
+                    }
+                },
+                select_relevant_tools(
+                    registry.as_ref(),
+                    tool_rag.as_deref(),
+                    recall_query,
+                    query_embedding.as_deref(),
+                    tool_calling_enabled,
+                )
+                .instrument(tools_span),
+                CharacterProcessor::select_style_examples(
+                    &card,
+                    &user_name,
+                    recall_query,
+                    &history,
+                    mem_store.as_deref().map(|s| s as &dyn ene_core::MemoryPort),
+                    embedder.as_ref(),
+                    &mind.character,
+                    2,
+                )
+                .instrument(style_span),
+                async {
+                    if let Some(store) = mem_store.as_deref() {
+                        load_active_scene_summary(store, session_id.as_str())
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|s| s.text)
+                    } else {
+                        None
+                    }
+                }
+                .instrument(scene_span),
+            )
+        }
+        .instrument(span_pre_b)
+        .await
+    };
 
     let pre_turn = match pre_turn_result {
         Ok(v) => {
@@ -240,32 +637,23 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             v
         }
         Err(e) => {
-            emit_terminal(
+            return stream_finish(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
+                origin,
                 TerminalReason::Failed {
                     message: e.to_string(),
                 },
             );
-            return session;
         }
     };
 
     let mut turn_affect = pre_turn.affect.clone();
 
-    if mind.emotion.enabled
-        && let Some(store) = mem_store.as_deref()
-        && let Err(error) = CognitionEngine::persist_affect_snapshot(store, &turn_affect).await
-    {
-        tracing::warn!(
-            component = "CognitionEngine",
-            error = %error,
-            "Failed to persist pre-turn affect snapshot"
-        );
-    }
-
-    if mem_config.enabled
+    if !is_proactive
+        && mem_config.enabled
         && let Some(store) = &mem_store
     {
         ene_store::MemoryStore::spawn_insert_log(
@@ -277,6 +665,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         );
     }
 
+    // Phase C: affect persist || prompt pack (with prefetched style/scene).
     emit_diag(
         &diag_tx,
         DiagnosticEvent::PipelinePhase {
@@ -291,7 +680,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         &card_name,
         &user_name,
         session_id.as_str(),
-        &user_input,
+        compose_query,
         &history,
         &mem_store,
         query_embedding.as_deref(),
@@ -299,68 +688,265 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         &provider,
         post_history_phi.as_deref(),
     );
+    let prefetch = ComposePrefetch {
+        style_examples: Some(style_examples),
+        scene_summary: Some(scene_summary),
+        // Consume any pending interruption so the model can resume it (#206).
+        interruption_note: Some(
+            session
+                .take_interruption()
+                .map(|state| interruption_note(&state)),
+        ),
+    };
+
+    // Extract the small fields still needed after composition, then move
+    // `pre_turn` by value into `compose_prompt_packet` to avoid cloning the
+    // recalled/commitment vectors (#review M2).
+    let classifier_expression_hint = pre_turn.classifier_expression_hint.clone();
+    let pre_turn_affect = pre_turn.affect.clone();
 
     tracing::info!(%turn, "Building prompt packet context...");
-    let composed = match engine.compose_prompt_packet(compose_ctx, &pre_turn).await {
-        Ok(v) => {
+    let span_pre_c = tracing::info_span!("pre_turn.phase_c");
+    let persist_span = tracing::info_span!(parent: &span_pre_c, "persist_affect");
+    let compose_span = tracing::info_span!(parent: &span_pre_c, "compose_prompt");
+    let compose_timeout = std::time::Duration::from_secs(30);
+    let (persist_result, composed_result) = async {
+        tokio::join!(
+            async {
+                if mind.emotion.enabled
+                    && let Some(store) = mem_store.as_deref()
+                {
+                    CognitionEngine::persist_affect_snapshot(store, &turn_affect).await
+                } else {
+                    Ok(())
+                }
+            }
+            .instrument(persist_span),
+            tokio::time::timeout(
+                compose_timeout,
+                engine
+                    .compose_prompt_packet(compose_ctx, pre_turn, prefetch)
+                    .instrument(compose_span),
+            ),
+        )
+    }
+    .instrument(span_pre_c)
+    .await;
+
+    if let Err(error) = persist_result {
+        tracing::warn!(
+            component = "CognitionEngine",
+            error = %error,
+            "Failed to persist pre-turn affect snapshot"
+        );
+    }
+
+    let composed = match composed_result {
+        Ok(Ok(v)) => {
             tracing::info!(%turn, "Prompt packet context assembled successfully");
             v
         }
-        Err(e) => {
-            emit_terminal(
+        Ok(Err(e)) => {
+            return stream_finish(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
+                origin,
                 TerminalReason::Failed {
                     message: e.to_string(),
                 },
             );
-            return session;
+        }
+        Err(_timeout) => {
+            return stream_finish(
+                session,
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Failed {
+                    message: "prompt composition timed out".to_string(),
+                },
+            );
         }
     };
 
     let mut messages = composed.messages;
-    let max_rounds = tool_config.max_rounds;
+    if is_proactive {
+        apply_proactive_prompt(
+            &mut messages,
+            runtime_directive.as_deref(),
+            proactive_screen_image.as_deref(),
+        );
+    }
+    let max_rounds = plugin_config.max_rounds;
     let session_id_for_tools = session.memory.session_id.clone();
     let mut round = 0usize;
     let mut turn_tool_results: Vec<ToolResultSummary> = Vec::new();
 
+    // TTS pipeline: spawn a background worker that synthesizes sentences into
+    // PCM audio chunks and emits them through the dedicated audio channel
+    // (#272; not the chat broadcast bus — see `send_audio_chunk`).
+    // The worker monitors the turn's CancellationToken so barge-in can stop
+    // synthesis immediately instead of finishing the current sentence (#H4).
+    let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let tts_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = if tts_provider.is_some() {
+        Some(tts_tx)
+    } else {
+        None
+    };
+    if let Some(ref provider) = tts_provider {
+        let tts_provider = Arc::clone(provider);
+        let audio_tx = audio_tx.clone();
+        let turn = turn.clone();
+        let tts_cancel = cancel_token.clone();
+        tokio::spawn(
+            async move {
+                let mut rx = tts_rx;
+                loop {
+                    // Wait for the next sentence or cancellation (#H4).
+                    let sentence = tokio::select! {
+                        biased;
+                        () = tts_cancel.cancelled() => break,
+                        recv = rx.recv() => match recv {
+                            Some(s) => s,
+                            None => break, // channel closed: all sentences flushed
+                        },
+                    };
+                    let trimmed = sentence.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    match tts_provider.synthesize_stream(trimmed).await {
+                        Ok(mut stream) => {
+                            use tokio_stream::StreamExt as _;
+                            loop {
+                                // Consume synthesis chunks or bail on cancel (#H4).
+                                let chunk_res = tokio::select! {
+                                    biased;
+                                    () = tts_cancel.cancelled() => break,
+                                    next = stream.next() => match next {
+                                        Some(res) => res,
+                                        None => break, // stream exhausted
+                                    },
+                                };
+                                match chunk_res {
+                                    Ok(chunk) => {
+                                        send_audio_chunk(
+                                            &audio_tx,
+                                            AudioChunk {
+                                                turn: turn.clone(),
+                                                origin,
+                                                pcm: chunk.pcm,
+                                                sample_rate: chunk.sample_rate,
+                                                is_final: false,
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            component = "TtsPipeline",
+                                            error = %e,
+                                            "TTS synthesis chunk error"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                component = "TtsPipeline",
+                                error = %e,
+                                "TTS synthesis stream open failed"
+                            );
+                        }
+                    }
+                    // If cancelled mid-synthesis, stop processing further sentences.
+                    if tts_cancel.is_cancelled() {
+                        break;
+                    }
+                }
+                // Emit final marker only on clean completion (not on cancel).
+                // This natural final is a graceful end of the utterance, so the
+                // desktop playback pump maps it to a non-aborting final marker
+                // (`abort: false`); a barge-in abort is signalled separately by
+                // the synthetic final the pump emits on `Terminal(Cancelled)`.
+                if !tts_cancel.is_cancelled() {
+                    send_audio_chunk(
+                        &audio_tx,
+                        AudioChunk {
+                            turn: turn.clone(),
+                            origin,
+                            pcm: Vec::new(),
+                            sample_rate: 0,
+                            is_final: true,
+                        },
+                    )
+                    .await;
+                }
+            }
+            .instrument(tracing::info_span!("tts_pipeline")),
+        );
+    }
+    let mut tts_sentence_buf = String::new();
+    // Incremental char count for `tts_sentence_buf` to avoid O(n) rescans (#L8).
+    let mut tts_sentence_buf_chars: usize = 0;
+
     loop {
         if cancel_token.is_cancelled() {
-            emit_terminal(
+            let spoken = session.display.display_buffer.clone();
+            spawn_interrupted_memory_work(
+                mem_store.as_ref(),
+                &mind,
+                &provider,
+                embedder.as_ref(),
+                &memory_writer_tx,
+                user_input.as_str(),
+                &spoken,
+                &turn_tool_results,
+                &turn_affect,
+                &card_name,
+                &user_name,
+            );
+            return finish_cancelled(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
-                TerminalReason::Cancelled,
+                origin,
+                &spoken,
             );
-            return session;
         }
 
         if round >= max_rounds {
-            emit_terminal(
+            return stream_finish(
+                session,
                 &event_tx,
                 &terminal_emitted,
                 &turn,
+                origin,
                 TerminalReason::Failed {
                     message: "Max tool call rounds exceeded".into(),
                 },
             );
-            return session;
         }
 
         tracing::info!(%turn, round, "Requesting LLM response stream...");
         let mut stream = match provider.create_chat_stream(&messages, &tools).await {
             Ok(s) => s,
             Err(e) => {
-                emit_terminal(
+                return stream_finish(
+                    session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
+                    origin,
                     TerminalReason::Failed {
                         message: e.to_string(),
                     },
                 );
-                return session;
             }
         };
 
@@ -374,13 +960,28 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
         let mut is_first_chunk = true;
         while let Some(chunk_res) = stream.next().await {
             if cancel_token.is_cancelled() {
-                emit_terminal(
+                let spoken = session.display.display_buffer.clone();
+                spawn_interrupted_memory_work(
+                    mem_store.as_ref(),
+                    &mind,
+                    &provider,
+                    embedder.as_ref(),
+                    &memory_writer_tx,
+                    user_input.as_str(),
+                    &spoken,
+                    &turn_tool_results,
+                    &turn_affect,
+                    &card_name,
+                    &user_name,
+                );
+                return finish_cancelled(
+                    session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
-                    TerminalReason::Cancelled,
+                    origin,
+                    &spoken,
                 );
-                return session;
             }
 
             if is_first_chunk {
@@ -398,42 +999,47 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                         assistant_content.push_str(content_delta);
                         let (text_deltas, special_tokens) = session.process_delta(content_delta);
                         for text in text_deltas {
-                            let _ = event_tx.send(EneEvent::TextDelta {
+                            // Mirror streamed text into the shared buffer so a
+                            // hard-aborted turn can recover its partial response
+                            // for interruption recording (#H5).
+                            partial_text.lock().push_str(&text);
+                            drop(event_tx.send(EneEvent::TextDelta {
                                 turn: turn.clone(),
-                                delta: text,
-                            });
+                                origin,
+                                delta: text.clone(),
+                            }));
+                            if let Some(ref tx) = tts_tx {
+                                tts_sentence_buf.push_str(&text);
+                                tts_sentence_buf_chars =
+                                    tts_sentence_buf_chars.saturating_add(text.chars().count());
+                                while let Some(end) = find_tts_sentence_boundary(
+                                    &tts_sentence_buf,
+                                    tts_sentence_buf_chars,
+                                ) {
+                                    let sentence: String = tts_sentence_buf.drain(..end).collect();
+                                    tts_sentence_buf_chars = tts_sentence_buf_chars
+                                        .saturating_sub(sentence.chars().count());
+                                    drop(tx.send(sentence));
+                                }
+                            }
                         }
                         for token in special_tokens {
                             accumulated_emotion_tokens.push(token.clone());
 
-                            if !suppress_stream_tokens {
-                                // Try `<|perf:…|>` first (#128).
-                                if let Some(cue) = ene_mind::parse_performance_marker(&token) {
-                                    let source = match cue.kind {
-                                        PerfKind::Expression
-                                        | PerfKind::Motion
-                                        | PerfKind::LookAt => {
-                                            if mind.emotion.llm_expression_is_advisory {
-                                                CueSource::LlmAdvisory
-                                            } else {
-                                                CueSource::LlmCommand
-                                            }
+                            if !suppress_stream_tokens
+                                && let Some(cue) = ene_mind::parse_performance_marker(&token)
+                            {
+                                let source = match cue.kind {
+                                    PerfKind::Expression | PerfKind::Motion | PerfKind::LookAt => {
+                                        if mind.emotion.llm_expression_is_advisory {
+                                            CueSource::LlmAdvisory
+                                        } else {
+                                            CueSource::LlmCommand
                                         }
-                                        PerfKind::Cancel => CueSource::LlmCommand,
-                                    };
-                                    perf_arbiter.accept(cue.clone(), source);
-                                } else if let Some(name) =
-                                    ene_mind::extract_emotion_from_token(&token)
-                                {
-                                    // Backward compat: `<|emo:NAME|>`.
-                                    let source = if mind.emotion.llm_expression_is_advisory {
-                                        CueSource::LlmAdvisory
-                                    } else {
-                                        CueSource::LlmCommand
-                                    };
-                                    let cue = PerformanceCue::expression(name);
-                                    perf_arbiter.accept(cue.clone(), source);
-                                }
+                                    }
+                                    PerfKind::Cancel => CueSource::LlmCommand,
+                                };
+                                perf_arbiter.accept(cue.clone(), source);
                             }
                         }
                     }
@@ -442,15 +1048,16 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                     }
                 }
                 Err(e) => {
-                    emit_terminal(
+                    return stream_finish(
+                        session,
                         &event_tx,
                         &terminal_emitted,
                         &turn,
+                        origin,
                         TerminalReason::Failed {
                             message: e.to_string(),
                         },
                     );
-                    return session;
                 }
             }
         }
@@ -477,8 +1084,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
             if mind.emotion.enabled {
                 let llm_proposal = accumulated_emotion_tokens
                     .iter()
-                    .find_map(|token| ene_mind::extract_emotion_from_token(token))
-                    .or_else(|| pre_turn.classifier_expression_hint.clone());
+                    .find_map(|token| {
+                        ene_mind::parse_performance_marker(token)
+                            .and_then(|cue| (cue.kind == PerfKind::Expression).then_some(cue.name))
+                    })
+                    .or_else(|| classifier_expression_hint.clone());
                 let (previous_expression, elapsed_since_change) =
                     session.expression_context(&turn_affect);
                 let (decision, updated_affect) = engine.resolve_expression_turn(
@@ -517,41 +1127,50 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 let (cues, sources): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
                 let primary_source = sources.into_iter().max_by_key(|s| cue_source_priority(*s));
                 if let Some(source) = primary_source {
-                    let _ = event_tx.send(EneEvent::Performance {
+                    drop(event_tx.send(EneEvent::Performance {
                         turn: turn.clone(),
+                        origin,
                         cues,
                         source,
-                    });
+                    }));
                 }
             }
 
+            let post_user = if is_proactive {
+                ""
+            } else {
+                user_input.as_str()
+            };
+            let post = PostTurnInput {
+                turn: TurnInput {
+                    user_message: post_user,
+                    assistant_message: Some(&clean_content),
+                    tool_results: &turn_tool_results,
+                },
+                affect: &turn_affect,
+                character_id: &card_name,
+                user_id: &user_name,
+                interrupted: false,
+                spoken_text: None,
+            };
+
             if let Some(store) = mem_store.as_deref() {
-                let post = PostTurnInput {
-                    turn: TurnInput {
-                        user_message: &user_input,
-                        assistant_message: Some(&clean_content),
-                        tool_results: &turn_tool_results,
-                    },
-                    affect: turn_affect,
-                    character_id: &card_name,
-                    user_id: &user_name,
-                };
-                if let Err(error) = engine
-                    .after_turn(
-                        store,
-                        &mind,
-                        post,
-                        ene_mind::MemoryWriteProviders {
-                            llm: Some(provider.as_ref()),
-                            embedder: embedder.as_ref().map(std::convert::AsRef::as_ref),
-                        },
-                    )
-                    .await
-                {
+                let finalize_result = tokio::time::timeout(
+                    std::time::Duration::from_mins(1),
+                    engine.finalize_turn(store, &mind, &post),
+                )
+                .await;
+                if let Err(error) = match finalize_result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err(ene_mind::error::EneCognitionError::Other(
+                        "finalize_turn timed out after 60s".to_string(),
+                    )),
+                } {
                     tracing::warn!(
                         component = "CognitionEngine",
                         error = %error,
-                        "Post-turn after_turn failed"
+                        "Post-turn finalize_turn failed"
                     );
                 }
             }
@@ -572,22 +1191,40 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 prompt_meta: Some(&composed.meta),
             });
 
-            // Finalize and emit Terminal before the affect classifier so the
-            // chat UI is not blocked for up to classifier_timeout_secs, and so
-            // a cancel abort cannot drop an already-streamed assistant reply
-            // from history.
+            // Commit assistant history before Terminal so the next turn's prompt
+            // includes this exchange even when memory extraction is deferred.
             session.finalize_response();
             session.record_assistant_response();
-            emit_terminal(&event_tx, &terminal_emitted, &turn, TerminalReason::Done);
 
-            if let Some(classifier_store) = mem_store.clone()
+            if let Some(store) = mem_store.clone() {
+                let deferred_input = OwnedPostTurnInput {
+                    turn: OwnedTurnInput {
+                        user_message: post_user.to_string(),
+                        assistant_message: Some(clean_content.clone()),
+                        tool_results: turn_tool_results.clone(),
+                    },
+                    affect: turn_affect,
+                    character_id: card_name.clone(),
+                    user_id: user_name.clone(),
+                    interrupted: false,
+                    spoken_text: None,
+                };
+                let memory_writer_handle = CognitionEngine::spawn_deferred_memory_work(
+                    store,
+                    mind.clone(),
+                    deferred_input,
+                    provider.clone(),
+                    embedder.clone(),
+                );
+                drop(memory_writer_tx.send(memory_writer_handle));
+            }
+
+            if !is_proactive
+                && let Some(classifier_store) = mem_store.clone()
                 && mind.emotion.enabled
-                && matches!(mind.emotion.engine, EngineMode::Llm | EngineMode::Hybrid)
                 && !assistant_content.trim().is_empty()
             {
                 let classifier_config = config.clone();
-                let classifier_model = mind.emotion.classifier_model.clone();
-                let classifier_max_tokens = mind.emotion.classifier_max_tokens;
                 let classifier_lang = mind.emotion.classifier_language.clone();
                 let classifier_timeout_secs = mind.emotion.classifier_timeout_secs;
                 let classifier_character_id = card_name.clone();
@@ -597,110 +1234,134 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 let classifier_context = ene_mind::engine::build_classifier_context(
                     &history,
                     &clean_content,
-                    &pre_turn.affect,
+                    &pre_turn_affect,
                     mind.context.recent_turns,
                 );
 
                 // Fire-and-forget: must not delay Terminal (already emitted).
                 // The JoinHandle is sent to the actor for lifecycle management.
-                let classifier_handle = tokio::spawn(async move {
-                    tracing::info!(
-                        component = "EmotionEngine",
-                        turn_id = classifier_turn_id,
-                        "Starting post-turn affect classifier"
-                    );
-                    let started = std::time::Instant::now();
-                    match ene_mind::emotion::classifier::classify_for_config(
-                        &classifier_config,
-                        classifier_model.as_deref(),
-                        classifier_max_tokens,
-                        &classifier_context,
-                        classifier_timeout_secs,
-                        &classifier_lang,
-                    )
-                    .await
-                    {
-                        Ok(proposal) => {
-                            let pending = ene_store::PendingAffectProposal {
-                                character_id: classifier_character_id,
-                                user_id: classifier_user_id,
-                                source_turn_id: classifier_turn_id,
-                                user_emotion: proposal.user_emotion,
-                                user_intent: proposal.user_intent,
-                                valence: proposal.valence,
-                                arousal: proposal.arousal,
-                                irritation: proposal.irritation,
-                                affinity: proposal.affinity,
-                                recommended_expression: proposal.recommended_expression,
-                                confidence: proposal.confidence,
-                                reason: proposal.reason,
-                                created_at: chrono::Utc::now(),
-                            };
-                            if let Err(error) = classifier_store
-                                .upsert_pending_affect_proposal(&pending)
-                                .await
-                            {
+                let classifier_handle = tokio::spawn(
+                    async move {
+                        tracing::info!(
+                            component = "EmotionEngine",
+                            turn_id = classifier_turn_id,
+                            "Starting post-turn affect classifier"
+                        );
+                        let started = std::time::Instant::now();
+                        match ene_mind::emotion::classifier::classify_for_config(
+                            &classifier_config,
+                            None,
+                            0,
+                            &classifier_context,
+                            classifier_timeout_secs,
+                            &classifier_lang,
+                        )
+                        .await
+                        {
+                            Ok(proposal) => {
+                                let pending = ene_store::PendingAffectProposal {
+                                    character_id: classifier_character_id,
+                                    user_id: classifier_user_id,
+                                    source_turn_id: classifier_turn_id,
+                                    user_emotion: proposal.user_emotion,
+                                    user_intent: proposal.user_intent,
+                                    valence: proposal.valence,
+                                    arousal: proposal.arousal,
+                                    irritation: proposal.irritation,
+                                    affinity: proposal.affinity,
+                                    recommended_expression: proposal.recommended_expression,
+                                    confidence: proposal.confidence,
+                                    reason: proposal.reason,
+                                    created_at: chrono::Utc::now(),
+                                };
+                                if let Err(error) = classifier_store
+                                    .upsert_pending_affect_proposal(&pending)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        component = "EmotionEngine",
+                                        error = %error,
+                                        turn_id = classifier_turn_id,
+                                        "Failed to persist post-turn classifier proposal"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        component = "EmotionEngine",
+                                        turn_id = classifier_turn_id,
+                                        elapsed_ms = started.elapsed().as_millis(),
+                                        user_emotion = %pending.user_emotion,
+                                        user_intent = %pending.user_intent,
+                                        estimated_valence = pending.valence,
+                                        estimated_arousal = pending.arousal,
+                                        estimated_irritation = pending.irritation,
+                                        estimated_affinity = pending.affinity,
+                                        recommended_expression = %pending.recommended_expression,
+                                        confidence = pending.confidence,
+                                        reason = %pending.reason,
+                                        "Post-turn affect classifier estimate complete"
+                                    );
+                                }
+                            }
+                            Err(error) => {
                                 tracing::warn!(
                                     component = "EmotionEngine",
                                     error = %error,
-                                    turn_id = classifier_turn_id,
-                                    "Failed to persist post-turn classifier proposal"
-                                );
-                            } else {
-                                tracing::info!(
-                                    component = "EmotionEngine",
+                                    failure_reason =
+                                        ene_mind::emotion::classifier::classify_failure_reason(
+                                            &error
+                                        ),
                                     turn_id = classifier_turn_id,
                                     elapsed_ms = started.elapsed().as_millis(),
-                                    user_emotion = %pending.user_emotion,
-                                    user_intent = %pending.user_intent,
-                                    estimated_valence = pending.valence,
-                                    estimated_arousal = pending.arousal,
-                                    estimated_irritation = pending.irritation,
-                                    estimated_affinity = pending.affinity,
-                                    recommended_expression = %pending.recommended_expression,
-                                    confidence = pending.confidence,
-                                    reason = %pending.reason,
-                                    "Post-turn affect classifier estimate complete"
+                                    "Post-turn affect classifier failed"
                                 );
                             }
                         }
-                        Err(error) => {
-                            tracing::warn!(
-                                component = "EmotionEngine",
-                                error = %error,
-                                failure_reason =
-                                    ene_mind::emotion::classifier::classify_failure_reason(&error),
-                                turn_id = classifier_turn_id,
-                                elapsed_ms = started.elapsed().as_millis(),
-                                "Post-turn affect classifier failed"
-                            );
-                        }
                     }
-                });
+                    .instrument(tracing::info_span!("post_turn.affect")),
+                );
                 // Send handle to actor for lifecycle management.
                 // A send failure means the actor has shut down; the
                 // classifier task runs as a detached orphan until
                 // completion, which is acceptable at shutdown.
-                let _ = classifier_tx.send(classifier_handle);
+                drop(classifier_tx.send(classifier_handle));
             }
 
-            return session;
+            // Flush any remaining TTS buffer before Terminal.
+            if let Some(ref tx) = tts_tx
+                && !tts_sentence_buf.trim().is_empty()
+            {
+                drop(tx.send(tts_sentence_buf.clone()));
+            }
+            drop(tts_tx);
+
+            return stream_finish(
+                session,
+                &event_tx,
+                &terminal_emitted,
+                &turn,
+                origin,
+                TerminalReason::Done,
+            );
         }
 
         let tool_calls = finalize_tool_calls(current_tool_calls);
-        let tx_messages = perform_tool_executions(
-            registry.as_ref(),
-            session_id_for_tools.as_str(),
-            tool_calls,
-            &assistant_content,
-            &event_tx,
-            &turn,
-            &pending_permissions,
-            &pending_user_inputs,
-            tool_config.timeout_ms,
-            mind.memory.tool_grounding.max_summary_chars,
-        )
-        .await;
+        let exec_ctx = crate::streaming::ToolExecutionContext {
+            registry: registry.as_ref(),
+            tool_rag: tool_rag.as_deref(),
+            session_id: session_id_for_tools.as_str(),
+            event_tx: &event_tx,
+            turn: &turn,
+            origin,
+            pending_permissions: &pending_permissions,
+            pending_user_inputs: &pending_user_inputs,
+            timeout_ms: plugin_config.timeout_ms,
+            max_summary_chars: mind.memory.tool_grounding.max_summary_chars,
+            audit_store: mem_store.as_ref(),
+            permission_scopes: &permission_scopes,
+            undo_stack: &undo_stack,
+            deferred_tool_tx: &deferred_tool_tx,
+        };
+        let tx_messages = perform_tool_executions(&exec_ctx, tool_calls, &assistant_content).await;
 
         match tx_messages {
             Ok(output) => {
@@ -709,16 +1370,118 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> ene_mind::ConversationS
                 round += 1;
             }
             Err(e) => {
-                emit_terminal(
+                return stream_finish(
+                    session,
                     &event_tx,
                     &terminal_emitted,
                     &turn,
+                    origin,
                     TerminalReason::Failed {
                         message: e.to_string(),
                     },
                 );
-                return session;
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::string_slice,
+    reason = "boundary indices come from char_indices and are always char-boundary safe"
+)]
+mod tests {
+    use super::*;
+
+    /// Helper: char count for the incremental-tracking tests (#L8).
+    fn char_count(buf: &str) -> usize {
+        buf.chars().count()
+    }
+
+    #[test]
+    fn ja_sentence_splits_at_cjk_period_without_trailing_space() {
+        // Japanese has no space after 。 — must split unconditionally (#M8).
+        let buf = "こんにちは。元気ですか？";
+        let end =
+            find_tts_sentence_boundary(buf, char_count(buf)).expect("should find a boundary at 。");
+        assert_eq!(&buf[..end], "こんにちは。");
+    }
+
+    #[test]
+    fn ja_sentence_splits_at_fullwidth_exclamation() {
+        let buf = "すごい！本当？";
+        let end =
+            find_tts_sentence_boundary(buf, char_count(buf)).expect("should find a boundary at ！");
+        assert_eq!(&buf[..end], "すごい！");
+    }
+
+    #[test]
+    fn ja_sentence_splits_at_fullwidth_question() {
+        let buf = "本当？うん。";
+        let end =
+            find_tts_sentence_boundary(buf, char_count(buf)).expect("should find a boundary at ？");
+        assert_eq!(&buf[..end], "本当？");
+    }
+
+    #[test]
+    fn en_sentence_splits_at_period_with_trailing_space() {
+        // The boundary index lands right after the punctuation; the trailing
+        // space stays in the buffer and is trimmed before synthesis.
+        let buf = "Hello. How are you?";
+        let end = find_tts_sentence_boundary(buf, char_count(buf))
+            .expect("should find a boundary at '. '");
+        assert_eq!(&buf[..end], "Hello.");
+    }
+
+    #[test]
+    fn en_sentence_splits_at_end_of_buffer() {
+        // ASCII punctuation at end-of-buffer is a boundary even without space.
+        let buf = "Are you there?";
+        let end = find_tts_sentence_boundary(buf, char_count(buf))
+            .expect("should find a boundary at trailing '?'");
+        assert_eq!(&buf[..end], "Are you there?");
+    }
+
+    #[test]
+    fn en_period_without_space_is_not_a_boundary() {
+        // "3.14" — the period is followed by a digit, not whitespace/end.
+        let buf = "Pi is 3.14 roughly";
+        assert!(
+            find_tts_sentence_boundary(buf, char_count(buf)).is_none(),
+            "a period followed by a digit must not be treated as a boundary"
+        );
+    }
+
+    #[test]
+    fn mixed_ja_en_splits_at_first_boundary() {
+        let buf = "OK。then let's go.";
+        let end = find_tts_sentence_boundary(buf, char_count(buf))
+            .expect("should find the first boundary at 。");
+        assert_eq!(&buf[..end], "OK。");
+    }
+
+    #[test]
+    fn no_boundary_returns_none() {
+        let buf = "just some text without punctuation";
+        assert!(find_tts_sentence_boundary(buf, char_count(buf)).is_none());
+    }
+
+    #[test]
+    fn overlong_buffer_forces_flush() {
+        // Exceeding TTS_MAX_BUFFER_CHARS forces a flush of the whole buffer.
+        let buf: String = "あ".repeat(TTS_MAX_BUFFER_CHARS + 1);
+        let end = find_tts_sentence_boundary(&buf, char_count(&buf))
+            .expect("overlong buffer should force a flush");
+        assert_eq!(end, buf.len());
+    }
+
+    #[test]
+    fn incremental_char_count_matches_recount() {
+        // The incremental count passed by the caller must agree with a fresh
+        // recount, otherwise the overlong flush threshold would misfire (#L8).
+        let buf = "こんにちは。Hello. ";
+        assert_eq!(char_count(buf), buf.chars().count());
+        let end = find_tts_sentence_boundary(buf, char_count(buf)).expect("boundary");
+        assert_eq!(&buf[..end], "こんにちは。");
     }
 }

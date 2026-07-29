@@ -1,8 +1,20 @@
 [package]
 name = "ene-desktop"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "ene desktop: winit + wgpu + egui shell, AI bridge, and system tray"
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = ["voice"]
+# Local voice pipeline I/O: microphone capture (cpal) and TTS playback
+# (rodio). Disable (`--no-default-features`) to build a text-only shell
+# without the native audio toolchain (ALSA / PipeWire); the `audio` module
+# compiles to inert stubs and `ene-ai`'s voice providers stay registered but
+# unreachable from the UI.
+voice = ["dep:cpal", "dep:rodio"]
 
 [dependencies]
 winit = "0.30"
@@ -17,15 +29,21 @@ egui-wgpu = "0.35"
 egui-winit = "0.35"
 ene-runtime = { workspace = true }
 ene-mind = { workspace = true }
+ene-ai = { workspace = true }
+ene-ai-local = { workspace = true }
+ene-voice = { workspace = true, features = ["voice"] }
 ene-store = { workspace = true }
 ene-config = { workspace = true }
-ene-tool-proto = { workspace = true }
+ene-plugin-proto = { workspace = true }
+ene-plugin-host = { workspace = true }
+ene-tool-rag = { workspace = true }
 ene-vrm = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }
 png = "0.18"
+image = { workspace = true, features = ["png"] }
+xcap = "0.9.6"
 tray-icon = { version = "0.24", default-features = false }
-ctor = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -34,10 +52,17 @@ bevy_ecs = { version = "0.19", default-features = false }
 bevy_app = { version = "0.19", default-features = false }
 device_query = "4"
 rust-embed = "8.11"
+fluent-bundle = { workspace = true }
 i18n-embed = { version = "0.16", features = ["fluent-system", "fluent", "desktop-requester"] }
 i18n-embed-fl = "0.10"
+active-win-pos-rs = "0.11.0"
+crossbeam-channel = { workspace = true }
+# Local voice pipeline I/O (optional; enabled by the `voice` feature).
+cpal = { workspace = true, optional = true }
+rodio = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ene-ai-local = { workspace = true, features = ["vulkan"] }
 gtk = "0.18.2"
 tray-icon = { version = "0.24", default-features = false, features = ["gtk"] }
 wayland-client = { version = "0.31", default-features = false }
@@ -45,6 +70,8 @@ wayland-protocols = { version = "0.32", default-features = false, features = ["s
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
 x11rb = { version = "0.13", default-features = false }
 bitflags = "2"
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screenshot", "screencast"] }
+pipewire = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }

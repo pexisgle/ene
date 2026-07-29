@@ -7,11 +7,9 @@
 use crate::ai_bridge::AiBridge;
 use crate::character_state::{AnimationControl, EmotionCommand, EmotionQueue};
 use crate::component::ui::UiStateComponent;
-#[cfg(target_os = "linux")]
-use crate::settings::cycle_mask_render_downsample;
 use crate::settings::{
-    AntialiasingMode, CharacterSettings, ShadowQuality, cycle_antialiasing_mode, cycle_debug_fps,
-    cycle_shadow_quality, cycle_target_fps, target_fps_label,
+    CharacterSettings, GraphicsQuality, GraphicsSettings, cycle_graphics_quality,
+    graphics_quality_label,
 };
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
@@ -19,7 +17,11 @@ use std::sync::Arc;
 
 /// Single action enum shared by every page widget. Hotkeys and
 /// buttons both translate into one of these before mutating state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The character-card editor variants carry a `String` path, so the
+/// enum is `Clone` but not `Copy`; call sites that need to reuse an
+/// action (e.g. the runtime hotkey dispatcher) clone it explicitly.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
     PrevCharacter,
     NextCharacter,
@@ -28,16 +30,8 @@ pub enum SettingsAction {
     TogglePlay,
     #[cfg(target_os = "linux")]
     ToggleDebugOverlay,
-    #[cfg(target_os = "linux")]
-    MaskDownsampleDown,
-    #[cfg(target_os = "linux")]
-    MaskDownsampleUp,
-    TargetFpsDown,
-    TargetFpsUp,
-    ShadowQualityDown,
-    ShadowQualityUp,
-    AntialiasingModeDown,
-    AntialiasingModeUp,
+    GraphicsQualityDown,
+    GraphicsQualityUp,
     LookAtStrengthDown,
     LookAtStrengthUp,
     ModelScaleDown,
@@ -58,10 +52,21 @@ pub enum SettingsAction {
     /// colliders (debug)" checkbox on the Character page.
     ToggleColliderDebug,
     ToggleInputRegionDebug,
-    DebugFpsDown,
-    DebugFpsUp,
     LanguageDown,
     LanguageUp,
+    /// Load the character card at `path` into the editor buffers
+    /// (Character Card editor page, #218).
+    LoadCharacterCard {
+        path: String,
+    },
+    /// Write the editor buffers back to the character card at `path`
+    /// (Character Card editor page, #218).
+    SaveCharacterCard {
+        path: String,
+    },
+    /// Validate the editor buffers without writing to disk
+    /// (Character Card editor page, #218).
+    ValidateCharacterCard,
 }
 
 pub fn apply_action(
@@ -113,6 +118,10 @@ pub fn apply_action(
         }
         SettingsAction::TogglePlay => {
             animation.toggle_playing();
+            if let Some(mut ui_anim) = world.get_mut::<crate::component::ui::UiAnimation>(ui_entity)
+            {
+                ui_anim.0.playing = animation.playing;
+            }
         }
         #[cfg(target_os = "linux")]
         SettingsAction::ToggleDebugOverlay => {
@@ -121,45 +130,15 @@ pub fn apply_action(
             }
             settings.mark_dirty();
         }
-        #[cfg(target_os = "linux")]
-        SettingsAction::MaskDownsampleDown => {
-            settings.graphics.mask_render_downsample =
-                cycle_mask_render_downsample(settings.graphics.mask_render_downsample, -1);
-            settings.mark_dirty();
+        SettingsAction::GraphicsQualityDown => {
+            let current = settings.graphics().quality;
+            let next = cycle_graphics_quality(current, -1);
+            settings.set_graphics(GraphicsSettings { quality: next });
         }
-        #[cfg(target_os = "linux")]
-        SettingsAction::MaskDownsampleUp => {
-            settings.graphics.mask_render_downsample =
-                cycle_mask_render_downsample(settings.graphics.mask_render_downsample, 1);
-            settings.mark_dirty();
-        }
-        SettingsAction::TargetFpsDown => {
-            settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::TargetFpsUp => {
-            settings.graphics.target_fps = cycle_target_fps(settings.graphics.target_fps, 1);
-            settings.mark_dirty();
-        }
-        SettingsAction::ShadowQualityDown => {
-            settings.graphics.shadow_quality =
-                cycle_shadow_quality(settings.graphics.shadow_quality, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::ShadowQualityUp => {
-            settings.graphics.shadow_quality =
-                cycle_shadow_quality(settings.graphics.shadow_quality, 1);
-            settings.mark_dirty();
-        }
-        SettingsAction::AntialiasingModeDown => {
-            settings.graphics.antialiasing_mode =
-                cycle_antialiasing_mode(settings.graphics.antialiasing_mode, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::AntialiasingModeUp => {
-            settings.graphics.antialiasing_mode =
-                cycle_antialiasing_mode(settings.graphics.antialiasing_mode, 1);
-            settings.mark_dirty();
+        SettingsAction::GraphicsQualityUp => {
+            let current = settings.graphics().quality;
+            let next = cycle_graphics_quality(current, 1);
+            settings.set_graphics(GraphicsSettings { quality: next });
         }
         SettingsAction::LookAtStrengthDown => {
             adjust_f32(&mut settings.character_state.look_at_strength, -0.05);
@@ -205,32 +184,167 @@ pub fn apply_action(
                 ui_state.0.show_input_region_debug = !ui_state.0.show_input_region_debug;
             }
         }
-        SettingsAction::DebugFpsDown => {
-            settings.graphics.debug_fps = cycle_debug_fps(settings.graphics.debug_fps, -1);
-            settings.mark_dirty();
-        }
-        SettingsAction::DebugFpsUp => {
-            settings.graphics.debug_fps = cycle_debug_fps(settings.graphics.debug_fps, 1);
-            settings.mark_dirty();
-        }
         SettingsAction::LanguageDown => {
-            settings.language = crate::settings::cycle_language(settings.language, -1);
-            crate::i18n::select_language(settings.language);
+            let current = settings.language();
+            let next = crate::settings::cycle_language(current, -1);
+            settings.set_language(next);
+            crate::i18n::select_language(next);
             settings.sync_classifier_language_from_ui();
-            settings.mark_dirty();
         }
         SettingsAction::LanguageUp => {
-            settings.language = crate::settings::cycle_language(settings.language, 1);
-            crate::i18n::select_language(settings.language);
+            let current = settings.language();
+            let next = crate::settings::cycle_language(current, 1);
+            settings.set_language(next);
+            crate::i18n::select_language(next);
             settings.sync_classifier_language_from_ui();
-            settings.mark_dirty();
+        }
+        SettingsAction::LoadCharacterCard { path } => {
+            load_character_card(&path, world, ui_entity);
+        }
+        SettingsAction::SaveCharacterCard { path } => {
+            save_character_card(&path, world, ui_entity);
+        }
+        SettingsAction::ValidateCharacterCard => {
+            validate_character_card(world, ui_entity);
         }
     }
 
     settings.clamp_runtime_values();
     settings.mark_dirty();
-    tracing::info!("apply_action: calling settings.save()");
-    settings.save();
+}
+
+/// Load the character card at `path` into the editor buffers on
+/// [`UiState`]. On read/parse failure the error is surfaced through
+/// `character_editor_validation_errors` and the loaded flag stays
+/// `false` so the page can retry.
+fn load_character_card(path: &str, world: &mut World, ui_entity: Entity) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![format!("Failed to read card: {error}")],
+            );
+            return;
+        }
+    };
+    let card: ene_config::CharacterCardV3 = match serde_json::from_str(&content) {
+        Ok(card) => card,
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![format!("Failed to parse card: {error}")],
+            );
+            return;
+        }
+    };
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        let data = &card.data;
+        state.0.character_editor_name.clone_from(&data.name);
+        state
+            .0
+            .character_editor_description
+            .clone_from(&data.description);
+        state
+            .0
+            .character_editor_personality
+            .clone_from(&data.personality);
+        state.0.character_editor_scenario.clone_from(&data.scenario);
+        state
+            .0
+            .character_editor_system_prompt
+            .clone_from(&data.system_prompt);
+        state
+            .0
+            .character_editor_mes_example
+            .clone_from(&data.mes_example);
+        state
+            .0
+            .character_editor_first_mes
+            .clone_from(&data.first_mes);
+        state
+            .0
+            .character_editor_post_history
+            .clone_from(&data.post_history_instructions);
+        state.0.character_editor_loaded = true;
+        state.0.character_editor_modified = false;
+        state.0.character_editor_validation_errors.clear();
+    }
+}
+
+/// Write the editor buffers back to the character card at `path`.
+/// The existing on-disk card is read first (when present) so that
+/// extensions, assets, and other fields the editor does not expose
+/// are preserved; a missing/unreadable file starts from a default
+/// card.
+fn save_character_card(path: &str, world: &mut World, ui_entity: Entity) {
+    let Some(snapshot) = world
+        .get::<UiStateComponent>(ui_entity)
+        .map(|s| s.0.clone())
+    else {
+        return;
+    };
+    let mut card = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<ene_config::CharacterCardV3>(&content).ok())
+        .unwrap_or_default();
+    card.data.name = snapshot.character_editor_name;
+    card.data.description = snapshot.character_editor_description;
+    card.data.personality = snapshot.character_editor_personality;
+    card.data.scenario = snapshot.character_editor_scenario;
+    card.data.system_prompt = snapshot.character_editor_system_prompt;
+    card.data.mes_example = snapshot.character_editor_mes_example;
+    card.data.first_mes = snapshot.character_editor_first_mes;
+    card.data.post_history_instructions = snapshot.character_editor_post_history;
+    let serialized = match serde_json::to_string_pretty(&card) {
+        Ok(serialized) => serialized,
+        Err(error) => {
+            set_editor_errors(
+                world,
+                ui_entity,
+                vec![format!("Failed to serialize card: {error}")],
+            );
+            return;
+        }
+    };
+    if let Err(error) = std::fs::write(path, serialized) {
+        set_editor_errors(
+            world,
+            ui_entity,
+            vec![format!("Failed to write card: {error}")],
+        );
+        return;
+    }
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.character_editor_modified = false;
+        state.0.character_editor_validation_errors.clear();
+    }
+}
+
+/// Validate the editor buffers without touching disk, populating
+/// `character_editor_validation_errors`.
+fn validate_character_card(world: &mut World, ui_entity: Entity) {
+    let Some(snapshot) = world
+        .get::<UiStateComponent>(ui_entity)
+        .map(|s| s.0.clone())
+    else {
+        return;
+    };
+    let mut errors = Vec::new();
+    if snapshot.character_editor_name.trim().is_empty() {
+        errors.push("Name must not be empty".to_string());
+    }
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.character_editor_validation_errors = errors;
+    }
+}
+
+fn set_editor_errors(world: &mut World, ui_entity: Entity, errors: Vec<String>) {
+    if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
+        state.0.character_editor_validation_errors = errors;
+    }
 }
 
 const fn cycle_index(index: usize, len: usize, step: isize) -> usize {
@@ -244,27 +358,8 @@ fn adjust_f32(value: &mut f32, delta: f32) {
     *value += delta;
 }
 
-pub fn format_fps_label(lang: crate::settings::Language, fps: u32) -> String {
-    target_fps_label(lang, fps)
-}
-
-pub fn format_shadow_label(lang: crate::settings::Language, quality: ShadowQuality) -> String {
-    let _ = lang;
-    match quality {
-        ShadowQuality::Low => crate::i18n::low(),
-        ShadowQuality::Medium => crate::i18n::medium(),
-        ShadowQuality::High => crate::i18n::high(),
-    }
-}
-
-pub fn format_aa_label(lang: crate::settings::Language, mode: AntialiasingMode) -> String {
-    let _ = lang;
-    match mode {
-        AntialiasingMode::Off => crate::i18n::off(),
-        AntialiasingMode::Fxaa => "FXAA".to_string(),
-        AntialiasingMode::Smaa => "SMAA".to_string(),
-        AntialiasingMode::Taa => "TAA".to_string(),
-    }
+pub fn format_quality_label(lang: crate::settings::Language, quality: GraphicsQuality) -> String {
+    graphics_quality_label(lang, quality)
 }
 
 /// Push the per-character default expression into the

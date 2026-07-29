@@ -1,9 +1,9 @@
-{user_name} に関する既存の事実：
+以下の会話を分析し、JSON を返してください。
+
+## Existing facts about {user_name}
 {existing_facts}
 
-会話：
+## Conversation
 ---
 {conversation}
 ---
-
-上記の会話を分析し、JSONを返してください。

@@ -8,7 +8,8 @@
     clippy::expect_used,
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
-    reason = "diagnostic example parses glb bytes with manual offsets"
+    clippy::print_stdout,
+    reason = "diagnostic example parses glb bytes with manual offsets and prints results to the terminal by design"
 )]
 
 use std::path::PathBuf;

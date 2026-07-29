@@ -19,7 +19,8 @@
     "character_version": "1.0",
     "extensions": {
       "ene": {
-        "motions": [
+        "motion_catalog": {
+          "motions": [
           {
             "name": "VRMA_01",
             "path": "motions/VRMA_01.vrma"
@@ -48,7 +49,8 @@
             "name": "VRMA_07",
             "path": "motions/VRMA_07.vrma"
           }
-        ],
+          ]
+        },
         "expressions": [
           {
             "name": "neutral",

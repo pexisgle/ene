@@ -8,6 +8,15 @@
 //! Senders (clones of [`AppEventSender`](crate::events::AppEventSender))
 //! are passed to producers at construction time so they can push
 //! without holding a reference to the state.
+//!
+//! TODO(#dual-source-of-truth): `runtime_startup_error`,
+//! `runtime_disconnected`, and `reconnect_attempted` are duplicated
+//! between `AppState` and `UiStateComponent` (in `component/ui.rs`).
+//! `AppState::sync_runtime_health_to_ui` / `pull_runtime_health_from_ui`
+//! manually copy these fields back and forth every frame. This is
+//! fragile and error-prone. A future refactor should pick a single
+//! source of truth (likely the bevy `UiStateComponent`) and have
+//! `AppState` read/write through it exclusively.
 use std::sync::Arc;
 
 use bevy_app::App;
@@ -17,7 +26,7 @@ use crate::ai_bridge::AiBridge;
 use crate::app::build_app;
 use crate::character::CharacterRenderer;
 use crate::events::{AppEvent, AppEventSender};
-use crate::gpu::GpuContext;
+use crate::gpu::{GpuContext, GpuError};
 use crate::settings::CharacterSettings;
 use crate::tray::TrayHandle;
 
@@ -38,7 +47,16 @@ pub struct DebugState {
 pub struct AppState {
     pub gpu: GpuContext,
     pub settings: CharacterSettings,
-    pub ai: Arc<AiBridge>,
+    pub ai: Option<Arc<AiBridge>>,
+    /// Localized startup failure when [`AiBridge::try_new`] fails (#242).
+    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.runtime_startup_error`
+    pub runtime_startup_error: Option<String>,
+    /// Actor broadcast channel closed; chat is disabled until reconnect.
+    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.runtime_disconnected`
+    pub runtime_disconnected: bool,
+    /// Whether the single automatic reconnect has already been attempted.
+    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.reconnect_attempted`
+    pub reconnect_attempted: bool,
     pub tray: Option<TrayHandle>,
     /// Character renderer (depth texture + default VRM).
     pub character: CharacterRenderer,
@@ -54,6 +72,14 @@ pub struct AppState {
     /// The new `bevy_ecs` [`App`]. Its schedule is run by
     /// [`crate::runtime::Runtime::about_to_wait`] on every frame.
     pub app: App,
+    /// Kept-alive sender for the TTS playback channel. Cloned into each
+    /// `AiBridge` so the playback thread survives bridge reconnects (the
+    /// channel stays open as long as this sender lives).
+    #[cfg(feature = "voice")]
+    pub audio_tx: Option<crate::audio::AudioChunkSender>,
+    /// Keep-alive handle for the TTS playback thread; joined on drop.
+    #[cfg(feature = "voice")]
+    pub audio_playback: Option<crate::audio::playback::AudioPlaybackHandle>,
 }
 
 impl AppState {
@@ -73,23 +99,78 @@ impl AppState {
         bootstrap_handle: &tokio::runtime::Handle,
     ) -> (Self, AppEventSender) {
         let (tx, rx) = mpsc::unbounded_channel::<AppEvent>();
-        let config = settings.ai.ai.clone();
-        let ai = Arc::new(AiBridge::new(tx.clone(), bootstrap_handle, config));
+        let config = settings.config_clone();
+
+        // Voice pipeline: spawn the TTS playback thread once and build the
+        // shared audio state. The playback sender is cloned into the AI
+        // bridge so `AudioChunk` events reach the rodio sink; the keep-alive
+        // handle and sender live on `AppState` so the channel stays open
+        // across bridge reconnects.
+        #[cfg(feature = "voice")]
+        let (audio_tx, audio_playback, audio_state, viseme_state) = {
+            let mic_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let tts_playing = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let viseme = crate::audio::VisemeState::default();
+            let (sender, handle) =
+                crate::audio::playback::spawn_playback(viseme.clone(), tts_playing.clone());
+            let state = crate::audio::AudioState {
+                mic_active,
+                tts_playing,
+                mic_device: settings.mic_device(),
+                config: config.clone(),
+            };
+            (Some(sender), Some(handle), state, viseme)
+        };
+        #[cfg(not(feature = "voice"))]
+        let audio_tx: Option<crate::audio::AudioChunkSender> = None;
+
+        let (ai, runtime_startup_error) =
+            match AiBridge::try_new(tx.clone(), bootstrap_handle, config, audio_tx.clone()) {
+                Ok(bridge) => (Some(Arc::new(bridge)), None),
+                Err(error) => {
+                    tracing::error!(
+                        component = "AiBridge",
+                        error = %error,
+                        "EneHandle::open failed"
+                    );
+                    (None, Some(crate::runtime_error::user_message(&error)))
+                }
+            };
         let character =
             CharacterRenderer::uninit(&settings.assets_dir, settings.current_character());
 
+        #[cfg(feature = "voice")]
+        let mut app = build_app(bootstrap_handle.clone(), rx, tx.clone());
+        #[cfg(not(feature = "voice"))]
         let app = build_app(bootstrap_handle.clone(), rx, tx.clone());
+
+        // Register the shared audio resources so the mic toggle, playback
+        // thread, and render-loop viseme hook can all reach them. The
+        // `cpal::Stream` mic handle is `!Send`, so it lives on the chat UI
+        // rather than in the ECS world.
+        #[cfg(feature = "voice")]
+        {
+            app.insert_resource(audio_state);
+            app.insert_resource(viseme_state);
+        }
 
         (
             Self {
                 gpu,
                 settings,
                 ai,
+                runtime_startup_error,
+                runtime_disconnected: false,
+                reconnect_attempted: false,
                 tray: None,
                 character,
                 character_physics_registration: None,
                 debug: DebugState::default(),
                 app,
+                #[cfg(feature = "voice")]
+                audio_tx,
+                #[cfg(feature = "voice")]
+                audio_playback,
             },
             tx,
         )
@@ -127,7 +208,9 @@ impl AppState {
         reason = "transitional AI bridge entry point for external callers"
     )]
     pub fn ai_run(&self, input: impl Into<String>) {
-        self.ai.run(input);
+        if let Some(ai) = &self.ai {
+            ai.run(input);
+        }
     }
 
     /// Persist current runtime state.
@@ -142,7 +225,7 @@ impl AppState {
         reason = "transitional AI bridge entry point for external callers"
     )]
     pub fn request_quit(&self, event_tx: &AppEventSender) {
-        let _ = event_tx.send(AppEvent::Quit);
+        drop(event_tx.send(AppEvent::Quit));
     }
 
     /// Borrow the bevy UI entity (the entity spawned by
@@ -315,7 +398,10 @@ impl AppState {
         if !needs {
             return;
         }
-        let Ok(snapshot) = self.ai.get_snapshot_blocking() else {
+        let Some(ai) = self.ai.as_ref() else {
+            return;
+        };
+        let Ok(snapshot) = ai.get_snapshot_blocking() else {
             return;
         };
         if let Some(mut chat) = self
@@ -326,17 +412,115 @@ impl AppState {
             chat.0.sync_from_history(&snapshot.history);
         }
     }
+
+    /// Attempt a single runtime reconnect after actor death (#242).
+    pub fn reconnect_runtime(
+        &mut self,
+        event_tx: &AppEventSender,
+        bootstrap_handle: &tokio::runtime::Handle,
+    ) -> Result<(), String> {
+        if self.reconnect_attempted {
+            return Err(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "runtime-reconnect-already-attempted"
+            ));
+        }
+        self.reconnect_attempted = true;
+        let config = self.settings.config_clone();
+        #[cfg(feature = "voice")]
+        let audio_tx = self.audio_tx.clone();
+        #[cfg(not(feature = "voice"))]
+        let audio_tx: Option<crate::audio::AudioChunkSender> = None;
+        match AiBridge::try_new(event_tx.clone(), bootstrap_handle, config, audio_tx) {
+            Ok(bridge) => {
+                self.ai = Some(Arc::new(bridge));
+                self.runtime_disconnected = false;
+                self.runtime_startup_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                let message = crate::runtime_error::user_message(&error);
+                self.runtime_startup_error = Some(message.clone());
+                Err(message)
+            }
+        }
+    }
+
+    /// Mirror runtime health into the settings UI state.
+    pub fn sync_runtime_health_to_ui(&mut self) {
+        let Some(entity) = self.ui_bevy_entity() else {
+            return;
+        };
+        let startup_error = self.runtime_startup_error.clone();
+        let disconnected = self.runtime_disconnected;
+        let reconnect_attempted = self.reconnect_attempted;
+        if let Some(mut ui) = self
+            .app
+            .world_mut()
+            .get_mut::<crate::component::ui::UiStateComponent>(entity)
+        {
+            ui.0.runtime_startup_error = startup_error;
+            ui.0.runtime_disconnected = disconnected;
+            ui.0.reconnect_attempted = reconnect_attempted;
+        }
+    }
+
+    /// Pull disconnect state produced by bevy consumer systems.
+    pub fn pull_runtime_health_from_ui(&mut self) {
+        let Some(entity) = self.ui_bevy_entity() else {
+            return;
+        };
+        if self
+            .app
+            .world()
+            .get::<crate::component::ui::UiStateComponent>(entity)
+            .is_some_and(|ui| ui.0.runtime_disconnected)
+        {
+            self.runtime_disconnected = true;
+        }
+    }
+
+    /// Apply UI reconnect requests queued from the settings window.
+    pub fn take_reconnect_request(&mut self) -> bool {
+        let Some(entity) = self.ui_bevy_entity() else {
+            return false;
+        };
+        let requested = self
+            .app
+            .world()
+            .get::<crate::component::ui::UiStateComponent>(entity)
+            .is_some_and(|ui| ui.0.reconnect_requested);
+        if requested
+            && let Some(mut ui) = self
+                .app
+                .world_mut()
+                .get_mut::<crate::component::ui::UiStateComponent>(entity)
+        {
+            ui.0.reconnect_requested = false;
+        }
+        requested
+    }
+}
+
+#[cfg(feature = "voice")]
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // Drop the playback channel sender first so the playback thread
+        // observes a closed channel and exits, then join it.
+        self.audio_tx = None;
+        if let Some(mut playback) = self.audio_playback.take() {
+            playback.stop();
+        }
+    }
 }
 
 /// Path resolution + error type for `AppState` construction.
 #[derive(Debug, thiserror::Error)]
 pub enum AppStateError {
     #[error("GPU context failed to initialise: {0}")]
-    Gpu(#[from] Box<dyn std::error::Error>),
+    Gpu(#[from] GpuError),
     #[error("Failed to resolve assets directory: {0}")]
     AssetsDir(String),
-    #[error("Tokio runtime error: {0}")]
-    Tokio(#[from] tokio::io::Error),
 }
 
 #[cfg(test)]

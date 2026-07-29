@@ -5,8 +5,8 @@ use std::sync::Arc;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use ene_config::truncate::Truncate;
+use ene_plugin_proto::{MultiAnswer, QuestionItem};
 use ene_runtime::UserInputResponse;
-use ene_tool_proto::{MultiAnswer, QuestionItem};
 
 use crate::ai_bridge::AiBridge;
 use crate::component::chat::ChatStateComponent;
@@ -54,49 +54,73 @@ pub fn render_permission_dialog(
     };
     let request_id = pending.request_id;
     let mut open = true;
-    egui::Window::new(crate::i18n::permission_requested())
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .default_width(420.0)
-        .max_width(480.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ui.ctx(), |ui| {
-            ui.vertical(|ui| {
-                ui.set_max_width(440.0);
-                permission_field_label(ui, &crate::i18n::action_label(), &pending.action);
-                permission_field_label(ui, &crate::i18n::target_label(), &pending.target);
-                if let Some(description) = &pending.description {
-                    permission_field_label(ui, &crate::i18n::description_label(), description);
+    egui::Window::new(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "permission-requested"
+    ))
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(false)
+    .default_width(420.0)
+    .max_width(480.0)
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .show(ui.ctx(), |ui| {
+        ui.vertical(|ui| {
+            ui.set_max_width(440.0);
+            permission_field_label(
+                ui,
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "action-label"),
+                &pending.action,
+            );
+            permission_field_label(
+                ui,
+                &i18n_embed_fl::fl!(crate::i18n::loader(), "target-label"),
+                &pending.target,
+            );
+            if let Some(description) = &pending.description {
+                permission_field_label(
+                    ui,
+                    &i18n_embed_fl::fl!(crate::i18n::loader(), "description-label"),
+                    description,
+                );
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "yes"))
+                    .clicked()
+                {
+                    drop(ai.answer_permission(
+                        request_id.clone(),
+                        ene_runtime::PermissionDecision::AllowOnce,
+                    ));
+                    clear_pending_permission(world, chat_entity);
                 }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button(crate::i18n::yes()).clicked() {
-                        let _ = ai.answer_permission(
-                            request_id.clone(),
-                            ene_runtime::PermissionDecision::AllowOnce,
-                        );
-                        clear_pending_permission(world, chat_entity);
-                    }
-                    if ui.button(crate::i18n::no()).clicked() {
-                        let _ = ai.answer_permission(
-                            request_id.clone(),
-                            ene_runtime::PermissionDecision::Deny,
-                        );
-                        clear_pending_permission(world, chat_entity);
-                    }
-                    if ui.button(crate::i18n::always()).clicked() {
-                        let _ = ai.answer_permission(
-                            request_id.clone(),
-                            ene_runtime::PermissionDecision::AllowSession,
-                        );
-                        clear_pending_permission(world, chat_entity);
-                    }
-                });
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "no"))
+                    .clicked()
+                {
+                    drop(ai.answer_permission(
+                        request_id.clone(),
+                        ene_runtime::PermissionDecision::Deny,
+                    ));
+                    clear_pending_permission(world, chat_entity);
+                }
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "always"))
+                    .clicked()
+                {
+                    drop(ai.answer_permission(
+                        request_id.clone(),
+                        ene_runtime::PermissionDecision::AllowSession,
+                    ));
+                    clear_pending_permission(world, chat_entity);
+                }
             });
         });
+    });
     if !open {
-        let _ = ai.answer_permission(request_id, ene_runtime::PermissionDecision::Deny);
+        drop(ai.answer_permission(request_id, ene_runtime::PermissionDecision::Deny));
         clear_pending_permission(world, chat_entity);
     }
 }
@@ -123,53 +147,64 @@ pub fn render_user_input_dialog(
     let request_id = prompt_snapshot.request_id;
     let items = prompt_snapshot.prompt.items;
     let mut open = true;
-    egui::Window::new(crate::i18n::user_input_requested())
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .default_size([420.0, 280.0])
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ui.ctx(), |ui| {
-            ui.vertical(|ui| {
-                ui.label(crate::i18n::answer_each_question());
-                ui.separator();
-                for (i, (item, draft)) in items.iter().zip(drafts.iter_mut()).enumerate() {
-                    render_user_input_row(ui, i, item, draft);
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button(crate::i18n::submit()).clicked() {
-                        let answers: Vec<MultiAnswer> = drafts
-                            .iter()
-                            .map(|d| {
-                                if d.skipped {
-                                    MultiAnswer::Skip
-                                } else if let Some(option) = &d.selected {
-                                    MultiAnswer::Selected {
-                                        option: option.clone(),
-                                    }
-                                } else {
-                                    MultiAnswer::Answer {
-                                        text: d.text.clone(),
-                                    }
+    egui::Window::new(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "user-input-requested"
+    ))
+    .open(&mut open)
+    .collapsible(false)
+    .resizable(true)
+    .default_size([420.0, 280.0])
+    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+    .show(ui.ctx(), |ui| {
+        ui.vertical(|ui| {
+            ui.label(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "answer-each-question"
+            ));
+            ui.separator();
+            for (i, (item, draft)) in items.iter().zip(drafts.iter_mut()).enumerate() {
+                render_user_input_row(ui, i, item, draft);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "submit"))
+                    .clicked()
+                {
+                    let answers: Vec<MultiAnswer> = drafts
+                        .iter()
+                        .map(|d| {
+                            if d.skipped {
+                                MultiAnswer::Skip
+                            } else if let Some(option) = &d.selected {
+                                MultiAnswer::Selected {
+                                    option: option.clone(),
                                 }
-                            })
-                            .collect();
-                        let _ = ai.answer_user_input(
-                            request_id.clone(),
-                            UserInputResponse::Multi(answers),
-                        );
-                        clear_pending_user_input(world, chat_entity);
-                    }
-                    if ui.button(crate::i18n::cancel()).clicked() {
-                        let _ = ai.answer_user_input(request_id.clone(), UserInputResponse::Cancel);
-                        clear_pending_user_input(world, chat_entity);
-                    }
-                });
+                            } else {
+                                MultiAnswer::Answer {
+                                    text: d.text.clone(),
+                                }
+                            }
+                        })
+                        .collect();
+                    drop(
+                        ai.answer_user_input(request_id.clone(), UserInputResponse::Multi(answers)),
+                    );
+                    clear_pending_user_input(world, chat_entity);
+                }
+                if ui
+                    .button(i18n_embed_fl::fl!(crate::i18n::loader(), "cancel"))
+                    .clicked()
+                {
+                    drop(ai.answer_user_input(request_id.clone(), UserInputResponse::Cancel));
+                    clear_pending_user_input(world, chat_entity);
+                }
             });
         });
+    });
     if !open {
-        let _ = ai.answer_user_input(request_id, UserInputResponse::Cancel);
+        drop(ai.answer_user_input(request_id, UserInputResponse::Cancel));
         clear_pending_user_input(world, chat_entity);
     }
 }
@@ -202,7 +237,10 @@ fn render_user_input_row(
         }
         let mut skipped = draft.skipped;
         if ui
-            .checkbox(&mut skipped, crate::i18n::skip_this_question())
+            .checkbox(
+                &mut skipped,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "skip-this-question"),
+            )
             .changed()
         {
             draft.skipped = skipped;

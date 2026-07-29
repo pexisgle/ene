@@ -5,9 +5,8 @@
 //! references (`typed_memories.commitment_id`) and are no longer dual-written
 //! from arbiter persist → sync.
 
-use ene_store::{
-    ActiveCommitmentPrompt, Commitment, CommitmentStatus, MemoryKind, MemoryStore, NewCommitment,
-};
+use ene_core::{ActiveCommitmentPrompt, Commitment, MemoryPort};
+use ene_store::{CommitmentStatus, MemoryKind, MemoryStore, NewCommitment};
 use tracing::{debug, warn};
 
 use crate::error::CognitionError;
@@ -108,8 +107,6 @@ impl CommitmentLedger {
                 status: CommitmentStatus::Active,
                 due_at: None,
                 due_label: candidate.commitment_due.clone(),
-                // Deprecated dual-write link; new rows leave this unset (#124).
-                source_memory_id: None,
             };
 
             let id = store
@@ -157,8 +154,13 @@ impl CommitmentLedger {
     }
 
     /// List active commitments for prompt injection (independent of vector recall).
+    ///
+    /// Takes `&dyn MemoryPort` (rather than the concrete `MemoryStore`, like
+    /// this ledger's other associated functions) because its only caller
+    /// outside this module, `ene-mind`'s recall runner (#270), holds its
+    /// store handle behind that abstraction.
     pub async fn list_active(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         character_id: &str,
         user_id: Option<&str>,
         limit: usize,
@@ -166,7 +168,7 @@ impl CommitmentLedger {
         store
             .list_active_commitments(character_id, user_id, limit)
             .await
-            .map_err(CognitionError::Memory)
+            .map_err(CognitionError::MemoryPort)
     }
 
     /// Map active commitments to lightweight prompt DTOs.
@@ -272,7 +274,6 @@ fn normalize_title(title: &str) -> String {
 #[cfg(test)]
 #[expect(
     clippy::default_trait_access,
-    deprecated,
     reason = "explicit Default for test fixture clarity; deprecated API retained for migration"
 )]
 mod tests {
@@ -297,6 +298,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: Some("Next time".to_string()),
+            tags: Vec::new(),
         }
     }
 
@@ -317,7 +319,6 @@ mod tests {
             .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].status, CommitmentStatus::Active);
-        assert_eq!(active[0].source_memory_id, None);
         assert_eq!(active[0].due_label.as_deref(), Some("Next time"));
 
         let prompts = CommitmentLedger::active_prompt_candidates(&active);
@@ -428,6 +429,7 @@ mod tests {
                 ..ArbiterOptions::default()
             },
             semantic_matches: Default::default(),
+            affect_valence: 0.0,
         };
         let candidate = commitment_candidate(0.9);
 
@@ -449,7 +451,6 @@ mod tests {
             .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].title, "discuss design");
-        assert_eq!(active[0].source_memory_id, None);
     }
 
     #[tokio::test]
@@ -464,7 +465,6 @@ mod tests {
                 status: CommitmentStatus::Active,
                 due_at: None,
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();
@@ -483,7 +483,6 @@ mod tests {
                 status: CommitmentStatus::Active,
                 due_at: None,
                 due_label: None,
-                source_memory_id: None,
             })
             .await
             .unwrap();

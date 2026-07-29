@@ -19,9 +19,12 @@ pub struct ToolRagConfig {
     pub top_k: usize,
     /// Final number of tools returned after reranking and filtering.
     pub final_n: usize,
-    /// Whether to use Hypothetical Document Embedding to expand the query.
+    /// Reserved for LLM `HyDE` expansion.
+    ///
+    /// Deprecated: no-op; scheduled for removal.
+    #[deprecated(note = "LLM HyDE is disabled (no-op); this knob is scheduled for removal")]
     pub use_hyde: bool,
-    /// Whether to use LLM-based reranking on the candidate set.
+    /// Whether to cosine-rerank candidates (embedding similarity; no LLM).
     pub use_rerank: bool,
     /// Number of candidates to pass to the reranker.
     pub rerank_candidates: usize,
@@ -34,20 +37,24 @@ pub struct ToolRagConfig {
     /// Per-field weighting for the multi-vector similarity computation.
     pub weights: FieldWeightsConfig,
     /// Cap how many tools per category may appear in the result set.
-    /// Keys are [`ToolCategory::config_key`](ene_tool_proto::ToolCategory::config_key)
+    /// Keys are [`ToolCategory::config_key`](ene_plugin_proto::ToolCategory::config_key)
     /// values (e.g. `"Filesystem"`).
     #[serde(default)]
     pub per_category_limits: HashMap<String, usize>,
 }
 
 impl Default for ToolRagConfig {
+    #[expect(
+        deprecated,
+        reason = "initialize deprecated use_hyde until it is removed"
+    )]
     fn default() -> Self {
         Self {
             enabled: true,
             top_k: 12,
             final_n: 6,
-            use_hyde: true,
-            use_rerank: true,
+            use_hyde: false,
+            use_rerank: false,
             rerank_candidates: 24,
             min_similarity: 0.25,
             background_index_on_startup: true,
@@ -73,6 +80,9 @@ pub struct FieldWeightsConfig {
     /// Weight for the negative/unwanted embedding (penalizes matches).
     pub negative: f32,
     /// Weight for the `HyDE` (hypothetical document embedding).
+    ///
+    /// Deprecated: unused; scheduled for removal.
+    #[deprecated(note = "LLM HyDE is disabled; this weight is unused and scheduled for removal")]
     pub hyde: f32,
     /// Weight for the `HyDE` blend factor — the fraction
     /// of the final score contributed by the `HyDE`
@@ -80,6 +90,11 @@ pub struct FieldWeightsConfig {
     /// per-field cosine similarity. Range `[0.0, 1.0]`;
     /// 0.0 disables `HyDE` blending, 1.0 uses only the
     /// `HyDE` similarity.
+    ///
+    /// Deprecated: unused; scheduled for removal.
+    #[deprecated(
+        note = "LLM HyDE is disabled; this blend factor is unused and scheduled for removal"
+    )]
     #[serde(default = "default_hyde_blend")]
     pub hyde_blend: f32,
 }
@@ -89,6 +104,10 @@ const fn default_hyde_blend() -> f32 {
 }
 
 impl Default for FieldWeightsConfig {
+    #[expect(
+        deprecated,
+        reason = "initialize deprecated HyDE weight fields until they are removed"
+    )]
     fn default() -> Self {
         Self {
             summary: 1.0,
@@ -113,6 +132,6 @@ impl HasConfigKey for ToolRagConfig {
 const _: () = {
     #[ctor::ctor(unsafe)]
     fn register() {
-        ene_config::__register_schema::<ToolRagConfig>(ConfigTarget::Settings, Some("tools"));
+        ene_config::register_config_schema::<ToolRagConfig>(ConfigTarget::Settings, Some("tools"));
     }
 };

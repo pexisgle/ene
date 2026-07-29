@@ -12,17 +12,40 @@ use crate::component::chat::ChatStateComponent;
 
 use super::dialogs::{render_permission_dialog, render_user_input_dialog};
 
-#[derive(Debug, Default)]
-pub struct ChatUi;
+#[derive(Default)]
+pub struct ChatUi {
+    /// Active microphone capture handle. Lives here (not in the ECS
+    /// world) because `cpal::Stream` is `!Send + !Sync`.
+    #[cfg(feature = "voice")]
+    mic_handle: crate::audio::MicCaptureHandle,
+    /// Placeholder so the struct has a field in text-only builds too.
+    #[cfg(not(feature = "voice"))]
+    mic_handle: Option<()>,
+}
+
+impl std::fmt::Debug for ChatUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatUi")
+            .field("mic_active", &self.mic_handle.is_some())
+            .finish()
+    }
+}
 
 impl ChatUi {
     pub fn render(
         &mut self,
         ui: &mut egui::Ui,
-        ai: &Arc<AiBridge>,
+        ai: Option<&Arc<AiBridge>>,
         world: &mut World,
         chat_entity: Entity,
     ) {
+        let Some(ai) = ai else {
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                i18n_embed_fl::fl!(crate::i18n::loader(), "runtime-unavailable"),
+            );
+            return;
+        };
         let Some(mut chat_state) = world.get_mut::<ChatStateComponent>(chat_entity) else {
             return;
         };
@@ -31,6 +54,16 @@ impl ChatUi {
         let scroll_to_bottom = chat_state.0.scroll_to_bottom;
         let messages = chat_state.0.messages.clone();
         chat_state.0.scroll_to_bottom = false;
+
+        // Mic state read once per frame so the toggle button can reflect it
+        // without holding a world borrow inside the egui closure. The
+        // `mic_active` flag is the authoritative "is capture live" state
+        // (L13): the error callback clears it on device unplug even though
+        // the `!Send` handle may still exist on the chat UI.
+        #[cfg(feature = "voice")]
+        let mic_active = world
+            .get_resource::<crate::audio::AudioState>()
+            .is_some_and(crate::audio::AudioState::is_mic_active);
 
         let available = ui.available_size();
         let input_height = 88.0;
@@ -43,7 +76,10 @@ impl ChatUi {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if messages.is_empty() {
-                    ui.weak(crate::i18n::chat_empty_history());
+                    ui.weak(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "chat-empty-history"
+                    ));
                 } else {
                     for message in &messages {
                         render_message_bubble(ui, message);
@@ -56,7 +92,7 @@ impl ChatUi {
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
-            ui.label(crate::i18n::chat_input());
+            ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "chat-input"));
             ui.add_enabled_ui(!processing, |ui| {
                 let mut draft = world
                     .get_mut::<ChatStateComponent>(chat_entity)
@@ -68,18 +104,58 @@ impl ChatUi {
                         .desired_width(f32::INFINITY)
                         .desired_rows(3)
                         .hint_text(if processing {
-                            crate::i18n::waiting_for_ai()
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "waiting-for-ai")
                         } else {
-                            crate::i18n::message_to_ai()
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "message-to-ai")
                         }),
                 );
 
                 let send_clicked = ui
-                    .add_enabled(!processing, egui::Button::new(crate::i18n::send()))
+                    .add_enabled(
+                        !processing,
+                        egui::Button::new(i18n_embed_fl::fl!(crate::i18n::loader(), "send")),
+                    )
                     .clicked();
                 let cancel_clicked = ui
-                    .add_enabled(can_cancel, egui::Button::new(crate::i18n::cancel()))
+                    .add_enabled(
+                        can_cancel,
+                        egui::Button::new(i18n_embed_fl::fl!(crate::i18n::loader(), "cancel")),
+                    )
                     .clicked();
+                let undo_clicked = ui
+                    .add_enabled(
+                        !processing,
+                        egui::Button::new(i18n_embed_fl::fl!(crate::i18n::loader(), "chat-undo")),
+                    )
+                    .clicked();
+
+                // Microphone toggle with a live active indicator. The
+                // button stays enabled while the AI is processing so the
+                // user can stop capture at any time.
+                #[cfg(feature = "voice")]
+                let mic_clicked = {
+                    let mic_button = if mic_active {
+                        egui::Button::new(
+                            egui::RichText::new(format!(
+                                "● {}",
+                                i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-active")
+                            ))
+                            .color(egui::Color32::from_rgb(220, 80, 80)),
+                        )
+                        .fill(egui::Color32::from_rgb(60, 30, 30))
+                    } else {
+                        egui::Button::new(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic"))
+                    };
+                    ui.add(mic_button)
+                        .on_hover_text(if mic_active {
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-toggle-off")
+                        } else {
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-toggle-on")
+                        })
+                        .clicked()
+                };
+                #[cfg(not(feature = "voice"))]
+                let mic_clicked = false;
 
                 // Multiline TextEdit inserts a newline on Enter; detect send
                 // while focused instead of waiting for lost_focus.
@@ -90,6 +166,52 @@ impl ChatUi {
 
                 if cancel_clicked || escape_cancel {
                     ai.cancel();
+                }
+
+                if mic_clicked
+                    && let Err(e) =
+                        crate::audio::toggle_mic_capture(world, ai, &mut self.mic_handle)
+                {
+                    tracing::warn!(component = "Audio", error = %e, "mic toggle failed");
+                    if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
+                        chat.0.undo_status = Some(format!(
+                            "{}: {e}",
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "audio-mic-error")
+                        ));
+                    }
+                }
+
+                if undo_clicked {
+                    let status = match ai.undo_blocking() {
+                        Ok(ene_runtime::UndoReport::NothingToUndo) => {
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "chat-undo-nothing")
+                        }
+                        Ok(ene_runtime::UndoReport::Irreversible { metadata }) => format!(
+                            "{} ({})",
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "chat-undo-irreversible"),
+                            metadata.tool_name
+                        ),
+                        Ok(ene_runtime::UndoReport::Reverted { metadata, .. }) => format!(
+                            "{} ({})",
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "chat-undo-reverted"),
+                            metadata.tool_name
+                        ),
+                        Ok(ene_runtime::UndoReport::Failed { metadata, error }) => format!(
+                            "{} ({}: {})",
+                            i18n_embed_fl::fl!(crate::i18n::loader(), "chat-undo-failed"),
+                            metadata.tool_name,
+                            error
+                        ),
+                        Err(e) => {
+                            format!(
+                                "{} ({e})",
+                                i18n_embed_fl::fl!(crate::i18n::loader(), "chat-undo-failed")
+                            )
+                        }
+                    };
+                    if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
+                        chat.0.undo_status = Some(status);
+                    }
                 }
 
                 if let Some(mut chat) = world.get_mut::<ChatStateComponent>(chat_entity) {
@@ -104,6 +226,12 @@ impl ChatUi {
             });
         });
 
+        if let Some(chat) = world.get::<ChatStateComponent>(chat_entity)
+            && let Some(status) = chat.0.undo_status.as_deref()
+        {
+            ui.weak(status);
+        }
+
         render_permission_dialog(ui, world, chat_entity, ai);
         render_user_input_dialog(ui, world, chat_entity, ai);
     }
@@ -112,9 +240,9 @@ impl ChatUi {
 fn render_message_bubble(ui: &mut egui::Ui, message: &crate::chat_state::ChatMessage) {
     let is_user = message.role == Role::User;
     let label = if is_user {
-        crate::i18n::chat_you()
+        i18n_embed_fl::fl!(crate::i18n::loader(), "chat-you")
     } else {
-        crate::i18n::chat_ene()
+        i18n_embed_fl::fl!(crate::i18n::loader(), "chat-ene")
     };
 
     let row_width = ui.available_width();
@@ -144,7 +272,7 @@ fn render_message_bubble(ui: &mut egui::Ui, message: &crate::chat_state::ChatMes
                 text.push('▌');
             }
             if text.is_empty() && message.is_streaming {
-                ui.weak(crate::i18n::waiting_for_ai());
+                ui.weak(i18n_embed_fl::fl!(crate::i18n::loader(), "waiting-for-ai"));
             } else {
                 ui.add(egui::Label::new(text).wrap().selectable(true));
             }

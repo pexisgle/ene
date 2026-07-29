@@ -41,23 +41,25 @@ pub use truncate::{Truncate, TruncateResult};
 
 pub use character_card::{
     CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension, ExpressionDefinition,
-    Lorebook, LorebookEntry, ResolvedExpression, expand_cbs_macros, resolve_expressions,
+    Lorebook, LorebookEntry, ResolvedExpression, UserPersona, expand_cbs_macros,
+    expand_cbs_macros_with, resolve_expressions,
 };
 
 pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};
 pub use config::{
-    __register_schema, __register_tool_schema, ConfigTarget, EneConfig, HasConfigKey,
-    generate_character_schema_json, generate_schema_json, get_global_config, get_global_section,
-    load_character_card, load_config, load_config_from, load_full_config, load_full_config_from,
-    register_runtime_schema, resolve_character_path, save_full_config, update_global_config,
-    update_section, write_schemas,
+    ConfigTarget, DEFAULT_RUNTIME_RULES, EneConfig, HasConfigKey, generate_character_schema_json,
+    generate_schema_json, get_global_config, get_global_section, load_character_card, load_config,
+    load_config_from, load_full_config, load_full_config_from, register_config_schema,
+    register_runtime_schema, register_tool_schema, resolve_character_path, save_full_config,
+    update_global_config, update_section, write_schemas,
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
 pub use paths::{
-    IS_DEV_BUILD, app_data_dir, assets_dir, builtin_tools_dir, character_card_schema_file_path,
-    character_schema_file_path, character_settings_path, config_file_path, models_dir,
-    schema_file_path, tool_socket_dir, user_tools_dir,
+    IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,
+    character_card_schema_file_path, character_schema_file_path, character_settings_path,
+    config_file_path, models_dir, plugin_socket_dir, schema_file_path, tool_socket_dir,
+    user_plugins_dir, user_tools_dir,
 };
 pub use prompts::{PromptLibrary, substitute as substitute_prompt_vars};
 pub use resources::ensure_resource_dirs;
@@ -65,6 +67,12 @@ pub use store::ConfigStore;
 
 // Re-export serde / schemars / ctor for sub-crates
 pub use ctor::ctor;
+// The `ctor` proc-macro emits `<crate_path>::__support::ctor_parse!`, so the
+// `define_config!`/`define_tool_config!` macros can redirect their generated
+// constructor at this crate (via `crate_path = $crate`) instead of leaking a
+// hard `::ctor` dependency into every downstream caller.
+#[doc(hidden)]
+pub use ctor::__support;
 pub use schemars;
 pub use serde;
 
@@ -126,9 +134,13 @@ macro_rules! define_config {
         }
 
         const _: () = {
-            #[ctor::ctor(unsafe)]
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
-                $crate::__register_schema::<$name>($crate::ConfigTarget::Settings, None);
+                $crate::register_config_schema::<$name>($crate::ConfigTarget::Settings, None);
             }
         };
     };
@@ -174,9 +186,13 @@ macro_rules! define_config {
         }
 
         const _: () = {
-            #[ctor::ctor(unsafe)]
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
-                $crate::__register_schema::<$name>($crate::ConfigTarget::Character, None);
+                $crate::register_config_schema::<$name>($crate::ConfigTarget::Character, None);
             }
         };
     };
@@ -228,9 +244,13 @@ macro_rules! define_config {
         }
 
         const _: () = {
-            #[ctor::ctor(unsafe)]
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
-                $crate::__register_schema::<$name>(
+                $crate::register_config_schema::<$name>(
                     <$parent as $crate::HasConfigKey>::TARGET,
                     Some(<$parent as $crate::HasConfigKey>::KEY),
                 );
@@ -274,15 +294,23 @@ macro_rules! define_tool_config {
         }
 
         const _: () = {
-            #[ctor::ctor(unsafe)]
+            /// # Safety
+            ///
+            /// Called by `ctor` before `main`. Only safe registration code
+            /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
+            #[$crate::ctor(unsafe, crate_path = $crate)]
             fn register() {
-                $crate::__register_tool_schema::<$name>($tool_name);
+                $crate::register_tool_schema::<$name>($tool_name);
             }
         };
     };
 }
 
 /// Declarative macro for defining labeled enums with a consistent API.
+///
+/// The **first variant** listed becomes the `Default` for the enum (via
+/// `#[derive(Default)]`). Ensure the most common or safest variant is listed
+/// first.
 #[macro_export]
 macro_rules! define_label_enum {
     (

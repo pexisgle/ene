@@ -33,6 +33,7 @@ use serde_json::Value;
 
 /// Roll axis for [`NodeConstraint::Roll`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RollAxis {
     /// Local X axis.
     X,
@@ -63,6 +64,7 @@ impl RollAxis {
 
 /// Aim axis for [`NodeConstraint::Aim`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AimAxis {
     /// World +X direction.
     PositiveX,
@@ -105,6 +107,7 @@ impl AimAxis {
 
 /// A single node constraint parsed from `VRMC_node_constraint`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum NodeConstraint {
     /// Copy the source's rotation delta onto the destination.
     Rotation {

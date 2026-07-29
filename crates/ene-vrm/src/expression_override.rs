@@ -79,6 +79,7 @@ pub fn is_procedural(name: &str) -> bool {
 
 /// How an expression overrides a procedural expression category.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ExpressionOverrideType {
     /// No override (spec default).
     #[default]
@@ -386,7 +387,7 @@ pub fn load_expression_overrides(gltf: &gltf::Gltf) -> Vec<ExpressionDefinition>
 
 // ---- Extension on ExpressionLayer ----
 
-use crate::expression::ExpressionLayer;
+use crate::expression::{ExpressionLayer, MAX_MORPH_TARGETS_PER_PRIMITIVE};
 
 impl ExpressionLayer {
     /// Apply per-expression override semantics to the current
@@ -414,6 +415,15 @@ impl ExpressionLayer {
                     expr_weight
                 };
                 for bind in &def.morph_target_binds {
+                    if bind.index >= MAX_MORPH_TARGETS_PER_PRIMITIVE {
+                        tracing::warn!(
+                            "expression '{}' morph target bind index {} exceeds MAX_MORPH_TARGETS_PER_PRIMITIVE ({}); skipping",
+                            def.name,
+                            bind.index,
+                            MAX_MORPH_TARGETS_PER_PRIMITIVE
+                        );
+                        continue;
+                    }
                     let current = self
                         .morph_target_weights
                         .entry((bind.node, bind.index))

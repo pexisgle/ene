@@ -1,0 +1,87 @@
+name: リファクタリング (Refactor)
+description: コード品質改善・構造整理（挙動は変えない）
+title: "refactor(scope): "
+labels: ["type:refactor", "priority:low"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        リファクタリングの提案ありがとうございます。
+        タイトルは Conventional Commits 形式 (`refactor(<scope>): <概要>`) で記入してください。
+        挙動を変える変更は「機能追加」または「バグ報告」をご利用ください。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 対象エリア (area)
+      description: 対象のクレート・領域を選択してください。
+      multiple: true
+      options:
+        - core (ene-runtime / ene-mind / ene-store)
+        - memory (メモリ・記憶システム)
+        - provider (ene-ai / ene-ai-local / LLMプロバイダー)
+        - tool-system (ene-plugin-host / ene-plugin-*)
+        - connector (外部サービス連携)
+        - embedding (ene-tool-rag / 埋め込み・RAG検索)
+        - voice (音声入出力・STT/TTS)
+        - avatar (ene-vrm / アバター)
+        - desktop (ene-desktop)
+        - cli (ene-cli)
+        - config (ene-config)
+        - security (セキュリティ・パーミッション)
+        - infra (インフラ・基盤)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: 優先度 (priority)
+      options:
+        - low (低優先度・将来対応)
+        - medium (中優先度)
+        - high (高優先度)
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 背景・現状
+      description: なぜリファクタリングが必要か、現状の問題点を説明してください。
+      placeholder: "例: ○○モジュールが肥大化し、テストが困難になっている。"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 変更方針
+      description: どのように整理・改善するか。
+      placeholder: |
+        - モジュールを `ene-xxx` クレートに分離する
+        - 重複ロジックを共通化する
+        - 可視性を `pub(crate)` に狭める
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 受け入れ条件
+      value: |
+        - [ ] 外部からの挙動・API が変わらない
+        - [ ] 既存テストがすべて通る (`cargo test --workspace`)
+        - [ ] `cargo clippy --workspace -- -D warnings` が通る
+        - [ ] `cargo fmt --all -- --check` が通る
+        - [ ] 必要に応じてドキュメントを更新した
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 関連
+      placeholder: "#123, docs/crates/xxx.md"
+    validations:
+      required: false

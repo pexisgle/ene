@@ -3,11 +3,14 @@ mod card;
 mod clear;
 mod commitments;
 mod config;
+mod doctor;
 mod help;
 mod history;
 mod memory;
+mod permissions;
 mod prompt;
 mod session;
+mod store;
 mod tool;
 mod undo;
 
@@ -56,7 +59,7 @@ pub trait CliCommand: Send + Sync {
     fn usage(&self) -> &'static str;
 
     /// Execute the command
-    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<(), CliError>;
+    async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError>;
 }
 
 /// Static registry containing all CLI command implementations except `/quit`
@@ -73,6 +76,9 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
     &memory::MemoryCommand as &dyn CliCommand,
     &commitments::CommitmentsCommand as &dyn CliCommand,
     &session::SessionCommand as &dyn CliCommand,
+    &permissions::PermissionsCommand as &dyn CliCommand,
+    &doctor::DoctorCommand as &dyn CliCommand,
+    &store::StoreCommand as &dyn CliCommand,
 ];
 
 /// Maximum time the REPL will wait for the actor to drain on shutdown.
@@ -85,31 +91,28 @@ pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
     let cmd = parts[0];
     let arg = parts.get(1).copied().unwrap_or("");
 
-    // The user requested a dedicated early exit branch specifically for quit
+    // Signal the REPL to exit; `drain_and_exit` in repl.rs handles the
+    // actual actor shutdown so we avoid a redundant double-shutdown here.
     if cmd == "/quit" || cmd == "/exit" {
-        // Send a clean shutdown command and await the actor's drain
-        // so that pending memory writes, session splits, and tool
-        // processes finish (or are killed) before we return to main.
-        match ctx.handle.shutdown(SHUTDOWN_TIMEOUT).await {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!(
-                    "{}",
-                    crate::style::error(format!(
-                        "Actor did not shut down within {SHUTDOWN_TIMEOUT:?}: {e}"
-                    ))
-                );
-            }
-        }
         return CommandOutcome::Exit(0);
     }
 
     if let Some(command) = COMMANDS.iter().find(|c| c.name() == cmd) {
-        if let Err(err) = command.execute(arg, ctx).await {
-            eprintln!("{}", crate::style::error(err.to_string()));
+        match command.execute(arg, ctx).await {
+            Ok(outcome) => return outcome,
+            Err(err) => {
+                eprintln!("{}", crate::style::error(err.to_string()));
+            }
         }
     } else {
-        eprintln!("{}", crate::style::error(format!("Unknown command: {cmd}")));
+        eprintln!(
+            "{}",
+            crate::style::error(i18n_embed_fl::fl!(
+                crate::i18n::loader(),
+                "unknown-command",
+                command = cmd.to_string()
+            ))
+        );
     }
     CommandOutcome::Continue
 }

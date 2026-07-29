@@ -3,40 +3,47 @@ use std::time::Duration;
 use chrono::Utc;
 use ene_config::{CharacterCardV3, PromptLibrary};
 use ene_store::MemoryStore;
+use tracing::Instrument;
 
 use crate::character::CharacterProcessor;
 use crate::commitments::CommitmentLedger;
-use crate::config::{EngineMode, MindConfig};
+use crate::config::MindConfig;
 use crate::context::{
     ContextBudget, ContextManager, PackInput, load_active_scene_summary, pack_prompt,
     validate_context_config,
 };
 use crate::emotion::TurnAffectInput;
 use crate::error::CognitionError;
-use crate::lifecycle::{ComposedPrompt, PostTurnInput, PreTurnOutput, TurnContext};
+use crate::lifecycle::{
+    ComposePrefetch, ComposedPrompt, PostTurnInput, PreTurnOutput, TurnContext,
+};
 use crate::memory_writer::MemoryWriter;
 use crate::recall::{ExecuteRecallInput, execute_hybrid_recall};
 
 /// Central cognitive engine facade.
+#[expect(
+    dead_code,
+    reason = "facade fields are constructed and held for sub-component lifecycle; access is through engine methods"
+)]
 pub struct CognitionEngine {
     /// Pre-turn input analysis.
-    pub pre_turn: crate::pre_turn::PreTurnAnalyzer,
+    pub(crate) pre_turn: crate::pre_turn::PreTurnAnalyzer,
     /// Context budget and compression management.
-    pub context: ContextManager,
+    pub(crate) context: ContextManager,
     /// Memory extraction and arbitration.
-    pub memory_writer: MemoryWriter,
+    pub(crate) memory_writer: MemoryWriter,
     /// Memory recall planning.
-    pub recall: crate::recall::RecallPlanner,
+    pub(crate) recall: crate::recall::RecallPlanner,
     /// Deterministic and LLM emotion computation.
-    pub emotion: crate::emotion::EmotionEngine,
+    pub(crate) emotion: crate::emotion::EmotionEngine,
     /// Character identity and lorebook processing.
-    pub character: CharacterProcessor,
+    pub(crate) character: CharacterProcessor,
     /// Sectioned prompt composition.
-    pub prompt_packet: crate::prompt_packet::PromptPacket,
+    pub(crate) prompt_packet: crate::prompt_packet::PromptPacket,
     /// Expression arbitration and output validation.
-    pub output: crate::output::OutputArbiter,
+    pub(crate) output: crate::output::OutputArbiter,
     /// Companion promise and task tracking.
-    pub commitments: CommitmentLedger,
+    pub(crate) commitments: CommitmentLedger,
 }
 
 impl Default for CognitionEngine {
@@ -45,13 +52,34 @@ impl Default for CognitionEngine {
     }
 }
 
+/// Outcome of a deferred memory-write task (#240).
+#[derive(Debug, Clone)]
+pub enum MemoryWriteOutcome {
+    /// Write and forgetting completed successfully.
+    Ok {
+        /// Number of memory candidates deferred to the user-approval queue (#174).
+        deferred_candidates: usize,
+    },
+    /// Write failed; a retry row was enqueued (or marked permanent).
+    Failed {
+        /// Human-readable error.
+        message: String,
+        /// Pending queue id when enqueued.
+        pending_id: Option<i64>,
+        /// Whether the failure is permanent.
+        permanent: bool,
+        /// Character id for diagnostics.
+        character_id: String,
+    },
+}
+
 impl CognitionEngine {
     /// Create a new cognitive engine with default components.
     #[must_use]
     pub fn new() -> Self {
         Self {
             pre_turn: crate::pre_turn::PreTurnAnalyzer,
-            context: ContextManager,
+            context: ContextManager::default(),
             memory_writer: MemoryWriter,
             recall: crate::recall::RecallPlanner,
             emotion: crate::emotion::EmotionEngine,
@@ -74,10 +102,14 @@ impl CognitionEngine {
         previous_hash: Option<u64>,
     ) -> Result<(crate::character::CharacterMemorySyncReport, u64), CognitionError> {
         let store = ctx.store.ok_or_else(|| {
-            CognitionError::Other("Memory store required for character memory sync".into())
+            CognitionError::MissingProvider(
+                "Memory store required for character memory sync".into(),
+            )
         })?;
         let embedder = ctx.embedder.ok_or_else(|| {
-            CognitionError::Other("Embedding provider required for character memory sync".into())
+            CognitionError::MissingProvider(
+                "Embedding provider required for character memory sync".into(),
+            )
         })?;
 
         CharacterProcessor::sync_card_memories(
@@ -95,7 +127,7 @@ impl CognitionEngine {
     /// Pre-turn: load affect, plan recall, execute hybrid search.
     pub async fn before_turn(&self, ctx: TurnContext<'_>) -> Result<PreTurnOutput, CognitionError> {
         let store = ctx.store.ok_or_else(|| {
-            CognitionError::Other("Memory store required for cognitive path".into())
+            CognitionError::MissingProvider("Memory store required for cognitive path".into())
         })?;
 
         let mut affect = store
@@ -126,45 +158,39 @@ impl CognitionEngine {
                 recent_turn_count,
                 classifier_proposal: None,
                 classifier_min_confidence: ctx.config.emotion.classifier_min_confidence,
-                llm_only: ctx.config.emotion.engine == EngineMode::Llm,
+                llm_only: false,
             };
 
             // Consume a pending post-turn classifier proposal from the previous turn.
             let mut classifier_estimate_for_log = None;
-            if matches!(
-                ctx.config.emotion.engine,
-                EngineMode::Llm | EngineMode::Hybrid
-            ) {
-                let current_user_turn = count_user_turns(ctx.history);
-                if let Some(pending) = store
-                    .take_pending_affect_proposal(ctx.character_id, ctx.user_name)
-                    .await
-                    .map_err(CognitionError::Memory)?
-                {
-                    if pending.source_turn_id >= current_user_turn {
-                        tracing::warn!(
-                            component = "EmotionEngine",
-                            source_turn_id = pending.source_turn_id,
-                            current_user_turn,
-                            "Dropping future pending classifier proposal"
-                        );
-                    } else if pending.source_turn_id < current_user_turn - 1 {
-                        tracing::warn!(
-                            component = "EmotionEngine",
-                            source_turn_id = pending.source_turn_id,
-                            current_user_turn,
-                            "Dropping stale pending classifier proposal"
-                        );
-                    } else {
-                        let proposal = pending_to_affect_proposal(pending);
-                        if proposal.confidence >= ctx.config.emotion.classifier_min_confidence {
-                            classifier_expression_hint =
-                                Some(proposal.recommended_expression.clone());
-                        }
-                        if proposal.confidence > 0.0 {
-                            classifier_estimate_for_log = Some(proposal.clone());
-                            turn_input = turn_input.with_proposal(proposal);
-                        }
+            let current_user_turn = count_user_turns(ctx.history);
+            if let Some(pending) = store
+                .take_pending_affect_proposal(ctx.character_id, ctx.user_name)
+                .await
+                .map_err(CognitionError::Memory)?
+            {
+                if pending.source_turn_id >= current_user_turn {
+                    tracing::warn!(
+                        component = "EmotionEngine",
+                        source_turn_id = pending.source_turn_id,
+                        current_user_turn,
+                        "Dropping future pending classifier proposal"
+                    );
+                } else if pending.source_turn_id < current_user_turn - 1 {
+                    tracing::warn!(
+                        component = "EmotionEngine",
+                        source_turn_id = pending.source_turn_id,
+                        current_user_turn,
+                        "Dropping stale pending classifier proposal"
+                    );
+                } else {
+                    let proposal = pending_to_affect_proposal(pending);
+                    if proposal.confidence >= ctx.config.emotion.classifier_min_confidence {
+                        classifier_expression_hint = Some(proposal.recommended_expression.clone());
+                    }
+                    if proposal.confidence > 0.0 {
+                        classifier_estimate_for_log = Some(proposal.clone());
+                        turn_input = turn_input.with_proposal(proposal);
                     }
                 }
             }
@@ -204,10 +230,12 @@ impl CognitionEngine {
 
         let recent_turns = ctx.recent_recall_turns();
         let embedding = ctx.query_embedding.ok_or_else(|| {
-            CognitionError::Other("Query embedding required for cognitive recall".into())
+            CognitionError::MissingProvider("Query embedding required for cognitive recall".into())
         })?;
         let embedder = ctx.embedder.ok_or_else(|| {
-            CognitionError::Other("Embedding provider required for cognitive recall".into())
+            CognitionError::MissingProvider(
+                "Embedding provider required for cognitive recall".into(),
+            )
         })?;
 
         let recall_input = ExecuteRecallInput {
@@ -218,8 +246,6 @@ impl CognitionEngine {
             recent_turns: &recent_turns,
             query_embedding: embedding,
             embedding_model: embedder.model_name(),
-            embedder: Some(embedder.as_ref()),
-            llm_provider: ctx.llm_provider.clone(),
             affect: Some(&affect),
             card: Some(ctx.card),
         };
@@ -264,6 +290,76 @@ impl CognitionEngine {
         })
     }
 
+    /// Lightweight pre-turn for proactive speech: affect + commitments only (no recall / embedding).
+    pub async fn before_proactive_turn(
+        &self,
+        ctx: TurnContext<'_>,
+    ) -> Result<PreTurnOutput, CognitionError> {
+        use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
+
+        let recall_plan = RecallPlan {
+            current_topic: "proactive".to_string(),
+            semantic_queries: Vec::new(),
+            episodic_queries: Vec::new(),
+            required_kinds: Vec::new(),
+            scope: RecallScopeFilter {
+                character_id: ctx.character_id.to_string(),
+                user_id: Some(ctx.user_name.to_string()),
+            },
+            budget: RecallBudgetHints {
+                memory_budget_tokens: 0,
+                semantic_budget_tokens: 0,
+                result_limit: 0,
+            },
+            search: RecallSearchHints {
+                primary_query_text: String::new(),
+                similarity_threshold: 0.0,
+                min_score: 0.0,
+                decay_half_life_days: 30.0,
+                query_affect: None,
+            },
+        };
+
+        let Some(store) = ctx.store else {
+            return Ok(PreTurnOutput {
+                recall_plan,
+                affect: ene_store::AffectState::neutral(ctx.character_id),
+                recalled: Vec::new(),
+                commitments: Vec::new(),
+                classifier_expression_hint: None,
+            });
+        };
+
+        let affect = store
+            .get_affect_state(ctx.character_id)
+            .await
+            .map_err(CognitionError::Memory)?;
+
+        let commitment_rows =
+            match CommitmentLedger::list_active(store, ctx.character_id, Some(ctx.user_name), 16)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(
+                        component = "CognitionEngine",
+                        error = %error,
+                        "Failed to list active commitments for proactive pre-turn"
+                    );
+                    vec![]
+                }
+            };
+        let commitments = CommitmentLedger::active_prompt_candidates(&commitment_rows);
+
+        Ok(PreTurnOutput {
+            recall_plan,
+            affect,
+            recalled: Vec::new(),
+            commitments,
+            classifier_expression_hint: None,
+        })
+    }
+
     /// Persist affect state after pre-turn update (survives stream cancel/failure).
     pub async fn persist_affect_snapshot(
         store: &MemoryStore,
@@ -276,48 +372,72 @@ impl CognitionEngine {
     }
 
     /// Compose a sectioned prompt packet into LLM messages.
+    ///
+    /// Pass [`ComposePrefetch`] fields from a parallel pre-LLM phase to skip
+    /// redundant style/scene fetches. Default prefetch fetches them here.
     pub async fn compose_prompt_packet(
         &self,
         ctx: TurnContext<'_>,
-        pre: &PreTurnOutput,
+        pre: PreTurnOutput,
+        prefetch: ComposePrefetch,
     ) -> Result<ComposedPrompt, CognitionError> {
         Self::validate_config(ctx.config)?;
 
-        let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
-        let kernel = if ctx.config.character.always_include_identity_kernel {
-            CharacterProcessor::compile_kernel(ctx.card, ctx.user_name, max_kernel_tokens)
-        } else {
-            crate::character::IdentityKernel {
-                name: ctx.card.data.get_character_name().to_string(),
-                text: String::new(),
-                post_history_instructions: None,
-            }
-        };
+        // Destructure to move the recalled/commitment vectors into the pack
+        // input without cloning (#review M2).
+        let PreTurnOutput {
+            recall_plan,
+            affect,
+            recalled,
+            commitments,
+            classifier_expression_hint: _,
+        } = pre;
 
-        let style_examples = CharacterProcessor::select_style_examples(
+        let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
+        // Load user persona from global config so the identity kernel can expand
+        // the `{{user_persona}}` CBS macro at compile time (#H-3).
+        let user_persona = ene_config::get_global_config().user_persona;
+        let kernel = CharacterProcessor::compile_kernel(
             ctx.card,
             ctx.user_name,
-            ctx.user_input,
-            ctx.history,
-            ctx.store,
-            ctx.embedder,
-            &ctx.config.character,
-            2,
-        )
-        .await;
+            user_persona.as_ref(),
+            max_kernel_tokens,
+        );
+
+        let style_examples = if let Some(examples) = prefetch.style_examples {
+            examples
+        } else {
+            CharacterProcessor::select_style_examples(
+                ctx.card,
+                ctx.user_name,
+                ctx.user_input,
+                ctx.history,
+                ctx.store.map(|s| s as &dyn ene_core::MemoryPort),
+                ctx.embedder,
+                &ctx.config.character,
+                2,
+            )
+            .await
+        };
 
         let affect_summary = Some(format!(
             "mood={}; valence={:.2}; arousal={:.2}",
-            pre.affect.mood_label, pre.affect.valence, pre.affect.arousal
+            affect.mood_label, affect.valence, affect.arousal
         ));
 
-        let scene_summary = if let Some(store) = ctx.store {
+        let scene_summary = if let Some(prefetched) = prefetch.scene_summary {
+            prefetched
+        } else if let Some(store) = ctx.store {
             load_active_scene_summary(store, ctx.session_id)
                 .await?
                 .map(|s| s.text)
         } else {
             None
         };
+
+        // `Some(None)` means the caller checked and there is no pending
+        // interruption; `None` (legacy/test callers) injects nothing (#206).
+        let interruption_note = prefetch.interruption_note.flatten();
 
         let prompts = PromptLibrary::load(&ctx.config.emotion.classifier_language);
         let char_name = ctx.card.data.get_character_name();
@@ -335,22 +455,31 @@ impl CognitionEngine {
             ctx.history.to_vec()
         };
 
+        // Build author's note from character card data if present
+        let authors_note = ctx
+            .card
+            .data
+            .get_authors_note()
+            .map(|(content, depth)| crate::character::AuthorsNote::new(content, depth));
+
         let pack_input = PackInput {
             platform_contract,
             identity_kernel: kernel,
             behavior_contract,
             style_examples,
-            recalled: pre.recalled.clone(),
-            commitments: pre.commitments.clone(),
+            recalled,
+            commitments,
             affect_summary,
             scene_summary,
             history,
             output_contract: ctx.post_history_block.map(str::to_string),
+            interruption_note,
+            authors_note,
+            user_persona,
             user_input: ctx.user_input.to_string(),
         };
 
-        let budget =
-            ContextBudget::from_config_and_hints(&ctx.config.context, &pre.recall_plan.budget);
+        let budget = ContextBudget::from_config_and_hints(&ctx.config.context, &recall_plan.budget);
         let packed = pack_prompt(pack_input, &budget);
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections.clone_from(&packed.meta.dropped);
@@ -380,6 +509,190 @@ impl CognitionEngine {
         providers: crate::memory_writer::MemoryWriteProviders<'_>,
     ) -> Result<(), CognitionError> {
         MemoryWriter::after_turn(store, config, input, providers).await
+    }
+
+    /// Synchronous post-turn finalize: persist affect state only.
+    ///
+    /// Forgetting runs on the deferred path via [`Self::spawn_deferred_memory_work`].
+    pub async fn finalize_turn(
+        &self,
+        store: &MemoryStore,
+        config: &MindConfig,
+        input: &PostTurnInput<'_>,
+    ) -> Result<(), CognitionError> {
+        MemoryWriter::finalize_turn(store, config, input).await
+    }
+
+    /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
+    ///
+    /// On failure, enqueues a [`ene_store::PendingMemoryWrite`] for later retry (#240).
+    /// Returns the task handle so callers can track or abort it.
+    pub fn spawn_deferred_memory_work(
+        store: std::sync::Arc<MemoryStore>,
+        config: MindConfig,
+        input: crate::lifecycle::OwnedPostTurnInput,
+        llm: std::sync::Arc<dyn ene_ai::LlmProvider>,
+        embedder: Option<std::sync::Arc<dyn ene_ai::EmbeddingProvider>>,
+    ) -> tokio::task::JoinHandle<MemoryWriteOutcome> {
+        tokio::spawn(
+            async move {
+                tracing::info!(
+                    component = "MemoryWriter",
+                    character_id = %input.character_id,
+                    user_id = %input.user_id,
+                    "Post-turn memory extraction and forgetting starting"
+                );
+                // Drain due retries before writing the new turn (#240).
+                Self::drain_pending_memory_writes(
+                    store.as_ref(),
+                    &config,
+                    llm.as_ref(),
+                    embedder.as_ref().map(std::convert::AsRef::as_ref),
+                    3,
+                )
+                .await;
+
+                let borrowed = input.as_borrowed();
+                let providers = crate::memory_writer::MemoryWriteProviders {
+                    llm: Some(llm.as_ref()),
+                    embedder: embedder.as_ref().map(std::convert::AsRef::as_ref),
+                };
+                let result: Result<usize, CognitionError> = async {
+                    let deferred =
+                        MemoryWriter::write_memories(store.as_ref(), &config, &borrowed, providers)
+                            .await?;
+                    MemoryWriter::apply_forgetting(store.as_ref(), &config, &borrowed).await?;
+                    Ok(deferred)
+                }
+                .await;
+                match result {
+                    Ok(deferred_candidates) => {
+                        tracing::info!(
+                            component = "MemoryWriter",
+                            deferred_candidates,
+                            "Post-turn memory extraction and forgetting completed"
+                        );
+                        MemoryWriteOutcome::Ok {
+                            deferred_candidates,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            component = "MemoryWriter",
+                            error = %error,
+                            "Post-turn memory extraction failed"
+                        );
+                        let message = error.to_string();
+                        let payload = serde_json::to_string(&input).unwrap_or_else(|_| {
+                            format!(
+                                "{{\"character_id\":{},\"user_id\":{}}}",
+                                serde_json::to_string(&input.character_id).unwrap_or_default(),
+                                serde_json::to_string(&input.user_id).unwrap_or_default()
+                            )
+                        });
+                        match store
+                            .enqueue_pending_memory_write(
+                                &input.character_id,
+                                &input.user_id,
+                                payload,
+                                message.clone(),
+                            )
+                            .await
+                        {
+                            Ok(pending_id) => MemoryWriteOutcome::Failed {
+                                message,
+                                pending_id: Some(pending_id),
+                                permanent: false,
+                                character_id: input.character_id,
+                            },
+                            Err(enqueue_err) => {
+                                tracing::error!(
+                                    component = "MemoryWriter",
+                                    error = %enqueue_err,
+                                    "Failed to enqueue pending memory write"
+                                );
+                                MemoryWriteOutcome::Failed {
+                                    message,
+                                    pending_id: None,
+                                    permanent: true,
+                                    character_id: input.character_id,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .instrument(tracing::info_span!("post_turn.memory")),
+        )
+    }
+
+    /// Retry due pending memory writes from the persistent queue (#240).
+    pub async fn drain_pending_memory_writes(
+        store: &MemoryStore,
+        config: &MindConfig,
+        llm: &dyn ene_ai::LlmProvider,
+        embedder: Option<&dyn ene_ai::EmbeddingProvider>,
+        limit: usize,
+    ) {
+        let Ok(due) = store.take_due_pending_memory_writes(limit).await else {
+            return;
+        };
+        for row in due {
+            let Ok(input) =
+                serde_json::from_str::<crate::lifecycle::OwnedPostTurnInput>(&row.payload_json)
+            else {
+                drop(
+                    store
+                        .fail_pending_memory_write(row.id, "invalid payload JSON")
+                        .await,
+                );
+                continue;
+            };
+            let borrowed = input.as_borrowed();
+            let providers = crate::memory_writer::MemoryWriteProviders {
+                llm: Some(llm),
+                embedder,
+            };
+            let result = async {
+                MemoryWriter::write_memories(store, config, &borrowed, providers).await?;
+                MemoryWriter::apply_forgetting(store, config, &borrowed).await
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    drop(store.complete_pending_memory_write(row.id).await);
+                    tracing::info!(
+                        component = "MemoryWriter",
+                        pending_id = row.id,
+                        "Retried pending memory write succeeded"
+                    );
+                }
+                Err(error) => {
+                    match store
+                        .fail_pending_memory_write(row.id, error.to_string())
+                        .await
+                    {
+                        Ok(updated) => {
+                            tracing::warn!(
+                                component = "MemoryWriter",
+                                pending_id = row.id,
+                                status = updated.status.as_str(),
+                                attempts = updated.attempts,
+                                "Retried pending memory write failed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                component = "MemoryWriter",
+                                pending_id = row.id,
+                                error = %e,
+                                "Failed to update pending memory write after retry"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Resolve the final character expression after an assistant turn (#89).
@@ -448,10 +761,11 @@ fn pending_to_affect_proposal(
 
 /// Count user messages in a history snapshot (current turn user is already included).
 pub fn count_user_turns(history: &[crate::lifecycle::HistoryEntry]) -> i64 {
-    history
+    let count = history
         .iter()
         .filter(|entry| entry.role == ene_ai::Role::User)
-        .count() as i64
+        .count();
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 /// Completed user-turn index for a post-turn classifier proposal.
@@ -586,5 +900,83 @@ mod turn_id_tests {
         assert!(ctx.conversation.contains("user: thanks"));
         assert!(ctx.conversation.contains("assistant: you're welcome"));
         assert!(ctx.current_affect.to_prompt_json().contains("valence"));
+    }
+
+    #[tokio::test]
+    async fn compose_prompt_packet_uses_prefetch_without_store() {
+        use crate::character::{StyleExample, StyleIntent};
+        use crate::lifecycle::{ComposePrefetch, PreTurnOutput};
+        use crate::recall::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
+        use ene_config::CharacterCardV3;
+        use ene_store::AffectState;
+
+        let engine = CognitionEngine::new();
+        let config = MindConfig::default();
+        let card = CharacterCardV3::default();
+        let pre = PreTurnOutput {
+            recall_plan: RecallPlan {
+                current_topic: "test".into(),
+                semantic_queries: Vec::new(),
+                episodic_queries: Vec::new(),
+                required_kinds: Vec::new(),
+                scope: RecallScopeFilter {
+                    character_id: "ene".into(),
+                    user_id: Some("user".into()),
+                },
+                budget: RecallBudgetHints {
+                    memory_budget_tokens: 256,
+                    semantic_budget_tokens: 128,
+                    result_limit: 4,
+                },
+                search: RecallSearchHints {
+                    primary_query_text: "hi".into(),
+                    similarity_threshold: 0.0,
+                    min_score: 0.0,
+                    decay_half_life_days: 30.0,
+                    query_affect: None,
+                },
+            },
+            affect: AffectState::neutral("ene"),
+            recalled: Vec::new(),
+            commitments: Vec::new(),
+            classifier_expression_hint: None,
+        };
+        let prefetch = ComposePrefetch {
+            style_examples: Some(vec![StyleExample {
+                text: "PREFETCHED_STYLE_MARKER".into(),
+                intent: StyleIntent::Greeting,
+            }]),
+            scene_summary: Some(Some("PREFETCHED_SCENE_MARKER".into())),
+            interruption_note: None,
+        };
+        let ctx = TurnContext {
+            config: &config,
+            card: &card,
+            character_id: "ene",
+            user_name: "user",
+            session_id: "sess",
+            user_input: "hi",
+            history: &[],
+            store: None,
+            query_embedding: None,
+            embedder: None,
+            llm_provider: None,
+            post_history_block: None,
+        };
+        let composed = engine
+            .compose_prompt_packet(ctx, pre, prefetch)
+            .await
+            .expect("compose");
+        let blob = format!("{composed:?}");
+        assert!(
+            blob.contains("PREFETCHED_STYLE_MARKER"),
+            "prefetched style should appear in prompt: {blob}"
+        );
+        assert!(
+            blob.contains("PREFETCHED_SCENE_MARKER"),
+            "prefetched scene should appear in prompt: {blob}"
+        );
+        assert_eq!(composed.meta.style_example_count, 1);
+        assert!(composed.meta.scene_summary_included);
     }
 }

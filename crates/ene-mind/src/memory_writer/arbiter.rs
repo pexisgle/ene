@@ -7,9 +7,10 @@
 
 use std::collections::HashMap;
 
-use ene_store::{
-    AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemorySalience, MemoryScope,
-    MemorySource, MemoryStatus, MemoryStore, NewMemoryItem,
+use ene_core::{
+    AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemoryPort, MemorySalience,
+    MemoryScope, MemorySource, MemoryStatus, NewMemoryItem, PendingCandidate,
+    PendingCandidateStatus,
 };
 use tracing::debug;
 use unicode_normalization::UnicodeNormalization;
@@ -89,6 +90,9 @@ pub struct ArbiterContext<'a> {
     pub options: ArbiterOptions,
     /// Pre-computed semantic matches per candidate index (optional).
     pub semantic_matches: HashMap<usize, Vec<SemanticMatch>>,
+    /// Affect valence of the turn the candidates were extracted from
+    /// (-1.0 ..= 1.0). Used to derive `outcome_rating` for self-reflection (#210).
+    pub affect_valence: f32,
 }
 
 /// Machine-readable reason for an arbiter decision (for tracing and tests).
@@ -188,6 +192,9 @@ pub struct AppliedDecision {
     pub inserted_id: Option<i64>,
     /// Whether a status update was applied to an existing memory.
     pub updated_existing: bool,
+    /// Outcome rating derived from user response sentiment (#210).
+    /// Range: -1.0 (negative) to 1.0 (positive). `None` when not yet evaluated.
+    pub outcome_rating: Option<f32>,
 }
 
 /// Validates, deduplicates, and resolves contradictions for memory candidates.
@@ -231,14 +238,25 @@ impl MemoryArbiter {
 
     /// Load active memories, evaluate candidates, and apply decisions.
     pub async fn arbitrate_and_apply(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         candidates: &[MemoryCandidate],
         ctx: &ArbiterContext<'_>,
     ) -> Result<Vec<AppliedDecision>, CognitionError> {
-        let existing = store
-            .get_typed_memories_by_character(ctx.character_id, None, 10_000, 0)
-            .await
-            .map_err(CognitionError::Memory)?;
+        let candidate_kinds: Vec<MemoryKind> = candidates
+            .iter()
+            .map(|c| c.kind)
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let mut existing: Vec<MemoryItem> = Vec::new();
+        for kind in &candidate_kinds {
+            let items = store
+                .get_typed_memories_by_character(ctx.character_id, Some(*kind), 10_000, 0)
+                .await
+                .map_err(CognitionError::MemoryPort)?;
+            existing.extend(items);
+        }
 
         let active_existing: Vec<MemoryItem> = existing
             .into_iter()
@@ -246,18 +264,28 @@ impl MemoryArbiter {
             .collect();
 
         let decisions = Self::evaluate_all(candidates, &active_existing, ctx);
-        Self::apply_decisions(store, &decisions).await
+        Self::apply_decisions(store, &decisions, ctx).await
     }
 
     /// Apply a slice of decisions to the memory store.
+    ///
+    /// **Non-transactional**: each decision is applied independently. If one
+    /// fails mid-batch, previously applied decisions are already committed and
+    /// will not be rolled back. Callers that need all-or-nothing semantics
+    /// should wrap the store connection in a transaction before calling this.
+    ///
+    /// `ctx.affect_valence` (-1.0 ..= 1.0) is recorded as the `outcome_rating`
+    /// of each persisted decision so the self-reflection pipeline (#210) can
+    /// score interaction outcomes by user sentiment.
     pub async fn apply_decisions(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         decisions: &[CandidateDecision],
+        ctx: &ArbiterContext<'_>,
     ) -> Result<Vec<AppliedDecision>, CognitionError> {
         let mut applied = Vec::with_capacity(decisions.len());
 
         for decision in decisions {
-            let result = Self::apply_one(store, decision).await?;
+            let result = Self::apply_one(store, decision, ctx).await?;
             applied.push(result);
         }
 
@@ -533,19 +561,22 @@ impl MemoryArbiter {
     }
 
     async fn apply_one(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         decision: &CandidateDecision,
+        ctx: &ArbiterContext<'_>,
     ) -> Result<AppliedDecision, CognitionError> {
+        let affect_valence = ctx.affect_valence;
         match &decision.action {
             ArbiterAction::Persist(item) => {
                 let id = store
                     .insert_typed_memory(item)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: false,
+                    outcome_rating: Some(affect_valence),
                 })
             }
             ArbiterAction::Supersede {
@@ -555,39 +586,76 @@ impl MemoryArbiter {
                 let id = store
                     .supersede_typed_memory(new_item, *superseded_id)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: Some(id),
                     updated_existing: true,
+                    outcome_rating: Some(affect_valence),
                 })
             }
             ArbiterAction::MarkUserDeleted { memory_id } => {
                 let updated = store
-                    .transition_typed_memory_status(*memory_id, MemoryStatus::UserDeleted)
+                    .set_memory_status(*memory_id, MemoryStatus::UserDeleted)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: None,
                     updated_existing: updated,
+                    outcome_rating: Some(affect_valence),
                 })
             }
             ArbiterAction::MarkDisputed { memory_id } => {
                 let updated = store
-                    .transition_typed_memory_status(*memory_id, MemoryStatus::Disputed)
+                    .set_memory_status(*memory_id, MemoryStatus::Disputed)
                     .await
-                    .map_err(CognitionError::Memory)?;
+                    .map_err(CognitionError::MemoryPort)?;
                 Ok(AppliedDecision {
                     decision: decision.clone(),
                     inserted_id: None,
                     updated_existing: updated,
+                    outcome_rating: Some(affect_valence),
                 })
             }
-            ArbiterAction::Ignore | ArbiterAction::AskConfirmationLater => Ok(AppliedDecision {
+            ArbiterAction::AskConfirmationLater => {
+                // Defer the candidate to the user-approval queue (#174) so it
+                // can be reviewed and persisted later instead of being dropped.
+                let pending = PendingCandidate {
+                    id: 0,
+                    character_id: ctx.character_id.to_string(),
+                    user_id: ctx.user_id.to_string(),
+                    title: decision.candidate.title.clone(),
+                    content: decision.candidate.content.clone(),
+                    kind: decision.candidate.kind,
+                    confidence: decision.candidate.confidence,
+                    reason_detail: decision.reason.detail.clone(),
+                    existing_memory_title: None,
+                    source_quote: decision.candidate.source_quote.clone(),
+                    status: PendingCandidateStatus::Pending,
+                };
+                let inserted_id = store
+                    .insert_pending_candidate(pending)
+                    .map_err(CognitionError::MemoryPort)?;
+                tracing::debug!(
+                    component = "MemoryArbiter",
+                    character_id = %ctx.character_id,
+                    candidate_id = inserted_id,
+                    title = %decision.candidate.title,
+                    "Deferred memory candidate to user-approval queue"
+                );
+                Ok(AppliedDecision {
+                    decision: decision.clone(),
+                    inserted_id: None,
+                    updated_existing: false,
+                    outcome_rating: Some(affect_valence),
+                })
+            }
+            ArbiterAction::Ignore => Ok(AppliedDecision {
                 decision: decision.clone(),
                 inserted_id: None,
                 updated_existing: false,
+                outcome_rating: Some(affect_valence),
             }),
         }
     }
@@ -617,16 +685,31 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
     // language due-date parsing is deferred (see issue #75 follow-up).
     let (valid_from, valid_until) = (None, None);
 
+    // The store has no dedicated tags column, so candidate tags are serialized
+    // into the content as a trailing JSON metadata footer. Downstream consumers
+    // (recall, export) can detect partial/interrupted episodes from this marker
+    // without a schema migration (#M7).
+    let content = append_tags_metadata(&candidate.content, &candidate.tags);
+
+    // Interrupted (barge-in / cancelled) episodes are partial and therefore
+    // less reliable: deprioritize them in recall scoring by lowering the
+    // persisted confidence (#M7).
+    let confidence = if is_interrupted_candidate(candidate) {
+        MemoryConfidence::new((candidate.confidence - INTERRUPTED_CONFIDENCE_PENALTY).max(0.0))
+    } else {
+        MemoryConfidence::new(candidate.confidence)
+    };
+
     NewMemoryItem {
         scope,
         character_id: ctx.character_id.to_string(),
         user_id: ctx.user_id.to_string(),
         kind: candidate.kind,
         title: candidate.title.clone(),
-        content: candidate.content.clone(),
+        content,
         source,
         source_ref: ctx.source_ref.map(str::to_string),
-        confidence: MemoryConfidence::new(candidate.confidence),
+        confidence,
         salience,
         affect: AffectAnnotation::default(),
         relationship_impact: 0.0,
@@ -638,6 +721,29 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
         created_at: None,
         commitment_id: None,
     }
+}
+
+/// Confidence penalty applied to memories extracted from interrupted turns (#M7).
+const INTERRUPTED_CONFIDENCE_PENALTY: f32 = 0.15;
+
+/// Tag marker used to flag episodes from interrupted (barge-in) turns (#M7).
+pub(crate) const INTERRUPTED_TAG: &str = "interrupted";
+
+/// Whether a candidate originated from an interrupted turn (#M7).
+fn is_interrupted_candidate(candidate: &MemoryCandidate) -> bool {
+    candidate.tags.iter().any(|tag| tag == INTERRUPTED_TAG)
+}
+
+/// Serialize candidate tags into a trailing JSON metadata footer so they
+/// survive persistence despite the store lacking a tags column (#M7).
+///
+/// Returns the original content unchanged when there are no tags.
+fn append_tags_metadata(content: &str, tags: &[String]) -> String {
+    if tags.is_empty() {
+        return content.to_string();
+    }
+    let footer = serde_json::json!({ "tags": tags }).to_string();
+    format!("{content}\n\n<!-- ene:tags {footer} -->")
 }
 
 fn passes_validation(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) -> bool {
@@ -783,6 +889,7 @@ mod tests {
     use super::*;
     use crate::memory_writer::candidate::ToolResultSummary;
     use chrono::Utc;
+    use ene_store::MemoryStore;
 
     fn ctx(turn: TurnInput<'_>) -> ArbiterContext<'_> {
         ArbiterContext {
@@ -793,6 +900,7 @@ mod tests {
             provenance: CandidateProvenance::Deterministic,
             options: ArbiterOptions::default(),
             semantic_matches: HashMap::new(),
+            affect_valence: 0.0,
         }
     }
 
@@ -806,6 +914,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         }
     }
 
@@ -934,6 +1043,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
         assert!(matches!(
@@ -987,6 +1097,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
         assert!(matches!(
@@ -1017,6 +1128,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(
@@ -1046,6 +1158,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(
@@ -1095,10 +1208,11 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let arbiter_ctx = ctx(turn);
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
-        let applied = MemoryArbiter::apply_decisions(&store, &decisions)
+        let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)
             .await
             .unwrap();
         assert_eq!(applied.len(), 1);
@@ -1111,6 +1225,98 @@ mod tests {
         let new_id = applied[0].inserted_id.unwrap();
         let new_mem = store.get_typed_memory(new_id).await.unwrap().unwrap();
         assert_eq!(new_mem.supersedes_id, Some(old_id));
+    }
+
+    /// `apply_decisions` is documented as non-transactional: when a later
+    /// decision fails, the earlier decisions in the batch stay committed and
+    /// are not rolled back. This test pins that behavior so a future move to
+    /// transactional batching is a deliberate, noticed change.
+    #[tokio::test]
+    async fn apply_decisions_is_non_transactional_on_partial_failure() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let candidate = sample_candidate(0.9);
+
+        let persist_item = NewMemoryItem {
+            scope: MemoryScope::User,
+            character_id: "ene".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Semantic,
+            title: "project X".to_string(),
+            content: "User is working on project X".to_string(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.9),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+
+        let decisions = vec![
+            CandidateDecision {
+                candidate: candidate.clone(),
+                action: ArbiterAction::Persist(persist_item),
+                reason: ArbiterReason::new(ArbiterReasonCode::ValidNewMemory, "first succeeds"),
+            },
+            CandidateDecision {
+                candidate,
+                // Superseding a non-existent id fails inside `apply_one`.
+                action: ArbiterAction::Supersede {
+                    new_item: NewMemoryItem {
+                        scope: MemoryScope::User,
+                        character_id: "ene".to_string(),
+                        user_id: "user1".to_string(),
+                        kind: MemoryKind::Semantic,
+                        title: "replacement".to_string(),
+                        content: "replacement content".to_string(),
+                        source: MemorySource::Inferred,
+                        source_ref: None,
+                        confidence: MemoryConfidence::new(0.9),
+                        salience: MemorySalience::default(),
+                        affect: AffectAnnotation::default(),
+                        relationship_impact: 0.0,
+                        valid_from: None,
+                        valid_until: None,
+                        status: MemoryStatus::Active,
+                        supersedes_id: None,
+                        pinned: false,
+                        created_at: None,
+                        commitment_id: None,
+                    },
+                    superseded_id: 999_999,
+                },
+                reason: ArbiterReason::new(
+                    ArbiterReasonCode::ContradictionSupersede,
+                    "second fails",
+                ),
+            },
+        ];
+
+        let turn = TurnInput {
+            user_message: "I am working on project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ctx(turn);
+        let result = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx).await;
+        assert!(
+            result.is_err(),
+            "the batch must surface the second decision's failure"
+        );
+
+        // The first decision's write survived even though the batch failed.
+        let count = store.count_typed_memories("ene", None).await.unwrap();
+        assert_eq!(
+            count, 1,
+            "non-transactional batch must keep the first decision's committed write"
+        );
     }
 
     #[test]
@@ -1129,6 +1335,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let second = MemoryCandidate {
             content: "Different detail about project X".to_string(),
@@ -1242,6 +1449,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1315,6 +1523,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1382,6 +1591,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
         let mut semantic_matches = HashMap::new();
         semantic_matches.insert(
@@ -1423,6 +1633,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
@@ -1445,6 +1656,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
@@ -1480,6 +1692,177 @@ mod tests {
         assert_eq!(mem.title, "project X");
         assert_eq!(mem.status, MemoryStatus::Active);
         assert_eq!(mem.source, MemorySource::Inferred);
+    }
+
+    /// Demonstrates the #270 decoupling: the arbiter's cognitive logic
+    /// (validation, dedup, contradiction resolution) runs against
+    /// `&dyn MemoryPort` and can be exercised with a plain in-memory test
+    /// double — no `SQLite`, no `ene_store::MemoryStore` — while still
+    /// covering the full persist → supersede flow through the trait.
+    #[tokio::test]
+    async fn arbitrate_and_apply_works_against_in_memory_port_without_sqlite() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+
+        let port = InMemoryMemoryPort::new();
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ctx(turn);
+
+        // First candidate persists as a brand-new memory.
+        let applied =
+            MemoryArbiter::arbitrate_and_apply(&port, &[sample_candidate(0.9)], &arbiter_ctx)
+                .await
+                .unwrap();
+        assert_eq!(applied.len(), 1);
+        assert!(matches!(
+            applied[0].decision.action,
+            ArbiterAction::Persist(_)
+        ));
+        let first_id = applied[0].inserted_id.expect("persisted id");
+
+        let stored = port.all_items();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].title, "project X");
+        assert_eq!(stored[0].status, MemoryStatus::Active);
+        assert_eq!(stored[0].source, MemorySource::Inferred);
+
+        // A higher-confidence candidate with different content for the same
+        // (title-adjacent) semantic key supersedes the first row — exercises
+        // the arbiter's contradiction-resolution path, not just insertion.
+        let mut stronger = sample_candidate(0.97);
+        stronger.content = "User is now working on project Y instead".to_string();
+        let semantic_matches = HashMap::from([(
+            0,
+            vec![SemanticMatch {
+                memory_id: first_id,
+                similarity: 0.9,
+                memory: stored[0].clone(),
+            }],
+        )]);
+        let arbiter_ctx_2 = ArbiterContext {
+            semantic_matches,
+            ..ctx(TurnInput {
+                user_message: "remember project X",
+                assistant_message: None,
+                tool_results: &[],
+            })
+        };
+        let applied_2 = MemoryArbiter::arbitrate_and_apply(&port, &[stronger], &arbiter_ctx_2)
+            .await
+            .unwrap();
+        assert_eq!(applied_2.len(), 1);
+        assert!(matches!(
+            applied_2[0].decision.action,
+            ArbiterAction::Supersede { .. }
+        ));
+
+        let final_items = port.all_items();
+        let old = final_items
+            .iter()
+            .find(|m| m.id == Some(first_id))
+            .expect("original row still present");
+        assert_eq!(old.status, MemoryStatus::Superseded);
+        assert!(
+            final_items
+                .iter()
+                .any(|m| m.status == MemoryStatus::Active && m.content.contains("project Y"))
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_records_outcome_rating_from_affect_valence() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let arbiter_ctx = ArbiterContext {
+            affect_valence: 0.75,
+            ..ctx(turn)
+        };
+        let applied =
+            MemoryArbiter::arbitrate_and_apply(&store, &[sample_candidate(0.9)], &arbiter_ctx)
+                .await
+                .unwrap();
+
+        assert_eq!(applied.len(), 1);
+        assert_eq!(
+            applied[0].outcome_rating,
+            Some(0.75),
+            "outcome_rating must mirror the turn affect valence"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_confirmation_later_defers_to_pending_candidates() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let turn = TurnInput {
+            user_message: "I might have switched to tea",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // Existing memory with a close-but-not-dominant confidence gap so the
+        // arbiter defers to user confirmation instead of superseding.
+        let existing_item = NewMemoryItem {
+            scope: MemoryScope::User,
+            character_id: "ene".to_string(),
+            user_id: "user1".to_string(),
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes coffee".to_string(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.85),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        let existing = store.insert_typed_memory(&existing_item).await.unwrap();
+        let existing = store.get_typed_memory(existing).await.unwrap().unwrap();
+
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes tea".to_string(),
+            source_quote: "I might have switched to tea".to_string(),
+            // Much weaker than the existing memory (delta < -dispute_gap) but
+            // still above min_confidence, so the arbiter defers to the user.
+            confidence: 0.66,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let arbiter_ctx = ctx(turn);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::AskConfirmationLater
+        ));
+
+        let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)
+            .await
+            .unwrap();
+        assert_eq!(applied.len(), 1);
+        assert!(applied[0].inserted_id.is_none());
+
+        // The candidate was deferred to the user-approval queue.
+        let pending = store
+            .list_pending_candidates("ene", Some(ene_store::PendingCandidateStatus::Pending))
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].title, "drink");
     }
 
     #[tokio::test]
@@ -1522,6 +1905,7 @@ mod tests {
             should_persist: false,
             deletion_target_key: Some("project X".to_string()),
             commitment_due: None,
+            tags: Vec::new(),
         };
         let applied = MemoryArbiter::arbitrate_and_apply(&store, &[candidate], &ctx(turn))
             .await
@@ -1579,14 +1963,16 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: None,
+            tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
+        let arbiter_ctx = ctx(turn);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::MarkDisputed { memory_id } if memory_id == &id
         ));
 
-        let applied = MemoryArbiter::apply_decisions(&store, &decisions)
+        let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)
             .await
             .unwrap();
         assert!(applied[0].updated_existing);
@@ -1611,6 +1997,7 @@ mod tests {
             should_persist: true,
             deletion_target_key: None,
             commitment_due: Some("tomorrow 15:00".to_string()),
+            tags: Vec::new(),
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
         let ArbiterAction::Persist(item) = decision_action(&decisions) else {
@@ -1618,5 +2005,74 @@ mod tests {
         };
         assert!(item.valid_until.is_none());
         assert!(item.valid_from.is_none());
+    }
+
+    #[test]
+    fn interrupted_candidate_confidence_is_deprioritized() {
+        // An interrupted (barge-in) episode is partial and therefore less
+        // reliable: the persisted confidence is reduced by the penalty (#M7).
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let mut candidate = sample_candidate(0.9);
+        candidate.tags.push(INTERRUPTED_TAG.to_string());
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+            panic!("expected Persist");
+        };
+        let expected = 0.9 - INTERRUPTED_CONFIDENCE_PENALTY;
+        assert!(
+            (item.confidence.get() - expected).abs() < 1e-6,
+            "interrupted confidence {} should be penalized to {expected}",
+            item.confidence.get()
+        );
+    }
+
+    #[test]
+    fn interrupted_candidate_tags_are_serialized_into_content() {
+        // The store has no tags column, so tags are serialized into the
+        // content as a metadata footer (#M7).
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let mut candidate = sample_candidate(0.9);
+        candidate.tags.push(INTERRUPTED_TAG.to_string());
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+            panic!("expected Persist");
+        };
+        assert!(
+            item.content.contains("ene:tags"),
+            "content should carry the tags metadata footer: {}",
+            item.content
+        );
+        assert!(item.content.contains(INTERRUPTED_TAG));
+    }
+
+    #[test]
+    fn non_interrupted_candidate_has_no_tags_footer() {
+        let turn = TurnInput {
+            user_message: "remember project X",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let decisions = MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn));
+        let ArbiterAction::Persist(item) = decision_action(&decisions) else {
+            panic!("expected Persist");
+        };
+        assert!(
+            !item.content.contains("ene:tags"),
+            "untagged content must not gain a metadata footer"
+        );
+    }
+
+    #[test]
+    fn append_tags_metadata_empty_tags_is_identity() {
+        let content = "plain content";
+        assert_eq!(append_tags_metadata(content, &[]), content);
     }
 }
