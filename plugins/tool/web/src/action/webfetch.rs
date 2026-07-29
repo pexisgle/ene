@@ -327,7 +327,7 @@ impl WebFetchAction {
         match format {
             "html" => Ok(body.to_string()),
             "text" => Ok(html_to_plain_text(&body)),
-            _ => Ok(ene_tool_sdk::html::html_to_markdown(&body)),
+            _ => Ok(ene_util::html::html_to_markdown(&body)),
         }
     }
 }

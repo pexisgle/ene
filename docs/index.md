@@ -39,6 +39,7 @@ Ene Workspace
 │   ├── ene-ai-local       (Local LLM inference via llama-cpp-4)
 │   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
 │   ├── ene-connector      (Shared connector framework & MCP bridge)
+│   ├── ene-util           (Pure utilities: truncation, HTML-to-Markdown)
 │   └── ene-vrm            (3D VRM 1.0 loader & wgpu renderer)
 ├── Plugin Architecture
 │   ├── ene-plugin-proto   (IPC wire protocol v4 definitions)

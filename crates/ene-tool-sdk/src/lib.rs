@@ -1,15 +1,13 @@
 //! # ene-tool-sdk
 //!
 //! Tool plugin authoring SDK: the [`ToolAction`] trait, provider adapters
-//! ([`ActionSetProvider`], [`SingleActionProvider`]), a [`prelude`] for
-//! one-line imports, and shared helpers (HTML-to-Markdown, truncation).
+//! ([`ActionSetProvider`], [`SingleActionProvider`]), and a [`prelude`] for
+//! one-line imports.
 //!
 //! ## Modules
 //!
 //! - [`action`] — The unified [`ToolAction`] interface implemented by every tool
 //! - [`provider`] — `ToolProvider` adapters over action sets
-//! - [`html`] — HTML-to-Markdown conversion and content extraction (scraper-based)
-//! - [`truncate`] — Smart content truncation helpers (by chars, lines, and tail)
 //!
 //! ## Tool Design Philosophy
 //!
@@ -25,9 +23,6 @@
 //! retrieval precision for your specific use case.
 #![warn(missing_docs)]
 
-/// HTML-to-Markdown conversion and content extraction.
-pub mod html;
-
 /// Unified tool action interface.
 pub mod action;
 /// `ToolProvider` adapters over `Vec<Box<dyn ToolAction>>` (or a single action).
@@ -36,12 +31,6 @@ pub mod provider;
 pub use action::{ToolAction, ToolSpecArgs};
 pub use provider::ActionSetProvider;
 pub use provider::SingleActionProvider;
-
-/// Re-exports of smart truncation from `ene-config` (former `ene-common`).
-pub mod truncate {
-    #[doc(no_inline)]
-    pub use ene_config::truncate::{Truncate, TruncateResult};
-}
 
 /// Common imports for tool action files.
 ///

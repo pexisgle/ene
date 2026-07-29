@@ -3,6 +3,7 @@
 use crate::config::ToolGroundingConfig;
 use crate::memory_writer::candidate::{MemoryCandidate, ToolResultSummary};
 use ene_core::MemoryKind;
+use ene_util::Truncate;
 
 const SCREENSHOT_SENTINEL: &str = "[Screenshot successfully captured and sent to vision system]";
 
@@ -14,10 +15,8 @@ pub fn summarize_tool_result(
     max_summary_chars: usize,
 ) -> ToolResultSummary {
     let mut summary = normalize_tool_output(raw_output);
-    if max_summary_chars > 0 && summary.chars().count() > max_summary_chars {
-        let mut truncated: String = summary.chars().take(max_summary_chars).collect();
-        truncated.push_str("...");
-        summary = truncated;
+    if max_summary_chars > 0 {
+        summary = Truncate::simple(&summary, max_summary_chars);
     }
     ToolResultSummary {
         tool_name: tool_name.to_string(),

@@ -39,6 +39,7 @@ Ene ワークスペース
 │   ├── ene-ai-local       (llama-cpp-4 によるローカル LLM 推論)
 │   ├── ene-voice          (ローカル STT/TTS/VAD 音声パイプライン)
 │   ├── ene-connector      (共有コネクタフレームワーク & MCP ブリッジ)
+│   ├── ene-util           (純粋ユーティリティ: 切り詰め、HTML→Markdown)
 │   └── ene-vrm            (3D VRM 1.0 ローダー & wgpu レンダラー)
 ├── プラグインシステム
 │   ├── ene-plugin-proto   (IPC ワイヤープロトコル v4 定義)

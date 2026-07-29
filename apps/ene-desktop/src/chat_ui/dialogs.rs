@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use ene_config::truncate::Truncate;
 use ene_plugin_proto::{MultiAnswer, QuestionItem};
 use ene_runtime::UserInputResponse;
+use ene_util::truncate::Truncate;
 
 use crate::ai_bridge::AiBridge;
 use crate::component::chat::ChatStateComponent;

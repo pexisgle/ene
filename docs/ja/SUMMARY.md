@@ -22,6 +22,7 @@
 - [Connector (`ene-connector`)](crates/connector.md)
 - [プラグインシステム (`ene-plugin-*`)](crates/plugin-system.md)
 - [Tool SDK (`ene-tool-sdk`)](crates/tool-sdk.md)
+- [ユーティリティ (`ene-util`)](crates/util.md)
 - [VRM (`ene-vrm`)](crates/vrm.md)
 
 # アプリケーション
