@@ -127,3 +127,27 @@ host advertises a range via `VersionRange::host_supported()` and keeps N-1 compa
   or anything under `assets/models/`.
 - Report the failing package and root cause rather than relaxing a lint. Don't claim a check
   passed that you didn't run.
+
+## Cursor Cloud specific instructions
+
+The Cloud Agent VM has **no Nix and no direnv**, so the "Build environment" flow above does not
+apply as written. `cargo` is on `PATH` via a rustup `stable` toolchain — run `cargo <cmd>`
+directly from the repo root (do not use `direnv exec` / `nix develop`, and ignore the
+`rtk cargo` user rule; those tools are not installed). Native build deps come from the system
+image (apt) instead of the flake and are baked into the VM; the startup script only runs
+`cargo fetch`.
+
+- **Toolchain:** edition 2024 needs Rust ≥ 1.85; the VM uses rustup `stable` (the old system
+  `rustc` 1.83 is too old — don't pin to it).
+- **C/C++ toolchain (do not revert):** `cc`/`c++` are pinned to **GCC** via
+  `update-alternatives`. Clang 18 here cannot find libstdc++ headers (`cstdint`) or `-lstdc++`,
+  which breaks native C/C++ build deps and final linking. If a build fails with those errors,
+  run `sudo update-alternatives --set cc /usr/bin/gcc && sudo update-alternatives --set c++ /usr/bin/g++`.
+- **Don't set `RUSTFLAGS`/`CC`/`CXX` for normal builds** — changing them invalidates the cache
+  and forces a full (~10+ min) workspace rebuild.
+- **Desktop (`ene-desktop`)** runs headless via **software Vulkan (lavapipe)**: launch with
+  `DISPLAY=:1 WGPU_BACKEND=vulkan`; it also needs `libxkbcommon-x11`.
+- **Live chat needs credentials.** The bundled `assets/settings.json` ships without a usable
+  chat key, so out-of-the-box chat fails; provide credentials via the `ai.*` config
+  (`ENE_AI__…` env overrides, see the Configuration section). Embeddings/local models are
+  fetched to `assets/models/` (gitignored) on first use.
