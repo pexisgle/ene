@@ -124,9 +124,71 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | `ene-plugin-web` | `web.*` | Web search and markdown page scraper | No |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude provider plugin | No |
 
+All six plugins above are included in the default `plugins.list` and start
+automatically on fresh installs.
+
 ---
 
-## 5. MCP (Model Context Protocol) Integration
+## 5. Plugin Security Model
+
+### Opt-in discovery
+
+Plugin discovery is **opt-in**: only binaries explicitly listed in
+`plugins.list` with `enable: true` are started. Dropping a binary into the
+plugins directory does **not** cause it to execute — the host logs a warning
+suggesting the user add it to configuration. This prevents a "drop binary →
+auto-execute" attack vector.
+
+```jsonc
+// settings.json (excerpt)
+{
+  "plugins": {
+    "list": {
+      "fs": { "enable": true },
+      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+    }
+  }
+}
+```
+
+### Environment hardening (`env_clear`)
+
+Every plugin and MCP stdio server is spawned with `env_clear()` — the
+inherited environment is wiped and only an explicit whitelist is forwarded:
+
+| Variable | Purpose |
+|---|---|
+| `PATH` | Locating system executables |
+| `HOME` | User config files |
+| `TMPDIR` | Temporary files |
+| `LANG` | Locale-sensitive output |
+| `TZ` | Timezone (only if set) |
+| `LD_LIBRARY_PATH` | Shared library loading (Linux) |
+| `SystemRoot`, `USERPROFILE`, `APPDATA`, `TEMP`, `PATHEXT` | Windows essentials |
+| `ENE_PLUGIN_SOCKET` | IPC channel (plugins only) |
+
+### Per-plugin `env_passthrough`
+
+Plugins that need additional host variables (e.g. API keys) declare them
+explicitly via `env_passthrough` in their `plugins.list` entry. A built-in
+denylist blocks security-sensitive names (`LD_PRELOAD`, `LD_AUDIT`,
+`DYLD_INSERT_LIBRARIES`, `ENE_PLUGIN_SOCKET`, etc.) regardless of
+configuration.
+
+MCP stdio servers support the same `env_passthrough` field in their
+`plugins.mcp_servers` entry for parity.
+
+### Binary checksum verification (TOFU)
+
+On first activation, the host computes the SHA-256 checksum of the plugin
+binary and records it in `plugins.list.<name>.checksum`
+(trust-on-first-use). Subsequent launches verify the binary against the
+recorded checksum and refuse to start if it has changed. Comparison is
+case-insensitive (hex encoding).
+
+---
+
+## 6. MCP (Model Context Protocol) Integration
 
 `ene-connector` and `ene-plugin-host` seamlessly integrate external MCP servers:
 
@@ -136,7 +198,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 ---
 
-## 6. Writing a Custom Tool Plugin
+## 7. Writing a Custom Tool Plugin
 
 Developers can quickly author new tool plugins using `ene-tool-sdk`'s `#[derive(ToolAction)]` and `ene-plugin`'s server entry point. This sketch is illustrative — see an existing plugin under `plugins/tool/*` (e.g. `plugins/tool/app/src/main.rs`) for the current, compiling pattern, or `cargo doc -p ene-tool-macros --open` for the derive macro's exact requirements:
 

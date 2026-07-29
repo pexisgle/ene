@@ -118,6 +118,104 @@ fn delay_for_restart(restart_count: usize) -> Duration {
     Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
 }
 
+/// Environment variable names that must never be forwarded via
+/// `env_passthrough`, regardless of user configuration. These could
+/// subvert the sandbox or hijack the IPC channel.
+const ENV_PASSTHROUGH_DENYLIST: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+    "ENE_PLUGIN_SOCKET",
+];
+
+/// Abstraction over command types that support environment manipulation.
+///
+/// Both `std::process::Command` and `tokio::process::Command` implement
+/// this, allowing the env-hardening logic to be shared between the plugin
+/// spawn path (std) and the MCP stdio spawn path (tokio).
+pub(crate) trait EnvCommand {
+    /// Clears the entire inherited environment.
+    fn clear_env(&mut self);
+    /// Sets a single environment variable.
+    fn set_env(&mut self, key: &str, val: &str);
+}
+
+impl EnvCommand for std::process::Command {
+    fn clear_env(&mut self) {
+        self.env_clear();
+    }
+    fn set_env(&mut self, key: &str, val: &str) {
+        self.env(key, val);
+    }
+}
+
+impl EnvCommand for tokio::process::Command {
+    fn clear_env(&mut self) {
+        self.env_clear();
+    }
+    fn set_env(&mut self, key: &str, val: &str) {
+        self.env(key, val);
+    }
+}
+
+/// Applies the hardened environment to a command.
+///
+/// Clears the inherited environment (`env_clear()`) and forwards only an
+/// explicit whitelist of essential platform variables, plus any
+/// caller-supplied `env_passthrough` entries (filtered against a denylist).
+///
+/// This is the single source of truth for env hardening — used by both
+/// the plugin spawn path and the MCP stdio spawn path.
+pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[String]) {
+    cmd.clear_env();
+
+    // Essential platform variables (Unix + general).
+    for var in ["PATH", "HOME", "TMPDIR", "LANG"] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.set_env(var, &val);
+        }
+    }
+
+    // Timezone: forward only when set.
+    if let Ok(tz) = std::env::var("TZ") {
+        cmd.set_env("TZ", &tz);
+    }
+
+    // Shared library path on Linux.
+    #[cfg(target_os = "linux")]
+    if let Ok(val) = std::env::var("LD_LIBRARY_PATH") {
+        cmd.set_env("LD_LIBRARY_PATH", &val);
+    }
+
+    // Windows requires these for basic process operation.
+    #[cfg(windows)]
+    for var in ["SystemRoot", "USERPROFILE", "APPDATA", "TEMP", "PATHEXT"] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.set_env(var, &val);
+        }
+    }
+
+    // Per-plugin explicit passthrough (interim until #412/#413),
+    // filtered against the denylist.
+    for var in env_passthrough {
+        if ENV_PASSTHROUGH_DENYLIST
+            .iter()
+            .any(|blocked| blocked.eq_ignore_ascii_case(var))
+        {
+            tracing::warn!(
+                component = "PluginHostManager",
+                variable = %var,
+                "env_passthrough entry is on the denylist; ignoring"
+            );
+            continue;
+        }
+        if let Ok(val) = std::env::var(var) {
+            cmd.set_env(var, &val);
+        }
+    }
+}
+
 /// Builds a [`std::process::Command`] for a plugin with a hardened
 /// environment.
 ///
@@ -130,44 +228,21 @@ fn delay_for_restart(restart_count: usize) -> Duration {
 /// - `LANG` — locale-sensitive output
 /// - `TZ` — timezone awareness (only if set)
 /// - `LD_LIBRARY_PATH` — shared library loading on Linux
+/// - `SystemRoot`, `USERPROFILE`, `APPDATA`, `TEMP`, `PATHEXT` — Windows
 /// - `ENE_PLUGIN_SOCKET` — the IPC channel
 ///
-/// Additional variables can be forwarded per-plugin via `env_passthrough`.
+/// Additional variables can be forwarded per-plugin via `env_passthrough`,
+/// subject to a denylist that blocks security-sensitive names.
 fn build_plugin_command(
     binary_path: &std::path::Path,
     socket_path: &std::path::Path,
     env_passthrough: &[String],
 ) -> std::process::Command {
     let mut cmd = std::process::Command::new(binary_path);
-    cmd.env_clear();
-
-    // Essential platform variables.
-    for var in ["PATH", "HOME", "TMPDIR", "LANG"] {
-        if let Ok(val) = std::env::var(var) {
-            cmd.env(var, val);
-        }
-    }
-
-    // Timezone: forward only when set.
-    if let Ok(tz) = std::env::var("TZ") {
-        cmd.env("TZ", tz);
-    }
-
-    // Shared library path on Linux.
-    #[cfg(target_os = "linux")]
-    if let Ok(val) = std::env::var("LD_LIBRARY_PATH") {
-        cmd.env("LD_LIBRARY_PATH", val);
-    }
+    apply_hardened_env(&mut cmd, env_passthrough);
 
     // IPC socket — the primary communication channel.
     cmd.env("ENE_PLUGIN_SOCKET", socket_path);
-
-    // Per-plugin explicit passthrough (interim until #412/#413).
-    for var in env_passthrough {
-        if let Ok(val) = std::env::var(var) {
-            cmd.env(var, val);
-        }
-    }
 
     cmd
 }
@@ -488,6 +563,18 @@ impl PluginHostManager {
                 continue;
             }
 
+            // Reject names that could escape the plugin directory via
+            // path traversal before any filesystem access.
+            if !is_valid_plugin_name(name) {
+                tracing::error!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    "Invalid plugin name (must match [a-zA-Z0-9_-] with no path \
+                     separators or '..'); skipping"
+                );
+                continue;
+            }
+
             let entry_config = Some(entry.config.clone())
                 .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()));
 
@@ -590,6 +677,15 @@ impl PluginHostManager {
         }
 
         // Batch-persist TOFU checksums recorded during this startup.
+        //
+        // NOTE: `updated_config` is derived from the in-memory `config`
+        // parameter captured at process startup. `ene_config::update_section`
+        // re-reads the file from disk before overwriting the `plugins`
+        // section, so concurrent edits to *other* sections are preserved.
+        // However, if another process modified the `plugins` section between
+        // our startup read and this write, those changes are lost. This is
+        // acceptable because only a single host process writes plugin config
+        // at startup; a dedicated atomic writer may replace this in future.
         if !checksums_to_record.is_empty() {
             let mut updated_config = config
                 .get_section::<crate::config::PluginConfig>()
@@ -636,7 +732,12 @@ impl PluginHostManager {
                         let args_ref: Vec<&str> =
                             args.iter().map(std::string::String::as_str).collect();
                         if let Err(err) = registry
-                            .connect_stdio(&server.name, command, &args_ref)
+                            .connect_stdio(
+                                &server.name,
+                                command,
+                                &args_ref,
+                                &server.env_passthrough,
+                            )
                             .await
                         {
                             tracing::warn!(
@@ -912,6 +1013,22 @@ fn is_executable(path: &std::path::Path) -> bool {
     }
 }
 
+/// Validates that a plugin name is safe for use in filesystem paths.
+///
+/// Rejects names containing path separators, parent-directory traversal
+/// (`..`), or characters outside the safe set `[a-zA-Z0-9_-]`. This
+/// prevents config keys like `x/../../etc/evil` from escaping the plugin
+/// directory.
+fn is_valid_plugin_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Returns `true` when the plugin binary resolves from the builtin plugins
 /// directory. Used by the API key trust gate: only builtin or explicitly
 /// configured plugins receive resolved credentials.
@@ -924,7 +1041,14 @@ fn is_builtin_plugin(name: &str) -> bool {
 
 /// Finds the binary path for a plugin by name, searching builtin and user
 /// directories with both `ene-plugin-{name}` and `{name}` naming conventions.
+///
+/// Returns `None` if the name fails [`is_valid_plugin_name`] validation or
+/// no matching binary exists.
 fn find_plugin_binary(name: &str) -> Option<PathBuf> {
+    if !is_valid_plugin_name(name) {
+        return None;
+    }
+
     let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
 
     let builtin_dir = ene_config::builtin_plugins_dir();
@@ -1085,7 +1209,7 @@ fn verify_and_record_checksum(
         return Ok(Some(actual));
     };
 
-    if actual != expected {
+    if !actual.eq_ignore_ascii_case(expected) {
         return Err(PluginHostError::ChecksumMismatch {
             name: plugin_name.to_string(),
             expected: expected.to_string(),
@@ -1107,10 +1231,14 @@ fn verify_and_record_checksum(
 )]
 #[expect(
     clippy::undocumented_unsafe_blocks,
-    reason = "test-only set_var/remove_var; single-threaded test execution"
+    reason = "test-only set_var/remove_var; serialized via ENV_MUTEX"
 )]
 mod tests {
     use super::*;
+
+    /// Serializes tests that mutate the process environment (`set_var` /
+    /// `remove_var` are unsound when concurrent threads read the env).
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn delay_for_restart_grows_then_caps() {
@@ -1137,6 +1265,31 @@ mod tests {
     }
 
     #[test]
+    fn find_plugin_binary_rejects_path_traversal() {
+        assert!(find_plugin_binary("../etc/passwd").is_none());
+        assert!(find_plugin_binary("foo/bar").is_none());
+        assert!(find_plugin_binary("..").is_none());
+        assert!(find_plugin_binary("").is_none());
+    }
+
+    #[test]
+    fn is_valid_plugin_name_accepts_safe_names() {
+        assert!(is_valid_plugin_name("fs"));
+        assert!(is_valid_plugin_name("ene-plugin-web"));
+        assert!(is_valid_plugin_name("my_plugin_2"));
+    }
+
+    #[test]
+    fn is_valid_plugin_name_rejects_unsafe_names() {
+        assert!(!is_valid_plugin_name(""));
+        assert!(!is_valid_plugin_name(".."));
+        assert!(!is_valid_plugin_name("x/../../etc/evil"));
+        assert!(!is_valid_plugin_name("foo\\bar"));
+        assert!(!is_valid_plugin_name("has space"));
+        assert!(!is_valid_plugin_name("semi;colon"));
+    }
+
+    #[test]
     fn checksum_mismatch_blocks_verification() {
         use std::io::Write;
 
@@ -1159,6 +1312,10 @@ mod tests {
             verify_and_record_checksum("fake", &bin_path, Some(&real)).unwrap(),
             None
         );
+
+        // Case-insensitive comparison: uppercase hex also matches.
+        let upper = real.to_ascii_uppercase();
+        assert!(verify_and_record_checksum("fake", &bin_path, Some(&upper)).is_ok());
 
         // Mismatched checksum is rejected with ChecksumMismatch.
         let result = verify_and_record_checksum("fake", &bin_path, Some("deadbeef"));
@@ -1197,6 +1354,8 @@ mod tests {
     fn build_plugin_command_respects_passthrough() {
         use std::ffi::OsStr;
 
+        let _guard = ENV_MUTEX.lock().unwrap();
+
         let binary = std::path::Path::new("/bin/true");
         let socket = std::path::Path::new("/tmp/test.sock");
 
@@ -1213,5 +1372,32 @@ mod tests {
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
         assert!(!envs.contains_key(OsStr::new("ENE_TEST_LEAKED_VAR")));
         unsafe { std::env::remove_var("ENE_TEST_LEAKED_VAR") };
+    }
+
+    #[test]
+    fn build_plugin_command_blocks_denylisted_passthrough() {
+        use std::ffi::OsStr;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let binary = std::path::Path::new("/bin/true");
+        let socket = std::path::Path::new("/tmp/test.sock");
+
+        // LD_PRELOAD must not be forwarded even if explicitly requested.
+        unsafe { std::env::set_var("LD_PRELOAD", "/tmp/evil.so") };
+        let cmd = build_plugin_command(binary, socket, &["LD_PRELOAD".to_string()]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert!(!envs.contains_key(OsStr::new("LD_PRELOAD")));
+        unsafe { std::env::remove_var("LD_PRELOAD") };
+
+        // ENE_PLUGIN_SOCKET must not be overridable via passthrough.
+        let cmd = build_plugin_command(binary, socket, &["ENE_PLUGIN_SOCKET".to_string()]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        // The socket is set by build_plugin_command itself, not by passthrough.
+        // Verify it points to the expected socket path.
+        assert_eq!(
+            envs.get(OsStr::new("ENE_PLUGIN_SOCKET")),
+            Some(&Some(std::ffi::OsStr::new("/tmp/test.sock")))
+        );
     }
 }

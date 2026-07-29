@@ -86,22 +86,13 @@ impl McpToolRegistry {
         name: &str,
         command: &str,
         args: &[&str],
+        env_passthrough: &[String],
     ) -> Result<(), PluginHostError> {
-        let cmd = Command::new(command).configure(|c| {
-            // Harden: clear inherited environment and forward only essentials.
-            c.env_clear();
-            for var in ["PATH", "HOME", "TMPDIR", "LANG"] {
-                if let Ok(val) = std::env::var(var) {
-                    c.env(var, val);
-                }
-            }
-            if let Ok(tz) = std::env::var("TZ") {
-                c.env("TZ", tz);
-            }
-            #[cfg(target_os = "linux")]
-            if let Ok(val) = std::env::var("LD_LIBRARY_PATH") {
-                c.env("LD_LIBRARY_PATH", val);
-            }
+        let passthrough = env_passthrough.to_vec();
+        let cmd = Command::new(command).configure(move |c| {
+            // Harden: clear inherited environment and forward only essentials
+            // via the shared helper (same whitelist as plugin spawn).
+            crate::manager::apply_hardened_env(c, &passthrough);
             for arg in args {
                 c.arg(arg);
             }

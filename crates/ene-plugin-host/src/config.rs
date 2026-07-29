@@ -14,12 +14,24 @@ const fn default_health_interval_ms() -> u64 {
     30_000
 }
 
-/// Default plugin list containing the builtin tool plugins.
+/// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
-    ["app", "browser", "fs", "utility", "web"]
+    let mut list: HashMap<String, PluginEntry> = ["app", "browser", "fs", "utility", "web"]
         .into_iter()
         .map(|name| (name.to_string(), PluginEntry::default()))
-        .collect()
+        .collect();
+
+    // The Anthropic provider plugin needs ANTHROPIC_API_KEY forwarded from
+    // the host environment; without it the provider cannot authenticate.
+    list.insert(
+        "anthropic".to_string(),
+        PluginEntry {
+            env_passthrough: vec!["ANTHROPIC_API_KEY".to_string()],
+            ..PluginEntry::default()
+        },
+    );
+
+    list
 }
 
 /// A single plugin entry in the `plugins.list` map.
