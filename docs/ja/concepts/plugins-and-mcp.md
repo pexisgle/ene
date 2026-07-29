@@ -124,9 +124,68 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | `ene-plugin-web` | `web.*` | Web 検索および Markdown ページ抽出 | いいえ |
 | `ene-plugin-anthropic` | Provider | Anthropic Claude プロバイダプラグイン | いいえ |
 
+上記 6 プラグインはすべてデフォルトの `plugins.list` に含まれており、
+新規インストール時に自動的に起動します。
+
 ---
 
-## 5. MCP (Model Context Protocol) 連携
+## 5. プラグインセキュリティモデル
+
+### オプトイン型ディスカバリ
+
+プラグインのディスカバリは**オプトイン方式**です。`plugins.list` に明示的に
+`enable: true` で登録されたバイナリのみが起動します。プラグインディレクトリに
+バイナリを配置するだけでは実行されず、ホストは設定への追加を促す警告を
+ログに出力します。これにより「バイナリ配置 → 自動実行」の攻撃経路を遮断します。
+
+```jsonc
+// settings.json (抜粋)
+{
+  "plugins": {
+    "list": {
+      "fs": { "enable": true },
+      "anthropic": { "enable": true, "env_passthrough": ["ANTHROPIC_API_KEY"] }
+    }
+  }
+}
+```
+
+### 環境変数のハードニング (`env_clear`)
+
+すべてのプラグインおよび MCP stdio サーバーは `env_clear()` 付きで起動されます。
+継承された環境変数は消去され、明示的なホワイトリストのみが転送されます：
+
+| 変数 | 用途 |
+|---|---|
+| `PATH` | システム実行ファイルの探索 |
+| `HOME` | ユーザー設定ファイル |
+| `TMPDIR` | 一時ファイル |
+| `LANG` | ロケール依存出力 |
+| `TZ` | タイムゾーン (設定時のみ) |
+| `LD_LIBRARY_PATH` | 共有ライブラリ読み込み (Linux) |
+| `SystemRoot`, `USERPROFILE`, `APPDATA`, `TEMP`, `PATHEXT` | Windows 必須変数 |
+| `ENE_PLUGIN_SOCKET` | IPC チャネル (プラグインのみ) |
+
+### プラグインごとの `env_passthrough`
+
+追加のホスト環境変数 (API キーなど) が必要なプラグインは、`plugins.list`
+エントリの `env_passthrough` で明示的に宣言します。セキュリティ上危険な名前
+(`LD_PRELOAD`、`LD_AUDIT`、`DYLD_INSERT_LIBRARIES`、`ENE_PLUGIN_SOCKET` など)
+は設定に関係なくブロックする組み込み拒否リストが適用されます。
+
+MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passthrough`
+フィールドをサポートしています。
+
+### バイナリチェックサム検証 (TOFU)
+
+初回起動時にホストはプラグインバイナリの SHA-256 チェックサムを計算し、
+`plugins.list.<name>.checksum` に記録します (Trust-on-First-Use)。
+以降の起動ではバイナリを記録済みチェックサムと照合し、変更があれば
+起動を拒否します。比較は大文字小文字を区別しません (16進エンコーディング)。
+
+---
+
+## 6. MCP (Model Context Protocol) 連携
 
 `ene-connector` および `ene-plugin-host` は外部 MCP サーバーをシームレスに統合します：
 
@@ -136,7 +195,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 ---
 
-## 6. カスタムツールプラグインの開発
+## 7. カスタムツールプラグインの開発
 
 開発者は `ene-tool-sdk` の `#[derive(ToolAction)]` と `ene-plugin` のサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-tool-macros --open` を参照してください：
 

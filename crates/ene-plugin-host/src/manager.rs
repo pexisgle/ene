@@ -1,10 +1,12 @@
 //! Plugin host manager: process supervision, capability routing, and lifecycle.
 //!
-//! [`PluginHostManager`] discovers plugin binaries, spawns them as child
-//! processes, performs the v3 handshake, and routes advertised capabilities
-//! (tools, LLM providers) into the appropriate host registries. It also
-//! connects to configured MCP servers and exposes their tools alongside
-//! plugin-provided tools.
+//! [`PluginHostManager`] starts only plugins explicitly listed in
+//! `plugins.list` with `enable: true` (opt-in discovery). Each plugin is
+//! spawned with a hardened environment (`env_clear()` + whitelist), performs
+//! the v3 handshake, and routes advertised capabilities (tools, LLM
+//! providers) into the appropriate host registries. It also connects to
+//! configured MCP servers and exposes their tools alongside plugin-provided
+//! tools.
 
 use std::collections::HashMap;
 
@@ -44,6 +46,8 @@ struct SupervisedPlugin {
     binary_path: PathBuf,
     sandbox: ene_plugin_proto::SandboxConfigData,
     plugin_config: Option<serde_json::Value>,
+    /// Environment variable names to copy from the host on restart.
+    env_passthrough: Vec<String>,
     restart_count: usize,
 }
 
@@ -80,13 +84,13 @@ impl SupervisedPlugin {
             "Restarting plugin"
         );
 
-        let child = std::process::Command::new(&self.binary_path)
-            .env("ENE_PLUGIN_SOCKET", &self.socket_path)
-            .spawn()
-            .map_err(|e| PluginHostError::SpawnFailed {
-                name: self.name.clone(),
-                reason: e.to_string(),
-            })?;
+        let child =
+            build_plugin_command(&self.binary_path, &self.socket_path, &self.env_passthrough)
+                .spawn()
+                .map_err(|e| PluginHostError::SpawnFailed {
+                    name: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
 
         self.child = child;
         Ok(())
@@ -112,6 +116,135 @@ impl Drop for SupervisedPlugin {
 fn delay_for_restart(restart_count: usize) -> Duration {
     let delay_ms = BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(restart_count as u32));
     Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
+}
+
+/// Environment variable names that must never be forwarded via
+/// `env_passthrough`, regardless of user configuration. These could
+/// subvert the sandbox or hijack the IPC channel.
+const ENV_PASSTHROUGH_DENYLIST: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_FORCE_FLAT_NAMESPACE",
+    "ENE_PLUGIN_SOCKET",
+];
+
+/// Abstraction over command types that support environment manipulation.
+///
+/// Both `std::process::Command` and `tokio::process::Command` implement
+/// this, allowing the env-hardening logic to be shared between the plugin
+/// spawn path (std) and the MCP stdio spawn path (tokio).
+pub(crate) trait EnvCommand {
+    /// Clears the entire inherited environment.
+    fn clear_env(&mut self);
+    /// Sets a single environment variable.
+    fn set_env(&mut self, key: &str, val: &str);
+}
+
+impl EnvCommand for std::process::Command {
+    fn clear_env(&mut self) {
+        self.env_clear();
+    }
+    fn set_env(&mut self, key: &str, val: &str) {
+        self.env(key, val);
+    }
+}
+
+impl EnvCommand for tokio::process::Command {
+    fn clear_env(&mut self) {
+        self.env_clear();
+    }
+    fn set_env(&mut self, key: &str, val: &str) {
+        self.env(key, val);
+    }
+}
+
+/// Applies the hardened environment to a command.
+///
+/// Clears the inherited environment (`env_clear()`) and forwards only an
+/// explicit whitelist of essential platform variables, plus any
+/// caller-supplied `env_passthrough` entries (filtered against a denylist).
+///
+/// This is the single source of truth for env hardening — used by both
+/// the plugin spawn path and the MCP stdio spawn path.
+pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[String]) {
+    cmd.clear_env();
+
+    // Essential platform variables (Unix + general).
+    for var in ["PATH", "HOME", "TMPDIR", "LANG"] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.set_env(var, &val);
+        }
+    }
+
+    // Timezone: forward only when set.
+    if let Ok(tz) = std::env::var("TZ") {
+        cmd.set_env("TZ", &tz);
+    }
+
+    // Shared library path on Linux.
+    #[cfg(target_os = "linux")]
+    if let Ok(val) = std::env::var("LD_LIBRARY_PATH") {
+        cmd.set_env("LD_LIBRARY_PATH", &val);
+    }
+
+    // Windows requires these for basic process operation.
+    #[cfg(windows)]
+    for var in ["SystemRoot", "USERPROFILE", "APPDATA", "TEMP", "PATHEXT"] {
+        if let Ok(val) = std::env::var(var) {
+            cmd.set_env(var, &val);
+        }
+    }
+
+    // Per-plugin explicit passthrough (interim until #412/#413),
+    // filtered against the denylist.
+    for var in env_passthrough {
+        if ENV_PASSTHROUGH_DENYLIST
+            .iter()
+            .any(|blocked| blocked.eq_ignore_ascii_case(var))
+        {
+            tracing::warn!(
+                component = "PluginHostManager",
+                variable = %var,
+                "env_passthrough entry is on the denylist; ignoring"
+            );
+            continue;
+        }
+        if let Ok(val) = std::env::var(var) {
+            cmd.set_env(var, &val);
+        }
+    }
+}
+
+/// Builds a [`std::process::Command`] for a plugin with a hardened
+/// environment.
+///
+/// The inherited environment is cleared (`env_clear()`) and only an
+/// explicit whitelist of essential variables is forwarded:
+///
+/// - `PATH` — locating system executables
+/// - `HOME` — user config files
+/// - `TMPDIR` — temporary files
+/// - `LANG` — locale-sensitive output
+/// - `TZ` — timezone awareness (only if set)
+/// - `LD_LIBRARY_PATH` — shared library loading on Linux
+/// - `SystemRoot`, `USERPROFILE`, `APPDATA`, `TEMP`, `PATHEXT` — Windows
+/// - `ENE_PLUGIN_SOCKET` — the IPC channel
+///
+/// Additional variables can be forwarded per-plugin via `env_passthrough`,
+/// subject to a denylist that blocks security-sensitive names.
+fn build_plugin_command(
+    binary_path: &std::path::Path,
+    socket_path: &std::path::Path,
+    env_passthrough: &[String],
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(binary_path);
+    apply_hardened_env(&mut cmd, env_passthrough);
+
+    // IPC socket — the primary communication channel.
+    cmd.env("ENE_PLUGIN_SOCKET", socket_path);
+
+    cmd
 }
 
 /// A `ToolRegistry` adapter that routes tool calls to a plugin over IPC,
@@ -308,9 +441,11 @@ impl ToolRegistry for PluginToolRegistry {
 
 /// Orchestrates the lifecycle of all plugin processes and MCP connections.
 ///
-/// Discovers plugin binaries from [`builtin_plugins_dir`](ene_config::builtin_plugins_dir)
-/// and [`user_plugins_dir`](ene_config::user_plugins_dir), spawns each as a
-/// child process, performs the v3 handshake, and routes capabilities:
+/// Starts only plugins explicitly listed in `plugins.list` with
+/// `enable: true` (opt-in discovery). Binaries found on disk that are
+/// not listed emit a warning suggesting the user add them. Each plugin
+/// is spawned with a hardened environment (`env_clear()` + whitelist),
+/// performs the v3 handshake, and routes capabilities:
 ///
 /// - `capabilities.tools` (count) → wrapped in a [`ToolRegistry`] adapter (specs fetched via `ListTools`)
 /// - `capabilities.llm_providers` → registered as [`IpcLlmProviderFactory`] entries
@@ -351,8 +486,11 @@ impl Drop for PluginHostManager {
 }
 
 impl PluginHostManager {
-    /// Discovers and starts all plugin binaries, performing handshakes and
-    /// capability routing. Also connects to configured MCP servers.
+    /// Discovers and starts configured plugin binaries, performing handshakes
+    /// and capability routing. Also connects to configured MCP servers.
+    ///
+    /// Only plugins listed in `plugins.list` with `enable: true` are started
+    /// (opt-in). Binaries found on disk that are not listed emit a warning.
     ///
     /// `db_tokens` maps plugin names to pre-shared DB IPC auth tokens; tool
     /// plugins that need database access receive their token via the sandbox
@@ -400,15 +538,23 @@ impl PluginHostManager {
             }
         })?;
 
-        let plugin_names = discover_plugins();
+        // Warn about plugin binaries on disk that are NOT listed in config.
+        for name in discover_plugins() {
+            if !plugin_config.list.contains_key(&name) {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    "Plugin binary found on disk but not listed in plugins.list; \
+                     add 'plugins.list.{name}.enable = true' to settings.json to activate it"
+                );
+            }
+        }
 
-        for name in &plugin_names {
-            let entry = plugin_config.list.get(name);
+        // TOFU checksums to persist after startup completes.
+        let mut checksums_to_record: HashMap<String, String> = HashMap::new();
 
-            // Skip plugins explicitly disabled in configuration.
-            if let Some(entry) = entry
-                && !entry.enable
-            {
+        for (name, entry) in &plugin_config.list {
+            if !entry.enable {
                 tracing::info!(
                     component = "PluginHostManager",
                     plugin = %name,
@@ -417,24 +563,35 @@ impl PluginHostManager {
                 continue;
             }
 
-            let entry_config = entry
-                .map(|e| e.config.clone())
-                .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()));
+            // Reject names that could escape the plugin directory via
+            // path traversal before any filesystem access.
+            if !is_valid_plugin_name(name) {
+                tracing::error!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    "Invalid plugin name (must match [a-zA-Z0-9_-] with no path \
+                     separators or '..'); skipping"
+                );
+                continue;
+            }
 
-            // The expected checksum is a *typed* field on the plugin entry
-            // (`PluginEntry::checksum`), not part of the flattened `config`
-            // JSON. Pass it explicitly so verification actually runs.
-            let expected_checksum = entry.and_then(|e| e.checksum.clone());
+            let entry_config = Some(entry.config.clone())
+                .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()));
 
             match Self::start_plugin(
                 name,
                 entry_config,
-                expected_checksum,
+                entry.checksum.clone(),
+                entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
             )
             .await
             {
-                Ok((plugin, conn)) => {
+                Ok((plugin, conn, tofu_checksum)) => {
+                    if let Some(checksum) = tofu_checksum {
+                        checksums_to_record.insert(name.clone(), checksum);
+                    }
+
                     let caps = conn.lock().await.capabilities().clone();
 
                     // Route tool capabilities — fetch actual specs via ListTools.
@@ -519,6 +676,34 @@ impl PluginHostManager {
             }
         }
 
+        // Batch-persist TOFU checksums recorded during this startup.
+        //
+        // NOTE: `updated_config` is derived from the in-memory `config`
+        // parameter captured at process startup. `ene_config::update_section`
+        // re-reads the file from disk before overwriting the `plugins`
+        // section, so concurrent edits to *other* sections are preserved.
+        // However, if another process modified the `plugins` section between
+        // our startup read and this write, those changes are lost. This is
+        // acceptable because only a single host process writes plugin config
+        // at startup; a dedicated atomic writer may replace this in future.
+        if !checksums_to_record.is_empty() {
+            let mut updated_config = config
+                .get_section::<crate::config::PluginConfig>()
+                .unwrap_or_default();
+            for (name, checksum) in &checksums_to_record {
+                if let Some(e) = updated_config.list.get_mut(name) {
+                    e.checksum = Some(checksum.clone());
+                }
+            }
+            if let Err(e) = ene_config::update_section(&updated_config) {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    error = %e,
+                    "Failed to persist plugin checksums to configuration"
+                );
+            }
+        }
+
         // Connect to configured MCP servers via McpConnector (WS7: wire into lifecycle).
         let connector_registry = Arc::new(ConnectorRegistry::new());
         if !plugin_config.mcp_servers.is_empty() {
@@ -547,7 +732,12 @@ impl PluginHostManager {
                         let args_ref: Vec<&str> =
                             args.iter().map(std::string::String::as_str).collect();
                         if let Err(err) = registry
-                            .connect_stdio(&server.name, command, &args_ref)
+                            .connect_stdio(
+                                &server.name,
+                                command,
+                                &args_ref,
+                                &server.env_passthrough,
+                            )
                             .await
                         {
                             tracing::warn!(
@@ -673,11 +863,13 @@ impl PluginHostManager {
         name: &str,
         plugin_config: Option<serde_json::Value>,
         expected_checksum: Option<String>,
+        env_passthrough: Vec<String>,
         db_token: Option<String>,
     ) -> Result<
         (
             Arc<Mutex<SupervisedPlugin>>,
             Arc<Mutex<IpcPluginConnection>>,
+            Option<String>,
         ),
         PluginHostError,
     > {
@@ -686,10 +878,10 @@ impl PluginHostManager {
             reason: "binary not found".to_string(),
         })?;
 
-        // Verify binary checksum if configured. When no checksum is
-        // configured, log a one-time warning on first launch (the documented
-        // trust-on-first-use behavior).
-        verify_plugin_checksum(name, &binary_path, expected_checksum.as_deref())?;
+        // Verify binary checksum. When no checksum is configured, compute
+        // and return it for trust-on-first-use recording.
+        let tofu_checksum =
+            verify_and_record_checksum(name, &binary_path, expected_checksum.as_deref())?;
 
         let socket_path: PathBuf = {
             #[cfg(unix)]
@@ -717,8 +909,7 @@ impl PluginHostManager {
             }
         }
 
-        let child = std::process::Command::new(&binary_path)
-            .env("ENE_PLUGIN_SOCKET", &socket_path)
+        let child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)
             .spawn()
             .map_err(|e| PluginHostError::SpawnFailed {
                 name: name.to_string(),
@@ -736,10 +927,15 @@ impl PluginHostManager {
             binary_path: binary_path.clone(),
             sandbox,
             plugin_config,
+            env_passthrough,
             restart_count: 0,
         };
 
-        Ok((Arc::new(Mutex::new(plugin)), Arc::new(Mutex::new(conn))))
+        Ok((
+            Arc::new(Mutex::new(plugin)),
+            Arc::new(Mutex::new(conn)),
+            tofu_checksum,
+        ))
     }
 }
 
@@ -817,6 +1013,22 @@ fn is_executable(path: &std::path::Path) -> bool {
     }
 }
 
+/// Validates that a plugin name is safe for use in filesystem paths.
+///
+/// Rejects names containing path separators, parent-directory traversal
+/// (`..`), or characters outside the safe set `[a-zA-Z0-9_-]`. This
+/// prevents config keys like `x/../../etc/evil` from escaping the plugin
+/// directory.
+fn is_valid_plugin_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Returns `true` when the plugin binary resolves from the builtin plugins
 /// directory. Used by the API key trust gate: only builtin or explicitly
 /// configured plugins receive resolved credentials.
@@ -829,7 +1041,14 @@ fn is_builtin_plugin(name: &str) -> bool {
 
 /// Finds the binary path for a plugin by name, searching builtin and user
 /// directories with both `ene-plugin-{name}` and `{name}` naming conventions.
+///
+/// Returns `None` if the name fails [`is_valid_plugin_name`] validation or
+/// no matching binary exists.
 fn find_plugin_binary(name: &str) -> Option<PathBuf> {
+    if !is_valid_plugin_name(name) {
+        return None;
+    }
+
     let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
 
     let builtin_dir = ene_config::builtin_plugins_dir();
@@ -961,34 +1180,36 @@ async fn health_probe_loop(
     }
 }
 
-/// Verifies that the plugin binary at `path` matches the expected SHA-256
-/// checksum.
+/// Verifies the plugin binary checksum and computes a TOFU checksum when
+/// none is recorded yet.
 ///
-/// When `expected` is `None`, logs a one-time warning that the binary is being
-/// launched without integrity verification (trust-on-first-use) and returns
-/// `Ok`. When `expected` is `Some`, computes the SHA-256 hash of the binary and
+/// When `expected` is `Some`, computes the SHA-256 hash of the binary and
 /// returns [`PluginHostError::ChecksumMismatch`] if it doesn't match.
-fn verify_plugin_checksum(
+/// When `expected` is `None`, computes the checksum and returns it as
+/// `Ok(Some(checksum))` for the caller to persist (trust-on-first-use).
+fn verify_and_record_checksum(
     plugin_name: &str,
-    path: &PathBuf,
+    path: &std::path::Path,
     expected: Option<&str>,
-) -> Result<(), PluginHostError> {
-    let Some(expected) = expected else {
-        tracing::warn!(
-            component = "PluginHostManager",
-            plugin = %plugin_name,
-            "Plugin binary launched without checksum verification (trust-on-first-use); \
-             set plugins.list.{plugin_name}.checksum to enable integrity checks"
-        );
-        return Ok(());
-    };
-
+) -> Result<Option<String>, PluginHostError> {
     let contents = std::fs::read(path).map_err(|e| PluginHostError::SpawnFailed {
         name: plugin_name.to_string(),
         reason: format!("cannot read binary for checksum verification: {e}"),
     })?;
     let actual = hex::encode(sha2::Sha256::digest(&contents));
-    if actual != expected {
+
+    let Some(expected) = expected else {
+        // Trust-on-first-use: record the checksum for future verification.
+        tracing::info!(
+            component = "PluginHostManager",
+            plugin = %plugin_name,
+            checksum = %actual,
+            "Recording plugin binary checksum (trust-on-first-use)"
+        );
+        return Ok(Some(actual));
+    };
+
+    if !actual.eq_ignore_ascii_case(expected) {
         return Err(PluginHostError::ChecksumMismatch {
             name: plugin_name.to_string(),
             expected: expected.to_string(),
@@ -1000,7 +1221,7 @@ fn verify_plugin_checksum(
         plugin = %plugin_name,
         "Plugin binary checksum verified"
     );
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -1008,8 +1229,16 @@ fn verify_plugin_checksum(
     clippy::unwrap_used,
     reason = "tests use unwrap for concise failure messages"
 )]
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only set_var/remove_var; serialized via ENV_MUTEX"
+)]
 mod tests {
     use super::*;
+
+    /// Serializes tests that mutate the process environment (`set_var` /
+    /// `remove_var` are unsound when concurrent threads read the env).
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn delay_for_restart_grows_then_caps() {
@@ -1036,6 +1265,31 @@ mod tests {
     }
 
     #[test]
+    fn find_plugin_binary_rejects_path_traversal() {
+        assert!(find_plugin_binary("../etc/passwd").is_none());
+        assert!(find_plugin_binary("foo/bar").is_none());
+        assert!(find_plugin_binary("..").is_none());
+        assert!(find_plugin_binary("").is_none());
+    }
+
+    #[test]
+    fn is_valid_plugin_name_accepts_safe_names() {
+        assert!(is_valid_plugin_name("fs"));
+        assert!(is_valid_plugin_name("ene-plugin-web"));
+        assert!(is_valid_plugin_name("my_plugin_2"));
+    }
+
+    #[test]
+    fn is_valid_plugin_name_rejects_unsafe_names() {
+        assert!(!is_valid_plugin_name(""));
+        assert!(!is_valid_plugin_name(".."));
+        assert!(!is_valid_plugin_name("x/../../etc/evil"));
+        assert!(!is_valid_plugin_name("foo\\bar"));
+        assert!(!is_valid_plugin_name("has space"));
+        assert!(!is_valid_plugin_name("semi;colon"));
+    }
+
+    #[test]
     fn checksum_mismatch_blocks_verification() {
         use std::io::Write;
 
@@ -1052,19 +1306,98 @@ mod tests {
         hasher.update(b"fake plugin binary contents");
         let real = hex::encode(hasher.finalize());
 
-        // Matching checksum passes.
-        assert!(verify_plugin_checksum("fake", &bin_path, Some(&real)).is_ok());
+        // Matching checksum passes, no TOFU recording.
+        assert!(verify_and_record_checksum("fake", &bin_path, Some(&real)).is_ok());
+        assert_eq!(
+            verify_and_record_checksum("fake", &bin_path, Some(&real)).unwrap(),
+            None
+        );
+
+        // Case-insensitive comparison: uppercase hex also matches.
+        let upper = real.to_ascii_uppercase();
+        assert!(verify_and_record_checksum("fake", &bin_path, Some(&upper)).is_ok());
 
         // Mismatched checksum is rejected with ChecksumMismatch.
-        let result = verify_plugin_checksum("fake", &bin_path, Some("deadbeef"));
+        let result = verify_and_record_checksum("fake", &bin_path, Some("deadbeef"));
         assert!(matches!(
             result,
             Err(PluginHostError::ChecksumMismatch { .. })
         ));
 
-        // No checksum configured → trust-on-first-use, passes.
-        assert!(verify_plugin_checksum("fake", &bin_path, None).is_ok());
+        // No checksum configured → trust-on-first-use, returns computed hash.
+        let tofu = verify_and_record_checksum("fake", &bin_path, None).unwrap();
+        assert_eq!(tofu, Some(real));
 
         drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn build_plugin_command_clears_environment() {
+        use std::ffi::OsStr;
+
+        let binary = std::path::Path::new("/bin/true");
+        let socket = std::path::Path::new("/tmp/test.sock");
+
+        let cmd = build_plugin_command(binary, socket, &[]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+
+        // Must contain the IPC socket.
+        assert!(envs.contains_key(OsStr::new("ENE_PLUGIN_SOCKET")));
+        // Must contain whitelisted vars (when present in host env).
+        assert!(envs.contains_key(OsStr::new("PATH")));
+        // Must NOT contain arbitrary secrets.
+        assert!(!envs.contains_key(OsStr::new("ANTHROPIC_API_KEY")));
+        assert!(!envs.contains_key(OsStr::new("AWS_SECRET_ACCESS_KEY")));
+    }
+
+    #[test]
+    fn build_plugin_command_respects_passthrough() {
+        use std::ffi::OsStr;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let binary = std::path::Path::new("/bin/true");
+        let socket = std::path::Path::new("/tmp/test.sock");
+
+        // Set a variable in the current process to verify passthrough.
+        unsafe { std::env::set_var("ENE_TEST_PASSTHROUGH_VAR", "hello") };
+        let cmd = build_plugin_command(binary, socket, &["ENE_TEST_PASSTHROUGH_VAR".to_string()]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert!(envs.contains_key(OsStr::new("ENE_TEST_PASSTHROUGH_VAR")));
+        unsafe { std::env::remove_var("ENE_TEST_PASSTHROUGH_VAR") };
+
+        // Without passthrough, the variable must not leak.
+        unsafe { std::env::set_var("ENE_TEST_LEAKED_VAR", "secret") };
+        let cmd = build_plugin_command(binary, socket, &[]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert!(!envs.contains_key(OsStr::new("ENE_TEST_LEAKED_VAR")));
+        unsafe { std::env::remove_var("ENE_TEST_LEAKED_VAR") };
+    }
+
+    #[test]
+    fn build_plugin_command_blocks_denylisted_passthrough() {
+        use std::ffi::OsStr;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let binary = std::path::Path::new("/bin/true");
+        let socket = std::path::Path::new("/tmp/test.sock");
+
+        // LD_PRELOAD must not be forwarded even if explicitly requested.
+        unsafe { std::env::set_var("LD_PRELOAD", "/tmp/evil.so") };
+        let cmd = build_plugin_command(binary, socket, &["LD_PRELOAD".to_string()]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        assert!(!envs.contains_key(OsStr::new("LD_PRELOAD")));
+        unsafe { std::env::remove_var("LD_PRELOAD") };
+
+        // ENE_PLUGIN_SOCKET must not be overridable via passthrough.
+        let cmd = build_plugin_command(binary, socket, &["ENE_PLUGIN_SOCKET".to_string()]);
+        let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        // The socket is set by build_plugin_command itself, not by passthrough.
+        // Verify it points to the expected socket path.
+        assert_eq!(
+            envs.get(OsStr::new("ENE_PLUGIN_SOCKET")),
+            Some(&Some(std::ffi::OsStr::new("/tmp/test.sock")))
+        );
     }
 }

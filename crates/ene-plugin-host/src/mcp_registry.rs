@@ -86,8 +86,13 @@ impl McpToolRegistry {
         name: &str,
         command: &str,
         args: &[&str],
+        env_passthrough: &[String],
     ) -> Result<(), PluginHostError> {
-        let cmd = Command::new(command).configure(|c| {
+        let passthrough = env_passthrough.to_vec();
+        let cmd = Command::new(command).configure(move |c| {
+            // Harden: clear inherited environment and forward only essentials
+            // via the shared helper (same whitelist as plugin spawn).
+            crate::manager::apply_hardened_env(c, &passthrough);
             for arg in args {
                 c.arg(arg);
             }

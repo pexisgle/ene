@@ -133,8 +133,9 @@ impl Connector for McpConnector {
                 let command = command.clone();
                 let args: Vec<String> = args.clone();
                 let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
+                let passthrough = config.env_passthrough.clone();
                 self.registry
-                    .connect_stdio(&name, &command, &args_ref)
+                    .connect_stdio(&name, &command, &args_ref, &passthrough)
                     .await
                     .map_err(|e| ConnectorError::transport(e.to_string()))
             }
