@@ -3,7 +3,7 @@
 use std::hash::{Hash, Hasher};
 
 use ene_config::{CharacterCardV3, LorebookEntry, expand_cbs_macros};
-use ene_store::{
+use ene_core::{
     AffectAnnotation, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope, MemorySource,
     MemoryStatus, NewMemoryItem,
 };

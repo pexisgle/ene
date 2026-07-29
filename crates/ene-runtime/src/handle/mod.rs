@@ -438,7 +438,7 @@ impl EneHandle {
 
         let registry = actor::build_tool_registry(plugin_host.as_ref())?;
         let tool_rag = match embedder.as_ref() {
-            Some(emb) => actor::init_tool_rag(&config, emb, &session)?,
+            Some(emb) => actor::init_tool_rag(&config, emb, memory_store.clone())?,
             None => None,
         };
         if let Some(rag) = &tool_rag {
@@ -467,7 +467,7 @@ impl EneHandle {
 
         let mind_memory = mind.memory.clone();
         let memory = crate::diagnostics::MemoryQueryHandle::new(
-            session.memory.memory_store.clone(),
+            memory_store.clone(),
             session.memory.embedding_provider.clone(),
             mind_memory,
         );
@@ -570,6 +570,7 @@ impl EneHandle {
             Arc::clone(&turn_gate),
             config,
             session,
+            memory_store,
             registry,
             tool_rag,
             health_monitor,
@@ -1359,6 +1360,7 @@ mod tests {
             Arc::new(TurnGate::new()),
             config,
             ConversationSession::new(),
+            None,
             registry,
             None,
             health_monitor,

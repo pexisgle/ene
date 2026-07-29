@@ -1,4 +1,4 @@
-use ene_store::{AffectState, MemoryKind};
+use ene_core::{AffectState, MemoryKind};
 
 /// Heuristic recall intents inferred from the current turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

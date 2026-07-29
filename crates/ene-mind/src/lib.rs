@@ -44,9 +44,11 @@
 //! and the architecture boundaries; see the
 //! [API v1 ADR](../../docs/reference/architecture/api-v1.md) for the target crate map.
 //!
-//! - Depends on: `ene-store`, `ene-config`, `ene-ai`
-//! - Does NOT depend on: `ene-runtime` (prevents circular dependencies)
-//! - Calls `ene-store` only through its public `MemoryStore` methods — never issues
+//! - Depends on: `ene-core`, `ene-config`, `ene-ai`
+//! - Does NOT depend on: `ene-runtime` (prevents circular dependencies),
+//!   `ene-store` (production code uses `ene_core::MemoryPort`; `ene-store`
+//!   is a dev-dependency for integration tests only, #309)
+//! - Calls the store only through `ene_core::MemoryPort` — never issues
 //!   raw SQL or `sea-orm` queries directly. `ene-store` remains the sole `SQLite` owner.
 //! - Owns mind logic exclusively: memory extraction, recall planning, emotion,
 //!   context budgeting, prompt composition, and session state all live here.
@@ -117,9 +119,9 @@ pub use context::{
 /// Emotion engine types.
 #[doc(no_inline)]
 pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
-/// Re-export commitment domain types from ene-store for consumers.
+/// Re-export commitment domain types from ene-core for consumers (#309).
 #[doc(no_inline)]
-pub use ene_store::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
+pub use ene_core::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Central cognitive engine facade.
 pub use engine::{CognitionEngine, MemoryWriteOutcome};
 /// Cognitive runtime error type.

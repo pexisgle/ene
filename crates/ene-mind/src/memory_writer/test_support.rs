@@ -16,8 +16,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ene_core::{
-    Commitment, MemoryItem, MemoryKind, MemoryPort, MemoryPortError, MemoryStatus,
-    NaturalDecayReport, NewMemoryItem, PendingCandidate, Query, ScoredMemory,
+    ActiveSceneSummaryRow, AffectState, Commitment, MemoryItem, MemoryKind, MemoryPort,
+    MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan,
+    PendingAffectProposal, PendingCandidate, PendingMemoryWrite, Query, ScoredMemory,
 };
 use parking_lot::Mutex;
 
@@ -260,6 +261,108 @@ impl MemoryPort for InMemoryMemoryPort {
         _user_id: Option<&str>,
         _limit: usize,
     ) -> Result<Vec<Commitment>, MemoryPortError> {
+        Ok(Vec::new())
+    }
+
+    // ── Affect state (#309) ────────────────────────────────────────────────
+
+    async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError> {
+        Ok(AffectState::neutral(character_id))
+    }
+
+    async fn upsert_affect_state(&self, _affect: &AffectState) -> Result<(), MemoryPortError> {
+        Ok(())
+    }
+
+    async fn take_pending_affect_proposal(
+        &self,
+        _character_id: &str,
+        _user_name: &str,
+    ) -> Result<Option<PendingAffectProposal>, MemoryPortError> {
+        Ok(None)
+    }
+
+    // ── Commitment CRUD (#309) ─────────────────────────────────────────────
+
+    async fn insert_commitment(&self, _new: &NewCommitment) -> Result<i64, MemoryPortError> {
+        Ok(self.alloc_id())
+    }
+
+    async fn supersede_commitment(
+        &self,
+        _id: i64,
+        _description: &str,
+        _due_label: Option<&str>,
+    ) -> Result<bool, MemoryPortError> {
+        Ok(false)
+    }
+
+    async fn complete_commitment(&self, _id: i64) -> Result<bool, MemoryPortError> {
+        Ok(false)
+    }
+
+    async fn cancel_commitment(&self, _id: i64) -> Result<bool, MemoryPortError> {
+        Ok(false)
+    }
+
+    async fn mark_stale_commitments(
+        &self,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<usize, MemoryPortError> {
+        Ok(0)
+    }
+
+    // ── Pending memory writes (#309) ───────────────────────────────────────
+
+    async fn enqueue_pending_memory_write(
+        &self,
+        _character_id: &str,
+        _user_id: &str,
+        _payload: String,
+        _error_message: String,
+    ) -> Result<i64, MemoryPortError> {
+        Ok(self.alloc_id())
+    }
+
+    async fn take_due_pending_memory_writes(
+        &self,
+        _limit: usize,
+    ) -> Result<Vec<PendingMemoryWrite>, MemoryPortError> {
+        Ok(Vec::new())
+    }
+
+    async fn complete_pending_memory_write(&self, _id: i64) -> Result<(), MemoryPortError> {
+        Ok(())
+    }
+
+    async fn fail_pending_memory_write(
+        &self,
+        id: i64,
+        error_message: String,
+    ) -> Result<PendingMemoryWrite, MemoryPortError> {
+        Err(MemoryPortError::Backend(format!(
+            "pending write {id} not found in test double: {error_message}"
+        )))
+    }
+
+    // ── Memory spans / compression (#309) ──────────────────────────────────
+
+    async fn insert_memory_span(&self, _span: &NewMemorySpan) -> Result<i64, MemoryPortError> {
+        Ok(self.alloc_id())
+    }
+
+    async fn get_active_scene_summary(
+        &self,
+        _session_id: &str,
+    ) -> Result<Option<ActiveSceneSummaryRow>, MemoryPortError> {
+        Ok(None)
+    }
+
+    async fn list_memory_spans_by_session_and_level(
+        &self,
+        _session_id: &str,
+        _level: i32,
+    ) -> Result<Vec<NewMemorySpan>, MemoryPortError> {
         Ok(Vec::new())
     }
 }

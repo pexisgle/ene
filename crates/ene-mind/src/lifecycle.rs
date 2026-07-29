@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ene_ai::{EmbeddingProvider, LlmMessage, LlmProvider, Role};
 use ene_config::CharacterCardV3;
-use ene_store::{ActiveCommitmentPrompt, AffectState, MemoryStore};
+use ene_core::{ActiveCommitmentPrompt, AffectState, MemoryPort};
 
 use crate::character::StyleExample;
 use crate::config::MindConfig;
@@ -61,7 +61,7 @@ pub struct TurnContext<'a> {
     /// Recent conversation history.
     pub history: &'a [HistoryEntry],
     /// Memory store (optional when memory disabled).
-    pub store: Option<&'a MemoryStore>,
+    pub store: Option<&'a dyn MemoryPort>,
     /// Query embedding for recall (optional).
     pub query_embedding: Option<&'a [f32]>,
     /// Embedding provider for model name.

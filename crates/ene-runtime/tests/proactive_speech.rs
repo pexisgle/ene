@@ -134,6 +134,7 @@ async fn proactive_stream_does_not_add_user_history() {
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        concrete_store: None,
     };
 
     let outcome = run_stream_cognitive(ctx).await;
@@ -220,6 +221,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        concrete_store: None,
     };
 
     let outcome = run_stream_cognitive(ctx).await;
@@ -290,6 +292,7 @@ async fn proactive_stream_without_memory_store() {
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        concrete_store: None,
     };
 
     let outcome = run_stream_cognitive(ctx).await;

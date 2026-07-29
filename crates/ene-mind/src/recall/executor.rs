@@ -1,6 +1,6 @@
 //! Maps hybrid search output from `ene-store` into explainable recall results.
 
-use ene_store::ScoredMemory;
+use ene_core::ScoredMemory;
 
 use super::result::{RecalledMemory, explain_scored_memories};
 

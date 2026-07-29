@@ -17,8 +17,9 @@
 
 use std::fmt::Write;
 
+use crate::error::CognitionError;
 use ene_config::PromptLibrary;
-use ene_store::{EneMemoryError, KeyFact};
+use ene_core::KeyFact;
 use serde::{Deserialize, Serialize};
 
 /// Structured conversation summary returned by the LLM.
@@ -43,7 +44,7 @@ pub async fn summarize_conversation(
     character_name: &str,
     user_name: &str,
     existing_facts: &[KeyFact],
-) -> Result<ConversationSummaryResult, EneMemoryError> {
+) -> Result<ConversationSummaryResult, CognitionError> {
     if history.is_empty() {
         return Ok(ConversationSummaryResult {
             summary: String::new(),
@@ -172,11 +173,9 @@ pub async fn summarize_conversation(
     )
     .await
     .map_err(|_| {
-        EneMemoryError::MemoryStoreConnectionError(
-            "summarization: chat completion timed out after 120s".to_string(),
-        )
+        CognitionError::Other("summarization: chat completion timed out after 120s".to_string())
     })?
-    .map_err(|e| EneMemoryError::MemoryStoreConnectionError(format!("summarization: {e}")))?;
+    .map_err(|e| CognitionError::Other(format!("summarization: {e}")))?;
 
     parse_summary_json(&content)
 }
@@ -188,7 +187,7 @@ pub async fn summarize_conversation(
 /// LLM text as the summary when JSON parsing failed, which meant a
 /// markdown-wrapped or prose response would be persisted as a "summary" and
 /// surface later in the recalled context as noise.
-fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, EneMemoryError> {
+fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, CognitionError> {
     let cleaned = raw
         .trim()
         .trim_start_matches("```json")
@@ -209,7 +208,7 @@ fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, EneMemoryE
         }
     }
 
-    Err(EneMemoryError::MemoryStoreConnectionError(format!(
+    Err(CognitionError::Other(format!(
         "[Summarizer] LLM response was not valid JSON for the expected summary schema; \
          refusing to persist raw prose as a summary. First 200 chars: {}",
         raw.chars().take(200).collect::<String>()

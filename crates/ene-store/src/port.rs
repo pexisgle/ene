@@ -15,8 +15,9 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ene_core::{
-    Commitment, MemoryItem, MemoryKind, MemoryPort, MemoryPortError, MemoryStatus,
-    NaturalDecayReport, NewMemoryItem, PendingCandidate, Query, ScoredMemory,
+    ActiveSceneSummaryRow, AffectState, Commitment, MemoryItem, MemoryKind, MemoryPort,
+    MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan,
+    PendingAffectProposal, PendingCandidate, PendingMemoryWrite, Query, ScoredMemory,
 };
 
 use crate::error::EneMemoryError;
@@ -154,5 +155,105 @@ impl MemoryPort for MemoryStore {
         limit: usize,
     ) -> Result<Vec<Commitment>, MemoryPortError> {
         Ok(Self::list_active_commitments(self, character_id, user_id, limit).await?)
+    }
+
+    // ── Affect state (#309) ────────────────────────────────────────────────
+
+    async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError> {
+        Ok(Self::get_affect_state(self, character_id).await?)
+    }
+
+    async fn upsert_affect_state(&self, affect: &AffectState) -> Result<(), MemoryPortError> {
+        Ok(Self::upsert_affect_state(self, affect).await?)
+    }
+
+    async fn take_pending_affect_proposal(
+        &self,
+        character_id: &str,
+        user_name: &str,
+    ) -> Result<Option<PendingAffectProposal>, MemoryPortError> {
+        Ok(Self::take_pending_affect_proposal(self, character_id, user_name).await?)
+    }
+
+    // ── Commitment CRUD (#309) ─────────────────────────────────────────────
+
+    async fn insert_commitment(&self, new: &NewCommitment) -> Result<i64, MemoryPortError> {
+        Ok(Self::insert_commitment(self, new).await?)
+    }
+
+    async fn supersede_commitment(
+        &self,
+        id: i64,
+        description: &str,
+        due_label: Option<&str>,
+    ) -> Result<bool, MemoryPortError> {
+        Ok(Self::supersede_commitment(self, id, description, due_label).await?)
+    }
+
+    async fn complete_commitment(&self, id: i64) -> Result<bool, MemoryPortError> {
+        Ok(Self::complete_commitment(self, id).await?)
+    }
+
+    async fn cancel_commitment(&self, id: i64) -> Result<bool, MemoryPortError> {
+        Ok(Self::cancel_commitment(self, id).await?)
+    }
+
+    async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryPortError> {
+        Ok(Self::mark_stale_commitments(self, now).await?)
+    }
+
+    // ── Pending memory writes (#309) ───────────────────────────────────────
+
+    async fn enqueue_pending_memory_write(
+        &self,
+        character_id: &str,
+        user_id: &str,
+        payload: String,
+        error_message: String,
+    ) -> Result<i64, MemoryPortError> {
+        Ok(
+            Self::enqueue_pending_memory_write(self, character_id, user_id, payload, error_message)
+                .await?,
+        )
+    }
+
+    async fn take_due_pending_memory_writes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<PendingMemoryWrite>, MemoryPortError> {
+        Ok(Self::take_due_pending_memory_writes(self, limit).await?)
+    }
+
+    async fn complete_pending_memory_write(&self, id: i64) -> Result<(), MemoryPortError> {
+        Ok(Self::complete_pending_memory_write(self, id).await?)
+    }
+
+    async fn fail_pending_memory_write(
+        &self,
+        id: i64,
+        error_message: String,
+    ) -> Result<PendingMemoryWrite, MemoryPortError> {
+        Ok(Self::fail_pending_memory_write(self, id, error_message).await?)
+    }
+
+    // ── Memory spans / compression (#309) ──────────────────────────────────
+
+    async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, MemoryPortError> {
+        Ok(Self::insert_memory_span(self, span).await?)
+    }
+
+    async fn get_active_scene_summary(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ActiveSceneSummaryRow>, MemoryPortError> {
+        Ok(Self::get_active_scene_summary(self, session_id).await?)
+    }
+
+    async fn list_memory_spans_by_session_and_level(
+        &self,
+        session_id: &str,
+        level: i32,
+    ) -> Result<Vec<NewMemorySpan>, MemoryPortError> {
+        Ok(Self::list_memory_spans_by_session_and_level(self, session_id, level).await?)
     }
 }

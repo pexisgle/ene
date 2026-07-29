@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ene_store::AffectState;
+use ene_core::AffectState;
 
 /// Optional LLM affect classifier proposal (#88).
 #[derive(Debug, Clone, Default, PartialEq)]

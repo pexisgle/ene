@@ -7,7 +7,7 @@
 //! enforces per-kind minimum slots, and rewards source diversity. Hybrid scores
 //! on each [`ScoredMemory`] are preserved unchanged.
 
-use ene_store::{MemoryCandidateSource, MemoryKind, ScoredMemory, document_lexical_similarity};
+use ene_core::{MemoryCandidateSource, MemoryKind, ScoredMemory};
 
 use crate::config::MindMemoryConfig;
 
@@ -93,6 +93,51 @@ impl MemoryDiversifyPipeline {
 fn truncate(mut candidates: Vec<ScoredMemory>, limit: usize) -> Vec<ScoredMemory> {
     candidates.truncate(limit);
     candidates
+}
+
+/// Jaccard similarity between two memory documents (title + content tokens).
+///
+/// Inlined from `ene-store`'s `search::document_lexical_similarity` (#309)
+/// so `ene-mind` no longer needs a production dependency on `ene-store`.
+/// A future `ene-rag` crate (#302) will own this properly.
+fn document_lexical_similarity(
+    title_a: &str,
+    content_a: &str,
+    title_b: &str,
+    content_b: &str,
+) -> f32 {
+    use std::collections::HashSet;
+
+    fn tokenize(text: &str) -> HashSet<String> {
+        text.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    let tokens_a: HashSet<String> = tokenize(title_a)
+        .into_iter()
+        .chain(tokenize(content_a))
+        .collect();
+    let tokens_b: HashSet<String> = tokenize(title_b)
+        .into_iter()
+        .chain(tokenize(content_b))
+        .collect();
+    if tokens_a.is_empty() || tokens_b.is_empty() {
+        return 0.0;
+    }
+    let intersection = tokens_a.intersection(&tokens_b).count();
+    let union = tokens_a.union(&tokens_b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "token counts are small; f32 precision is sufficient for similarity scoring"
+    )]
+    let ratio = intersection as f32 / union as f32;
+    ratio
 }
 
 fn item_similarity(a: &ScoredMemory, b: &ScoredMemory) -> f32 {

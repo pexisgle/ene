@@ -1,5 +1,5 @@
 use super::types::SessionId;
-use ene_store::KeyFact;
+use ene_core::KeyFact;
 
 /// Reasons for a session split or compression boundary.
 #[derive(Debug, Clone)]

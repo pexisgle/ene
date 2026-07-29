@@ -109,7 +109,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
 
     let mut session = ene_mind::ConversationSession::new();
     session.character_card = Some(card);
-    session.memory.memory_store = Some(store);
+    session.memory.memory_store = Some(store.clone());
 
     let mut config = EneConfig::default();
     let mut mind = MindConfig::default();
@@ -157,6 +157,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        concrete_store: Some(store),
     };
 
     let started = Instant::now();

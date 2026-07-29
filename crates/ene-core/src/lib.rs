@@ -60,7 +60,9 @@ mod commitment;
 mod key_fact;
 mod memory;
 mod pending;
+mod pending_write;
 mod port;
+mod span;
 
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
@@ -71,4 +73,6 @@ pub use memory::{
     MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
 };
 pub use pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
+pub use pending_write::{PendingMemoryWrite, PendingMemoryWriteStatus};
 pub use port::{MemoryPort, MemoryPortError};
+pub use span::{ActiveSceneSummaryRow, NewMemorySpan};

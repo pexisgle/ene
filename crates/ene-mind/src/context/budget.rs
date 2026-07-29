@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use ene_store::ActiveCommitmentPrompt;
+use ene_core::ActiveCommitmentPrompt;
 
 use ene_config::UserPersona;
 

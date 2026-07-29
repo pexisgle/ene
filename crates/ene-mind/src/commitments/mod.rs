@@ -6,7 +6,7 @@
 //! from arbiter persist → sync.
 
 use ene_core::{ActiveCommitmentPrompt, Commitment, MemoryPort};
-use ene_store::{CommitmentStatus, MemoryKind, MemoryStore, NewCommitment};
+use ene_core::{CommitmentStatus, MemoryKind, NewCommitment};
 use tracing::{debug, warn};
 
 use crate::error::CognitionError;
@@ -38,7 +38,7 @@ impl CommitmentLedger {
     /// candidates (`should_persist = false`) cancel matching active ledger rows
     /// by normalized title.
     pub async fn apply_commitment_candidates(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         ctx: &CommitmentSyncContext<'_>,
         candidates: &[MemoryCandidate],
     ) -> Result<Vec<i64>, CognitionError> {
@@ -62,7 +62,7 @@ impl CommitmentLedger {
                     MAX_ACTIVE_MATCH_CHECK,
                 )
                 .await
-                .map_err(CognitionError::Memory)?;
+                .map_err(CognitionError::MemoryPort)?;
             if let Some(existing) = active
                 .iter()
                 .find(|c| normalize_title(&c.title) == title_key)
@@ -80,7 +80,7 @@ impl CommitmentLedger {
                                 candidate.commitment_due.as_deref(),
                             )
                             .await
-                            .map_err(CognitionError::Memory)?;
+                            .map_err(CognitionError::MemoryPort)?;
                         debug!(
                             component = "CommitmentLedger",
                             commitment_id = id,
@@ -112,7 +112,7 @@ impl CommitmentLedger {
             let id = store
                 .insert_commitment(&new_item)
                 .await
-                .map_err(CognitionError::Memory)?;
+                .map_err(CognitionError::MemoryPort)?;
 
             debug!(
                 component = "CommitmentLedger",
@@ -131,7 +131,7 @@ impl CommitmentLedger {
     /// Replaces the former dual-write path (`arbitrate` → typed persist →
     /// `sync_from_applied_decisions`).
     pub async fn arbitrate_apply_and_sync(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         candidates: &[MemoryCandidate],
         arbiter_ctx: &ArbiterContext<'_>,
         sync_ctx: &CommitmentSyncContext<'_>,
@@ -189,34 +189,34 @@ impl CommitmentLedger {
     }
 
     /// Mark a commitment as done.
-    pub async fn complete(store: &MemoryStore, id: i64) -> Result<bool, CognitionError> {
+    pub async fn complete(store: &dyn MemoryPort, id: i64) -> Result<bool, CognitionError> {
         store
             .complete_commitment(id)
             .await
-            .map_err(CognitionError::Memory)
+            .map_err(CognitionError::MemoryPort)
     }
 
     /// Mark a commitment as cancelled.
-    pub async fn cancel(store: &MemoryStore, id: i64) -> Result<bool, CognitionError> {
+    pub async fn cancel(store: &dyn MemoryPort, id: i64) -> Result<bool, CognitionError> {
         store
             .cancel_commitment(id)
             .await
-            .map_err(CognitionError::Memory)
+            .map_err(CognitionError::MemoryPort)
     }
 
     /// Mark overdue active commitments as stale.
     pub async fn mark_stale_overdue(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<usize, CognitionError> {
         store
             .mark_stale_commitments(now)
             .await
-            .map_err(CognitionError::Memory)
+            .map_err(CognitionError::MemoryPort)
     }
 
     async fn cancel_matching_by_title(
-        store: &MemoryStore,
+        store: &dyn MemoryPort,
         ctx: &CommitmentSyncContext<'_>,
         title: &str,
     ) -> Result<(), CognitionError> {
@@ -224,7 +224,7 @@ impl CommitmentLedger {
         let active = store
             .list_active_commitments(ctx.character_id, Some(ctx.user_id), MAX_ACTIVE_MATCH_CHECK)
             .await
-            .map_err(CognitionError::Memory)?;
+            .map_err(CognitionError::MemoryPort)?;
 
         if active.len() == MAX_ACTIVE_MATCH_CHECK {
             warn!(
@@ -280,6 +280,7 @@ mod tests {
     use super::*;
     use crate::memory_writer::candidate::{MemoryCandidate, TurnInput};
     use crate::memory_writer::{ArbiterContext, ArbiterOptions, CandidateProvenance};
+    use ene_store::MemoryStore;
 
     fn sync_ctx<'a>() -> CommitmentSyncContext<'a> {
         CommitmentSyncContext {

@@ -157,6 +157,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        concrete_store: Some(store.clone()),
     };
 
     let _session = run_stream_cognitive(ctx).await;

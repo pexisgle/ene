@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use ene_store::AffectState;
+use ene_core::AffectState;
 
 use super::types::{AffectDelta, AffectUpdateReason};
 
@@ -93,7 +93,7 @@ pub fn apply_decay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_store::AffectState;
+    use ene_core::AffectState;
 
     #[test]
     fn decay_moves_valence_toward_zero() {

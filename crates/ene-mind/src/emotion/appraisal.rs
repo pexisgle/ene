@@ -1,6 +1,6 @@
 //! Deterministic keyword/heuristic appraisal rules (#86).
 
-use ene_store::AffectState;
+use ene_core::AffectState;
 
 use super::types::{AffectDelta, AffectUpdateReason};
 
@@ -275,7 +275,7 @@ fn apply_field_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ene_store::AffectState;
+    use ene_core::AffectState;
 
     #[test]
     fn gratitude_raises_valence_and_affinity() {

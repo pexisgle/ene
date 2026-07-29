@@ -6,7 +6,7 @@
 
 use crate::output::arbiter::affect_to_expression;
 use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
-use ene_store::AffectState;
+use ene_core::AffectState;
 
 /// Tracks a single cue slot with priority semantics.
 #[derive(Debug, Clone)]

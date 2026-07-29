@@ -223,6 +223,9 @@ pub struct StreamContext {
     /// stream task so the actor can recover the partial response if the task
     /// is hard-aborted before it records the interruption itself (#H5).
     pub partial_text: Arc<parking_lot::Mutex<String>>,
+    /// Concrete store for `MemoryStore`-specific operations (conversation
+    /// log insertion) not available through `ene_core::MemoryPort` (#309).
+    pub concrete_store: Option<Arc<ene_store::MemoryStore>>,
 }
 
 /// Runs the full AI streaming completion loop with tool calling, optional memory

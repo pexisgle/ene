@@ -34,7 +34,7 @@ flowchart TD
   Runtime --> ToolRag[crates/ene-tool-rag]
   Runtime --> Config[crates/ene-config]
 
-  Mind --> Store
+  Mind -.dev-only.-> Store
   Mind --> Core[crates/ene-core]
   Mind --> Config
   Mind --> Ai
@@ -76,7 +76,7 @@ flowchart TD
 ### Strict Architectural Boundaries
 - `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — domain vocabulary sits below both `ene-store` and `ene-mind`; neither depends on the other for it
 - `ene-store` ↛ `ene-ai` / `ene-mind`
-- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
+- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host` / `ene-store` (production code; `ene-store` is a dev-dependency only, used for integration tests)
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
 - `ene-plugin` ↛ `ene-runtime` / `ene-mind` / `ene-store`
 

@@ -34,7 +34,7 @@ flowchart TD
   Runtime --> ToolRag[crates/ene-tool-rag]
   Runtime --> Config[crates/ene-config]
 
-  Mind --> Store
+  Mind -.dev-only.-> Store
   Mind --> Core[crates/ene-core]
   Mind --> Config
   Mind --> Ai
@@ -76,7 +76,7 @@ flowchart TD
 ### 厳格なアーキテクチャ境界ルール
 - `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — ドメイン語彙は `ene-store` と `ene-mind` の双方より下位に位置し、どちらもこの型のために互いへ依存しない
 - `ene-store` ↛ `ene-ai` / `ene-mind`
-- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host`
+- `ene-mind` ↛ `ene-runtime` / `ene-plugin-host` / `ene-store` (本番コード; `ene-store` は統合テスト用の dev-dependency のみ)
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
 - `ene-plugin` ↛ `ene-runtime` / `ene-mind` / `ene-store`
 

@@ -31,7 +31,7 @@ use ene_config::PromptLibrary;
 
 use super::candidate::{Locale, MemoryCandidate, TurnInput};
 use crate::error::CognitionError;
-use ene_store::typed_memory::MemoryKind;
+use ene_core::MemoryKind;
 
 /// Default timeout for the LLM call in seconds, used by [`extract`] when no
 /// explicit budget is supplied. Callers that have a

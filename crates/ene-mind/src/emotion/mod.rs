@@ -9,7 +9,7 @@ pub use types::{
     AffectDelta, AffectProposal, AffectUpdateReason, AffectUpdateResult, TurnAffectInput,
 };
 
-use ene_store::AffectState;
+use ene_core::AffectState;
 
 use crate::config::EmotionConfig;
 

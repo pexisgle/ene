@@ -5,7 +5,7 @@ mod section;
 pub use section::{PromptSection, PromptSectionKind};
 
 use ene_ai::{LlmMessage, UserMessagePart};
-use ene_store::{ActiveCommitmentPrompt, MemoryKind, MemorySource};
+use ene_core::{ActiveCommitmentPrompt, MemoryKind, MemorySource};
 
 use crate::lifecycle::{HistoryEntry, PromptPacketMeta};
 use crate::recall::{RecallReason, RecalledMemory};

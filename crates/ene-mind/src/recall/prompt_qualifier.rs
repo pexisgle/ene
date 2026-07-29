@@ -1,6 +1,6 @@
 //! Prompt qualifiers for recalled typed memories (#76).
 
-use ene_store::MemoryStatus;
+use ene_core::MemoryStatus;
 
 use crate::recall::RecalledMemory;
 

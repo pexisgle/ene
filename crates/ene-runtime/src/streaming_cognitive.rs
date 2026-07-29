@@ -141,7 +141,9 @@ fn build_turn_context<'a>(
         session_id,
         user_input,
         history,
-        store: mem_store.as_deref(),
+        store: mem_store
+            .as_ref()
+            .map(|s| s.as_ref() as &dyn ene_core::MemoryPort),
         query_embedding,
         embedder,
         llm_provider: Some(provider.clone()),
@@ -192,7 +194,7 @@ fn spawn_interrupted_memory_work(
     user_input: &str,
     spoken_text: &str,
     turn_tool_results: &[ToolResultSummary],
-    turn_affect: &ene_store::AffectState,
+    turn_affect: &ene_core::AffectState,
     card_name: &str,
     user_name: &str,
 ) {
@@ -292,6 +294,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         deferred_tool_tx,
         tts_provider,
         partial_text,
+        concrete_store,
     } = ctx;
 
     let is_proactive = origin == TurnOrigin::Proactive;
@@ -333,7 +336,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let card_name = session.card_name().to_string();
     let user_name = config.user_name.clone();
     let session_id = session.memory.session_id.clone();
-    let mem_store = session.memory.memory_store.clone();
+    let mem_store = concrete_store.clone();
 
     let history: Vec<HistoryEntry> = session.history().to_vec();
     let recall_query = if is_proactive {
@@ -1259,7 +1262,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         .await
                         {
                             Ok(proposal) => {
-                                let pending = ene_store::PendingAffectProposal {
+                                let pending = ene_core::PendingAffectProposal {
                                     character_id: classifier_character_id,
                                     user_id: classifier_user_id,
                                     source_turn_id: classifier_turn_id,
