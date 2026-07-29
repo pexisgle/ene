@@ -194,7 +194,7 @@ Ene loads character personalities and prompt templates via JSON character cards:
 
 ## 4. Schema Generation
 
-Settings schemas are declared at each owning crate via `define_config!`. Schemas are automatically regenerated upon config initialization.
+Settings schemas are declared at each owning crate via `define_config!`. Schemas are written once per process at application startup (CLI `init`, desktop first-launch, and the runtime open paths), not on every config load. Each schema file is written atomically (temp file + `fsync` + rename), so a crash can never leave a truncated schema behind.
 
 > [!CAUTION]
 > Never hand-edit or commit ignored schema files under `assets/schema/*`.

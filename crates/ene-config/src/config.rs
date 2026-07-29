@@ -646,31 +646,26 @@ pub fn load_character_card(
 /// is a breaking change from the previous behavior, which silently
 /// reset the entire config to defaults on any extract failure.
 pub fn load_config() -> Result<EneConfig, EneConfigError> {
-    let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
-    load_config_from(assets_dir, &config_path)
+    load_config_from(&config_path)
 }
 
-/// Loads config from the specified asset directory and config file path.
+/// Loads config from the specified config file path.
 ///
 /// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
-pub fn load_config_from(
-    assets_dir: &Path,
-    config_path: &Path,
-) -> Result<EneConfig, EneConfigError> {
-    load_full_config_from(assets_dir, config_path)
+pub fn load_config_from(config_path: &Path) -> Result<EneConfig, EneConfigError> {
+    load_full_config_from(config_path)
 }
 
-/// Fully loads the config file. Also auto-updates the schema file on startup.
+/// Fully loads the config file.
 ///
 /// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
 pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
-    let assets_dir = crate::paths::assets_dir();
     let config_path = crate::paths::config_file_path();
-    load_full_config_from(assets_dir, &config_path)
+    load_full_config_from(&config_path)
 }
 
-/// Fully loads `EneConfig` from the specified asset directory and config file path.
+/// Fully loads `EneConfig` from the specified config file path.
 ///
 /// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
 ///
@@ -682,10 +677,7 @@ pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
 /// the path as `AI.tasks.chat.model` and the value was silently dropped
 /// because `get_section::<AiConfig>()` looks up `T::path() = ["ai"]`
 /// (lowercase).
-pub fn load_full_config_from(
-    assets_dir: &Path,
-    config_path: &Path,
-) -> Result<EneConfig, EneConfigError> {
+pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigError> {
     use figment::{
         Figment,
         providers::{Env, Format, Json, Serialized},
@@ -706,20 +698,24 @@ pub fn load_full_config_from(
         EneConfigError::GenericConfigError(format!("configuration extract failed: {e}"))
     })?;
 
-    // Ensure schema directory exists
-    let schema_dir = assets_dir.join("schema");
-    if let Err(e) = std::fs::create_dir_all(&schema_dir) {
-        tracing::error!(component = "Config", path = %schema_dir.display(), error = %e, "Failed to create schema directory");
-    }
-
-    write_schemas(assets_dir);
-
     update_global_config(config.clone());
     Ok(config)
 }
 
 /// Auto-generates and writes out settings and character schemas under the assets schema directory.
+///
+/// Guarded by a process-wide [`std::sync::Once`] so the (idempotent but
+/// wasteful) schema regeneration runs exactly once per process, even though
+/// several startup entry points (CLI `init`, desktop `first_launch_setup`,
+/// runtime `open_from_disk`/`open_with_config`) all call it (#325). Each
+/// schema file is written via [`atomic_write`] so a crash mid-write can
+/// never leave a truncated schema behind.
 pub fn write_schemas(assets_dir: &Path) {
+    static WRITE_SCHEMAS_ONCE: std::sync::Once = std::sync::Once::new();
+    WRITE_SCHEMAS_ONCE.call_once(|| write_schemas_inner(assets_dir));
+}
+
+fn write_schemas_inner(assets_dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(assets_dir.join("schema")) {
         tracing::error!(component = "Config", error = %e, "Failed to create schema directory");
         return;
@@ -727,27 +723,155 @@ pub fn write_schemas(assets_dir: &Path) {
 
     let schema_path = crate::paths::schema_file_path();
     if let Ok(schema_json) = generate_schema_json()
-        && let Err(e) = std::fs::write(&schema_path, schema_json)
+        && let Err(e) = atomic_write(&schema_path, &schema_json)
     {
         tracing::error!(component = "Config", path = %schema_path.display(), error = %e, "Failed to write settings schema");
     }
 
     let char_schema_path = crate::paths::character_schema_file_path();
     if let Ok(char_schema_json) = generate_character_schema_json()
-        && let Err(e) = std::fs::write(&char_schema_path, char_schema_json)
+        && let Err(e) = atomic_write(&char_schema_path, &char_schema_json)
     {
         tracing::error!(component = "Config", path = %char_schema_path.display(), error = %e, "Failed to write character schema");
     }
 
     let char_card_schema_path = crate::paths::character_card_schema_file_path();
     if let Ok(char_card_schema_json) = generate_character_card_schema_json()
-        && let Err(e) = std::fs::write(&char_card_schema_path, char_card_schema_json)
+        && let Err(e) = atomic_write(&char_card_schema_path, &char_card_schema_json)
     {
         tracing::error!(component = "Config", path = %char_card_schema_path.display(), error = %e, "Failed to write character card schema");
     }
 }
 
-/// Saves the config file in a type-safe manner
+/// Atomically writes `contents` to `path` by first writing to a temporary
+/// file in the same directory, then renaming over the target.
+///
+/// The rename is atomic on POSIX when source and destination reside on the
+/// same filesystem, which is guaranteed by placing the temp file in the
+/// target's parent directory. This prevents partial or corrupt config files
+/// if the process crashes mid-write (#325).
+///
+/// The temporary file name embeds the process id and a monotonic counter so
+/// concurrent writers targeting the same path never collide on the temp
+/// name. On Unix, an existing target's permission bits are copied onto the
+/// temp file before the rename so a tightened mode (e.g. `0600` on a
+/// `settings.json` holding `provider.api_key`) survives the rewrite.
+///
+/// # Durability
+///
+/// The file contents are `fsync`ed before the rename and the parent
+/// directory afterwards, but both are best-effort: on filesystems where
+/// `fsync` is a no-op (or fails) the rename is still atomic — a crash can
+/// only ever leave either the old or the new file, never a partial one —
+/// but the rename itself may not be durable across a power loss.
+pub(crate) fn atomic_write(path: &Path, contents: &str) -> Result<(), EneConfigError> {
+    use std::io::Write;
+
+    let dir = path.parent().ok_or_else(|| {
+        EneConfigError::GenericConfigError(format!("no parent directory for {}", path.display()))
+    })?;
+    std::fs::create_dir_all(dir).map_err(EneConfigError::IoError)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("config");
+    let tmp_path = dir.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        tmp_counter()
+    ));
+
+    let mut file = std::fs::File::create(&tmp_path).map_err(EneConfigError::IoError)?;
+    file.write_all(contents.as_bytes())
+        .map_err(EneConfigError::IoError)?;
+
+    preserve_permissions(path, &file);
+
+    // Best-effort fsync: ensure bytes reach stable storage before the
+    // rename makes them visible. Failure is non-fatal — the rename is
+    // still atomic, we just lose the durability guarantee on exotic
+    // filesystems.
+    if let Err(e) = file.sync_all() {
+        tracing::debug!(
+            component = "Config",
+            path = %tmp_path.display(),
+            error = %e,
+            "best-effort fsync before rename failed (non-fatal)"
+        );
+    }
+
+    drop(file);
+    std::fs::rename(&tmp_path, path).map_err(EneConfigError::IoError)?;
+    fsync_dir(dir);
+    Ok(())
+}
+
+/// Monotonic counter so successive temp files in the same process get
+/// distinct names even when written within the same millisecond.
+fn tmp_counter() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Copies the permission bits from an existing `src` file onto `dst`.
+///
+/// A missing source (first write) or any metadata error is ignored: the
+/// temp file simply keeps the default mode. This is best-effort hardening,
+/// not a correctness requirement of the atomic replace.
+#[cfg(unix)]
+fn preserve_permissions(src: &Path, dst: &std::fs::File) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(meta) = std::fs::metadata(src) else {
+        return;
+    };
+    let perms = std::fs::Permissions::from_mode(meta.mode() & 0o7777);
+    if let Err(e) = dst.set_permissions(perms) {
+        tracing::debug!(
+            component = "Config",
+            path = %src.display(),
+            error = %e,
+            "best-effort permission preservation failed (non-fatal)"
+        );
+    }
+}
+
+/// Non-Unix platforms: nothing to preserve beyond the default mode.
+#[cfg(not(unix))]
+fn preserve_permissions(_src: &Path, _dst: &std::fs::File) {}
+
+/// Best-effort `fsync` of a directory so the preceding `rename` is durable.
+///
+/// Not all platforms/filesystems support syncing a directory; any error is
+/// logged at debug level and ignored. The atomic-replace guarantee does not
+/// depend on this — it only affects durability across a power loss.
+fn fsync_dir(dir: &Path) {
+    match std::fs::File::open(dir) {
+        Ok(handle) => {
+            if let Err(e) = handle.sync_all() {
+                tracing::debug!(
+                    component = "Config",
+                    path = %dir.display(),
+                    error = %e,
+                    "best-effort directory fsync failed (non-fatal)"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                component = "Config",
+                path = %dir.display(),
+                error = %e,
+                "could not open directory for fsync (non-fatal)"
+            );
+        }
+    }
+}
+
+/// Saves the config file in a type-safe manner, using an atomic
+/// temp-file-then-rename strategy to avoid partial writes (#325).
 pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
@@ -755,7 +879,7 @@ pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
         std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
     }
     let json = serde_json::to_string_pretty(config)?;
-    std::fs::write(config_path, json).map_err(EneConfigError::IoError)?;
+    atomic_write(&config_path, &json)?;
     Ok(())
 }
 
@@ -890,7 +1014,7 @@ mod tests {
         // Not valid JSON for an EneConfig.
         std::fs::write(&path, "{ this is not valid json }").expect("write invalid JSON fixture");
 
-        let result = load_full_config_from(tmp.path(), &path);
+        let result = load_full_config_from(&path);
         assert!(
             result.is_err(),
             "expected Err on malformed settings.json, got Ok"
@@ -906,7 +1030,7 @@ mod tests {
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "{}").expect("write empty settings fixture");
 
-        let result = load_full_config_from(tmp.path(), &path);
+        let result = load_full_config_from(&path);
         assert!(result.is_ok(), "empty settings.json should extract ok");
     }
 
@@ -951,5 +1075,73 @@ mod tests {
             .expect("set_path");
         let value = config.get_path("ai.tasks.chat.model").expect("get_path");
         assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
+    }
+
+    /// `atomic_write` must leave the target with exactly the requested
+    /// contents and must not leak its temporary file into the directory.
+    #[test]
+    fn atomic_write_produces_final_contents_and_no_tmp_leftover() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let target = tmp.path().join("settings.json");
+
+        atomic_write(&target, "{\"hello\":\"world\"}").expect("atomic_write succeeds");
+
+        let contents = std::fs::read_to_string(&target).expect("target is readable");
+        assert_eq!(contents, "{\"hello\":\"world\"}");
+
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("dir readable")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                std::path::Path::new(name)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tmp"))
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp file should be renamed away, found leftovers: {leftovers:?}"
+        );
+    }
+
+    /// A second `atomic_write` over an existing file must fully replace the
+    /// previous contents (no append, no partial overlap).
+    #[test]
+    fn atomic_write_overwrites_existing_file() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let target = tmp.path().join("settings.json");
+
+        atomic_write(&target, "first-contents-that-is-quite-long")
+            .expect("first atomic_write succeeds");
+        atomic_write(&target, "short").expect("second atomic_write succeeds");
+
+        let contents = std::fs::read_to_string(&target).expect("target is readable");
+        assert_eq!(contents, "short");
+    }
+
+    /// On Unix, rewriting an existing file whose mode was tightened (e.g.
+    /// `0600` for a `settings.json` holding `provider.api_key`) must not
+    /// widen it back to the default `0644` (#325 review finding).
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_existing_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let target = tmp.path().join("settings.json");
+
+        std::fs::write(&target, "{}").expect("seed file");
+        let mut perms = std::fs::metadata(&target).expect("metadata").permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&target, perms).expect("tighten mode");
+
+        atomic_write(&target, "{\"k\":\"v\"}").expect("atomic_write succeeds");
+
+        let mode = std::fs::metadata(&target).expect("metadata").mode() & 0o7777;
+        assert_eq!(
+            mode, 0o600,
+            "tightened permissions must survive the rewrite"
+        );
     }
 }

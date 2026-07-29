@@ -32,6 +32,10 @@ pub struct FirstLaunchPaths {
 pub fn first_launch_setup() -> Result<FirstLaunchPaths, AppStateError> {
     let assets_dir =
         ene_config::ensure_resource_dirs().map_err(|e| AppStateError::AssetsDir(e.to_string()))?;
+
+    // Write JSON schemas once at startup rather than on every config load (#325).
+    ene_config::write_schemas(&assets_dir);
+
     let (default_vrm, default_vrma) = crate::settings::read_cli_paths();
     Ok(FirstLaunchPaths {
         assets_dir,

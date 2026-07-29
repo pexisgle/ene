@@ -14,6 +14,9 @@ use crate::handle::EneHandle;
 ///
 /// Intended for CLI startup.
 pub async fn open_from_disk() -> Result<(EneHandle, EneConfig), EneRuntimeError> {
+    // Write JSON schemas once at startup rather than on every config load (#325).
+    ene_config::write_schemas(ene_config::assets_dir());
+
     let store = ConfigStore::try_load()?;
     let config = store.config();
     let card = load_character_card(&config.character)?;
@@ -23,6 +26,9 @@ pub async fn open_from_disk() -> Result<(EneHandle, EneConfig), EneRuntimeError>
 
 /// Open a ready handle from an already-loaded config (desktop).
 pub async fn open_with_config(config: EneConfig) -> Result<EneHandle, EneRuntimeError> {
+    // Write JSON schemas once at startup rather than on every config load (#325).
+    ene_config::write_schemas(ene_config::assets_dir());
+
     let card = load_character_card(&config.character)?;
     EneHandle::open(config, card).await
 }

@@ -1,6 +1,7 @@
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::config::atomic_write;
 use crate::{CharacterConfig, EneConfig, EneConfigError, save_full_config};
 
 /// Centralized configuration store with dirty tracking for auto-save.
@@ -129,6 +130,11 @@ impl ConfigStore {
 
     /// Gives mutable access to the per-character config.
     /// Automatically marks it as dirty.
+    ///
+    /// **Note:** this always marks dirty regardless of whether the closure
+    /// actually changed anything. If called in a hot loop, prefer
+    /// [`set_character_config`](Self::set_character_config) which performs
+    /// an equality check first.
     pub fn with_character_config_mut(&self, f: impl FnOnce(&mut CharacterConfig)) {
         f(&mut self.character_config.write());
         self.character_dirty.store(true, Ordering::Release);
@@ -157,8 +163,16 @@ impl ConfigStore {
     }
 
     /// Replaces the per-character config and marks dirty.
+    ///
+    /// If `config` is equal to the current value, the dirty flag is **not**
+    /// set and the method returns early. This prevents spurious disk writes
+    /// when called every frame with an unchanged state (see #325).
     pub fn set_character_config(&self, config: CharacterConfig) {
-        *self.character_config.write() = config;
+        let mut guard = self.character_config.write();
+        if *guard == config {
+            return;
+        }
+        *guard = config;
         self.character_dirty.store(true, Ordering::Release);
     }
 
@@ -208,11 +222,8 @@ impl ConfigStore {
             if let Some(name) = character_name {
                 let char_config = self.character_config.read();
                 let path = crate::character_settings_path(name);
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
-                }
                 let json = serde_json::to_string_pretty(&*char_config)?;
-                std::fs::write(&path, json).map_err(EneConfigError::IoError)?;
+                atomic_write(&path, &json)?;
                 drop(char_config);
             }
             self.character_dirty.store(false, Ordering::Release);
@@ -240,5 +251,66 @@ impl ConfigStore {
     /// from disk and will call [`flush_if_dirty`] on the next cycle.
     pub fn mark_dirty(&self) {
         self.global_dirty.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for #325: pushing an unchanged [`CharacterConfig`] (the
+    /// desktop does this every frame) must not flip the dirty flag, or the
+    /// store would rewrite `character_settings.json` on every flush cycle.
+    #[test]
+    fn set_character_config_unchanged_value_does_not_mark_dirty() {
+        let store = ConfigStore::from_config(EneConfig::default());
+        assert!(!store.is_dirty(), "fresh store starts clean");
+
+        let config = CharacterConfig::default();
+        store.set_character_config(config.clone());
+        assert!(
+            !store.is_dirty(),
+            "setting the same value must not mark the store dirty"
+        );
+    }
+
+    /// A genuinely different [`CharacterConfig`] must still mark dirty so
+    /// the change is persisted on the next flush.
+    #[test]
+    fn set_character_config_changed_value_marks_dirty() {
+        let store = ConfigStore::from_config(EneConfig::default());
+
+        let config = CharacterConfig {
+            model_scale: 2.5,
+            ..CharacterConfig::default()
+        };
+        store.set_character_config(config.clone());
+
+        assert!(
+            store.is_dirty(),
+            "a changed value must mark the store dirty"
+        );
+        assert_eq!(store.character_config(), config);
+    }
+
+    /// The equality guard must consider the flattened `extra` map too, so a
+    /// change that only touches a nested section is still persisted.
+    #[test]
+    fn set_character_config_extra_change_marks_dirty() {
+        let store = ConfigStore::from_config(EneConfig::default());
+
+        let config = CharacterConfig {
+            extra: std::collections::BTreeMap::from([(
+                "motion".to_string(),
+                serde_json::Value::String("wave".to_string()),
+            )]),
+            ..CharacterConfig::default()
+        };
+        store.set_character_config(config);
+
+        assert!(
+            store.is_dirty(),
+            "an `extra`-only change must mark the store dirty"
+        );
     }
 }
