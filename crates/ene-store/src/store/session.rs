@@ -305,16 +305,11 @@ impl MemoryStore {
     /// Assembles a redacted, self-contained export for one session.
     ///
     /// Message content is passed through [`crate::export::redact_secrets`] so
-    /// obvious credentials never leave the store in the clear.
-    ///
-    /// # Limitation
-    ///
-    /// `tool_logs` is always empty: the `audit_log` table records a `turn_id`
-    /// but has no column linking a row back to its session, so audit entries
-    /// cannot be associated with a session reliably. Rather than guess (and
-    /// risk leaking another session's tool calls or fabricating data), the
-    /// export omits tool logs. A future schema revision could add a
-    /// `session_id` column to `audit_log` to enable this.
+    /// obvious credentials never leave the store in the clear. Tool-audit
+    /// logs are filtered by `session_id` (#426); their arguments were already
+    /// redacted by [`crate::audit::redact_arguments`] at write time, so no
+    /// secret material is re-exposed here. Rows with a `NULL` `session_id`
+    /// (pre-migration or out-of-band diagnostics calls) are never included.
     ///
     /// # Errors
     ///
@@ -338,12 +333,28 @@ impl MemoryStore {
             })
             .collect();
 
+        let tool_logs = self
+            .list_audit_entries_by_session(session_id)
+            .await?
+            .into_iter()
+            .map(|entry| crate::export::ExportedToolLog {
+                turn_id: entry.turn_id,
+                tool_name: entry.tool_name,
+                action: entry.action,
+                target: entry.target,
+                decision: entry.decision.as_str().to_string(),
+                success: entry.success,
+                redacted_args: entry.redacted_args,
+                created_at: entry.created_at,
+            })
+            .collect();
+
         Ok(crate::export::SessionExport {
             format_version: crate::export::SESSION_EXPORT_FORMAT_VERSION,
             exported_at: Utc::now(),
             session,
             messages,
-            tool_logs: Vec::new(),
+            tool_logs,
         })
     }
 

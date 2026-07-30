@@ -10,6 +10,7 @@ fn audit_row_to_entry(row: entities::audit_log::Model) -> crate::audit::AuditEnt
     crate::audit::AuditEntry {
         id: row.id,
         turn_id: row.turn_id,
+        session_id: row.session_id,
         tool_name: row.tool_name,
         action: row.action,
         target: row.target,
@@ -32,8 +33,12 @@ impl MemoryStore {
         use sea_orm::ActiveValue::Set;
 
         let now = Utc::now();
+        // An empty session_id marks out-of-band diagnostics calls; persist
+        // those as NULL so they are never attributed to a session (#426).
+        let session_id = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
         let model = entities::audit_log::ActiveModel {
             turn_id: Set(entry.turn_id.clone()),
+            session_id: Set(session_id),
             tool_name: Set(entry.tool_name.clone()),
             action: Set(entry.action.clone()),
             target: Set(entry.target.clone()),
@@ -90,6 +95,24 @@ impl MemoryStore {
             .filter(entities::audit_log::Column::ToolName.eq(tool_name))
             .order_by_desc(entities::audit_log::Column::CreatedAt)
             .limit(limit as u64)
+            .all(&self.db)
+            .await?;
+
+        Ok(rows.into_iter().map(audit_row_to_entry).collect())
+    }
+
+    /// Returns audit entries for a single session, oldest first (#426).
+    ///
+    /// Rows whose `session_id` is `NULL` (written before the column
+    /// existed, or out-of-band diagnostics calls) are never returned, so
+    /// a session's export can never leak another session's tool history.
+    pub async fn list_audit_entries_by_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<crate::audit::AuditEntry>, EneMemoryError> {
+        let rows = entities::audit_log::Entity::find()
+            .filter(entities::audit_log::Column::SessionId.eq(session_id))
+            .order_by_asc(entities::audit_log::Column::CreatedAt)
             .all(&self.db)
             .await?;
 

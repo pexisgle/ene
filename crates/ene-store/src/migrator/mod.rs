@@ -15,6 +15,7 @@ impl MigratorTrait for Migrator {
             Box::new(PendingMemoryWritesMigration),
             Box::new(SourceRefIndexMigration),
             Box::new(EmbeddingsCleanupIndexMigration),
+            Box::new(AuditLogSessionIdMigration),
         ]
     }
 }
@@ -1054,6 +1055,7 @@ enum AuditLog {
     Success,
     RedactedArgs,
     CreatedAt,
+    SessionId,
 }
 
 #[derive(Iden)]
@@ -1218,6 +1220,65 @@ impl MigrationTrait for SourceRefIndexMigration {
                 Index::drop()
                     .name("idx_typed_mem_character_source_ref")
                     .table(TypedMemories::Table)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+/// Adds a nullable `session_id` column and index to `audit_log` (#426).
+///
+/// Existing rows keep `NULL`, so audit entries written before this
+/// migration are never misattributed to a session. New rows record the
+/// originating session so `build_export` can filter tool history per
+/// session instead of omitting it entirely.
+pub struct AuditLogSessionIdMigration;
+
+impl MigrationName for AuditLogSessionIdMigration {
+    fn name(&self) -> &'static str {
+        "m20260731_000004_audit_log_session_id"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AuditLogSessionIdMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AuditLog::Table)
+                    .add_column(ColumnDef::new(AuditLog::SessionId).string().null())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_audit_log_session")
+                    .table(AuditLog::Table)
+                    .col(AuditLog::SessionId)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_audit_log_session")
+                    .table(AuditLog::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AuditLog::Table)
+                    .drop_column(AuditLog::SessionId)
                     .to_owned(),
             )
             .await?;
