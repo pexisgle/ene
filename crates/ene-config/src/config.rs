@@ -1247,8 +1247,10 @@ mod tests {
     /// serialise ahead of `version` (which is second).
     #[test]
     fn schema_is_first_and_version_second() {
-        let mut config = EneConfig::default();
-        config.schema = DEFAULT_SETTINGS_SCHEMA.to_string();
+        let config = EneConfig {
+            schema: DEFAULT_SETTINGS_SCHEMA.to_string(),
+            ..EneConfig::default()
+        };
         let value = serde_json::to_value(&config).expect("config serialises");
         let keys: Vec<&str> = value
             .as_object()
@@ -1292,8 +1294,10 @@ mod tests {
     /// preserved verbatim on save (auto-fill only applies when empty).
     #[test]
     fn save_preserves_user_schema() {
-        let mut config = EneConfig::default();
-        config.schema = "./custom.schema.json".to_string();
+        let config = EneConfig {
+            schema: "./custom.schema.json".to_string(),
+            ..EneConfig::default()
+        };
         let json = serialize_for_save(&config).expect("serialise for save");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(
@@ -1303,7 +1307,7 @@ mod tests {
     }
 
     /// Regression for #331: the user's hand-arranged top-level section order is
-    /// preserved across a save (IndexMap, not alphabetical BTreeMap).
+    /// preserved across a save (`IndexMap`, not alphabetical `BTreeMap`).
     #[test]
     fn section_order_preserved_on_save() {
         let mut config = EneConfig::default();
