@@ -244,7 +244,7 @@ impl MemoryPort for InMemoryMemoryPort {
         Ok(())
     }
 
-    fn insert_pending_candidate(
+    async fn insert_pending_candidate(
         &self,
         candidate: PendingCandidate,
     ) -> Result<i64, MemoryPortError> {
@@ -253,6 +253,50 @@ impl MemoryPort for InMemoryMemoryPort {
         stored.id = id;
         self.pending.lock().push(stored);
         Ok(id)
+    }
+
+    async fn prune_pending_candidates(
+        &self,
+        character_id: &str,
+        max_age_days: u32,
+        max_per_character: usize,
+        now: DateTime<Utc>,
+    ) -> Result<usize, MemoryPortError> {
+        let mut pending = self.pending.lock();
+        let before = pending.len();
+
+        if max_age_days > 0 {
+            let cutoff = now
+                .checked_sub_signed(chrono::Duration::days(i64::from(max_age_days)))
+                .unwrap_or(now);
+            pending.retain(|c| !(c.character_id == character_id && c.created_at < cutoff));
+        }
+
+        if max_per_character > 0 {
+            let mut indices: Vec<usize> = pending
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.character_id == character_id
+                        && c.status == ene_core::PendingCandidateStatus::Pending
+                })
+                .map(|(i, _)| i)
+                .collect();
+            // Oldest first; drop the overflow beyond the cap.
+            indices.sort_by(|&a, &b| pending[a].created_at.cmp(&pending[b].created_at));
+            if indices.len() > max_per_character {
+                let overflow = indices.len() - max_per_character;
+                let drop: HashSet<usize> = indices.into_iter().take(overflow).collect();
+                let mut idx = 0usize;
+                pending.retain(|_| {
+                    let keep = !drop.contains(&idx);
+                    idx += 1;
+                    keep
+                });
+            }
+        }
+
+        Ok(before - pending.len())
     }
 
     async fn list_active_commitments(

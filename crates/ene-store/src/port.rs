@@ -142,11 +142,30 @@ impl MemoryPort for MemoryStore {
         )
     }
 
-    fn insert_pending_candidate(
+    async fn insert_pending_candidate(
         &self,
         candidate: PendingCandidate,
     ) -> Result<i64, MemoryPortError> {
-        Ok(Self::insert_pending_candidate(self, candidate)?)
+        Ok(Self::insert_pending_candidate(self, candidate).await?)
+    }
+
+    async fn prune_pending_candidates(
+        &self,
+        character_id: &str,
+        max_age_days: u32,
+        max_per_character: usize,
+        now: DateTime<Utc>,
+    ) -> Result<usize, MemoryPortError> {
+        Ok(
+            Self::prune_pending_candidates(
+                self,
+                character_id,
+                max_age_days,
+                max_per_character,
+                now,
+            )
+            .await?,
+        )
     }
 
     async fn list_active_commitments(

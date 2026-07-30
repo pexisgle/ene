@@ -1715,8 +1715,10 @@ fn sample_pending_candidate(character_id: &str, title: &str) -> PendingCandidate
         confidence: 0.8,
         reason_detail: "extracted from conversation".to_string(),
         existing_memory_title: None,
+        existing_memory_id: None,
         source_quote: "I like tea".to_string(),
         status: PendingCandidateStatus::Pending,
+        created_at: Utc::now(),
     }
 }
 
@@ -1726,11 +1728,13 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
 
     let id = store
         .insert_pending_candidate(sample_pending_candidate("ene", "likes tea"))
+        .await
         .expect("insert");
     assert_eq!(id, 1);
 
     let listed = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
         .expect("list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].title, "likes tea");
@@ -1750,10 +1754,12 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
     // The candidate is now approved and no longer pending.
     let pending = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
         .expect("list pending");
     assert!(pending.is_empty());
     let approved = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Approved))
+        .await
         .expect("list approved");
     assert_eq!(approved.len(), 1);
 
@@ -1767,6 +1773,7 @@ async fn pending_candidate_reject_does_not_persist() {
 
     let id = store
         .insert_pending_candidate(sample_pending_candidate("ene", "rejected fact"))
+        .await
         .expect("insert");
     store
         .resolve_pending_candidate(id, false)
@@ -1775,6 +1782,7 @@ async fn pending_candidate_reject_does_not_persist() {
 
     let rejected = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Rejected))
+        .await
         .expect("list rejected");
     assert_eq!(rejected.len(), 1);
 
@@ -1786,25 +1794,131 @@ async fn pending_candidate_reject_does_not_persist() {
     assert_eq!(count, 0);
 }
 
+/// #420: candidates persist to the `pending_candidates` table, so they
+/// survive a restart (a fresh store instance on the same file) and are
+/// shared across instances — the inverse of the old in-memory behaviour.
+/// Listing remains isolated per character.
 #[tokio::test]
-async fn pending_candidates_are_isolated_per_store_instance() {
-    let store_a = setup_store().await;
-    let store_b = setup_store().await;
+async fn pending_candidates_persist_across_instances_and_isolate_per_character() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
 
-    store_a
-        .insert_pending_candidate(sample_pending_candidate("ene", "only in A"))
-        .expect("insert A");
+    let store = MemoryStore::open(&path, 4).await.expect("open");
+    store
+        .insert_pending_candidate(sample_pending_candidate("ene", "ene fact"))
+        .await
+        .expect("insert ene");
+    store
+        .insert_pending_candidate(sample_pending_candidate("mira", "mira fact"))
+        .await
+        .expect("insert mira");
+    drop(store);
 
-    let in_a = store_a
+    // Reopen a fresh instance on the same database file (simulated restart).
+    let reopened = MemoryStore::open(&path, 4).await.expect("reopen");
+
+    // Candidates survived the restart and are shared via the DB.
+    let ene = reopened
         .list_pending_candidates("ene", None)
-        .expect("list A");
-    assert_eq!(in_a.len(), 1);
+        .await
+        .expect("list ene");
+    assert_eq!(ene.len(), 1);
+    assert_eq!(ene[0].title, "ene fact");
 
-    // The second store instance must not see store A's candidates.
-    let in_b = store_b
+    // Listing is isolated per character: "ene" does not see "mira"'s queue.
+    let mira = reopened
+        .list_pending_candidates("mira", None)
+        .await
+        .expect("list mira");
+    assert_eq!(mira.len(), 1);
+    assert_eq!(mira[0].title, "mira fact");
+}
+
+// ── #420: pending-candidate retention policy ──
+
+#[tokio::test]
+async fn pending_candidate_age_prune_removes_expired() {
+    let store = setup_store().await;
+
+    let old_id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "stale"))
+        .await
+        .expect("insert old");
+    store
+        .test_backdate_pending_candidate(old_id, 30)
+        .await
+        .expect("backdate");
+    store
+        .insert_pending_candidate(sample_pending_candidate("ene", "fresh"))
+        .await
+        .expect("insert fresh");
+
+    let removed = store
+        .prune_pending_candidates("ene", 14, 0, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 1);
+
+    let remaining = store
         .list_pending_candidates("ene", None)
-        .expect("list B");
-    assert!(in_b.is_empty());
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].title, "fresh");
+}
+
+#[tokio::test]
+async fn pending_candidate_count_prune_caps_queue() {
+    let store = setup_store().await;
+
+    for i in 0..5 {
+        store
+            .insert_pending_candidate(sample_pending_candidate("ene", &format!("cand {i}")))
+            .await
+            .expect("insert");
+    }
+
+    // Cap at 3: the two oldest pending candidates are dropped.
+    let removed = store
+        .prune_pending_candidates("ene", 0, 3, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 2);
+
+    let remaining = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 3);
+    // Oldest-first ordering means "cand 0" and "cand 1" were culled.
+    assert_eq!(remaining[0].title, "cand 2");
+}
+
+#[tokio::test]
+async fn pending_candidate_prune_disabled_with_zero() {
+    let store = setup_store().await;
+
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "ancient"))
+        .await
+        .expect("insert");
+    store
+        .test_backdate_pending_candidate(id, 365)
+        .await
+        .expect("backdate");
+
+    // Both limits disabled (0): nothing is removed despite the age.
+    let removed = store
+        .prune_pending_candidates("ene", 0, 0, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 0);
+
+    let remaining = store
+        .list_pending_candidates("ene", None)
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 1);
 }
 
 // ── #419: PRAGMAs must reach every pooled connection ──

@@ -631,11 +631,14 @@ impl MemoryArbiter {
                     confidence: decision.candidate.confidence,
                     reason_detail: decision.reason.detail.clone(),
                     existing_memory_title: None,
+                    existing_memory_id: None,
                     source_quote: decision.candidate.source_quote.clone(),
                     status: PendingCandidateStatus::Pending,
+                    created_at: chrono::Utc::now(),
                 };
                 let inserted_id = store
                     .insert_pending_candidate(pending)
+                    .await
                     .map_err(CognitionError::MemoryPort)?;
                 tracing::debug!(
                     component = "MemoryArbiter",
@@ -1860,6 +1863,7 @@ mod tests {
         // The candidate was deferred to the user-approval queue.
         let pending = store
             .list_pending_candidates("ene", Some(ene_store::PendingCandidateStatus::Pending))
+            .await
             .unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].title, "drink");

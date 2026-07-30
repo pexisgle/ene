@@ -28,6 +28,8 @@ pub struct ForgettingReport {
     pub faded_count: usize,
     /// Memories transitioned to `archived`.
     pub archived_count: usize,
+    /// Pending memory candidates removed by the retention policy (#420).
+    pub pruned_candidates: usize,
 }
 
 impl From<NaturalDecayReport> for ForgettingReport {
@@ -35,6 +37,7 @@ impl From<NaturalDecayReport> for ForgettingReport {
         Self {
             faded_count: report.faded_count,
             archived_count: report.archived_count,
+            pruned_candidates: 0,
         }
     }
 }
@@ -54,7 +57,7 @@ impl ForgettingLifecycle {
         config: &MindMemoryConfig,
     ) -> Result<ForgettingReport, CognitionError> {
         let half_life = config.default_forgetting_half_life_days.max(0.0);
-        let report = store
+        let decay = store
             .apply_natural_decay_batch(
                 ctx.character_id,
                 ctx.user_id,
@@ -65,16 +68,32 @@ impl ForgettingLifecycle {
             .await
             .map_err(CognitionError::MemoryPort)?;
 
+        // Enforce the pending-candidate retention policy on the same batch
+        // path (#420): expire stale candidates and cap the live queue.
+        let retention = &config.pending_candidate_retention;
+        let pruned_candidates = store
+            .prune_pending_candidates(
+                ctx.character_id,
+                retention.max_age_days,
+                retention.max_per_character,
+                ctx.now,
+            )
+            .await
+            .map_err(CognitionError::MemoryPort)?;
+
         debug!(
             component = "ForgettingLifecycle",
             character_id = ctx.character_id,
-            faded_count = report.faded_count,
-            archived_count = report.archived_count,
+            faded_count = decay.faded_count,
+            archived_count = decay.archived_count,
+            pruned_candidates,
             half_life_days = half_life,
             "Natural decay pass complete"
         );
 
-        Ok(report.into())
+        let mut report = ForgettingReport::from(decay);
+        report.pruned_candidates = pruned_candidates;
+        Ok(report)
     }
 }
 

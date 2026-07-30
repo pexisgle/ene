@@ -155,11 +155,6 @@ pub struct MemoryStore {
     embedding_dim: usize,
     /// On-disk path when opened from a file (`None` for `:memory:`).
     path: Option<std::path::PathBuf>,
-    /// In-memory pending memory candidates awaiting user approval (#174).
-    ///
-    /// Ephemeral (lost on restart) while the feature is new; a dedicated
-    /// `pending_candidates` table will back this in a future migration.
-    pending_candidates: parking_lot::Mutex<Vec<PendingCandidate>>,
 }
 
 /// Applies the required `SQLite` PRAGMAs to the `sqlx` connect options
@@ -232,7 +227,6 @@ impl MemoryStore {
             db,
             embedding_dim,
             path,
-            pending_candidates: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -394,61 +388,72 @@ impl MemoryStore {
         crate::backup::backup_database(path, Some(&self.db)).await
     }
 
-    // ── Pending candidate CRUD (#174) ──
+    // ── Pending candidate CRUD (#174, #420) ──
 
     /// Insert a new pending candidate and return its assigned id.
     ///
-    /// The candidate starts in [`PendingCandidateStatus::Pending`]. Ids are
-    /// assigned monotonically within this store instance.
-    pub fn insert_pending_candidate(
+    /// The candidate is persisted to the `pending_candidates` table (#420) so
+    /// it survives restarts and is shared across every [`MemoryStore`]
+    /// instance opened on the same database. The stored status is forced to
+    /// [`PendingCandidateStatus::Pending`] regardless of the value supplied;
+    /// the id comes from the table's `AUTOINCREMENT` primary key.
+    pub async fn insert_pending_candidate(
         &self,
         candidate: PendingCandidate,
     ) -> Result<i64, EneMemoryError> {
-        let mut guard = self.pending_candidates.lock();
-        let next_id = guard
-            .iter()
-            .map(|c| c.id)
-            .max()
-            .map_or(1, |m| m.saturating_add(1));
-        let mut stored = candidate;
-        stored.id = next_id;
-        stored.status = PendingCandidateStatus::Pending;
-        guard.push(stored);
-        Ok(next_id)
+        use crate::entities::pending_candidates::ActiveModel;
+        use sea_orm::ActiveModelTrait;
+        use sea_orm::ActiveValue::Set;
+
+        let active = ActiveModel {
+            id: sea_orm::NotSet,
+            character_id: Set(candidate.character_id),
+            user_id: Set(candidate.user_id),
+            title: Set(candidate.title),
+            content: Set(candidate.content),
+            kind: Set(candidate.kind.as_str().to_string()),
+            confidence: Set(candidate.confidence),
+            reason_detail: Set(candidate.reason_detail),
+            source_quote: Set(candidate.source_quote),
+            existing_memory_id: Set(candidate.existing_memory_id),
+            status: Set(PendingCandidateStatus::Pending.as_str().to_string()),
+            created_at: Set(candidate.created_at),
+        };
+        let inserted = active.insert(&self.db).await?;
+        Ok(inserted.id)
     }
 
     /// List pending candidates for a character, optionally filtered by status.
     ///
-    /// When `status_filter` is `None`, candidates of every status are returned.
-    pub fn list_pending_candidates(
+    /// When `status_filter` is `None`, candidates of every status are
+    /// returned, oldest first.
+    pub async fn list_pending_candidates(
         &self,
         character_id: &str,
         status_filter: Option<PendingCandidateStatus>,
     ) -> Result<Vec<PendingCandidate>, EneMemoryError> {
-        let guard = self.pending_candidates.lock();
-        Ok(guard
-            .iter()
-            .filter(|c| {
-                c.character_id == character_id
-                    && status_filter.is_none_or(|status| c.status == status)
-            })
-            .cloned()
-            .collect())
+        use crate::entities::pending_candidates::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+
+        let mut query = Entity::find().filter(Column::CharacterId.eq(character_id));
+        if let Some(status) = status_filter {
+            query = query.filter(Column::Status.eq(status.as_str()));
+        }
+        let rows = query
+            .order_by_asc(Column::CreatedAt)
+            .order_by_asc(Column::Id)
+            .all(&self.db)
+            .await?;
+        Ok(rows.into_iter().map(Into::into).collect())
     }
 
     /// Approve a pending candidate, persisting it to typed memory as active.
     ///
     /// The candidate is inserted via [`Self::insert_typed_memory`] and its
-    /// status flipped to [`PendingCandidateStatus::Approved`]. Returns an
-    /// error when the candidate is not found or has already been resolved.
+    /// stored status flipped to [`PendingCandidateStatus::Approved`]. Returns
+    /// an error when the candidate is not found or has already been resolved.
     pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, EneMemoryError> {
-        let candidate =
-            {
-                let guard = self.pending_candidates.lock();
-                guard.iter().find(|c| c.id == id).cloned().ok_or_else(|| {
-                    EneMemoryError::Other(format!("pending candidate {id} not found"))
-                })?
-            };
+        let candidate = self.load_pending_candidate(id).await?;
         if candidate.status != PendingCandidateStatus::Pending {
             return Err(EneMemoryError::Other(format!(
                 "pending candidate {id} is already {}",
@@ -472,17 +477,15 @@ impl MemoryStore {
             valid_from: None,
             valid_until: None,
             status: crate::MemoryStatus::Active,
-            supersedes_id: None,
+            supersedes_id: candidate.existing_memory_id,
             pinned: false,
             created_at: None,
             commitment_id: None,
         };
         let memory_id = self.insert_typed_memory(&item).await?;
 
-        let mut guard = self.pending_candidates.lock();
-        if let Some(stored) = guard.iter_mut().find(|c| c.id == id) {
-            stored.status = PendingCandidateStatus::Approved;
-        }
+        self.set_pending_candidate_status(id, PendingCandidateStatus::Approved)
+            .await?;
         Ok(memory_id)
     }
 
@@ -500,18 +503,147 @@ impl MemoryStore {
             self.approve_pending_candidate(id).await?;
             return Ok(());
         }
-        let mut guard = self.pending_candidates.lock();
-        let candidate = guard
-            .iter_mut()
-            .find(|c| c.id == id)
-            .ok_or_else(|| EneMemoryError::Other(format!("pending candidate {id} not found")))?;
+        let candidate = self.load_pending_candidate(id).await?;
         if candidate.status != PendingCandidateStatus::Pending {
             return Err(EneMemoryError::Other(format!(
                 "pending candidate {id} is already {}",
                 candidate.status.as_str()
             )));
         }
-        candidate.status = PendingCandidateStatus::Rejected;
+        self.set_pending_candidate_status(id, PendingCandidateStatus::Rejected)
+            .await?;
         Ok(())
+    }
+
+    /// Enforce the pending-candidate retention policy for a character (#420).
+    ///
+    /// Two independent limits, either of which may be disabled with `0`:
+    ///
+    /// * **Age** (`max_age_days > 0`): delete candidates of *any* status whose
+    ///   `created_at` is older than `now - max_age_days`. Resolved candidates
+    ///   (approved / rejected) have no further UI value once stale, so they are
+    ///   swept too — this is what keeps the table from growing without bound.
+    /// * **Count** (`max_per_character > 0`): cap the live `pending` queue; when
+    ///   it exceeds the cap, delete the oldest overflow rows.
+    ///
+    /// Returns the total number of rows removed. Idempotent and cheap (pure
+    /// SQL `DELETE`), so it is safe to run on every post-turn forgetting pass.
+    pub async fn prune_pending_candidates(
+        &self,
+        character_id: &str,
+        max_age_days: u32,
+        max_per_character: usize,
+        now: DateTime<Utc>,
+    ) -> Result<usize, EneMemoryError> {
+        use crate::entities::pending_candidates::{Column, Entity};
+        use sea_orm::{
+            ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+        };
+
+        let mut removed = 0usize;
+
+        if max_age_days > 0 {
+            let cutoff = now
+                .checked_sub_signed(chrono::Duration::days(i64::from(max_age_days)))
+                .unwrap_or(now);
+            let aged = Entity::delete_many()
+                .filter(Column::CharacterId.eq(character_id))
+                .filter(Column::CreatedAt.lt(cutoff))
+                .exec(&self.db)
+                .await?;
+            removed = removed.saturating_add(aged.rows_affected as usize);
+        }
+
+        if max_per_character > 0 {
+            // Count the live queue, then delete the oldest overflow beyond the
+            // cap. Doing it as a count + targeted delete (rather than a
+            // `NOT IN (SELECT ... LIMIT)` subquery) keeps the SQL portable and
+            // easy to reason about.
+            let pending_count = Entity::find()
+                .filter(Column::CharacterId.eq(character_id))
+                .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
+                .count(&self.db)
+                .await? as usize;
+
+            if pending_count > max_per_character {
+                let overflow = pending_count - max_per_character;
+                // Ids of the oldest `overflow` pending rows.
+                let drop_ids: Vec<i64> = Entity::find()
+                    .filter(Column::CharacterId.eq(character_id))
+                    .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
+                    .order_by_asc(Column::CreatedAt)
+                    .order_by_asc(Column::Id)
+                    .limit(overflow as u64)
+                    .all(&self.db)
+                    .await?
+                    .into_iter()
+                    .map(|m| m.id)
+                    .collect();
+
+                if !drop_ids.is_empty() {
+                    let culled = Entity::delete_many()
+                        .filter(Column::Id.is_in(drop_ids))
+                        .exec(&self.db)
+                        .await?;
+                    removed = removed.saturating_add(culled.rows_affected as usize);
+                }
+            }
+        }
+
+        Ok(removed)
+    }
+
+    /// Load a single pending candidate row by id (#420).
+    async fn load_pending_candidate(&self, id: i64) -> Result<PendingCandidate, EneMemoryError> {
+        use crate::entities::pending_candidates::Entity;
+        use sea_orm::EntityTrait;
+
+        Entity::find_by_id(id)
+            .one(&self.db)
+            .await?
+            .map(Into::into)
+            .ok_or_else(|| EneMemoryError::Other(format!("pending candidate {id} not found")))
+    }
+
+    /// Update the stored status of a pending candidate row (#420).
+    async fn set_pending_candidate_status(
+        &self,
+        id: i64,
+        status: PendingCandidateStatus,
+    ) -> Result<(), EneMemoryError> {
+        use crate::entities::pending_candidates::{Column, Entity};
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        Entity::update_many()
+            .col_expr(
+                Column::Status,
+                sea_orm::sea_query::Expr::value(status.as_str().to_string()),
+            )
+            .filter(Column::Id.eq(id))
+            .exec(&self.db)
+            .await?;
+        Ok(())
+    }
+
+    /// Backdate a pending candidate's `created_at` for retention tests (#420).
+    #[doc(hidden)]
+    pub async fn test_backdate_pending_candidate(
+        &self,
+        id: i64,
+        days_ago: i64,
+    ) -> Result<bool, EneMemoryError> {
+        use crate::entities::pending_candidates::{ActiveModel, Entity};
+        use sea_orm::{ActiveModelTrait, ActiveValue::Set, EntityTrait};
+
+        let Some(model) = Entity::find_by_id(id).one(&self.db).await? else {
+            return Ok(false);
+        };
+        let anchor = Utc::now()
+            .checked_sub_signed(chrono::Duration::days(days_ago))
+            .unwrap_or_else(Utc::now);
+        let mut active: ActiveModel = model.into();
+        active.created_at = Set(anchor);
+        active.update(&self.db).await?;
+        Ok(true)
     }
 }

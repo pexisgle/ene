@@ -4,6 +4,7 @@
 //! between the cognitive layer (`ene-mind`'s arbiter) and whichever store
 //! implementation backs [`crate::MemoryPort`] — not `SeaORM` entities.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::memory::MemoryKind;
@@ -29,6 +30,17 @@ impl PendingCandidateStatus {
             Self::Rejected => "rejected",
         }
     }
+
+    /// Parse a stored status label.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "pending" => Some(Self::Pending),
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
 }
 
 /// A pending memory candidate awaiting user approval (#174).
@@ -52,10 +64,22 @@ pub struct PendingCandidate {
     pub reason_detail: String,
     /// Title of the existing memory this candidate would supersede, if any.
     pub existing_memory_title: Option<String>,
+    /// Id of the existing typed memory this candidate would supersede, if any.
+    ///
+    /// Persisted alongside the candidate (#420) so the approval flow can
+    /// resolve the supersede target without re-searching. `None` when the
+    /// candidate does not conflict with an existing memory.
+    pub existing_memory_id: Option<i64>,
     /// Source quote from the conversation that triggered this candidate.
     pub source_quote: String,
     /// Workflow status.
     pub status: PendingCandidateStatus,
+    /// When the candidate was created.
+    ///
+    /// Persisted to the `pending_candidates` table (#420) and used as the
+    /// anchor for the age-based retention sweep. Callers inserting a new
+    /// candidate set this to [`Utc::now`].
+    pub created_at: DateTime<Utc>,
 }
 
 /// Result of a natural-decay batch run (#76).

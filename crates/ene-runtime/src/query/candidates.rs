@@ -77,16 +77,12 @@ impl MemoryCandidateHandle {
     ///
     /// Part of the API v1 contract (#274): errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
-    #[expect(
-        clippy::unused_async,
-        reason = "kept async for API symmetry with approve/reject, which do await the store; \
-                   a future recall-aware listing may also need to await"
-    )]
     pub async fn list_pending(&self) -> Result<Vec<PendingCandidateSummary>, PublicApiError> {
         let character_id = self.card_name.lock().clone();
         let list = self
             .store()?
-            .list_pending_candidates(&character_id, Some(PendingCandidateStatus::Pending))?;
+            .list_pending_candidates(&character_id, Some(PendingCandidateStatus::Pending))
+            .await?;
         Ok(list.iter().map(PendingCandidateSummary::from).collect())
     }
 
