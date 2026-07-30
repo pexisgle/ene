@@ -116,7 +116,7 @@ impl EmbeddingError {
 ///
 /// The only embedding operation on this trait is [`embed_batch`]. Single-text and
 /// query helpers are free functions ([`embed`], [`embed_query`]) that call
-/// batch. `HyDE` and rerank live in pipeline helpers (`ene_tool_rag::hybrid`),
+/// batch. `HyDE` and rerank live in pipeline helpers (`ene_rag::tool::hybrid`),
 /// not on this trait.
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {

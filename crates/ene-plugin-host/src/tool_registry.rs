@@ -32,7 +32,7 @@ pub enum DeferredCallResult {
 /// Implemented by plugin tool registries, [`McpToolRegistry`](crate::McpToolRegistry),
 /// and [`CompositeToolRegistry`].
 ///
-/// Tool RAG indexing and selection is handled by `ene-tool-rag`,
+/// Tool RAG indexing and selection is handled by `ene-rag`,
 /// not by this trait.
 #[async_trait]
 pub trait ToolRegistry: Send + Sync {
@@ -126,7 +126,7 @@ pub trait ToolRegistry: Send + Sync {
 
 /// A tool registry that aggregates multiple sub-registries.
 ///
-/// Tool RAG indexing and selection is handled by `ene-tool-rag`.
+/// Tool RAG indexing and selection is handled by `ene-rag`.
 /// This registry only handles dispatch (list, call, config).
 ///
 /// Name collision across sub-registries is a hard error — per API v1 / #135,
