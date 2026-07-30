@@ -41,7 +41,6 @@ flowchart TD
   Mind --> Proto[crates/ene-plugin-proto]
 
   ToolHost --> Ai
-  ToolHost --> Connector[crates/ene-connector]
   ToolHost --> Proto
 
   AiLocal --> Ai
@@ -136,7 +135,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-ai` | `AiProvider` trait, OpenAI provider, Anthropic IPC provider adapter, provider factory |
 | `ene-ai-local` | Local GGUF LLM inference via `llama-cpp-4` |
 | `ene-voice` | Local STT (Whisper), TTS, VAD (Silero ONNX), cpal audio I/O |
-| `ene-connector` | External-service credential authority (OAuth2/API-key storage, connector identity, permission scopes); consumed by `ene-plugin-host` |
+| `ene-connector` | External-service credential authority (OAuth2/API-key storage, connector identity, permission scopes); no consumer yet — reintroduced by the MCP credential bridge under #412/#415 |
 | `ene-plugin-host` | Plugin process supervision, MCP server discovery, health checks, circuit breaker |
 | `ene-plugin-proto` | IPC Protocol v4 wire messages, versioning, framing, tool types |
 | `ene-plugin` | Plugin authoring SDK: `ToolPlugin`/`LlmPlugin` facade, `ToolAction`/`ActionSetProvider`, prelude |

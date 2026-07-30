@@ -7,8 +7,10 @@
 //! secrets are redacted from `Debug`/`Serialize` and zeroed on drop, stable
 //! connector identifiers, OAuth permission scopes, and display metadata. It
 //! deliberately does **not** own connection lifecycle — process supervision,
-//! restarts, and health probing live in `ene-plugin-host`, which is the only
-//! crate that consumes these types.
+//! restarts, and health probing live in `ene-plugin-host`. These types have no
+//! consumer yet: the MCP credential bridge that will consume them is
+//! reintroduced in `ene-plugin-host` under #412, backed by the credential vault
+//! landing here under #415.
 //!
 //! # Architecture
 //!

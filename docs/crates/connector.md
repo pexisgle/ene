@@ -2,7 +2,7 @@
 
 > **Crate**: `ene-connector` | **Role**: Credential and identity authority for external-service connectors
 
-`ene-connector` owns the *credential* side of connecting to external services: secure OAuth2 / API-key storage (secrets are redacted from `Debug`/`Serialize` and zeroed on drop, never logged), stable connector identifiers (`ConnectorId`), OAuth permission scopes, and display metadata (`ConnectorIdentity`). It does not implement any specific external service, and it does not own connection lifecycle — process supervision, restarts, and health probing live in `ene-plugin-host`, which is the only crate that consumes these types. The MCP bridge (including its SSRF URL validation) is implemented there, not here.
+`ene-connector` owns the *credential* side of connecting to external services: secure OAuth2 / API-key storage (secrets are redacted from `Debug`/`Serialize` and zeroed on drop, never logged), stable connector identifiers (`ConnectorId`), OAuth permission scopes, and display metadata (`ConnectorIdentity`). It does not implement any specific external service, and it does not own connection lifecycle — process supervision, restarts, and health probing live in `ene-plugin-host`. These types have no consumer yet: the MCP bridge (including its SSRF URL validation) already lives in `ene-plugin-host`'s `mcp_registry`, and the credential side that will consume this crate is reintroduced there under #412, backed by the credential vault landing here under #415.
 
 ---
 
