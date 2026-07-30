@@ -654,6 +654,7 @@ impl PluginHostManager {
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
+                Duration::from_millis(plugin_config.handshake_timeout_ms),
             )
             .await
             {
@@ -848,6 +849,7 @@ impl PluginHostManager {
 
         // Spawn the periodic health probe loop (disabled when the interval is 0).
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
+        let handshake_timeout = Duration::from_millis(plugin_config.handshake_timeout_ms);
         let health_task = if supervised.is_empty() || health_interval.is_zero() {
             if health_interval.is_zero() && !supervised.is_empty() {
                 tracing::info!(
@@ -863,7 +865,7 @@ impl PluginHostManager {
                 connections.iter().map(Arc::clone).collect();
             let tx = health_tx.clone();
             Some(tokio::spawn(async move {
-                health_probe_loop(health_interval, probes, conns, tx).await;
+                health_probe_loop(health_interval, handshake_timeout, probes, conns, tx).await;
             }))
         };
 
@@ -935,6 +937,7 @@ impl PluginHostManager {
         expected_checksum: Option<String>,
         env_passthrough: Vec<String>,
         db_token: Option<String>,
+        handshake_timeout: Duration,
     ) -> Result<
         (
             Arc<Mutex<SupervisedPlugin>>,
@@ -986,9 +989,13 @@ impl PluginHostManager {
                 reason: e.to_string(),
             })?;
 
-        let conn =
-            IpcPluginConnection::connect(&socket_path, sandbox.clone(), plugin_config.clone())
-                .await?;
+        let conn = IpcPluginConnection::connect(
+            &socket_path,
+            sandbox.clone(),
+            plugin_config.clone(),
+            handshake_timeout,
+        )
+        .await?;
 
         // The pinned checksum for restart-time verification: the configured
         // checksum when present, otherwise the trust-on-first-use checksum
@@ -1159,6 +1166,7 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
 )]
 async fn health_probe_loop(
     interval: Duration,
+    handshake_timeout: Duration,
     plugins: Vec<Arc<Mutex<SupervisedPlugin>>>,
     connections: Vec<Arc<Mutex<IpcPluginConnection>>>,
     health_tx: mpsc::UnboundedSender<PluginHealthEvent>,
@@ -1267,7 +1275,14 @@ async fn health_probe_loop(
             let plugin_config = p.plugin_config.clone();
             drop(p);
 
-            match IpcPluginConnection::connect(&socket_path, sandbox, plugin_config).await {
+            match IpcPluginConnection::connect(
+                &socket_path,
+                sandbox,
+                plugin_config,
+                handshake_timeout,
+            )
+            .await
+            {
                 Ok(new_conn) => {
                     let mut c = conn.lock().await;
                     *c = new_conn;

@@ -194,6 +194,10 @@ pub struct IpcPluginConnection {
     /// documented pattern to follow when adding another gate.
     negotiated_version: u32,
     timeout: Duration,
+    /// Timeout applied to the handshake response read. Captured at
+    /// [`connect`](Self::connect) time so [`reconnect`](Self::reconnect)
+    /// reuses the same bound without re-reading configuration.
+    handshake_timeout: Duration,
     /// Shared routing state for the reader task.
     router: Arc<Router>,
     /// Handle to the reader task. Aborted on reconnect/shutdown.
@@ -207,10 +211,18 @@ impl IpcPluginConnection {
     ///
     /// Retries the connect up to [`CONNECT_MAX_RETRIES`] times with a
     /// fixed delay, giving the child process time to bind its listener.
+    ///
+    /// The handshake response is awaited for at most `handshake_timeout`;
+    /// a plugin that accepts the socket but never replies fails fast with
+    /// [`PluginHostError::HandshakeFailed`] instead of blocking startup
+    /// indefinitely. Plugins that perform heavy initialization should
+    /// respond to the handshake promptly and defer expensive work until
+    /// afterwards.
     pub async fn connect(
         socket_path: &Path,
         sandbox: SandboxConfigData,
         plugin_config: Option<serde_json::Value>,
+        handshake_timeout: Duration,
     ) -> Result<Self, PluginHostError> {
         let name = socket_path.file_name().map_or_else(
             || "unknown".to_string(),
@@ -233,12 +245,20 @@ impl IpcPluginConnection {
             reason: format!("failed to send Handshake: {e}"),
         })?;
 
-        let resp = read_plugin_response(&mut stream).await.map_err(|e| {
-            PluginHostError::HandshakeFailed {
+        let resp = tokio::time::timeout(handshake_timeout, read_plugin_response(&mut stream))
+            .await
+            .map_err(|_| PluginHostError::HandshakeFailed {
+                name: name.clone(),
+                reason: format!(
+                    "no HandshakeAck within {} ms (plugin accepted the socket but never \
+                     responded; defer heavy initialization until after the handshake)",
+                    handshake_timeout.as_millis()
+                ),
+            })?
+            .map_err(|e| PluginHostError::HandshakeFailed {
                 name: name.clone(),
                 reason: format!("failed to read HandshakeAck: {e}"),
-            }
-        })?;
+            })?;
 
         let (negotiated_version, capabilities) = match resp {
             Some(PluginIpcResponse::HandshakeAck {
@@ -293,6 +313,7 @@ impl IpcPluginConnection {
             capabilities,
             negotiated_version,
             timeout: DEFAULT_TIMEOUT,
+            handshake_timeout,
             router,
             reader_task: Some(reader_task),
         })
@@ -703,12 +724,21 @@ impl IpcPluginConnection {
             reason: format!("failed to send Handshake on reconnect: {e}"),
         })?;
 
-        let resp = read_plugin_response(&mut stream).await.map_err(|e| {
-            PluginHostError::HandshakeFailed {
+        let resp = tokio::time::timeout(self.handshake_timeout, read_plugin_response(&mut stream))
+            .await
+            .map_err(|_| PluginHostError::HandshakeFailed {
+                name: name.clone(),
+                reason: format!(
+                    "no HandshakeAck within {} ms on reconnect (plugin accepted the \
+                         socket but never responded; defer heavy initialization until \
+                         after the handshake)",
+                    self.handshake_timeout.as_millis()
+                ),
+            })?
+            .map_err(|e| PluginHostError::HandshakeFailed {
                 name: name.clone(),
                 reason: format!("failed to read HandshakeAck on reconnect: {e}"),
-            }
-        })?;
+            })?;
 
         match resp {
             Some(PluginIpcResponse::HandshakeAck {
