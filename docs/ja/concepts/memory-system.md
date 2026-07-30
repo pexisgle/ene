@@ -19,7 +19,7 @@ Ene の長期記憶アーキテクチャは、セッションを越えた永続�
 
 ## 2. ハイブリッド想起アルゴリズム
 
-`before_turn` の実行時、 `ene-mind` は多要因 **ハイブリッド検索スコア** を使用して `ene-store` に問い合わせます：
+`before_turn` の実行時、 `ene-mind` は `ene-store` に候補の*収集* (ベクトル・字句・新近・コミットメントの検索) を依頼し、その候補を `ene-rag` に渡して多要因 **ハイブリッド検索スコア** で*スコアリング*します：
 
 $$S = w_v \cdot S_{\text{vector}} + w_l \cdot S_{\text{lexical}} + w_r \cdot S_{\text{recency}} + w_s \cdot S_{\text{salience}}$$
 

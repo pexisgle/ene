@@ -19,7 +19,7 @@ Memories in `ene-store` are typed via `MemoryKind` (supporting `Episodic`, `Sema
 
 ## 2. The Hybrid Recall Algorithm
 
-During `before_turn`, `ene-mind` queries `ene-store` using a multi-factor **Hybrid Search Score**:
+During `before_turn`, `ene-mind` asks `ene-store` to *gather* candidates (vector, lexical, recent, and commitment lookups) and then hands them to `ene-rag` to *score* with a multi-factor **Hybrid Search Score**:
 
 $$S = w_v \cdot S_{\text{vector}} + w_l \cdot S_{\text{lexical}} + w_r \cdot S_{\text{recency}} + w_s \cdot S_{\text{salience}}$$
 
