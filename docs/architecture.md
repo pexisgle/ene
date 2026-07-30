@@ -1,12 +1,12 @@
 # System Architecture & Design (API v1)
 
-**Ene** is designed around a clean separation of concerns: an actor-based runtime facade (`ene-runtime`), a pure cognitive turn engine (`ene-mind`), an isolated persistence layer (`ene-store`) built on persistence-agnostic domain vocabulary (`ene-core`), an out-of-process IPC plugin host (`ene-plugin-host`), and a standalone VRM renderer (`ene-vrm`).
+**Ene** is designed around a clean separation of concerns: an actor-based runtime facade (`ene-runtime`), a pure cognitive turn engine (`ene-mind`), an isolated persistence layer (`ene-store`) built on persistence-agnostic domain vocabulary (`ene-core`), a RAG scoring/decay policy layer (`ene-rag`), an out-of-process IPC plugin host (`ene-plugin-host`), and a standalone VRM renderer (`ene-vrm`).
 
 ---
 
 ## 1. Core Architecture Principles
 
-1. **API v1 Host Contract**: The host application (`ene-cli`, `ene-desktop`, or external integrations) interacts with Ene exclusively through `EneHandle::open`. Turns are identified by a mandatory `TurnId`. Turn execution is single-flight; concurrent execution attempts return `RunError::Busy`. The versioned wire contract is exactly `ene_runtime::public_api`'s `Public*` types (`PublicChatEvent`, `PublicLifecycleEvent`, `PublicSessionMeta`, `PublicExportedMessage`, `PublicApiError`, `API_VERSION`) plus the `EneHandle` methods built entirely from them (`list_sessions`, `export_session`, `import_session`, `search_sessions`, `archive_session`) (#269). No `ene_store` / `ene_mind` / `ene_plugin_proto` type appears in a `Public*` type's fields or in those methods' signatures; internal error enums project into `PublicApiError`'s stable categories via `From` impls, so adding an internal error variant does not break this contract. Other `EneHandle` methods (`subscribe`, `subscribe_lifecycle`, `take_audio_stream`, `diagnostics`, `update_feature_settings`, …) are host-internal wiring, same as the `streaming` / `message_builder` modules, and may freely use internal types. The event bus itself is split into three dedicated channels by traffic class — chat (`EneEvent`, `broadcast`), audio (`AudioChunk`, bounded single-consumer `mpsc`), and lifecycle (`LifecycleEvent`, small-capacity `broadcast`) — so a burst on one channel cannot lag or starve consumers of another (#272).
+1. **API v1 Host Contract**: The host application (`ene-cli`, `ene-desktop`, or external integrations) interacts with Ene exclusively through `EneHandle::open`. Turns are identified by a mandatory `TurnId`. Turn execution is single-flight; concurrent execution attempts return `RunError::Busy`. The versioned wire contract is exactly `ene_runtime::public_api`'s `Public*` types (`PublicChatEvent`, `PublicLifecycleEvent`, `PublicSessionMeta`, `PublicExportedMessage`, `PublicApiError`, `API_VERSION`) plus the `EneHandle` methods built entirely from them (`list_sessions`, `export_session`, `import_session`, `search_sessions`, `archive_session`) (#269). No `ene_store` / `ene_mind` / `ene_plugin_proto` type appears in a `Public*` type's fields or in those methods' signatures; internal error enums project into `PublicApiError`'s stable categories via `From` impls, so adding an internal error variant does not break this contract. Actor-liveness failures are reported uniformly as `PublicApiError::ActorDead` across the actor-control surface (permissions, undo, user input, feature updates) and the read-only diagnostics/vision handles (#408) — there is no separate actor-dead error type; only `run` and `cancel` keep dedicated error types (`RunError`, `CancelError`) because their `Busy` / `TurnMismatch` variants carry information callers branch on. Other `EneHandle` methods (`subscribe`, `subscribe_lifecycle`, `take_audio_stream`, `diagnostics`, `update_feature_settings`, …) are host-internal wiring, same as the `streaming` / `message_builder` modules, and may freely use internal types. The event bus itself is split into three dedicated channels by traffic class — chat (`EneEvent`, `broadcast`), audio (`AudioChunk`, bounded single-consumer `mpsc`), and lifecycle (`LifecycleEvent`, small-capacity `broadcast`) — so a burst on one channel cannot lag or starve consumers of another (#272).
 2. **Actor Execution Model**: `ene-runtime` manages state via an internal Tokio actor. Public methods on `EneHandle` are non-blocking channel sends or oneshot async requests.
 3. **Pure Cognitive Mind**: `ene-mind` owns prompt packet composition, hybrid memory recall, affect/emotions (PAD model), proactive speech triggers, and output performance arbitration. `ene-mind` **never** depends on `ene-runtime` or `ene-plugin-host`, and its cognitive-logic modules (recall, memory arbiter, forgetting, character sync, journal, self-reflection) call the persistence layer only through the `ene_core::MemoryPort` trait (#270) — never the concrete `ene_store::MemoryStore` — so they can be unit-tested against an in-memory test double without SQLite.
 4. **Isolated Persistence**: `ene-store` owns all SQLite schema, migrations, SeaORM entities, and vector search (`sqlite-vec`). `ene-store` **never** depends on `ene-mind` or `ene-ai`.
@@ -31,7 +31,7 @@ flowchart TD
   Runtime --> Ai[crates/ene-ai]
   Runtime --> AiLocal[crates/ene-ai-local]
   Runtime --> ToolHost[crates/ene-plugin-host]
-  Runtime --> ToolRag[crates/ene-tool-rag]
+  Runtime --> Rag[crates/ene-rag]
   Runtime --> Config[crates/ene-config]
 
   Mind -.dev-only.-> Store
@@ -53,9 +53,10 @@ flowchart TD
   Voice --> Ai
   Voice --> Config
 
-  ToolRag --> Ai
-  ToolRag --> Store
-  ToolRag --> Proto
+  Rag --> Ai
+  Rag --> Core
+  Rag --> Proto
+  Rag --> Config
 
   Store --> Config
   Store --> Core
@@ -74,6 +75,7 @@ flowchart TD
 
 ### Strict Architectural Boundaries
 - `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — domain vocabulary sits below both `ene-store` and `ene-mind`; neither depends on the other for it
+- `ene-rag` ↛ `ene-store` / `ene-mind` / `ene-runtime` (#302) — the RAG scoring/decay policy layer depends on `ene-core` domain vocabulary plus generic deps only; persistence is reached through the `ene_core::EmbeddingStorePort` trait, so a store↔rag cycle is impossible at compile time
 - `ene-store` ↛ `ene-ai` / `ene-mind`
 - `ene-mind` ↛ `ene-runtime` / `ene-plugin-host` / `ene-store` (production code; `ene-store` is a dev-dependency only, used for integration tests)
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
@@ -143,6 +145,6 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-plugin` | Plugin authoring SDK: `ToolPlugin`/`LlmPlugin` facade, `ToolAction`/`ActionSetProvider`, prelude |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
 | `ene-tool-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
-| `ene-tool-rag` | Retrieval-augmented tool selection and reranking |
+| `ene-rag` | RAG policy layer: memory recall scoring/decay, tool selection and reranking (absorbed the former `ene-tool-rag`) |
 | `ene-vrm` | VRM 1.0 avatar loading and wgpu renderer |
 | `ene-config` | Configuration loading, settings schema, character card definitions |

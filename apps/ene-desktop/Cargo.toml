@@ -37,7 +37,7 @@ ene-config = { workspace = true }
 ene-plugin-proto = { workspace = true }
 ene-plugin-host = { workspace = true }
 ene-util = { workspace = true }
-ene-tool-rag = { workspace = true }
+ene-rag = { workspace = true, features = ["tool"] }
 ene-vrm = { workspace = true }
 tokio = { workspace = true }
 parking_lot = { workspace = true }

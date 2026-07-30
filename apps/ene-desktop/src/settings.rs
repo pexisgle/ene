@@ -346,8 +346,9 @@ pub struct UiState {
     pub permission_message: Option<String>,
     /// Cached session metadata rows for the sessions page (#176).
     /// Lazy-loaded the first time the page is shown and refreshed
-    /// after every archive / import action.
-    pub session_rows: Vec<ene_store::SessionMeta>,
+    /// after every archive / import action. Rendered directly from the
+    /// API v1 [`ene_runtime::PublicSessionMeta`] DTO (#408).
+    pub session_rows: Vec<ene_runtime::PublicSessionMeta>,
     /// Whether `session_rows` has been populated at least once, so an
     /// empty store is not mistaken for "not yet loaded".
     pub sessions_loaded: bool,

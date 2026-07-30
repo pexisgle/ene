@@ -1,16 +1,40 @@
 //! Tool RAG pipeline — multi-vector embedding, field-weighted similarity,
-//! optional cosine rerank, and per-category limits.
+//! optional cosine rerank, and per-category limits (#302, moved from
+//! `ene-tool-rag`).
 //!
 //! LLM `HyDE` is deprecated and disabled; `use_hyde` is retained as a no-op
 //! config knob scheduled for removal.
+//!
+//! Persistence goes through [`ene_core::EmbeddingStorePort`] rather than the
+//! concrete store type, so this crate never depends on `ene-store`.
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred in the tool pipeline"
+)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "tool scoring and timing deltas use intentional arithmetic"
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "ranked tool selection indexes into scored candidate lists"
+)]
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
+use ene_core::EmbeddingStorePort;
 use ene_plugin_proto::tool_types::EmbeddingField;
 use ene_plugin_proto::{ToolName, ToolRagProfile, ToolSpec};
-use ene_store::MemoryStore;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+pub mod config;
+pub mod error;
+pub mod hybrid;
+
+pub use config::{FieldWeightsConfig, ToolRagConfig};
+pub use error::ToolRagError;
+pub use hybrid::{HybridRerankProvider, hybrid_embed, hyde_document, rerank_tool_specs};
 
 // ── Per-field similarity weights ──────────────────────────────────────────
 
@@ -47,6 +71,19 @@ pub struct FieldWeights {
     pub hyde_blend: f32,
 }
 
+impl FieldWeights {
+    /// The weight for a given embedding field.
+    pub const fn for_field(&self, field: EmbeddingField) -> f32 {
+        match field {
+            EmbeddingField::Summary => self.summary,
+            EmbeddingField::Description => self.description,
+            EmbeddingField::Capability => self.capability,
+            EmbeddingField::Example => self.example,
+            EmbeddingField::Negative => self.negative,
+        }
+    }
+}
+
 impl Default for FieldWeights {
     #[expect(
         deprecated,
@@ -65,12 +102,12 @@ impl Default for FieldWeights {
     }
 }
 
-impl From<crate::config::FieldWeightsConfig> for FieldWeights {
+impl From<crate::tool::config::FieldWeightsConfig> for FieldWeights {
     #[expect(
         deprecated,
         reason = "copy deprecated HyDE weight fields until they are removed"
     )]
-    fn from(c: crate::config::FieldWeightsConfig) -> Self {
+    fn from(c: crate::tool::config::FieldWeightsConfig) -> Self {
         Self {
             summary: c.summary,
             description: c.description,
@@ -86,7 +123,7 @@ impl From<crate::config::FieldWeightsConfig> for FieldWeights {
 // ── Runtime options (derived from config) ─────────────────────────────────
 
 /// Runtime options for the `ToolRag` pipeline, resolved from
-/// [`crate::config::ToolRagConfig`].
+/// [`crate::tool::config::ToolRagConfig`].
 #[derive(Debug, Clone)]
 pub struct ToolRagOptions {
     /// Whether the RAG pipeline is enabled.
@@ -140,10 +177,10 @@ impl Default for ToolRagOptions {
     }
 }
 
-impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
-    type Error = crate::ToolRagError;
+impl TryFrom<crate::tool::config::ToolRagConfig> for ToolRagOptions {
+    type Error = crate::tool::ToolRagError;
 
-    fn try_from(c: crate::config::ToolRagConfig) -> Result<Self, Self::Error> {
+    fn try_from(c: crate::tool::config::ToolRagConfig) -> Result<Self, Self::Error> {
         Self::from_config(c)
     }
 }
@@ -151,13 +188,15 @@ impl TryFrom<crate::config::ToolRagConfig> for ToolRagOptions {
 impl ToolRagOptions {
     /// Builds options from config. Invalid `forced` names fail construction.
     #[expect(deprecated, reason = "copy deprecated use_hyde until it is removed")]
-    pub fn from_config(c: crate::config::ToolRagConfig) -> Result<Self, crate::ToolRagError> {
+    pub fn from_config(
+        c: crate::tool::config::ToolRagConfig,
+    ) -> Result<Self, crate::tool::ToolRagError> {
         let mut forced = Vec::with_capacity(c.forced.len());
         for name in c.forced {
             match ToolName::try_new(name) {
                 Ok(tn) => forced.push(tn),
                 Err(e) => {
-                    return Err(crate::ToolRagError::Config {
+                    return Err(crate::tool::ToolRagError::Config {
                         message: format!("invalid tool name in rag.forced: {e}"),
                     });
                 }
@@ -191,7 +230,7 @@ impl ToolRagOptions {
 /// optional cosine rerank → top-N.
 pub struct ToolRag {
     embedder: Arc<dyn EmbeddingProvider>,
-    store: Option<Arc<MemoryStore>>,
+    store: Option<Arc<dyn EmbeddingStorePort>>,
     opts: ToolRagOptions,
     /// Last-known `ToolSpecs`, used when returning results from [`select`].
     specs: RwLock<HashMap<ToolName, ToolSpec>>,
@@ -213,10 +252,11 @@ pub struct ToolRag {
 }
 
 impl ToolRag {
-    /// Creates a new `ToolRag` instance with the given embedder, optional memory store, and options.
+    /// Creates a new `ToolRag` instance with the given embedder, optional
+    /// embedding store, and options.
     pub fn new(
         embedder: Arc<dyn EmbeddingProvider>,
-        store: Option<Arc<MemoryStore>>,
+        store: Option<Arc<dyn EmbeddingStorePort>>,
         opts: ToolRagOptions,
     ) -> Self {
         Self {
@@ -235,9 +275,9 @@ impl ToolRag {
     /// Invalid `forced` names fail construction.
     pub fn from_config(
         embedder: Arc<dyn EmbeddingProvider>,
-        store: Option<Arc<MemoryStore>>,
-        config: crate::config::ToolRagConfig,
-    ) -> Result<Self, crate::ToolRagError> {
+        store: Option<Arc<dyn EmbeddingStorePort>>,
+        config: crate::tool::config::ToolRagConfig,
+    ) -> Result<Self, crate::tool::ToolRagError> {
         let opts = ToolRagOptions::from_config(config)?;
         Ok(Self::new(embedder, store, opts))
     }
@@ -261,7 +301,7 @@ impl ToolRag {
         &self.opts
     }
 
-    /// Whether the pipeline has a backing memory store.
+    /// Whether the pipeline has a backing embedding store.
     pub const fn has_store(&self) -> bool {
         self.store.is_some()
     }
@@ -353,7 +393,7 @@ impl ToolRag {
             };
 
             self.index_field(
-                &store,
+                store.as_ref(),
                 &cached,
                 &model_name,
                 profile,
@@ -365,7 +405,7 @@ impl ToolRag {
             .await?;
 
             self.index_field(
-                &store,
+                store.as_ref(),
                 &cached,
                 &model_name,
                 profile,
@@ -377,7 +417,7 @@ impl ToolRag {
             .await?;
 
             self.index_field(
-                &store,
+                store.as_ref(),
                 &cached,
                 &model_name,
                 profile,
@@ -389,7 +429,7 @@ impl ToolRag {
             .await?;
 
             self.index_field(
-                &store,
+                store.as_ref(),
                 &cached,
                 &model_name,
                 profile,
@@ -403,7 +443,7 @@ impl ToolRag {
             for i in 0..profile.examples.len() {
                 let field_key = format!("ex_{i}");
                 self.index_field(
-                    &store,
+                    store.as_ref(),
                     &cached,
                     &model_name,
                     profile,
@@ -451,7 +491,7 @@ impl ToolRag {
 
     async fn index_field(
         &self,
-        store: &Arc<MemoryStore>,
+        store: &dyn EmbeddingStorePort,
         cached: &HashMap<(String, String, String), (String, String)>,
         model_name: &str,
         profile: &ToolRagProfile,
@@ -534,10 +574,10 @@ impl ToolRag {
         }
 
         let t_start = std::time::Instant::now();
-        let Some(store) = &self.store else {
+        let Some(store) = self.store.as_ref().map(Arc::clone) else {
             tracing::warn!(
                 component = "ToolRag",
-                "No memory store; returning forced tools only"
+                "No embedding store; returning forced tools only"
             );
             return self.forced_only_specs();
         };
@@ -639,7 +679,7 @@ impl ToolRag {
 
         if self.opts.use_rerank && candidates.len() > 1 {
             let rerank_specs: Vec<ToolSpec> = candidates.iter().map(|(s, _)| s.clone()).collect();
-            match crate::hybrid::rerank_tool_specs(
+            match crate::tool::hybrid::rerank_tool_specs(
                 self.embedder.as_ref(),
                 None,
                 query,
@@ -761,7 +801,7 @@ struct CachedFieldRow {
 }
 
 /// `true` when the embedding is empty, all-zero, or contains NaN.
-fn is_zero_norm(emb: &[f32]) -> bool {
+pub(crate) fn is_zero_norm(emb: &[f32]) -> bool {
     if emb.is_empty() {
         return true;
     }
@@ -789,13 +829,7 @@ fn score_tools(
         }
         let sim = cosine_similarity(query_embedding, &row.embedding);
 
-        let weight = match row.field {
-            EmbeddingField::Summary => weights.summary,
-            EmbeddingField::Description => weights.description,
-            EmbeddingField::Capability => weights.capability,
-            EmbeddingField::Example => weights.example,
-            EmbeddingField::Negative => weights.negative,
-        };
+        let weight = weights.for_field(row.field);
 
         *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += sim * weight;
     }
@@ -858,7 +892,7 @@ fn is_cached(
 
 /// Persist a single field embedding.
 async fn persist(
-    store: &Arc<MemoryStore>,
+    store: &dyn EmbeddingStorePort,
     tool_name: &str,
     field: &str,
     field_key: &str,
@@ -965,7 +999,7 @@ mod tests {
 
     #[test]
     fn from_config_rejects_invalid_forced() {
-        let cfg = crate::config::ToolRagConfig {
+        let cfg = crate::tool::config::ToolRagConfig {
             top_k: 3,
             final_n: 2,
             use_rerank: true,
@@ -975,7 +1009,7 @@ mod tests {
                 "NOT A VALID NAME!!!".into(),
                 "utility.todo_add".into(),
             ],
-            ..crate::config::ToolRagConfig::default()
+            ..crate::tool::config::ToolRagConfig::default()
         };
         #[expect(clippy::expect_used, reason = "unit test asserts Err")]
         let err = ToolRagOptions::from_config(cfg).expect_err("invalid forced");
@@ -987,11 +1021,11 @@ mod tests {
 
     #[test]
     fn from_config_accepts_valid_forced() {
-        let cfg = crate::config::ToolRagConfig {
+        let cfg = crate::tool::config::ToolRagConfig {
             top_k: 3,
             final_n: 2,
             forced: vec!["utility.question".into(), "utility.todo_add".into()],
-            ..crate::config::ToolRagConfig::default()
+            ..crate::tool::config::ToolRagConfig::default()
         };
         #[expect(clippy::expect_used, reason = "unit test asserts Ok")]
         let opts = ToolRagOptions::from_config(cfg).expect("valid");
@@ -1004,7 +1038,7 @@ mod tests {
 
     #[test]
     fn defaults_disable_hyde_and_rerank() {
-        let cfg = crate::config::ToolRagConfig::default();
+        let cfg = crate::tool::config::ToolRagConfig::default();
         #[expect(deprecated, reason = "assert deprecated default")]
         {
             assert!(!cfg.use_hyde);

@@ -51,10 +51,12 @@
 //! DTO conversion layer but the command/response side of `EneHandle` did
 //! not — session methods returned `ene_store::SessionMeta`,
 //! `ene_store::ExportedMessage`, and `ene_store::EneMemoryError` directly,
-//! double-nested inside `Result<Result<T, E>, ActorDeadError>`. This module
-//! now mirrors the event-side pattern for those methods.
+//! double-nested inside `Result<Result<T, E>, ActorDead>`. This module
+//! now mirrors the event-side pattern for those methods. As of #408 the
+//! actor-control and diagnostics methods likewise report a dead actor as
+//! [`PublicApiError::ActorDead`] rather than a dedicated error type.
 
-use crate::handle::{ActorDeadError, EneEvent, EneStatus, LifecycleEvent, TerminalReason};
+use crate::handle::{EneEvent, EneStatus, LifecycleEvent, TerminalReason};
 use crate::types::TurnOrigin;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -100,9 +102,9 @@ pub struct PublicPerfCue {
 ///
 /// Returned by [`crate::EneHandle::list_sessions`]. Field-for-field
 /// equivalent to `ene_store::SessionMeta` (never renamed or reshaped without
-/// a doc-only reason) so embedders that need the internal type back (e.g.
-/// `ene-desktop`'s existing UI models) can convert with a trivial field
-/// copy rather than a lossy transform.
+/// a doc-only reason). As of #408 this DTO is also the canonical type the
+/// desktop UI renders directly — embedders no longer convert it back to the
+/// `ene_store` shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicSessionMeta {
     /// Row id.
@@ -165,11 +167,15 @@ impl From<ene_store::ExportedMessage> for PublicExportedMessage {
 
 /// Stable error categories for API v1 request/response methods (#269).
 ///
-/// Internal error enums (`ene_store::EneMemoryError`, [`ActorDeadError`])
-/// project into one of these categories via the `From` impls below, so a
-/// new internal error variant does not change this type — see the
-/// `API_VERSION` bump-policy doc above. `#[non_exhaustive]` so a future
-/// category addition is itself non-breaking for match arms in client code.
+/// Internal error enums (`ene_store::EneMemoryError`) project into one of
+/// these categories via the `From` impls below, so a new internal error
+/// variant does not change this type — see the `API_VERSION` bump-policy doc
+/// above. The actor-control methods on [`crate::EneHandle`] (permissions,
+/// undo, user input, feature updates) and the diagnostics / vision handles
+/// report a dead actor directly as [`PublicApiError::ActorDead`] (#408) —
+/// there is no separate actor-dead error type. `#[non_exhaustive]` so a
+/// future category addition is itself non-breaking for match arms in client
+/// code.
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -201,12 +207,6 @@ pub enum PublicApiError {
         /// Human-readable detail (never contains secrets).
         message: String,
     },
-}
-
-impl From<ActorDeadError> for PublicApiError {
-    fn from(_: ActorDeadError) -> Self {
-        Self::ActorDead
-    }
 }
 
 impl From<ene_store::EneMemoryError> for PublicApiError {
@@ -650,12 +650,6 @@ mod tests {
 
         let value = serde_json::to_value(PublicApiError::ActorDead).expect("serializable");
         assert_eq!(value["kind"], "actor_dead");
-    }
-
-    #[test]
-    fn actor_dead_error_maps_to_actor_dead() {
-        let mapped: PublicApiError = ActorDeadError.into();
-        assert!(matches!(mapped, PublicApiError::ActorDead));
     }
 
     #[test]

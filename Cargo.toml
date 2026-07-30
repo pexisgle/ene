@@ -118,10 +118,10 @@ ene-plugin = { path = "crates/ene-plugin" }
 ene-plugin-db = { path = "crates/ene-plugin-db" }
 ene-plugin-host = { path = "crates/ene-plugin-host" }
 ene-plugin-proto = { path = "crates/ene-plugin-proto" }
+ene-rag = { path = "crates/ene-rag" }
 ene-runtime = { path = "crates/ene-runtime" }
 ene-store = { path = "crates/ene-store" }
 ene-tool-macros = { path = "crates/ene-tool-macros" }
-ene-tool-rag = { path = "crates/ene-tool-rag" }
 ene-util = { path = "crates/ene-util" }
 ene-voice = { path = "crates/ene-voice" }
 ene-vrm = { path = "crates/ene-vrm" }

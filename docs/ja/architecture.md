@@ -1,12 +1,12 @@
 # システムアーキテクチャと設計 (API v1)
 
-**Ene** は明確な責務分離に基づいて設計されています。アクターベースのランタイムファサード (`ene-runtime`)、純粋な認知ターンエンジン (`ene-mind`)、永続化に依存しないドメイン語彙 (`ene-core`) の上に構築された独立した永続化層 (`ene-store`)、プロセス外 IPC プラグインホスト (`ene-plugin-host`)、および独立した VRM レンダラー (`ene-vrm`) で構成されています。
+**Ene** は明確な責務分離に基づいて設計されています。アクターベースのランタイムファサード (`ene-runtime`)、純粋な認知ターンエンジン (`ene-mind`)、永続化に依存しないドメイン語彙 (`ene-core`) の上に構築された独立した永続化層 (`ene-store`)、RAG のスコアリング/減衰ポリシー層 (`ene-rag`)、プロセス外 IPC プラグインホスト (`ene-plugin-host`)、および独立した VRM レンダラー (`ene-vrm`) で構成されています。
 
 ---
 
 ## 1. コアアーキテクチャ原則
 
-1. **API v1 ホスト契約**: ホストアプリケーション (`ene-cli`, `ene-desktop`, 外部連携) は `EneHandle::open` を介してのみ Ene と対話します。ターンは必須の `TurnId` で識別されます。ターンの実行は単一飛行 (single-flight) であり、同時実行の試みは `RunError::Busy` を返します。
+1. **API v1 ホスト契約**: ホストアプリケーション (`ene-cli`, `ene-desktop`, 外部連携) は `EneHandle::open` を介してのみ Ene と対話します。ターンは必須の `TurnId` で識別されます。ターンの実行は単一飛行 (single-flight) であり、同時実行の試みは `RunError::Busy` を返します。アクターの生存状態に関する失敗は、アクター制御面 (権限、undo、ユーザー入力、機能更新) と読み取り専用の diagnostics / vision ハンドルのすべてで一様に `PublicApiError::ActorDead` として報告されます (#408)。独立した「アクター死亡」エラー型は存在せず、`run` と `cancel` のみが専用のエラー型 (`RunError`, `CancelError`) を持ちます。これはそれらの `Busy` / `TurnMismatch` バリアントが呼び出し側の分岐に必要な情報を担っているためです。
 2. **アクター実行モデル**: `ene-runtime` は内部の Tokio アクターを介して状態を管理します。 `EneHandle` の公開メソッドはノンブロッキングのチャネル送信、または oneshot 非同期リクエストです。
 3. **純粋な認知 Mind**: `ene-mind` はプロンプトパケットの構築、ハイブリッド記憶想起、感情状態 (PADモデル) の更新、プロアクティブ発話トリガー、および出力 Performance 演出の調停を所有します。 `ene-mind` は `ene-runtime` や `ene-plugin-host` に**一切依存しません**。また、その認知ロジック群 (想起、記憶アービター、忘却、キャラクター同期、ジャーナル、自己内省) は永続化層に対して常に `ene_core::MemoryPort` トレイト (#270) 経由でのみアクセスし、具象型 `ene_store::MemoryStore` には直接依存しません。これにより SQLite なしでインメモリのテストダブルに対して単体テストできます。
 4. **孤立した永続化層**: `ene-store` は SQLite スキーマ、マイグレーション、SeaORM エンティティ、およびベクトル検索 (`sqlite-vec`) を所有します。 `ene-store` は `ene-mind` や `ene-ai` に**一切依存しません**。
@@ -31,7 +31,7 @@ flowchart TD
   Runtime --> Ai[crates/ene-ai]
   Runtime --> AiLocal[crates/ene-ai-local]
   Runtime --> ToolHost[crates/ene-plugin-host]
-  Runtime --> ToolRag[crates/ene-tool-rag]
+  Runtime --> Rag[crates/ene-rag]
   Runtime --> Config[crates/ene-config]
 
   Mind -.dev-only.-> Store
@@ -53,9 +53,10 @@ flowchart TD
   Voice --> Ai
   Voice --> Config
 
-  ToolRag --> Ai
-  ToolRag --> Store
-  ToolRag --> Proto
+  Rag --> Ai
+  Rag --> Core
+  Rag --> Proto
+  Rag --> Config
 
   Store --> Config
   Store --> Core
@@ -74,6 +75,7 @@ flowchart TD
 
 ### 厳格なアーキテクチャ境界ルール
 - `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — ドメイン語彙は `ene-store` と `ene-mind` の双方より下位に位置し、どちらもこの型のために互いへ依存しない
+- `ene-rag` ↛ `ene-store` / `ene-mind` / `ene-runtime` (#302) — RAG のスコアリング/減衰ポリシー層は `ene-core` のドメイン語彙と汎用依存のみに依存する。永続化には `ene_core::EmbeddingStorePort` トレイト経由でのみ到達するため、store↔rag の循環依存はコンパイル時に不可能となる
 - `ene-store` ↛ `ene-ai` / `ene-mind`
 - `ene-mind` ↛ `ene-runtime` / `ene-plugin-host` / `ene-store` (本番コード; `ene-store` は統合テスト用の dev-dependency のみ)
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
@@ -143,6 +145,6 @@ flowchart TD
 | `ene-plugin` | プラグイン開発 SDK: `ToolPlugin`/`LlmPlugin` ファサード、`ToolAction`/`ActionSetProvider`、prelude |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
 | `ene-tool-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
-| `ene-tool-rag` | ツール仕様の検索拡張生成 (RAG) と再ランク |
+| `ene-rag` | RAG ポリシー層: 記憶想起のスコアリング/減衰、ツール選択と再ランク (旧 `ene-tool-rag` を吸収) |
 | `ene-vrm` | VRM 1.0 アバター読み込みおよび wgpu レンダラー |
 | `ene-config` | 設定読み込み、設定スキーマ、キャラクターカード定義 |

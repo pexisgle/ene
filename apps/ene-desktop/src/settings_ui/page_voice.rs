@@ -508,7 +508,7 @@ pub fn render(
         let mind = settings.config_section::<ene_mind::MindConfig>();
         let store = settings.config_section::<ene_store::StoreConfig>();
         let tools = settings.config_section::<ene_plugin_host::PluginConfig>();
-        let rag = settings.config_section::<ene_tool_rag::ToolRagConfig>();
+        let rag = settings.config_section::<ene_rag::ToolRagConfig>();
         ai.sync_feature_runtime(&mind, &store, &tools, &rag);
     }
 }

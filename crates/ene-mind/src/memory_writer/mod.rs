@@ -458,10 +458,11 @@ async fn build_semantic_matches(
             time_range: None,
         };
 
-        let scored = store
+        let gathered = store
             .search(&options)
             .await
             .map_err(CognitionError::MemoryPort)?;
+        let scored = ene_rag::score_and_rank(&options, gathered);
 
         let semantic: Vec<SemanticMatch> = scored
             .into_iter()

@@ -51,9 +51,9 @@ use ene_mind::{
 };
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
 use ene_plugin_host::{CompositeToolRegistry, PluginHealthEvent, PluginHostError, ToolRegistry};
+use ene_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 #[cfg(any(unix, windows))]
 use ene_store::db_server::DbIpcServer;
-use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -2762,7 +2762,10 @@ pub(super) fn init_tool_rag(
         return Ok(None);
     }
 
-    let store = concrete_store;
+    // The tool RAG persists embeddings through the `EmbeddingStorePort`
+    // abstraction (#302) so `ene-rag` never depends on `ene-store`.
+    let store: Option<Arc<dyn ene_core::EmbeddingStorePort>> =
+        concrete_store.map(|s| s as Arc<dyn ene_core::EmbeddingStorePort>);
     let opts = ToolRagOptions::from_config(rag_config)?;
     Ok(Some(Arc::new(ToolRag::new(embedder.clone(), store, opts))))
 }
