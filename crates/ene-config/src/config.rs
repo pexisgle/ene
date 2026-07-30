@@ -428,6 +428,112 @@ pub(crate) fn set_nested(
     Ok(())
 }
 
+/// Recursively computes the JSON values present in `current` but absent from,
+/// or different in, `base` (#326).
+///
+/// When both sides are JSON objects the comparison descends key by key; for
+/// every other shape (scalars, arrays, mismatched types) the whole `current`
+/// value is returned when it differs from `base`. Returns `None` when the two
+/// values are identical. Object keys that exist only in `base` are ignored —
+/// this is an additive diff used to capture the user's in-session mutations,
+/// not a symmetric difference.
+fn deep_diff(base: &serde_json::Value, current: &serde_json::Value) -> Option<serde_json::Value> {
+    use serde_json::Value;
+
+    match (base, current) {
+        (Value::Object(base_obj), Value::Object(cur_obj)) => {
+            let mut changed = serde_json::Map::new();
+            for (key, cur_val) in cur_obj {
+                match base_obj.get(key) {
+                    Some(base_val) => {
+                        if let Some(diff) = deep_diff(base_val, cur_val) {
+                            changed.insert(key.clone(), diff);
+                        }
+                    }
+                    None => {
+                        changed.insert(key.clone(), cur_val.clone());
+                    }
+                }
+            }
+            if changed.is_empty() {
+                None
+            } else {
+                Some(Value::Object(changed))
+            }
+        }
+        _ => (base != current).then(|| current.clone()),
+    }
+}
+
+/// Recursively overlays `patch` onto `base`, returning the merged result
+/// (#326).
+///
+/// JSON objects are merged key by key (recursing into nested objects); any
+/// other shape in `patch` replaces the corresponding `base` value outright.
+fn deep_merge(base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+
+    match (base, patch) {
+        (Value::Object(mut base_obj), Value::Object(patch_obj)) => {
+            for (key, patch_val) in patch_obj {
+                let merged = match base_obj.remove(&key) {
+                    Some(base_val) => deep_merge(base_val, patch_val),
+                    None => patch_val,
+                };
+                base_obj.insert(key, merged);
+            }
+            Value::Object(base_obj)
+        }
+        (_, patch) => patch,
+    }
+}
+
+/// Serialises only the JSON layer of `config` for persistence (#326).
+///
+/// The in-memory [`EneConfig`] is the result of layering defaults → JSON file
+/// → `ENE_` env vars, so serialising it directly would bake transient env
+/// overrides (and every default) into `settings.json`. Instead this rebuilds
+/// the same layered baseline the loader produced, subtracts it from `config`
+/// to isolate the user's genuine in-session mutations, and merges those
+/// mutations onto the **raw** on-disk JSON. The env layer cancels out of the
+/// subtraction (it is present in both the baseline and `config`), so env
+/// overrides stay transient, while unknown fields and the user's key order in
+/// the raw JSON are preserved.
+fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String, EneConfigError> {
+    let baseline = extract_layered_config(config_path)?;
+    let baseline_val = serde_json::to_value(&baseline)?;
+    let current_val = serde_json::to_value(config)?;
+
+    // No user mutations: write the raw JSON layer back untouched so env
+    // overrides and defaults never reach disk.
+    let Some(mutations) = deep_diff(&baseline_val, &current_val) else {
+        return read_raw_json_layer(config_path);
+    };
+
+    let raw_layer = match read_raw_json_layer(config_path) {
+        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)?,
+        // A missing file is an empty JSON layer; the mutations become the
+        // file's initial contents.
+        Err(EneConfigError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+        Err(e) => return Err(e),
+    };
+
+    let merged = deep_merge(raw_layer, mutations);
+    Ok(serde_json::to_string_pretty(&merged)?)
+}
+
+/// Reads the raw on-disk `settings.json` as a string, falling back to an empty
+/// JSON object when the file does not exist yet.
+fn read_raw_json_layer(config_path: &Path) -> Result<String, EneConfigError> {
+    match std::fs::read_to_string(config_path) {
+        Ok(raw) => Ok(raw),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".to_string()),
+        Err(e) => Err(EneConfigError::IoError(e)),
+    }
+}
+
 /// Generates the JSON representation of the JSON Schema for settings.json
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
@@ -775,6 +881,19 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
 /// because `get_section::<AiConfig>()` looks up `T::path() = ["ai"]`
 /// (lowercase).
 pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigError> {
+    let config = extract_layered_config(config_path)?;
+    update_global_config(config.clone());
+    Ok(config)
+}
+
+/// Builds the layered config (defaults → JSON file → `ENE_` env vars) for the
+/// given path **without** touching the global singleton.
+///
+/// Shared by [`load_full_config_from`] (the load path) and
+/// [`serialize_json_layer`] (the save path, #326). The save path needs the
+/// exact same baseline the loader produced so it can isolate the user's
+/// in-session mutations from the defaults and env layers.
+fn extract_layered_config(config_path: &Path) -> Result<EneConfig, EneConfigError> {
     use figment::{
         Figment,
         providers::{Env, Format, Json, Serialized},
@@ -793,12 +912,9 @@ pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigE
                 .map(|k| k.as_str().to_lowercase().into()),
         );
 
-    let config: EneConfig = figment.extract().map_err(|e| {
+    figment.extract().map_err(|e| {
         EneConfigError::GenericConfigError(format!("configuration extract failed: {e}"))
-    })?;
-
-    update_global_config(config.clone());
-    Ok(config)
+    })
 }
 
 /// Auto-generates and writes out settings and character schemas under the assets schema directory.
@@ -971,13 +1087,17 @@ fn fsync_dir(dir: &Path) {
 
 /// Saves the config file in a type-safe manner, using an atomic
 /// temp-file-then-rename strategy to avoid partial writes (#325).
+///
+/// Only the JSON layer is persisted: `ENE_` env-var overrides and defaults are
+/// excluded so a transient env override never becomes permanent (#326). See
+/// [`serialize_json_layer`] for the layer-reconstruction details.
 pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
     }
-    let json = serde_json::to_string_pretty(config)?;
+    let json = serialize_json_layer(config, &config_path)?;
     atomic_write(&config_path, &json)?;
     Ok(())
 }
@@ -1289,6 +1409,135 @@ mod tests {
             .expect("set_path");
         let value = config.get_path("ai.tasks.chat.model").expect("get_path");
         assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
+    }
+
+    /// `deep_diff` reports only additions and changed leaves, recursing into
+    /// nested objects and ignoring keys that exist solely in the base.
+    #[test]
+    fn deep_diff_captures_additions_and_changes_only() {
+        use serde_json::json;
+        let base = json!({"a": 1, "nested": {"x": 1, "y": 2}, "same": "keep"});
+        let current = json!({"a": 1, "nested": {"x": 9, "y": 2}, "same": "keep", "added": true});
+        let diff = deep_diff(&base, &current).expect("there is a diff");
+        assert_eq!(diff, json!({"nested": {"x": 9}, "added": true}));
+    }
+
+    /// `deep_diff` returns `None` for identical values (including nesting).
+    #[test]
+    fn deep_diff_none_when_identical() {
+        use serde_json::json;
+        let value = json!({"a": {"b": [1, 2, 3]}, "c": "x"});
+        assert!(deep_diff(&value, &value).is_none());
+    }
+
+    /// `deep_merge` overlays nested objects key by key and replaces leaves.
+    #[test]
+    fn deep_merge_overlays_nested_objects() {
+        use serde_json::json;
+        let base = json!({"keep": 1, "nested": {"a": 1, "b": 2}});
+        let patch = json!({"nested": {"b": 9, "c": 3}, "new": true});
+        let merged = deep_merge(base, patch);
+        assert_eq!(
+            merged,
+            json!({"keep": 1, "nested": {"a": 1, "b": 9, "c": 3}, "new": true})
+        );
+    }
+
+    /// Regression for #326: an `ENE_` env-var override applies at runtime but
+    /// must NOT be baked into `settings.json` on save.
+    #[test]
+    fn env_override_not_persisted_on_save() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("seed empty settings");
+
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
+        unsafe {
+            std::env::set_var("ENE_AI__TASKS__CHAT__MODEL", "gpt-env-override");
+        }
+
+        let config = extract_layered_config(&path).expect("load");
+        assert_eq!(
+            config.get_path("ai.tasks.chat.model"),
+            Some(serde_json::Value::String("gpt-env-override".to_string())),
+            "env override must apply at runtime"
+        );
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        unsafe {
+            std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
+        }
+
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(
+            saved.get("ai").is_none(),
+            "env override must not be persisted, got {json}"
+        );
+    }
+
+    /// Regression for #326: a genuine user change persists (layered onto the
+    /// raw JSON) while a concurrent env override stays transient.
+    #[test]
+    fn genuine_change_persists_but_env_override_does_not() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, r#"{"user_name":"DiskName"}"#).expect("seed settings");
+
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
+        unsafe {
+            std::env::set_var("ENE_AI__TASKS__CHAT__MODEL", "gpt-env");
+        }
+
+        let mut config = extract_layered_config(&path).expect("load");
+        // A genuine user mutation (e.g. the UI changed the display name).
+        config.user_name = "ChangedByUser".to_string();
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        unsafe {
+            std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
+        }
+
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            saved.get("user_name"),
+            Some(&serde_json::Value::String("ChangedByUser".to_string())),
+            "genuine user change must persist, got {json}"
+        );
+        assert!(
+            saved.get("ai").is_none(),
+            "env override must not be persisted, got {json}"
+        );
+    }
+
+    /// Regression for #326: saving an untouched config must not force default
+    /// values into `settings.json`; the raw JSON layer is written back as-is.
+    #[test]
+    fn defaults_not_forced_to_disk_on_save() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, r#"{"user_name":"OnlyThis"}"#).expect("seed settings");
+
+        let config = extract_layered_config(&path).expect("load");
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let keys: Vec<&str> = saved
+            .as_object()
+            .expect("saved config is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["user_name"],
+            "only the on-disk key should remain, got {json}"
+        );
     }
 
     /// `atomic_write` must leave the target with exactly the requested

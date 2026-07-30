@@ -21,6 +21,8 @@ export ENE_STORE__DB_PATH="/path/to/custom_memory.db"
 export ENE_MIND__PROACTIVE__INTERVAL_SECONDS="300"
 ```
 
+環境変数による上書きは**一時的**です。現在のプロセスの実行時にのみ適用され、`settings.json` に書き戻されることはありません。設定を保存しても JSON 層の値のみが永続化されるため、`ENE_*` 変数を削除すれば、次回の起動時に元の JSON／デフォルト値に戻ります (#326)。
+
 ---
 
 ## 2. 設定セクション一覧
