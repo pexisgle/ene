@@ -246,10 +246,20 @@ pub enum EneStatus {
 /// Event receiver handle obtained from [`crate::EneHandle::subscribe`].
 ///
 /// Wraps the broadcast receiver and provides a ergonomic interface for
-/// consuming events from the actor. On lag, emits
-/// [`crate::diagnostics::DiagnosticEvent::Lagged`] /
-/// [`crate::diagnostics::DiagnosticEvent::ResyncNeeded`] so gaps are never
-/// silent (#189).
+/// consuming events from the actor. On lag, [`Self::recv`] / [`Self::try_recv`]
+/// return [`tokio::sync::broadcast::error::RecvError::Lagged`] and emit
+/// [`crate::diagnostics::DiagnosticEvent::Lagged`] so gaps are never silent
+/// (#189).
+///
+/// ## Recovering from a lag (#403)
+///
+/// `Lagged` means one or more chat events — possibly the active turn's
+/// [`EneEvent::Terminal`] — were dropped, so the streamed view of the
+/// in-flight turn is no longer trustworthy. The uniform recovery is to call
+/// [`crate::EneHandle::active_turn`] (a cheap, mailbox-free query) and, when
+/// it returns `Some(turn)`, [`crate::EneHandle::cancel`] that turn so the
+/// single-flight gate is released; see [`crate::EneHandle::active_turn`] for
+/// the full procedure. Both the CLI and desktop follow it.
 pub struct EneEventReceiver {
     pub(super) inner: broadcast::Receiver<EneEvent>,
     pub(super) diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
@@ -268,12 +278,6 @@ impl EneEventReceiver {
                 .send(crate::diagnostics::DiagnosticEvent::Lagged {
                     channel: "events".to_string(),
                     skipped,
-                }),
-        );
-        drop(
-            self.diag_tx
-                .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
-                    channel: "events".to_string(),
                 }),
         );
     }
@@ -340,6 +344,15 @@ impl AudioStreamReceiver {
 /// `"lifecycle"` diagnostics channel tag so gaps here are never silent
 /// either, even though lifecycle traffic is low-frequency and unlikely to
 /// ever overflow its small buffer.
+///
+/// ## Recovering from a lag (#403)
+///
+/// Unlike a chat-bus lag, a lifecycle lag never strands an in-flight turn:
+/// lifecycle notifications are turn-independent, so there is no
+/// [`crate::EneHandle::cancel`] step. The consumer simply re-derives the
+/// state the missed notification would have carried — e.g. re-query
+/// [`crate::EneHandle::candidates`] for the pending-candidate count after
+/// missing a `PendingCandidateAvailable`.
 pub struct LifecycleReceiver {
     pub(super) inner: broadcast::Receiver<LifecycleEvent>,
     pub(super) diag_tx: broadcast::Sender<crate::diagnostics::DiagnosticEvent>,
@@ -358,12 +371,6 @@ impl LifecycleReceiver {
                 .send(crate::diagnostics::DiagnosticEvent::Lagged {
                     channel: "lifecycle".to_string(),
                     skipped,
-                }),
-        );
-        drop(
-            self.diag_tx
-                .send(crate::diagnostics::DiagnosticEvent::ResyncNeeded {
-                    channel: "lifecycle".to_string(),
                 }),
         );
     }

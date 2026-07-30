@@ -4,6 +4,7 @@ help-hint = コマンドのリストを表示するには '/help' と入力し�
 ## REPL / 実行エラー
 busy-warning = [ビジー] すでにターンが進行中です。完了を待ってください。
 run-failed = [実行] 失敗しました: { $error }
+stream-lag-resync = [ストリーム] { $skipped } 件のイベントを取りこぼしました（遅延）。再同期のため進行中のターンをキャンセルします。
 unknown-command = 不明なコマンドです: { $command }
 
 ## 権限プロンプト
