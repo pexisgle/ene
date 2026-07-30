@@ -68,7 +68,7 @@ pub use error::ToolHostError;
 /// LLM provider factory for plugin-provided providers.
 pub use factory::IpcLlmProviderFactory;
 /// Plugin health events.
-pub use health::PluginHealthEvent;
+pub use health::{DisabledReason, PluginHealthEvent};
 /// IPC connection to a single plugin binary.
 pub use ipc_plugin::IpcPluginConnection;
 /// IPC-backed LLM provider.

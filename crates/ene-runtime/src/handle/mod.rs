@@ -46,7 +46,7 @@ use ene_ai::LlmProviderRegistry;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::ConversationSession;
-use ene_plugin_host::PluginHealthEvent;
+use ene_plugin_host::{DisabledReason, PluginHealthEvent};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -893,11 +893,14 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
             Some(format!("{consecutive_failures} consecutive failures")),
         ),
         PluginHealthEvent::CircuitClosed { plugin } => (plugin, "circuit_closed", None),
-        PluginHealthEvent::Disabled { plugin } => (
-            plugin,
-            "disabled",
-            Some("restart budget exhausted".to_string()),
-        ),
+        PluginHealthEvent::Disabled { plugin, reason } => {
+            // `status` stays the stable `"disabled"`; the detail explains why.
+            let detail = match reason {
+                DisabledReason::ChecksumMismatch => "binary checksum mismatch on restart",
+                DisabledReason::RestartBudgetExhausted => "restart budget exhausted",
+            };
+            (plugin, "disabled", Some(detail.to_string()))
+        }
     };
     DiagnosticEvent::ToolHealth {
         tool,
@@ -929,6 +932,46 @@ mod tests {
 
     fn test_card() -> CharacterCardV3 {
         CharacterCardV3::default()
+    }
+
+    /// Unwraps a [`DiagnosticEvent::ToolHealth`] into its `(tool, status,
+    /// detail)` parts for assertion.
+    fn tool_health_parts(event: DiagnosticEvent) -> (String, String, Option<String>) {
+        match event {
+            DiagnosticEvent::ToolHealth {
+                tool,
+                status,
+                detail,
+            } => (tool, status, detail),
+            other => panic!("expected ToolHealth, got {other:?}"),
+        }
+    }
+
+    /// The bootstrap-time bridge maps [`DisabledReason`] to its detail string
+    /// via an exhaustive match (#429), keeping the `"disabled"` status contract
+    /// stable. Kept in lockstep with the actor-side mapper's test.
+    #[test]
+    fn disabled_reason_maps_to_detail_string() {
+        let (tool, status, detail) =
+            tool_health_parts(plugin_health_event_to_diag(PluginHealthEvent::Disabled {
+                plugin: "fs".to_string(),
+                reason: DisabledReason::ChecksumMismatch,
+            }));
+        assert_eq!(tool, "fs");
+        assert_eq!(status, "disabled");
+        assert_eq!(
+            detail.as_deref(),
+            Some("binary checksum mismatch on restart")
+        );
+
+        let (tool, status, detail) =
+            tool_health_parts(plugin_health_event_to_diag(PluginHealthEvent::Disabled {
+                plugin: "web".to_string(),
+                reason: DisabledReason::RestartBudgetExhausted,
+            }));
+        assert_eq!(tool, "web");
+        assert_eq!(status, "disabled");
+        assert_eq!(detail.as_deref(), Some("restart budget exhausted"));
     }
 
     #[tokio::test]

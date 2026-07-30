@@ -186,6 +186,16 @@ binary and records it in `plugins.list.<name>.checksum`
 recorded checksum and refuse to start if it has changed. Comparison is
 case-insensitive (hex encoding).
 
+The checksum is also re-verified on every supervised restart: before the host
+kills and re-spawns a crashed or unresponsive plugin, it recomputes the
+on-disk binary's checksum and compares it against the value pinned at startup.
+If the binary changed while the host was running (for example, a `cargo build`
+replaced it during development), the restart is aborted and the plugin is
+**permanently disabled** until the host itself is restarted. This is
+intentional — the running instance was verified against the original binary,
+so the host refuses to silently exec a different one; restart the host to pick
+up the new binary and re-pin its checksum.
+
 ---
 
 ## 6. MCP (Model Context Protocol) Integration

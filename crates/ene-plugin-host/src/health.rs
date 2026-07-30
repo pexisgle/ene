@@ -5,6 +5,29 @@
 //! runtime bridges them into diagnostic events so UI layers can react.
 //! Statuses are stable English contracts.
 
+/// Why a plugin was permanently disabled ([`PluginHealthEvent::Disabled`]).
+///
+/// The [`Display`](std::fmt::Display) impl is the stable English code contract
+/// surfaced to diagnostics consumers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisabledReason {
+    /// The restart budget was exhausted (too many consecutive restarts).
+    RestartBudgetExhausted,
+    /// A restart-time binary checksum verification failed: the on-disk binary
+    /// changed since it was pinned at startup.
+    ChecksumMismatch,
+}
+
+impl std::fmt::Display for DisabledReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let code = match self {
+            Self::RestartBudgetExhausted => "restart_budget_exhausted",
+            Self::ChecksumMismatch => "checksum_mismatch",
+        };
+        f.write_str(code)
+    }
+}
+
 /// A health/lifecycle event for a supervised plugin process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginHealthEvent {
@@ -44,10 +67,17 @@ pub enum PluginHealthEvent {
         /// Plugin name.
         plugin: String,
     },
-    /// A plugin exceeded its restart budget and is disabled.
+    /// A plugin was permanently disabled and will not be restarted again.
+    ///
+    /// Emitted when the restart budget is exhausted or when a restart-time
+    /// binary checksum verification fails (the on-disk binary changed since
+    /// it was last verified). The plugin stays stopped; the user must
+    /// intervene.
     Disabled {
         /// Plugin name.
         plugin: String,
+        /// Why the plugin was disabled.
+        reason: DisabledReason,
     },
 }
 
@@ -61,7 +91,7 @@ impl PluginHealthEvent {
             | Self::Recovered { plugin }
             | Self::CircuitOpened { plugin, .. }
             | Self::CircuitClosed { plugin }
-            | Self::Disabled { plugin } => plugin,
+            | Self::Disabled { plugin, .. } => plugin,
         }
     }
 }
