@@ -1089,6 +1089,17 @@ mod tests {
         );
     }
 
+    /// Acquires the migration test lock so a load-path test cannot run while a
+    /// [`crate::migration::tests::with_test_version`] test has a partially
+    /// installed override (target version bumped, registry not yet populated).
+    /// Without this, `load_full_config_from` — which now runs migrations — could
+    /// observe that window and fail spuriously under parallel test threads.
+    fn migration_guard() -> impl Drop {
+        crate::migration::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Regression for #40: pre-fix, `load_full_config_from` called
     /// `figment.extract().unwrap_or_else(|e| { ... EneConfig::default() })`
     /// which silently reset the entire config to defaults on any
@@ -1096,6 +1107,7 @@ mod tests {
     /// `EneConfigError::GenericConfigError` instead.
     #[test]
     fn malformed_settings_json_returns_error_not_default() {
+        let _guard = migration_guard();
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         // Not valid JSON for an EneConfig.
@@ -1113,6 +1125,7 @@ mod tests {
     /// stays green after the new `?` propagation.
     #[test]
     fn empty_settings_json_extracts_defaults() {
+        let _guard = migration_guard();
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "{}").expect("write empty settings fixture");
