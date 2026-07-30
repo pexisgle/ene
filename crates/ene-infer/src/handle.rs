@@ -181,12 +181,18 @@ impl<M: LocalModel> EngineHandle<M> {
         let heartbeat = cfg.stall_timeout.map(|_| Arc::new(AtomicU64::new(0)));
 
         if let (Some(stall_timeout), Some(heartbeat)) = (cfg.stall_timeout, heartbeat.clone()) {
+            // Re-coerce here (not just in `with_stall_escalation_factor`):
+            // the field is `pub` on a non-`#[non_exhaustive]` struct, so a
+            // struct literal could set it to 0, which would make
+            // `confirm_threshold` zero and mark every active job as a
+            // confirmed stall on the first poll.
+            let escalation_factor = cfg.stall_escalation_factor.max(1);
             spawn_stall_watchdog(
                 Arc::clone(&job_active),
                 heartbeat,
                 epoch,
                 stall_timeout,
-                cfg.stall_escalation_factor,
+                escalation_factor,
                 Arc::clone(&engine_name),
                 Arc::clone(&down_reason),
             );
