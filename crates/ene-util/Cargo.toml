@@ -10,14 +10,14 @@ publish.workspace = true
 [features]
 default = ["truncate"]
 truncate = []
-html = ["dep:htmd", "dep:scraper", "dep:ego-tree", "dep:regex"]
+html = ["dep:htmd", "dep:scraper", "dep:ego-tree", "dep:regex", "dep:tracing"]
 
 [dependencies]
 htmd = { workspace = true, optional = true }
 scraper = { workspace = true, optional = true }
 ego-tree = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
-tracing = { workspace = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 ene-util = { path = ".", features = ["html"] }
