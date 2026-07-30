@@ -196,5 +196,7 @@ Ene loads character personalities and prompt templates via JSON character cards:
 
 Settings schemas are declared at each owning crate via `define_config!`. Schemas are written once per process at application startup (CLI `init`, desktop first-launch, and the runtime open paths), not on every config load. Each schema file is written atomically (temp file + `fsync` + rename), so a crash can never leave a truncated schema behind.
 
+When `settings.json` is saved, Ene automatically writes a relative `$schema` pointer (`./schema/settings.schema.json`) at the top of the file so editors provide completions and validation without the key being hand-written. An existing `$schema` value is preserved verbatim; the pointer is only filled in when it is absent. The user's hand-arranged top-level section order is likewise preserved across a save, and newly added sections append at the end.
+
 > [!CAUTION]
 > Never hand-edit or commit ignored schema files under `assets/schema/*`.
