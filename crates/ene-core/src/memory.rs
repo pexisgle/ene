@@ -592,6 +592,21 @@ pub struct ScoredMemory {
     pub sources: Vec<MemoryCandidateSource>,
 }
 
+/// A candidate gathered from one or more recall sources, before scoring (#302).
+///
+/// Produced by [`MemoryPort::search`](crate::MemoryPort::search) and consumed
+/// by the `ene-rag` scoring layer. Lives in `ene-core` so both the store
+/// (gatherer) and the RAG crate (scorer) can name it without a cycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatheredCandidate {
+    /// The recalled memory item.
+    pub item: MemoryItem,
+    /// Best vector cosine similarity across recall sources (0.0 when absent).
+    pub vector_similarity: f32,
+    /// Sources that contributed this candidate.
+    pub sources: Vec<MemoryCandidateSource>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
