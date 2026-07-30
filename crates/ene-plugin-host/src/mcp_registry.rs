@@ -143,9 +143,11 @@ impl McpToolRegistry {
     /// The URL is validated for SSRF protection before any connection is
     /// attempted (see [`validate_http_url`]). `allow_insecure_urls` is the
     /// `plugins.mcp_allow_insecure_urls` opt-in: when `false` (the default)
-    /// only HTTPS is accepted and loopback addresses are refused; when `true`
-    /// plain-HTTP and loopback endpoints are permitted for local development.
-    /// Link-local addresses (cloud metadata) are refused regardless.
+    /// only HTTPS is accepted and loopback addresses and the `localhost`
+    /// hostname are refused; when `true` plain-HTTP and loopback/`localhost`
+    /// endpoints are permitted for local development. Link-local addresses
+    /// (cloud metadata) and unspecified addresses (`0.0.0.0`, `[::]`) are
+    /// refused regardless.
     ///
     /// # Errors
     /// Returns [`PluginHostError::McpHandshake`] when the URL fails SSRF
@@ -360,22 +362,30 @@ impl McpToolRegistry {
 /// - **Link-local addresses** (`169.254.0.0/16` — including the cloud metadata
 ///   endpoint `169.254.169.254` — and `fe80::/10`) are **always** rejected,
 ///   even when `allow_insecure` is set. These are never a legitimate MCP target
-///   and are the primary SSRF hazard.
-/// - **Loopback addresses** (`127.0.0.0/8`, `::1`) are rejected by default and
+///   and are the primary SSRF hazard. IPv4-mapped IPv6 literals
+///   (`[::ffff:169.254.169.254]`) are normalized to their IPv4 form first, so
+///   they cannot smuggle a link-local (or loopback) address past these checks;
+///   on Linux a dual-stack connect to such an address reaches the IPv4 target.
+/// - **Unspecified addresses** (`0.0.0.0`, `[::]`) are **always** rejected:
+///   they are not loopback, yet on Linux connecting to them lands on localhost.
+/// - **Loopback addresses** (`127.0.0.0/8`, `::1`) and the `localhost`
+///   hostname (plus any `*.localhost` subdomain) are rejected by default and
 ///   permitted only when `allow_insecure` is `true`, so `http://127.0.0.1`
-///   local servers work under the explicit opt-in. (`http://localhost` already
-///   passes, since a hostname is not an IP literal.)
+///   and `http://localhost` local servers work under the explicit opt-in.
+///   (The loopback rule does not apply to arbitrary hostnames, since a hostname
+///   is not an IP literal — the scheme rule still rejects `http://` for them.)
 ///
 /// Returns `Ok(())` when the URL is acceptable, or a human-readable reason on
 /// rejection (surfaced in both the error and a tracing log by the caller).
 ///
 /// # Scope: DNS rebinding
 ///
-/// Only IP-literal hosts are inspected. A hostname that *resolves* to an
-/// internal address (e.g. a DNS-rebinding attack) is not caught here; a full
-/// defense requires validating the resolved address at connect time. That is
-/// out of scope for this validation — it is no weaker than the previous
-/// behavior, which performed no validation on the live path at all.
+/// Only IP-literal hosts (and the well-known `localhost` name) are inspected.
+/// A hostname that *resolves* to an internal address (e.g. a DNS-rebinding
+/// attack) is not caught here; a full defense requires validating the resolved
+/// address at connect time. That is out of scope for this validation — it is no
+/// weaker than the previous behavior, which performed no validation on the live
+/// path at all.
 fn validate_http_url(url: &str, allow_insecure: bool) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
 
@@ -395,46 +405,91 @@ fn validate_http_url(url: &str, allow_insecure: bool) -> Result<(), String> {
         }
     }
 
-    // Inspect IP-literal hosts for loopback / link-local addresses. IPv6
-    // literals arrive bracketed from `Url::host_str` (e.g. `[::1]`), so strip
-    // the brackets before parsing.
-    if let Some(host) = parsed.host_str()
-        && let Ok(ip) = host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-    {
-        match ip {
-            std::net::IpAddr::V4(ipv4) => {
-                // Refuse link-local (169.254.0.0/16) — always, incl. metadata.
-                if ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254 {
-                    return Err(
-                        "link-local addresses (169.254.0.0/16, incl. cloud metadata) are not allowed"
-                            .to_string(),
-                    );
-                }
-                // Refuse loopback (127.0.0.0/8) unless explicitly opted in.
-                if ipv4.is_loopback() && !allow_insecure {
-                    return Err("loopback addresses (127.0.0.0/8) are not allowed; set \
-                         plugins.mcp_allow_insecure_urls = true for local development"
-                        .to_string());
-                }
+    // Inspect the host for loopback / link-local / unspecified addresses.
+    // Match on the parsed `url::Host` rather than `host_str()`: IP literals
+    // arrive already normalized (the url crate folds decimal/octal IPv4 forms
+    // such as `https://2852039166/` into `169.254.169.254`), and bracket
+    // stripping is handled for us instead of via fragile `trim` munging.
+    match parsed.host() {
+        Some(url::Host::Domain(domain)) => {
+            // `localhost` (and any `*.localhost` subdomain) resolves to the
+            // loopback interface, so apply the same default-deny rule as for
+            // loopback IP literals.
+            let is_localhost = domain.eq_ignore_ascii_case("localhost")
+                || domain.to_ascii_lowercase().ends_with(".localhost");
+            if is_localhost && !allow_insecure {
+                return Err("localhost is not allowed; set \
+                     plugins.mcp_allow_insecure_urls = true for local development"
+                    .to_string());
             }
-            std::net::IpAddr::V6(ipv6) => {
-                // Refuse link-local (fe80::/10) — always.
-                if ipv6.segments()[0] & 0xffc0 == 0xfe80 {
-                    return Err("link-local addresses (fe80::/10) are not allowed".to_string());
-                }
-                // Refuse loopback (::1) unless explicitly opted in.
-                if ipv6.is_loopback() && !allow_insecure {
-                    return Err("loopback address (::1) is not allowed; set \
-                         plugins.mcp_allow_insecure_urls = true for local development"
-                        .to_string());
-                }
+        }
+        Some(url::Host::Ipv4(ipv4)) => {
+            reject_ip(std::net::IpAddr::V4(ipv4), allow_insecure)?;
+        }
+        Some(url::Host::Ipv6(ipv6)) => {
+            // Normalize IPv4-mapped IPv6 (`::ffff:a.b.c.d`) to its IPv4 form so
+            // the IPv4 link-local / loopback / unspecified rules apply; a
+            // dual-stack connect on Linux reaches the mapped IPv4 target.
+            let ip = ipv6
+                .to_ipv4_mapped()
+                .map_or(std::net::IpAddr::V6(ipv6), std::net::IpAddr::V4);
+            reject_ip(ip, allow_insecure)?;
+        }
+        None => {}
+    }
+
+    Ok(())
+}
+
+/// Applies the IP-literal SSRF rules shared by the IPv4 and (normalized) IPv6
+/// branches of [`validate_http_url`].
+///
+/// Link-local addresses are always refused; unspecified and loopback addresses
+/// are refused unless `allow_insecure` opts into local development.
+fn reject_ip(ip: std::net::IpAddr, allow_insecure: bool) -> Result<(), String> {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            // Refuse link-local (169.254.0.0/16) — always, incl. metadata.
+            if ipv4.octets()[0] == 169 && ipv4.octets()[1] == 254 {
+                return Err(
+                    "link-local addresses (169.254.0.0/16, incl. cloud metadata) are not allowed"
+                        .to_string(),
+                );
+            }
+            // Refuse unspecified (0.0.0.0) — always: on Linux a connect to it
+            // lands on localhost, bypassing the loopback default-deny.
+            if ipv4.is_unspecified() {
+                return Err(
+                    "unspecified address (0.0.0.0) is not allowed; it connects to localhost"
+                        .to_string(),
+                );
+            }
+            // Refuse loopback (127.0.0.0/8) unless explicitly opted in.
+            if ipv4.is_loopback() && !allow_insecure {
+                return Err("loopback addresses (127.0.0.0/8) are not allowed; set \
+                     plugins.mcp_allow_insecure_urls = true for local development"
+                    .to_string());
+            }
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            // Refuse link-local (fe80::/10) — always.
+            if ipv6.segments()[0] & 0xffc0 == 0xfe80 {
+                return Err("link-local addresses (fe80::/10) are not allowed".to_string());
+            }
+            // Refuse unspecified (::) — always.
+            if ipv6.is_unspecified() {
+                return Err(
+                    "unspecified address (::) is not allowed; it connects to localhost".to_string(),
+                );
+            }
+            // Refuse loopback (::1) unless explicitly opted in.
+            if ipv6.is_loopback() && !allow_insecure {
+                return Err("loopback address (::1) is not allowed; set \
+                     plugins.mcp_allow_insecure_urls = true for local development"
+                    .to_string());
             }
         }
     }
-
     Ok(())
 }
 
@@ -648,6 +703,59 @@ mod tests {
             let err = validate_http_url("https://[fe80::1]/sse", allow).unwrap_err();
             assert!(err.contains("link-local"), "unexpected: {err}");
         }
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_link_local_rejected_even_with_opt_in() {
+        // #1: `::ffff:169.254.169.254` is the IPv4-mapped form of the cloud
+        // metadata endpoint. A dual-stack connect on Linux reaches the IPv4
+        // target, so it must be normalized and rejected under both settings.
+        for allow in [false, true] {
+            let err = validate_http_url("https://[::ffff:169.254.169.254]/latest/meta-data", allow)
+                .unwrap_err();
+            assert!(err.contains("link-local"), "unexpected: {err}");
+        }
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_loopback_rejected_by_default() {
+        // #1: `::ffff:127.0.0.1` is the IPv4-mapped loopback; default-deny.
+        let err = validate_http_url("https://[::ffff:127.0.0.1]:8080/sse", false).unwrap_err();
+        assert!(err.contains("loopback"), "unexpected: {err}");
+        assert!(validate_http_url("https://[::ffff:127.0.0.1]:8080/sse", true).is_ok());
+    }
+
+    #[test]
+    fn unspecified_addresses_rejected_even_with_opt_in() {
+        // #2: `0.0.0.0` and `[::]` are not loopback, yet on Linux a connect to
+        // them lands on localhost — so they are refused under both settings.
+        for url in ["https://0.0.0.0:8080/sse", "https://[::]:8080/sse"] {
+            for allow in [false, true] {
+                let err = validate_http_url(url, allow).unwrap_err();
+                assert!(err.contains("unspecified"), "unexpected: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn localhost_hostname_rejected_by_default_allowed_with_opt_in() {
+        // #6: `localhost` resolves to loopback, so it follows the loopback
+        // default-deny rule — including `*.localhost` subdomains.
+        for url in [
+            "https://localhost:8080/sse",
+            "https://foo.localhost:8080/sse",
+        ] {
+            let err = validate_http_url(url, false).unwrap_err();
+            assert!(err.contains("localhost"), "unexpected: {err}");
+            assert!(validate_http_url(url, true).is_ok());
+        }
+    }
+
+    #[test]
+    fn public_hostname_is_not_treated_as_localhost() {
+        // #6: the localhost rule must not over-match unrelated hostnames.
+        assert!(validate_http_url("https://notlocalhost.example.com/sse", false).is_ok());
+        assert!(validate_http_url("https://example.localhost.evil.com/sse", false).is_ok());
     }
 
     #[test]
