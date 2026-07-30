@@ -151,7 +151,10 @@ impl McpToolRegistry {
     ///
     /// # Errors
     /// Returns [`PluginHostError::McpHandshake`] when the URL fails SSRF
-    /// validation or the transport handshake / `list_tools` call fails.
+    /// validation, when a configured auth header contains invalid characters
+    /// (fail-closed: the connection is refused rather than downgraded to
+    /// unauthenticated), or when the transport handshake / `list_tools` call
+    /// fails.
     pub async fn connect_http(
         &self,
         name: &str,
@@ -160,10 +163,15 @@ impl McpToolRegistry {
         allow_insecure_urls: bool,
     ) -> Result<(), PluginHostError> {
         validate_http_url(url, allow_insecure_urls).map_err(|reason| {
+            // Log scheme/host/port only — the URL may embed userinfo
+            // credentials (`https://user:token@host/sse`) that must not leak.
+            let (scheme, host, port) = redacted_endpoint(url);
             tracing::warn!(
                 component = "McpToolRegistry",
                 server = %name,
-                url = %url,
+                scheme = %scheme,
+                host = %host,
+                port = ?port,
                 reason = %reason,
                 "MCP HTTP URL rejected by SSRF validation"
             );
@@ -172,19 +180,21 @@ impl McpToolRegistry {
 
         let mut config = StreamableHttpClientTransportConfig::with_uri(url);
 
-        // Convert the auth_header from config into a custom Authorization header.
+        // Convert the auth_header from config into a custom Authorization
+        // header. Fail closed: a configured-but-malformed header means the
+        // user intended authenticated access, so connecting unauthenticated
+        // would silently downgrade their security posture. The header value is
+        // a secret and is never logged.
         if let Some(auth) = auth_header {
-            if let Ok(value) = http::HeaderValue::from_str(auth) {
-                let mut custom_headers = HashMap::new();
-                custom_headers.insert(http::HeaderName::from_static("authorization"), value);
-                config = config.custom_headers(custom_headers);
-            } else {
-                tracing::warn!(
-                    component = "McpToolRegistry",
-                    server = %name,
-                    "MCP HTTP auth header contains invalid characters; skipping"
-                );
-            }
+            let value = http::HeaderValue::from_str(auth).map_err(|_| {
+                PluginHostError::McpHandshake(format!(
+                    "MCP HTTP auth header for '{name}' contains invalid characters; \
+                     refusing to connect unauthenticated"
+                ))
+            })?;
+            let mut custom_headers = HashMap::new();
+            custom_headers.insert(http::HeaderName::from_static("authorization"), value);
+            config = config.custom_headers(custom_headers);
         }
 
         let transport = StreamableHttpClientTransport::from_config(config);
@@ -387,7 +397,7 @@ impl McpToolRegistry {
 /// weaker than the previous behavior, which performed no validation on the live
 /// path at all.
 fn validate_http_url(url: &str, allow_insecure: bool) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
 
     match parsed.scheme() {
         "https" => {}
@@ -491,6 +501,28 @@ fn reject_ip(ip: std::net::IpAddr, allow_insecure: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Extracts the diagnostic-safe `(scheme, host, port)` triple from a URL for
+/// logging.
+///
+/// MCP URLs may embed userinfo credentials (`https://user:token@host/sse`), so
+/// the full URL must never be logged verbatim. This returns only the scheme,
+/// host, and explicit port — enough to identify the endpoint in a diagnostic
+/// without leaking the secret. An unparseable URL yields placeholder values.
+pub(crate) fn redacted_endpoint(url: &str) -> (String, String, Option<u16>) {
+    match url::Url::parse(url) {
+        Ok(parsed) => (
+            parsed.scheme().to_string(),
+            parsed.host_str().unwrap_or("<no host>").to_string(),
+            parsed.port(),
+        ),
+        Err(_) => (
+            "<unparseable>".to_string(),
+            "<unparseable>".to_string(),
+            None,
+        ),
+    }
 }
 
 #[async_trait]
@@ -779,5 +811,31 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("MCP HTTP URL rejected"), "unexpected: {msg}");
         assert!(msg.contains("insecure"), "server name missing: {msg}");
+    }
+
+    /// #8: a configured auth header with invalid characters must fail closed
+    /// (refuse to connect) rather than silently downgrading to an
+    /// unauthenticated connection. This is checked before any network I/O.
+    #[tokio::test]
+    async fn connect_http_fails_closed_on_invalid_auth_header() {
+        let registry = McpToolRegistry::new();
+        // A valid HTTPS URL (passes SSRF validation) but a header value with a
+        // control character, which http::HeaderValue::from_str rejects.
+        let result = registry
+            .connect_http(
+                "secure",
+                "https://mcp.example.com/sse",
+                Some("Bearer bad\nvalue"),
+                false,
+            )
+            .await;
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PluginHostError::McpHandshake(_)),
+            "unexpected variant: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("invalid characters"), "unexpected: {msg}");
+        assert!(msg.contains("secure"), "server name missing: {msg}");
     }
 }

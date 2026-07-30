@@ -26,7 +26,7 @@ use crate::factory::IpcLlmProviderFactory;
 use crate::health::PluginHealthEvent;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
-use crate::mcp_registry::McpToolRegistry;
+use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 
 /// Maximum number of restart attempts before a plugin is disabled.
@@ -817,10 +817,15 @@ impl PluginHostManager {
                         }
                     }
                     McpTransport::Http { url, auth_header } => {
+                        // Log scheme/host/port only — the URL may embed userinfo
+                        // credentials (`https://user:token@host/sse`).
+                        let (scheme, host, port) = redacted_endpoint(url);
                         tracing::info!(
                             component = "PluginHostManager",
                             server = %server.name,
-                            url = %url,
+                            scheme = %scheme,
+                            host = %host,
+                            port = ?port,
                             "Connecting to MCP server via streamable HTTP transport"
                         );
                         if let Err(err) = registry
@@ -832,10 +837,15 @@ impl PluginHostManager {
                             )
                             .await
                         {
-                            tracing::warn!(
+                            // A rejected server is a configuration error the user
+                            // must act on — its tools silently disappear — so log
+                            // at error level rather than warn.
+                            tracing::error!(
                                 component = "PluginHostManager",
                                 server = %server.name,
-                                url = %url,
+                                scheme = %scheme,
+                                host = %host,
+                                port = ?port,
                                 error = %err,
                                 "MCP HTTP connection failed"
                             );
