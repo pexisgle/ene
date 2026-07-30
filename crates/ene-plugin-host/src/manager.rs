@@ -44,11 +44,14 @@ struct SupervisedPlugin {
     child: std::process::Child,
     socket_path: PathBuf,
     binary_path: PathBuf,
-    /// Expected SHA-256 checksum (hex) of the binary, verified on every
-    /// restart. Populated from the configured checksum or, when none was
-    /// configured, the trust-on-first-use checksum recorded at startup.
-    /// `None` disables restart-time verification (matching start-time
-    /// semantics when no checksum is known).
+    /// SHA-256 checksum (hex) of the binary that was verified at startup,
+    /// re-verified on every restart. Populated from the configured checksum
+    /// or, when none was configured, the trust-on-first-use checksum
+    /// recorded at startup — so for plugins started via `start_plugin` this
+    /// is always `Some` and restart-time verification is always active:
+    /// the binary pinned at startup must still be on disk to restart.
+    /// `None` would disable verification, but no production code path
+    /// constructs the struct that way.
     expected_checksum: Option<String>,
     sandbox: ene_plugin_proto::SandboxConfigData,
     plugin_config: Option<serde_json::Value>,
@@ -88,6 +91,16 @@ impl SupervisedPlugin {
         // we must neither destroy the good process nor launch the bad one.
         // A mismatch aborts the restart and is surfaced by the caller as a
         // `PluginHealthEvent::Disabled` diagnostic (#429).
+        //
+        // Residual window: `spawn()` below re-opens the binary by path, so
+        // an attacker with write access to the plugin directory could swap
+        // the file between this check and the exec. Closing that would
+        // require spawning from an already-opened file descriptor, which
+        // std does not support cross-platform (Windows, and macOS has no
+        // /proc); such an attacker could also swap the binary immediately
+        // after any spawn. Checksums here are tamper *detection* for a
+        // binary replaced while the host runs, not a guarantee against an
+        // active adversary.
         verify_plugin_checksum(
             &self.name,
             &self.binary_path,
