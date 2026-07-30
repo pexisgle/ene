@@ -23,11 +23,13 @@
 //!   the new column is applied with `ALTER TABLE ... ADD COLUMN`, the stored
 //!   declaration is refreshed, and the tool proceeds. `SQLite` fills existing
 //!   rows with the column's `DEFAULT` (or `NULL`).
-//! - **Conflicting change** (a column type change, or a previously declared
-//!   table dropped from the declaration) — rejected with
-//!   [`DbServerError::SchemaConflict`]. `SQLite` cannot alter or drop columns
-//!   in place, so the host refuses to let the validation layer and the actual
-//!   tables silently diverge; the plugin author must reconcile the difference.
+//! - **Conflicting change** (a column type change, a previously declared
+//!   table or column dropped from the declaration, or a new column that
+//!   carries a `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` constraint) — rejected
+//!   with [`DbServerError::SchemaConflict`]. `SQLite` cannot alter or drop
+//!   columns in place, nor add a constrained column, so the host refuses to
+//!   let the validation layer and the actual tables silently diverge; the
+//!   plugin author must reconcile the difference.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -855,8 +857,20 @@ impl DbIpcServer {
 
             for column in &table.columns {
                 match old_columns.get(column.name.as_str()) {
-                    // Brand-new column: additive, applied via ALTER TABLE.
-                    None => diff.added_columns.push((table.clone(), column.clone())),
+                    // Brand-new column. `ALTER TABLE ADD COLUMN` can only add
+                    // a plain column: SQLite forbids adding one that carries a
+                    // PRIMARY KEY, UNIQUE, or AUTOINCREMENT constraint, so such
+                    // an addition is rejected explicitly rather than failing
+                    // with a cryptic error at execution time.
+                    None => {
+                        if column.primary_key || column.auto_increment || column.unique {
+                            return Err(DbServerError::SchemaConflict(format!(
+                                "column '{}.{}' was added with a PRIMARY KEY/UNIQUE/AUTOINCREMENT constraint; SQLite cannot add such a column via ALTER TABLE, so the plugin must reconcile this change explicitly",
+                                table.name, column.name
+                            )));
+                        }
+                        diff.added_columns.push((table.clone(), column.clone()));
+                    }
                     // Existing column with a changed type: SQLite cannot
                     // change a column type in place, so refuse rather than
                     // let validation and storage diverge.
@@ -869,6 +883,21 @@ impl DbIpcServer {
                     Some(_) => {}
                 }
             }
+
+            // A column present in the stored table but absent from the new
+            // declaration would leave the physical column behind while
+            // validation stops referencing it. Refuse so the author handles
+            // the removal explicitly.
+            let new_column_names: HashSet<&str> =
+                table.columns.iter().map(|c| c.name.as_str()).collect();
+            for old_column in &old_table.columns {
+                if !new_column_names.contains(old_column.name.as_str()) {
+                    return Err(DbServerError::SchemaConflict(format!(
+                        "column '{}.{}' was removed from the schema declaration; SQLite cannot drop columns in place, so the plugin must reconcile this change explicitly",
+                        table.name, old_column.name
+                    )));
+                }
+            }
         }
 
         // A table present in the stored declaration but absent from the new
@@ -878,7 +907,7 @@ impl DbIpcServer {
         for old_table in &previous.tables {
             if !new_table_names.contains(old_table.name.as_str()) {
                 return Err(DbServerError::SchemaConflict(format!(
-                    "table '{}' was removed from the schema declaration; SQLite cannot drop columns/tables in place, so the plugin must reconcile this change explicitly",
+                    "table '{}' was removed from the schema declaration; SQLite cannot drop tables in place, so the plugin must reconcile this change explicitly",
                     old_table.name
                 )));
             }
@@ -889,11 +918,12 @@ impl DbIpcServer {
 
     /// Builds an `ALTER TABLE ... ADD COLUMN` statement for an added column.
     ///
-    /// The column is rendered with the same type/constraint rules as
-    /// [`Self::build_create_table_sql`], minus `PRIMARY KEY`/`AUTOINCREMENT`
-    /// (`SQLite` forbids adding a primary-key column to an existing table; a
-    /// primary key must exist at table creation). `NOT NULL` is only emitted
-    /// alongside a `DEFAULT`, matching `SQLite`'s `ADD COLUMN` requirement.
+    /// `SQLite` forbids adding a column that carries a `PRIMARY KEY`,
+    /// `UNIQUE`, or `AUTOINCREMENT` constraint, so none are emitted here;
+    /// [`Self::diff_schemas`] rejects such additions before this is reached.
+    /// `NOT NULL` is only emitted alongside a `DEFAULT`, matching `SQLite`'s
+    /// `ADD COLUMN` requirement that a non-nullable added column have a
+    /// default to populate existing rows.
     fn build_alter_add_column_sql(table: &DbTable, column: &DbColumn) -> String {
         let mut sql = format!("ALTER TABLE {} ADD COLUMN {} ", table.name, column.name);
 
@@ -907,10 +937,6 @@ impl DbIpcServer {
         // SQLite requires a DEFAULT for a NOT NULL column added via ALTER.
         if !column.nullable && column.default.is_some() {
             sql.push_str(" NOT NULL");
-        }
-
-        if column.unique {
-            sql.push_str(" UNIQUE");
         }
 
         if let Some(default) = &column.default {
@@ -1830,6 +1856,60 @@ mod tests {
             tables: Vec::new(),
             indexes: Vec::new(),
         };
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// Removing a column from an existing table is rejected rather than
+    /// leaving the physical column orphaned.
+    #[tokio::test]
+    async fn removed_column_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 drops the `path` column from `fs_undo`.
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0].columns.pop();
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// Adding a column that carries a `UNIQUE` constraint is rejected, since
+    /// `SQLite` cannot add a constrained column via `ALTER TABLE`.
+    #[tokio::test]
+    async fn added_unique_column_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 adds a UNIQUE column, which ALTER TABLE ADD COLUMN forbids.
+        let mut schema_v2 = test_schema_v1();
+        let mut unique_col = test_column("slug", ene_plugin_db::DbType::Text);
+        unique_col.unique = true;
+        schema_v2.tables[0].columns.push(unique_col);
 
         let resp = declare(&db, schema_v2).await;
         assert!(
