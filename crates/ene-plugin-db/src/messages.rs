@@ -154,6 +154,10 @@ pub enum DbErrorCode {
     TypeMismatch,
     /// The filter expression is invalid.
     InvalidFilter,
+    /// The declared schema conflicts with the one already stored for this
+    /// prefix in a way that cannot be applied automatically (e.g. a column
+    /// type change). The plugin must reconcile the difference explicitly.
+    SchemaConflict,
     /// An internal server error occurred.
     Internal,
 }
@@ -166,6 +170,7 @@ impl std::fmt::Display for DbErrorCode {
             Self::UnknownColumn => write!(f, "UNKNOWN_COLUMN"),
             Self::TypeMismatch => write!(f, "TYPE_MISMATCH"),
             Self::InvalidFilter => write!(f, "INVALID_FILTER"),
+            Self::SchemaConflict => write!(f, "SCHEMA_CONFLICT"),
             Self::Internal => write!(f, "INTERNAL"),
         }
     }
