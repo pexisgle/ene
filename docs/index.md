@@ -38,6 +38,7 @@ Ene Workspace
 │   ├── ene-ai             (Core AI provider traits, OpenAI, Anthropic adapter)
 │   ├── ene-ai-local       (Local LLM inference via llama-cpp-4)
 │   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
+│   ├── ene-rag            (RAG policy: memory scoring/decay, tool selection)
 │   ├── ene-connector      (Shared connector framework & MCP bridge)
 │   └── ene-vrm            (3D VRM 1.0 loader & wgpu renderer)
 ├── Plugin Architecture
@@ -46,8 +47,7 @@ Ene Workspace
 │   ├── ene-plugin-host    (Plugin process manager & supervisor)
 │   ├── ene-tool-sdk       (Tool plugin authoring SDK: ToolAction, providers, helpers)
 │   ├── ene-plugin-db      (Plugin stateful DB IPC client)
-│   ├── ene-tool-macros    (Proc-macros for tool actions)
-│   └── ene-tool-rag       (Retrieval-augmented tool specification search)
+│   └── ene-tool-macros    (Proc-macros for tool actions)
 └── Out-of-Process Plugins
     ├── plugins/provider/* (Provider plugins: anthropic)
     └── plugins/tool/*     (Tool plugins: app, browser, fs, utility, web)

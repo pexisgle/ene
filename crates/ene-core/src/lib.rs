@@ -68,11 +68,14 @@ pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 pub use key_fact::KeyFact;
 pub use memory::{
-    AffectAnnotation, HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
-    MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
-    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
+    AffectAnnotation, GatheredCandidate, HybridSearchWeights, MemoryCandidateSource,
+    MemoryConfidence, MemoryItem, MemoryJournalListOptions, MemoryKind, MemorySalience,
+    MemoryScope, MemoryScoreBreakdown, MemorySearchOptions, MemorySource, MemoryStatus,
+    NewMemoryItem, Query, ScoredMemory, TimeRange,
 };
 pub use pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
 pub use pending_write::{PendingMemoryWrite, PendingMemoryWriteStatus};
-pub use port::{MemoryPort, MemoryPortError};
+pub use port::{
+    EmbeddingStorePort, EmbeddingStorePortError, MemoryPort, MemoryPortError, ToolEmbeddingFieldRow,
+};
 pub use span::{ActiveSceneSummaryRow, NewMemorySpan};

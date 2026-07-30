@@ -2,7 +2,7 @@
 //! background-task admission (Stage 8 of the concurrency redesign).
 //!
 //! Lives under the `tools.*` settings section — sibling of `tools.rag`
-//! (see `ene_tool_rag::ToolRagConfig`) — since it governs tool-execution
+//! (see `ene_rag::ToolRagConfig`) — since it governs tool-execution
 //! *runtime* behavior (how many background tasks the actor keeps in
 //! flight, how long a deferred poller runs), not the plugin process/IPC
 //! layer that `plugins.*` (`ene_plugin_host::PluginConfig`) owns.

@@ -1,3 +1,5 @@
+//! Tool RAG pipeline errors (#302, moved from `ene-tool-rag`).
+
 /// Tool RAG pipeline errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolRagError {

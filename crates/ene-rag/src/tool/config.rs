@@ -1,3 +1,5 @@
+//! Tool RAG configuration types (#302, moved from `ene-tool-rag`).
+
 use ene_config::{ConfigTarget, HasConfigKey};
 use std::collections::HashMap;
 

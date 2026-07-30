@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ene_core::{
-    ActiveSceneSummaryRow, AffectState, Commitment, MemoryItem, MemoryKind, MemoryPort,
-    MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan,
-    PendingAffectProposal, PendingCandidate, PendingMemoryWrite, Query, ScoredMemory,
+    ActiveSceneSummaryRow, AffectState, Commitment, GatheredCandidate, MemoryItem, MemoryKind,
+    MemoryPort, MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment, NewMemoryItem,
+    NewMemorySpan, PendingAffectProposal, PendingCandidate, PendingMemoryWrite, Query,
 };
 use parking_lot::Mutex;
 
@@ -175,9 +175,9 @@ impl MemoryPort for InMemoryMemoryPort {
         Ok(archived)
     }
 
-    async fn search(&self, _query: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryPortError> {
+    async fn search(&self, _query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
         // No test using this double exercises hybrid recall scoring; kept
-        // trivially empty rather than reimplementing `ene-store`'s search.
+        // trivially empty rather than reimplementing `ene-store`'s gather.
         Ok(Vec::new())
     }
 

@@ -4,7 +4,8 @@
 //! and memory/journal/tool inspection live here.
 
 use crate::error::EneRuntimeError;
-use crate::handle::{ActorDeadError, EneCommand, EneStateSnapshot};
+use crate::handle::{EneCommand, EneStateSnapshot};
+use crate::public_api::PublicApiError;
 use crate::types::TurnId;
 use ene_mind::SplitResult;
 use ene_plugin_proto::ToolSpec;
@@ -483,21 +484,21 @@ impl EneDiagnostics {
     }
 
     /// Request a snapshot of the current actor state.
-    pub async fn get_snapshot(&self) -> Result<EneStateSnapshot, EneRuntimeError> {
+    pub async fn get_snapshot(&self) -> Result<EneStateSnapshot, PublicApiError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::GetSnapshot { reply: tx })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
     /// List available tools from the registry.
-    pub async fn list_tools(&self) -> Result<Vec<ToolSpec>, EneRuntimeError> {
+    pub async fn list_tools(&self) -> Result<Vec<ToolSpec>, PublicApiError> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ListTools { reply: tx })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Search tools in the registry using RAG if available.
@@ -542,10 +543,10 @@ impl EneDiagnostics {
     }
 
     /// Invalidate the Tool RAG index.
-    pub fn invalidate_tool_index(&self) -> Result<(), ActorDeadError> {
+    pub fn invalidate_tool_index(&self) -> Result<(), PublicApiError> {
         self.cmd_tx
             .send(EneCommand::InvalidateToolIndex)
-            .map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Hot-swap the character card (CLI `/card`).

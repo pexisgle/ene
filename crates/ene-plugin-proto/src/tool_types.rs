@@ -336,7 +336,7 @@ impl ToolCategory {
 /// Host/RAG-only metadata for a callable tool (#137).
 ///
 /// Never passed to the LLM tool list — exchanged via
-/// `IpcResponse::RagProfiles` and consumed by `ene-tool-rag`.
+/// `IpcResponse::RagProfiles` and consumed by `ene-rag`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolRagProfile {
     /// Full tool name (e.g. `"filesystem.read"`).

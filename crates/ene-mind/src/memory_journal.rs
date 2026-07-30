@@ -39,10 +39,11 @@ impl MemoryJournal {
             embedder.model_name(),
             limit,
         );
-        store
+        let gathered = store
             .search(&query)
             .await
-            .map_err(CognitionError::MemoryPort)
+            .map_err(CognitionError::MemoryPort)?;
+        Ok(ene_rag::score_and_rank(&query, gathered))
     }
 
     /// [`search`] plus explainable recall reasons.

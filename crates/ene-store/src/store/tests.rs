@@ -864,7 +864,8 @@ async fn hybrid_search_ranks_by_salience_and_recency_not_vector_alone() {
     insert_memory_with_embedding(&store, &high_salience, &query_emb).await;
 
     let options = hybrid_search_options("music preference", &query_emb, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert_eq!(results.len(), 2);
     let top = results.first().expect("top hybrid result");
     let second = results.get(1).expect("second hybrid result");
@@ -902,7 +903,8 @@ async fn hybrid_search_lexical_component_for_matching_query() {
     insert_memory_with_embedding(&store, &item, &orthogonal).await;
 
     let options = hybrid_search_options("matcha latte", &orthogonal, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert_eq!(results.len(), 1);
     let result = results.first().expect("lexical match result");
     assert!(result.breakdown.lexical_score > 0.0);
@@ -933,7 +935,8 @@ async fn hybrid_search_surfaces_active_commitment_with_low_vector_similarity() {
         .unwrap();
 
     let options = hybrid_search_options("unrelated query", &query_emb, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert!(
         results.iter().any(|r| {
             r.item.commitment_id == Some(commitment_id)
@@ -985,7 +988,8 @@ async fn hybrid_search_excludes_archived_superseded_and_user_deleted() {
     }
 
     let options = hybrid_search_options("shared content", &emb, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert!(results.is_empty());
 }
 
@@ -1019,7 +1023,8 @@ async fn hybrid_search_faded_memory_has_stale_penalty() {
     insert_memory_with_embedding(&store, &item, &emb).await;
 
     let options = hybrid_search_options("faded memory", &emb, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert_eq!(results.len(), 1);
     let result = results.first().expect("faded memory result");
     assert!(result.breakdown.vector_similarity > 0.0);
@@ -1088,7 +1093,8 @@ async fn hybrid_search_finds_old_lexical_match_outside_recent_pool() {
     let mut options = hybrid_search_options("ancient dragon recipe", &query_emb, now);
     options.recent_fallback_limit = 0;
     options.similarity_threshold = 0.8;
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert!(
         results
             .iter()
@@ -1130,7 +1136,8 @@ async fn hybrid_search_excludes_unrelated_recent_without_fallback() {
     let mut options = hybrid_search_options("completely different topic", &query_emb, now);
     options.recent_fallback_limit = 0;
     options.similarity_threshold = 0.8;
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert!(results.is_empty());
 }
 
@@ -1172,7 +1179,8 @@ async fn hybrid_search_ranks_higher_confidence_when_other_signals_match() {
     insert_memory_with_embedding(&store, &high_confidence, &query_emb).await;
 
     let options = hybrid_search_options("shared topic", &query_emb, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert_eq!(results.len(), 2);
     let top = results.first().expect("top confidence result");
     let second = results.get(1).expect("second confidence result");
@@ -1218,7 +1226,8 @@ async fn hybrid_search_respects_user_id_scope() {
 
     let mut options = hybrid_search_options("scoped memory", &query_emb, now);
     options.user_id = Some("user1");
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert_eq!(results.len(), 1);
     let result = results.first().expect("scoped search result");
     assert_eq!(result.item.user_id, "user1");
@@ -1254,7 +1263,8 @@ async fn hybrid_search_dedupes_multi_source_candidates() {
     insert_memory_with_embedding(&store, &item, &emb).await;
 
     let options = hybrid_search_options("pizza tradition", &emb, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert_eq!(results.len(), 1);
     let result = results.first().expect("deduped search result");
     assert!(result.sources.len() >= 2);
@@ -1542,7 +1552,8 @@ async fn hybrid_search_preserves_pinned_flag() {
     insert_memory_with_embedding(&store, &item, &emb).await;
 
     let options = hybrid_search_options("pinned vector", &emb, now);
-    let results = store.search(&options).await.unwrap();
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
     assert_eq!(results.len(), 1);
     let result = results.first().expect("pinned search result");
     assert!(result.item.pinned);

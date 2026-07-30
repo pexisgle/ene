@@ -330,7 +330,7 @@ async fn list_sessions_with_store_disabled_returns_public_api_error() {
     // #269: EneHandle::list_sessions returns Result<Vec<PublicSessionMeta>,
     // PublicApiError> — a single Result of API v1 DTO types, not
     // Result<Result<Vec<ene_store::SessionMeta>, ene_store::EneMemoryError>,
-    // ActorDeadError>. The type annotation below is a compile-time proof of
+    // PublicApiError>. The type annotation below is a compile-time proof of
     // the contract; the disabled-store case is also a realistic error path.
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await

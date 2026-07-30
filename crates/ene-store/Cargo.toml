@@ -29,6 +29,7 @@ ene-config = { workspace = true }
 ene-core = { workspace = true }
 ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
+ene-rag = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

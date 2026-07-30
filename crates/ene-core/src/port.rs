@@ -24,7 +24,9 @@ use thiserror::Error;
 
 use crate::affect::{AffectState, PendingAffectProposal};
 use crate::commitment::{Commitment, NewCommitment};
-use crate::memory::{MemoryItem, MemoryKind, MemoryStatus, NewMemoryItem, Query, ScoredMemory};
+use crate::memory::{
+    GatheredCandidate, MemoryItem, MemoryKind, MemoryStatus, NewMemoryItem, Query,
+};
 use crate::pending::{NaturalDecayReport, PendingCandidate};
 use crate::pending_write::PendingMemoryWrite;
 use crate::span::{ActiveSceneSummaryRow, NewMemorySpan};
@@ -99,8 +101,13 @@ pub trait MemoryPort: Send + Sync {
         keep_refs: &HashSet<String>,
     ) -> Result<usize, MemoryPortError>;
 
-    /// Search typed memories with explainable hybrid scoring (#123).
-    async fn search(&self, query: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryPortError>;
+    /// Gather typed-memory candidates with explainable hybrid scoring (#123, #302).
+    ///
+    /// Returns *gathered* candidates (vector/lexical/commitment/recent sources
+    /// merged by memory id) **without** applying the weighted scoring policy —
+    /// scoring is the `ene-rag` layer's job. Callers compose: the store gathers,
+    /// `ene-rag` scores and ranks.
+    async fn search(&self, query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError>;
 
     /// Atomically insert a replacement memory and mark the prior row superseded.
     async fn supersede_typed_memory(
@@ -235,4 +242,69 @@ pub trait MemoryPort: Send + Sync {
         session_id: &str,
         level: i32,
     ) -> Result<Vec<NewMemorySpan>, MemoryPortError>;
+}
+
+/// A stored tool-embedding field row (#302).
+///
+/// Plain data vocabulary for the tool-embedding index so the RAG layer
+/// (`ene-rag`) can read cached embeddings through [`EmbeddingStorePort`]
+/// without depending on the concrete store crate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolEmbeddingFieldRow {
+    /// Namespaced tool name (e.g. `utility.question`).
+    pub tool_name: String,
+    /// Embedding field label (`summary`, `description`, `capability`, `example`, `negative`).
+    pub field: String,
+    /// Disambiguator for repeated fields (e.g. `ex_0`, `ex_1`).
+    pub field_key: String,
+    /// Content-derived version hash for cache invalidation.
+    pub version_hash: String,
+    /// Embedding model name that produced this vector.
+    pub model_name: String,
+    /// The embedding vector.
+    pub embedding: Vec<f32>,
+    /// Source text that was embedded.
+    pub source_text: String,
+}
+
+/// Error type for [`EmbeddingStorePort`] operations (#302).
+#[derive(Debug, Error)]
+pub enum EmbeddingStorePortError {
+    /// The backing store rejected or failed an operation.
+    #[error("embedding store backend error: {0}")]
+    Backend(String),
+}
+
+/// Persistence abstraction for the tool-embedding index (#302).
+///
+/// `ene-tool-rag` (now absorbed into `ene-rag`) historically called
+/// store-specific methods (`list_tool_embedding_hashes`,
+/// `list_tool_embedding_fields`, `upsert_tool_embedding_field`) on the
+/// concrete `MemoryStore`. Cutting this port lets `ene-rag` depend only on
+/// `ene-core`, keeping the "no `ene-rag → ene-store` edge" guarantee that
+/// makes a dependency cycle compile-time impossible.
+#[async_trait]
+pub trait EmbeddingStorePort: Send + Sync {
+    /// Returns `(tool_name, field, field_key, version_hash, model_name)` for
+    /// every cached tool embedding row, without fetching vectors or source text.
+    async fn list_tool_embedding_hashes(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String)>, EmbeddingStorePortError>;
+
+    /// Lists all stored tool embeddings with full data (vector + source text).
+    async fn list_tool_embedding_fields(
+        &self,
+    ) -> Result<Vec<ToolEmbeddingFieldRow>, EmbeddingStorePortError>;
+
+    /// Inserts or updates one field's embedding for a tool.
+    async fn upsert_tool_embedding_field(
+        &self,
+        tool_name: &str,
+        field: &str,
+        field_key: &str,
+        version_hash: &str,
+        model_name: &str,
+        embedding: &[f32],
+        source_text: &str,
+    ) -> Result<(), EmbeddingStorePortError>;
 }
