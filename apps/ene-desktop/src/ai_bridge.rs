@@ -64,6 +64,13 @@ const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 /// doesn't belong in `ene-runtime`: a blocking call that exceeded
 /// [`BLOCKING_TIMEOUT`] and was cancelled before the actor replied.
 ///
+/// As of #408 a dead actor reaches this type solely as
+/// [`ene_runtime::PublicApiError::ActorDead`] (via the [`AiBridgeError::Api`]
+/// variant): the actor-control methods on `EneHandle` (permissions, undo,
+/// user input, feature updates) and the diagnostics snapshot all return
+/// `PublicApiError` directly, so there is no separate actor-dead error to
+/// fold in here.
+///
 /// UI call sites format this with `{error}` (its `Display` impl, via
 /// `thiserror`) the same way they previously formatted the bare `String`
 /// this type replaces, so this change does not by itself introduce any
@@ -75,12 +82,16 @@ pub enum AiBridgeError {
     /// The blocking call exceeded [`BLOCKING_TIMEOUT`] and was cancelled.
     #[error("operation timed out after {0}s")]
     Timeout(u64),
-    /// The runtime actor rejected the request, or host-internal wiring
-    /// (`EneHandle::diagnostics()` and friends) failed.
+    /// Host-internal wiring that still reports [`EneRuntimeError`] failed:
+    /// runtime bootstrap ([`AiBridge::try_new`]) and the diagnostics methods
+    /// that also surface actor-side failures beyond a dead channel
+    /// (`search_tools` / `call_tool` / `manual_split` / `set_character`,
+    /// which can additionally report `EneRuntimeError::Busy`).
     #[error(transparent)]
     Runtime(#[from] EneRuntimeError),
-    /// One of the API v1 contract methods on [`EneHandle`] returned a
-    /// stable [`ene_runtime::PublicApiError`] category.
+    /// One of the API v1 contract methods on [`EneHandle`] — or an
+    /// actor-control / diagnostics method that reports a dead actor (#408) —
+    /// returned a stable [`ene_runtime::PublicApiError`] category.
     #[error(transparent)]
     Api(#[from] ene_runtime::PublicApiError),
     /// A memory-store operation invoked directly from the desktop bridge
@@ -92,12 +103,6 @@ pub enum AiBridgeError {
     /// actor) failed.
     #[error(transparent)]
     Ai(#[from] ene_ai::AiError),
-}
-
-impl From<ene_runtime::ActorDeadError> for AiBridgeError {
-    fn from(_: ene_runtime::ActorDeadError) -> Self {
-        Self::Api(ene_runtime::PublicApiError::ActorDead)
-    }
 }
 
 /// Converts the API v1 [`ene_runtime::PublicSessionMeta`] DTO back into the

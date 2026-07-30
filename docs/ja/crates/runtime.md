@@ -12,6 +12,7 @@
 - 読み取り専用のセッション/候補クエリと画面画像のビジョン要約は、アクターのメールボックスを完全にバイパスして `ene-store` やビジョンモデルに直接アクセスします。ターン実行コマンドとアクターのスループットを奪い合いません。
 - イベントバスは単一チャネルではなく、トラフィックの性質ごとに3系統の専用チャネルへ分離されています: `broadcast` によるチャットバス (`EneEvent`)、bounded かつ単一コンシューマの `mpsc` による音声チャネル (`AudioChunk`)、小容量の `broadcast` によるライフサイクルバス (`LifecycleEvent`)。一方のチャネルのバーストが他方の subscriber を lag させたり飢餓状態にしたりすることはありません。
 - 安定版パブリック API v1 契約は `public_api` にすべて集約されています (`PublicApiError`, `PublicChatEvent`, `PublicLifecycleEvent`, `PublicSessionMeta`, `PublicExportedMessage`, `API_VERSION`)。`Public*` 型のフィールドに `ene-store` / `ene-mind` / `ene-plugin-proto` の型が現れることはありません。内部エラー enum は `From` 実装を介して `PublicApiError` の安定したカテゴリへ射影されるため、内部エラーバリアントの追加が契約を破壊することはありません。
+- アクターの死亡は一様に `PublicApiError::ActorDead` として報告されます (#408)。`EneHandle` のアクター制御メソッド (権限、undo、ユーザー入力、機能更新) と読み取り専用の diagnostics / vision ハンドルはすべて、専用の「アクター死亡」型ではなく `PublicApiError` を返します。消費者が分岐するエラー型は `RunError` / `CancelError` / `PublicApiError` の3系統のみです。`RunError::Busy` と `CancelError::TurnMismatch` は呼び出し側がこれらに基づいて動作するため保持されています。`EneRuntimeError` はブートストラップと、チャネル断絶以外のアクター側失敗 (例: `EneRuntimeError::Busy` タスクアドミッション) も表面化する diagnostics メソッドのためだけに残されています。
 - `message_builder` と `streaming` は意図的に `#[doc(hidden)]` になっています — API v1 契約の一部ではなく、CLI のデバッグコマンドと統合テストのためだけに公開されています。
 
 ## 設計思想

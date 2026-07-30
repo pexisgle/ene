@@ -26,7 +26,7 @@
 //! proactive generation turn can still attach it, preserving prior
 //! behavior.
 
-use crate::handle::{ActorDeadError, EneCommand};
+use crate::handle::EneCommand;
 use crate::public_api::PublicApiError;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -89,8 +89,8 @@ impl VisionHandle {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::PrepareVisionSummary { app_label, reply })
-            .map_err(|_| ActorDeadError)?;
-        let prepared = rx.await.map_err(|_| ActorDeadError)??;
+            .map_err(|_| PublicApiError::ActorDead)?;
+        let prepared = rx.await.map_err(|_| PublicApiError::ActorDead)??;
 
         // Best-effort stash of the *encoded* frame for the next proactive
         // generation turn (never the raw buffer, and never blocks this

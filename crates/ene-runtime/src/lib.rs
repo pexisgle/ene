@@ -82,9 +82,9 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 /// [`LifecycleReceiver`] (lifecycle bus, via
 /// [`EneHandle::subscribe_lifecycle`]).
 pub use handle::{
-    ActorDeadError, AudioChunk, AudioStreamReceiver, DeferredToolTask, EneEvent, EneEventReceiver,
-    EneHandle, EneStateSnapshot, EneStatus, FeatureSettingsUpdate, LifecycleEvent,
-    LifecycleReceiver, ShutdownTimeout, TerminalReason,
+    AudioChunk, AudioStreamReceiver, DeferredToolTask, EneEvent, EneEventReceiver, EneHandle,
+    EneStateSnapshot, EneStatus, FeatureSettingsUpdate, LifecycleEvent, LifecycleReceiver,
+    ShutdownTimeout, TerminalReason,
 };
 
 // ── Read-only query / vision handles (#271) ──
