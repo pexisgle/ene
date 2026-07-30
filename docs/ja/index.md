@@ -38,6 +38,7 @@ Ene ワークスペース
 │   ├── ene-ai             (コア AI プロバイダトレイト、OpenAI、Anthropic アダプタ)
 │   ├── ene-ai-local       (llama-cpp-4 によるローカル LLM 推論)
 │   ├── ene-voice          (ローカル STT/TTS/VAD 音声パイプライン)
+│   ├── ene-rag            (RAG ポリシー: 記憶スコアリング/減衰、ツール選択)
 │   ├── ene-connector      (共有コネクタフレームワーク & MCP ブリッジ)
 │   └── ene-vrm            (3D VRM 1.0 ローダー & wgpu レンダラー)
 ├── プラグインシステム
@@ -46,8 +47,7 @@ Ene ワークスペース
 │   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
 │   ├── ene-tool-sdk       (ツールプラグイン開発 SDK: ToolAction、プロバイダ、ヘルパー)
 │   ├── ene-plugin-db      (プラグイン用状態保持 DB IPC クライアント)
-│   ├── ene-tool-macros    (ツールアクション用 Proc-macro)
-│   └── ene-tool-rag       (ツール仕様の検索拡張生成 RAG)
+│   └── ene-tool-macros    (ツールアクション用 Proc-macro)
 └── プロセス外プラグイン
     ├── plugins/provider/* (プロバイダプラグイン: anthropic)
     └── plugins/tool/*     (ツールプラグイン: app, browser, fs, utility, web)

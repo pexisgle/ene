@@ -1,6 +1,6 @@
 # システムアーキテクチャと設計 (API v1)
 
-**Ene** は明確な責務分離に基づいて設計されています。アクターベースのランタイムファサード (`ene-runtime`)、純粋な認知ターンエンジン (`ene-mind`)、永続化に依存しないドメイン語彙 (`ene-core`) の上に構築された独立した永続化層 (`ene-store`)、プロセス外 IPC プラグインホスト (`ene-plugin-host`)、および独立した VRM レンダラー (`ene-vrm`) で構成されています。
+**Ene** は明確な責務分離に基づいて設計されています。アクターベースのランタイムファサード (`ene-runtime`)、純粋な認知ターンエンジン (`ene-mind`)、永続化に依存しないドメイン語彙 (`ene-core`) の上に構築された独立した永続化層 (`ene-store`)、RAG のスコアリング/減衰ポリシー層 (`ene-rag`)、プロセス外 IPC プラグインホスト (`ene-plugin-host`)、および独立した VRM レンダラー (`ene-vrm`) で構成されています。
 
 ---
 
@@ -31,7 +31,7 @@ flowchart TD
   Runtime --> Ai[crates/ene-ai]
   Runtime --> AiLocal[crates/ene-ai-local]
   Runtime --> ToolHost[crates/ene-plugin-host]
-  Runtime --> ToolRag[crates/ene-tool-rag]
+  Runtime --> Rag[crates/ene-rag]
   Runtime --> Config[crates/ene-config]
 
   Mind -.dev-only.-> Store
@@ -53,9 +53,10 @@ flowchart TD
   Voice --> Ai
   Voice --> Config
 
-  ToolRag --> Ai
-  ToolRag --> Store
-  ToolRag --> Proto
+  Rag --> Ai
+  Rag --> Core
+  Rag --> Proto
+  Rag --> Config
 
   Store --> Config
   Store --> Core
@@ -75,6 +76,7 @@ flowchart TD
 
 ### 厳格なアーキテクチャ境界ルール
 - `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — ドメイン語彙は `ene-store` と `ene-mind` の双方より下位に位置し、どちらもこの型のために互いへ依存しない
+- `ene-rag` ↛ `ene-store` / `ene-mind` / `ene-runtime` (#302) — RAG のスコアリング/減衰ポリシー層は `ene-core` のドメイン語彙と汎用依存のみに依存する。永続化には `ene_core::EmbeddingStorePort` トレイト経由でのみ到達するため、store↔rag の循環依存はコンパイル時に不可能となる
 - `ene-store` ↛ `ene-ai` / `ene-mind`
 - `ene-mind` ↛ `ene-runtime` / `ene-plugin-host` / `ene-store` (本番コード; `ene-store` は統合テスト用の dev-dependency のみ)
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
@@ -145,6 +147,6 @@ flowchart TD
 | `ene-tool-sdk` | ツールプラグイン開発 SDK (`ToolAction`, `ActionSetProvider`, prelude) |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
 | `ene-tool-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
-| `ene-tool-rag` | ツール仕様の検索拡張生成 (RAG) と再ランク |
+| `ene-rag` | RAG ポリシー層: 記憶想起のスコアリング/減衰、ツール選択と再ランク (旧 `ene-tool-rag` を吸収) |
 | `ene-vrm` | VRM 1.0 アバター読み込みおよび wgpu レンダラー |
 | `ene-config` | 設定読み込み、設定スキーマ、キャラクターカード定義 |

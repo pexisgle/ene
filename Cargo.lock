@@ -2581,9 +2581,9 @@ dependencies = [
  "ene-mind",
  "ene-plugin-host",
  "ene-plugin-proto",
+ "ene-rag",
  "ene-runtime",
  "ene-store",
- "ene-tool-rag",
  "ene-voice",
  "ene-vrm",
  "fluent-bundle",
@@ -2637,6 +2637,7 @@ dependencies = [
  "ene-config",
  "ene-core",
  "ene-plugin-proto",
+ "ene-rag",
  "ene-store",
  "parking_lot",
  "regex",
@@ -2844,6 +2845,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ene-rag"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "ctor",
+ "ene-ai",
+ "ene-config",
+ "ene-core",
+ "ene-plugin-proto",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ene-runtime"
 version = "0.1.0"
 dependencies = [
@@ -2859,8 +2880,8 @@ dependencies = [
  "ene-mind",
  "ene-plugin-host",
  "ene-plugin-proto",
+ "ene-rag",
  "ene-store",
- "ene-tool-rag",
  "ene-voice",
  "futures",
  "image",
@@ -2889,6 +2910,7 @@ dependencies = [
  "ene-core",
  "ene-plugin-db",
  "ene-plugin-proto",
+ "ene-rag",
  "libsqlite3-sys",
  "parking_lot",
  "sea-orm",
@@ -2917,25 +2939,6 @@ dependencies = [
  "serde_json",
  "syn 3.0.3",
  "tokio",
-]
-
-[[package]]
-name = "ene-tool-rag"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "ctor",
- "ene-ai",
- "ene-config",
- "ene-plugin-proto",
- "ene-store",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
 ]
 
 [[package]]

@@ -35,24 +35,8 @@ pub struct ConversationLogEntry {
     pub created_at: DateTime<Utc>,
 }
 
-/// A row of tool embedding data with all fields.
-#[derive(Debug, Clone)]
-pub struct ToolEmbeddingFieldRow {
-    /// Tool name.
-    pub tool_name: String,
-    /// Embedding field kind (summary, description, etc.).
-    pub field: String,
-    /// Disambiguator for multiple entries of the same field type.
-    pub field_key: String,
-    /// Content hash for change detection.
-    pub version_hash: String,
-    /// Embedding model name.
-    pub model_name: String,
-    /// Deserialized embedding vector.
-    pub embedding: Vec<f32>,
-    /// Source text that was embedded.
-    pub source_text: String,
-}
+/// A row of tool embedding data with all fields (domain type from `ene-core`, #302).
+pub use ene_core::ToolEmbeddingFieldRow;
 
 /// Registers the sqlite-vec extension globally for the process.
 pub fn init_sqlite_vec() {

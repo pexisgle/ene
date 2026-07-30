@@ -126,8 +126,8 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
 
 Distinct from `plugins.*` (which manages the plugin *process*/IPC layer):
 `tools.*` covers tool-invocation runtime knobs owned by `ene-runtime` and
-`ene-tool-rag`. `tools.rag` configures the Tool RAG selection pipeline
-(`ene_tool_rag::ToolRagConfig`); the fields shown below
+`ene-rag`. `tools.rag` configures the Tool RAG selection pipeline
+(`ene_rag::ToolRagConfig`); the fields shown below
 (`ene_runtime::ToolRuntimeConfig`) cap how many background tasks the turn
 actor keeps in flight at once and bound the deferred-tool poll budget. Once
 a cap is reached, admission is rejected (fails fast) rather than queued

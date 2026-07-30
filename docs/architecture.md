@@ -1,6 +1,6 @@
 # System Architecture & Design (API v1)
 
-**Ene** is designed around a clean separation of concerns: an actor-based runtime facade (`ene-runtime`), a pure cognitive turn engine (`ene-mind`), an isolated persistence layer (`ene-store`) built on persistence-agnostic domain vocabulary (`ene-core`), an out-of-process IPC plugin host (`ene-plugin-host`), and a standalone VRM renderer (`ene-vrm`).
+**Ene** is designed around a clean separation of concerns: an actor-based runtime facade (`ene-runtime`), a pure cognitive turn engine (`ene-mind`), an isolated persistence layer (`ene-store`) built on persistence-agnostic domain vocabulary (`ene-core`), a RAG scoring/decay policy layer (`ene-rag`), an out-of-process IPC plugin host (`ene-plugin-host`), and a standalone VRM renderer (`ene-vrm`).
 
 ---
 
@@ -31,7 +31,7 @@ flowchart TD
   Runtime --> Ai[crates/ene-ai]
   Runtime --> AiLocal[crates/ene-ai-local]
   Runtime --> ToolHost[crates/ene-plugin-host]
-  Runtime --> ToolRag[crates/ene-tool-rag]
+  Runtime --> Rag[crates/ene-rag]
   Runtime --> Config[crates/ene-config]
 
   Mind -.dev-only.-> Store
@@ -53,9 +53,10 @@ flowchart TD
   Voice --> Ai
   Voice --> Config
 
-  ToolRag --> Ai
-  ToolRag --> Store
-  ToolRag --> Proto
+  Rag --> Ai
+  Rag --> Core
+  Rag --> Proto
+  Rag --> Config
 
   Store --> Config
   Store --> Core
@@ -75,6 +76,7 @@ flowchart TD
 
 ### Strict Architectural Boundaries
 - `ene-core` ↛ `ene-store` / `ene-mind` / `ene-ai` / `ene-runtime` (#270) — domain vocabulary sits below both `ene-store` and `ene-mind`; neither depends on the other for it
+- `ene-rag` ↛ `ene-store` / `ene-mind` / `ene-runtime` (#302) — the RAG scoring/decay policy layer depends on `ene-core` domain vocabulary plus generic deps only; persistence is reached through the `ene_core::EmbeddingStorePort` trait, so a store↔rag cycle is impossible at compile time
 - `ene-store` ↛ `ene-ai` / `ene-mind`
 - `ene-mind` ↛ `ene-runtime` / `ene-plugin-host` / `ene-store` (production code; `ene-store` is a dev-dependency only, used for integration tests)
 - `ene-vrm` ↛ `ene-mind` / `ene-runtime` / `ene-store`
@@ -145,6 +147,6 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | `ene-tool-sdk` | Tool plugin authoring SDK (`ToolAction`, `ActionSetProvider`, prelude) |
 | `ene-plugin-db` | Typed IPC client for stateful plugin database operations |
 | `ene-tool-macros` | Proc-macros: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
-| `ene-tool-rag` | Retrieval-augmented tool selection and reranking |
+| `ene-rag` | RAG policy layer: memory recall scoring/decay, tool selection and reranking (absorbed the former `ene-tool-rag`) |
 | `ene-vrm` | VRM 1.0 avatar loading and wgpu renderer |
 | `ene-config` | Configuration loading, settings schema, character card definitions |

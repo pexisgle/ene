@@ -102,13 +102,14 @@ const fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
 }
 
 fn merge_hybrid_candidate(
-    gathered: &mut std::collections::HashMap<i64, crate::search::GatheredCandidate>,
+    gathered: &mut std::collections::HashMap<i64, ene_core::GatheredCandidate>,
     user_id: Option<&str>,
     item: crate::MemoryItem,
     vector_similarity: f32,
     source: crate::MemoryCandidateSource,
 ) {
-    use crate::search::{GatheredCandidate, is_recallable_status};
+    use ene_core::GatheredCandidate;
+    use ene_rag::is_recallable_status;
 
     if !is_recallable_status(item.status) {
         return;
@@ -546,19 +547,22 @@ impl MemoryStore {
         Ok(archived)
     }
 
-    /// Search typed memories with explainable hybrid scoring (#123).
+    /// Gather typed-memory candidates for explainable hybrid scoring (#123, #302).
     ///
-    /// Sole public typed-memory search entry. Gathers candidates from optional
+    /// Sole public typed-memory gather entry. Collects candidates from optional
     /// vector similarity (when `query.embedding` is `Some`), lexical token
-    /// matches, a limited recent fallback, and active commitments; scores and
-    /// de-duplicates by memory id; returns the top `query.limit` results.
-    /// Callers must pre-compute embeddings — the store never embeds.
+    /// matches, a limited recent fallback, and active commitments, then
+    /// de-duplicates by memory id. **Scoring, filtering, sorting, and
+    /// truncation are the `ene-rag` layer's job** — callers compose
+    /// `store.search(...)` with [`ene_rag::score_and_rank`] to get ranked
+    /// [`crate::ScoredMemory`] results. Callers must pre-compute embeddings —
+    /// the store never embeds.
     pub async fn search(
         &self,
         query: &crate::Query<'_>,
-    ) -> Result<Vec<crate::ScoredMemory>, EneMemoryError> {
-        use crate::search::{lexical_overlap_score, score_candidate};
+    ) -> Result<Vec<ene_core::GatheredCandidate>, EneMemoryError> {
         use crate::typed_memory::MemoryCandidateSource;
+        use ene_rag::lexical_overlap_score;
         use std::collections::HashMap;
 
         if let Some(embedding) = query.embedding {
@@ -566,7 +570,7 @@ impl MemoryStore {
         }
 
         let pool = query.candidate_pool_size.max(query.limit);
-        let mut gathered: HashMap<i64, crate::search::GatheredCandidate> = HashMap::new();
+        let mut gathered: HashMap<i64, ene_core::GatheredCandidate> = HashMap::new();
 
         // Vector candidates across recallable statuses (skipped when no embedding).
         if let Some(embedding) = query.embedding {
@@ -711,41 +715,7 @@ impl MemoryStore {
             }
         }
 
-        let mut scored: Vec<crate::ScoredMemory> = gathered
-            .into_values()
-            .filter(|candidate| {
-                crate::search::within_time_range(
-                    query.time_range.as_ref(),
-                    candidate.item.created_at,
-                )
-            })
-            .map(|candidate| {
-                let breakdown = score_candidate(query, &candidate);
-                crate::ScoredMemory {
-                    item: candidate.item,
-                    breakdown,
-                    sources: candidate.sources,
-                }
-            })
-            .filter(|scored| scored.breakdown.total >= query.min_score)
-            .collect();
-
-        scored.sort_by(|a, b| {
-            b.breakdown
-                .total
-                .total_cmp(&a.breakdown.total)
-                .then_with(|| {
-                    b.breakdown
-                        .vector_similarity
-                        .total_cmp(&a.breakdown.vector_similarity)
-                })
-                .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
-        });
-
-        if scored.len() > query.limit {
-            scored.truncate(query.limit);
-        }
-        Ok(scored)
+        Ok(gathered.into_values().collect())
     }
 
     /// Legacy vector-only search over `active` memories (tests / internal).

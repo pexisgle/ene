@@ -23,7 +23,7 @@ pub enum EneRuntimeError {
     Tool(#[from] ene_plugin_host::PluginHostError),
     /// Tool RAG pipeline error.
     #[error(transparent)]
-    ToolRag(#[from] ene_tool_rag::ToolRagError),
+    ToolRag(#[from] ene_rag::ToolRagError),
     /// Task channel closed.
     #[error("Task channel closed")]
     ChannelClosed,

@@ -256,5 +256,5 @@ pub struct FeatureSettingsUpdate {
     /// Plugin system section (formerly tool host section).
     pub plugins: ene_plugin_host::PluginConfig,
     /// Tool RAG section.
-    pub rag: ene_tool_rag::ToolRagConfig,
+    pub rag: ene_rag::ToolRagConfig,
 }

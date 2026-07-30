@@ -7,7 +7,7 @@ use ene_mind::ConversationSession;
 use ene_mind::memory_writer::{ToolResultSummary, tool_grounding};
 use ene_plugin_host::PluginHostError;
 use ene_plugin_proto::ToolError;
-use ene_tool_rag::ToolRag;
+use ene_rag::ToolRag;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
