@@ -171,8 +171,9 @@ impl CharacterConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{CharacterConfig, ConfigTarget, HasConfigKey};
+    use super::CharacterConfig;
     use super::MotionLayer;
+    use crate::{ConfigTarget, HasConfigKey};
 
     #[test]
     fn motion_layer_label_round_trips() {
