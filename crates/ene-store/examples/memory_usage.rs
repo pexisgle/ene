@@ -49,27 +49,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let id = store.insert_typed_memory(&memory).await?;
     println!("Inserted typed memory with ID: {id}");
 
-    // Search with a Query (no embedding — lexical/recency-only match).
-    let results = store
-        .search(&Query {
-            query_text: "Alice loves blue",
-            embedding: None,
-            character_id: "Ene",
-            user_id: Some("user1"),
-            model_name: "test",
-            limit: 5,
-            similarity_threshold: 0.0,
-            candidate_pool_size: 16,
-            query_affect: None,
-            weights: HybridSearchWeights::default(),
-            decay_half_life_days: 30.0,
-            time_range: None,
-            now: Utc::now(),
-            min_score: 0.0,
-            commitment_boost: 0.0,
-            recent_fallback_limit: 5,
-        })
-        .await?;
+    // Gather candidates with a Query (no embedding — lexical/recency-only match),
+    // then score and rank them in the ene-rag policy layer (#302).
+    let query = Query {
+        query_text: "Alice loves blue",
+        embedding: None,
+        character_id: "Ene",
+        user_id: Some("user1"),
+        model_name: "test",
+        limit: 5,
+        similarity_threshold: 0.0,
+        candidate_pool_size: 16,
+        query_affect: None,
+        weights: HybridSearchWeights::default(),
+        decay_half_life_days: 30.0,
+        time_range: None,
+        now: Utc::now(),
+        min_score: 0.0,
+        commitment_boost: 0.0,
+        recent_fallback_limit: 5,
+    };
+    let gathered = store.search(&query).await?;
+    let results = ene_rag::score_and_rank(&query, gathered);
 
     println!("\nSearch results (lexical-only):");
     for (i, scored) in results.iter().enumerate() {

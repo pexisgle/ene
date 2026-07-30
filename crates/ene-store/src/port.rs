@@ -15,9 +15,10 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ene_core::{
-    ActiveSceneSummaryRow, AffectState, Commitment, MemoryItem, MemoryKind, MemoryPort,
-    MemoryPortError, MemoryStatus, NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan,
-    PendingAffectProposal, PendingCandidate, PendingMemoryWrite, Query, ScoredMemory,
+    ActiveSceneSummaryRow, AffectState, Commitment, EmbeddingStorePort, EmbeddingStorePortError,
+    GatheredCandidate, MemoryItem, MemoryKind, MemoryPort, MemoryPortError, MemoryStatus,
+    NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan, PendingAffectProposal,
+    PendingCandidate, PendingMemoryWrite, Query, ToolEmbeddingFieldRow,
 };
 
 use crate::error::EneMemoryError;
@@ -83,7 +84,7 @@ impl MemoryPort for MemoryStore {
         )
     }
 
-    async fn search(&self, query: &Query<'_>) -> Result<Vec<ScoredMemory>, MemoryPortError> {
+    async fn search(&self, query: &Query<'_>) -> Result<Vec<GatheredCandidate>, MemoryPortError> {
         Ok(Self::search(self, query).await?)
     }
 
@@ -255,5 +256,49 @@ impl MemoryPort for MemoryStore {
         level: i32,
     ) -> Result<Vec<NewMemorySpan>, MemoryPortError> {
         Ok(Self::list_memory_spans_by_session_and_level(self, session_id, level).await?)
+    }
+}
+
+impl From<EneMemoryError> for EmbeddingStorePortError {
+    fn from(err: EneMemoryError) -> Self {
+        Self::Backend(err.to_string())
+    }
+}
+
+#[async_trait]
+impl EmbeddingStorePort for MemoryStore {
+    async fn list_tool_embedding_hashes(
+        &self,
+    ) -> Result<Vec<(String, String, String, String, String)>, EmbeddingStorePortError> {
+        Ok(Self::list_tool_embedding_hashes(self).await?)
+    }
+
+    async fn list_tool_embedding_fields(
+        &self,
+    ) -> Result<Vec<ToolEmbeddingFieldRow>, EmbeddingStorePortError> {
+        Ok(Self::list_tool_embedding_fields(self).await?)
+    }
+
+    async fn upsert_tool_embedding_field(
+        &self,
+        tool_name: &str,
+        field: &str,
+        field_key: &str,
+        version_hash: &str,
+        model_name: &str,
+        embedding: &[f32],
+        source_text: &str,
+    ) -> Result<(), EmbeddingStorePortError> {
+        Ok(Self::upsert_tool_embedding_field(
+            self,
+            tool_name,
+            field,
+            field_key,
+            version_hash,
+            model_name,
+            embedding,
+            source_text,
+        )
+        .await?)
     }
 }
