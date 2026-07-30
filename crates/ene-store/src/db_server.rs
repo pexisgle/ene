@@ -78,16 +78,19 @@ impl DbServerError {
     }
 
     /// Returns this error with the failing batch operation index prefixed to
-    /// its message, preserving the wire error code where a variant carries one,
-    /// so a rejected [`DbRequest::Batch`] reports which operation aborted it.
+    /// its message, preserving the wire error code of every variant, so a
+    /// rejected [`DbRequest::Batch`] reports which operation aborted it while
+    /// the client still matches on the same typed error it would get from a
+    /// standalone request.
     fn at_batch_op(self, idx: usize) -> Self {
         let prefix = format!("batch op {idx}");
         match self {
             Self::PermissionDenied(msg) => Self::PermissionDenied(format!("{prefix}: {msg}")),
             Self::UnknownTable(msg) => Self::UnknownTable(format!("{prefix}: {msg}")),
-            Self::UnknownColumn { table, column } => {
-                Self::Internal(format!("{prefix}: unknown column {table}.{column}"))
-            }
+            Self::UnknownColumn { table, column } => Self::UnknownColumn {
+                table: format!("{prefix}: {table}"),
+                column,
+            },
             Self::Io(e) => Self::Internal(format!("{prefix}: IO error: {e}")),
             Self::Json(e) => Self::Internal(format!("{prefix}: JSON error: {e}")),
             Self::Db(e) => Self::Internal(format!("{prefix}: database error: {e}")),
@@ -594,19 +597,16 @@ impl DbIpcServer {
 
         txn.commit().await.map_err(DbServerError::Db)?;
 
-        // Mirror the standalone `Insert` behavior: a committed insert updates
-        // the connection-scoped `LastInsertRowId` cell to the batch's final
-        // insert rowid, so the tool's view stays consistent.
+        // Mirror the standalone `Insert` behavior: only inserts update the
+        // connection-scoped `LastInsertRowId` cell (standalone `Upsert`
+        // deliberately does not — an upsert that resolves via the
+        // conflict-update path performs no insert, so its `last_insert_id()`
+        // would be stale). Record the batch's final insert rowid so the tool's
+        // view stays consistent.
         if let Ok(mut guard) = last_rowid.lock() {
             for res in results.iter().rev() {
-                let rowid = match res {
-                    DbBatchOpResult::Insert { rowid } | DbBatchOpResult::Upsert { rowid } => {
-                        Some(*rowid)
-                    }
-                    DbBatchOpResult::Update { .. } | DbBatchOpResult::Delete { .. } => None,
-                };
-                if let Some(rowid) = rowid {
-                    *guard = Some(rowid);
+                if let DbBatchOpResult::Insert { rowid } = res {
+                    *guard = Some(*rowid);
                     break;
                 }
             }
@@ -1539,7 +1539,7 @@ mod tests {
         let db = sea_orm::Database::connect(opt).await.unwrap();
         db.execute_unprepared(
             "CREATE TABLE fs_test (id INTEGER PRIMARY KEY AUTOINCREMENT, \
-             name TEXT NOT NULL, qty INTEGER)",
+             name TEXT NOT NULL UNIQUE, qty INTEGER)",
         )
         .await
         .unwrap();
@@ -1895,5 +1895,114 @@ mod tests {
             ene_plugin_db::DbResponse::Batch { results } => assert!(results.is_empty()),
             other => panic!("expected Batch, got {other:?}"),
         }
+    }
+
+    /// A batch op referencing an undeclared column preserves the structured
+    /// `UnknownColumn` wire code (rather than being downgraded to `Internal`),
+    /// so clients matching on the typed error still catch it, while the message
+    /// names the failing operation index.
+    #[tokio::test]
+    async fn batch_unknown_column_preserves_error_code() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![ene_plugin_db::DbWriteOp::Insert {
+            table: "fs_test".to_string(),
+            row: std::collections::BTreeMap::from([(
+                "no_such_column".to_string(),
+                ene_plugin_db::DbValue::Text("x".to_string()),
+            )]),
+        }];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::UnknownColumn);
+                assert!(
+                    message.contains("batch op 0"),
+                    "error should name the failing op: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// A committed batch whose final write is an upsert does **not** overwrite
+    /// the connection-scoped `LastInsertRowId` cell: only inserts do, matching
+    /// the standalone `Upsert` path (which never records a rowid, since an
+    /// upsert resolving via conflict-update performs no insert and its
+    /// `last_insert_id()` would be stale).
+    #[tokio::test]
+    async fn batch_upsert_does_not_update_last_insert_rowid() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("seed".to_string()),
+                )]),
+            },
+            // Conflict-update on the existing `name = "seed"` row: no insert.
+            ene_plugin_db::DbWriteOp::Upsert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        ene_plugin_db::DbValue::Text("seed".to_string()),
+                    ),
+                    ("qty".to_string(), ene_plugin_db::DbValue::Int(5)),
+                ]),
+                conflict_columns: vec!["name".to_string()],
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+        let results = match resp {
+            ene_plugin_db::DbResponse::Batch { results } => results,
+            other => panic!("expected Batch, got {other:?}"),
+        };
+        let insert_rowid = match results[0] {
+            ene_plugin_db::DbBatchOpResult::Insert { rowid } => rowid,
+            ref other => panic!("expected Insert result, got {other:?}"),
+        };
+
+        // The upsert must not have clobbered the insert's rowid.
+        let lookup = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::LastInsertRowId,
+        )
+        .await;
+        let lookup_id = match lookup {
+            ene_plugin_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            other => panic!("expected LastInsertRowId, got {other:?}"),
+        };
+        assert_eq!(lookup_id, insert_rowid);
     }
 }
