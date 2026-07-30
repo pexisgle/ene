@@ -260,7 +260,7 @@ impl AiBridge {
         mind: &ene_mind::MindConfig,
         store: &ene_store::StoreConfig,
         plugins: &ene_plugin_host::PluginConfig,
-        rag: &ene_tool_rag::ToolRagConfig,
+        rag: &ene_rag::ToolRagConfig,
     ) {
         self.proactive_observe.apply_mind(mind);
         if let Err(e) = self

@@ -46,7 +46,7 @@ use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::ConversationSession;
 use ene_plugin_host::PluginHealthEvent;
-use ene_tool_rag::ToolRagConfig;
+use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 

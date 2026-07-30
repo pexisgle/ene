@@ -7,7 +7,7 @@ use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
 use bevy_ecs::world::World;
 use ene_plugin_host::PluginConfig;
-use ene_tool_rag::ToolRagConfig;
+use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 
 /// Known tool binary names shown even when absent from the saved map.
