@@ -50,7 +50,9 @@ use ene_mind::{
     compression_has_usable_summary,
 };
 use ene_mind::{ConversationSession, EneSessionError, SplitResult};
-use ene_plugin_host::{CompositeToolRegistry, PluginHealthEvent, PluginHostError, ToolRegistry};
+use ene_plugin_host::{
+    CompositeToolRegistry, DisabledReason, PluginHealthEvent, PluginHostError, ToolRegistry,
+};
 #[cfg(any(unix, windows))]
 use ene_store::db_server::DbIpcServer;
 use ene_tool_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
@@ -2676,9 +2678,9 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
         PluginHealthEvent::CircuitClosed { plugin } => (plugin, "circuit_closed", None),
         PluginHealthEvent::Disabled { plugin, reason } => {
             // `status` stays the stable `"disabled"`; the detail explains why.
-            let detail = match reason.as_str() {
-                "checksum_mismatch" => "binary checksum mismatch on restart",
-                _ => "restart budget exhausted",
+            let detail = match reason {
+                DisabledReason::ChecksumMismatch => "binary checksum mismatch on restart",
+                DisabledReason::RestartBudgetExhausted => "restart budget exhausted",
             };
             (plugin, "disabled", Some(detail.to_string()))
         }
@@ -2768,4 +2770,50 @@ pub(super) fn init_tool_rag(
     let store = concrete_store;
     let opts = ToolRagOptions::from_config(rag_config)?;
     Ok(Some(Arc::new(ToolRag::new(embedder.clone(), store, opts))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unwraps a [`DiagnosticEvent::ToolHealth`] into its `(tool, status,
+    /// detail)` parts for assertion.
+    fn tool_health_parts(event: DiagnosticEvent) -> (String, String, Option<String>) {
+        match event {
+            DiagnosticEvent::ToolHealth {
+                tool,
+                status,
+                detail,
+            } => (tool, status, detail),
+            other => panic!("expected ToolHealth, got {other:?}"),
+        }
+    }
+
+    /// The `Disabled` detail string is derived from the structured
+    /// [`DisabledReason`] via an exhaustive match (#429): both variants must
+    /// map to their stable, human-readable detail while the `status` contract
+    /// stays `"disabled"`.
+    #[test]
+    fn disabled_reason_maps_to_detail_string() {
+        let (tool, status, detail) =
+            tool_health_parts(plugin_health_event_to_diag(PluginHealthEvent::Disabled {
+                plugin: "fs".to_string(),
+                reason: DisabledReason::ChecksumMismatch,
+            }));
+        assert_eq!(tool, "fs");
+        assert_eq!(status, "disabled");
+        assert_eq!(
+            detail.as_deref(),
+            Some("binary checksum mismatch on restart")
+        );
+
+        let (tool, status, detail) =
+            tool_health_parts(plugin_health_event_to_diag(PluginHealthEvent::Disabled {
+                plugin: "web".to_string(),
+                reason: DisabledReason::RestartBudgetExhausted,
+            }));
+        assert_eq!(tool, "web");
+        assert_eq!(status, "disabled");
+        assert_eq!(detail.as_deref(), Some("restart budget exhausted"));
+    }
 }
