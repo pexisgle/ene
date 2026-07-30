@@ -104,6 +104,23 @@ impl MigrationTrait for Vec0EmbeddingIndexMigration {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let db = manager.get_connection();
+
+        // Drop the sync triggers first so they don't reference the dropped
+        // vec0 tables (they are created by `ensure_vec0_index`, not by this
+        // migration, but the down path must clean them up regardless).
+        db.execute_unprepared("DROP TRIGGER IF EXISTS trg_vec_mem_ai")
+            .await?;
+        db.execute_unprepared("DROP TRIGGER IF EXISTS trg_vec_mem_au")
+            .await?;
+        db.execute_unprepared("DROP TRIGGER IF EXISTS trg_vec_mem_ad")
+            .await?;
+        db.execute_unprepared("DROP TRIGGER IF EXISTS trg_vec_tool_ai")
+            .await?;
+        db.execute_unprepared("DROP TRIGGER IF EXISTS trg_vec_tool_au")
+            .await?;
+        db.execute_unprepared("DROP TRIGGER IF EXISTS trg_vec_tool_ad")
+            .await?;
+
         db.execute_unprepared("DROP TABLE IF EXISTS vec_memory_embeddings")
             .await?;
         db.execute_unprepared("DROP TABLE IF EXISTS vec_tool_embeddings")

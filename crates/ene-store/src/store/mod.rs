@@ -76,6 +76,9 @@ pub fn init_sqlite_vec() {
 /// For fresh databases (no embeddings at migration time) this is where
 /// the tables are first created.
 ///
+/// If the embedding dimension changes (e.g. user switches embedding models),
+/// the vec0 tables are dropped and recreated to match the new dimension.
+///
 /// Sync triggers on `memory_embeddings` and `tool_embedding_index` keep
 /// the `vec0` shadow tables consistent through all write paths, including
 /// `ON DELETE CASCADE` from `typed_memories`.
@@ -83,9 +86,37 @@ pub(crate) async fn ensure_vec0_index(
     db: &DatabaseConnection,
     embedding_dim: usize,
 ) -> Result<(), EneMemoryError> {
-    use sea_orm::ConnectionTrait;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
 
     let dim = embedding_dim;
+
+    // Check if vec_memory_embeddings exists and has the correct dimension.
+    // The vec0 column definition bakes in `float[N]` at creation time, so a
+    // dimension change (e.g. switching embedding models) requires a rebuild.
+    // We read the stored CREATE statement from sqlite_master and check for
+    // the expected `float[{dim}]` substring.
+    let needs_recreate = if let Some(row) = db
+        .query_one_raw(Statement::from_sql_and_values(
+            DbBackend::Sqlite,
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_memory_embeddings'",
+            [],
+        ))
+        .await?
+    {
+        let sql: String = row.try_get_by_index(0).map_err(|e| {
+            EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
+        })?;
+        !sql.contains(&format!("float[{dim}]"))
+    } else {
+        false
+    };
+
+    if needs_recreate {
+        db.execute_unprepared("DROP TABLE IF EXISTS vec_memory_embeddings")
+            .await?;
+        db.execute_unprepared("DROP TABLE IF EXISTS vec_tool_embeddings")
+            .await?;
+    }
 
     // ── vec_memory_embeddings ──
     // character_id is denormalized from typed_memories so the KNN query
@@ -110,6 +141,23 @@ pub(crate) async fn ensure_vec0_index(
          )"
     ))
     .await?;
+
+    // Backfill if we recreated the tables
+    if needs_recreate {
+        db.execute_unprepared(
+            "INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
+             SELECT me.id, me.embedding, tm.character_id, me.model_name, me.field \
+             FROM memory_embeddings me \
+             INNER JOIN typed_memories tm ON tm.id = me.memory_item_id",
+        )
+        .await?;
+
+        db.execute_unprepared(
+            "INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
+             SELECT id, embedding, tool_name FROM tool_embedding_index",
+        )
+        .await?;
+    }
 
     // ── Sync triggers: memory_embeddings → vec_memory_embeddings ──
     // Note: vec0 returns SQLITE_ERROR (not SQLITE_CONSTRAINT) on duplicate
