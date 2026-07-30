@@ -1,14 +1,35 @@
-//! Hybrid memory search scoring (pure functions, #302).
+//! Hybrid memory search scoring (pure functions, #302, #346).
 //!
 //! Moved from `ene-store::search` — combines vector similarity, lexical
 //! overlap, recency, salience, affect, relationship, and access signals into
 //! an explainable score breakdown. No DB I/O lives here; `ene-store` gathers
 //! candidates and this layer scores them.
+//!
+//! ## Score structure (#346)
+//!
+//! The combination is *relevance-driven*, not additive:
+//!
+//! ```text
+//! total = relevance × quality_factor × penalty_multiplier + commitment_boost
+//! ```
+//!
+//! - `relevance` blends vector similarity and lexical overlap — it decides
+//!   whether a memory is a candidate at all.
+//! - `quality_factor` (`>= 1.0`) rescales relevant memories by their intrinsic
+//!   quality; it can reorder candidates but never lift an irrelevant one.
+//! - `penalty_multiplier` (`(0, 1]`) applies contradiction/stale penalties as a
+//!   scale-invariant fraction rather than an absolute subtraction.
+//! - `commitment_boost` stays additive so an active promise surfaces even with
+//!   zero query relevance.
+//!
+//! This replaces the previous weighted sum, in which the quality components
+//! collectively outweighed relevance roughly 2:1 and could push an unrelated
+//! memory above a strongly relevant one.
 
 use chrono::{DateTime, Utc};
 use ene_core::{
-    AffectAnnotation, GatheredCandidate, MemoryCandidateSource, MemoryScoreBreakdown, MemoryStatus,
-    Query,
+    AffectAnnotation, GatheredCandidate, HybridSearchWeights, MemoryCandidateSource,
+    MemoryScoreBreakdown, MemoryStatus, Query,
 };
 use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization;
@@ -222,7 +243,88 @@ pub fn stale_penalty(
     penalty
 }
 
-/// Compute weighted hybrid score breakdown for a gathered candidate.
+/// Combined query-relevance signal in `[0, 1]` (#346).
+///
+/// Blends vector cosine similarity and lexical overlap with their relevance
+/// weights. This is the score *base*: it decides whether a memory is a
+/// candidate at all. A memory that is neither vector-similar nor lexically
+/// overlapping has relevance zero and cannot be lifted by quality alone.
+pub fn relevance_score(vector_similarity: f32, lexical: f32, weights: HybridSearchWeights) -> f32 {
+    let vector_weight = weights.vector.max(0.0);
+    let lexical_weight = weights.lexical.max(0.0);
+    let total_weight = vector_weight + lexical_weight;
+    if total_weight <= 0.0 {
+        return 0.0;
+    }
+    let vector = if vector_similarity.is_nan() {
+        0.0
+    } else {
+        vector_similarity.clamp(0.0, 1.0)
+    };
+    let lexical = if lexical.is_nan() {
+        0.0
+    } else {
+        lexical.clamp(0.0, 1.0)
+    };
+    (vector * vector_weight + lexical * lexical_weight) / total_weight
+}
+
+/// Multiplicative quality factor `>= 1.0` (#346).
+///
+/// Combines the memory's intrinsic quality signals — recency, salience,
+/// confidence, affect match, relationship, and access history — into
+/// `1 + Σ(component × weight)`. It rescales the relevance base rather than
+/// competing with it, so a high-quality memory can outrank a similarly
+/// relevant one but can never overtake a much more relevant memory (the
+/// additive-structure bug in #346).
+pub fn quality_factor(
+    recency: f32,
+    salience: f32,
+    confidence: f32,
+    emotional: f32,
+    relationship: f32,
+    access: f32,
+    weights: HybridSearchWeights,
+) -> f32 {
+    let component = |value: f32, weight: f32| -> f32 {
+        if value.is_nan() || weight <= 0.0 {
+            0.0
+        } else {
+            value.clamp(0.0, 1.0) * weight
+        }
+    };
+    1.0 + component(recency, weights.recency)
+        + component(salience, weights.salience)
+        + component(confidence, weights.confidence)
+        + component(emotional, weights.emotional_match)
+        + component(relationship, weights.relationship)
+        + component(access, weights.access_boost)
+}
+
+/// Scale-invariant penalty multiplier in `(0, 1]` (#346).
+///
+/// Converts the absolute contradiction and stale penalties into a single
+/// multiplicative retention factor `1 / (1 + Σpenalty)`, so a penalty removes
+/// the same *fraction* of a score regardless of its magnitude. The old
+/// additive subtraction was asymmetric — near-fatal for weak candidates and
+/// negligible for strong ones.
+pub fn penalty_multiplier(contradiction: f32, stale: f32) -> f32 {
+    let contradiction = if contradiction.is_nan() {
+        0.0
+    } else {
+        contradiction.max(0.0)
+    };
+    let stale = if stale.is_nan() { 0.0 } else { stale.max(0.0) };
+    1.0 / (1.0 + contradiction + stale)
+}
+
+/// Compute the hybrid score breakdown for a gathered candidate (#346).
+///
+/// Structure: `total = relevance × quality_factor × penalty_multiplier
+/// + commitment_boost`, clamped to `>= 0`. Relevance (vector + lexical) is the
+/// multiplicative base, quality only rescales it, penalties are a
+/// scale-invariant multiplier, and the commitment boost stays additive so an
+/// active promise surfaces even with zero query relevance.
 pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> MemoryScoreBreakdown {
     let item = &candidate.item;
     let lexical = lexical_overlap_score(options.query_text, &item.title, &item.content);
@@ -235,26 +337,18 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
     let contradiction = contradiction_penalty(item.status);
     let stale = stale_penalty(item.status, options.now, item.valid_until);
 
-    let w = &options.weights;
-    let weighted = access.mul_add(
-        w.access_boost,
-        relationship.mul_add(
-            w.relationship,
-            emotional.mul_add(
-                w.emotional_match,
-                confidence.mul_add(
-                    w.confidence,
-                    salience.mul_add(
-                        w.salience,
-                        recency.mul_add(
-                            w.recency,
-                            lexical.mul_add(w.lexical, candidate.vector_similarity * w.vector),
-                        ),
-                    ),
-                ),
-            ),
-        ),
+    let w = options.weights;
+    let relevance = relevance_score(candidate.vector_similarity, lexical, w);
+    let quality = quality_factor(
+        recency,
+        salience,
+        confidence,
+        emotional,
+        relationship,
+        access,
+        w,
     );
+    let penalty = penalty_multiplier(contradiction, stale);
 
     let commitment_boost = if candidate
         .sources
@@ -265,8 +359,12 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
         0.0
     };
 
-    let total = (weighted + commitment_boost - contradiction - stale).max(0.0);
-    let total = if total.is_nan() { 0.0 } else { total };
+    let total = relevance.mul_add(quality * penalty, commitment_boost);
+    let total = if total.is_nan() || total < 0.0 {
+        0.0
+    } else {
+        total
+    };
 
     MemoryScoreBreakdown {
         vector_similarity: candidate.vector_similarity,
@@ -277,6 +375,8 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
         emotional_match: emotional,
         relationship,
         access_boost: access,
+        relevance,
+        quality_factor: quality,
         contradiction_penalty: contradiction,
         stale_penalty: stale,
         commitment_boost,
@@ -689,5 +789,136 @@ mod tests {
         let ranked = score_and_rank(&options, vec![weak, strong]);
         assert_eq!(ranked.len(), 1);
         assert!(ranked[0].breakdown.vector_similarity > 0.5);
+    }
+
+    fn item_with_quality(salience: f32, confidence: f32, access_count: i64) -> MemoryItem {
+        let mut item = sample_item(MemoryStatus::Active);
+        item.salience = MemorySalience::new(salience);
+        item.confidence = MemoryConfidence::new(confidence);
+        item.access_count = access_count;
+        item
+    }
+
+    #[test]
+    fn quality_cannot_override_relevance() {
+        // Regression for #346: a barely-relevant memory with maximal quality
+        // must not outrank a strongly-relevant memory with low quality.
+        let now = Utc::now();
+        let options = sample_query(now);
+
+        let relevant = GatheredCandidate {
+            item: item_with_quality(0.1, 0.1, 0),
+            vector_similarity: 0.95,
+            sources: vec![MemoryCandidateSource::Vector],
+        };
+        let irrelevant = GatheredCandidate {
+            item: item_with_quality(1.0, 1.0, 50),
+            vector_similarity: 0.0,
+            sources: vec![MemoryCandidateSource::Recent],
+        };
+
+        let ranked = score_and_rank(&options, vec![irrelevant, relevant]);
+        assert_eq!(ranked.len(), 2);
+        assert!(
+            ranked[0].breakdown.vector_similarity > 0.9,
+            "the strongly relevant memory must rank first, got {:?}",
+            ranked[0].breakdown
+        );
+    }
+
+    #[test]
+    fn zero_relevance_scores_zero_without_commitment() {
+        let now = Utc::now();
+        let options = sample_query(now);
+        let candidate = GatheredCandidate {
+            item: item_with_quality(1.0, 1.0, 100),
+            vector_similarity: 0.0,
+            sources: vec![MemoryCandidateSource::Recent],
+        };
+        let breakdown = score_candidate(&options, &candidate);
+        assert!(breakdown.relevance < f32::EPSILON);
+        assert!(breakdown.total < f32::EPSILON);
+    }
+
+    #[test]
+    fn commitment_surfaces_despite_zero_relevance() {
+        let now = Utc::now();
+        let options = sample_query(now);
+        let candidate = GatheredCandidate {
+            item: item_with_quality(0.5, 0.5, 0),
+            vector_similarity: 0.0,
+            sources: vec![MemoryCandidateSource::Commitment],
+        };
+        let breakdown = score_candidate(&options, &candidate);
+        assert!(breakdown.commitment_boost > 0.0);
+        assert!(breakdown.total >= breakdown.commitment_boost);
+    }
+
+    #[test]
+    fn penalty_is_scale_invariant() {
+        // Regression for #346: penalties remove a constant *fraction* of the
+        // score, so a disputed strong candidate keeps its lead over a disputed
+        // weak one (the old absolute subtraction hit weak candidates hardest).
+        let now = Utc::now();
+        let options = sample_query(now);
+
+        let strong = GatheredCandidate {
+            item: item_with_quality(0.9, 0.9, 10),
+            vector_similarity: 0.9,
+            sources: vec![MemoryCandidateSource::Vector],
+        };
+        let weak = GatheredCandidate {
+            item: item_with_quality(0.2, 0.2, 0),
+            vector_similarity: 0.4,
+            sources: vec![MemoryCandidateSource::Vector],
+        };
+
+        let strong_clean = score_candidate(&options, &strong);
+        let weak_clean = score_candidate(&options, &weak);
+
+        let mut disputed_strong_item = strong.item.clone();
+        disputed_strong_item.status = MemoryStatus::Disputed;
+        let strong_disputed = score_candidate(
+            &options,
+            &GatheredCandidate {
+                item: disputed_strong_item,
+                vector_similarity: strong.vector_similarity,
+                sources: strong.sources.clone(),
+            },
+        );
+        let mut disputed_weak_item = weak.item.clone();
+        disputed_weak_item.status = MemoryStatus::Disputed;
+        let weak_disputed = score_candidate(
+            &options,
+            &GatheredCandidate {
+                item: disputed_weak_item,
+                vector_similarity: weak.vector_similarity,
+                sources: weak.sources.clone(),
+            },
+        );
+
+        // Same multiplicative retention factor regardless of magnitude.
+        let strong_retained = strong_disputed.total / strong_clean.total;
+        let weak_retained = weak_disputed.total / weak_clean.total;
+        assert!((strong_retained - weak_retained).abs() < 1e-4);
+        // The strong candidate still beats the weak one once both are disputed.
+        assert!(strong_disputed.total > weak_disputed.total);
+    }
+
+    #[test]
+    fn relevance_and_quality_breakdown_are_exposed() {
+        let now = Utc::now();
+        let options = sample_query(now);
+        let candidate = GatheredCandidate {
+            item: item_with_quality(0.7, 0.8, 3),
+            vector_similarity: 0.6,
+            sources: vec![MemoryCandidateSource::Vector],
+        };
+        let breakdown = score_candidate(&options, &candidate);
+        assert!(breakdown.relevance > 0.0);
+        assert!(breakdown.quality_factor >= 1.0);
+        // total = relevance * quality * penalty (no commitment here).
+        let expected = breakdown.relevance * breakdown.quality_factor;
+        assert!((breakdown.total - expected).abs() < 1e-5);
     }
 }

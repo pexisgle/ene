@@ -30,7 +30,7 @@ pub struct ToolRagConfig {
     pub use_rerank: bool,
     /// Number of candidates to pass to the reranker.
     pub rerank_candidates: usize,
-    /// Minimum similarity score for a tool to be considered.
+    /// Minimum normalized similarity (`[-1, 1]`) for a tool to be considered (#436).
     pub min_similarity: f32,
     /// Whether to warm the index at startup in a background task.
     pub background_index_on_startup: bool,
@@ -67,7 +67,7 @@ impl Default for ToolRagConfig {
     }
 }
 
-/// Serializable field weights.
+/// Serializable field weights (#436).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FieldWeightsConfig {
@@ -79,8 +79,17 @@ pub struct FieldWeightsConfig {
     pub capability: f32,
     /// Weight for the tool example embedding.
     pub example: f32,
-    /// Weight for the negative/unwanted embedding (penalizes matches).
+    /// Deprecated soft-penalty weight for the negative embedding.
+    ///
+    /// Negative examples are now an exclusion gate ([`negative_threshold`](Self::negative_threshold))
+    /// rather than a subtracted score; retained for configuration compatibility
+    /// and no longer used in scoring.
     pub negative: f32,
+    /// Similarity at or above which a tool's negative-example embedding excludes
+    /// it from selection (#436). Range `[0, 1]`; `1.0` effectively disables the
+    /// gate.
+    #[serde(default = "default_negative_threshold")]
+    pub negative_threshold: f32,
     /// Weight for the `HyDE` (hypothetical document embedding).
     ///
     /// Deprecated: unused; scheduled for removal.
@@ -105,6 +114,10 @@ const fn default_hyde_blend() -> f32 {
     0.6
 }
 
+const fn default_negative_threshold() -> f32 {
+    0.85
+}
+
 impl Default for FieldWeightsConfig {
     #[expect(
         deprecated,
@@ -117,6 +130,7 @@ impl Default for FieldWeightsConfig {
             capability: 0.8,
             example: 0.4,
             negative: -0.5,
+            negative_threshold: default_negative_threshold(),
             hyde: 0.7,
             hyde_blend: default_hyde_blend(),
         }

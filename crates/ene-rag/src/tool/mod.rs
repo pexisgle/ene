@@ -1,6 +1,13 @@
 //! Tool RAG pipeline — multi-vector embedding, field-weighted similarity,
 //! optional cosine rerank, and per-category limits (#302, moved from
-//! `ene-tool-rag`).
+//! `ene-tool-rag`; scoring restructured by #436).
+//!
+//! The per-tool relevance score is a *normalized* weighted average over the
+//! fields a tool actually has (best match per field), so it lives in
+//! `[-1, 1]` and does not grow with the number of declared fields or examples.
+//! Negative examples act as an exclusion gate rather than a subtracted
+//! penalty. This mirrors the relevance-driven structure of the memory hybrid
+//! score (#346) so the two policies cannot diverge.
 //!
 //! LLM `HyDE` is deprecated and disabled; `use_hyde` is retained as a no-op
 //! config knob scheduled for removal.
@@ -39,8 +46,15 @@ pub use hybrid::{HybridRerankProvider, hybrid_embed, hyde_document, rerank_tool_
 // ── Per-field similarity weights ──────────────────────────────────────────
 
 /// Controls how strongly each embedding field contributes to the per-tool
-/// relevance score. Negative weights (e.g. on `negative`) produce a soft
-/// penalty rather than hard exclusion.
+/// relevance score (#436).
+///
+/// The score is a weighted average over the fields a tool *actually has*,
+/// taking the best match when a field has several embeddings (examples), so it
+/// is normalized to `[-1, 1]` and independent of field count. The `negative`
+/// field is not averaged in: when a tool's negative-example similarity reaches
+/// [`negative_threshold`](Self::negative_threshold) the tool is excluded
+/// outright (a gate), so declaring negatives can only ever filter, never
+/// penalize a tool relative to one that declares none.
 #[derive(Debug, Clone)]
 pub struct FieldWeights {
     /// Weight for the tool summary embedding.
@@ -51,8 +65,16 @@ pub struct FieldWeights {
     pub capability: f32,
     /// Weight for the tool example embedding.
     pub example: f32,
-    /// Weight for the negative/unwanted embedding (penalizes matches).
+    /// Deprecated soft-penalty weight for the negative embedding.
+    ///
+    /// Negative examples are now a gate ([`negative_threshold`](Self::negative_threshold))
+    /// rather than a subtracted score; this field is retained for configuration
+    /// compatibility and is no longer used in scoring.
     pub negative: f32,
+    /// Similarity at or above which a tool's negative-example embedding excludes
+    /// it from selection (#436). Range `[0, 1]`; `1.0` effectively disables the
+    /// gate.
+    pub negative_threshold: f32,
     /// Weight for the `HyDE` (hypothetical document embedding).
     ///
     /// Deprecated: LLM `HyDE` is disabled; this weight is unused and scheduled for removal.
@@ -72,14 +94,17 @@ pub struct FieldWeights {
 }
 
 impl FieldWeights {
-    /// The weight for a given embedding field.
-    pub const fn for_field(&self, field: EmbeddingField) -> f32 {
+    /// The averaging weight for a positive embedding field (#436).
+    ///
+    /// Returns `None` for [`EmbeddingField::Negative`], which is handled as an
+    /// exclusion gate rather than an averaged component.
+    pub const fn averaging_weight(&self, field: EmbeddingField) -> Option<f32> {
         match field {
-            EmbeddingField::Summary => self.summary,
-            EmbeddingField::Description => self.description,
-            EmbeddingField::Capability => self.capability,
-            EmbeddingField::Example => self.example,
-            EmbeddingField::Negative => self.negative,
+            EmbeddingField::Summary => Some(self.summary),
+            EmbeddingField::Description => Some(self.description),
+            EmbeddingField::Capability => Some(self.capability),
+            EmbeddingField::Example => Some(self.example),
+            EmbeddingField::Negative => None,
         }
     }
 }
@@ -96,6 +121,7 @@ impl Default for FieldWeights {
             capability: 0.8,
             example: 0.4,
             negative: -0.5,
+            negative_threshold: 0.85,
             hyde: 0.7,
             hyde_blend: 0.6,
         }
@@ -114,6 +140,7 @@ impl From<crate::tool::config::FieldWeightsConfig> for FieldWeights {
             capability: c.capability,
             example: c.example,
             negative: c.negative,
+            negative_threshold: c.negative_threshold,
             hyde: c.hyde,
             hyde_blend: c.hyde_blend,
         }
@@ -139,7 +166,7 @@ pub struct ToolRagOptions {
     pub use_rerank: bool,
     /// Number of candidates to consider during reranking.
     pub rerank_candidates: usize,
-    /// Minimum similarity score for a tool to be included.
+    /// Minimum normalized similarity (`[-1, 1]`) for a tool to be included (#436).
     pub min_similarity: f32,
     /// Whether to index tools in the background on startup.
     pub background_index_on_startup: bool,
@@ -809,10 +836,21 @@ pub(crate) fn is_zero_norm(emb: &[f32]) -> bool {
     norm_sq == 0.0 || norm_sq.is_nan()
 }
 
-/// Core scoring + filtering pipeline, extracted for testability.
+/// Core scoring + filtering pipeline, extracted for testability (#436).
 ///
 /// Returns `(tool_name, score)` pairs sorted descending by score,
 /// filtered by `min_similarity` and per-category limits.
+///
+/// Scoring is normalized and field-count-independent:
+/// - For each tool, the best (max) cosine similarity is taken per field, so a
+///   tool with many examples is not rewarded beyond its best one.
+/// - The positive fields a tool *actually has* are combined as a weighted
+///   average `Σ(sim_f × w_f) / Σ(w_f)`, so the score stays in `[-1, 1]`
+///   regardless of how many fields the tool declares and `min_similarity` is a
+///   genuine similarity threshold.
+/// - The `negative` field is an exclusion gate: a tool whose best
+///   negative-example similarity reaches `weights.negative_threshold` is
+///   dropped, so declaring negatives can only filter, never penalize.
 fn score_tools(
     field_rows: &[CachedFieldRow],
     query_embedding: &[f32],
@@ -821,21 +859,55 @@ fn score_tools(
     per_category_limits: &HashMap<String, usize>,
     profiles: &HashMap<ToolName, ToolRagProfile>,
 ) -> Vec<(String, f32)> {
-    let mut per_tool: HashMap<String, f32> = HashMap::new();
-
+    // Best (max) similarity per (tool, field).
+    let mut best_by_field: HashMap<(String, EmbeddingField), f32> = HashMap::new();
     for row in field_rows {
         if is_zero_norm(&row.embedding) {
             continue;
         }
         let sim = cosine_similarity(query_embedding, &row.embedding);
-
-        let weight = weights.for_field(row.field);
-
-        *per_tool.entry(row.tool_name.clone()).or_insert(0.0) += sim * weight;
+        let key = (row.tool_name.clone(), row.field);
+        let entry = best_by_field.entry(key).or_insert(f32::NEG_INFINITY);
+        if sim > *entry {
+            *entry = sim;
+        }
     }
 
-    let mut scored: Vec<(String, f32)> = per_tool
+    // Aggregate positive fields into a weighted average; track the negative gate.
+    let mut weighted_sum: HashMap<String, f32> = HashMap::new();
+    let mut weight_total: HashMap<String, f32> = HashMap::new();
+    let mut negative_sim: HashMap<String, f32> = HashMap::new();
+    for ((tool, field), sim) in best_by_field {
+        match weights.averaging_weight(field) {
+            Some(weight) if weight > 0.0 => {
+                *weighted_sum.entry(tool.clone()).or_insert(0.0) += sim * weight;
+                *weight_total.entry(tool).or_insert(0.0) += weight;
+            }
+            Some(_) => {}
+            None => {
+                let entry = negative_sim.entry(tool).or_insert(f32::NEG_INFINITY);
+                if sim > *entry {
+                    *entry = sim;
+                }
+            }
+        }
+    }
+
+    let mut scored: Vec<(String, f32)> = weighted_sum
         .into_iter()
+        .filter_map(|(tool, sum)| {
+            let total_weight = weight_total.get(&tool).copied().unwrap_or(0.0);
+            if total_weight <= 0.0 {
+                return None;
+            }
+            if negative_sim
+                .get(&tool)
+                .is_some_and(|&neg| neg >= weights.negative_threshold)
+            {
+                return None;
+            }
+            Some((tool, sum / total_weight))
+        })
         .filter(|(_, s)| *s >= min_similarity)
         .collect();
 
@@ -1161,9 +1233,10 @@ mod tests {
     }
 
     #[test]
-    fn score_tools_negative_weight_penalizes() {
+    fn score_tools_negative_field_gates_tool_out() {
         let query = vec![1.0, 0.0];
-        // "a" has a strong negative-field match; its score should be reduced.
+        // "a" matches the query on its summary but also matches its own
+        // negative example strongly — it should be excluded, not penalized.
         let rows = vec![
             row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
             row("a", EmbeddingField::Negative, vec![1.0, 0.0]),
@@ -1178,7 +1251,103 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
         );
-        // "a" score = 1.0*1.0 + 1.0*(-0.5) = 0.5; "b" score = 0.8*1.0 = 0.8.
+        assert_eq!(scored.len(), 1);
         assert_eq!(scored[0].0, "b");
+    }
+
+    #[test]
+    fn score_tools_weak_negative_match_does_not_exclude() {
+        let query = vec![1.0, 0.0];
+        // "a" has a negative example, but it is only weakly similar to the
+        // query (below the gate threshold), so "a" stays in the result.
+        let rows = vec![
+            row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
+            row("a", EmbeddingField::Negative, vec![0.0, 1.0]),
+        ];
+        let weights = FieldWeights::default();
+        let scored = score_tools(
+            &rows,
+            &query,
+            &weights,
+            0.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(scored.len(), 1);
+        assert_eq!(scored[0].0, "a");
+    }
+
+    #[test]
+    fn score_tools_is_independent_of_field_count() {
+        // Regression for #436: a tool with many fields must not beat a
+        // more-relevant tool that declares fewer fields.
+        let query = vec![1.0, 0.0];
+        let mediocre = vec![0.4, 0.0];
+        let rows = vec![
+            // "many": summary + description + capability + 3 examples, all
+            // only weakly aligned with the query.
+            row("many", EmbeddingField::Summary, mediocre.clone()),
+            row("many", EmbeddingField::Description, mediocre.clone()),
+            row("many", EmbeddingField::Capability, mediocre.clone()),
+            row("many", EmbeddingField::Example, mediocre.clone()),
+            row("many", EmbeddingField::Example, mediocre.clone()),
+            row("many", EmbeddingField::Example, mediocre),
+            // "focused": summary only, perfectly aligned.
+            row("focused", EmbeddingField::Summary, vec![1.0, 0.0]),
+        ];
+        let weights = FieldWeights::default();
+        let scored = score_tools(
+            &rows,
+            &query,
+            &weights,
+            0.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(scored.len(), 2);
+        assert_eq!(scored[0].0, "focused");
+        // Normalized scores stay within cosine-similarity range.
+        assert!(scored[0].1 <= 1.0);
+        assert!(scored[1].1 <= 1.0);
+    }
+
+    #[test]
+    fn score_tools_multiple_examples_do_not_inflate_score() {
+        // Regression for #436: adding more examples must not raise the score;
+        // only the best example counts.
+        let query = vec![1.0, 0.0];
+        let one_example = vec![row("one", EmbeddingField::Example, vec![0.4, 0.0])];
+        let many_examples = vec![
+            row("many", EmbeddingField::Example, vec![0.4, 0.0]),
+            row("many", EmbeddingField::Example, vec![0.4, 0.0]),
+            row("many", EmbeddingField::Example, vec![0.4, 0.0]),
+            row("many", EmbeddingField::Example, vec![0.4, 0.0]),
+            row("many", EmbeddingField::Example, vec![0.4, 0.0]),
+        ];
+        let weights = FieldWeights::default();
+        let one = score_tools(
+            &one_example,
+            &query,
+            &weights,
+            -10.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        let many = score_tools(
+            &many_examples,
+            &query,
+            &weights,
+            -10.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(one.len(), 1);
+        assert_eq!(many.len(), 1);
+        assert!(
+            (one[0].1 - many[0].1).abs() < 1e-6,
+            "example count must not change the score: one={} many={}",
+            one[0].1,
+            many[0].1
+        );
     }
 }
