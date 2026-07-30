@@ -21,7 +21,7 @@ body:
         - provider (ene-ai / ene-ai-local / LLMプロバイダー)
         - tool-system (ene-plugin-host / ene-plugin-*)
         - connector (外部サービス連携)
-        - embedding (ene-tool-rag / 埋め込み・RAG検索)
+        - embedding (ene-rag / 埋め込み・RAG検索)
         - voice (音声入出力・STT/TTS)
         - avatar (ene-vrm / アバター)
         - desktop (ene-desktop)

@@ -18,7 +18,7 @@
 - **Why a dedicated policy crate**: `ene-store`'s mandate is persistence (SQLite/SeaORM, schema, vector primitives, candidate gathering). Pure scoring and decay functions touch no database, so housing them there violated the "store is only about persistence" principle and made the store depend on policy it should not own.
 - **Why `MemoryPort::search` returns gathered candidates, not scored results**: the store's job ends at gathering candidates from its indexes; scoring is policy. Returning unranked `GatheredCandidate`s lets callers compose `store.search(...)` with `ene_rag::score_and_rank`, keeping the gather/score split explicit at the trait boundary.
 - **Why one half-life decay primitive**: recall recency (`recency_score`) and lifecycle retention (`decay_score`) independently implemented the same `exp(-λ·age)` formula with different anchors. A single `half_life_decay` kernel removes the duplication while preserving each caller's anchor and post-processing exactly.
-- **Why a `Scorer` trait rather than a dynamic registry**: the memory side scores a gathered candidate into a score breakdown while the tool side scores a field embedding into a scalar — different candidate and score types. A string-keyed registry would erase those types; the trait lets each RAG system keep its own candidate/context/score types while sharing the surrounding pipeline. This is also the extension point for the planned document/workspace index (#185).
+- **Why there is no `Scorer` trait (yet)**: an earlier revision introduced a `Scorer` trait to abstract "score one candidate against a context" across the memory and tool systems. It was removed during review (#302): nothing outside its own unit tests called it, and its tool implementor duplicated the inline logic in the selection pipeline. A trait that exists only to be implemented twice — one of them behind a feature flag — is a liability, not an extension point. When the document/workspace index (#185) introduces a genuine third scoring system, the abstraction can be reintroduced with a real consumer to shape it.
 - **Scope note**: this crate is a *structural* separation. Scoring formulas are preserved exactly as they were; the hybrid-score additive-structure redesign is tracked separately (#346 / #436).
 
 ## API reference
@@ -29,7 +29,7 @@ Struct and method signatures are not duplicated here — they drift. Generate ru
 cargo doc -p ene-rag --open
 ```
 
-Start at the `scoring` and `decay` modules for the memory policy, the `Scorer` trait for the extension point, and the `tool` module (feature-gated) for the tool-selection pipeline.
+Start at the `scoring` and `decay` modules for the memory policy, and the `tool` module (feature-gated) for the tool-selection pipeline.
 
 ---
 

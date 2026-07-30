@@ -7,6 +7,18 @@
 //!
 //! Persistence goes through [`ene_core::EmbeddingStorePort`] rather than the
 //! concrete store type, so this crate never depends on `ene-store`.
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred in the tool pipeline"
+)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "tool scoring and timing deltas use intentional arithmetic"
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "ranked tool selection indexes into scored candidate lists"
+)]
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
 use ene_core::EmbeddingStorePort;

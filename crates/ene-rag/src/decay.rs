@@ -44,13 +44,10 @@ fn age_in_days(reference: DateTime<Utc>, anchor: DateTime<Utc>) -> f64 {
 
 /// Exponential recency score in `[0.0, 1.0]` using half-life decay in days.
 ///
-/// Anchor: `last_accessed_at → updated_at → created_at`. Used for recall
+/// Anchor: `last_accessed_at → updated_at`. Used for recall
 /// ranking among recallable rows.
 pub fn recency_score(reference: DateTime<Utc>, item: &MemoryItem, half_life_days: f64) -> f32 {
-    let anchor = item
-        .last_accessed_at
-        .or(Some(item.updated_at))
-        .unwrap_or(item.created_at);
+    let anchor = item.last_accessed_at.unwrap_or(item.updated_at);
     half_life_decay(age_in_days(reference, anchor), half_life_days)
 }
 

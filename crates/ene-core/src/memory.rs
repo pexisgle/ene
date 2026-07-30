@@ -597,6 +597,12 @@ pub struct ScoredMemory {
 /// Produced by [`MemoryPort::search`](crate::MemoryPort::search) and consumed
 /// by the `ene-rag` scoring layer. Lives in `ene-core` so both the store
 /// (gatherer) and the RAG crate (scorer) can name it without a cycle.
+///
+/// Carries `Serialize`/`Deserialize` so it can cross a process boundary in the
+/// future (e.g. an out-of-process store). Note that each candidate embeds a full
+/// [`MemoryItem`] — including its `content` string — so a large candidate set can
+/// produce a sizeable serialized payload; any future IPC path should stay
+/// size-aware (cap candidate counts, or send identifiers instead of full items).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GatheredCandidate {
     /// The recalled memory item.

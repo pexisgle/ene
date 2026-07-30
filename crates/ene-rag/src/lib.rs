@@ -30,7 +30,7 @@
 //! `ene-runtime` enables `tool` to build the selection pipeline.
 //!
 //! ```text
-//! ene-core  ←  ene-rag            (scoring, decay, Scorer trait)
+//! ene-core  ←  ene-rag            (scoring, decay)
 //! ene-core  ←  ene-rag[tool]      (+ tool selection; needs ene-ai)
 //! ene-core  ←  ene-store          (persistence; uses ene-rag scoring core)
 //! ```
@@ -44,10 +44,6 @@
 //! - [`scoring`] — hybrid memory scoring (`score_candidate` and its component
 //!   functions) plus [`score_and_rank`](scoring::score_and_rank), the
 //!   gather→score composition entry point.
-//! - [`scorer`] — the [`Scorer`](scorer::Scorer) trait extension point and its
-//!   memory-recall implementor ([`MemoryScorer`](scorer::MemoryScorer)); the
-//!   tool-selection implementor ([`ToolScorer`](scorer::ToolScorer)) is behind
-//!   the `tool` feature.
 //! - [`tool`] *(feature = `tool`)* — the tool-selection RAG pipeline (absorbed
 //!   from `ene-tool-rag`): multi-vector embedding, weighted field similarity,
 //!   rerank, per-category limits. Persistence goes through
@@ -66,18 +62,6 @@
 //! preserved exactly as they were; the hybrid-score additive-structure redesign
 //! is tracked separately (#346 / #436).
 #![warn(missing_docs)]
-#![expect(
-    clippy::option_if_let_else,
-    reason = "nursery style; match/if-let clarity preferred locally"
-)]
-#![expect(
-    clippy::arithmetic_side_effects,
-    reason = "RAG scoring and timing deltas use intentional arithmetic"
-)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "ranked tool selection indexes into scored candidate lists"
-)]
 #![cfg_attr(
     test,
     expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions",)
@@ -85,8 +69,6 @@
 
 /// Decay scoring and lifecycle thresholds.
 pub mod decay;
-/// The `Scorer` trait extension point and its implementors.
-pub mod scorer;
 /// Hybrid memory search scoring.
 pub mod scoring;
 /// Tool-selection RAG pipeline (absorbed from `ene-tool-rag`).
@@ -97,9 +79,6 @@ pub use decay::{
     ARCHIVE_THRESHOLD, FADE_THRESHOLD, active_decay_anchor, decay_score, emotional_impact,
     faded_decay_anchor, half_life_decay, recency_score, target_status_after_decay,
 };
-pub use scorer::{MemoryScorer, Scorer};
-#[cfg(feature = "tool")]
-pub use scorer::{ToolFieldEmbedding, ToolScoreContext, ToolScorer};
 pub use scoring::{
     access_boost_score, contradiction_penalty, document_lexical_similarity, emotional_match_score,
     is_recallable_status, lexical_overlap_score, relationship_score, score_and_rank,
