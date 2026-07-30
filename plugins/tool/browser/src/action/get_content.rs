@@ -1,4 +1,4 @@
-use ene_tool_sdk::prelude::*;
+use ene_plugin::prelude::*;
 use std::sync::Arc;
 
 #[derive(Clone, Default, Deserialize, JsonSchema, ToolAction)]
@@ -69,11 +69,11 @@ impl GetContentAction {
             .map_err(|e| ToolError::execution_failed(format!("Failed to get content: {e}")))?;
 
         let extracted = match format {
-            "html" => ene_tool_sdk::html::extract_html(&html, extract, trim),
-            _ => ene_tool_sdk::html::extract_markdown(&html, extract, trim),
+            "html" => ene_util::html::extract_html(&html, extract, trim),
+            _ => ene_util::html::extract_markdown(&html, extract, trim),
         };
 
-        Ok(ene_tool_sdk::truncate::Truncate::simple(&extracted, 15000))
+        Ok(ene_util::truncate::Truncate::simple(&extracted, 15000))
     }
 }
 

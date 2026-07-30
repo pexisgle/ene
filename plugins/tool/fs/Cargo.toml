@@ -15,7 +15,7 @@ path = "src/main.rs"
 ene-plugin = { workspace = true }
 ene-plugin-db = { workspace = true }
 ene-plugin-proto = { workspace = true }
-ene-tool-sdk = { workspace = true }
+ene-util = { workspace = true }
 tokio = { workspace = true, features = ["fs", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

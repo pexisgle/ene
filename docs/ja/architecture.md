@@ -63,8 +63,7 @@ flowchart TD
   Store --> PluginDb[crates/ene-plugin-db]
 
   Tool[crates/ene-plugin] --> Proto
-  ToolSdk[crates/ene-tool-sdk] --> Tool
-  ToolSdk --> Macros[crates/ene-tool-macros]
+  Tool --> Macros[crates/ene-tool-macros]
 
   ToolHost -.IPC生成.-> Anthropic[plugins/provider/anthropic]
   ToolHost -.IPC生成.-> ToolApp[plugins/tool/app]
@@ -143,8 +142,7 @@ flowchart TD
 | `ene-connector` | プラットフォーム連携 (Discord, Telegram, Slack, Webhook) および MCP クライアント/サーバーブリッジ |
 | `ene-plugin-host` | プラグインプロセス監視、MCP サーバー発見、ヘルスチェック、サーキットブレーカー |
 | `ene-plugin-proto` | IPC Protocol v4 ワイヤーメッセージ、バージョン定義、フレーミング |
-| `ene-plugin` | プラグイン開発 SDK & `ToolPluginAdapter` ファサード |
-| `ene-tool-sdk` | ツールプラグイン開発 SDK (`ToolAction`, `ActionSetProvider`, prelude) |
+| `ene-plugin` | プラグイン開発 SDK: `ToolPlugin`/`LlmPlugin` ファサード、`ToolAction`/`ActionSetProvider`、prelude |
 | `ene-plugin-db` | ステートフルプラグインの DB 操作用型付き IPC クライアント |
 | `ene-tool-macros` | Proc-macro: `#[derive(ToolAction)]`, `#[derive(ToolSpec)]`, `#[tool_action]` |
 | `ene-rag` | RAG ポリシー層: 記憶想起のスコアリング/減衰、ツール選択と再ランク (旧 `ene-tool-rag` を吸収) |

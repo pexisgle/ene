@@ -40,12 +40,12 @@ Ene Workspace
 │   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
 │   ├── ene-rag            (RAG policy: memory scoring/decay, tool selection)
 │   ├── ene-connector      (Shared connector framework & MCP bridge)
+│   ├── ene-util           (Pure utilities: truncation, HTML-to-Markdown)
 │   └── ene-vrm            (3D VRM 1.0 loader & wgpu renderer)
 ├── Plugin Architecture
 │   ├── ene-plugin-proto   (IPC wire protocol v4 definitions)
 │   ├── ene-plugin         (Plugin authoring SDK & adapter facade)
 │   ├── ene-plugin-host    (Plugin process manager & supervisor)
-│   ├── ene-tool-sdk       (Tool plugin authoring SDK: ToolAction, providers, helpers)
 │   ├── ene-plugin-db      (Plugin stateful DB IPC client)
 │   └── ene-tool-macros    (Proc-macros for tool actions)
 └── Out-of-Process Plugins

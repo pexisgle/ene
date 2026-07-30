@@ -67,6 +67,9 @@ Violating these is the most common way to break this repo:
 - `ene-plugin-proto` is wire ABI only. `ene-plugin` is the authoring facade,
   `ene-plugin-host` owns process/registry orchestration, `ene-vrm` is rendering-only.
   Never move business or DB logic into ABI crates.
+- `ene-util` — dependency-isolated pure utility functions (truncate, html). No I/O, no
+  business logic, no state. New helpers go here only if they are pure functions with
+  dependencies that can be feature-gated; anything else belongs in a domain crate.
 - API v1 invariants: every turn has a `TurnId`; `run` is single-flight and returns
   `RunError::Busy`; `Terminal` follows history commit and synchronous finalization (deferred
   memory work may continue after it); `Performance` is the presentation event, kept separate
@@ -100,7 +103,7 @@ hand-edit or commit it.
 ## Plugins and IPC
 
 New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`. Derive
-`ToolAction`, build on `ene_tool_sdk::{prelude, ActionSetProvider}`, then serve via
+`ToolAction`, build on `ene_plugin::{prelude, ActionSetProvider}`, then serve via
 `run_plugin_server(PluginDispatch::new(Some(Arc::new(ToolProviderPlugin::new(provider))), None, None, None, None))`
 (see `plugins/tool/utility/src/main.rs`). Use namespaced `<namespace>.<action>` names and
 declare side effects / sandbox needs. Verify with `/tool list` and update both

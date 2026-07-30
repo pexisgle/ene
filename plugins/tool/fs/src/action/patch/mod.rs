@@ -4,7 +4,7 @@ use self::patch_parser::PatchOperation;
 use crate::undo::UndoEntry;
 use crate::utils::sandbox::Sandbox;
 use crate::utils::{SandboxRef, default_sandbox, resolve_sandbox};
-use ene_tool_sdk::prelude::*;
+use ene_plugin::prelude::*;
 use std::path::Path;
 
 pub async fn apply_patch(patch_text: &str, sandbox: &Sandbox) -> Result<String, ToolError> {

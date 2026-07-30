@@ -22,6 +22,7 @@ parking_lot = { workspace = true }
 ene-config = { workspace = true }
 ene-core = { workspace = true }
 ene-ai = { workspace = true }
+ene-util = { workspace = true }
 ene-rag = { workspace = true }
 
 chrono = { workspace = true }

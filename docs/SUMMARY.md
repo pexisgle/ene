@@ -21,7 +21,8 @@
 - [Voice (`ene-voice`)](crates/voice.md)
 - [Connector (`ene-connector`)](crates/connector.md)
 - [Plugin System (`ene-plugin-*`)](crates/plugin-system.md)
-- [Tool SDK (`ene-tool-sdk`)](crates/tool-sdk.md)
+- [Tool Authoring (`ene-tool-macros` & friends)](crates/tool-sdk.md)
+- [Utilities (`ene-util`)](crates/util.md)
 - [VRM (`ene-vrm`)](crates/vrm.md)
 
 # Applications

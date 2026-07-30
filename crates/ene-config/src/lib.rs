@@ -33,11 +33,6 @@ pub mod prompts;
 pub mod resources;
 /// Centralized config store with dirty tracking for auto-save.
 pub mod store;
-/// Smart content truncation helpers (folded from former `ene-common`).
-pub mod truncate;
-
-#[doc(no_inline)]
-pub use truncate::{Truncate, TruncateResult};
 
 pub use character_card::{
     CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension, ExpressionDefinition,

@@ -78,7 +78,7 @@ struct RegistryState {
 ///
 /// A zero-sized handle type; all state lives in a process-global
 /// [`OnceLock`]. There is intentionally one registry per process, not one
-/// per [`crate::local_engine::llm::LocalLlmEngine`]/etc. instance — sharing
+/// per [`crate::engine_adapter::llm::LocalLlmEngine`]/etc. instance — sharing
 /// the budget across independently-constructed adapters is the entire
 /// point.
 pub struct ResourceRegistry;
@@ -149,7 +149,7 @@ impl ResourceRegistry {
 #[cfg(test)]
 mod tests {
     use super::{ResourceClass, ResourceRegistry, default_permits};
-    use crate::local_engine::descriptor::ResourceBudgets;
+    use crate::engine_adapter::descriptor::ResourceBudgets;
 
     #[test]
     fn default_permits_matches_documented_values() {

@@ -43,19 +43,25 @@
     expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")
 )]
 
+/// Unified tool action interface (merged from former `ene-tool-sdk`).
+pub mod action;
 /// Compatibility adapter for wrapping legacy [`ToolProvider`] as [`ToolPlugin`].
 pub mod compat;
 /// Plugin trait and streaming chunk types.
 pub mod plugin;
 /// Plugin IPC server and dispatch loop.
 pub mod server;
+/// `ToolProvider` adapters over `Vec<Box<dyn ToolAction>>` (or a single action).
+pub mod tool_provider;
 
+pub use action::{ToolAction, ToolSpecArgs};
 pub use compat::ToolProviderPlugin;
 pub use plugin::{
     EmbedPlugin, LlmPlugin, PluginStream, PluginStreamChunk, SttPlugin, ToolPlugin,
     ToolPluginCapabilities, TtsPlugin,
 };
 pub use server::{PluginDispatch, run_plugin_server};
+pub use tool_provider::{ActionSetProvider, SingleActionProvider};
 
 // Re-export key types from ene-plugin-proto so plugin authors only need
 // to depend on `ene-plugin` for the full authoring surface.
@@ -98,18 +104,63 @@ pub use ene_plugin_proto::{DeferredStatus, SandboxConfigData};
 /// `tracing`) with no AI, DB, or wire-ABI concepts of its own, so this
 /// dependency does not cross any architecture boundary documented in
 /// `AGENTS.md`.
+///
+/// ## Submodules
+///
+/// The prelude is organized into two submodules for clarity:
+///
+/// - [`prelude::tool`] — Tool plugin authoring: `ToolAction`, `ActionSetProvider`,
+///   derive macros, and related types.
+/// - [`prelude::provider`] — Provider plugin authoring: `LlmPlugin`, `TtsPlugin`,
+///   `SttPlugin`, `EmbedPlugin`, server entry point, and inference discipline.
+///
+/// A backward-compatible glob re-export at the prelude root means
+/// `use ene_plugin::prelude::*;` still brings in everything.
 pub mod prelude {
-    #[doc(no_inline)]
-    pub use ene_infer::{
-        EngineConfig, EngineError, EngineHandle, JobContext, LocalModel, StopReason,
-    };
+    /// Tool plugin authoring imports.
+    pub mod tool {
+        #[doc(no_inline)]
+        pub use async_trait::async_trait;
+        #[doc(no_inline)]
+        pub use ene_plugin_proto::ToolError;
+        #[doc(no_inline)]
+        pub use ene_tool_macros::{ToolAction, ToolSpec, tool_action};
+        #[doc(no_inline)]
+        pub use schemars::JsonSchema;
+        #[doc(no_inline)]
+        pub use serde::Deserialize;
 
+        #[doc(no_inline)]
+        pub use crate::ActionSetProvider;
+        #[doc(no_inline)]
+        pub use crate::SingleActionProvider;
+        #[doc(no_inline)]
+        pub use crate::ToolAction as _;
+        #[doc(no_inline)]
+        pub use crate::ToolSpecArgs;
+    }
+
+    /// Provider plugin authoring imports (LLM, TTS, STT, embedding).
+    pub mod provider {
+        #[doc(no_inline)]
+        pub use ene_infer::{
+            EngineConfig, EngineError, EngineHandle, JobContext, LocalModel, StopReason,
+        };
+
+        #[doc(no_inline)]
+        pub use crate::{
+            ConcurrencyHint, EmbedPlugin, LlmPlugin, LlmProviderSpec, PluginDispatch, PluginError,
+            PluginStream, PluginStreamChunk, SttPlugin, SttProviderSpec, ToolPlugin,
+            ToolPluginCapabilities, TtsPlugin, TtsProviderSpec, run_plugin_server,
+        };
+    }
+
+    // Backward-compatible glob re-exports so `use ene_plugin::prelude::*;`
+    // continues to work for both tool and provider plugin authors.
     #[doc(no_inline)]
-    pub use crate::{
-        ConcurrencyHint, EmbedPlugin, LlmPlugin, LlmProviderSpec, PluginDispatch, PluginError,
-        PluginStream, PluginStreamChunk, SttPlugin, SttProviderSpec, ToolPlugin,
-        ToolPluginCapabilities, TtsPlugin, TtsProviderSpec, run_plugin_server,
-    };
+    pub use provider::*;
+    #[doc(no_inline)]
+    pub use tool::*;
 }
 
 #[cfg(test)]

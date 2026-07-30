@@ -69,7 +69,7 @@ pub fn derive_tool_spec(input: TokenStream) -> TokenStream {
 /// # Example
 ///
 /// ```ignore
-/// use ene_tool_sdk::prelude::*;
+/// use ene_plugin::prelude::*;
 ///
 /// #[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
 /// #[tool(namespace = "app", name = "press_key",
@@ -147,17 +147,17 @@ fn expand_tool_action_derive(ast: &DeriveInput) -> syn::Result<TokenStream2> {
         #spec_output
 
         #[::async_trait::async_trait]
-        impl #impl_generics ::ene_tool_sdk::ToolAction for #ident #ty_generics #where_clause {
+        impl #impl_generics ::ene_plugin::ToolAction for #ident #ty_generics #where_clause {
             fn name(&self) -> &'static str {
-                <Self as ::ene_tool_sdk::ToolSpecArgs>::TOOL_NAME
+                <Self as ::ene_plugin::ToolSpecArgs>::TOOL_NAME
             }
 
             fn definition(&self) -> ::ene_plugin_proto::ToolSpec {
-                <Self as ::ene_tool_sdk::ToolSpecArgs>::spec()
+                <Self as ::ene_plugin::ToolSpecArgs>::spec()
             }
 
             fn rag_profile(&self) -> ::ene_plugin_proto::ToolRagProfile {
-                <Self as ::ene_tool_sdk::ToolSpecArgs>::rag_profile()
+                <Self as ::ene_plugin::ToolSpecArgs>::rag_profile()
             }
 
             async fn execute(&self, arguments: &str) -> ::std::result::Result<::std::string::String, ::ene_plugin_proto::ToolError> {
@@ -165,7 +165,7 @@ fn expand_tool_action_derive(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                     ::ene_plugin_proto::ToolError::InvalidArguments {
                         message: ::std::format!(
                             "Invalid arguments for {}: {e}",
-                            <Self as ::ene_tool_sdk::ToolSpecArgs>::TOOL_NAME
+                            <Self as ::ene_plugin::ToolSpecArgs>::TOOL_NAME
                         ),
                     }
                 })?;
@@ -243,17 +243,17 @@ fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) {
     }
     let name_fn: syn::ImplItem = syn::parse_quote! {
         fn name(&self) -> &'static str {
-            <#args_ty as ::ene_tool_sdk::ToolSpecArgs>::TOOL_NAME
+            <#args_ty as ::ene_plugin::ToolSpecArgs>::TOOL_NAME
         }
     };
     let def_fn: syn::ImplItem = syn::parse_quote! {
         fn definition(&self) -> ::ene_plugin_proto::ToolSpec {
-            <#args_ty as ::ene_tool_sdk::ToolSpecArgs>::spec()
+            <#args_ty as ::ene_plugin::ToolSpecArgs>::spec()
         }
     };
     let rag_fn: syn::ImplItem = syn::parse_quote! {
         fn rag_profile(&self) -> ::ene_plugin_proto::ToolRagProfile {
-            <#args_ty as ::ene_tool_sdk::ToolSpecArgs>::rag_profile()
+            <#args_ty as ::ene_plugin::ToolSpecArgs>::rag_profile()
         }
     };
     item.items.push(name_fn);
@@ -398,7 +398,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl #impl_generics ::ene_tool_sdk::ToolSpecArgs for #ident #ty_generics #where_clause {
+        impl #impl_generics ::ene_plugin::ToolSpecArgs for #ident #ty_generics #where_clause {
             const TOOL_NAME: &'static str = #tool_name_str;
             fn spec() -> ::ene_plugin_proto::ToolSpec {
                 <Self>::spec()

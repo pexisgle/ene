@@ -11,7 +11,7 @@ This family of crates forms Ene's unified, out-of-process IPC plugin infrastruct
 - `ene-plugin-proto` is wire-protocol concerns only — it must not gain business logic, database access, or AI-provider dependencies. It defines both the tool IPC wire messages and the richer plugin protocol (handshake, capability declarations, streaming LLM messages) plus the cross-platform transport layer (UDS / named pipe framing).
 - `ene-plugin` is the authoring facade consumed by plugin binaries; it does not depend on `ene-runtime`, `ene-mind`, or `ene-store`. It is not used by the host.
 - `ene-plugin-host` is host-side only: process discovery/spawning, handshake negotiation, capability routing into the tool and LLM provider registries, health probes, and shutdown. It bridges plugin-provided LLM providers into `ene_ai::LlmProvider` via an IPC adapter, and aggregates plugin-provided and MCP tools behind a single tool-registry interface.
-- Keep `plugins/tool/*` and `plugins/provider/*` binaries lightweight — they depend on `ene-plugin`/`ene-tool-sdk`, not on arbitrary cross-crate business logic.
+- Keep `plugins/tool/*` and `plugins/provider/*` binaries lightweight — they depend on `ene-plugin`, not on arbitrary cross-crate business logic.
 
 ## Design rationale
 

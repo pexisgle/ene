@@ -1,7 +1,7 @@
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::{context::AppContext, style};
 use async_trait::async_trait;
-use ene_config::Truncate;
+use ene_util::Truncate;
 
 /// Map an API v1 [`ene_runtime::PublicApiError`] onto the CLI's own error
 /// type, preserving the actor-dead vs. execution-failure distinction that
@@ -160,7 +160,7 @@ async fn handle_search(ctx: &AppContext, query: &str) -> Result<CommandOutcome, 
     } else {
         println!("{}", style::success("Matching messages:"));
         for (session_id, msg) in matches {
-            let preview = ene_config::Truncate::simple(&msg.content, 80);
+            let preview = ene_util::Truncate::simple(&msg.content, 80);
             println!(
                 "  [{}] {}: {}",
                 style::header(session_id.as_str()),

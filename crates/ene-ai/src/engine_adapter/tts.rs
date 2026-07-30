@@ -169,7 +169,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::{LocalTtsEngine, TtsSynthesisRequest, TtsSynthesisResponse, map_engine_error};
-    use crate::local_engine::descriptor::{EngineDescriptor, ResourceClass};
+    use crate::engine_adapter::descriptor::{EngineDescriptor, ResourceClass};
     use crate::traits::{AudioProviderError, TtsProvider};
 
     #[derive(Debug, thiserror::Error)]
@@ -323,8 +323,8 @@ mod tests {
         let handle = ene_infer::EngineHandle::spawn(|| Ok(MockTtsModel::default()), cfg);
         let descriptor = EngineDescriptor::new(
             "mock-tts",
-            crate::local_engine::descriptor::CapabilitySet::empty()
-                .with(crate::local_engine::descriptor::Capability::Tts),
+            crate::engine_adapter::descriptor::CapabilitySet::empty()
+                .with(crate::engine_adapter::descriptor::Capability::Tts),
             resource,
         );
         LocalTtsEngine::with_chunk_samples(handle, descriptor, chunk_samples)

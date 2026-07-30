@@ -40,12 +40,12 @@ Ene ワークスペース
 │   ├── ene-voice          (ローカル STT/TTS/VAD 音声パイプライン)
 │   ├── ene-rag            (RAG ポリシー: 記憶スコアリング/減衰、ツール選択)
 │   ├── ene-connector      (共有コネクタフレームワーク & MCP ブリッジ)
+│   ├── ene-util           (純粋ユーティリティ: 切り詰め、HTML→Markdown)
 │   └── ene-vrm            (3D VRM 1.0 ローダー & wgpu レンダラー)
 ├── プラグインシステム
 │   ├── ene-plugin-proto   (IPC ワイヤープロトコル v4 定義)
 │   ├── ene-plugin         (プラグイン開発 SDK & アダプタファサード)
 │   ├── ene-plugin-host    (プラグインプロセス管理 & スーパーバイザ)
-│   ├── ene-tool-sdk       (ツールプラグイン開発 SDK: ToolAction、プロバイダ、ヘルパー)
 │   ├── ene-plugin-db      (プラグイン用状態保持 DB IPC クライアント)
 │   └── ene-tool-macros    (ツールアクション用 Proc-macro)
 └── プロセス外プラグイン

@@ -1,4 +1,4 @@
-//! Smart content truncation helpers (folded from former `ene-common`).
+//! Smart content truncation helpers.
 
 use std::collections::VecDeque;
 

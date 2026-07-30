@@ -34,14 +34,14 @@ pub mod types;
 /// Role enum for conversation history.
 #[doc(no_inline)]
 pub use ene_ai::Role;
-/// Truncation utility.
-pub use ene_config::truncate::Truncate;
 /// Character-card types re-exported from `ene-config`.
 #[doc(no_inline)]
 pub use ene_config::{
     CharacterAsset, CharacterCardData, CharacterCardV3, ExpressionDefinition, ResolvedExpression,
     expand_cbs_macros, resolve_expressions,
 };
+/// Truncation utility.
+pub use ene_util::truncate::Truncate;
 /// Session error type.
 pub use error::EneSessionError;
 /// Central session holder.

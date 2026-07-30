@@ -150,7 +150,7 @@ where
         // streaming. A model that wants real incremental delivery should
         // implement `ene_infer::StreamingLocalModel` and be wrapped in
         // `StreamingLocalLlmEngine` instead (see that type's docs, and
-        // `crate::local_engine`'s module docs on why this had to be a
+        // `crate::engine_adapter`'s module docs on why this had to be a
         // separate type rather than a second `impl` here).
         let text = self.chat_completion(messages, None).await?;
         Ok(Box::pin(tokio_stream::once(Ok(LlmResponseChunk {
@@ -392,7 +392,7 @@ mod tests {
     use super::{
         LlmChatRequest, LlmChatResponse, LocalLlmEngine, StreamingLocalLlmEngine, map_engine_error,
     };
-    use crate::local_engine::descriptor::{
+    use crate::engine_adapter::descriptor::{
         Capability, CapabilitySet, EngineDescriptor, ResourceClass,
     };
     use crate::message::{LlmMessage, UserMessagePart};
@@ -620,8 +620,8 @@ mod tests {
         // test's bottleneck — only the engine's own bounded queue
         // (`queue_depth: 1`) should produce `Busy`.
         let resource = ResourceClass::Gpu { device: 207 };
-        crate::local_engine::resource::ResourceRegistry::configure_all(
-            &crate::local_engine::descriptor::ResourceBudgets::new().with_permits(resource, 8),
+        crate::engine_adapter::resource::ResourceRegistry::configure_all(
+            &crate::engine_adapter::descriptor::ResourceBudgets::new().with_permits(resource, 8),
         );
         let provider = std::sync::Arc::new(engine(
             resource,

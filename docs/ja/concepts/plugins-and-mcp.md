@@ -207,10 +207,10 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
 
 ## 7. カスタムツールプラグインの開発
 
-開発者は `ene-tool-sdk` の `#[derive(ToolAction)]` と `ene-plugin` のサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-tool-macros --open` を参照してください：
+開発者は `ene-plugin` の `#[derive(ToolAction)]`（`ene-tool-macros` 経由）とサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-tool-macros --open` を参照してください：
 
 ```rust,ignore
-use ene_tool_sdk::prelude::*;
+use ene_plugin::prelude::*;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(namespace = "custom", name = "greet",
