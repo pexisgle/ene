@@ -1282,10 +1282,12 @@ mod tests {
         // Regression for #436: a tool with many fields must not beat a
         // more-relevant tool that declares fewer fields.
         let query = vec![1.0, 0.0];
-        let mediocre = vec![0.4, 0.0];
+        // Cosine similarity is direction-based, so use a vector at a real
+        // angle to the query (sim ~0.707), not merely a shorter one.
+        let mediocre = vec![0.5, 0.5];
         let rows = vec![
             // "many": summary + description + capability + 3 examples, all
-            // only weakly aligned with the query.
+            // only moderately aligned with the query.
             row("many", EmbeddingField::Summary, mediocre.clone()),
             row("many", EmbeddingField::Description, mediocre.clone()),
             row("many", EmbeddingField::Capability, mediocre.clone()),
