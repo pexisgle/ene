@@ -228,13 +228,16 @@ async fn panic_reason_survives_into_engine_down() {
 
 #[tokio::test]
 async fn stalled_worker_reports_engine_down_not_busy_forever() {
+    // Default escalation factor (3): confirm_threshold = 30ms × 3 = 90ms.
+    // The stalled job runs for 300ms without ticking, well past the
+    // confirmation threshold, so the engine is permanently disabled.
     let cfg =
         EngineConfig::new(4, Duration::from_secs(5)).with_stall_timeout(Duration::from_millis(30));
     let engine = spawn_mock(cfg);
 
     // This job never calls `tick()`, so the watchdog should notice the
     // stall and mark the engine down while the job is still running (it
-    // takes 300ms; the watchdog polls roughly every 7.5ms).
+    // takes 300ms; the watchdog confirms at ~90ms, polling every ~7.5ms).
     engine
         .submit(
             MockRequest::stalled(Duration::from_millis(300)),
@@ -254,9 +257,83 @@ async fn stalled_worker_reports_engine_down_not_busy_forever() {
         .await;
     assert!(
         matches!(after, Err(EngineError::EngineDown { .. })),
-        "expected EngineDown once a stall was detected, got {after:?} (Busy would mean a wedged \
+        "expected EngineDown once a stall was confirmed, got {after:?} (Busy would mean a wedged \
          worker fills the queue forever with no way for callers to tell it apart from transient \
          saturation)"
+    );
+}
+
+/// A job that stops ticking for longer than `stall_timeout` but completes
+/// before the escalation threshold (`stall_timeout × escalation_factor`)
+/// is a false positive: the engine must remain fully usable afterward.
+#[tokio::test]
+async fn false_positive_stall_does_not_permanently_disable_engine() {
+    // stall_timeout=30ms, escalation_factor=3 → confirm at 90ms.
+    // The job runs for 60ms without ticking: long enough to trigger a
+    // *suspected* stall (>30ms) but short enough to complete before
+    // confirmation (<90ms).
+    let cfg = EngineConfig::new(4, Duration::from_secs(5))
+        .with_stall_timeout(Duration::from_millis(30))
+        .with_stall_escalation_factor(3);
+    let engine = spawn_mock(cfg);
+
+    let result = engine
+        .submit(
+            MockRequest::stalled(Duration::from_millis(60)),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "expected the false-positive stall job to still succeed, got {result:?}"
+    );
+
+    // Give the watchdog time to observe the worker going idle and clear
+    // its suspicion.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The engine must still accept and complete jobs.
+    let next = engine
+        .submit(
+            MockRequest::scripted(Duration::ZERO, false),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        next.is_ok(),
+        "expected the engine to remain usable after a false-positive stall, got {next:?}"
+    );
+}
+
+/// With `escalation_factor=1`, the first detection is immediately final
+/// (the pre-graduated behavior): a stalled job disables the engine as soon
+/// as `stall_timeout` elapses.
+#[tokio::test]
+async fn escalation_factor_one_confirms_immediately() {
+    let cfg = EngineConfig::new(4, Duration::from_secs(5))
+        .with_stall_timeout(Duration::from_millis(30))
+        .with_stall_escalation_factor(1);
+    let engine = spawn_mock(cfg);
+
+    engine
+        .submit(
+            MockRequest::stalled(Duration::from_millis(300)),
+            CancellationToken::new(),
+        )
+        .await
+        .ok();
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let after = engine
+        .submit(
+            MockRequest::scripted(Duration::ZERO, false),
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(
+        matches!(after, Err(EngineError::EngineDown { .. })),
+        "expected EngineDown with escalation_factor=1, got {after:?}"
     );
 }
 
