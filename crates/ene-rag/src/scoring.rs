@@ -16,15 +16,22 @@ use unicode_normalization::UnicodeNormalization;
 use crate::decay::recency_score;
 
 /// Whether a character belongs to a CJK script that is written without spaces
-/// between words (Han ideographs, Hiragana, Katakana, Hangul).
+/// between words (Han ideographs, Hiragana, Katakana, Hangul), plus the CJK
+/// iteration/ideographic marks (e.g. `々`, `〇`, `〆`).
 ///
 /// These are the ranges relevant to Japanese (plus Hangul for Korean); half-width
 /// and compatibility forms are folded into these ranges by NFKC normalization in
-/// [`tokenize`] before this is consulted.
+/// [`tokenize`] before this is consulted. The iteration marks are included because
+/// `char::is_alphanumeric()` returns `true` for them (category `Lm`), so without
+/// this they would be misrouted through the non-CJK word path and split common
+/// words like `人々` / `時々` into lone unigrams.
 fn is_cjk(ch: char) -> bool {
     matches!(
         u32::from(ch),
-        0x3040..=0x309F   // Hiragana
+        0x3005..=0x3007   // Ideographic iteration (々), closing (〆), zero (〇) marks
+        | 0x3031..=0x3035 // Vertical kana repeat marks (〱–〵)
+        | 0x303B..=0x303C // Vertical ideographic iteration (〻) and masu (〼) marks
+        | 0x3040..=0x309F // Hiragana
         | 0x30A0..=0x30FF // Katakana
         | 0x31F0..=0x31FF // Katakana phonetic extensions
         | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
@@ -456,6 +463,21 @@ mod tests {
         let tokens = tokenize("猫");
         assert!(tokens.contains("猫"));
         assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    fn tokenize_keeps_iteration_mark_in_bigrams() {
+        // The ideographic iteration mark `々` (category Lm) is alphanumeric, so it
+        // must be classified as CJK or it would split words like 人々/時々 into
+        // lone unigrams (Bugbot regression guard).
+        let tokens = tokenize("人々時々色々");
+        assert!(tokens.contains("人々"));
+        assert!(tokens.contains("時々"));
+        assert!(tokens.contains("色々"));
+        assert!(
+            !tokens.contains("々"),
+            "々 must not be emitted as a standalone token, got {tokens:?}"
+        );
     }
 
     #[test]
