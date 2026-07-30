@@ -99,7 +99,15 @@ ene_config::define_config!(
         /// Named plugin entries (tools and providers).
         #[serde(default = "default_plugin_list")]
         pub list: HashMap<String, PluginEntry> = default_plugin_list(),
-        /// Maximum number of concurrent tool calls.
+        /// Maximum number of concurrent in-flight IPC requests per plugin
+        /// connection.
+        ///
+        /// This is a per-connection bound over *all* request types — tool
+        /// calls, pings, `list_tools`, `chat_completion`, and so on — not just
+        /// tool calls. Requests beyond the bound queue (bounded by their own
+        /// timeout) rather than fanning out to the plugin. Chat *streams*
+        /// (`CreateChatStream`) are the exception: they bypass this bound and
+        /// are not counted against it.
         pub max_concurrent: usize = 8,
         /// Maximum number of sequential tool calls per turn.
         #[serde(default = "default_max_rounds")]
