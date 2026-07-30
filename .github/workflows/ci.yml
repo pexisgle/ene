@@ -11,7 +11,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  SCCACHE_CACHE_SIZE: 2G
 
 jobs:
   fmt:
@@ -49,8 +48,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cmd-format: "nix develop --command {0}"
-          cache-directories: ~/.cache/sccache
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run clippy
         run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
 
@@ -77,8 +76,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cmd-format: "nix develop --command {0}"
-          cache-directories: ~/.cache/sccache
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         run: nix develop --command cargo test --workspace
 
@@ -105,8 +104,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cmd-format: "nix develop --command {0}"
-          cache-directories: ~/.cache/sccache
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
       # pre-existing broken-intra-doc-link warnings unrelated to #273 (e.g.
       # ene-ai, ene-voice, apps/ene-desktop). Turning warnings into hard
