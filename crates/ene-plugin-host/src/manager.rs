@@ -982,20 +982,34 @@ impl PluginHostManager {
             }
         }
 
-        let child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)
+        let mut child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)
             .spawn()
             .map_err(|e| PluginHostError::SpawnFailed {
                 name: name.to_string(),
                 reason: e.to_string(),
             })?;
 
-        let conn = IpcPluginConnection::connect(
+        let conn = match IpcPluginConnection::connect(
             &socket_path,
             sandbox.clone(),
             plugin_config.clone(),
             handshake_timeout,
         )
-        .await?;
+        .await
+        {
+            Ok(conn) => conn,
+            Err(e) => {
+                // A handshake failure (e.g. the handshake timeout firing on a
+                // stalling plugin) leaves the just-spawned child running;
+                // dropping a std `Child` does not kill it. Kill and reap it so
+                // a wedged plugin does not leak a process and its socket file
+                // across launches.
+                drop(child.kill());
+                drop(child.wait());
+                ene_plugin_proto::cleanup_path(&socket_path);
+                return Err(e);
+            }
+        };
 
         // The pinned checksum for restart-time verification: the configured
         // checksum when present, otherwise the trust-on-first-use checksum

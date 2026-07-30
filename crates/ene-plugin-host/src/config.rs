@@ -119,6 +119,10 @@ ene_config::define_config!(
         /// blocking startup indefinitely. Plugins that perform heavy
         /// initialization (model loading, etc.) should respond to the
         /// handshake promptly and defer expensive work until afterwards.
+        ///
+        /// Unlike `health_interval_ms`, `0` does **not** disable the timeout:
+        /// it makes the handshake fail immediately. Use a large value if a
+        /// plugin legitimately needs a long time before answering.
         #[serde(default = "default_handshake_timeout_ms")]
         pub handshake_timeout_ms: u64 = default_handshake_timeout_ms(),
         /// MCP servers to connect to.
