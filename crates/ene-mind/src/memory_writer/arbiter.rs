@@ -169,7 +169,18 @@ pub enum ArbiterAction {
         memory_id: i64,
     },
     /// Defer persistence until the user confirms (weak contradiction).
-    AskConfirmationLater,
+    ///
+    /// Carries the conflicting memory's identity so the deferred candidate can
+    /// record what it would supersede: `existing_memory_id` is persisted and
+    /// later propagated to the typed memory's `supersedes_id` on approval, and
+    /// `existing_memory_title` is a display-only hint for the approval UI
+    /// (#420 review).
+    AskConfirmationLater {
+        /// Id of the existing memory this candidate conflicts with, if any.
+        existing_memory_id: Option<i64>,
+        /// Title of that existing memory (display hint only; not persisted).
+        existing_memory_title: Option<String>,
+    },
 }
 
 /// Decision for one candidate.
@@ -552,7 +563,10 @@ impl MemoryArbiter {
         if candidate.confidence >= ctx.options.min_confidence {
             return Some(CandidateDecision {
                 candidate: candidate.clone(),
-                action: ArbiterAction::AskConfirmationLater,
+                action: ArbiterAction::AskConfirmationLater {
+                    existing_memory_id: Some(existing_id),
+                    existing_memory_title: Some(existing.title.clone()),
+                },
                 reason: ArbiterReason::new(ask_code, detail),
             });
         }
@@ -618,9 +632,14 @@ impl MemoryArbiter {
                     outcome_rating: Some(affect_valence),
                 })
             }
-            ArbiterAction::AskConfirmationLater => {
+            ArbiterAction::AskConfirmationLater {
+                existing_memory_id,
+                existing_memory_title,
+            } => {
                 // Defer the candidate to the user-approval queue (#174) so it
                 // can be reviewed and persisted later instead of being dropped.
+                // The conflicting memory's identity (when present) is recorded
+                // so approval can propagate it to `supersedes_id` (#420 review).
                 let pending = PendingCandidate {
                     id: 0,
                     character_id: ctx.character_id.to_string(),
@@ -630,8 +649,8 @@ impl MemoryArbiter {
                     kind: decision.candidate.kind,
                     confidence: decision.candidate.confidence,
                     reason_detail: decision.reason.detail.clone(),
-                    existing_memory_title: None,
-                    existing_memory_id: None,
+                    existing_memory_title: existing_memory_title.clone(),
+                    existing_memory_id: *existing_memory_id,
                     source_quote: decision.candidate.source_quote.clone(),
                     status: PendingCandidateStatus::Pending,
                     created_at: chrono::Utc::now(),
@@ -1612,11 +1631,102 @@ mod tests {
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx);
         assert!(matches!(
             decision_action(&decisions),
-            ArbiterAction::AskConfirmationLater
+            ArbiterAction::AskConfirmationLater { .. }
         ));
         assert_eq!(
             decisions[0].reason.code,
             ArbiterReasonCode::AskUserConfirmation
+        );
+    }
+
+    /// #420 review (MEDIUM 5): a weak contradiction that defers to the user
+    /// records the conflicting memory's identity on the action, and applying
+    /// the decision persists it onto the pending candidate so approval can
+    /// later propagate it to `supersedes_id`.
+    #[tokio::test]
+    async fn ask_confirmation_captures_conflicting_memory() {
+        use crate::memory_writer::test_support::InMemoryMemoryPort;
+
+        let turn = TurnInput {
+            user_message: "I love tea now",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let existing = MemoryItem {
+            id: Some(8),
+            scope: MemoryScope::User,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind: MemoryKind::Preference,
+            title: "love: coffee".into(),
+            content: "I love coffee".into(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.95),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            access_count: 0,
+            last_accessed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            faded_at: None,
+            commitment_id: None,
+        };
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "love: coffee".to_string(),
+            content: "I love tea".to_string(),
+            source_quote: "I love tea now".to_string(),
+            confidence: 0.66,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let mut semantic_matches = HashMap::new();
+        semantic_matches.insert(
+            0,
+            vec![SemanticMatch {
+                memory_id: 8,
+                similarity: 0.9,
+                memory: existing,
+            }],
+        );
+        let arbiter_ctx = ArbiterContext {
+            semantic_matches,
+            ..ctx(turn)
+        };
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx);
+
+        // The decision carries the conflicting memory's id + title.
+        match decision_action(&decisions) {
+            ArbiterAction::AskConfirmationLater {
+                existing_memory_id,
+                existing_memory_title,
+            } => {
+                assert_eq!(*existing_memory_id, Some(8));
+                assert_eq!(existing_memory_title.as_deref(), Some("love: coffee"));
+            }
+            other => panic!("expected AskConfirmationLater, got {other:?}"),
+        }
+
+        // Applying the decision persists both onto the deferred candidate.
+        let port = InMemoryMemoryPort::new();
+        MemoryArbiter::apply_decisions(&port, &decisions, &arbiter_ctx)
+            .await
+            .expect("apply");
+        let queued = port.pending_candidates();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].existing_memory_id, Some(8));
+        assert_eq!(
+            queued[0].existing_memory_title.as_deref(),
+            Some("love: coffee")
         );
     }
 
@@ -1851,7 +1961,7 @@ mod tests {
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
         assert!(matches!(
             decision_action(&decisions),
-            ArbiterAction::AskConfirmationLater
+            ArbiterAction::AskConfirmationLater { .. }
         ));
 
         let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)

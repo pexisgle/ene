@@ -268,13 +268,18 @@ impl Default for MindMemoryConfig {
 pub struct PendingCandidateRetentionConfig {
     /// Auto-expire candidates older than this many days (`Faded`-equivalent).
     ///
-    /// Applies to candidates of every status — a resolved candidate older than
-    /// this has no further UI value. `0` disables age expiry.
+    /// Applies to candidates of **every status, including unanswered
+    /// (`pending`) ones**: a candidate left unreviewed past this age is
+    /// dropped so the queue cannot grow without bound even when the count cap
+    /// is disabled, and a resolved candidate older than this has no further UI
+    /// value anyway. `0` disables age expiry.
     pub max_age_days: u32,
-    /// Maximum pending (unresolved) candidates kept per character.
+    /// Maximum pending (unresolved) candidates kept per character per user.
     ///
     /// When the live queue exceeds this cap the oldest overflow is dropped.
-    /// `0` disables the count cap.
+    /// The cap is scoped to the acting user (plus character-shared rows), so
+    /// on a multi-user database one user's overflow cannot evict another
+    /// user's candidates. `0` disables the count cap.
     pub max_per_character: usize,
 }
 
