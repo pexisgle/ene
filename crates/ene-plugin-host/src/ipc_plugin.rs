@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use ene_plugin_proto::{
@@ -14,7 +15,7 @@ use ene_plugin_proto::{
     read_plugin_response, write_plugin_request,
 };
 use tokio::io::{ReadHalf, WriteHalf};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::error::PluginHostError;
@@ -170,8 +171,21 @@ async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>) {
 /// An IPC connection to a single plugin binary.
 ///
 /// Handles the handshake, request/response round-trips, and transparent
-/// reconnection on transport failure. All methods are async; the caller
-/// is expected to serialize access (e.g. via `tokio::sync::Mutex`).
+/// reconnection on transport failure. All request-path methods take `&self`
+/// and may be called concurrently from multiple tasks: the socket write half
+/// is guarded by its own short-lived [`Mutex`] (released *before* awaiting the
+/// response), and responses are correlated by `request_id` through the shared
+/// [`Router`]. Callers therefore share a plain `Arc<IpcPluginConnection>` and
+/// need no external lock to multiplex requests (#431).
+///
+/// ## Request multiplexing (#431)
+///
+/// [`request_once`](Self::request_once) registers a oneshot waiter, writes the
+/// request under the brief writer lock, releases that lock, and *then* awaits
+/// the response. Multiple requests can thus be in flight at once against the
+/// same connection — the single reader task routes each response to its waiter
+/// by `request_id`. A connection-level [`Semaphore`] bounds the number of
+/// concurrent in-flight requests (see [`connect`](Self::connect)).
 ///
 /// ## Single reader task (H-12)
 ///
@@ -184,15 +198,18 @@ pub struct IpcPluginConnection {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
     plugin_config: Option<serde_json::Value>,
-    /// Write half of the IPC stream. The read half is owned by the reader task.
-    writer: Option<WriteHalf<IpcStream>>,
-    capabilities: PluginCapabilities,
+    /// Write half of the IPC stream, behind its own lock so the write is
+    /// serialized (frames never interleave) but released before the response
+    /// wait. The read half is owned by the reader task. `None` only transiently
+    /// during [`reconnect`](Self::reconnect).
+    writer: Mutex<Option<WriteHalf<IpcStream>>>,
+    capabilities: parking_lot::RwLock<PluginCapabilities>,
     /// The protocol version negotiated with the plugin during the handshake
     /// (see [`VersionRange::negotiate`]). Used to gate host behavior that
     /// depends on a message variant introduced after v3 — see
     /// [`supports_cancel_stream`](Self::supports_cancel_stream) for the
     /// documented pattern to follow when adding another gate.
-    negotiated_version: u32,
+    negotiated_version: AtomicU32,
     timeout: Duration,
     /// Timeout applied to the handshake response read. Captured at
     /// [`connect`](Self::connect) time so [`reconnect`](Self::reconnect)
@@ -200,14 +217,33 @@ pub struct IpcPluginConnection {
     handshake_timeout: Duration,
     /// Shared routing state for the reader task.
     router: Arc<Router>,
-    /// Handle to the reader task. Aborted on reconnect/shutdown.
-    reader_task: Option<JoinHandle<()>>,
+    /// Handle to the reader task, behind a lock so [`reconnect`](Self::reconnect)
+    /// can abort and replace it through `&self`. Aborted on reconnect/shutdown.
+    reader_task: Mutex<Option<JoinHandle<()>>>,
+    /// Monotonic connection generation, incremented on every successful
+    /// (re)connect. Lets the request path coalesce concurrent reconnects: when
+    /// a shared transport failure fails many in-flight requests at once, only
+    /// the first one actually reconnects and the rest observe the advanced
+    /// generation and simply retry on the fresh connection (#431). Without
+    /// this, each failed request would tear down the connection its sibling
+    /// just re-established.
+    generation: AtomicU64,
+    /// Bounds the number of concurrent in-flight requests against this
+    /// connection (#431 / #435). A permit is acquired in
+    /// [`request_once`](Self::request_once) and held for the round-trip, so the
+    /// plugin is protected from unbounded host fan-out. Sized from
+    /// `PluginConfig::max_concurrent` at [`connect`](Self::connect) time.
+    inflight: Arc<Semaphore>,
 }
 
 impl IpcPluginConnection {
     /// Connects to a plugin binary at `socket_path`, performs the protocol
     /// handshake (advertising the host's supported version range), and stores
     /// the advertised capabilities.
+    ///
+    /// `max_concurrent` bounds the number of concurrent in-flight requests
+    /// against this connection (#431 / #435); it is clamped to at least 1 and
+    /// is normally sourced from `PluginConfig::max_concurrent`.
     ///
     /// Retries the connect up to [`CONNECT_MAX_RETRIES`] times with a
     /// fixed delay, giving the child process time to bind its listener.
@@ -223,6 +259,7 @@ impl IpcPluginConnection {
         sandbox: SandboxConfigData,
         plugin_config: Option<serde_json::Value>,
         handshake_timeout: Duration,
+        max_concurrent: usize,
     ) -> Result<Self, PluginHostError> {
         let name = socket_path.file_name().map_or_else(
             || "unknown".to_string(),
@@ -309,19 +346,23 @@ impl IpcPluginConnection {
             socket_path: socket_path.to_path_buf(),
             sandbox,
             plugin_config,
-            writer: Some(writer),
-            capabilities,
-            negotiated_version,
+            writer: Mutex::new(Some(writer)),
+            capabilities: parking_lot::RwLock::new(capabilities),
+            negotiated_version: AtomicU32::new(negotiated_version),
             timeout: DEFAULT_TIMEOUT,
             handshake_timeout,
             router,
-            reader_task: Some(reader_task),
+            reader_task: Mutex::new(Some(reader_task)),
+            // The initial connection is generation 1; each successful
+            // `reconnect` advances it (see `reconnect`).
+            generation: AtomicU64::new(1),
+            inflight: Arc::new(Semaphore::new(max_concurrent.max(1))),
         })
     }
 
     /// Returns the capabilities advertised by the plugin during the handshake.
-    pub const fn capabilities(&self) -> &PluginCapabilities {
-        &self.capabilities
+    pub fn capabilities(&self) -> PluginCapabilities {
+        self.capabilities.read().clone()
     }
 
     /// Returns the protocol version negotiated with the plugin during the
@@ -333,8 +374,8 @@ impl IpcPluginConnection {
     /// protocol version should compare against this value — see
     /// [`supports_cancel_stream`](Self::supports_cancel_stream) for the
     /// pattern to follow.
-    pub const fn negotiated_version(&self) -> u32 {
-        self.negotiated_version
+    pub fn negotiated_version(&self) -> u32 {
+        self.negotiated_version.load(Ordering::Acquire)
     }
 
     /// Returns whether the negotiated protocol version supports explicit
@@ -351,12 +392,12 @@ impl IpcPluginConnection {
     /// add a `const fn supports_x(&self) -> bool` here that compares
     /// `self.negotiated_version` against the version the feature was
     /// introduced in, and branch on it wherever the feature is used.
-    pub const fn supports_cancel_stream(&self) -> bool {
-        self.negotiated_version >= CANCEL_STREAM_MIN_VERSION
+    pub fn supports_cancel_stream(&self) -> bool {
+        self.negotiated_version() >= CANCEL_STREAM_MIN_VERSION
     }
 
     /// Sends a `ListTools` request and returns the actual tool specs.
-    pub async fn list_tools(&mut self) -> Result<Vec<ene_plugin_proto::ToolSpec>, PluginHostError> {
+    pub async fn list_tools(&self) -> Result<Vec<ene_plugin_proto::ToolSpec>, PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::ListTools {
                 request_id: String::new(),
@@ -372,7 +413,7 @@ impl IpcPluginConnection {
     }
 
     /// Sends a `Ping` and waits for `Pong` within [`PING_TIMEOUT`].
-    pub async fn ping(&mut self) -> Result<(), PluginHostError> {
+    pub async fn ping(&self) -> Result<(), PluginHostError> {
         let resp = self
             .do_request_with_timeout(
                 PluginIpcRequest::Ping {
@@ -402,7 +443,7 @@ impl IpcPluginConnection {
     /// When `context` is `Some`, it is included in the `CallTool` IPC
     /// request so the plugin receives it scoped to this single call.
     pub async fn call_tool(
-        &mut self,
+        &self,
         name: &str,
         arguments: &str,
         context: Option<CallContext>,
@@ -434,7 +475,7 @@ impl IpcPluginConnection {
     /// connection; the wire protocol carries only the identifiers, so no
     /// tool name is needed at the connection level (tool routing happens in
     /// the composite registry above).
-    pub async fn set_call_context(&mut self, ctx: &CallContext) -> Result<(), PluginHostError> {
+    pub async fn set_call_context(&self, ctx: &CallContext) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::SetCallContext {
                 request_id: String::new(),
@@ -447,7 +488,7 @@ impl IpcPluginConnection {
 
     /// Approves (or denies) a pending permission request by its identifier.
     pub async fn approve_permission(
-        &mut self,
+        &self,
         permission_request_id: &str,
     ) -> Result<(), PluginHostError> {
         let resp = self
@@ -461,7 +502,7 @@ impl IpcPluginConnection {
 
     /// Registers a session-wide permission allow pattern (action + target glob).
     pub async fn allow_pattern(
-        &mut self,
+        &self,
         action: &str,
         target_pattern: &str,
     ) -> Result<(), PluginHostError> {
@@ -477,7 +518,7 @@ impl IpcPluginConnection {
 
     /// Revokes a previously granted session-wide permission allow pattern.
     pub async fn revoke_pattern(
-        &mut self,
+        &self,
         action: &str,
         target_pattern: &str,
     ) -> Result<(), PluginHostError> {
@@ -500,7 +541,7 @@ impl IpcPluginConnection {
     /// When `context` is `Some`, it is included in the `CallTool` IPC
     /// request so the plugin receives it scoped to this single call.
     pub async fn call_tool_deferred(
-        &mut self,
+        &self,
         name: &str,
         arguments: &str,
         context: Option<CallContext>,
@@ -535,10 +576,7 @@ impl IpcPluginConnection {
     /// when a `DeferredCompleted` push arrives) before issuing a `PollDeferred`
     /// request. This ensures a completion that arrived while the connection
     /// was idle is delivered promptly (Cr-5).
-    pub async fn poll_deferred(
-        &mut self,
-        task_id: &str,
-    ) -> Result<DeferredStatus, PluginHostError> {
+    pub async fn poll_deferred(&self, task_id: &str) -> Result<DeferredStatus, PluginHostError> {
         // Check the push cache first (Cr-5 idle delivery).
         if let Some(result) = self.router.deferred.lock().remove(task_id) {
             return Ok(match result {
@@ -565,7 +603,7 @@ impl IpcPluginConnection {
     }
 
     /// Cancels a deferred (background) task by its identifier.
-    pub async fn cancel_deferred(&mut self, task_id: &str) -> Result<(), PluginHostError> {
+    pub async fn cancel_deferred(&self, task_id: &str) -> Result<(), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::CancelDeferred {
                 request_id: String::new(),
@@ -582,11 +620,11 @@ impl IpcPluginConnection {
     /// [`supports_cancel_stream`](Self::supports_cancel_stream)) — the
     /// caller must rely on its existing timeout-based fallback to end the
     /// stream on such plugins rather than requiring the new message.
-    pub async fn cancel_stream(&mut self, request_id: &str) -> Result<(), PluginHostError> {
+    pub async fn cancel_stream(&self, request_id: &str) -> Result<(), PluginHostError> {
         if !self.supports_cancel_stream() {
             tracing::debug!(
                 component = "IpcPluginConnection",
-                negotiated_version = self.negotiated_version,
+                negotiated_version = self.negotiated_version(),
                 request_id,
                 "plugin negotiated a version below CancelStream support; \
                  relying on timeout-based fallback instead of sending CancelStream"
@@ -612,7 +650,7 @@ impl IpcPluginConnection {
     /// terminal `StreamEnd`/`StreamError` is observed or the channel closes
     /// (connection failure or stream cancellation).
     pub async fn send_create_chat_stream(
-        &mut self,
+        &self,
         request_id: String,
         provider_kind: String,
         provider_config: serde_json::Value,
@@ -648,13 +686,13 @@ impl IpcPluginConnection {
     ///
     /// Called when a stream completes or is dropped, releasing the per-request
     /// routing entry.
-    pub fn close_chat_stream(&mut self, request_id: &str) {
+    pub fn close_chat_stream(&self, request_id: &str) {
         self.router.streams.lock().remove(request_id);
     }
 
     /// Sends a `ChatCompletion` request and awaits the result.
     pub async fn chat_completion(
-        &mut self,
+        &self,
         request_id: String,
         provider_kind: String,
         provider_config: serde_json::Value,
@@ -684,7 +722,7 @@ impl IpcPluginConnection {
     }
 
     /// Sends a graceful `Shutdown` request (best-effort; ignores errors).
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&self) {
         drop(self.send_request(&PluginIpcRequest::Shutdown).await);
     }
 
@@ -696,17 +734,28 @@ impl IpcPluginConnection {
     ///
     /// Aborts the old reader task and spawns a new one on the fresh stream.
     /// All pending waiters are failed by the old reader task's exit.
-    pub async fn reconnect(&mut self) -> Result<(), PluginHostError> {
+    ///
+    /// Takes `&self` (interior mutability): the writer and reader-task handles
+    /// are swapped behind their own locks. The writer lock is held across the
+    /// socket swap so a concurrent [`request_once`](Self::request_once) cannot
+    /// write to a half-replaced stream; in-flight waiters observe the old
+    /// reader task's `fail_all()` and surface a transport failure to their
+    /// callers (#431).
+    pub async fn reconnect(&self) -> Result<(), PluginHostError> {
         let name = self.socket_path.file_name().map_or_else(
             || "unknown".to_string(),
             |n| n.to_string_lossy().to_string(),
         );
 
+        // Hold the writer lock across the swap so no concurrent request writes
+        // to the stale stream or to a half-replaced connection.
+        let mut writer_guard = self.writer.lock().await;
+
         // Abort the old reader task so it stops reading from the stale stream.
-        if let Some(task) = self.reader_task.take() {
+        if let Some(task) = self.reader_task.lock().await.take() {
             task.abort();
         }
-        self.writer = None;
+        *writer_guard = None;
 
         let mut stream = Self::connect_with_retry(&self.socket_path, &name).await?;
 
@@ -756,8 +805,8 @@ impl IpcPluginConnection {
                         got: version,
                     });
                 }
-                self.capabilities = capabilities;
-                self.negotiated_version = version;
+                *self.capabilities.write() = capabilities;
+                self.negotiated_version.store(version, Ordering::Release);
             }
             Some(PluginIpcResponse::Error { message, .. }) => {
                 return Err(PluginHostError::HandshakeFailed {
@@ -780,8 +829,12 @@ impl IpcPluginConnection {
         // Spawn a new reader task on the fresh stream.
         let (reader, writer) = tokio::io::split(stream);
         let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&self.router)));
-        self.writer = Some(writer);
-        self.reader_task = Some(reader_task);
+        *writer_guard = Some(writer);
+        *self.reader_task.lock().await = Some(reader_task);
+
+        // Advance the generation so concurrent requests that failed on the old
+        // connection coalesce onto this one instead of each reconnecting again.
+        self.generation.fetch_add(1, Ordering::AcqRel);
 
         Ok(())
     }
@@ -902,7 +955,7 @@ impl IpcPluginConnection {
 
     /// Sends a request and reads a single response with the default timeout.
     async fn do_request(
-        &mut self,
+        &self,
         req: PluginIpcRequest,
     ) -> Result<PluginIpcResponse, PluginHostError> {
         self.do_request_with_timeout(req, self.timeout).await
@@ -948,7 +1001,7 @@ impl IpcPluginConnection {
     /// non-idempotent call. Streaming reads bypass this path entirely and
     /// never trigger reconnection mid-stream.
     async fn do_request_with_timeout(
-        &mut self,
+        &self,
         mut req: PluginIpcRequest,
         timeout: Duration,
     ) -> Result<PluginIpcResponse, PluginHostError> {
@@ -965,19 +1018,49 @@ impl IpcPluginConnection {
             Self::inject_request_id(&mut req, &rid);
             rid
         };
-        match self.request_once(&req, &request_id, timeout).await {
+
+        // Bound concurrent in-flight requests against this connection (#431 /
+        // #435). The permit is acquired once and held across the whole logical
+        // request — including the single reconnect-and-retry — so a retry never
+        // re-acquires and a saturated connection fails closed rather than
+        // queueing unboundedly. Released on every exit path via drop.
+        let permit = self
+            .inflight
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| PluginHostError::transport("connection concurrency limiter closed"))?;
+
+        // Snapshot the connection generation before the first attempt. If the
+        // transport fails and a sibling request has already reconnected in the
+        // meantime (advancing the generation), this request simply retries on
+        // the fresh connection instead of reconnecting a second time and
+        // tearing down the sibling's work (#431).
+        let generation_before = self.generation.load(Ordering::Acquire);
+
+        match self.request_once(&req, &request_id, timeout, &permit).await {
             Ok(resp) => {
                 Self::verify_request_id(&resp, &request_id)?;
                 Ok(resp)
             }
             Err(e @ PluginHostError::TransportFailed { .. }) => {
-                tracing::warn!(
-                    component = "IpcPluginConnection",
-                    error = %e,
-                    "Transport failure; reconnecting and retrying request once"
-                );
-                self.reconnect().await?;
-                let resp = self.request_once(&req, &request_id, timeout).await?;
+                if self.generation.load(Ordering::Acquire) == generation_before {
+                    tracing::warn!(
+                        component = "IpcPluginConnection",
+                        error = %e,
+                        "Transport failure; reconnecting and retrying request once"
+                    );
+                    self.reconnect().await?;
+                } else {
+                    tracing::debug!(
+                        component = "IpcPluginConnection",
+                        error = %e,
+                        "Transport failure; a concurrent request already reconnected, retrying"
+                    );
+                }
+                let resp = self
+                    .request_once(&req, &request_id, timeout, &permit)
+                    .await?;
                 Self::verify_request_id(&resp, &request_id)?;
                 Ok(resp)
             }
@@ -989,16 +1072,24 @@ impl IpcPluginConnection {
     /// oneshot waiters.
     ///
     /// Registers a oneshot waiter with the router *before* sending the request,
-    /// then sends the request and awaits the waiter with a timeout. The single
-    /// reader task routes the response to the waiter by `request_id`.
+    /// writes the request under the short-lived writer lock, **releases that
+    /// lock**, and only then awaits the waiter with a timeout. The single
+    /// reader task routes the response to the waiter by `request_id`, so the
+    /// connection is free to carry other in-flight requests during the wait
+    /// (#431).
+    ///
+    /// `_permit` is this request's slot in the connection-level concurrency
+    /// bound, acquired by [`do_request_with_timeout`](Self::do_request_with_timeout);
+    /// it is held (not re-acquired) here so the bound spans the retry too.
     ///
     /// Classifies transport failures as [`PluginHostError::TransportFailed`]
     /// so the caller can decide whether a reconnect-and-retry is warranted.
     async fn request_once(
-        &mut self,
+        &self,
         req: &PluginIpcRequest,
         request_id: &str,
         timeout: Duration,
+        _permit: &tokio::sync::OwnedSemaphorePermit,
     ) -> Result<PluginIpcResponse, PluginHostError> {
         let (tx, rx) = oneshot::channel();
         self.router
@@ -1028,12 +1119,16 @@ impl IpcPluginConnection {
 
     /// Writes a request to the stream (no read).
     ///
+    /// The writer lock is held only for the duration of the frame write, so
+    /// concurrent requests serialize their writes (frames never interleave)
+    /// without blocking each other's response waits (#431).
+    ///
     /// A missing stream or a failed write is reported as
     /// [`PluginHostError::TransportFailed`], which the request path treats as
     /// reconnectable.
-    async fn send_request(&mut self, req: &PluginIpcRequest) -> Result<(), PluginHostError> {
-        let writer = self
-            .writer
+    async fn send_request(&self, req: &PluginIpcRequest) -> Result<(), PluginHostError> {
+        let mut writer = self.writer.lock().await;
+        let writer = writer
             .as_mut()
             .ok_or_else(|| PluginHostError::transport("not connected to plugin"))?;
         write_plugin_request(writer, req)

@@ -198,11 +198,13 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
 /// tasks, the deferred-completion drainer) can emit responses concurrently
 /// without contending for the socket (Cr-4 / H-12).
 ///
-/// Each `CreateChatStream` request is run in its own spawned task keyed by its
-/// `request_id` and guarded by a [`CancellationToken`]; a `CancelStream`
-/// request looks up that token and cancels the stream mid-flight (Cr-4). The
-/// read loop stays responsive to further requests — including cancellation —
-/// while streams are in progress.
+/// Every request is dispatched in its own spawned task (see
+/// [`connection_read_loop`]), so a slow request never blocks the read loop:
+/// pings are answered while tool calls run, and multiple tool calls can be in
+/// flight at once (#431). Each `CreateChatStream` request is additionally
+/// guarded by a [`CancellationToken`] keyed by its `request_id`; a
+/// `CancelStream` request looks up that token and cancels the stream mid-flight
+/// (Cr-4).
 ///
 /// A periodic drainer pushes [`PluginIpcResponse::DeferredCompleted`] messages
 /// on a timer, so background task completions reach the host even while the
@@ -279,10 +281,15 @@ fn spawn_deferred_drain(
 
 /// Reads requests in a loop and dispatches them.
 ///
-/// `CreateChatStream` requests are spawned as independent, cancellable tasks;
-/// `CancelStream` cancels the matching stream; `Shutdown` notifies the server
-/// and ends the loop; all other requests are dispatched inline and their single
-/// response sent over `tx`. Returns `Ok(())` on EOF or graceful shutdown.
+/// Every request is dispatched in its own spawned task so the read loop stays
+/// responsive regardless of how long any single request takes: a slow
+/// `CallTool` cannot block a `Ping`, and multiple tool calls can be in flight
+/// at once (#431). Responses are sent over `tx`, whose dedicated writer task
+/// serializes the outgoing frames, so concurrent handlers never interleave
+/// bytes on the socket (Cr-4 / H-12). `CreateChatStream` additionally registers
+/// a [`CancellationToken`] so `CancelStream` can abort it mid-flight;
+/// `Shutdown` notifies the server and ends the loop. Returns `Ok(())` on EOF or
+/// graceful shutdown.
 async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
     dispatch: &Arc<PluginDispatch>,
     mut reader: R,
@@ -341,10 +348,17 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
                 return Ok(());
             }
             _ => {
-                let resp = dispatch_request(dispatch, &req).await;
-                if tx.send(resp).await.is_err() {
-                    return Ok(());
-                }
+                // Dispatch in a spawned task so a slow request (e.g. a
+                // long-running tool call) does not block the read loop from
+                // answering pings or accepting further concurrent requests
+                // (#431). Correlation is by `request_id`, so response order
+                // need not match request order.
+                let dispatch = Arc::clone(dispatch);
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let resp = dispatch_request(&dispatch, &req).await;
+                    drop(tx.send(resp).await);
+                });
             }
         }
     }
@@ -964,6 +978,81 @@ mod tests {
 
         fn config_schema(&self) -> Option<serde_json::Value> {
             Some(serde_json::json!({"type": "object"}))
+        }
+    }
+
+    /// A tool plugin whose `call_tool` blocks on a shared gate until released,
+    /// counting how many calls are concurrently in flight. Used to prove the
+    /// server dispatches non-streaming requests concurrently (#431): under the
+    /// old inline dispatch the counter could never exceed 1.
+    struct GatedToolPlugin {
+        in_flight: std::sync::atomic::AtomicUsize,
+        released: std::sync::atomic::AtomicBool,
+        notify: tokio::sync::Notify,
+    }
+
+    impl GatedToolPlugin {
+        fn new() -> Self {
+            Self {
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                released: std::sync::atomic::AtomicBool::new(false),
+                notify: tokio::sync::Notify::new(),
+            }
+        }
+
+        /// Blocks until [`release`](Self::release) is called.
+        async fn wait(&self) {
+            use std::sync::atomic::Ordering;
+            while !self.released.load(Ordering::Acquire) {
+                self.notify.notified().await;
+            }
+        }
+
+        /// Releases every current and future [`wait`](Self::wait) call.
+        fn release(&self) {
+            use std::sync::atomic::Ordering;
+            self.released.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+        }
+
+        /// Current number of blocked `gated.slow` calls.
+        fn in_flight(&self) -> usize {
+            self.in_flight.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
+
+    #[async_trait]
+    impl ToolPlugin for GatedToolPlugin {
+        fn tool_capabilities(&self) -> ToolPluginCapabilities {
+            ToolPluginCapabilities { tool_count: 1 }
+        }
+
+        async fn call_tool(
+            &self,
+            name: &str,
+            args: &str,
+            _context: Option<&ene_plugin_proto::CallContext>,
+        ) -> Result<ene_plugin_proto::ToolResult, ene_plugin_proto::ToolError> {
+            use std::sync::atomic::Ordering;
+            if name == "gated.slow" {
+                self.in_flight.fetch_add(1, Ordering::AcqRel);
+                self.wait().await;
+                self.in_flight.fetch_sub(1, Ordering::AcqRel);
+            }
+            Ok(ene_plugin_proto::ToolResult::text(args.to_string()))
+        }
+    }
+
+    /// Waits (with a deadlock backstop) until `plugin.in_flight()` reaches
+    /// `expected`.
+    async fn wait_for_in_flight(plugin: &GatedToolPlugin, expected: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while plugin.in_flight() < expected {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {expected} in-flight call(s)"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 
@@ -1801,5 +1890,145 @@ mod tests {
             saw_cancel_error,
             "expected terminal StreamError after cancel"
         );
+    }
+
+    /// Two `CallTool` requests on one connection must both be in flight
+    /// concurrently (#431). Under the old inline dispatch the read loop blocked
+    /// on the first request, so the second was not even read until the first
+    /// completed and `in_flight` could never exceed 1.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_tool_calls_overlap_in_flight() {
+        use std::sync::Arc as StdArc;
+
+        use ene_plugin_proto::{read_plugin_response, write_plugin_request};
+
+        let plugin = StdArc::new(GatedToolPlugin::new());
+        let dispatch = StdArc::new(PluginDispatch::new(
+            Some(StdArc::clone(&plugin) as StdArc<dyn ToolPlugin>),
+            None,
+            None,
+            None,
+            None,
+        ));
+        let shutdown = StdArc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        tokio::spawn(handle_connection(
+            StdArc::clone(&dispatch),
+            IpcStream::Unix(server),
+            StdArc::clone(&shutdown),
+        ));
+        let mut client = client;
+
+        for (id, args) in [("c1", "one"), ("c2", "two")] {
+            write_plugin_request(
+                &mut client,
+                &PluginIpcRequest::CallTool {
+                    request_id: id.into(),
+                    name: "gated.slow".into(),
+                    arguments: args.into(),
+                    deferred: false,
+                    context: None,
+                },
+            )
+            .await
+            .expect("write call");
+        }
+
+        // Both calls must reach the plugin and be blocked at the same time.
+        wait_for_in_flight(&plugin, 2).await;
+
+        plugin.release();
+
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            let resp =
+                tokio::time::timeout(Duration::from_secs(5), read_plugin_response(&mut client))
+                    .await
+                    .expect("no timeout")
+                    .expect("read ok")
+                    .expect("non-EOF");
+            if let PluginIpcResponse::CallResult { request_id, result } = resp {
+                got.push((request_id, result.expect("ok").text_for_llm()));
+            }
+        }
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("c1".to_string(), "one".to_string()),
+                ("c2".to_string(), "two".to_string())
+            ]
+        );
+    }
+
+    /// A `Ping` must be answered while a slow tool call is still in flight
+    /// (#431): the read loop dispatches each request in its own task, so the
+    /// probe is not queued behind the blocked call.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ping_answered_while_tool_call_in_flight() {
+        use std::sync::Arc as StdArc;
+
+        use ene_plugin_proto::{read_plugin_response, write_plugin_request};
+
+        let plugin = StdArc::new(GatedToolPlugin::new());
+        let dispatch = StdArc::new(PluginDispatch::new(
+            Some(StdArc::clone(&plugin) as StdArc<dyn ToolPlugin>),
+            None,
+            None,
+            None,
+            None,
+        ));
+        let shutdown = StdArc::new(tokio::sync::Notify::new());
+
+        let (client, server) = tokio::net::UnixStream::pair().expect("unix pair");
+        tokio::spawn(handle_connection(
+            StdArc::clone(&dispatch),
+            IpcStream::Unix(server),
+            StdArc::clone(&shutdown),
+        ));
+        let mut client = client;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::CallTool {
+                request_id: "slow".into(),
+                name: "gated.slow".into(),
+                arguments: "x".into(),
+                deferred: false,
+                context: None,
+            },
+        )
+        .await
+        .expect("write call");
+
+        // Wait until the slow call is in flight, then ping.
+        wait_for_in_flight(&plugin, 1).await;
+
+        write_plugin_request(
+            &mut client,
+            &PluginIpcRequest::Ping {
+                request_id: "p1".into(),
+            },
+        )
+        .await
+        .expect("write ping");
+
+        // The Pong must arrive while the slow call is still blocked (the gate
+        // is not released until after this assertion).
+        let resp = tokio::time::timeout(Duration::from_secs(5), read_plugin_response(&mut client))
+            .await
+            .expect("no timeout")
+            .expect("read ok")
+            .expect("non-EOF");
+        assert!(
+            matches!(&resp, PluginIpcResponse::Pong { request_id } if request_id == "p1"),
+            "expected Pong while slow call pending, got {resp:?}"
+        );
+        assert_eq!(plugin.in_flight(), 1, "slow call must still be blocked");
+
+        plugin.release();
     }
 }
