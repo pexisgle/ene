@@ -5,7 +5,7 @@ use ene_config::Truncate;
 
 /// Map an API v1 [`ene_runtime::PublicApiError`] onto the CLI's own error
 /// type, preserving the actor-dead vs. execution-failure distinction that
-/// used to come from the double-`Result` (`ActorDeadError` vs.
+/// used to come from the double-`Result` (`ActorDead` vs.
 /// `ene_store::EneMemoryError`) `EneHandle` returned before #269.
 fn session_error(e: ene_runtime::PublicApiError) -> CliError {
     match e {

@@ -6,7 +6,7 @@
 
 ## 1. コアアーキテクチャ原則
 
-1. **API v1 ホスト契約**: ホストアプリケーション (`ene-cli`, `ene-desktop`, 外部連携) は `EneHandle::open` を介してのみ Ene と対話します。ターンは必須の `TurnId` で識別されます。ターンの実行は単一飛行 (single-flight) であり、同時実行の試みは `RunError::Busy` を返します。
+1. **API v1 ホスト契約**: ホストアプリケーション (`ene-cli`, `ene-desktop`, 外部連携) は `EneHandle::open` を介してのみ Ene と対話します。ターンは必須の `TurnId` で識別されます。ターンの実行は単一飛行 (single-flight) であり、同時実行の試みは `RunError::Busy` を返します。アクターの生存状態に関する失敗は、アクター制御面 (権限、undo、ユーザー入力、機能更新) と読み取り専用の diagnostics / vision ハンドルのすべてで一様に `PublicApiError::ActorDead` として報告されます (#408)。独立した「アクター死亡」エラー型は存在せず、`run` と `cancel` のみが専用のエラー型 (`RunError`, `CancelError`) を持ちます。これはそれらの `Busy` / `TurnMismatch` バリアントが呼び出し側の分岐に必要な情報を担っているためです。
 2. **アクター実行モデル**: `ene-runtime` は内部の Tokio アクターを介して状態を管理します。 `EneHandle` の公開メソッドはノンブロッキングのチャネル送信、または oneshot 非同期リクエストです。
 3. **純粋な認知 Mind**: `ene-mind` はプロンプトパケットの構築、ハイブリッド記憶想起、感情状態 (PADモデル) の更新、プロアクティブ発話トリガー、および出力 Performance 演出の調停を所有します。 `ene-mind` は `ene-runtime` や `ene-plugin-host` に**一切依存しません**。また、その認知ロジック群 (想起、記憶アービター、忘却、キャラクター同期、ジャーナル、自己内省) は永続化層に対して常に `ene_core::MemoryPort` トレイト (#270) 経由でのみアクセスし、具象型 `ene_store::MemoryStore` には直接依存しません。これにより SQLite なしでインメモリのテストダブルに対して単体テストできます。
 4. **孤立した永続化層**: `ene-store` は SQLite スキーマ、マイグレーション、SeaORM エンティティ、およびベクトル検索 (`sqlite-vec`) を所有します。 `ene-store` は `ene-mind` や `ene-ai` に**一切依存しません**。

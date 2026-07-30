@@ -39,6 +39,7 @@ pub use event::{
 
 use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::error::EneRuntimeError;
+use crate::public_api::PublicApiError;
 use crate::streaming::{PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
 use ene_ai::LlmProviderRegistry;
@@ -65,11 +66,6 @@ const AUDIO_CHANNEL_CAPACITY: usize = 64;
 /// `ToolBackgroundCompleted`) are low-frequency and turn-independent, so a
 /// much smaller buffer than the chat bus's 1024 is sufficient.
 const LIFECYCLE_CHANNEL_CAPACITY: usize = 64;
-
-/// Error returned when a command is sent to an actor that is no longer running.
-#[derive(Debug, thiserror::Error)]
-#[error("Actor is no longer running")]
-pub struct ActorDeadError;
 
 /// Error returned by [`EneHandle::shutdown`] when the actor's drain
 /// takes longer than the supplied timeout.
@@ -768,51 +764,51 @@ impl EneHandle {
         &self,
         request_id: impl Into<RequestId>,
         decision: PermissionDecision,
-    ) -> Result<(), ActorDeadError> {
+    ) -> Result<(), PublicApiError> {
         self.cmd_tx
             .send(EneCommand::PermissionDecision {
                 request_id: request_id.into(),
                 decision,
             })
-            .map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)
     }
 
     /// List all session-wide permission grants (#177).
     pub async fn list_permissions(
         &self,
-    ) -> Result<Vec<crate::streaming::PermissionScope>, ActorDeadError> {
+    ) -> Result<Vec<crate::streaming::PermissionScope>, PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ListPermissions { reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Revoke a single session-wide permission grant by id (#177).
-    pub async fn revoke_permission(&self, id: u64) -> Result<bool, ActorDeadError> {
+    pub async fn revoke_permission(&self, id: u64) -> Result<bool, PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::RevokePermission { id, reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Revoke all session-wide permission grants (#177).
-    pub async fn reset_all_permissions(&self) -> Result<usize, ActorDeadError> {
+    pub async fn reset_all_permissions(&self) -> Result<usize, PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::ResetAllPermissions { reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Undo the most recent reversible tool operation (#178).
-    pub async fn undo(&self) -> Result<crate::undo::UndoReport, ActorDeadError> {
+    pub async fn undo(&self) -> Result<crate::undo::UndoReport, PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(EneCommand::Undo { reply })
-            .map_err(|_| ActorDeadError)?;
-        rx.await.map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Send a user-input response for a pending interactive tool.
@@ -820,23 +816,23 @@ impl EneHandle {
         &self,
         request_id: impl Into<RequestId>,
         response: UserInputResponse,
-    ) -> Result<(), ActorDeadError> {
+    ) -> Result<(), PublicApiError> {
         self.cmd_tx
             .send(EneCommand::UserInputResponse {
                 request_id: request_id.into(),
                 response,
             })
-            .map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Push a privacy-safe proactive observation from the host (#166 / #168).
     pub fn update_proactive_observation(
         &self,
         observation: ene_mind::ProactiveObservation,
-    ) -> Result<(), ActorDeadError> {
+    ) -> Result<(), PublicApiError> {
         self.cmd_tx
             .send(EneCommand::UpdateProactiveObservation { observation })
-            .map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Hot-update proactive policy in the running actor.
@@ -847,10 +843,10 @@ impl EneHandle {
     pub fn update_proactive_settings(
         &self,
         mind: ene_mind::ProactiveConfig,
-    ) -> Result<(), ActorDeadError> {
+    ) -> Result<(), PublicApiError> {
         self.cmd_tx
             .send(EneCommand::UpdateProactiveSettings { mind })
-            .map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Hot-update Features-tab sections (mind / store / tools / RAG).
@@ -860,12 +856,12 @@ impl EneHandle {
     pub fn update_feature_settings(
         &self,
         settings: FeatureSettingsUpdate,
-    ) -> Result<(), ActorDeadError> {
+    ) -> Result<(), PublicApiError> {
         self.cmd_tx
             .send(EneCommand::UpdateFeatureSettings {
                 settings: Box::new(settings),
             })
-            .map_err(|_| ActorDeadError)
+            .map_err(|_| PublicApiError::ActorDead)
     }
 }
 
@@ -1186,7 +1182,7 @@ mod tests {
 
         // (a) + (b): if the panic had propagated out of `run_command_isolated`
         // and killed the actor task, every subsequent call on `handle` would
-        // return `ActorDeadError` / a dropped reply channel. It doesn't.
+        // return `PublicApiError::ActorDead` / a dropped reply channel. It doesn't.
         let scopes = handle
             .list_permissions()
             .await
@@ -1206,7 +1202,7 @@ mod tests {
 
         // (d) pending_permissions: resolve the entry inserted before the panic
         // through the real public API. If the map had been left empty, stuck
-        // locked, or the sender dropped, this would fail (ActorDeadError) or
+        // locked, or the sender dropped, this would fail (ActorDead) or
         // `permission_rx` below would never resolve.
         handle
             .decide_permission(request_id, PermissionDecision::AllowOnce)

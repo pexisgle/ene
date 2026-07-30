@@ -210,7 +210,7 @@ fn render_session_row(
     ai: &Arc<AiBridge>,
     world: &mut World,
     ui_entity: Entity,
-    session: &ene_store::SessionMeta,
+    session: &ene_runtime::PublicSessionMeta,
 ) {
     ui.group(|ui| {
         let title = if session.title.is_empty() {

@@ -64,6 +64,13 @@ const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 /// doesn't belong in `ene-runtime`: a blocking call that exceeded
 /// [`BLOCKING_TIMEOUT`] and was cancelled before the actor replied.
 ///
+/// As of #408 a dead actor reaches this type solely as
+/// [`ene_runtime::PublicApiError::ActorDead`] (via the [`AiBridgeError::Api`]
+/// variant): the actor-control methods on `EneHandle` (permissions, undo,
+/// user input, feature updates) and the diagnostics snapshot all return
+/// `PublicApiError` directly, so there is no separate actor-dead error to
+/// fold in here.
+///
 /// UI call sites format this with `{error}` (its `Display` impl, via
 /// `thiserror`) the same way they previously formatted the bare `String`
 /// this type replaces, so this change does not by itself introduce any
@@ -75,12 +82,16 @@ pub enum AiBridgeError {
     /// The blocking call exceeded [`BLOCKING_TIMEOUT`] and was cancelled.
     #[error("operation timed out after {0}s")]
     Timeout(u64),
-    /// The runtime actor rejected the request, or host-internal wiring
-    /// (`EneHandle::diagnostics()` and friends) failed.
+    /// Host-internal wiring that still reports [`EneRuntimeError`] failed:
+    /// runtime bootstrap ([`AiBridge::try_new`]) and the diagnostics methods
+    /// that also surface actor-side failures beyond a dead channel
+    /// (`search_tools` / `call_tool` / `manual_split` / `set_character`,
+    /// which can additionally report `EneRuntimeError::Busy`).
     #[error(transparent)]
     Runtime(#[from] EneRuntimeError),
-    /// One of the API v1 contract methods on [`EneHandle`] returned a
-    /// stable [`ene_runtime::PublicApiError`] category.
+    /// One of the API v1 contract methods on [`EneHandle`] — or an
+    /// actor-control / diagnostics method that reports a dead actor (#408) —
+    /// returned a stable [`ene_runtime::PublicApiError`] category.
     #[error(transparent)]
     Api(#[from] ene_runtime::PublicApiError),
     /// A memory-store operation invoked directly from the desktop bridge
@@ -92,48 +103,6 @@ pub enum AiBridgeError {
     /// actor) failed.
     #[error(transparent)]
     Ai(#[from] ene_ai::AiError),
-}
-
-impl From<ene_runtime::ActorDeadError> for AiBridgeError {
-    fn from(_: ene_runtime::ActorDeadError) -> Self {
-        Self::Api(ene_runtime::PublicApiError::ActorDead)
-    }
-}
-
-/// Converts the API v1 [`ene_runtime::PublicSessionMeta`] DTO back into the
-/// `ene_store::SessionMeta` shape the desktop settings UI (#176) already
-/// consumes directly.
-///
-/// `EneHandle::list_sessions` returns the DTO as of #269 so the runtime's
-/// public contract doesn't leak `ene_store` types; converting back here (a
-/// trivial field copy — both types share the same fields) keeps
-/// [`AiBridge::list_sessions_blocking`]'s own return type (now
-/// `Result<_, AiBridgeError>` as of #274) working with the `ene_store`
-/// shapes the desktop UI already renders, without the UI layer having to
-/// know about the DTO split at all.
-fn session_meta_from_public(m: ene_runtime::PublicSessionMeta) -> ene_store::SessionMeta {
-    ene_store::SessionMeta {
-        id: m.id,
-        session_id: m.session_id,
-        card_name: m.card_name,
-        title: m.title,
-        created_at: m.created_at,
-        updated_at: m.updated_at,
-        archived: m.archived,
-        turn_count: m.turn_count,
-    }
-}
-
-/// Converts the API v1 [`ene_runtime::PublicExportedMessage`] DTO back into
-/// `ene_store::ExportedMessage`, mirroring [`session_meta_from_public`].
-fn exported_message_from_public(
-    m: ene_runtime::PublicExportedMessage,
-) -> ene_store::ExportedMessage {
-    ene_store::ExportedMessage {
-        role: m.role,
-        content: m.content,
-        created_at: m.created_at,
-    }
 }
 
 impl AiBridge {
@@ -327,14 +296,16 @@ impl AiBridge {
     /// Blocks the calling thread on the tokio runtime while the actor
     /// answers, mirroring [`AiBridge::list_permissions_blocking`].
     /// Intended for the sessions settings page.
+    ///
+    /// Returns the API v1 [`ene_runtime::PublicSessionMeta`] DTO directly —
+    /// the desktop UI renders it as its canonical session type (#408), so
+    /// there is no reverse conversion to `ene_store::SessionMeta`.
     pub fn list_sessions_blocking(
         &self,
         include_archived: bool,
         limit: usize,
-    ) -> Result<Vec<ene_store::SessionMeta>, AiBridgeError> {
-        let metas =
-            self.block_on_timeout(self.handle.sessions().list(include_archived, limit))??;
-        Ok(metas.into_iter().map(session_meta_from_public).collect())
+    ) -> Result<Vec<ene_runtime::PublicSessionMeta>, AiBridgeError> {
+        Ok(self.block_on_timeout(self.handle.sessions().list(include_archived, limit))??)
     }
 
     /// Export a session as a pretty-printed JSON string (#176).
@@ -355,19 +326,18 @@ impl AiBridge {
 
     /// Search session messages, returning matching
     /// `(session_id, message)` pairs (#176).
+    ///
+    /// Messages are the API v1 [`ene_runtime::PublicExportedMessage`] DTO,
+    /// rendered directly by the desktop UI (#408) — no reverse conversion to
+    /// `ene_store::ExportedMessage`.
     pub fn search_sessions_blocking(
         &self,
         query: impl Into<String>,
         limit: usize,
         offset: usize,
-    ) -> Result<Vec<(String, ene_store::ExportedMessage)>, AiBridgeError> {
+    ) -> Result<Vec<(String, ene_runtime::PublicExportedMessage)>, AiBridgeError> {
         let query = query.into();
-        let matches =
-            self.block_on_timeout(self.handle.sessions().search(&query, limit, offset))??;
-        Ok(matches
-            .into_iter()
-            .map(|(session_id, message)| (session_id, exported_message_from_public(message)))
-            .collect())
+        Ok(self.block_on_timeout(self.handle.sessions().search(&query, limit, offset))??)
     }
 
     /// Archive or unarchive a session, returning whether the archived
