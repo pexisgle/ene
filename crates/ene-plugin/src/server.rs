@@ -198,13 +198,13 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
 /// tasks, the deferred-completion drainer) can emit responses concurrently
 /// without contending for the socket (Cr-4 / H-12).
 ///
-/// Every request is dispatched in its own spawned task (see
-/// [`connection_read_loop`]), so a slow request never blocks the read loop:
-/// pings are answered while tool calls run, and multiple tool calls can be in
-/// flight at once (#431). Each `CreateChatStream` request is additionally
-/// guarded by a [`CancellationToken`] keyed by its `request_id`; a
-/// `CancelStream` request looks up that token and cancels the stream mid-flight
-/// (Cr-4).
+/// Long-running requests are dispatched in their own spawned tasks while cheap
+/// state mutations are handled inline (see [`connection_read_loop`]), so a slow
+/// request never blocks the read loop: pings are answered while tool calls run,
+/// and multiple tool calls can be in flight at once (#431). Each
+/// `CreateChatStream` request is additionally guarded by a [`CancellationToken`]
+/// keyed by its `request_id`; a `CancelStream` request looks up that token and
+/// cancels the stream mid-flight (Cr-4).
 ///
 /// A periodic drainer pushes [`PluginIpcResponse::DeferredCompleted`] messages
 /// on a timer, so background task completions reach the host even while the
@@ -230,6 +230,13 @@ async fn handle_connection(
 
     // Tear down: cancel any in-flight streams, stop the drainer, then let the
     // writer flush remaining frames and finish once all senders are dropped.
+    //
+    // Note on teardown latency: spawned dispatch tasks hold `tx` clones, so
+    // `drop(tx); writer_task.await` below waits for every in-flight request to
+    // finish (or be cancelled) before the writer channel closes. This is new
+    // with the spawned-dispatch design but bounded: `run_plugin_server` joins
+    // each connection task with a 5 s timeout, so a hung request cannot stall
+    // shutdown indefinitely.
     for (_, token) in streams.lock().drain() {
         token.cancel();
     }
@@ -281,15 +288,27 @@ fn spawn_deferred_drain(
 
 /// Reads requests in a loop and dispatches them.
 ///
-/// Every request is dispatched in its own spawned task so the read loop stays
-/// responsive regardless of how long any single request takes: a slow
-/// `CallTool` cannot block a `Ping`, and multiple tool calls can be in flight
-/// at once (#431). Responses are sent over `tx`, whose dedicated writer task
-/// serializes the outgoing frames, so concurrent handlers never interleave
-/// bytes on the socket (Cr-4 / H-12). `CreateChatStream` additionally registers
-/// a [`CancellationToken`] so `CancelStream` can abort it mid-flight;
-/// `Shutdown` notifies the server and ends the loop. Returns `Ok(())` on EOF or
-/// graceful shutdown.
+/// Long-running requests (`CallTool`, `ChatCompletion`, `EmbedBatch`,
+/// `SynthesizeSpeech`, `TranscribeAudio`, `PollDeferred`) are dispatched in
+/// their own spawned tasks so the read loop stays responsive regardless of how
+/// long any single one takes: a slow `CallTool` cannot block a `Ping`, and
+/// multiple tool calls can be in flight at once (#431). Responses are sent over
+/// `tx`, whose dedicated writer task serializes the outgoing frames, so
+/// concurrent handlers never interleave bytes on the socket (Cr-4 / H-12).
+///
+/// Cheap *state-mutating* requests (`Handshake`, `SetCallContext`,
+/// `ApprovePermission`, `AllowPattern`, `RevokePattern`) and lightweight
+/// queries (`Ping`, `ListTools`, `GetConfigSchema`, `CancelDeferred`) are
+/// handled **inline**, in read order, rather than spawned. This makes their
+/// ordering relative to the spawned requests they gate a server-enforced
+/// invariant instead of a client convention: `Handshake` applies the sandbox
+/// (`tool.set_sandbox` / `set_config`) and completes before the first
+/// `CallTool` is even read off the socket, and a permission/pattern mutation
+/// is committed before any subsequent call that depends on it (#431 review).
+///
+/// `CreateChatStream` additionally registers a [`CancellationToken`] so
+/// `CancelStream` can abort it mid-flight; `Shutdown` notifies the server and
+/// ends the loop. Returns `Ok(())` on EOF or graceful shutdown.
 async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
     dispatch: &Arc<PluginDispatch>,
     mut reader: R,
@@ -347,18 +366,34 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
                 shutdown.notify_one();
                 return Ok(());
             }
-            _ => {
-                // Dispatch in a spawned task so a slow request (e.g. a
-                // long-running tool call) does not block the read loop from
-                // answering pings or accepting further concurrent requests
-                // (#431). Correlation is by `request_id`, so response order
-                // need not match request order.
+            // Long-running requests: dispatch in a spawned task so a slow one
+            // (e.g. a tool call or an LLM completion) does not block the read
+            // loop from answering pings or accepting further concurrent
+            // requests (#431). Correlation is by `request_id`, so response
+            // order need not match request order.
+            long_running @ (PluginIpcRequest::CallTool { .. }
+            | PluginIpcRequest::ChatCompletion { .. }
+            | PluginIpcRequest::EmbedBatch { .. }
+            | PluginIpcRequest::SynthesizeSpeech { .. }
+            | PluginIpcRequest::TranscribeAudio { .. }
+            | PluginIpcRequest::PollDeferred { .. }) => {
                 let dispatch = Arc::clone(dispatch);
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let resp = dispatch_request(&dispatch, &req).await;
+                    let resp = dispatch_request(&dispatch, &long_running).await;
                     drop(tx.send(resp).await);
                 });
+            }
+            // Everything else — `Handshake` (applies the sandbox/config),
+            // `SetCallContext`, `ApprovePermission`, `AllowPattern`,
+            // `RevokePattern`, and the cheap queries (`Ping`, `ListTools`,
+            // `GetConfigSchema`, `CancelDeferred`) — is handled inline, in
+            // read order. State mutations must be committed before any later
+            // request that depends on them is dispatched, so they cannot be
+            // reordered behind a spawned task (#431 review).
+            other => {
+                let resp = dispatch_request(dispatch, &other).await;
+                drop(tx.send(resp).await);
             }
         }
     }
