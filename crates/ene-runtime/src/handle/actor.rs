@@ -677,9 +677,11 @@ impl TurnActor {
     /// running the heavy I/O in `bg_command_tasks` so the actor loop is never
     /// blocked (#397).
     ///
-    /// Shuts down the live host (stopping disabled plugins), spawns fresh DB
-    /// IPC servers for the newly-detected plugin set, starts a new host with
-    /// the updated configuration, re-registers any plugin-provided LLM
+    /// Shuts down the live host (stopping disabled plugins), deregisters the
+    /// old host's plugin-provided LLM factories from the global
+    /// [`LlmProviderRegistry`], spawns fresh DB IPC servers for the
+    /// newly-detected plugin set, starts a new host with the updated
+    /// configuration, re-registers the new host's plugin-provided LLM
     /// factories, re-bridges health events into diagnostics, and rebuilds the
     /// tool registry from the new host.
     ///
@@ -689,10 +691,6 @@ impl TurnActor {
     /// sends [`EneCommand::PluginHostReconfigured`] back through the mailbox.
     ///
     /// Remaining limitations:
-    /// - Plugin-provided LLM factories are re-registered into the global
-    ///   [`LlmProviderRegistry`], but factories from the previous host are not
-    ///   unregistered (the registry has no deregistration API); a re-registered
-    ///   kind simply replaces its entry.
     /// - DB IPC servers spawned for the previous host are not torn down; the
     ///   new set replaces them on the same per-plugin socket paths (the stale
     ///   socket file is removed before re-binding), so at most one live server
@@ -2123,8 +2121,20 @@ async fn reconfigure_plugin_host_bg(
     cmd_tx: mpsc::UnboundedSender<EneCommand>,
 ) {
     // Stop the previous host (and its health bridge) first.
-    {
+    //
+    // Capture the old host's plugin-provided LLM factory names before
+    // shutdown so they can be deregistered from the global
+    // [`LlmProviderRegistry`] once the host is gone. Factories for plugins
+    // that are no longer enabled in the new configuration are then never
+    // re-registered below, so a stale factory pointing at a dead process can
+    // no longer be selected (#399). Surviving plugins are deregistered here
+    // and re-registered from the fresh host further down, which simply
+    // replaces their entry.
+    let stale_llm_factory_names: Vec<String> = {
         let mut guard = plugin_host.lock().await;
+        let names = guard.as_ref().map_or_else(Vec::new, |host| {
+            host.llm_factories().keys().cloned().collect()
+        });
         if let Some(mut host) = guard.take() {
             host.shutdown().await;
         }
@@ -2133,6 +2143,16 @@ async fn reconfigure_plugin_host_bg(
         let mut bridge = health_bridge_handle.lock().await;
         if let Some(handle) = bridge.take() {
             handle.abort();
+        }
+        names
+    };
+    for name in &stale_llm_factory_names {
+        if LlmProviderRegistry::deregister(name) {
+            tracing::info!(
+                component = "TurnActor",
+                kind = %name,
+                "Deregistered stale plugin-provided LLM provider factory during reconfiguration"
+            );
         }
     }
 
@@ -2164,7 +2184,9 @@ async fn reconfigure_plugin_host_bg(
         }
     };
 
-    // Re-register plugin-provided LLM factories (replaces prior entries).
+    // Re-register plugin-provided LLM factories from the fresh host. The old
+    // host's factories were deregistered above, so any kind not served by the
+    // new host stays deregistered (#399).
     if let Some(host) = new_host.as_ref() {
         for (kind, factory) in host.llm_factories() {
             tracing::info!(
