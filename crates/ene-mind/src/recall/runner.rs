@@ -81,11 +81,12 @@ pub async fn execute_hybrid_recall(
         &config.memory,
     );
 
-    let scored = input
+    let gathered = input
         .store
         .search(&search_options)
         .await
         .map_err(CognitionError::MemoryPort)?;
+    let scored = ene_rag::score_and_rank(&search_options, gathered);
 
     let diversify_options = MemoryDiversifyOptions::from_config(&config.memory);
     let diversified = MemoryDiversifyPipeline::diversify(scored, &plan, diversify_options);
