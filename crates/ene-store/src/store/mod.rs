@@ -66,6 +66,110 @@ pub fn init_sqlite_vec() {
     });
 }
 
+/// Creates the `vec0` ANN index tables and sync triggers if they do not
+/// already exist (#304).
+///
+/// Called during store initialization after migrations. For databases
+/// upgraded from a pre-vec0 schema the migration
+/// `m20260731_000004_vec0_embedding_index` already created and backfilled
+/// the tables; this function is a no-op in that case (`IF NOT EXISTS`).
+/// For fresh databases (no embeddings at migration time) this is where
+/// the tables are first created.
+///
+/// Sync triggers on `memory_embeddings` and `tool_embedding_index` keep
+/// the `vec0` shadow tables consistent through all write paths, including
+/// `ON DELETE CASCADE` from `typed_memories`.
+pub(crate) async fn ensure_vec0_index(
+    db: &DatabaseConnection,
+    embedding_dim: usize,
+) -> Result<(), EneMemoryError> {
+    use sea_orm::ConnectionTrait;
+
+    let dim = embedding_dim;
+
+    // ── vec_memory_embeddings ──
+    // character_id is denormalized from typed_memories so the KNN query
+    // can scope to a single character via a vec0 metadata filter.
+    db.execute_unprepared(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_memory_embeddings USING vec0( \
+             memory_embedding_id integer primary key, \
+             embedding float[{dim}] distance_metric=cosine, \
+             character_id text, \
+             model_name text, \
+             field text \
+         )"
+    ))
+    .await?;
+
+    // ── vec_tool_embeddings ──
+    db.execute_unprepared(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_tool_embeddings USING vec0( \
+             tool_embedding_id integer primary key, \
+             embedding float[{dim}] distance_metric=cosine, \
+             tool_name text \
+         )"
+    ))
+    .await?;
+
+    // ── Sync triggers: memory_embeddings → vec_memory_embeddings ──
+    // Note: vec0 returns SQLITE_ERROR (not SQLITE_CONSTRAINT) on duplicate
+    // PKs, so INSERT OR REPLACE does not work. The update trigger uses
+    // DELETE + INSERT instead. character_id is resolved from typed_memories
+    // via a correlated SELECT in the trigger body.
+    db.execute_unprepared(
+        "CREATE TRIGGER IF NOT EXISTS trg_vec_mem_ai AFTER INSERT ON memory_embeddings BEGIN \
+             INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
+             SELECT new.id, new.embedding, tm.character_id, new.model_name, new.field \
+             FROM typed_memories tm WHERE tm.id = new.memory_item_id; \
+         END",
+    )
+    .await?;
+
+    db.execute_unprepared(
+        "CREATE TRIGGER IF NOT EXISTS trg_vec_mem_au AFTER UPDATE ON memory_embeddings BEGIN \
+             DELETE FROM vec_memory_embeddings WHERE memory_embedding_id = old.id; \
+             INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
+             SELECT new.id, new.embedding, tm.character_id, new.model_name, new.field \
+             FROM typed_memories tm WHERE tm.id = new.memory_item_id; \
+         END",
+    )
+    .await?;
+
+    db.execute_unprepared(
+        "CREATE TRIGGER IF NOT EXISTS trg_vec_mem_ad AFTER DELETE ON memory_embeddings BEGIN \
+             DELETE FROM vec_memory_embeddings WHERE memory_embedding_id = old.id; \
+         END",
+    )
+    .await?;
+
+    // ── Sync triggers: tool_embedding_index → vec_tool_embeddings ──
+    db.execute_unprepared(
+        "CREATE TRIGGER IF NOT EXISTS trg_vec_tool_ai AFTER INSERT ON tool_embedding_index BEGIN \
+             INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
+             VALUES (new.id, new.embedding, new.tool_name); \
+         END",
+    )
+    .await?;
+
+    db.execute_unprepared(
+        "CREATE TRIGGER IF NOT EXISTS trg_vec_tool_au AFTER UPDATE ON tool_embedding_index BEGIN \
+             DELETE FROM vec_tool_embeddings WHERE tool_embedding_id = old.id; \
+             INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
+             VALUES (new.id, new.embedding, new.tool_name); \
+         END",
+    )
+    .await?;
+
+    db.execute_unprepared(
+        "CREATE TRIGGER IF NOT EXISTS trg_vec_tool_ad AFTER DELETE ON tool_embedding_index BEGIN \
+             DELETE FROM vec_tool_embeddings WHERE tool_embedding_id = old.id; \
+         END",
+    )
+    .await?;
+
+    Ok(())
+}
+
 pub(crate) fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(v.len().saturating_mul(4));
     for f in v {
@@ -82,9 +186,12 @@ pub(crate) fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) const COSINE_SIMILARITY_SQL: &str = "1.0 - vec_distance_cosine";
 
+#[cfg(test)]
 pub(crate) const ALLOWED_EMBEDDING_COLS: &[&str] = &["embedding", "memory_embeddings.embedding"];
+#[cfg(test)]
 pub(crate) fn cosine_similarity_expr(
     embedding_col: &str,
     query_bytes: &[u8],
@@ -97,6 +204,7 @@ pub(crate) fn cosine_similarity_expr(
     let sql = format!("{COSINE_SIMILARITY_SQL}({embedding_col}, ?)");
     Expr::cust_with_values(sql, vec![query_bytes.to_vec()])
 }
+#[cfg(test)]
 pub(crate) fn cosine_similarity_filter(
     embedding_col: &str,
     query_bytes: &[u8],
@@ -322,6 +430,7 @@ impl MemoryStore {
             .collect();
 
         if pending.is_empty() {
+            ensure_vec0_index(&db, embedding_dim).await?;
             return Ok(Self::init(db, embedding_dim, Some(path.to_path_buf())));
         }
 
@@ -341,6 +450,7 @@ impl MemoryStore {
                 if backup_path.is_some() {
                     crate::backup::prune_backups(path, options.max_backups)?;
                 }
+                ensure_vec0_index(&db, embedding_dim).await?;
                 Ok(Self::init(db, embedding_dim, Some(path.to_path_buf())))
             }
             Err(cause) => {
@@ -375,6 +485,8 @@ impl MemoryStore {
         let db = Database::connect(opt).await?;
 
         Migrator::up(&db, None).await?;
+
+        ensure_vec0_index(&db, embedding_dim).await?;
 
         Ok(Self::init(db, embedding_dim, None))
     }

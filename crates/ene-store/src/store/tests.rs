@@ -333,25 +333,21 @@ async fn upsert_memory_embedding_rejects_bad_embedding() {
 /// `busy_timeout` are still meaningful.
 #[tokio::test]
 async fn pragmas_are_applied_on_open() {
-    use sea_orm::ConnectionTrait;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
     let store = setup_store().await;
-    // `execute_unprepared` returns a `ExecResult`
-    // whose `rows_affected` field is populated for
-    // some statements; for `PRAGMA foreign_keys` it
-    // returns the current value of the pragma (0 or
-    // 1) as `rows_affected`. This is a pragmatic
-    // way to assert the PRAGMA took effect without
-    // pulling in a full query API.
-    let res = store
+    // Query the PRAGMA value directly instead of relying on rows_affected()
+    // which is unreliable for PRAGMA statements.
+    let row = store
         .connection()
-        .execute_unprepared("PRAGMA foreign_keys")
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_keys".to_string(),
+        ))
         .await
-        .unwrap();
-    assert_eq!(
-        res.rows_affected(),
-        1,
-        "foreign_keys PRAGMA should report 1 (ON)"
-    );
+        .unwrap()
+        .expect("PRAGMA foreign_keys should return a row");
+    let value: i32 = row.try_get_by_index(0).unwrap();
+    assert_eq!(value, 1, "foreign_keys PRAGMA should report 1 (ON)");
 }
 
 #[tokio::test]
@@ -1975,5 +1971,263 @@ async fn upsert_memory_embedding_does_not_create_duplicates() {
         stored_bytes,
         embedding_to_bytes(&emb2),
         "stored embedding must be the second (updated) value"
+    );
+}
+
+// ── #304: vec0 ANN index tests ──
+
+/// The vec0 indexed search must return the same results as the brute-force
+/// scan for a small dataset where both paths are exhaustive.
+#[tokio::test]
+async fn vec0_search_matches_brute_force() {
+    let store = setup_store().await;
+
+    let items = [
+        (
+            "tea preferences",
+            "user likes green tea",
+            vec![1.0, 0.0, 0.0, 0.0],
+        ),
+        (
+            "movie night",
+            "user enjoys sci-fi movies",
+            vec![0.8, 0.6, 0.0, 0.0],
+        ),
+        (
+            "work schedule",
+            "user works 9 to 5",
+            vec![0.5, 0.5, 0.5, 0.5],
+        ),
+        (
+            "pet cat",
+            "user has a cat named Luna",
+            vec![0.0, 0.0, 0.0, 1.0],
+        ),
+    ];
+
+    for (title, content, emb) in &items {
+        let item = test_memory_item(title, content);
+        let id = store.insert_typed_memory(&item).await.unwrap();
+        store
+            .upsert_memory_embedding(id, "test-model", "content", emb)
+            .await
+            .unwrap();
+    }
+
+    let query = vec![0.9, 0.1, 0.0, 0.0];
+    let statuses: &[&str] = &["active"];
+
+    let indexed = store
+        .search_typed_memories_vector(&query, "ene", "test-model", None, statuses, 10, 0.0)
+        .await
+        .unwrap();
+
+    let brute = store
+        .search_typed_memories_vector_brute_force(
+            &query,
+            "ene",
+            "test-model",
+            None,
+            statuses,
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        indexed.len(),
+        brute.len(),
+        "indexed and brute-force must return the same number of results"
+    );
+
+    for (i, (b_item, b_sim)) in brute.iter().enumerate() {
+        let (i_item, i_sim) = &indexed[i];
+        assert_eq!(i_item.id, b_item.id, "result {i}: same memory id expected");
+        assert!(
+            (i_sim - b_sim).abs() < 1e-5,
+            "result {i}: similarity mismatch: indexed={i_sim}, brute={b_sim}"
+        );
+    }
+}
+
+/// The vec0 index must be kept in sync when embeddings are upserted
+/// (insert and update paths).
+#[tokio::test]
+async fn vec0_sync_on_upsert() {
+    let store = setup_store().await;
+
+    let item = test_memory_item("sync test", "content for sync");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+
+    // Insert path: first upsert creates the vec0 row.
+    let emb1 = vec![1.0, 0.0, 0.0, 0.0];
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &emb1)
+        .await
+        .unwrap();
+
+    let results = store
+        .search_typed_memories_vector(&emb1, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1, "vec0 must contain the inserted embedding");
+    assert_eq!(results[0].0.id, Some(id));
+
+    // Update path: second upsert replaces the vec0 row.
+    let emb2 = vec![0.0, 1.0, 0.0, 0.0];
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &emb2)
+        .await
+        .unwrap();
+
+    // Search with the old vector should still find the row (it's the only one).
+    let results = store
+        .search_typed_memories_vector(&emb1, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "vec0 must still contain exactly one row after update"
+    );
+
+    // Search with the new vector should find it with higher similarity.
+    let results_new = store
+        .search_typed_memories_vector(&emb2, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(results_new.len(), 1);
+    assert!(
+        results_new[0].1 > results[0].1,
+        "updated embedding must be more similar to the new vector"
+    );
+}
+
+/// Deleting a typed memory (FK cascade) must remove the vec0 row.
+#[tokio::test]
+async fn vec0_sync_on_cascade_delete() {
+    use sea_orm::ConnectionTrait;
+
+    let store = setup_store().await;
+
+    let item = test_memory_item("cascade vec0", "content to delete");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &[1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+
+    // Verify the vec0 row exists.
+    let before = store
+        .search_typed_memories_vector(
+            &[1.0, 0.0, 0.0, 0.0],
+            "ene",
+            "test-model",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 1, "vec0 row must exist before delete");
+
+    // Delete the parent typed_memories row; FK cascade deletes memory_embeddings,
+    // and the AFTER DELETE trigger removes the vec0 row.
+    store
+        .connection()
+        .execute_unprepared(&format!("DELETE FROM typed_memories WHERE id = {id}"))
+        .await
+        .unwrap();
+
+    let after = store
+        .search_typed_memories_vector(
+            &[1.0, 0.0, 0.0, 0.0],
+            "ene",
+            "test-model",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        after.len(),
+        0,
+        "vec0 row must be removed after cascade delete"
+    );
+}
+
+/// The vec0 tool embedding index must be kept in sync with
+/// `tool_embedding_index` writes and deletes.
+#[tokio::test]
+async fn vec0_tool_search_sync() {
+    let store = setup_store().await;
+
+    let emb = vec![1.0, 0.0, 0.0, 0.0];
+    store
+        .upsert_tool_embedding_field(
+            "weather",
+            "summary",
+            "s0",
+            "hash1",
+            "test-model",
+            &emb,
+            "weather tool",
+        )
+        .await
+        .unwrap();
+
+    let results = store.search_tools(&emb, 10, 0.0).await.unwrap();
+    assert_eq!(results.len(), 1, "tool must be found via vec0");
+    assert_eq!(results[0].0, "weather");
+
+    // Delete and verify removal.
+    store.delete_tool_embeddings("weather").await.unwrap();
+    let results = store.search_tools(&emb, 10, 0.0).await.unwrap();
+    assert_eq!(
+        results.len(),
+        0,
+        "tool must be removed from vec0 after delete"
+    );
+}
+
+/// The similarity threshold must filter results in the vec0 path.
+#[tokio::test]
+async fn vec0_search_respects_threshold() {
+    let store = setup_store().await;
+
+    let item = test_memory_item("threshold test", "content");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+    // Orthogonal vector: cosine similarity to query [1,0,0,0] is 0.
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &[0.0, 1.0, 0.0, 0.0])
+        .await
+        .unwrap();
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+
+    // With threshold 0.0, the orthogonal vector (similarity ≈ 0) should appear.
+    let results = store
+        .search_typed_memories_vector(&query, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "orthogonal vector must pass threshold 0.0"
+    );
+
+    // With threshold 0.5, it should be filtered out.
+    let results = store
+        .search_typed_memories_vector(&query, "ene", "test-model", None, &["active"], 10, 0.5)
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        0,
+        "orthogonal vector must be filtered by threshold 0.5"
     );
 }
