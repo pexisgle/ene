@@ -320,9 +320,9 @@ pub fn penalty_multiplier(contradiction: f32, stale: f32) -> f32 {
 
 /// Compute the hybrid score breakdown for a gathered candidate (#346).
 ///
-/// Structure: `total = relevance × quality_factor × penalty_multiplier
-/// + commitment_boost`, clamped to `>= 0`. Relevance (vector + lexical) is the
-/// multiplicative base, quality only rescales it, penalties are a
+/// Total is `relevance × quality_factor × penalty_multiplier + commitment_boost`,
+/// clamped to be non-negative. Relevance (vector similarity plus lexical overlap)
+/// is the multiplicative base, quality only rescales it, penalties are a
 /// scale-invariant multiplier, and the commitment boost stays additive so an
 /// active promise surfaces even with zero query relevance.
 pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> MemoryScoreBreakdown {
@@ -793,6 +793,10 @@ mod tests {
 
     fn item_with_quality(salience: f32, confidence: f32, access_count: i64) -> MemoryItem {
         let mut item = sample_item(MemoryStatus::Active);
+        // Neutral text with no overlap against the "pizza" query, so relevance
+        // is driven purely by the vector similarity each test supplies.
+        item.title = "weather report".into();
+        item.content = "sunny skies expected tomorrow".into();
         item.salience = MemorySalience::new(salience);
         item.confidence = MemoryConfidence::new(confidence);
         item.access_count = access_count;
