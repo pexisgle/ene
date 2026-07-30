@@ -428,63 +428,78 @@ pub(crate) fn set_nested(
     Ok(())
 }
 
-/// Recursively computes the JSON values present in `current` but absent from,
-/// or different in, `base` (#326).
+/// Applies the user's in-session edits onto the raw on-disk JSON layer (#326).
 ///
-/// When both sides are JSON objects the comparison descends key by key; for
-/// every other shape (scalars, arrays, mismatched types) the whole `current`
-/// value is returned when it differs from `base`. Returns `None` when the two
-/// values are identical. Object keys that exist only in `base` are ignored —
-/// this is an additive diff used to capture the user's in-session mutations,
-/// not a symmetric difference.
-fn deep_diff(base: &serde_json::Value, current: &serde_json::Value) -> Option<serde_json::Value> {
+/// This is a three-way merge keyed on `base` — the layered config
+/// (defaults → JSON → env) the loader produced — which is the common ancestor
+/// of both `raw` (the JSON layer on disk) and `current` (the in-memory config
+/// after the user's edits):
+///
+/// - a key whose value is unchanged between `base` and `current` keeps the raw
+///   on-disk value (so env overrides and defaults never reach disk);
+/// - a key the user changed (or added) takes the `current` value;
+/// - a key present in `base` but absent from `current` was cleared by the user
+///   (e.g. an `Option` field reset to `None`, which `skip_serializing_if`
+///   omits from serialisation) and is removed from the output.
+///
+/// The env layer cancels out of the comparison because it is present in both
+/// `base` and `current`, so env overrides stay transient. Unknown fields and
+/// the user's key order in `raw` are preserved.
+///
+/// This assumes the `ENE_` environment is stable between load and save (the
+/// normal case — the process environment does not change at runtime). If an
+/// override is unset mid-process, the value it injected at load looks like a
+/// user change relative to the rebuilt baseline and would be persisted.
+fn three_way_merge(
+    base: &serde_json::Value,
+    raw: &serde_json::Value,
+    current: &serde_json::Value,
+) -> serde_json::Value {
     use serde_json::Value;
 
-    match (base, current) {
-        (Value::Object(base_obj), Value::Object(cur_obj)) => {
-            let mut changed = serde_json::Map::new();
+    match (base, raw, current) {
+        (Value::Object(base_obj), Value::Object(raw_obj), Value::Object(cur_obj)) => {
+            let mut out = serde_json::Map::new();
+            // Keys present in the current (edited) config: keep the raw value
+            // when unchanged, otherwise take the user's new value.
             for (key, cur_val) in cur_obj {
                 match base_obj.get(key) {
-                    Some(base_val) => {
-                        if let Some(diff) = deep_diff(base_val, cur_val) {
-                            changed.insert(key.clone(), diff);
+                    Some(base_val) if base_val == cur_val => {
+                        if let Some(raw_val) = raw_obj.get(key) {
+                            out.insert(key.clone(), raw_val.clone());
                         }
                     }
+                    Some(base_val) => {
+                        let raw_val = raw_obj
+                            .get(key)
+                            .cloned()
+                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                        out.insert(key.clone(), three_way_merge(base_val, &raw_val, cur_val));
+                    }
                     None => {
-                        changed.insert(key.clone(), cur_val.clone());
+                        out.insert(key.clone(), cur_val.clone());
                     }
                 }
             }
-            if changed.is_empty() {
-                None
+            // Keys the user deleted (present in base, absent from current):
+            // drop them so a cleared field does not linger on disk.
+            for (key, raw_val) in raw_obj {
+                if base_obj.contains_key(key) && !cur_obj.contains_key(key) {
+                    continue;
+                }
+                out.entry(key.clone()).or_insert_with(|| raw_val.clone());
+            }
+            Value::Object(out)
+        }
+        // Non-object (or shape-mismatched) values: the user's current value
+        // wins when it differs from the base, otherwise the raw value stays.
+        _ => {
+            if base == current {
+                raw.clone()
             } else {
-                Some(Value::Object(changed))
+                current.clone()
             }
         }
-        _ => (base != current).then(|| current.clone()),
-    }
-}
-
-/// Recursively overlays `patch` onto `base`, returning the merged result
-/// (#326).
-///
-/// JSON objects are merged key by key (recursing into nested objects); any
-/// other shape in `patch` replaces the corresponding `base` value outright.
-fn deep_merge(base: serde_json::Value, patch: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-
-    match (base, patch) {
-        (Value::Object(mut base_obj), Value::Object(patch_obj)) => {
-            for (key, patch_val) in patch_obj {
-                let merged = match base_obj.remove(&key) {
-                    Some(base_val) => deep_merge(base_val, patch_val),
-                    None => patch_val,
-                };
-                base_obj.insert(key, merged);
-            }
-            Value::Object(base_obj)
-        }
-        (_, patch) => patch,
     }
 }
 
@@ -493,26 +508,17 @@ fn deep_merge(base: serde_json::Value, patch: serde_json::Value) -> serde_json::
 /// The in-memory [`EneConfig`] is the result of layering defaults → JSON file
 /// → `ENE_` env vars, so serialising it directly would bake transient env
 /// overrides (and every default) into `settings.json`. Instead this rebuilds
-/// the same layered baseline the loader produced, subtracts it from `config`
-/// to isolate the user's genuine in-session mutations, and merges those
-/// mutations onto the **raw** on-disk JSON. The env layer cancels out of the
-/// subtraction (it is present in both the baseline and `config`), so env
-/// overrides stay transient, while unknown fields and the user's key order in
-/// the raw JSON are preserved.
+/// the same layered baseline the loader produced and three-way merges the
+/// in-memory config onto the **raw** on-disk JSON, so only genuine user edits
+/// are persisted. See [`three_way_merge`] for the merge semantics.
 fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String, EneConfigError> {
     let baseline = extract_layered_config(config_path)?;
     let baseline_val = serde_json::to_value(&baseline)?;
     let current_val = serde_json::to_value(config)?;
 
-    // No user mutations: write the raw JSON layer back untouched so env
-    // overrides and defaults never reach disk.
-    let Some(mutations) = deep_diff(&baseline_val, &current_val) else {
-        return read_raw_json_layer(config_path);
-    };
-
     let raw_layer = match read_raw_json_layer(config_path) {
         Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)?,
-        // A missing file is an empty JSON layer; the mutations become the
+        // A missing file is an empty JSON layer; the user's edits become the
         // file's initial contents.
         Err(EneConfigError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             serde_json::Value::Object(serde_json::Map::new())
@@ -520,7 +526,7 @@ fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String
         Err(e) => return Err(e),
     };
 
-    let merged = deep_merge(raw_layer, mutations);
+    let merged = three_way_merge(&baseline_val, &raw_layer, &current_val);
     Ok(serde_json::to_string_pretty(&merged)?)
 }
 
@@ -1411,35 +1417,58 @@ mod tests {
         assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
     }
 
-    /// `deep_diff` reports only additions and changed leaves, recursing into
-    /// nested objects and ignoring keys that exist solely in the base.
+    /// `three_way_merge` keeps the raw on-disk value for keys the user did not
+    /// change, takes the user's value for changed/added keys, and drops keys
+    /// the user cleared (present in base, absent from current).
     #[test]
-    fn deep_diff_captures_additions_and_changes_only() {
+    fn three_way_merge_keeps_raw_for_unchanged_and_drops_cleared() {
         use serde_json::json;
-        let base = json!({"a": 1, "nested": {"x": 1, "y": 2}, "same": "keep"});
-        let current = json!({"a": 1, "nested": {"x": 9, "y": 2}, "same": "keep", "added": true});
-        let diff = deep_diff(&base, &current).expect("there is a diff");
-        assert_eq!(diff, json!({"nested": {"x": 9}, "added": true}));
-    }
-
-    /// `deep_diff` returns `None` for identical values (including nesting).
-    #[test]
-    fn deep_diff_none_when_identical() {
-        use serde_json::json;
-        let value = json!({"a": {"b": [1, 2, 3]}, "c": "x"});
-        assert!(deep_diff(&value, &value).is_none());
-    }
-
-    /// `deep_merge` overlays nested objects key by key and replaces leaves.
-    #[test]
-    fn deep_merge_overlays_nested_objects() {
-        use serde_json::json;
-        let base = json!({"keep": 1, "nested": {"a": 1, "b": 2}});
-        let patch = json!({"nested": {"b": 9, "c": 3}, "new": true});
-        let merged = deep_merge(base, patch);
+        // base = layered load (defaults + JSON + env); `env_key` is an env
+        // override present in base and current, so it must NOT reach the output.
+        let base = json!({
+            "unchanged": 1,
+            "changed": "old",
+            "env_key": "from-env",
+            "cleared": "was-set",
+        });
+        let raw = json!({
+            "unchanged": 1,
+            "changed": "old",
+            "cleared": "was-set",
+            "unknown": "preserve-me",
+        });
+        let current = json!({
+            "unchanged": 1,
+            "changed": "new",
+            "env_key": "from-env",
+            "added": true,
+        });
+        let merged = three_way_merge(&base, &raw, &current);
         assert_eq!(
             merged,
-            json!({"keep": 1, "nested": {"a": 1, "b": 9, "c": 3}, "new": true})
+            json!({
+                "unchanged": 1,
+                "changed": "new",
+                "added": true,
+                "unknown": "preserve-me",
+            }),
+            "env_key must not persist, cleared must be dropped, unknown preserved"
+        );
+    }
+
+    /// `three_way_merge` recurses into nested objects so a cleared nested field
+    /// is removed while untouched siblings keep their raw on-disk values.
+    #[test]
+    fn three_way_merge_recurses_into_nested_objects() {
+        use serde_json::json;
+        let base = json!({"section": {"keep": 1, "drop": 2, "edit": "a"}});
+        let raw = json!({"section": {"keep": 1, "drop": 2, "edit": "a"}});
+        let current = json!({"section": {"keep": 1, "edit": "b"}});
+        let merged = three_way_merge(&base, &raw, &current);
+        assert_eq!(
+            merged,
+            json!({"section": {"keep": 1, "edit": "b"}}),
+            "nested cleared key must be dropped, edit applied"
         );
     }
 
@@ -1519,6 +1548,9 @@ mod tests {
     /// values into `settings.json`; the raw JSON layer is written back as-is.
     #[test]
     fn defaults_not_forced_to_disk_on_save() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, r#"{"user_name":"OnlyThis"}"#).expect("seed settings");
@@ -1537,6 +1569,30 @@ mod tests {
             keys,
             vec!["user_name"],
             "only the on-disk key should remain, got {json}"
+        );
+    }
+
+    /// Regression for #326: clearing an optional field (here `user_persona`,
+    /// which `skip_serializing_if` omits when `None`) must be persisted — the
+    /// stale on-disk value must not survive a save/reload cycle.
+    #[test]
+    fn cleared_optional_field_is_removed_from_disk() {
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, r#"{"user_persona":{"name":"Alice"}}"#).expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
+        assert!(
+            config.user_persona.is_some(),
+            "persona should load from disk"
+        );
+        config.user_persona = None;
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(
+            saved.get("user_persona").is_none(),
+            "cleared optional field must be removed from disk, got {json}"
         );
     }
 
