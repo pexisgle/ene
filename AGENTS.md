@@ -100,7 +100,7 @@ hand-edit or commit it.
 ## Plugins and IPC
 
 New tools are separate lightweight binaries: `cargo new --bin plugins/tool/<name>`. Derive
-`ToolAction`, build on `ene_tool_sdk::{prelude, ActionSetProvider}`, then serve via
+`ToolAction`, build on `ene_plugin::{prelude, ActionSetProvider}`, then serve via
 `run_plugin_server(PluginDispatch::new(Some(Arc::new(ToolProviderPlugin::new(provider))), None, None, None, None))`
 (see `plugins/tool/utility/src/main.rs`). Use namespaced `<namespace>.<action>` names and
 declare side effects / sandbox needs. Verify with `/tool list` and update both
