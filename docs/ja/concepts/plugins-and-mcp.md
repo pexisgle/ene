@@ -130,7 +130,49 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 ---
 
-## 5. プラグインセキュリティモデル
+## 5. プラグイン状態データベース (DB IPC)
+
+ステートフルなツールプラグイン (`ene-plugin-fs`, `ene-plugin-utility`) は、
+自前で SQLite コネクションを開くのではなく、ツールごとの DB IPC サーバー
+(`ene-store` の `db_server`) を通じて状態を永続化します。プラグインは
+`ene-plugin-db` をリンクし、その `DbClient` が length-prefixed JSON の Unix
+ソケット越しにサーバーと通信します。サーバーはすべての接続を事前共有トークンで
+認証し、プラグインが `DeclareSchema` で宣言したスキーマを強制し、テーブルを
+プレフィックスで分離することで、プラグインが自前のテーブル (例: `fs_*`) にしか
+触れられないようにします。
+
+### メッセージセット
+
+`DbRequest` / `DbResponse` (`crates/ene-plugin-db/src/messages.rs` 内) は CRUD の
+表面を覆います: `Handshake`, `DeclareSchema`, `Insert`, `Upsert`, `Select`,
+`Update`, `Delete`, `Count`, `Batch`, `LastInsertRowId`, `Ping`, `Shutdown`。
+DDL は露出されません — プラグインは宣言済みスキーマの外でテーブルの作成・変更・
+削除を行えません。
+
+### 原子的バッチ (`Batch`)
+
+複数の書き込みを原子的に適用する必要があるプラグインは、`DbWriteOp`
+(`Insert` / `Upsert` / `Update` / `Delete`) のリストを載せた単一の `Batch`
+リクエストを送ります。サーバーはまずすべての操作を宣言済みスキーマに対して検証し、
+その後リスト全体を**1つの SQLite トランザクション**内で実行します: すべての操作が
+コミットされるか、いずれかの操作が失敗した場合はバッチ全体がロールバックされ、
+何も永続化されません。レスポンスはリクエスト順に操作ごとの `DbBatchOpResult` を
+1つずつ持ちます。失敗時にはサーバーは失敗した操作のインデックスを名指しする
+`Error` を返します。
+
+トランザクションは単一リクエストのスコープに閉じており — IPC の往復をまたいで
+保持されることは決してないため — プラグインが SQLite の書き込みロックをピン留め
+して開きっぱなしにすること (これはコア自身の記憶書き込みを停滞させます) はできず、
+切断された接続が中途半端に適用されたバッチを残すことも決してありません。これは、
+明示的な `Begin`/`Commit`/`Rollback` を IPC 越しに露出する代わりに意図的に選ばれた
+代替案です: バッチは「複数行を原子的に書き込む」ケース (例: 複数行の undo エントリ
+の記録) を、ロックを長時間保持する危険なしにカバーします。`Batch` は、上記の stdio
+プロトコルと同じ追加専用の規律に従い、プロトコルバージョンの引き上げなしに新しい
+リクエスト/レスポンスバリアントとして追加されました。
+
+---
+
+## 6. プラグインセキュリティモデル
 
 ### オプトイン型ディスカバリ
 
@@ -196,7 +238,7 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
 
 ---
 
-## 6. MCP (Model Context Protocol) 連携
+## 7. MCP (Model Context Protocol) 連携
 
 `ene-connector` および `ene-plugin-host` は外部 MCP サーバーをシームレスに統合します：
 
@@ -206,7 +248,7 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
 
 ---
 
-## 7. カスタムツールプラグインの開発
+## 8. カスタムツールプラグインの開発
 
 開発者は `ene-plugin` の `#[derive(ToolAction)]`（`ene-tool-macros` 経由）とサーバーエントリポイントを使用して独自のツールプラグインを作成できます。以下は説明用のスケッチです — 実際にコンパイルが通る現行パターンは `plugins/tool/*` 配下の既存プラグイン (例: `plugins/tool/app/src/main.rs`) や `cargo doc -p ene-tool-macros --open` を参照してください：
 

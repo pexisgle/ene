@@ -7,6 +7,11 @@
 //! DB server. The core server enforces table-name prefix isolation so that
 //! each plugin can only access its own tables.
 //!
+//! Groups of writes that must stand or fall together can be applied atomically
+//! with [`DbClient::batch`]: the server runs the whole [`DbWriteOp`] list in a
+//! single `SQLite` transaction, committing all of them or rolling all of them
+//! back, so a plugin never persists a half-applied update.
+//!
 //! ## Quick Start
 //!
 //! ```rust,no_run
@@ -48,7 +53,7 @@ pub mod messages;
 pub mod types;
 
 pub use client::{DbClient, DbError};
-pub use messages::{DbErrorCode, DbRequest, DbResponse};
+pub use messages::{DbBatchOpResult, DbErrorCode, DbRequest, DbResponse, DbWriteOp};
 pub use types::{
     DbColumn, DbFilter, DbIndex, DbOrderBy, DbOrderDirection, DbSchema, DbTable, DbType, DbValue,
     Row,

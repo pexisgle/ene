@@ -18,11 +18,13 @@ use std::sync::Arc;
 
 use crate::entities::tool_schemas;
 use ene_plugin_db::{
-    DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable, DbValue, Row,
+    DbBatchOpResult, DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable,
+    DbValue, DbWriteOp, Row,
 };
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, ExprTrait, Statement,
+    TransactionTrait,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
@@ -73,6 +75,24 @@ impl DbServerError {
             Self::Internal(msg) => (DbErrorCode::Internal, msg.clone()),
         };
         DbResponse::Error { code, message }
+    }
+
+    /// Returns this error with the failing batch operation index prefixed to
+    /// its message, preserving the wire error code where a variant carries one,
+    /// so a rejected [`DbRequest::Batch`] reports which operation aborted it.
+    fn at_batch_op(self, idx: usize) -> Self {
+        let prefix = format!("batch op {idx}");
+        match self {
+            Self::PermissionDenied(msg) => Self::PermissionDenied(format!("{prefix}: {msg}")),
+            Self::UnknownTable(msg) => Self::UnknownTable(format!("{prefix}: {msg}")),
+            Self::UnknownColumn { table, column } => {
+                Self::Internal(format!("{prefix}: unknown column {table}.{column}"))
+            }
+            Self::Io(e) => Self::Internal(format!("{prefix}: IO error: {e}")),
+            Self::Json(e) => Self::Internal(format!("{prefix}: JSON error: {e}")),
+            Self::Db(e) => Self::Internal(format!("{prefix}: database error: {e}")),
+            Self::Internal(msg) => Self::Internal(format!("{prefix}: {msg}")),
+        }
     }
 }
 
@@ -453,6 +473,14 @@ impl DbIpcServer {
                     Err(e) => e.to_error_response(),
                 }
             }
+            DbRequest::Batch { ops } => {
+                match Self::handle_batch(db, declared_tables, declared_columns, last_rowid, ops)
+                    .await
+                {
+                    Ok(results) => DbResponse::Batch { results },
+                    Err(e) => e.to_error_response(),
+                }
+            }
             DbRequest::LastInsertRowId => {
                 // Return the rowid of the most recent
                 // Insert on this logical connection. SQLite's
@@ -473,6 +501,118 @@ impl DbIpcServer {
                 message: "Handshake already completed".to_string(),
             },
         }
+    }
+
+    /// Validates a single [`DbWriteOp`] against the declared schema without
+    /// touching the database. Mirrors the per-request validation performed in
+    /// [`handle_request`](Self::handle_request) for the standalone
+    /// `Insert`/`Upsert`/`Update`/`Delete` requests, so a batch is rejected
+    /// before any statement runs.
+    fn validate_write_op(
+        declared_tables: &HashMap<String, DbTable>,
+        declared_columns: &HashMap<String, HashSet<String>>,
+        op: &DbWriteOp,
+    ) -> Result<(), DbServerError> {
+        match op {
+            DbWriteOp::Insert { table, row } => Self::validate_table_access(declared_tables, table)
+                .and_then(|()| Self::validate_row_columns(declared_columns, table, row)),
+            DbWriteOp::Upsert { table, row, .. } => {
+                Self::validate_table_access(declared_tables, table)
+                    .and_then(|()| Self::validate_row_columns(declared_columns, table, row))
+            }
+            DbWriteOp::Update { table, set, filter } => {
+                Self::validate_table_access(declared_tables, table)
+                    .and_then(|()| Self::validate_row_columns(declared_columns, table, set))
+                    .and_then(|()| Self::validate_filter_columns(declared_columns, table, filter))
+            }
+            DbWriteOp::Delete { table, filter } => {
+                Self::validate_table_access(declared_tables, table)
+                    .and_then(|()| Self::validate_filter_columns(declared_columns, table, filter))
+            }
+        }
+    }
+
+    /// Executes a [`DbRequest::Batch`] atomically.
+    ///
+    /// Every operation is validated against the declared schema up front, then
+    /// applied inside a single `SQLite` transaction opened on `db`. If all
+    /// operations succeed the transaction commits and one [`DbBatchOpResult`]
+    /// per operation is returned in request order. If any operation fails, the
+    /// transaction is rolled back and an error naming the failing operation is
+    /// returned — nothing from the batch is persisted.
+    ///
+    /// The transaction is scoped entirely to this call: it is never held across
+    /// IPC round-trips, so a plugin cannot pin the `SQLite` write lock open, and
+    /// a dropped connection cannot leave a half-applied batch (the transaction
+    /// either commits before the response is sent or rolls back on drop).
+    async fn handle_batch(
+        db: &DatabaseConnection,
+        declared_tables: &HashMap<String, DbTable>,
+        declared_columns: &HashMap<String, HashSet<String>>,
+        last_rowid: &Arc<std::sync::Mutex<Option<i64>>>,
+        ops: Vec<DbWriteOp>,
+    ) -> Result<Vec<DbBatchOpResult>, DbServerError> {
+        for (idx, op) in ops.iter().enumerate() {
+            Self::validate_write_op(declared_tables, declared_columns, op)
+                .map_err(|e| e.at_batch_op(idx))?;
+        }
+
+        let txn = db.begin().await.map_err(DbServerError::Db)?;
+
+        let mut results = Vec::with_capacity(ops.len());
+        for (idx, op) in ops.into_iter().enumerate() {
+            let result = match op {
+                DbWriteOp::Insert { table, row } => Self::handle_insert(&txn, &table, row)
+                    .await
+                    .map(|rowid| DbBatchOpResult::Insert { rowid }),
+                DbWriteOp::Upsert {
+                    table,
+                    row,
+                    conflict_columns,
+                } => Self::handle_upsert(&txn, &table, row, conflict_columns)
+                    .await
+                    .map(|rowid| DbBatchOpResult::Upsert { rowid }),
+                DbWriteOp::Update { table, set, filter } => {
+                    Self::handle_update(&txn, &table, set, filter)
+                        .await
+                        .map(|affected| DbBatchOpResult::Update { affected })
+                }
+                DbWriteOp::Delete { table, filter } => Self::handle_delete(&txn, &table, filter)
+                    .await
+                    .map(|affected| DbBatchOpResult::Delete { affected }),
+            };
+            match result {
+                Ok(res) => results.push(res),
+                Err(e) => {
+                    // Explicit rollback for a prompt, deterministic release of
+                    // the write lock; dropping `txn` would roll back too.
+                    txn.rollback().await.map_err(DbServerError::Db)?;
+                    return Err(e.at_batch_op(idx));
+                }
+            }
+        }
+
+        txn.commit().await.map_err(DbServerError::Db)?;
+
+        // Mirror the standalone `Insert` behavior: a committed insert updates
+        // the connection-scoped `LastInsertRowId` cell to the batch's final
+        // insert rowid, so the tool's view stays consistent.
+        if let Ok(mut guard) = last_rowid.lock() {
+            for res in results.iter().rev() {
+                let rowid = match res {
+                    DbBatchOpResult::Insert { rowid } | DbBatchOpResult::Upsert { rowid } => {
+                        Some(*rowid)
+                    }
+                    DbBatchOpResult::Update { .. } | DbBatchOpResult::Delete { .. } => None,
+                };
+                if let Some(rowid) = rowid {
+                    *guard = Some(rowid);
+                    break;
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     fn validate_table_access(
@@ -836,7 +976,7 @@ impl DbIpcServer {
         reason = "indexes into request-owned row map with validated column keys"
     )]
     async fn handle_insert(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         row: Row,
     ) -> Result<i64, DbServerError> {
@@ -871,7 +1011,7 @@ impl DbIpcServer {
         reason = "indexes into request-owned row map with validated column keys"
     )]
     async fn handle_upsert(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         row: Row,
         conflict_columns: Vec<String>,
@@ -1043,7 +1183,7 @@ impl DbIpcServer {
         reason = "indexes into request-owned set map with validated column keys"
     )]
     async fn handle_update(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         set: Row,
         filter: DbFilter,
@@ -1076,7 +1216,7 @@ impl DbIpcServer {
     }
 
     async fn handle_delete(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         filter: DbFilter,
     ) -> Result<u64, DbServerError> {
@@ -1381,5 +1521,379 @@ mod tests {
             other => panic!("expected LastInsertRowId, got {other:?}"),
         };
         assert_eq!(lookup2_id, second_id);
+    }
+
+    /// Sets up an in-memory DB with a single pooled connection (mirroring the
+    /// store's in-memory setup, so reads and writes hit the same connection),
+    /// a declared `fs_test` table, and the connection-scoped state that
+    /// [`DbIpcServer::handle_request`] threads through.
+    async fn setup_batch_fixture() -> (
+        sea_orm::DatabaseConnection,
+        HashMap<String, ene_plugin_db::DbTable>,
+        HashMap<String, HashSet<String>>,
+        Arc<std::sync::Mutex<Option<i64>>>,
+    ) {
+        use sea_orm::ConnectionTrait;
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1);
+        let db = sea_orm::Database::connect(opt).await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE fs_test (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             name TEXT NOT NULL, qty INTEGER)",
+        )
+        .await
+        .unwrap();
+
+        let mut declared_tables: HashMap<String, ene_plugin_db::DbTable> = HashMap::new();
+        declared_tables.insert(
+            "fs_test".to_string(),
+            ene_plugin_db::DbTable {
+                name: "fs_test".to_string(),
+                columns: vec![
+                    ene_plugin_db::DbColumn {
+                        name: "id".to_string(),
+                        ty: ene_plugin_db::DbType::Integer,
+                        nullable: false,
+                        primary_key: true,
+                        auto_increment: true,
+                        unique: false,
+                        default: None,
+                    },
+                    ene_plugin_db::DbColumn {
+                        name: "name".to_string(),
+                        ty: ene_plugin_db::DbType::Text,
+                        nullable: false,
+                        primary_key: false,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                    ene_plugin_db::DbColumn {
+                        name: "qty".to_string(),
+                        ty: ene_plugin_db::DbType::Integer,
+                        nullable: true,
+                        primary_key: false,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                ],
+            },
+        );
+        let mut declared_columns: HashMap<String, HashSet<String>> = HashMap::new();
+        declared_columns.insert(
+            "fs_test".to_string(),
+            ["id".to_string(), "name".to_string(), "qty".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
+        (db, declared_tables, declared_columns, last_rowid)
+    }
+
+    /// Counts rows in `fs_test` via the request dispatcher.
+    async fn count_test_rows(
+        db: &sea_orm::DatabaseConnection,
+        declared_tables: &mut HashMap<String, ene_plugin_db::DbTable>,
+        declared_columns: &mut HashMap<String, HashSet<String>>,
+        last_rowid: &Arc<std::sync::Mutex<Option<i64>>>,
+    ) -> i64 {
+        match DbIpcServer::handle_request(
+            db,
+            "fs",
+            "fs_",
+            declared_tables,
+            declared_columns,
+            last_rowid,
+            ene_plugin_db::DbRequest::Count {
+                table: "fs_test".to_string(),
+                filter: ene_plugin_db::DbFilter::Always,
+            },
+        )
+        .await
+        {
+            ene_plugin_db::DbResponse::Count { count } => count,
+            other => panic!("expected Count, got {other:?}"),
+        }
+    }
+
+    /// A batch of valid writes commits atomically: every operation is applied
+    /// and one [`ene_plugin_db::DbBatchOpResult`] is returned per operation, in
+    /// request order.
+    #[tokio::test]
+    async fn batch_commits_all_ops_atomically() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        ene_plugin_db::DbValue::Text("alpha".to_string()),
+                    ),
+                    ("qty".to_string(), ene_plugin_db::DbValue::Int(1)),
+                ]),
+            },
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        ene_plugin_db::DbValue::Text("beta".to_string()),
+                    ),
+                    ("qty".to_string(), ene_plugin_db::DbValue::Int(2)),
+                ]),
+            },
+            ene_plugin_db::DbWriteOp::Update {
+                table: "fs_test".to_string(),
+                set: std::collections::BTreeMap::from([(
+                    "qty".to_string(),
+                    ene_plugin_db::DbValue::Int(99),
+                )]),
+                filter: ene_plugin_db::DbFilter::eq("name", "alpha"),
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        let results = match resp {
+            ene_plugin_db::DbResponse::Batch { results } => results,
+            other => panic!("expected Batch, got {other:?}"),
+        };
+        assert_eq!(results.len(), 3);
+        assert!(
+            matches!(results[0], ene_plugin_db::DbBatchOpResult::Insert { rowid } if rowid > 0)
+        );
+        assert!(
+            matches!(results[1], ene_plugin_db::DbBatchOpResult::Insert { rowid } if rowid > 0)
+        );
+        assert_eq!(
+            results[2],
+            ene_plugin_db::DbBatchOpResult::Update { affected: 1 }
+        );
+
+        // Both inserts committed.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            2
+        );
+    }
+
+    /// A failing statement rolls the whole batch back: the valid insert that
+    /// preceded the NOT NULL violation is not persisted, and the error names
+    /// the failing operation index.
+    #[tokio::test]
+    async fn batch_rolls_back_on_failing_statement() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            // Valid insert.
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("ok".to_string()),
+                )]),
+            },
+            // Violates `name TEXT NOT NULL`; the whole batch must roll back.
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Null,
+                )]),
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::Internal);
+                assert!(
+                    message.contains("batch op 1"),
+                    "error should name the failing op: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // The first (valid) insert must have been rolled back.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
+    }
+
+    /// Schema validation runs before any statement executes, so a batch that
+    /// references an undeclared table is rejected wholesale and nothing — not
+    /// even the valid operations before it — is applied.
+    #[tokio::test]
+    async fn batch_rejects_undeclared_table_before_executing() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("ok".to_string()),
+                )]),
+            },
+            ene_plugin_db::DbWriteOp::Delete {
+                table: "fs_undeclared".to_string(),
+                filter: ene_plugin_db::DbFilter::Always,
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::UnknownTable);
+                assert!(
+                    message.contains("batch op 1"),
+                    "error should name the failing op: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // Validation precedes execution, so the valid insert never ran.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
+    }
+
+    /// A committed batch updates the connection-scoped `LastInsertRowId` cell
+    /// to the batch's final insert rowid, matching standalone `Insert` behavior.
+    #[tokio::test]
+    async fn batch_updates_last_insert_rowid() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("one".to_string()),
+                )]),
+            },
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("two".to_string()),
+                )]),
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+        let results = match resp {
+            ene_plugin_db::DbResponse::Batch { results } => results,
+            other => panic!("expected Batch, got {other:?}"),
+        };
+        let second_rowid = match results[1] {
+            ene_plugin_db::DbBatchOpResult::Insert { rowid } => rowid,
+            ref other => panic!("expected Insert result, got {other:?}"),
+        };
+
+        let lookup = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::LastInsertRowId,
+        )
+        .await;
+        let lookup_id = match lookup {
+            ene_plugin_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            other => panic!("expected LastInsertRowId, got {other:?}"),
+        };
+        assert_eq!(lookup_id, second_rowid);
+    }
+
+    /// An empty batch is a no-op that commits successfully with no results.
+    #[tokio::test]
+    async fn empty_batch_commits_nothing() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops: vec![] },
+        )
+        .await;
+        match resp {
+            ene_plugin_db::DbResponse::Batch { results } => assert!(results.is_empty()),
+            other => panic!("expected Batch, got {other:?}"),
+        }
     }
 }

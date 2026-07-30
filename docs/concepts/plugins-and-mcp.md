@@ -130,7 +130,48 @@ automatically on fresh installs.
 
 ---
 
-## 5. Plugin Security Model
+## 5. Plugin State Database (DB IPC)
+
+Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) persist their
+state through a per-tool DB IPC server (`ene-store`'s `db_server`) rather than
+opening their own SQLite connection. The plugin links `ene-plugin-db`, whose
+`DbClient` talks to the server over a length-prefixed JSON Unix socket. The
+server authenticates every connection with a pre-shared token, enforces the
+schema the plugin declared via `DeclareSchema`, and isolates tables by prefix
+so a plugin can only touch its own tables (e.g. `fs_*`).
+
+### Message set
+
+`DbRequest` / `DbResponse` (in `crates/ene-plugin-db/src/messages.rs`) cover the
+CRUD surface: `Handshake`, `DeclareSchema`, `Insert`, `Upsert`, `Select`,
+`Update`, `Delete`, `Count`, `Batch`, `LastInsertRowId`, `Ping`, `Shutdown`.
+DDL is not exposed — a plugin cannot create, alter, or drop tables outside its
+declared schema.
+
+### Atomic batches (`Batch`)
+
+A plugin that must apply several writes atomically sends a single `Batch`
+request carrying a list of `DbWriteOp` (`Insert` / `Upsert` / `Update` /
+`Delete`). The server validates every operation against the declared schema up
+front, then runs the whole list inside **one SQLite transaction**: either every
+operation commits, or — if any operation fails — the entire batch is rolled
+back and nothing is persisted. The response carries one `DbBatchOpResult` per
+operation, in request order; on failure the server returns `Error` naming the
+index of the failing operation.
+
+Because the transaction is scoped to a single request — never held across IPC
+round-trips — a plugin cannot pin SQLite's write lock open (which would stall
+the core's own memory writes), and a dropped connection can never leave a
+half-applied batch behind. This is the deliberate alternative to exposing
+explicit `Begin`/`Commit`/`Rollback` over IPC: the batch covers the
+"write several rows atomically" case (e.g. recording a multi-row undo entry)
+without the long-held-lock hazard. `Batch` was added as a new request/response
+variant with no protocol-version bump, following the same additive-only
+discipline as the stdio protocol above.
+
+---
+
+## 6. Plugin Security Model
 
 ### Opt-in discovery
 
@@ -199,7 +240,7 @@ up the new binary and re-pin its checksum.
 
 ---
 
-## 6. MCP (Model Context Protocol) Integration
+## 7. MCP (Model Context Protocol) Integration
 
 `ene-connector` and `ene-plugin-host` seamlessly integrate external MCP servers:
 
@@ -209,7 +250,7 @@ up the new binary and re-pin its checksum.
 
 ---
 
-## 7. Writing a Custom Tool Plugin
+## 8. Writing a Custom Tool Plugin
 
 Developers can quickly author new tool plugins using `ene-plugin`'s `#[derive(ToolAction)]` (via `ene-tool-macros`) and server entry point. This sketch is illustrative — see an existing plugin under `plugins/tool/*` (e.g. `plugins/tool/app/src/main.rs`) for the current, compiling pattern, or `cargo doc -p ene-tool-macros --open` for the derive macro's exact requirements:
 
