@@ -159,12 +159,17 @@ pub trait MemoryPort: Send + Sync {
     ///
     /// Deletes candidates older than `max_age_days` (across all statuses) and
     /// trims the live `pending` queue down to `max_per_character` rows,
-    /// dropping the oldest overflow. A `max_age_days` of `0` disables age
-    /// expiry; a `max_per_character` of `0` disables the count cap. Returns
-    /// the number of rows removed.
+    /// dropping the oldest overflow. Both passes are scoped to `character_id`
+    /// and, when `user_id` is `Some`, to that user's rows plus character-shared
+    /// rows (`user_id = ""`) — mirroring the visibility rule used by natural
+    /// decay — so one user's candidates cannot evict another's on a multi-user
+    /// database. A `max_age_days` of `0` disables age expiry; a
+    /// `max_per_character` of `0` disables the count cap. Returns the number
+    /// of rows removed.
     async fn prune_pending_candidates(
         &self,
         character_id: &str,
+        user_id: Option<&str>,
         max_age_days: u32,
         max_per_character: usize,
         now: DateTime<Utc>,

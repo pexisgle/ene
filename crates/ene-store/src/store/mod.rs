@@ -426,13 +426,15 @@ impl MemoryStore {
     /// List pending candidates for a character, optionally filtered by status.
     ///
     /// When `status_filter` is `None`, candidates of every status are
-    /// returned, oldest first.
+    /// returned, oldest first. Rows whose stored status label is unrecognized
+    /// are excluded (fail closed) rather than surfaced as `Pending` (#420
+    /// review).
     pub async fn list_pending_candidates(
         &self,
         character_id: &str,
         status_filter: Option<PendingCandidateStatus>,
     ) -> Result<Vec<PendingCandidate>, EneMemoryError> {
-        use crate::entities::pending_candidates::{Column, Entity};
+        use crate::entities::pending_candidates::{Column, Entity, model_to_dto};
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
         let mut query = Entity::find().filter(Column::CharacterId.eq(character_id));
@@ -444,22 +446,35 @@ impl MemoryStore {
             .order_by_asc(Column::Id)
             .all(&self.db)
             .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        Ok(rows.into_iter().filter_map(model_to_dto).collect())
     }
 
     /// Approve a pending candidate, persisting it to typed memory as active.
     ///
-    /// The candidate is inserted via [`Self::insert_typed_memory`] and its
-    /// stored status flipped to [`PendingCandidateStatus::Approved`]. Returns
-    /// an error when the candidate is not found or has already been resolved.
+    /// Race-safe (#420 review): the stored status is flipped to
+    /// [`PendingCandidateStatus::Approved`] with a *conditional* update
+    /// (`WHERE id = ? AND status = 'pending'`) **before** the typed memory is
+    /// inserted, and the insert only proceeds if this call won the flip.
+    /// Because the queue is shared across every [`MemoryStore`] instance on
+    /// the same database, two concurrent approvals can no longer both pass a
+    /// read-check and both insert — exactly one `UPDATE` matches, the loser
+    /// sees `rows_affected == 0` and errors without inserting a duplicate
+    /// typed memory. Returns an error when the candidate is not found or has
+    /// already been resolved.
     pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, EneMemoryError> {
-        let candidate = self.load_pending_candidate(id).await?;
-        if candidate.status != PendingCandidateStatus::Pending {
+        // Claim the row first; only the winner proceeds to insert.
+        let claimed = self
+            .claim_pending_candidate(id, PendingCandidateStatus::Approved)
+            .await?;
+        if !claimed {
             return Err(EneMemoryError::Other(format!(
-                "pending candidate {id} is already {}",
-                candidate.status.as_str()
+                "pending candidate {id} not found or already resolved"
             )));
         }
+
+        // Re-read the now-approved row to build the typed memory. The status
+        // flip already serialized concurrent resolvers, so this read is stable.
+        let candidate = self.load_pending_candidate(id).await?;
 
         let item = crate::NewMemoryItem {
             scope: crate::MemoryScope::Character,
@@ -482,18 +497,16 @@ impl MemoryStore {
             created_at: None,
             commitment_id: None,
         };
-        let memory_id = self.insert_typed_memory(&item).await?;
-
-        self.set_pending_candidate_status(id, PendingCandidateStatus::Approved)
-            .await?;
-        Ok(memory_id)
+        self.insert_typed_memory(&item).await
     }
 
     /// Resolve (approve or reject) a pending candidate by id.
     ///
     /// When `approved` is `true`, the candidate is persisted to typed memory
     /// (see [`Self::approve_pending_candidate`]); when `false`, its status is
-    /// set to [`PendingCandidateStatus::Rejected`].
+    /// set to [`PendingCandidateStatus::Rejected`]. Both paths claim the row
+    /// with a conditional status flip first, so concurrent resolvers cannot
+    /// double-apply (#420 review).
     pub async fn resolve_pending_candidate(
         &self,
         id: i64,
@@ -503,15 +516,14 @@ impl MemoryStore {
             self.approve_pending_candidate(id).await?;
             return Ok(());
         }
-        let candidate = self.load_pending_candidate(id).await?;
-        if candidate.status != PendingCandidateStatus::Pending {
+        let claimed = self
+            .claim_pending_candidate(id, PendingCandidateStatus::Rejected)
+            .await?;
+        if !claimed {
             return Err(EneMemoryError::Other(format!(
-                "pending candidate {id} is already {}",
-                candidate.status.as_str()
+                "pending candidate {id} not found or already resolved"
             )));
         }
-        self.set_pending_candidate_status(id, PendingCandidateStatus::Rejected)
-            .await?;
         Ok(())
     }
 
@@ -520,17 +532,26 @@ impl MemoryStore {
     /// Two independent limits, either of which may be disabled with `0`:
     ///
     /// * **Age** (`max_age_days > 0`): delete candidates of *any* status whose
-    ///   `created_at` is older than `now - max_age_days`. Resolved candidates
-    ///   (approved / rejected) have no further UI value once stale, so they are
-    ///   swept too — this is what keeps the table from growing without bound.
+    ///   `created_at` is older than `now - max_age_days`. This deliberately
+    ///   includes **unanswered** (`pending`) candidates: a candidate left
+    ///   unreviewed past the age limit expires so the queue cannot grow
+    ///   without bound even when the count cap is disabled. Resolved
+    ///   candidates (approved / rejected) have no further UI value once stale,
+    ///   so they are swept too.
     /// * **Count** (`max_per_character > 0`): cap the live `pending` queue; when
     ///   it exceeds the cap, delete the oldest overflow rows.
     ///
-    /// Returns the total number of rows removed. Idempotent and cheap (pure
-    /// SQL `DELETE`), so it is safe to run on every post-turn forgetting pass.
+    /// Both passes are scoped to `character_id` and, when `user_id` is
+    /// `Some`, to that user's rows plus character-shared rows (`user_id = ""`)
+    /// — mirroring the visibility rule used by natural decay — so on a
+    /// multi-user database one user's candidates cannot evict another's under
+    /// the count cap. Returns the total number of rows removed. Idempotent and
+    /// cheap (pure SQL `DELETE`), so it is safe to run on every post-turn
+    /// forgetting pass.
     pub async fn prune_pending_candidates(
         &self,
         character_id: &str,
+        user_id: Option<&str>,
         max_age_days: u32,
         max_per_character: usize,
         now: DateTime<Utc>,
@@ -540,6 +561,10 @@ impl MemoryStore {
             ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
         };
 
+        // Visibility condition shared by both passes: the character plus, when
+        // a user is given, that user's rows and character-shared rows.
+        let scope = pending_candidate_scope(character_id, user_id);
+
         let mut removed = 0usize;
 
         if max_age_days > 0 {
@@ -547,7 +572,7 @@ impl MemoryStore {
                 .checked_sub_signed(chrono::Duration::days(i64::from(max_age_days)))
                 .unwrap_or(now);
             let aged = Entity::delete_many()
-                .filter(Column::CharacterId.eq(character_id))
+                .filter(scope.clone())
                 .filter(Column::CreatedAt.lt(cutoff))
                 .exec(&self.db)
                 .await?;
@@ -560,7 +585,7 @@ impl MemoryStore {
             // `NOT IN (SELECT ... LIMIT)` subquery) keeps the SQL portable and
             // easy to reason about.
             let pending_count = Entity::find()
-                .filter(Column::CharacterId.eq(character_id))
+                .filter(scope.clone())
                 .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
                 .count(&self.db)
                 .await? as usize;
@@ -569,7 +594,7 @@ impl MemoryStore {
                 let overflow = pending_count - max_per_character;
                 // Ids of the oldest `overflow` pending rows.
                 let drop_ids: Vec<i64> = Entity::find()
-                    .filter(Column::CharacterId.eq(character_id))
+                    .filter(scope)
                     .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
                     .order_by_asc(Column::CreatedAt)
                     .order_by_asc(Column::Id)
@@ -590,39 +615,65 @@ impl MemoryStore {
             }
         }
 
+        if removed > 0 {
+            tracing::info!(
+                component = "MemoryStore",
+                character_id,
+                user_id = user_id.unwrap_or(""),
+                removed,
+                max_age_days,
+                max_per_character,
+                "Pruned pending memory candidates via retention policy"
+            );
+        }
+
         Ok(removed)
     }
 
     /// Load a single pending candidate row by id (#420).
+    ///
+    /// Errors when the row is missing or carries an unrecognized status label
+    /// (fail closed, matching [`Self::list_pending_candidates`]).
     async fn load_pending_candidate(&self, id: i64) -> Result<PendingCandidate, EneMemoryError> {
-        use crate::entities::pending_candidates::Entity;
+        use crate::entities::pending_candidates::{Entity, model_to_dto};
         use sea_orm::EntityTrait;
 
-        Entity::find_by_id(id)
+        let model = Entity::find_by_id(id)
             .one(&self.db)
             .await?
-            .map(Into::into)
-            .ok_or_else(|| EneMemoryError::Other(format!("pending candidate {id} not found")))
+            .ok_or_else(|| EneMemoryError::Other(format!("pending candidate {id} not found")))?;
+        model_to_dto(model).ok_or_else(|| {
+            EneMemoryError::Other(format!("pending candidate {id} has an unrecognized status"))
+        })
     }
 
-    /// Update the stored status of a pending candidate row (#420).
-    async fn set_pending_candidate_status(
+    /// Atomically claim a pending candidate by flipping its status from
+    /// [`PendingCandidateStatus::Pending`] to `target` (#420 review).
+    ///
+    /// Implemented as a single conditional `UPDATE ... WHERE id = ? AND status
+    /// = 'pending'`, so it doubles as a compare-and-swap: returns `true` only
+    /// when this call actually flipped a row. A concurrent resolver (or a
+    /// retry after a crash) loses the race and sees `false`, which callers
+    /// turn into an error instead of double-applying. Returns `false` when the
+    /// row is missing or already resolved.
+    async fn claim_pending_candidate(
         &self,
         id: i64,
-        status: PendingCandidateStatus,
-    ) -> Result<(), EneMemoryError> {
+        target: PendingCandidateStatus,
+    ) -> Result<bool, EneMemoryError> {
         use crate::entities::pending_candidates::{Column, Entity};
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-        Entity::update_many()
+        let res = Entity::update_many()
             .col_expr(
                 Column::Status,
-                sea_orm::sea_query::Expr::value(status.as_str().to_string()),
+                sea_orm::sea_query::Expr::value(target.as_str().to_string()),
             )
             .filter(Column::Id.eq(id))
+            .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
             .exec(&self.db)
             .await?;
-        Ok(())
+        Ok(res.rows_affected > 0)
     }
 
     /// Backdate a pending candidate's `created_at` for retention tests (#420).
@@ -646,4 +697,25 @@ impl MemoryStore {
         active.update(&self.db).await?;
         Ok(true)
     }
+}
+
+/// Visibility condition for pending-candidate retention queries (#420 review).
+///
+/// Scopes to `character_id` and, when `user_id` is `Some`, to that user's rows
+/// plus character-shared rows (`user_id = ""`) — mirroring
+/// `store::memory::user_visibility_condition` used by natural decay so one
+/// user's candidates cannot evict another's on a multi-user database.
+fn pending_candidate_scope(character_id: &str, user_id: Option<&str>) -> sea_orm::Condition {
+    use crate::entities::pending_candidates::Column;
+    use sea_orm::ColumnTrait;
+
+    let mut condition = sea_orm::Condition::all().add(Column::CharacterId.eq(character_id));
+    if let Some(uid) = user_id {
+        condition = condition.add(
+            sea_orm::Condition::any()
+                .add(Column::UserId.eq(uid))
+                .add(Column::UserId.eq("")),
+        );
+    }
+    condition
 }

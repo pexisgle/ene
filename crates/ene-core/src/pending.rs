@@ -31,9 +31,14 @@ impl PendingCandidateStatus {
         }
     }
 
-    /// Parse a stored status label.
+    /// Decode a stored status label.
+    ///
+    /// Returns `None` for an unrecognized label. Callers must fail closed on
+    /// `None` (exclude the row) rather than defaulting to [`Self::Pending`] —
+    /// a corrupted label silently resurrecting a row into the live queue
+    /// would let it be approved again (#420 review).
     #[must_use]
-    pub fn parse(raw: &str) -> Option<Self> {
+    pub fn from_db_str(raw: &str) -> Option<Self> {
         match raw {
             "pending" => Some(Self::Pending),
             "approved" => Some(Self::Approved),
@@ -63,6 +68,15 @@ pub struct PendingCandidate {
     /// Human-readable reason for the extraction.
     pub reason_detail: String,
     /// Title of the existing memory this candidate would supersede, if any.
+    ///
+    /// A denormalized display label captured from the conflicting memory at
+    /// insert time so the approval UI can render the conflict without a join.
+    /// It is **not** persisted — the `pending_candidates` table stores only
+    /// [`Self::existing_memory_id`] — so it does not survive a DB round-trip
+    /// and is `None` on rows rehydrated from storage; presentation layers
+    /// needing it then resolve the title by joining on
+    /// [`Self::existing_memory_id`] at list time. `None` when the candidate
+    /// does not conflict with an existing memory.
     pub existing_memory_title: Option<String>,
     /// Id of the existing typed memory this candidate would supersede, if any.
     ///

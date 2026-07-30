@@ -31,23 +31,40 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-impl From<Model> for PendingCandidate {
-    fn from(m: Model) -> Self {
-        Self {
-            id: m.id,
-            character_id: m.character_id,
-            user_id: m.user_id,
-            title: m.title,
-            content: m.content,
-            kind: MemoryKind::from_db_str(&m.kind),
-            confidence: m.confidence,
-            reason_detail: m.reason_detail,
-            existing_memory_title: None,
-            existing_memory_id: m.existing_memory_id,
-            source_quote: m.source_quote,
-            status: PendingCandidateStatus::parse(&m.status)
-                .unwrap_or(PendingCandidateStatus::Pending),
-            created_at: m.created_at,
-        }
-    }
+/// Convert a stored row into the domain DTO, failing closed on an
+/// unrecognized status label (#420 review).
+///
+/// Returns `None` (logging a warning) when the stored status is not one of
+/// `pending` / `approved` / `rejected`, so a corrupted row is excluded from
+/// listings instead of being silently resurrected into the live pending queue
+/// where it could be approved again.
+#[must_use]
+pub fn model_to_dto(m: Model) -> Option<PendingCandidate> {
+    let Some(status) = PendingCandidateStatus::from_db_str(&m.status) else {
+        tracing::warn!(
+            component = "ene-store",
+            candidate_id = m.id,
+            status = %m.status,
+            "Excluding pending candidate with unrecognized status label"
+        );
+        return None;
+    };
+    Some(PendingCandidate {
+        id: m.id,
+        character_id: m.character_id,
+        user_id: m.user_id,
+        title: m.title,
+        content: m.content,
+        kind: MemoryKind::from_db_str(&m.kind),
+        confidence: m.confidence,
+        reason_detail: m.reason_detail,
+        // Display-only hint captured at insert time; it is not persisted, so a
+        // row rehydrated from the DB resolves its conflict title by joining on
+        // `existing_memory_id` at list time instead.
+        existing_memory_title: None,
+        existing_memory_id: m.existing_memory_id,
+        source_quote: m.source_quote,
+        status,
+        created_at: m.created_at,
+    })
 }

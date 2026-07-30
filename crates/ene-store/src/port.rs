@@ -152,20 +152,20 @@ impl MemoryPort for MemoryStore {
     async fn prune_pending_candidates(
         &self,
         character_id: &str,
+        user_id: Option<&str>,
         max_age_days: u32,
         max_per_character: usize,
         now: DateTime<Utc>,
     ) -> Result<usize, MemoryPortError> {
-        Ok(
-            Self::prune_pending_candidates(
-                self,
-                character_id,
-                max_age_days,
-                max_per_character,
-                now,
-            )
-            .await?,
+        Ok(Self::prune_pending_candidates(
+            self,
+            character_id,
+            user_id,
+            max_age_days,
+            max_per_character,
+            now,
         )
+        .await?)
     }
 
     async fn list_active_commitments(
