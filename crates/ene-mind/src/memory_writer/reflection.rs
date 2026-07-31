@@ -1,9 +1,13 @@
-//! Self-reflection pipeline (#210).
+//! Self-reflection pipeline (#210, #347).
 //!
 //! Periodically reviews the outcomes of persisted memories (rated by affect
 //! valence) and generates `Reflection`-kind memories summarizing successful
-//! and unsuccessful interaction strategies. These reflections are later loaded
-//! during recall to boost or penalize similar memories.
+//! and unsuccessful interaction strategies. These reflections are loaded
+//! during recall and applied as a scoring signal — boosting or penalizing
+//! similar memories — rather than surfacing as ordinary recall results:
+//! the recall path excludes [`MemoryKind::Reflection`] from its search query
+//! and calls [`load_reflection_memories`] + [`apply_reflection_adjustment`]
+//! to close the feedback loop (#347).
 use crate::config::ReflectionConfig;
 use crate::memory_writer::arbiter::AppliedDecision;
 use ene_core::{
@@ -187,7 +191,13 @@ impl SelfReflectionPipeline {
     }
 }
 
-/// Load existing reflection memories for a character (up to 50).
+/// Load active reflection memories for a character (up to 50).
+///
+/// Only [`ene_core::MemoryStatus::Active`] reflections participate in the
+/// recall adjustment: superseded rows are duplicates, and faded/archived
+/// reflections are no longer the current strategy signal. Filtering here keeps
+/// the boost/penalty applied by `apply_reflection_adjustment` consistent with
+/// what the pipeline most recently persisted.
 pub async fn load_reflection_memories(
     store: &dyn MemoryPort,
     character_id: &str,
@@ -196,7 +206,10 @@ pub async fn load_reflection_memories(
         .get_typed_memories_by_character(character_id, Some(MemoryKind::Reflection), 50, 0)
         .await
     {
-        Ok(items) => items,
+        Ok(items) => items
+            .into_iter()
+            .filter(|item| item.status == ene_core::MemoryStatus::Active)
+            .collect(),
         Err(e) => {
             tracing::warn!(
                 component = "SelfReflection",
@@ -208,11 +221,15 @@ pub async fn load_reflection_memories(
     }
 }
 
-/// Adjust scored memory totals based on reflection strategy matches.
+/// Adjust scored memory totals based on reflection strategy matches (#347).
 ///
 /// Memories whose titles match "Successful strategies" content are boosted by
 /// `success_boost`; those matching "Strategies to avoid" are penalized by
-/// `failure_penalty`.
+/// `failure_penalty`. The applied factor is recorded in
+/// [`MemoryScoreBreakdown::reflection_multiplier`](ene_core::MemoryScoreBreakdown)
+/// and `total` is scaled by it, so the explainable breakdown stays consistent
+/// (the multiplier documents exactly how `total` was derived) rather than
+/// silently overwriting `total`.
 pub fn apply_reflection_adjustment(
     memories: &mut [ene_core::ScoredMemory],
     reflections: &[ene_core::MemoryItem],
@@ -225,11 +242,15 @@ pub fn apply_reflection_adjustment(
     }
     for m in memories.iter_mut() {
         let t = m.item.title.to_lowercase();
-        if succ.iter().any(|s| t.contains(s.as_str())) {
-            m.breakdown.total *= success_boost;
+        let multiplier = if succ.iter().any(|s| t.contains(s.as_str())) {
+            success_boost
         } else if fail.iter().any(|s| t.contains(s.as_str())) {
-            m.breakdown.total *= failure_penalty;
-        }
+            failure_penalty
+        } else {
+            continue;
+        };
+        m.breakdown.reflection_multiplier = multiplier;
+        m.breakdown.total *= multiplier;
     }
 }
 
@@ -417,5 +438,123 @@ mod tests {
         assert!(success.iter().any(|s| s == "warm greeting"));
         assert!(success.iter().any(|s| s == "ask follow-up"));
         assert!(avoid.iter().any(|s| s == "long monologue"));
+    }
+
+    fn scored_memory(title: &str, total: f32) -> ene_core::ScoredMemory {
+        use ene_store::{
+            AffectAnnotation, MemoryConfidence, MemoryItem, MemorySalience, MemoryScope,
+            MemorySource, MemoryStatus,
+        };
+
+        ene_core::ScoredMemory {
+            item: MemoryItem {
+                id: Some(1),
+                scope: MemoryScope::Shared,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: MemoryKind::Semantic,
+                title: title.into(),
+                content: String::new(),
+                source: MemorySource::Inferred,
+                source_ref: None,
+                confidence: MemoryConfidence::new(0.7),
+                salience: MemorySalience::new(0.6),
+                affect: AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                access_count: 0,
+                last_accessed_at: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                valid_from: None,
+                valid_until: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                faded_at: None,
+                commitment_id: None,
+            },
+            breakdown: ene_core::MemoryScoreBreakdown {
+                total,
+                ..ene_core::MemoryScoreBreakdown::default()
+            },
+            sources: Vec::new(),
+        }
+    }
+
+    fn reflection_memory(title: &str, content: &str) -> ene_core::MemoryItem {
+        use ene_store::{
+            AffectAnnotation, MemoryConfidence, MemoryItem, MemorySalience, MemoryScope,
+            MemorySource, MemoryStatus,
+        };
+
+        MemoryItem {
+            id: Some(1),
+            scope: MemoryScope::Shared,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind: MemoryKind::Reflection,
+            title: title.into(),
+            content: content.into(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.7),
+            salience: MemorySalience::new(0.6),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            access_count: 0,
+            last_accessed_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            faded_at: None,
+            commitment_id: None,
+        }
+    }
+
+    #[test]
+    fn apply_reflection_adjustment_records_multiplier_and_scales_total() {
+        let reflections = vec![
+            reflection_memory(
+                "Successful strategies",
+                "Successful interaction strategies: warm greeting",
+            ),
+            reflection_memory(
+                "Strategies to avoid",
+                "Less effective interaction strategies: long monologue",
+            ),
+        ];
+
+        let mut memories = vec![
+            scored_memory("warm greeting", 1.0),
+            scored_memory("long monologue", 1.0),
+            scored_memory("unrelated memory", 1.0),
+        ];
+
+        apply_reflection_adjustment(&mut memories, &reflections, 1.5, 0.5);
+
+        let boosted = &memories[0];
+        assert!((boosted.breakdown.reflection_multiplier - 1.5).abs() < f32::EPSILON);
+        assert!((boosted.breakdown.total - 1.5).abs() < f32::EPSILON);
+
+        let penalized = &memories[1];
+        assert!((penalized.breakdown.reflection_multiplier - 0.5).abs() < f32::EPSILON);
+        assert!((penalized.breakdown.total - 0.5).abs() < f32::EPSILON);
+
+        // Unmatched memories keep the neutral multiplier and unchanged total.
+        let untouched = &memories[2];
+        assert!((untouched.breakdown.reflection_multiplier - 1.0).abs() < f32::EPSILON);
+        assert!((untouched.breakdown.total - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn apply_reflection_adjustment_noop_without_strategies() {
+        let mut memories = vec![scored_memory("warm greeting", 1.0)];
+        apply_reflection_adjustment(&mut memories, &[], 1.5, 0.5);
+        assert!((memories[0].breakdown.reflection_multiplier - 1.0).abs() < f32::EPSILON);
+        assert!((memories[0].breakdown.total - 1.0).abs() < f32::EPSILON);
     }
 }

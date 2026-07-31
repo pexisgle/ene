@@ -459,6 +459,7 @@ async fn build_semantic_matches(
             commitment_boost: 0.0,
             recent_fallback_limit: 0,
             time_range: None,
+            exclude_kinds: Vec::new(),
         };
 
         let gathered = store

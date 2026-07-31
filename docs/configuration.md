@@ -91,6 +91,23 @@ available = min(model_window, context_window)
 }
 ```
 
+Local models default `context_size` to 16,384 tokens (#366), calibrated to hold
+the system's own default prompt budget (`mind.context.max_prompt_tokens` =
+12,000) plus the model's reply. The previous default of 2,048 was sized for
+small decision tasks and silently dropped most prompt sections once a local
+model carried the main conversation. 16K is chosen over 32K to keep the
+llama.cpp KV cache realistic (~2.3 GB vs ~4.6 GB for a Gemma-3-4B-class model,
+on top of the weights); a model used only for decision workloads can lower
+`context_size` explicitly.
+
+At startup the runtime validates each generative task's window (`chat`, plus
+`proactive` when configured) against what it needs — the prompt budget plus the
+response reserve (`tasks.<task>.max_tokens`) — and logs a warning when the
+configured window is too small, since prompt sections would otherwise be
+dropped every turn without any visible signal. Cloud tasks without an explicit
+`context_window` override are validated at runtime instead, once the provider
+reports its real window.
+
 #### Token usage accounting (#365)
 
 Every completion carries an optional token-usage record — `prompt_tokens`,
@@ -221,7 +238,7 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
     "list": {
       "app": { "enable": true },
       "browser": { "enable": true },
-      "fs": { "enable": true },
+      "fs": { "enable": true, "db_quota_mb": 256 },
       "utility": { "enable": true },
       "web": { "enable": true }
     },
@@ -249,6 +266,20 @@ plugin connection**, across *all* request types (tool calls, pings,
 bound queue (bounded by their own timeout) rather than fanning out to the
 plugin. Chat *streams* (`CreateChatStream`) are the exception: they bypass this
 bound and are not counted against it.
+
+`plugins.list.<name>.db_quota_mb` caps how much of the **shared `memory.db`** a
+plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into
+one shared database, so without a cap a single runaway or malicious plugin
+could exhaust the disk or bloat `memory.db` enough to degrade the memory
+system's queries, backups, and integrity checks. The host measures each
+plugin's footprint (the summed byte length of every cell across its declared
+tables) and rejects any storage-growing write — `Insert`/`Upsert`, including
+those inside a `Batch` — that would push it to or past the cap, returning a
+`QUOTA_EXCEEDED` error. Reads and deletes are never gated, so a plugin over
+quota can always free space. The default is `256` — generous enough that no
+built-in plugin comes close, while still bounding a runaway plugin before it
+does real damage. Set the field to `null` to disable enforcement for a plugin
+that legitimately needs unbounded storage.
 
 ### `tools.*` — Tool-Execution Runtime Behavior
 
