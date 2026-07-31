@@ -9,8 +9,12 @@
 //! penalty. This mirrors the relevance-driven structure of the memory hybrid
 //! score (#346) so the two policies cannot diverge.
 //!
-//! LLM `HyDE` is deprecated and disabled; `use_hyde` is retained as a no-op
-//! config knob scheduled for removal.
+//! LLM `HyDE` expansion is disabled and its config knobs have been removed;
+//! the [`hybrid`] helpers still expose [`hyde_document`](hybrid::hyde_document)
+//! for callers that supply their own LLM. Cosine reranking is available but
+//! off by default ([`ToolRagOptions::use_rerank`]): the normalized field score
+//! is already field-count-independent, so the extra per-query re-embeddings
+//! are opt-in.
 //!
 //! Persistence goes through [`ene_core::EmbeddingStorePort`] rather than the
 //! concrete store type, so this crate never depends on `ene-store`.
@@ -31,9 +35,10 @@ use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_
 use ene_core::EmbeddingStorePort;
 use ene_plugin_proto::tool_types::EmbeddingField;
 use ene_plugin_proto::{ToolName, ToolRagProfile, ToolSpec};
+use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 
 pub mod config;
 pub mod error;
@@ -75,22 +80,6 @@ pub struct FieldWeights {
     /// it from selection (#436). Range `[0, 1]`; `1.0` effectively disables the
     /// gate.
     pub negative_threshold: f32,
-    /// Weight for the `HyDE` (hypothetical document embedding).
-    ///
-    /// Deprecated: LLM `HyDE` is disabled; this weight is unused and scheduled for removal.
-    #[deprecated(note = "LLM HyDE is disabled; this weight is unused and scheduled for removal")]
-    pub hyde: f32,
-    /// Weight for the `HyDE` blend factor — the fraction
-    /// of the final score contributed by the `HyDE`
-    /// similarity, with the remainder from the direct
-    /// per-field cosine similarity. Replaces the
-    /// previously hardcoded 0.6 factor.
-    ///
-    /// Deprecated: LLM `HyDE` is disabled; unused and scheduled for removal.
-    #[deprecated(
-        note = "LLM HyDE is disabled; this blend factor is unused and scheduled for removal"
-    )]
-    pub hyde_blend: f32,
 }
 
 impl FieldWeights {
@@ -125,10 +114,6 @@ impl FieldWeights {
 }
 
 impl Default for FieldWeights {
-    #[expect(
-        deprecated,
-        reason = "initialize deprecated HyDE weight fields until they are removed"
-    )]
     fn default() -> Self {
         Self {
             summary: 1.0,
@@ -137,17 +122,11 @@ impl Default for FieldWeights {
             example: 0.4,
             negative: -0.5,
             negative_threshold: 0.70,
-            hyde: 0.7,
-            hyde_blend: 0.6,
         }
     }
 }
 
 impl From<crate::tool::config::FieldWeightsConfig> for FieldWeights {
-    #[expect(
-        deprecated,
-        reason = "copy deprecated HyDE weight fields until they are removed"
-    )]
     fn from(c: crate::tool::config::FieldWeightsConfig) -> Self {
         Self {
             summary: c.summary,
@@ -156,8 +135,6 @@ impl From<crate::tool::config::FieldWeightsConfig> for FieldWeights {
             example: c.example,
             negative: c.negative,
             negative_threshold: c.negative_threshold,
-            hyde: c.hyde,
-            hyde_blend: c.hyde_blend,
         }
     }
 }
@@ -174,10 +151,12 @@ pub struct ToolRagOptions {
     pub top_k: usize,
     /// Number of final tools to return after reranking.
     pub final_n: usize,
-    /// Deprecated: LLM `HyDE` expansion. Currently a no-op; scheduled for removal.
-    #[deprecated(note = "LLM HyDE is disabled (no-op); this knob is scheduled for removal")]
-    pub use_hyde: bool,
     /// Whether to cosine-rerank candidates (no LLM).
+    ///
+    /// Defaults to `false`: the weighted field-similarity score (#436) is
+    /// already normalized and field-count-independent, so the extra
+    /// `rerank_candidates` description re-embeddings per query are not worth
+    /// their cost by default.
     pub use_rerank: bool,
     /// Number of candidates to consider during reranking.
     pub rerank_candidates: usize,
@@ -194,16 +173,11 @@ pub struct ToolRagOptions {
 }
 
 impl Default for ToolRagOptions {
-    #[expect(
-        deprecated,
-        reason = "initialize deprecated use_hyde until it is removed"
-    )]
     fn default() -> Self {
         Self {
             enabled: true,
             top_k: 12,
             final_n: 6,
-            use_hyde: false,
             use_rerank: false,
             rerank_candidates: 24,
             min_similarity: 0.20,
@@ -229,7 +203,6 @@ impl TryFrom<crate::tool::config::ToolRagConfig> for ToolRagOptions {
 
 impl ToolRagOptions {
     /// Builds options from config. Invalid `forced` names fail construction.
-    #[expect(deprecated, reason = "copy deprecated use_hyde until it is removed")]
     pub fn from_config(
         c: crate::tool::config::ToolRagConfig,
     ) -> Result<Self, crate::tool::ToolRagError> {
@@ -244,17 +217,10 @@ impl ToolRagOptions {
                 }
             }
         }
-        if c.use_hyde {
-            tracing::warn!(
-                component = "ToolRag",
-                "tools.rag.use_hyde is deprecated and ignored (LLM HyDE disabled; scheduled for removal)"
-            );
-        }
         Ok(Self {
             enabled: c.enabled,
             top_k: c.top_k,
             final_n: c.final_n,
-            use_hyde: c.use_hyde,
             use_rerank: c.use_rerank,
             rerank_candidates: c.rerank_candidates,
             min_similarity: c.min_similarity,
@@ -325,10 +291,7 @@ impl ToolRag {
     }
 
     fn forced_only_specs(&self) -> Vec<ToolSpec> {
-        let all_specs = self
-            .specs
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let all_specs = self.specs.read();
         let mut result = Vec::new();
         for forced_name in &self.opts.forced {
             if let Some(spec) = all_specs.get(forced_name) {
@@ -350,20 +313,14 @@ impl ToolRag {
 
     fn store_specs_and_profiles(&self, specs: &[ToolSpec], profiles: &[ToolRagProfile]) {
         {
-            let mut map = self
-                .specs
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut map = self.specs.write();
             map.clear();
             for spec in specs {
                 map.insert(spec.name.clone(), spec.clone());
             }
         }
         {
-            let mut map = self
-                .profiles
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut map = self.profiles.write();
             map.clear();
             for profile in profiles {
                 map.insert(profile.name.clone(), profile.clone());
@@ -391,10 +348,7 @@ impl ToolRag {
         let specs_hash = compute_index_hash(specs, profiles);
         let prev_hash = self.last_specs_hash.load(Ordering::Acquire);
         {
-            let cache = self
-                .cached_field_rows
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cache = self.cached_field_rows.read();
             if prev_hash == specs_hash && !cache.is_empty() {
                 self.store_specs_and_profiles(specs, profiles);
                 return Ok(());
@@ -512,10 +466,7 @@ impl ToolRag {
                         })
                     })
                     .collect();
-                let mut cache_write = self
-                    .cached_field_rows
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut cache_write = self.cached_field_rows.write();
                 *cache_write = Arc::new(mapped);
             }
             Err(e) => {
@@ -584,7 +535,6 @@ impl ToolRag {
     /// Pipeline: embed query → per-tool weighted field similarity →
     /// category limits → `top_k` → optional cosine rerank → `final_n` + forced.
     /// On embed failure, returns forced tools only (fail-closed).
-    /// LLM `HyDE` is deprecated and ignored (`use_hyde` is a no-op).
     pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
@@ -602,10 +552,6 @@ impl ToolRag {
     }
 
     /// Select the most relevant tools using a pre-computed query embedding.
-    #[expect(
-        deprecated,
-        reason = "read deprecated use_hyde for the no-op deprecation warning"
-    )]
     pub async fn select_with_embedding(
         &self,
         query: &str,
@@ -624,20 +570,10 @@ impl ToolRag {
             return self.forced_only_specs();
         };
 
-        if self.opts.use_hyde {
-            tracing::warn!(
-                component = "ToolRag",
-                "use_hyde is deprecated and ignored (LLM HyDE disabled; scheduled for removal)"
-            );
-        }
-
         // Clone the `Arc` handle (not the embeddings) so the read
         // lock is released before any `.await` below.
         let cached_rows: Option<Arc<Vec<CachedFieldRow>>> = {
-            let cache = self
-                .cached_field_rows
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cache = self.cached_field_rows.read();
             if cache.is_empty() {
                 None
             } else {
@@ -660,10 +596,7 @@ impl ToolRag {
                         })
                         .collect();
                     let shared = Arc::new(mapped);
-                    let mut cache_write = self
-                        .cached_field_rows
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut cache_write = self.cached_field_rows.write();
                     *cache_write = Arc::clone(&shared);
                     shared
                 }
@@ -681,10 +614,7 @@ impl ToolRag {
             &self.opts.weights,
             self.opts.min_similarity,
             &self.opts.per_category_limits,
-            &self
-                .profiles
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &self.profiles.read(),
         );
 
         // Cap to top_k before rerank.
@@ -697,10 +627,7 @@ impl ToolRag {
         // the entire specs map up front. The guard is scoped so it
         // is dropped before the rerank `.await` below.
         let mut candidates: Vec<(ToolSpec, f32)> = {
-            let all_specs = self
-                .specs
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let all_specs = self.specs.read();
             let take_n = self.opts.rerank_candidates.min(scored.len());
             let mut out: Vec<(ToolSpec, f32)> = Vec::with_capacity(take_n);
             for (name, score) in scored.iter().take(take_n) {
@@ -763,10 +690,7 @@ impl ToolRag {
         );
 
         {
-            let all_specs = self
-                .specs
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let all_specs = self.specs.read();
             let result_names: Vec<ToolName> = result.iter().map(|s| s.name.clone()).collect();
             for forced_name in self.opts.forced.iter().rev() {
                 if !result_names.contains(forced_name)
@@ -1124,18 +1048,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_disable_hyde_and_rerank() {
+    fn defaults_disable_rerank() {
         let cfg = crate::tool::config::ToolRagConfig::default();
-        #[expect(deprecated, reason = "assert deprecated default")]
-        {
-            assert!(!cfg.use_hyde);
-        }
         assert!(!cfg.use_rerank);
         let opts = ToolRagOptions::default();
-        #[expect(deprecated, reason = "assert deprecated default")]
-        {
-            assert!(!opts.use_hyde);
-        }
         assert!(!opts.use_rerank);
     }
 

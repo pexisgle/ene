@@ -157,6 +157,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: Some(store),

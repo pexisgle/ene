@@ -25,6 +25,7 @@ tool = [
     "dep:async-trait",
     "dep:blake3",
     "dep:ctor",
+    "dep:parking_lot",
     "dep:schemars",
     "dep:serde",
     "dep:serde_json",
@@ -45,6 +46,7 @@ ene-config = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 ctor = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

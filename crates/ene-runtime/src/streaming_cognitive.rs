@@ -292,15 +292,24 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         classifier_tx,
         memory_writer_tx,
         deferred_tool_tx,
+        aux_task_tx,
         tts_provider,
         partial_text,
         concrete_store,
     } = ctx;
 
     let is_proactive = origin == TurnOrigin::Proactive;
+    // Auxiliary tasks spawned by this turn that are not otherwise tracked.
+    // Held in a local `JoinSet` so they are aborted when the turn ends
+    // (every `return` path drops it), instead of lingering until they finish
+    // on their own (#401). A `JoinSet`'s `Drop` aborts all contained tasks.
+    let mut aux_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     if let Some(timeout) = generation_timeout {
         let token = cancel_token.clone();
-        tokio::spawn(async move {
+        // Tracked in `aux_tasks` rather than a bare `tokio::spawn`: if the
+        // turn ends early, the sleeper is aborted immediately instead of
+        // idling for the full timeout holding a (stale) cancel token (#401).
+        aux_tasks.spawn(async move {
             tokio::time::sleep(timeout).await;
             token.cancel();
         });
@@ -804,7 +813,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let audio_tx = audio_tx.clone();
         let turn = turn.clone();
         let tts_cancel = cancel_token.clone();
-        tokio::spawn(
+        let tts_handle = tokio::spawn(
             async move {
                 let mut rx = tts_rx;
                 loop {
@@ -892,6 +901,16 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             }
             .instrument(tracing::info_span!("tts_pipeline")),
         );
+        // Hand the TTS worker to the actor so a `Shutdown` (or actor teardown)
+        // can stop it. The worker already watches the turn's cancel token, so
+        // a normal `Cancel` stops it cooperatively; on shutdown the actor
+        // cancels the token **and** aborts the worker task itself — handles
+        // that arrive after the run loop's last drain are still admitted and
+        // aborted, so the worker genuinely cannot outlive the actor (#401). A
+        // send failure means the actor is already gone, in which case the
+        // worker runs to completion as a detached orphan — acceptable at
+        // shutdown.
+        drop(aux_task_tx.send(tts_handle));
     }
     let mut tts_sentence_buf = String::new();
     // Incremental char count for `tts_sentence_buf` to avoid O(n) rescans (#L8).
@@ -1358,6 +1377,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             pending_permissions: &pending_permissions,
             pending_user_inputs: &pending_user_inputs,
             timeout_ms: plugin_config.timeout_ms,
+            permission_prompt_timeout_ms: plugin_config.permission_prompt_timeout_ms,
+            user_input_prompt_timeout_ms: plugin_config.user_input_prompt_timeout_ms,
+            cancel_token: cancel_token.clone(),
             max_summary_chars: mind.memory.tool_grounding.max_summary_chars,
             audit_store: mem_store.as_ref(),
             permission_scopes: &permission_scopes,
