@@ -617,7 +617,7 @@ async fn typed_memory_crud() {
 }
 
 #[tokio::test]
-async fn recent_tool_failures_lists_active_reflections_only() {
+async fn recent_tool_failures_lists_recallable_reflections_only() {
     let store = setup_store().await;
 
     let reflection = |title: &str, status: crate::MemoryStatus| crate::NewMemoryItem {
@@ -659,21 +659,28 @@ async fn recent_tool_failures_lists_active_reflections_only() {
         ))
         .await
         .unwrap();
+    // A Faded failure is still recallable and keeps penalizing the tool:
+    // fading is a decay signal for recall relevance, not an un-failure.
+    store
+        .insert_typed_memory(&reflection("tool failure:db", crate::MemoryStatus::Faded))
+        .await
+        .unwrap();
     // A non-Reflection memory with a matching title must not be reported.
-    let mut semantic = reflection("tool failure:db", crate::MemoryStatus::Active);
+    let mut semantic = reflection("tool failure:sqlite", crate::MemoryStatus::Active);
     semantic.kind = crate::MemoryKind::Semantic;
     store.insert_typed_memory(&semantic).await.unwrap();
 
     let failures = store.recent_tool_failures("ene").await.unwrap();
     assert_eq!(
         failures.len(),
-        2,
-        "only active Reflection failures: {failures:?}"
+        3,
+        "only recallable Reflection failures: {failures:?}"
     );
     assert!(failures.contains(&"web".to_string()));
     assert!(failures.contains(&"fs".to_string()));
+    assert!(failures.contains(&"db".to_string()));
     assert!(!failures.contains(&"git".to_string()));
-    assert!(!failures.contains(&"db".to_string()));
+    assert!(!failures.contains(&"sqlite".to_string()));
 }
 
 #[tokio::test]

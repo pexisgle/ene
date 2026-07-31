@@ -292,7 +292,8 @@ penalized.
 
 When `use_failure_feedback` (default `true`) is enabled, tools that recently
 failed for the active character are down-weighted: their score is multiplied by
-`(1 - failure_penalty)` (default `0.5`) before ranking, and a tool pushed below
+`failure_penalty` (default `0.5`, so a failed tool halves its score) before
+ranking, and a tool pushed below
 `min_similarity` by the penalty is dropped. Recent failures are read through
 `ene_core::ToolFailureSignalPort` (implemented by `ene-store`), so the pipeline
 stays free of a persistence dependency — see

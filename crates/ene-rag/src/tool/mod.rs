@@ -730,6 +730,11 @@ impl ToolRag {
                             candidates[i].1 = *score;
                         }
                     }
+                    // The reranker overwrites the pre-rerank scores, so the
+                    // failure penalty applied earlier must be re-applied to
+                    // the reranked scores — otherwise a recently-failed tool
+                    // could rank first again despite the penalty (#349).
+                    apply_rerank_penalty(&mut candidates, &failed_tools, self.opts.failure_penalty);
                     candidates
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 }
@@ -968,6 +973,30 @@ fn apply_failure_penalty(
     }
     scored.retain(|(_, score)| *score >= min_similarity);
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+}
+
+/// Re-apply the failure penalty to candidates after a rerank pass (#349).
+///
+/// The reranker overwrites the pre-rerank scores that
+/// [`apply_failure_penalty`] already adjusted, so without this the failure
+/// signal would be silently discarded from the final ranking. Multiplies the
+/// reranked score of each recently-failed tool by `penalty` (clamped to
+/// `[0, 1]`); unlike the pre-rerank pass it never drops candidates, keeping
+/// the rerank pool composition intact.
+fn apply_rerank_penalty(
+    candidates: &mut [(ToolSpec, f32)],
+    failed_tools: &HashSet<String>,
+    penalty: f32,
+) {
+    if failed_tools.is_empty() || penalty <= 0.0 {
+        return;
+    }
+    let penalty = penalty.clamp(0.0, 1.0);
+    for (spec, score) in candidates.iter_mut() {
+        if failed_tools.contains(spec.name.as_str()) {
+            *score *= penalty;
+        }
+    }
 }
 
 /// Compute a content-based version hash for a single field.
@@ -1405,6 +1434,42 @@ mod tests {
         let mut scored = vec![("a".to_string(), 0.8), ("b".to_string(), 0.6)];
         apply_failure_penalty(&mut scored, &HashSet::new(), 0.5, 0.0);
         assert_eq!(scored, vec![("a".to_string(), 0.8), ("b".to_string(), 0.6)]);
+    }
+
+    /// #349: after a rerank overwrites the pre-rerank scores, the failure
+    /// penalty must be re-applied — otherwise a recently-failed tool that the
+    /// reranker scores highest would rank first anyway.
+    #[test]
+    fn rerank_penalty_reapplied_so_failed_tool_cannot_win() {
+        use ene_plugin_proto::ToolSpec;
+
+        let spec = |name: &str| {
+            ToolSpec::new(
+                ToolName::try_new(name.to_string()).unwrap(),
+                name.to_string(),
+                serde_json::json!({}),
+            )
+        };
+        let mut candidates: Vec<(ToolSpec, f32)> = vec![(spec("a"), 0.95), (spec("b"), 0.90)];
+        let failed = HashSet::from(["a".to_string()]);
+
+        apply_rerank_penalty(&mut candidates, &failed, 0.5);
+        let a = candidates
+            .iter()
+            .find(|(s, _)| s.name.as_str() == "a")
+            .unwrap()
+            .1;
+        let b = candidates
+            .iter()
+            .find(|(s, _)| s.name.as_str() == "b")
+            .unwrap()
+            .1;
+        assert!((a - 0.95 * 0.5).abs() < 1e-6);
+        assert!((b - 0.90).abs() < 1e-6);
+        assert!(
+            b > a,
+            "the failed tool must rank below the equal-scored clean tool"
+        );
     }
 
     /// #349: a recently-failed tool is down-weighted end-to-end through the
