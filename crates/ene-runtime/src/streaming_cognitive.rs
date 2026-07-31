@@ -1372,6 +1372,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             registry: registry.as_ref(),
             tool_rag: tool_rag.as_deref(),
             session_id: session_id_for_tools.as_str(),
+            character_id: &card_name,
             event_tx: &event_tx,
             turn: &turn,
             origin,

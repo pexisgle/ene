@@ -88,6 +88,9 @@ pub(crate) struct ToolExecutionContext<'a> {
     pub tool_rag: Option<&'a ToolRag>,
     /// Conversation session identifier.
     pub session_id: &'a str,
+    /// Active character identifier, used to scope tool-selection failure
+    /// feedback (#349).
+    pub character_id: &'a str,
     /// Broadcast channel for emitting tool events.
     pub event_tx: &'a broadcast::Sender<EneEvent>,
     /// Active turn id.
@@ -478,8 +481,7 @@ pub(crate) async fn perform_tool_executions(
                 .ok()
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
                 .unwrap_or_default();
-            execute_system_search_tool(ctx.registry, ctx.tool_rag, &query, ctx.session.card_name())
-                .await
+            execute_system_search_tool(ctx.registry, ctx.tool_rag, &query, ctx.character_id).await
         } else if background_capable.contains(&name) {
             // Try deferred execution for background-capable tools (#196).
             let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
@@ -1111,6 +1113,7 @@ mod tests {
                 registry: &registry,
                 tool_rag: None,
                 session_id: "session_123",
+                character_id: "ene",
                 event_tx: &event_tx,
                 turn: &turn,
                 origin: TurnOrigin::User,
@@ -1242,6 +1245,7 @@ mod tests {
                 registry: &registry,
                 tool_rag: None,
                 session_id: "session-1",
+                character_id: "ene",
                 event_tx: &event_tx,
                 turn: &turn,
                 origin: TurnOrigin::User,
@@ -1372,6 +1376,7 @@ mod tests {
             registry: &registry,
             tool_rag: None,
             session_id: "session-1",
+            character_id: "ene",
             event_tx: &event_tx,
             turn: &turn,
             origin: TurnOrigin::User,
@@ -1530,6 +1535,7 @@ mod tests {
             registry: &registry,
             tool_rag: None,
             session_id: "session-1",
+            character_id: "ene",
             event_tx: &event_tx,
             turn: &turn,
             origin: TurnOrigin::User,
@@ -1627,6 +1633,7 @@ mod tests {
             registry,
             tool_rag: None,
             session_id: "session-1",
+            character_id: "ene",
             event_tx,
             turn,
             origin: TurnOrigin::User,
