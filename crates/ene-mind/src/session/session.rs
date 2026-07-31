@@ -39,6 +39,20 @@ pub struct DisplayState {
     pub token_carry: String,
 }
 
+/// Upper bound for the incomplete-marker carry buffer (#391).
+///
+/// `token_carry` holds text from the moment a `<|` opener is seen until the
+/// matching `|>` closer arrives. If a model emits `<|` and never closes it,
+/// everything after the opener would be withheld from both the display and TTS
+/// until this bound is reached, so a large cap makes the avatar appear frozen
+/// for several sentences.
+///
+/// The longest well-formed marker is a motion cue carrying a name from the
+/// card's motion catalog plus a layer suffix — comfortably under 128 chars
+/// (see `special_token.rs`). 256 leaves generous headroom while keeping a
+/// stalled stream from withholding more than a sentence of output.
+const MAX_TOKEN_CARRY: usize = 256;
+
 /// Context for the memory subsystem within a session.
 #[derive(Clone)]
 pub struct MemoryContext {
@@ -237,18 +251,18 @@ impl ConversationSession {
     ///
     /// Returns `(text_deltas, special_tokens)`.
     pub fn process_delta(&mut self, chunk: &str) -> (Vec<String>, Vec<String>) {
-        let (text_deltas, special_tokens) =
+        let (mut text_deltas, special_tokens) =
             split_text_and_special_tokens(&mut self.display.token_carry, chunk);
+        // Guard against unbounded growth from an unterminated marker: if the
+        // carry exceeds `MAX_TOKEN_CARRY`, abandon the marker and release the
+        // withheld text to the live output stream so it reaches the display and
+        // TTS instead of being held back (or silently dropped) (#391).
+        if self.display.token_carry.len() > MAX_TOKEN_CARRY {
+            let abandoned = std::mem::take(&mut self.display.token_carry);
+            text_deltas.push(abandoned);
+        }
         for delta in &text_deltas {
             self.display.display_buffer.push_str(delta);
-        }
-        // Guard against unbounded growth from unclosed special token markers.
-        const MAX_TOKEN_CARRY: usize = 4096;
-        if self.display.token_carry.len() > MAX_TOKEN_CARRY {
-            self.display
-                .display_buffer
-                .push_str(&self.display.token_carry);
-            self.display.token_carry.clear();
         }
         (text_deltas, special_tokens)
     }
@@ -488,5 +502,60 @@ mod tests {
         s.mark_interrupted("turn-1", "partial", 3);
         s.reset_session();
         assert!(s.take_interruption().is_none());
+    }
+
+    #[test]
+    fn process_delta_emits_complete_marker_and_text() {
+        let mut s = ConversationSession::default();
+        let (text, tokens) = s.process_delta("Hi <|perf:expr=happy|> there");
+        assert_eq!(text, vec!["Hi ", " there"]);
+        assert_eq!(tokens, vec!["<|perf:expr=happy|>"]);
+        assert!(s.display.token_carry.is_empty());
+        assert_eq!(s.display.display_buffer, "Hi  there");
+    }
+
+    #[test]
+    fn process_delta_buffers_short_unterminated_marker() {
+        let mut s = ConversationSession::default();
+        let (text, tokens) = s.process_delta("Hello <|perf");
+        assert_eq!(text, vec!["Hello "]);
+        assert!(tokens.is_empty());
+        // A short incomplete marker is still carried, awaiting its closer.
+        assert_eq!(s.display.token_carry, "<|perf");
+    }
+
+    #[test]
+    fn process_delta_releases_unterminated_marker_beyond_cap() {
+        let mut s = ConversationSession::default();
+        // An opener that is never closed, followed by well over the carry cap
+        // of plain text. The withheld text must be released to the output
+        // stream rather than buffered without bound (#391).
+        let filler = "a".repeat(MAX_TOKEN_CARRY + 1);
+        let chunk = format!("<|{filler}");
+        let (text, tokens) = s.process_delta(&chunk);
+
+        assert!(tokens.is_empty());
+        // Carry is abandoned, not held.
+        assert!(s.display.token_carry.is_empty());
+        // The abandoned text reached the live output (display + TTS path).
+        assert_eq!(text.concat(), chunk);
+        assert_eq!(s.display.display_buffer, chunk);
+    }
+
+    #[test]
+    fn process_delta_unterminated_marker_withholds_at_most_cap() {
+        let mut s = ConversationSession::default();
+        // Open a marker that is never closed, then keep feeding text. The
+        // carry must never exceed the cap by more than a single chunk (#391).
+        s.process_delta("<|");
+        let mut withheld_max = s.display.token_carry.len();
+        for _ in 0..(MAX_TOKEN_CARRY * 4) {
+            s.process_delta("x");
+            withheld_max = withheld_max.max(s.display.token_carry.len());
+        }
+        assert!(
+            withheld_max <= MAX_TOKEN_CARRY + 1,
+            "carry grew to {withheld_max}, exceeding the cap"
+        );
     }
 }
