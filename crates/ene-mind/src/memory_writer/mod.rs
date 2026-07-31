@@ -249,6 +249,8 @@ impl MemoryWriter {
         let sync_ctx = CommitmentSyncContext {
             character_id: input.character_id,
             user_id: input.user_id,
+            embedder: providers.embedder,
+            title_similarity_threshold: config.memory.commitment_title_similarity_threshold,
         };
         let mut outcome_summary = ArbiterOutcomeSummary::default();
         let reflection = config

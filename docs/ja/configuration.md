@@ -146,16 +146,35 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
     },
     "proactive": {
       "enabled": true,
-      "interval_seconds": 600
+      "interval_seconds": 600,
+      "sources": {
+        "window_title_level": "app_only"
+      }
     },
     "memory": {
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
-      "commitment_boost": 0.25
+      "commitment_boost": 0.25,
+      "commitment_title_similarity_threshold": 0.82
     }
   }
 }
 ```
+
+プロアクティブ活動観測は、自発発話の判断材料としてフォーカス中のアプリケーションを取得します。
+`mind.proactive.sources.window_title_level` は、フォーカス中ウィンドウのタイトルをどこまで
+読み取るかを制御します (#378)。ウィンドウタイトルにはプライベート情報が日常的に含まれます
+（文書名・ファイル名（顧客名・案件名を含みうる）、ページ URL、チャット相手名、メール件名）。
+既定は `app_only`（アプリ名のみ。従来の挙動）です。このテキストは自発発話の判定モデルへ送られ、
+クラウドプロバイダーを設定している場合は**ローカルマシンの外へ送信されます**。レベルは次のとおりです：
+
+| レベル | 取得内容 |
+|---|---|
+| `app_only` | アプリ名のみ（既定。タイトルは読み取りません） |
+| `redacted_title` | アプリ名 + ウィンドウタイトル（ファイルパス・メールアドレス・URL・数字列を除去。`report.xlsx` のような単独の文書名は保持） |
+| `full_title` | アプリ名 + 生のウィンドウタイトル |
+
+`full_title` はローカルモデル使用時のみ選択してください。クラウドプロバイダー使用時は生のタイトルが外部へ送信されます。
 
 記憶想起はハイブリッドスコア `(relevance × quality + commitment_boost) × penalty`
 （`crates/ene-rag/src/scoring.rs` を参照）を使用します。新しくて関連性の強い記憶は
@@ -171,6 +190,12 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 場合、`ene_config::SUPPORTED_LANGUAGES`（`en`, `ja`）の言語についてはコンパイル時
 埋め込みパックへ、それ以外は英語へフォールバックします。詳細は
 [ターン・セッション](concepts/turn-and-session.md) §3 を参照してください。
+
+コミットメント台帳は、着信したコミットメントをタイトル埋め込みの類似度でアクティブな
+コミットメントと照合します (#387)。`commitment_title_similarity_threshold`（デフォルト
+`0.82`）はコサイン類似度の閾値で、これを上回ると言い回しの異なる約束は二重登録ではなく
+既存コミットメントの更新（supersede）として扱われます。埋め込みプロバイダーが未設定の
+場合、台帳は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
 
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 

@@ -145,16 +145,37 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
     },
     "proactive": {
       "enabled": true,
-      "interval_seconds": 600
+      "interval_seconds": 600,
+      "sources": {
+        "window_title_level": "app_only"
+      }
     },
     "memory": {
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
-      "commitment_boost": 0.25
+      "commitment_boost": 0.25,
+      "commitment_title_similarity_threshold": 0.82
     }
   }
 }
 ```
+
+The proactive activity observer captures the focused application to inform spontaneous
+speech. `mind.proactive.sources.window_title_level` controls how much of the focused
+window's title it reads (#378). It defaults to `app_only` (the app name only — the
+historical behaviour), because window titles routinely contain private data: document and
+file names (which can embed customer or project names), page URLs, chat contact names, and
+email subjects. This text is fed to the proactive-speech decision model and, when a cloud
+provider is configured, **leaves the local machine**. The levels are:
+
+| Level | Captured |
+|---|---|
+| `app_only` | App name only (default; the title is never read) |
+| `redacted_title` | App name + window title with filesystem paths, email addresses, URLs, and number sequences stripped (standalone document names such as `report.xlsx` are preserved) |
+| `full_title` | App name + the raw window title |
+
+Choose `full_title` only with a local model; with a cloud provider the raw title is sent
+off-machine.
 
 Memory recall uses a hybrid score `(relevance × quality + commitment_boost) × penalty`
 (see `crates/ene-rag/src/scoring.rs`). A fresh, strongly relevant memory scores
@@ -171,6 +192,13 @@ user-facing LLM instruction strings are loaded at runtime from
 to a compile-time embedded pack for the languages in `ene_config::SUPPORTED_LANGUAGES`
 (`en`, `ja`), and otherwise to English. See
 [Turns & Sessions](concepts/turn-and-session.md) §3 for details.
+
+The commitment ledger matches incoming commitments against active ones by title
+embedding similarity (#387): `commitment_title_similarity_threshold` (default
+`0.82`) is the cosine-similarity cutoff above which a rephrased promise
+supersedes the existing commitment instead of being registered as a duplicate.
+With no embedding provider configured, the ledger falls back to exact
+normalized-title matching and this threshold is unused.
 
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 

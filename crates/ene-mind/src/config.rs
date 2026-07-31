@@ -154,6 +154,19 @@ pub struct MindMemoryConfig {
     pub hybrid_weights: ene_core::HybridSearchWeights,
     /// Score boost when a candidate is sourced from an active commitment.
     pub commitment_boost: f32,
+    /// Minimum title embedding similarity for the commitment ledger to treat two
+    /// commitments as the same one (#387).
+    ///
+    /// The ledger matches incoming commitment candidates against active rows by
+    /// comparing the cosine similarity of their **title embeddings**. A candidate
+    /// whose title is at least this similar to an existing active commitment
+    /// supersedes it instead of being registered as a separate row, so rephrased
+    /// promises ("資料をまとめる" vs "資料作成") collapse into one commitment
+    /// rather than accumulating contradictory duplicates in the prompt. When no
+    /// embedding provider is available the ledger falls back to exact normalized
+    /// title equality, so this threshold only applies on the embedding path.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub commitment_title_similarity_threshold: f32,
     /// Maximum pure-recent fallback candidates gathered during hybrid search.
     pub recent_fallback_limit: usize,
     /// Candidate pool size multiplier base for journal / diagnostics search.
@@ -248,6 +261,7 @@ impl Default for MindMemoryConfig {
             mmr_source_diversity_bonus: 0.05,
             hybrid_weights: ene_core::HybridSearchWeights::default(),
             commitment_boost: 0.25,
+            commitment_title_similarity_threshold: 0.82,
             recent_fallback_limit: 5,
             journal_candidate_pool_size: 64,
             journal_similarity_threshold: 0.45,
@@ -457,6 +471,42 @@ impl Default for CharacterMemoryConfig {
     }
 }
 
+/// How much of the focused window's title the activity observer captures (#378).
+///
+/// Window titles routinely contain private data — document and file names
+/// (which can embed customer or project names), page URLs, chat contact
+/// names, and email subjects. This text is fed to the proactive-speech
+/// decision LLM and, when a cloud provider is configured, leaves the local
+/// machine. The level is therefore a privacy knob: it defaults to
+/// [`WindowTitleLevel::AppOnly`] (the historical app-name-only behaviour) and
+/// higher levels are an explicit opt-in.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum WindowTitleLevel {
+    /// Capture only the application name (the historical, most-private
+    /// behaviour). The window title is never read.
+    #[default]
+    AppOnly,
+    /// Capture the window title with obvious sensitive fragments removed:
+    /// filesystem paths, email addresses, URLs, and digit runs that resemble
+    /// phone / account numbers.
+    RedactedTitle,
+    /// Capture the raw window title verbatim. Only choose this with a local
+    /// model; with a cloud provider the full title is sent off-machine.
+    FullTitle,
+}
+
 /// Input sources for proactive speech decisions (#103).
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
@@ -470,6 +520,12 @@ pub struct ProactiveSourcesConfig {
     pub activity: bool,
     /// Include a short-lived screen text summary (never raw image bytes).
     pub screen_summary: bool,
+    /// Window-title capture level for the activity source (#378).
+    ///
+    /// Only consulted when [`Self::activity`] is enabled. Defaults to
+    /// [`WindowTitleLevel::AppOnly`]; see that type for the privacy
+    /// implications of raising it.
+    pub window_title_level: WindowTitleLevel,
 }
 
 impl Default for ProactiveSourcesConfig {
@@ -478,6 +534,7 @@ impl Default for ProactiveSourcesConfig {
             conversation: true,
             activity: true,
             screen_summary: false,
+            window_title_level: WindowTitleLevel::default(),
         }
     }
 }
@@ -718,6 +775,19 @@ mod tests {
     }
 
     #[test]
+    fn commitment_title_similarity_threshold_out_of_range_is_clamped() {
+        let high: MindMemoryConfig =
+            serde_json::from_str(r#"{"commitment_title_similarity_threshold": 1.7}"#)
+                .expect("deserialize");
+        assert!((high.commitment_title_similarity_threshold - 1.0).abs() < f32::EPSILON);
+
+        let low: MindMemoryConfig =
+            serde_json::from_str(r#"{"commitment_title_similarity_threshold": -0.3}"#)
+                .expect("deserialize");
+        assert!(low.commitment_title_similarity_threshold < f32::EPSILON);
+    }
+
+    #[test]
     fn proactive_defaults_are_disabled() {
         let cfg = MindConfig::default();
         assert!(!cfg.proactive.enabled);
@@ -750,6 +820,37 @@ mod tests {
         let json = serde_json::to_value(&cfg).expect("serialize");
         assert_eq!(json["sources"]["conversation"], false);
         assert_eq!(json["sources"]["screen_summary"], true);
+    }
+
+    /// The window-title capture level defaults to the most-private
+    /// `app_only` when absent, so existing configs keep the historical
+    /// app-name-only behaviour (#378).
+    #[test]
+    fn proactive_window_title_level_defaults_to_app_only() {
+        let cfg: ProactiveConfig =
+            serde_json::from_str(r#"{"sources": {"activity": true}}"#).expect("deserialize");
+        assert_eq!(cfg.sources.window_title_level, WindowTitleLevel::AppOnly);
+        assert_eq!(
+            MindConfig::default().proactive.sources.window_title_level,
+            WindowTitleLevel::AppOnly
+        );
+    }
+
+    /// All three window-title levels round-trip through the public schema
+    /// using their `snake_case` wire names (#378).
+    #[test]
+    fn proactive_window_title_level_round_trips() {
+        for (raw, level) in [
+            ("app_only", WindowTitleLevel::AppOnly),
+            ("redacted_title", WindowTitleLevel::RedactedTitle),
+            ("full_title", WindowTitleLevel::FullTitle),
+        ] {
+            let json = format!(r#"{{"sources": {{"window_title_level": "{raw}"}}}}"#);
+            let cfg: ProactiveConfig = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(cfg.sources.window_title_level, level);
+            let out = serde_json::to_value(&cfg).expect("serialize");
+            assert_eq!(out["sources"]["window_title_level"], raw);
+        }
     }
 
     #[test]
