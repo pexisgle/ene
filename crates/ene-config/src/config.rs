@@ -1485,6 +1485,7 @@ mod tests {
     /// must NOT be baked into `settings.json` on save.
     #[test]
     fn env_override_not_persisted_on_save() {
+        let _guard = migration_guard();
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1520,6 +1521,7 @@ mod tests {
     /// raw JSON) while a concurrent env override stays transient.
     #[test]
     fn genuine_change_persists_but_env_override_does_not() {
+        let _guard = migration_guard();
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1557,6 +1559,7 @@ mod tests {
     /// keys added during the session appended at the end (#326 / #331).
     #[test]
     fn save_preserves_raw_key_order() {
+        let _guard = migration_guard();
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1598,6 +1601,7 @@ mod tests {
     /// without it is treated as version 1.
     #[test]
     fn defaults_not_forced_to_disk_on_save() {
+        let _guard = migration_guard();
         let _guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1627,6 +1631,7 @@ mod tests {
     /// stale on-disk value must not survive a save/reload cycle.
     #[test]
     fn cleared_optional_field_is_removed_from_disk() {
+        let _guard = migration_guard();
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, r#"{"user_persona":{"name":"Alice"}}"#).expect("seed settings");
