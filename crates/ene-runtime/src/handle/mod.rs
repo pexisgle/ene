@@ -701,6 +701,44 @@ impl EneHandle {
             .map_err(|_| CancelError::ActorDead)
     }
 
+    /// The id of the turn currently in flight, or `None` when the actor is
+    /// idle (#403).
+    ///
+    /// This is the lightweight resynchronization query consumers use after a
+    /// broadcast lag. It reads the single-flight [`TurnGate`] directly — one
+    /// `parking_lot` lock, no mailbox round-trip — so it returns promptly even
+    /// while a heavy turn is streaming, and it never queues behind the actor
+    /// loop the way [`crate::diagnostics::EneDiagnostics::get_snapshot`] does.
+    ///
+    /// ## Recovery procedure after a chat-bus lag
+    ///
+    /// [`EneEventReceiver::recv`] returns
+    /// [`tokio::sync::broadcast::error::RecvError::Lagged`] once the consumer
+    /// has fallen behind the chat ring buffer. Every event skipped by the lag
+    /// — including the active turn's [`EneEvent::Terminal`] — must be treated
+    /// as lost, so the consumer's streamed view of the in-flight turn is no
+    /// longer trustworthy. The uniform recovery, shared by every consumer
+    /// (CLI and desktop), is:
+    ///
+    /// 1. Call `active_turn()`. `Some(turn)` means the turn is *still* running
+    ///    on the actor (its `Terminal` was among the dropped events); `None`
+    ///    means it already finished and the gate was released.
+    /// 2. When `Some(turn)`, call [`EneHandle::cancel`] with it so the actor
+    ///    emits a fresh `Terminal` and releases the single-flight gate.
+    ///    Without this the gate stays held and the next
+    ///    [`EneHandle::run`] fails with [`RunError::Busy`].
+    /// 3. Tear down any local per-turn UI state (stream buffers, audio
+    ///    `is_final` tracking) as though the turn had ended.
+    ///
+    /// A lifecycle-bus lag ([`LifecycleReceiver`]) needs no cancellation:
+    /// lifecycle notifications are turn-independent, so the consumer simply
+    /// re-derives the affected state — e.g. re-query
+    /// [`EneHandle::candidates`] after missing a `PendingCandidateAvailable`.
+    #[must_use]
+    pub fn active_turn(&self) -> Option<TurnId> {
+        self.turn_gate.active.lock().clone()
+    }
+
     /// Send a `Shutdown` command and await the actor's drain, then shut down
     /// the plugin host (if still alive).
     pub async fn shutdown(&self, timeout: std::time::Duration) -> Result<(), ShutdownTimeout> {
@@ -1004,29 +1042,16 @@ mod tests {
         );
 
         let mut saw_lagged = false;
-        let mut saw_resync = false;
         while let Ok(ev) = diag_rx.try_recv() {
-            match ev {
-                crate::diagnostics::DiagnosticEvent::Lagged { channel, .. }
-                    if channel == "events" =>
-                {
-                    saw_lagged = true;
-                }
-                crate::diagnostics::DiagnosticEvent::ResyncNeeded { channel }
-                    if channel == "events" =>
-                {
-                    saw_resync = true;
-                }
-                _ => {}
+            if let crate::diagnostics::DiagnosticEvent::Lagged { channel, .. } = ev
+                && channel == "events"
+            {
+                saw_lagged = true;
             }
         }
         assert!(
             saw_lagged,
             "expected DiagnosticEvent::Lagged after event lag"
-        );
-        assert!(
-            saw_resync,
-            "expected DiagnosticEvent::ResyncNeeded after event lag"
         );
 
         // Test diag_tx buffer overflow (capacity is 256)
@@ -1052,6 +1077,177 @@ mod tests {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
             ),
             "Expected RecvError::Lagged for diagnostics channel overflow, got {res:?}"
+        );
+
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
+    /// Config whose chat provider points at a local listener that completes
+    /// the TCP handshake (via the kernel backlog) but never writes a response,
+    /// so any started turn hangs on the per-request timeout instead of
+    /// completing fast and releasing the single-flight gate on its own. The
+    /// caller must hold the returned listener for as long as the turn should
+    /// stay in flight.
+    async fn test_config_hanging_provider() -> (EneConfig, tokio::net::TcpListener) {
+        let hanging = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local hanging listener");
+        let addr = hanging.local_addr().expect("listener has a local address");
+        let mut config = test_config_memory_off();
+        let mut ai = ene_ai::AiConfig::default();
+        if let Some(provider) = ai.providers.get_mut("default") {
+            provider.base_url = format!("http://{addr}");
+        }
+        drop(config.set_section(&ai));
+        (config, hanging)
+    }
+
+    /// `active_turn()` is a lock-only read of the shared single-flight gate
+    /// (#403): `None` while idle, `Some(id)` once `run` has claimed the gate,
+    /// and `None` again after the gate is released. No mailbox round-trip is
+    /// involved, which is what makes it usable as a lag-recovery probe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_turn_reflects_single_flight_gate() {
+        let (config, _hanging) = test_config_hanging_provider().await;
+        let handle = EneHandle::open(config, test_card())
+            .await
+            .expect("open initializes handle");
+
+        assert!(
+            handle.active_turn().is_none(),
+            "no turn is in flight before run()"
+        );
+
+        // `run` claims the gate synchronously before the command is even
+        // delivered to the actor, and the hanging provider keeps the turn in
+        // flight, so the probe deterministically observes `Some` here.
+        let turn = handle.run("hello").expect("run claims the gate");
+        assert_eq!(
+            handle.active_turn().as_ref(),
+            Some(&turn),
+            "active_turn() must report the in-flight turn id"
+        );
+
+        // Release the gate the same way the actor does at end-of-turn and
+        // confirm the probe observes it immediately.
+        handle.turn_gate.end();
+        assert!(
+            handle.active_turn().is_none(),
+            "active_turn() must clear once the gate is released"
+        );
+
+        drop(handle.cancel(&turn));
+        drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+    }
+
+    /// End-to-end lag recovery (#403): after the chat bus overflows and the
+    /// consumer observes `RecvError::Lagged`, the documented resync path —
+    /// `active_turn()` then `cancel()` — restores a consistent view: the
+    /// in-flight turn is still discoverable through the lightweight probe
+    /// (not the stale, gap-ridden stream), cancellation succeeds, and the
+    /// actor emits a fresh `Terminal` so the gate is released. Also asserts
+    /// the lag surfaced exactly one `DiagnosticEvent::Lagged` and no
+    /// `ResyncNeeded` (that redundant variant was removed).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resync_after_chat_bus_lag_restores_consistent_view() {
+        // Keep the turn in flight deterministically (see the helper's doc):
+        // the hanging provider means the turn cannot complete and release the
+        // gate on its own while the lag recovery runs.
+        let (config, _hanging) = test_config_hanging_provider().await;
+        let handle = EneHandle::open(config, test_card())
+            .await
+            .expect("open initializes handle");
+
+        let mut event_rx = handle.subscribe();
+        let mut diag_rx = handle.diagnostics().subscribe();
+
+        let turn = handle.run("hello").expect("run claims the gate");
+
+        // Overflow the chat ring (capacity 1024) so the subscriber lags.
+        for i in 0..1025 {
+            drop(handle.event_tx.send(EneEvent::TextDelta {
+                turn: TurnId::new(),
+                origin: crate::types::TurnOrigin::User,
+                delta: format!("delta {i}"),
+            }));
+        }
+
+        // The consumer sees the gap synchronously, exactly as the CLI and
+        // desktop loops do.
+        let res = event_rx.recv().await;
+        assert!(
+            matches!(
+                res,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+            ),
+            "expected RecvError::Lagged after overflowing the chat bus, got {res:?}"
+        );
+
+        // Resync step 1: the in-flight turn is still discoverable through the
+        // mailbox-free probe even though its events were dropped.
+        assert_eq!(
+            handle.active_turn().as_ref(),
+            Some(&turn),
+            "active_turn() must still report the in-flight turn after a lag"
+        );
+
+        // Resync step 2: cancelling it succeeds and makes the actor emit a
+        // fresh Terminal, releasing the single-flight gate.
+        handle
+            .cancel(&turn)
+            .expect("cancel must succeed for the active turn");
+
+        let mut saw_terminal = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !saw_terminal && tokio::time::Instant::now() < deadline {
+            match event_rx.recv().await {
+                Ok(EneEvent::Terminal { turn: t, .. }) if t == turn => saw_terminal = true,
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_terminal,
+            "the actor must emit a fresh Terminal after the lag-recovery cancel"
+        );
+
+        // The actor emits `Terminal` a few instructions before releasing the
+        // gate, so poll briefly for the release rather than asserting it the
+        // instant the Terminal is observed.
+        let gate_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while handle.active_turn().is_some() && tokio::time::Instant::now() < gate_deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            handle.active_turn().is_none(),
+            "the gate must be released once the recovered turn terminates"
+        );
+
+        // The lag surfaced as exactly the observability twin of the recv
+        // error: a Lagged diagnostic for the events channel, and no
+        // ResyncNeeded (the redundant variant was removed in #403).
+        let mut saw_lagged = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            match ev {
+                crate::diagnostics::DiagnosticEvent::Lagged { channel, .. }
+                    if channel == "events" =>
+                {
+                    saw_lagged = true;
+                }
+                other => {
+                    let debug = format!("{other:?}");
+                    assert!(
+                        !debug.contains("ResyncNeeded"),
+                        "ResyncNeeded must no longer be emitted, got {debug}"
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_lagged,
+            "expected DiagnosticEvent::Lagged for the events channel"
         );
 
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);

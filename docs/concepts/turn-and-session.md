@@ -51,6 +51,28 @@ of another:
   (`StatusChanged`, `PendingCandidateAvailable`, `ToolBackgroundCompleted`).
   Multiple subscribers allowed, same as the chat bus.
 
+### Recovering from a broadcast lag
+
+The `broadcast` chat and lifecycle buses are lossy: when a subscriber falls
+behind, `recv` returns `RecvError::Lagged(n)` and the `n` skipped events are
+gone for good — possibly including the in-flight turn's `Terminal`. Gaps are
+never silent (a `DiagnosticEvent::Lagged` is emitted too), and the recovery
+procedure is uniform across consumers:
+
+- **Chat-bus lag** — the streamed view of the in-flight turn is no longer
+  trustworthy. Query `EneHandle::active_turn()` (a lightweight, mailbox-free
+  read of the single-flight gate); when it returns `Some(turn)`, cancel that
+  turn with `EneHandle::cancel` so the actor emits a fresh `Terminal` and
+  releases the gate — otherwise the next `run` fails with `RunError::Busy`.
+  Then tear down any local per-turn UI state.
+- **Lifecycle-bus lag** — there is no turn to cancel (lifecycle notifications
+  are turn-independent). Simply re-derive the state the missed notification
+  would have carried, e.g. re-query `EneHandle::candidates()` for the pending
+  candidate count.
+
+Run `cargo doc -p ene-runtime --open` and see `EneHandle::active_turn` for the
+authoritative procedure.
+
 ---
 
 ## 2. Session Lifecycle & Session Splitting

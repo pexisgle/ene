@@ -4,6 +4,7 @@ help-hint = Type '/help' for a list of commands.
 ## REPL / run errors
 busy-warning = [Busy] A turn is already in progress. Wait for it to finish.
 run-failed = [Run] Failed: { $error }
+stream-lag-resync = [Stream] Dropped { $skipped } events (fell behind); cancelling the active turn to resynchronize.
 unknown-command = Unknown command: { $command }
 
 ## Permission prompt
