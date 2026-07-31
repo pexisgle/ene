@@ -2258,7 +2258,7 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn healthy_probe_recovers_restart_budget() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::AtomicUsize;
 
         let temp = tempfile::tempdir().expect("OS allows temp directory creation");
         let sock = temp.path().join("recover.sock");
