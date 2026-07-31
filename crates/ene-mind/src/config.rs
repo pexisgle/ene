@@ -523,10 +523,10 @@ impl Default for TopicBoundaryConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            boundary_threshold: 0.55,
-            weight_centroid: 0.6,
+            boundary_threshold: 0.30,
+            weight_centroid: 0.50,
             weight_silence: 0.15,
-            weight_topic_length: 0.25,
+            weight_topic_length: 0.35,
             centroid_alpha: 0.15,
             min_utterance_chars: 6,
             silence_saturation_secs: 300,
