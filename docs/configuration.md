@@ -185,6 +185,14 @@ ranking, `recall_similarity_threshold` (default `0.35`) gates the vector-gather
 step, and `commitment_boost` (default `0.25`) lets active promises surface even
 with zero query relevance.
 
+`mind.emotion.classifier_language` (default `"en"`) selects the prompt-library
+language used for the affect classifier and the cognitive output contract. The
+user-facing LLM instruction strings are loaded at runtime from
+`assets/lang/{lang}/prompts.json`; when that pack is absent the build falls back
+to a compile-time embedded pack for the languages in `ene_config::SUPPORTED_LANGUAGES`
+(`en`, `ja`), and otherwise to English. See
+[Turns & Sessions](concepts/turn-and-session.md) §3 for details.
+
 The commitment ledger matches incoming commitments against active ones by title
 embedding similarity (#387): `commitment_title_similarity_threshold` (default
 `0.82`) is the cosine-similarity cutoff above which a rephrased promise

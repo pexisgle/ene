@@ -46,6 +46,16 @@ pub enum EneConfigError {
     /// General I/O error.
     #[error("I/O error: {0}")]
     IoError(#[source] std::io::Error),
+    /// A runtime prompt pack could not be read from the assets directory. The
+    /// caller is expected to fall back to the compile-time embedded library.
+    #[error("Failed to read prompt pack at {path}: {source}")]
+    PromptPackRead {
+        /// The pack path that was attempted.
+        path: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Type alias for internal module usages.

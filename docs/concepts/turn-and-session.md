@@ -105,6 +105,24 @@ Rather than sending raw chat arrays to the LLM, `PromptComposer` builds structur
 
 Budget allocation dynamically truncates oldest dialogue messages while maintaining identity and safety rules under token pressure.
 
+### Prompt Library & Language Packs
+
+The user-facing LLM instruction strings (system framing, emotion rules,
+summarizer and extractor prompts, split reasons, and so on) are not hard-coded.
+`ene-config`'s `PromptLibrary` loads them at runtime from a per-language JSON
+pack at `assets/lang/{lang}/prompts.json`, selected by the `mind.emotion.classifier_language`
+setting. This keeps prompt text editable without recompiling, and adding a
+language is a matter of dropping in a new `assets/lang/{lang}/` directory — no
+Rust code change to the loading path is required.
+
+When a runtime pack is missing or unreadable (unit tests, CI, or a stripped
+install), `PromptLibrary` falls back to a compile-time embedded pack. Only the
+languages listed in `ene_config::SUPPORTED_LANGUAGES` (currently `en` and `ja`)
+carry an embedded fallback; any other language falls back to English. The
+embedded packs are generated from the same `crates/ene-config/prompts/` sources
+as the shipped assets, and a unit test asserts the two stay byte-for-byte
+identical.
+
 ---
 
 ## 4. Affect & Emotion Model (PAD)
