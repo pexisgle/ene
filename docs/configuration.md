@@ -243,6 +243,7 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
       "web": { "enable": true }
     },
     "max_concurrent": 8,
+    "parallel_tool_calls_max": 4,
     "mcp_servers": [
       {
         "name": "filesystem",
@@ -266,6 +267,22 @@ plugin connection**, across *all* request types (tool calls, pings,
 bound queue (bounded by their own timeout) rather than fanning out to the
 plugin. Chat *streams* (`CreateChatStream`) are the exception: they bypass this
 bound and are not counted against it.
+
+`parallel_tool_calls_max` bounds how many **side-effect-free** tool calls from a
+single LLM response run concurrently. When the model emits several tool calls in
+one turn, those whose `ToolSpec` declares `side_effects: ReadOnly` (and which are
+not background-capable) are dispatched in parallel up to this bound; everything
+else — side-effectful tools, tools that do not declare side effects, and
+`system.search_tools` — runs sequentially as before. Parallelism applies only
+when **every** call in the response is side-effect-free: in a mixed round a
+read-only call must never overtake an earlier write from the same response
+(read-after-write), so mixed rounds run strictly sequentially in original
+order. Results are re-ordered back
+to the original `tool_calls` order, so permission/user-input prompts, the undo
+stack, `ToolCallStart`/`ToolCallResult` events, and `ToolResultSummary` ordering
+are all preserved. Set it to `0` to disable parallelism entirely and force the
+previous fully-sequential behavior. The classification is fail-closed: a tool
+that does not declare `ReadOnly` side effects is never parallelized.
 
 `plugins.list.<name>.db_quota_mb` caps how much of the **shared `memory.db`** a
 plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into

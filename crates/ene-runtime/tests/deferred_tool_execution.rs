@@ -131,6 +131,7 @@ impl ToolRegistry for BackgroundRegistry {
                 }
             }),
             background_capable: true,
+            side_effects: None,
         }]
     }
 

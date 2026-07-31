@@ -140,7 +140,8 @@ pub async fn grep_search(
     summary = "Search for regex patterns within file contents.",
     description = "Search for regex patterns within file contents.",
     category = "Filesystem",
-    keywords_primary = "grep, search, regex, find, pattern, content"
+    keywords_primary = "grep, search, regex, find, pattern, content",
+    side_effects = "ReadOnly"
 )]
 pub struct FsGrepAction {
     /// Regex pattern to search for.
