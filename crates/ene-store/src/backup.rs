@@ -1,7 +1,7 @@
-//! File-level SQLite backup, restore, and integrity helpers (#239).
+//! File-level `SQLite` backup, restore, and integrity helpers (#239).
 //!
 //! Migration recovery uses **pre-migration file copies** rather than
-//! `Migrator::down()`. SQLite + SeaORM cannot safely roll a half-applied
+//! `Migrator::down()`. `SQLite` + SeaORM cannot safely roll a half-applied
 //! schema change back in-process; restoring a known-good file is the
 //! durable recovery path.
 
@@ -120,10 +120,19 @@ pub fn prune_backups(db_path: &Path, max_backups: usize) -> Result<(), EneMemory
     Ok(())
 }
 
-/// Checkpoint WAL and copy `db_path` to a new timestamped backup file.
+/// Back up `db_path` to a new timestamped file and return the backup path.
 ///
-/// When `conn` is `Some`, runs `PRAGMA wal_checkpoint(TRUNCATE)` first so the
-/// backup captures committed pages. Returns the backup path.
+/// When `conn` is `Some`, the backup is produced with `VACUUM INTO`
+/// (`SQLite` 3.27+): a single statement that copies the database — including
+/// any committed WAL frames — into a fresh, self-contained file atomically.
+/// This closes the race in the old checkpoint-then-`fs::copy` approach, where
+/// a concurrent writer between the `PRAGMA wal_checkpoint(TRUNCATE)` and the
+/// copy could tear the backup (#427).
+///
+/// When `conn` is `None` there is no connection to serialize through, so the
+/// function falls back to a plain file copy (plus `-wal`/`-shm` sidecars).
+/// That path is only sound while the database is otherwise quiescent; every
+/// in-tree caller passes a live connection.
 pub async fn backup_database(
     db_path: &Path,
     conn: Option<&DatabaseConnection>,
@@ -134,22 +143,47 @@ pub async fn backup_database(
             db_path.display()
         )));
     }
-    if let Some(db) = conn {
-        checkpoint_wal(db).await?;
-    }
     let dest = unique_backup_path(db_path);
-    fs::copy(db_path, &dest).map_err(|e| {
+    match conn {
+        Some(db) => vacuum_into(db, &dest).await?,
+        None => copy_database_file(db_path, &dest)?,
+    }
+    Ok(dest)
+}
+
+/// Copies the database to `dest` with a single `VACUUM main INTO` statement.
+///
+/// `VACUUM INTO` takes its target as a SQL string literal (it cannot be bound
+/// as a parameter), so single quotes in the path are escaped by doubling. The
+/// target file must not already exist; [`unique_backup_path`] yields a
+/// timestamp-and-pid name that does not.
+async fn vacuum_into(db: &DatabaseConnection, dest: &Path) -> Result<(), EneMemoryError> {
+    let dest_str = dest.to_str().ok_or_else(|| {
+        EneMemoryError::BackupError(format!("non-UTF-8 backup path: {}", dest.display()))
+    })?;
+    let escaped = dest_str.replace('\'', "''");
+    db.execute_unprepared(&format!("VACUUM main INTO '{escaped}'"))
+        .await
+        .map_err(|e| {
+            EneMemoryError::BackupError(format!("VACUUM INTO {} failed: {e}", dest.display()))
+        })?;
+    Ok(())
+}
+
+/// Best-effort file copy used only when no connection is available (#427).
+fn copy_database_file(db_path: &Path, dest: &Path) -> Result<(), EneMemoryError> {
+    fs::copy(db_path, dest).map_err(|e| {
         EneMemoryError::BackupError(format!(
             "failed to copy {} -> {}: {e}",
             db_path.display(),
             dest.display()
         ))
     })?;
-    // Also copy WAL/SHM if present (should be empty after checkpoint, but
-    // keep them for completeness when no connection was provided).
-    copy_sidecar(db_path, &dest, "-wal")?;
-    copy_sidecar(db_path, &dest, "-shm")?;
-    Ok(dest)
+    // Also copy WAL/SHM if present so the backup is complete without a
+    // connection to checkpoint them first.
+    copy_sidecar(db_path, dest, "-wal")?;
+    copy_sidecar(db_path, dest, "-shm")?;
+    Ok(())
 }
 
 fn unique_backup_path(db_path: &Path) -> PathBuf {
@@ -158,14 +192,27 @@ fn unique_backup_path(db_path: &Path) -> PathBuf {
         .unwrap_or_default()
         .as_secs();
     let pid = std::process::id();
-    let mut name = db_path
+    let mut base = db_path
         .file_name()
         .map_or_else(|| "memory.db".into(), std::ffi::OsStr::to_os_string);
-    name.push(BACKUP_SUFFIX);
-    name.push(format!("{ts}.{pid}"));
-    match db_path.parent() {
-        Some(parent) => parent.join(name),
-        None => PathBuf::from(name),
+    base.push(BACKUP_SUFFIX);
+    // `VACUUM INTO` refuses to overwrite an existing file, so the name must be
+    // unique even when two backups land in the same second (e.g. the open-time
+    // backup followed by an explicit `MemoryStore::backup`). Append a counter
+    // until the path is free.
+    let mut candidate = format!("{ts}.{pid}");
+    let parent = match db_path.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => PathBuf::from("."),
+    };
+    loop {
+        let mut name = base.clone();
+        name.push(&candidate);
+        let path = parent.join(&name);
+        if !path.exists() {
+            return path;
+        }
+        candidate.push_str(".1");
     }
 }
 

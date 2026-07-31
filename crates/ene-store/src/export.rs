@@ -99,16 +99,24 @@ pub struct ExportedToolLog {
 
 /// Masks obvious secrets in free-form message content.
 ///
-/// Recognizes three shapes without destroying normal prose:
+/// This is a **best-effort safety net, not a primary defense**: it recognizes
+/// a small set of high-signal credential shapes and leaves everything else
+/// untouched, so it must not be relied upon to keep arbitrary secrets out of
+/// an export. Secrets should never live in message content in the first
+/// place; this only catches the ones that slip through.
+///
+/// Recognized shapes:
 ///
 /// - `-----BEGIN ... PRIVATE KEY-----` … `-----END ... PRIVATE KEY-----` PEM
 ///   blocks (replaced wholesale),
 /// - `Bearer <token>` authorization tokens, and
-/// - `sk-`-prefixed API keys.
+/// - API keys carrying a known provider prefix: `sk-` (`OpenAI`-style), `AIza`
+///   (Google), `AKIA` (AWS access key ID), and `GitHub`'s `ghp_` / `gho_` /
+///   `ghu_` / `ghs_` / `ghr_` / `github_pat_` tokens.
 ///
-/// `sk-` and `Bearer` only match at a word boundary, so ordinary words such
-/// as "risk-free" are left untouched. Anything that does not look like a
-/// credential is returned unchanged.
+/// Prefixes only match at a word boundary, so ordinary words such as
+/// "risk-free" are left untouched. Credentials that do not use one of these
+/// shapes — or that use a prefix not listed above — pass through unchanged.
 #[must_use]
 pub fn redact_secrets(input: &str) -> String {
     let without_pem = redact_pem_blocks(input);
@@ -182,9 +190,29 @@ fn find_bearer(text: &str) -> Option<usize> {
     find_at_boundary(text, "Bearer ", 7)
 }
 
-/// Finds the byte offset of the next word-boundary `sk-` API key in `text`.
+/// API key prefixes recognized by [`redact_secrets`], covering the major
+/// cloud providers plus `GitHub`. The list is intentionally conservative: each
+/// entry is a distinctive, low-false-positive prefix rather than a guess.
+const API_KEY_PREFIXES: &[&str] = &[
+    "sk-",         // OpenAI-style secret keys
+    "AIza",        // Google API keys
+    "AKIA",        // AWS access key IDs
+    "ghp_",        // GitHub personal access tokens
+    "gho_",        // GitHub OAuth tokens
+    "ghu_",        // GitHub user-to-server tokens
+    "ghs_",        // GitHub server-to-server tokens
+    "ghr_",        // GitHub refresh tokens
+    "github_pat_", // GitHub fine-grained personal access tokens
+];
+
+/// Finds the byte offset of the next word-boundary API key in `text`, matching
+/// any of [`API_KEY_PREFIXES`]. Returns the earliest match across all prefixes.
 fn find_api_key(text: &str) -> Option<usize> {
-    find_at_boundary(text, "sk-", 3)
+    API_KEY_PREFIXES
+        .iter()
+        .copied()
+        .filter_map(|prefix| find_at_boundary(text, prefix, prefix.len()))
+        .min()
 }
 
 /// Finds the next occurrence of `needle` in `text` that is preceded by a word
@@ -216,9 +244,9 @@ fn mask_bearer(text: &str) -> usize {
         .saturating_add(token_len)
 }
 
-/// Returns the byte length of the `sk-` API key starting at the head of `text`
-/// (which must begin with `"sk-"`), so the caller can mask it. Keys end at the
-/// first whitespace or quote.
+/// Returns the byte length of the API key starting at the head of `text`
+/// (which begins with one of [`API_KEY_PREFIXES`]), so the caller can mask it.
+/// Keys end at the first whitespace or quote.
 fn mask_api_key(text: &str) -> usize {
     text.find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
         .unwrap_or(text.len())
@@ -257,6 +285,25 @@ mod tests {
         assert!(!out.contains("abc.def-ghi"), "token leaked: {out}");
         assert!(out.contains("Authorization:"));
         assert!(out.contains("end"));
+    }
+
+    #[test]
+    fn redacts_cloud_provider_keys() {
+        // Google, AWS, and GitHub prefixes are redacted like `sk-` keys (#427
+        // item 7).
+        for secret in [
+            "AIzaSyD-secret-google-key",
+            "AKIAIOSFODNN7EXAMPLE",
+            "ghp_1234567890abcdefghij",
+            "github_pat_11ABCDEFG_secret",
+        ] {
+            let input = format!("token is {secret} here");
+            let out = redact_secrets(&input);
+            assert!(!out.contains(secret), "secret leaked: {out}");
+            assert!(out.contains("[redacted]"), "no redaction marker: {out}");
+            assert!(out.contains("token is"), "prose lost: {out}");
+            assert!(out.contains("here"), "prose lost: {out}");
+        }
     }
 
     #[test]

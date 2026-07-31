@@ -8,8 +8,15 @@
 //! - Each tool declares its schema (tables + columns) via `DeclareSchema`.
 //! - The server records the declaration in `__tool_schemas` and enforces that
 //!   all subsequent requests only reference tables/columns in the declaration.
-//! - Table names must start with the tool's prefix (e.g. `fs_`, `utility_`).
-//! - DDL (CREATE/ALTER/DROP) is **not** exposed to tools.
+//! - Table names must start with the tool's prefix (e.g. `fs_`, `utility_`),
+//!   and index names must carry the prefix too (`SQLite` index names live in a
+//!   single database-wide namespace, so an unprefixed index could squat a name
+//!   a core migration later needs).
+//! - DDL is **not** exposed to tools as a direct operation. `CREATE TABLE` and
+//!   `CREATE INDEX` — plus the additive `ALTER TABLE ... ADD COLUMN` used to
+//!   grow an existing table — run only as a consequence of `DeclareSchema`,
+//!   under prefix isolation and identifier validation. The server never drops
+//!   tables or columns and rejects destructive or conflicting schema changes.
 //! - `sqlite_master` and other internal tables are blocked.
 //!
 //! ## Schema evolution
@@ -444,7 +451,10 @@ impl DbIpcServer {
                 conflict_columns,
             } => {
                 let res = Self::validate_table_access(declared_tables, &table)
-                    .and_then(|()| Self::validate_row_columns(declared_columns, &table, &row));
+                    .and_then(|()| Self::validate_row_columns(declared_columns, &table, &row))
+                    .and_then(|()| {
+                        Self::validate_conflict_columns(declared_columns, &table, &conflict_columns)
+                    });
                 match res {
                     Ok(()) => match Self::handle_upsert(db, &table, row, conflict_columns).await {
                         Ok(rowid) => DbResponse::Upsert { rowid },
@@ -557,10 +567,15 @@ impl DbIpcServer {
         match op {
             DbWriteOp::Insert { table, row } => Self::validate_table_access(declared_tables, table)
                 .and_then(|()| Self::validate_row_columns(declared_columns, table, row)),
-            DbWriteOp::Upsert { table, row, .. } => {
-                Self::validate_table_access(declared_tables, table)
-                    .and_then(|()| Self::validate_row_columns(declared_columns, table, row))
-            }
+            DbWriteOp::Upsert {
+                table,
+                row,
+                conflict_columns,
+            } => Self::validate_table_access(declared_tables, table)
+                .and_then(|()| Self::validate_row_columns(declared_columns, table, row))
+                .and_then(|()| {
+                    Self::validate_conflict_columns(declared_columns, table, conflict_columns)
+                }),
             DbWriteOp::Update { table, set, filter } => {
                 Self::validate_table_access(declared_tables, table)
                     .and_then(|()| Self::validate_row_columns(declared_columns, table, set))
@@ -717,6 +732,56 @@ impl DbIpcServer {
         Ok(())
     }
 
+    /// Validates that every column default in a schema declaration can be
+    /// rendered as a `SQLite` literal (#427).
+    ///
+    /// Defaults are the one value path that bypasses `sea-query`'s parameter
+    /// binding (they are embedded in the DDL), so a value with no valid
+    /// literal — a non-finite float — must be rejected up front. Running this
+    /// before any database write keeps a rejected declaration from leaving a
+    /// stored `__tool_schemas` row ahead of the physical tables.
+    fn validate_column_defaults(schema: &DbSchema) -> Result<(), DbServerError> {
+        for table in &schema.tables {
+            for col in &table.columns {
+                if let Some(default) = &col.default {
+                    Self::db_value_to_sql(default)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates that every upsert conflict column is declared for `table`.
+    ///
+    /// The other five dispatch paths all cross-check the identifiers they
+    /// reference against the declared schema; an upsert's `conflict_columns`
+    /// was the one identifier set that skipped this check (#427). The values
+    /// are quoted by `sea-query`'s `Alias`, so this is not an injection hole,
+    /// but it breaks the "only declared columns may be referenced" invariant
+    /// the rest of the server enforces — an undeclared conflict column would
+    /// reach the database and fail there with an opaque error instead of a
+    /// structured `UnknownColumn`.
+    fn validate_conflict_columns(
+        declared_columns: &HashMap<String, HashSet<String>>,
+        table: &str,
+        conflict_columns: &[String],
+    ) -> Result<(), DbServerError> {
+        let table_columns = declared_columns
+            .get(table)
+            .ok_or_else(|| DbServerError::UnknownTable(table.to_string()))?;
+
+        for col in conflict_columns {
+            if !table_columns.contains(col) {
+                return Err(DbServerError::UnknownColumn {
+                    table: table.to_string(),
+                    column: col.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn validate_select_columns(
         declared_columns: &HashMap<String, HashSet<String>>,
         table: &str,
@@ -812,11 +877,31 @@ impl DbIpcServer {
             }
         }
 
+        // Reject column defaults that cannot be rendered as a SQLite literal
+        // (currently only non-finite floats) before any database write, so a
+        // bad declaration never leaves a stored `__tool_schemas` row ahead of
+        // the physical tables (#427).
+        Self::validate_column_defaults(&schema)?;
+
         let known_table_names: HashSet<&str> =
             schema.tables.iter().map(|t| t.name.as_str()).collect();
         for index in &schema.indexes {
             Self::validate_identifier(&index.name)?;
             Self::validate_identifier(&index.table)?;
+            // SQLite index names share a single database-wide namespace, so an
+            // unprefixed index could squat a name a core migration later needs
+            // (e.g. `idx_typed_mem_kind`). Requiring the tool's prefix to
+            // appear in the index name keeps each tool's indexes inside its
+            // own namespace. The prefix may appear anywhere in the name — the
+            // established convention is `idx_<prefix>...` — so this stays
+            // compatible with existing declarations while still rejecting
+            // names that carry no prefix at all (#427).
+            if !index.name.contains(prefix) {
+                return Err(DbServerError::PermissionDenied(format!(
+                    "Index '{}' does not carry prefix '{}'",
+                    index.name, prefix
+                )));
+            }
             if !index.table.starts_with(prefix) {
                 return Err(DbServerError::PermissionDenied(format!(
                     "Index '{}' references table '{}' outside prefix '{}'",
@@ -932,7 +1017,7 @@ impl DbIpcServer {
         // EXISTS` / `CREATE INDEX IF NOT EXISTS` are no-ops on existing
         // objects and create any that are missing.
         for table in &schema.tables {
-            let create_sql = Self::build_create_table_sql(table);
+            let create_sql = Self::build_create_table_sql(table)?;
             db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, create_sql))
                 .await
                 .map_err(|e| DbServerError::Internal(e.to_string()))?;
@@ -1008,7 +1093,7 @@ impl DbIpcServer {
         }
 
         for (table, column) in &diff.added_columns {
-            let alter_sql = Self::build_alter_add_column_sql(table, column);
+            let alter_sql = Self::build_alter_add_column_sql(table, column)?;
             db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, alter_sql))
                 .await
                 .map_err(|e| {
@@ -1147,7 +1232,10 @@ impl DbIpcServer {
     /// `NOT NULL` is only emitted alongside a `DEFAULT`, matching `SQLite`'s
     /// `ADD COLUMN` requirement that a non-nullable added column have a
     /// default to populate existing rows.
-    fn build_alter_add_column_sql(table: &DbTable, column: &DbColumn) -> String {
+    fn build_alter_add_column_sql(
+        table: &DbTable,
+        column: &DbColumn,
+    ) -> Result<String, DbServerError> {
         let mut sql = format!("ALTER TABLE {} ADD COLUMN {} ", table.name, column.name);
 
         sql.push_str(match column.ty {
@@ -1164,10 +1252,10 @@ impl DbIpcServer {
 
         if let Some(default) = &column.default {
             sql.push_str(" DEFAULT ");
-            sql.push_str(&Self::db_value_to_sql(default));
+            sql.push_str(&Self::db_value_to_sql(default)?);
         }
 
-        sql
+        Ok(sql)
     }
 
     /// Validates a SQL identifier (table, column, or index name).
@@ -1207,7 +1295,7 @@ impl DbIpcServer {
         Ok(())
     }
 
-    fn build_create_table_sql(table: &DbTable) -> String {
+    fn build_create_table_sql(table: &DbTable) -> Result<String, DbServerError> {
         let mut sql = format!("CREATE TABLE IF NOT EXISTS {} (", table.name);
 
         let mut first = true;
@@ -1244,28 +1332,41 @@ impl DbIpcServer {
 
             if let Some(default) = &col.default {
                 sql.push_str(" DEFAULT ");
-                sql.push_str(&Self::db_value_to_sql(default));
+                sql.push_str(&Self::db_value_to_sql(default)?);
             }
         }
 
         sql.push(')');
-        sql
+        Ok(sql)
     }
 
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "blob hex capacity math operates on bounded message buffers"
-    )]
-    fn db_value_to_sql(value: &DbValue) -> String {
+    /// Renders a [`DbValue`] as a `SQLite` literal for embedding in hand-built
+    /// DDL (a column `DEFAULT` clause).
+    ///
+    /// DDL defaults are the one place values bypass `sea-query`'s parameter
+    /// binding, so each variant is rendered as a literal. A non-finite float
+    /// (`NaN` or infinity) has no valid `SQLite` literal — `f64::to_string`
+    /// yields `"NaN"` / `"inf"`, which is a syntax error — so it is rejected
+    /// here with [`DbServerError::PermissionDenied`] rather than producing a
+    /// `DeclareSchema` failure with an opaque database error (#427).
+    fn db_value_to_sql(value: &DbValue) -> Result<String, DbServerError> {
         match value {
-            DbValue::Null => "NULL".to_string(),
-            DbValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
-            DbValue::Int(i) => i.to_string(),
-            DbValue::Float(f) => f.to_string(),
-            DbValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+            DbValue::Null => Ok("NULL".to_string()),
+            DbValue::Bool(b) => Ok(if *b { "1" } else { "0" }.to_string()),
+            DbValue::Int(i) => Ok(i.to_string()),
+            DbValue::Float(f) => {
+                if f.is_finite() {
+                    Ok(f.to_string())
+                } else {
+                    Err(DbServerError::PermissionDenied(format!(
+                        "column DEFAULT value {f} is not finite; SQLite has no literal for NaN or infinity"
+                    )))
+                }
+            }
+            DbValue::Text(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
             DbValue::Blob(b) => {
                 use std::fmt::Write;
-                let mut hex = String::with_capacity(b.len() * 2 + 3);
+                let mut hex = String::with_capacity(b.len().saturating_mul(2).saturating_add(3));
                 hex.push_str("X'");
                 for byte in b {
                     // `fmt::Error` is `Copy`, so `drop()` would itself trip
@@ -1278,7 +1379,7 @@ impl DbIpcServer {
                     let _ = write!(hex, "{byte:02x}");
                 }
                 hex.push('\'');
-                hex
+                Ok(hex)
             }
         }
     }
@@ -1462,40 +1563,60 @@ impl DbIpcServer {
                 let val = if let Some(def) = col_def {
                     match def.ty {
                         ene_plugin_db::DbType::Integer => {
-                            if let Ok(Some(v)) = result.try_get::<Option<i64>>("", col) {
-                                DbValue::Int(v)
-                            } else {
-                                DbValue::Null
+                            match result.try_get::<Option<i64>>("", col) {
+                                Ok(Some(v)) => DbValue::Int(v),
+                                Ok(None) => DbValue::Null,
+                                Err(e) => {
+                                    log_select_type_mismatch(table, col, "INTEGER", &e);
+                                    DbValue::Null
+                                }
                             }
                         }
-                        ene_plugin_db::DbType::Real => {
-                            if let Ok(Some(v)) = result.try_get::<Option<f64>>("", col) {
-                                DbValue::Float(v)
-                            } else {
+                        ene_plugin_db::DbType::Real => match result.try_get::<Option<f64>>("", col)
+                        {
+                            Ok(Some(v)) => DbValue::Float(v),
+                            Ok(None) => DbValue::Null,
+                            Err(e) => {
+                                log_select_type_mismatch(table, col, "REAL", &e);
                                 DbValue::Null
                             }
-                        }
+                        },
                         ene_plugin_db::DbType::Text => {
-                            if let Ok(Some(v)) = result.try_get::<Option<String>>("", col) {
-                                DbValue::Text(v)
-                            } else {
-                                DbValue::Null
+                            match result.try_get::<Option<String>>("", col) {
+                                Ok(Some(v)) => DbValue::Text(v),
+                                Ok(None) => DbValue::Null,
+                                Err(e) => {
+                                    log_select_type_mismatch(table, col, "TEXT", &e);
+                                    DbValue::Null
+                                }
                             }
                         }
                         ene_plugin_db::DbType::Blob => {
-                            if let Ok(Some(v)) = result.try_get::<Option<Vec<u8>>>("", col) {
-                                DbValue::Blob(v)
-                            } else {
-                                DbValue::Null
+                            match result.try_get::<Option<Vec<u8>>>("", col) {
+                                Ok(Some(v)) => DbValue::Blob(v),
+                                Ok(None) => DbValue::Null,
+                                Err(e) => {
+                                    log_select_type_mismatch(table, col, "BLOB", &e);
+                                    DbValue::Null
+                                }
                             }
                         }
                         ene_plugin_db::DbType::Boolean => {
-                            if let Ok(Some(v)) = result.try_get::<Option<bool>>("", col) {
-                                DbValue::Bool(v)
-                            } else if let Ok(Some(v)) = result.try_get::<Option<i64>>("", col) {
-                                DbValue::Bool(v != 0)
-                            } else {
-                                DbValue::Null
+                            // SQLite stores booleans as integers, so a failed
+                            // `bool` decode is expected and retried as `i64`
+                            // without logging; only a failure of both decodes
+                            // indicates a genuine type mismatch.
+                            match result.try_get::<Option<bool>>("", col) {
+                                Ok(Some(v)) => DbValue::Bool(v),
+                                Ok(None) => DbValue::Null,
+                                Err(_) => match result.try_get::<Option<i64>>("", col) {
+                                    Ok(Some(v)) => DbValue::Bool(v != 0),
+                                    Ok(None) => DbValue::Null,
+                                    Err(e) => {
+                                        log_select_type_mismatch(table, col, "BOOLEAN", &e);
+                                        DbValue::Null
+                                    }
+                                },
                             }
                         }
                     }
@@ -1648,6 +1769,25 @@ impl DbIpcServer {
     }
 }
 
+/// Logs a column whose stored value could not be decoded as the type declared
+/// in the tool's schema (#427).
+///
+/// `SQLite` is dynamically typed, so a column declared `INTEGER` can hold a
+/// string; `handle_select` reads by the declared type and falls back to
+/// [`DbValue::Null`] when the decode fails. Returning `Null` for data that is
+/// actually present is confusing to debug from a plugin, so the mismatch is
+/// surfaced here as a structured warning rather than swallowed silently.
+fn log_select_type_mismatch(table: &str, column: &str, declared: &str, err: &sea_orm::DbErr) {
+    warn!(
+        component = "db_server",
+        table = %table,
+        column = %column,
+        declared_type = %declared,
+        error = %err,
+        "Select column value did not decode as its declared type; returning NULL"
+    );
+}
+
 /// Additive differences between a stored schema declaration and a new one.
 ///
 /// Produced by [`DbIpcServer::diff_schemas`]; consumed by
@@ -1739,7 +1879,7 @@ mod tests {
                 },
             ],
         };
-        let sql = DbIpcServer::build_create_table_sql(&table);
+        let sql = DbIpcServer::build_create_table_sql(&table).unwrap();
         assert!(sql.contains("CREATE TABLE IF NOT EXISTS fs_notes ("));
         assert!(sql.contains("id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT"));
         assert!(sql.contains("body TEXT"));
@@ -2792,7 +2932,7 @@ mod tests {
 
         let nullable = test_column("checksum", ene_plugin_db::DbType::Text);
         assert_eq!(
-            DbIpcServer::build_alter_add_column_sql(&table, &nullable),
+            DbIpcServer::build_alter_add_column_sql(&table, &nullable).unwrap(),
             "ALTER TABLE fs_undo ADD COLUMN checksum TEXT"
         );
 
@@ -2806,8 +2946,299 @@ mod tests {
             default: Some(ene_plugin_db::DbValue::Int(0)),
         };
         assert_eq!(
-            DbIpcServer::build_alter_add_column_sql(&table, &with_default),
+            DbIpcServer::build_alter_add_column_sql(&table, &with_default).unwrap(),
             "ALTER TABLE fs_undo ADD COLUMN count INTEGER NOT NULL DEFAULT 0"
         );
+    }
+
+    // --- #427 cleanup regression tests ---
+
+    /// A standalone upsert whose `conflict_columns` reference an undeclared
+    /// column is rejected with a structured `UnknownColumn` error before
+    /// anything reaches the database (#427 item 1).
+    #[tokio::test]
+    async fn upsert_with_undeclared_conflict_column_is_rejected() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Upsert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("alpha".to_string()),
+                )]),
+                conflict_columns: vec!["not_a_column".to_string()],
+            },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::UnknownColumn);
+                assert!(
+                    message.contains("not_a_column"),
+                    "error should name the bad conflict column: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // Nothing was persisted.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
+    }
+
+    /// A batch upsert with an undeclared conflict column is rejected up front
+    /// (before the transaction runs) and names the failing operation (#427
+    /// item 1).
+    #[tokio::test]
+    async fn batch_upsert_with_undeclared_conflict_column_is_rejected() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![ene_plugin_db::DbWriteOp::Upsert {
+            table: "fs_test".to_string(),
+            row: std::collections::BTreeMap::from([(
+                "name".to_string(),
+                ene_plugin_db::DbValue::Text("alpha".to_string()),
+            )]),
+            conflict_columns: vec!["not_a_column".to_string()],
+        }];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::UnknownColumn);
+                assert!(
+                    message.contains("batch op 0"),
+                    "error should name the failing op: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // Nothing was persisted.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
+    }
+
+    /// A declared column whose `DEFAULT` is a non-finite float is rejected
+    /// explicitly (`NaN`/`inf` have no valid `SQLite` literal) rather than
+    /// producing an opaque database syntax error (#427 item 3).
+    #[tokio::test]
+    async fn declare_schema_rejects_non_finite_default() {
+        let db = test_db_with_tool_schemas().await;
+
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut col = test_column("ratio", ene_plugin_db::DbType::Real);
+            col.default = Some(ene_plugin_db::DbValue::Float(bad));
+            let schema = ene_plugin_db::DbSchema {
+                prefix: "fs_".to_string(),
+                tables: vec![ene_plugin_db::DbTable {
+                    name: "fs_thing".to_string(),
+                    columns: vec![col],
+                }],
+                indexes: Vec::new(),
+            };
+
+            let resp = declare(&db, schema).await;
+            assert!(
+                matches!(
+                    resp,
+                    DbResponse::Error {
+                        code: DbErrorCode::PermissionDenied,
+                        ..
+                    }
+                ),
+                "expected PermissionDenied for default {bad}, got {resp:?}"
+            );
+        }
+    }
+
+    /// Finite float defaults render valid DDL; non-finite ones are refused
+    /// (#427 item 3).
+    #[test]
+    fn db_value_to_sql_rejects_non_finite_floats() {
+        assert!(DbIpcServer::db_value_to_sql(&ene_plugin_db::DbValue::Float(1.5)).is_ok());
+        assert!(DbIpcServer::db_value_to_sql(&ene_plugin_db::DbValue::Float(f64::NAN)).is_err());
+        assert!(
+            DbIpcServer::db_value_to_sql(&ene_plugin_db::DbValue::Float(f64::INFINITY)).is_err()
+        );
+        assert!(
+            DbIpcServer::db_value_to_sql(&ene_plugin_db::DbValue::Float(f64::NEG_INFINITY))
+                .is_err()
+        );
+    }
+
+    /// An index name that does not carry the tool's prefix is rejected, so a
+    /// plugin cannot squat a database-global index name a core migration may
+    /// later need (#427 item 4).
+    #[tokio::test]
+    async fn declare_schema_rejects_index_without_prefix() {
+        let db = test_db_with_tool_schemas().await;
+
+        let schema = ene_plugin_db::DbSchema {
+            prefix: "fs_".to_string(),
+            tables: vec![ene_plugin_db::DbTable {
+                name: "fs_thing".to_string(),
+                columns: vec![test_column("id", ene_plugin_db::DbType::Integer)],
+            }],
+            indexes: vec![ene_plugin_db::DbIndex {
+                // A plausible core index name with no `fs_` prefix.
+                name: "idx_typed_mem_kind".to_string(),
+                table: "fs_thing".to_string(),
+                columns: vec!["id".to_string()],
+                unique: false,
+            }],
+        };
+
+        let resp = declare(&db, schema).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::PermissionDenied,
+                    ..
+                }
+            ),
+            "expected PermissionDenied for unprefixed index, got {resp:?}"
+        );
+    }
+
+    /// An index name carrying the tool's prefix (the established
+    /// `idx_<prefix>...` convention) is accepted (#427 item 4).
+    #[tokio::test]
+    async fn declare_schema_accepts_prefixed_index() {
+        let db = test_db_with_tool_schemas().await;
+
+        let schema = ene_plugin_db::DbSchema {
+            prefix: "fs_".to_string(),
+            tables: vec![ene_plugin_db::DbTable {
+                name: "fs_thing".to_string(),
+                columns: vec![test_column("id", ene_plugin_db::DbType::Integer)],
+            }],
+            indexes: vec![ene_plugin_db::DbIndex {
+                name: "idx_fs_thing_id".to_string(),
+                table: "fs_thing".to_string(),
+                columns: vec!["id".to_string()],
+                unique: false,
+            }],
+        };
+
+        let resp = declare(&db, schema).await;
+        assert!(
+            matches!(resp, DbResponse::SchemaAccepted { .. }),
+            "expected SchemaAccepted for prefixed index, got {resp:?}"
+        );
+    }
+
+    /// A column whose stored value does not decode as its declared type reads
+    /// back as `Null` (the pre-existing behaviour), now made observable via a
+    /// warning log (#427 item 8).
+    #[tokio::test]
+    async fn select_type_mismatch_reads_back_as_null() {
+        use sea_orm::ConnectionTrait;
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        // SQLite is dynamically typed: this column holds text despite being
+        // declared INTEGER.
+        db.execute_unprepared("CREATE TABLE fs_test (id INTEGER PRIMARY KEY, qty INTEGER)")
+            .await
+            .unwrap();
+        db.execute_unprepared("INSERT INTO fs_test (qty) VALUES ('not-a-number')")
+            .await
+            .unwrap();
+
+        let mut declared_tables: HashMap<String, ene_plugin_db::DbTable> = HashMap::new();
+        declared_tables.insert(
+            "fs_test".to_string(),
+            ene_plugin_db::DbTable {
+                name: "fs_test".to_string(),
+                columns: vec![
+                    ene_plugin_db::DbColumn {
+                        name: "id".to_string(),
+                        ty: ene_plugin_db::DbType::Integer,
+                        nullable: false,
+                        primary_key: true,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                    ene_plugin_db::DbColumn {
+                        name: "qty".to_string(),
+                        ty: ene_plugin_db::DbType::Integer,
+                        nullable: true,
+                        primary_key: false,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                ],
+            },
+        );
+        let mut declared_columns: HashMap<String, HashSet<String>> = HashMap::new();
+        declared_columns.insert(
+            "fs_test".to_string(),
+            ["id".to_string(), "qty".to_string()].into_iter().collect(),
+        );
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Select {
+                table: "fs_test".to_string(),
+                columns: vec!["qty".to_string()],
+                filter: ene_plugin_db::DbFilter::Always,
+                order_by: Vec::new(),
+                limit: None,
+            },
+        )
+        .await;
+
+        let rows = match resp {
+            ene_plugin_db::DbResponse::Select { rows } => rows,
+            other => panic!("expected Select, got {other:?}"),
+        };
+        assert_eq!(rows.len(), 1);
+        // The mismatched value surfaces as Null rather than an opaque decode
+        // failure; the mismatch is logged (see `log_select_type_mismatch`).
+        assert_eq!(rows[0].get("qty"), Some(&ene_plugin_db::DbValue::Null));
     }
 }
