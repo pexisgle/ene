@@ -749,9 +749,10 @@ impl IpcPluginConnection {
     /// Uses the stored socket path, sandbox, and plugin config captured at
     /// the original [`connect`](Self::connect) call. Useful after a supervised
     /// process restart, where the caller knows the old connection is stale
-    /// regardless of the generation (see the health probe loop in `manager`).
-    /// Request-path reconnects go through [`reconnect_from`](Self::reconnect_from)
-    /// instead, which coalesces concurrent reconnects by generation.
+    /// regardless of the generation (see the per-plugin supervisor in
+    /// `manager`). Request-path reconnects go through
+    /// [`reconnect_from`](Self::reconnect_from) instead, which coalesces
+    /// concurrent reconnects by generation.
     pub async fn reconnect(&self) -> Result<(), PluginHostError> {
         self.reconnect_from(self.generation.load(Ordering::Acquire))
             .await
@@ -1082,10 +1083,10 @@ impl IpcPluginConnection {
         // re-acquires and a saturated connection queues rather than fanning
         // out unboundedly. The acquire itself is bounded by the request
         // timeout: a saturated connection must not stall the caller (e.g. a
-        // 5 s `Ping` liveness probe) indefinitely waiting for a slot, since
-        // the health probe loop pings every plugin sequentially in one task
-        // and one saturated plugin would otherwise stall probing for all of
-        // them. Released on every exit path via drop.
+        // 5 s `Ping` liveness probe) indefinitely waiting for a slot. Each
+        // plugin is supervised by its own task (#432), so a stalled probe delays
+        // only that plugin's supervisor rather than every plugin's. Released
+        // on every exit path via drop.
         let permit = tokio::time::timeout(timeout, self.inflight.clone().acquire_owned())
             .await
             .map_err(|_| {
