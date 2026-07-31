@@ -26,6 +26,7 @@ Inside the `ene-cli` interactive prompt, type `/` to access commands:
 | Command | Description |
 |---|---|
 | `/help` | Display list of available REPL slash commands |
+| `/prompt` | Preview the exact message list sent to the AI (rendered directly from `build_messages`) |
 | `/memory list` | Display active session recalled memory facts |
 | `/memory clear` | Purge or reset active session memories |
 | `/tool list` | List registered IPC tool plugins & active MCP servers |
