@@ -855,35 +855,21 @@ impl PluginHostManager {
             }
         }
 
-        // Spawn one independent supervisor task per plugin (disabled when the
-        // interval is 0). Each task pings and restarts only its own plugin, so
-        // one plugin's restart backoff (up to 30 s) or a slow reconnect can
-        // never stall the monitoring of any other plugin (#432). The task
-        // count is proportional to the plugin count — a handful in practice.
+        // Spawn one independent supervisor task per plugin via the
+        // [`spawn_supervisors`] helper (tested directly for its
+        // one-handle-per-plugin wiring). Each task pings and restarts only its
+        // own plugin, so one plugin's restart backoff (up to 30 s) or a slow
+        // reconnect can never stall the monitoring of any other plugin (#432).
+        // The task count is proportional to the plugin count — a handful in
+        // practice.
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
-        let health_tasks = if supervised.is_empty() || health_interval.is_zero() {
-            if health_interval.is_zero() && !supervised.is_empty() {
-                tracing::info!(
-                    component = "PluginHostManager",
-                    "Health probes disabled by configuration (health_interval_ms = 0)"
-                );
-            }
-            Vec::new()
-        } else {
-            supervised
-                .iter()
-                .zip(connections.iter())
-                .map(|(plugin, conn)| {
-                    tokio::spawn(supervise_plugin(
-                        health_interval,
-                        Arc::clone(plugin),
-                        Arc::clone(conn),
-                        health_tx.clone(),
-                        backoff_before_restart,
-                    ))
-                })
-                .collect()
-        };
+        let health_tasks = spawn_supervisors(
+            health_interval,
+            &supervised,
+            &connections,
+            &health_tx,
+            backoff_before_restart,
+        );
 
         Ok(Self {
             supervised,
@@ -1196,6 +1182,55 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.is_file())
 }
 
+/// Spawns one independent [`supervise_plugin`] task per supervised plugin and
+/// returns their join handles.
+///
+/// Exactly one handle is returned per `(supervised, connection)` pair — the
+/// wiring that keeps one plugin's restart backoff from stalling any other's
+/// monitoring (#432). When `interval` is zero or there are no supervised
+/// plugins, health probing is skipped entirely and an empty list is returned.
+///
+/// `backoff_sleep` is passed through to [`supervise_plugin`]; production
+/// passes [`backoff_before_restart`], tests inject a controllable stand-in.
+/// It must be `Copy` because it is handed to every spawned task, and
+/// `Send + 'static` (along with a `Send` future) because the tasks run on the
+/// Tokio runtime. It is generic over the returned future so no boxing (and no
+/// extra dependency) is needed.
+fn spawn_supervisors<F>(
+    interval: Duration,
+    supervised: &[Arc<Mutex<SupervisedPlugin>>],
+    connections: &[Arc<IpcPluginConnection>],
+    health_tx: &mpsc::UnboundedSender<PluginHealthEvent>,
+    backoff_sleep: impl Fn(usize) -> F + Copy + Send + 'static,
+) -> Vec<tokio::task::JoinHandle<()>>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    if supervised.is_empty() || interval.is_zero() {
+        if interval.is_zero() && !supervised.is_empty() {
+            tracing::info!(
+                component = "PluginHostManager",
+                "Health probes disabled by configuration (health_interval_ms = 0)"
+            );
+        }
+        return Vec::new();
+    }
+
+    supervised
+        .iter()
+        .zip(connections.iter())
+        .map(|(plugin, conn)| {
+            tokio::spawn(supervise_plugin(
+                interval,
+                Arc::clone(plugin),
+                Arc::clone(conn),
+                health_tx.clone(),
+                backoff_sleep,
+            ))
+        })
+        .collect()
+}
+
 /// Per-plugin health supervisor: periodically pings a single plugin and
 /// restarts it when dead or unresponsive, emitting health events.
 ///
@@ -1204,16 +1239,14 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
 /// 30 s) and any slow reconnect delay only *its own* next probe — they can
 /// never stall the monitoring of any other plugin, which the old single
 /// sequential loop did. The task runs until aborted by
-/// [`PluginHostManager::shutdown`] or drop.
+/// [`PluginHostManager::shutdown`] or drop — except for permanently disabled
+/// plugins (restart budget exhausted or checksum mismatch), for which the
+/// task exits as soon as it observes `disabled`, releasing its refs.
 ///
 /// `backoff_sleep` performs the restart backoff for a given restart count.
 /// Production passes [`backoff_before_restart`]; tests inject a controllable
 /// stand-in so the backoff can be observed without real delays. It is generic
 /// over the returned future so no boxing (and no extra dependency) is needed.
-#[expect(
-    clippy::infinite_loop,
-    reason = "background liveness probe runs for the lifetime of the plugin host"
-)]
 async fn supervise_plugin<F>(
     interval: Duration,
     plugin: Arc<Mutex<SupervisedPlugin>>,
@@ -1230,10 +1263,11 @@ async fn supervise_plugin<F>(
         ticker.tick().await;
 
         // Permanently disabled plugins (restart budget exhausted or a
-        // restart-time checksum mismatch) are left stopped; skip them so the
-        // supervisor does not keep restarting or re-emitting `Disabled`.
+        // restart-time checksum mismatch) are left stopped. The supervisor
+        // exits here rather than waking each interval only to `continue`,
+        // releasing its `Arc` refs so the plugin and connection can be dropped.
         if plugin.lock().await.disabled {
-            continue;
+            break;
         }
 
         // Ping without any connection lock: `ping` takes `&self` and the
@@ -1858,17 +1892,20 @@ mod tests {
     /// reconnects to. When `stay_alive` is true the child sleeps (so
     /// `is_alive()` reports the plugin as running); otherwise it exits
     /// immediately (so the supervisor sees a dead process and is driven into
-    /// its restart path). Used by the supervisor-isolation test, where the
+    /// its restart path). Used by the supervisor-isolation tests, where the
     /// "plugin" is a mock IPC server rather than a real long-lived process.
+    ///
+    /// The dummy binary is written under `dir` (a per-test
+    /// [`tempfile::tempdir`] that also holds the socket paths), so dropping
+    /// the `TempDir` removes everything the test created — no pid-suffixed
+    /// leftovers accumulate in the system temp dir.
     #[cfg(unix)]
     fn supervised_plugin_on_socket(
+        dir: &std::path::Path,
         name: &str,
         socket: PathBuf,
         stay_alive: bool,
     ) -> SupervisedPlugin {
-        let dir =
-            std::env::temp_dir().join(format!("ene-supervisor-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
         let binary_path = dir.join(format!("ene-plugin-{name}"));
         write_dummy_script(&binary_path);
         let real = compute_binary_checksum(name, &binary_path).unwrap();
@@ -1897,6 +1934,115 @@ mod tests {
         }
     }
 
+    /// [`spawn_supervisors`] (the wiring used by `PluginHostManager::start`)
+    /// must return exactly one supervisor handle per (supervised, connection)
+    /// pair (#432). The old single sequential loop, or a spawn-wiring bug that
+    /// starts fewer tasks than plugins, would make this assertion fail; a
+    /// `supervise_plugin`-level test cannot catch that because it always
+    /// drives the function with already-paired arguments.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn spawn_supervisors_returns_one_handle_per_plugin() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // No supervised plugins or a zero interval → no supervisor tasks at
+        // all.
+        let (tx, _rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
+        assert!(spawn_supervisors(Duration::ZERO, &[], &[], &tx, |_count| async {}).is_empty());
+        assert!(
+            spawn_supervisors(Duration::from_millis(30), &[], &[], &tx, |_count| async {},)
+                .is_empty()
+        );
+
+        // Two live (supervised, connection) pairs must yield two handles.
+        let temp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let pings_a = Arc::new(AtomicUsize::new(0));
+        let pings_b = Arc::new(AtomicUsize::new(0));
+        let sock_a = temp.path().join("wiring-a.sock");
+        let sock_b = temp.path().join("wiring-b.sock");
+        let server_a = tokio::spawn(run_healthy_mock_server(
+            sock_a.clone(),
+            Arc::clone(&pings_a),
+        ));
+        let server_b = tokio::spawn(run_healthy_mock_server(
+            sock_b.clone(),
+            Arc::clone(&pings_b),
+        ));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let supervised = vec![
+            Arc::new(Mutex::new(supervised_plugin_on_socket(
+                temp.path(),
+                "wiring-a",
+                sock_a.clone(),
+                true,
+            ))),
+            Arc::new(Mutex::new(supervised_plugin_on_socket(
+                temp.path(),
+                "wiring-b",
+                sock_b.clone(),
+                true,
+            ))),
+        ];
+        let connections = vec![
+            Arc::new(
+                IpcPluginConnection::connect(
+                    &sock_a,
+                    ene_plugin_proto::SandboxConfigData::default(),
+                    None,
+                    Duration::from_secs(5),
+                    8,
+                )
+                .await
+                .expect("wiring-a handshake"),
+            ),
+            Arc::new(
+                IpcPluginConnection::connect(
+                    &sock_b,
+                    ene_plugin_proto::SandboxConfigData::default(),
+                    None,
+                    Duration::from_secs(5),
+                    8,
+                )
+                .await
+                .expect("wiring-b handshake"),
+            ),
+        ];
+
+        let handles = spawn_supervisors(
+            Duration::from_millis(30),
+            &supervised,
+            &connections,
+            &tx,
+            |_count| async {},
+        );
+        assert_eq!(
+            handles.len(),
+            2,
+            "start() must spawn one supervisor task per (supervised, connection) pair"
+        );
+
+        // Each spawned supervisor really monitors its own plugin: both mock
+        // peers get probed on their own schedule.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if pings_a.load(Ordering::SeqCst) >= 1 && pings_b.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "spawned supervisors did not ping their own plugins in time"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        for handle in handles {
+            handle.abort();
+        }
+        server_a.abort();
+        server_b.abort();
+    }
+
     /// One plugin's restart backoff must not stop another plugin from being
     /// monitored (#432).
     ///
@@ -1910,12 +2056,15 @@ mod tests {
     /// count would not advance.
     #[tokio::test]
     #[cfg(unix)]
-    async fn one_plugins_backoff_does_not_block_another_supervisor() {
+    async fn one_plugin_backoff_does_not_block_another_supervisor() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let pid = std::process::id();
-        let healthy_sock = PathBuf::from(format!("/tmp/ene-sup-healthy-{pid}.sock"));
-        let dead_sock = PathBuf::from(format!("/tmp/ene-sup-dead-{pid}.sock"));
+        // One temp dir per test: the socket paths and the dummy plugin
+        // binaries all live under it, and dropping the `TempDir` removes them
+        // (no pid-suffixed leftovers accumulate in the system temp dir).
+        let temp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let healthy_sock = temp.path().join("healthy.sock");
+        let dead_sock = temp.path().join("dead.sock");
 
         let healthy_pings = Arc::new(AtomicUsize::new(0));
         let healthy_server = tokio::spawn(run_healthy_mock_server(
@@ -1926,11 +2075,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let healthy = Arc::new(Mutex::new(supervised_plugin_on_socket(
+            temp.path(),
             "healthy",
             healthy_sock.clone(),
             true,
         )));
         let dead = Arc::new(Mutex::new(supervised_plugin_on_socket(
+            temp.path(),
             "dead",
             dead_sock.clone(),
             false,
@@ -2055,7 +2206,7 @@ mod tests {
         dead_task.abort();
         healthy_server.abort();
         dead_server.abort();
-        ene_plugin_proto::cleanup_path(&healthy_sock);
-        ene_plugin_proto::cleanup_path(&dead_sock);
+        // The socket files and dummy binaries live under `temp` and are
+        // removed when the `TempDir` drops at the end of the test.
     }
 }
