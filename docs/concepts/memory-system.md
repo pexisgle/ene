@@ -37,7 +37,6 @@ When a memory is recalled, its `access_count` and `last_accessed_at` are bumped 
 
 The bump's effect on ranking is also bounded: the access boost fades with the age of the most recent access (a half-life decay), so accesses from long ago stop counting and a memory cannot lock in a permanent ranking advantage.
 
-<<<<<<< HEAD
 ### Contradiction Resolution (Memory Arbiter)
 Before a candidate memory is persisted, the memory arbiter checks whether it contradicts an existing memory of the same kind (`Preference`, `UserProfile`, `Semantic`, `Relationship`). Two memories are treated as the same subject when the cosine similarity of their **title embeddings** reaches `mind.memory.contradiction_title_similarity_threshold` (default `0.82`) (#351), so synonymous titles ("職業" vs "仕事") collapse into one subject instead of accumulating contradictory duplicates. When no embedding provider is configured, the arbiter falls back to exact normalized-title matching.
 
