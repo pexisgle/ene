@@ -2087,3 +2087,132 @@ async fn upsert_memory_embedding_does_not_create_duplicates() {
         "stored embedding must be the second (updated) value"
     );
 }
+
+// ── #426: audit_log session_id and session export tool history ──
+
+/// Builds a [`crate::NewAuditEntry`] for test use.
+fn test_audit_entry(session_id: &str, tool_name: &str) -> crate::NewAuditEntry {
+    crate::NewAuditEntry {
+        turn_id: format!("turn-{tool_name}"),
+        session_id: Some(session_id.to_string()),
+        tool_name: tool_name.to_string(),
+        action: "write".to_string(),
+        target: "/tmp/x".to_string(),
+        decision: crate::AuditDecision::AllowOnce,
+        success: true,
+        arguments: r#"{"path":"/tmp/x"}"#.to_string(),
+    }
+}
+
+/// Audit rows written within a session carry that session's id; rows
+/// with an empty session id (out-of-band diagnostics) persist as `NULL`.
+#[tokio::test]
+async fn audit_rows_carry_session_id() {
+    let store = setup_store().await;
+
+    store
+        .insert_audit_entry(&test_audit_entry("sess-a", "fs.write_file"))
+        .await
+        .expect("insert sess-a");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band");
+
+    let by_session = store
+        .list_audit_entries_by_session("sess-a")
+        .await
+        .expect("list by session");
+    assert_eq!(by_session.len(), 1);
+    let entry = by_session.first().expect("sess-a entry");
+    assert_eq!(entry.session_id.as_deref(), Some("sess-a"));
+    assert_eq!(entry.tool_name, "fs.write_file");
+
+    // The out-of-band row has a NULL session_id and is never attributed
+    // to any session.
+    let all = store.list_audit_entries(10).await.expect("list all");
+    assert_eq!(all.len(), 2);
+    let diag = all
+        .iter()
+        .find(|e| e.tool_name == "diag.ping")
+        .expect("diag entry");
+    assert_eq!(diag.session_id, None);
+    assert!(
+        store
+            .list_audit_entries_by_session("")
+            .await
+            .expect("list empty session")
+            .is_empty(),
+        "NULL-session rows must not match an empty session filter"
+    );
+}
+
+/// `build_export` returns the session's own tool history and never
+/// another session's (or NULL-session) rows.
+#[tokio::test]
+async fn session_export_includes_only_own_tool_history() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("sess-a", "card"))
+        .await
+        .expect("upsert sess-a");
+    store
+        .upsert_session(&new_session_meta("sess-b", "card"))
+        .await
+        .expect("upsert sess-b");
+
+    store
+        .insert_audit_entry(&test_audit_entry("sess-a", "fs.write_file"))
+        .await
+        .expect("insert sess-a tool");
+    store
+        .insert_audit_entry(&test_audit_entry("sess-b", "fs.read_file"))
+        .await
+        .expect("insert sess-b tool");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band tool");
+
+    let export = store.build_export("sess-a").await.expect("export sess-a");
+    assert_eq!(export.tool_logs.len(), 1);
+    let log = export.tool_logs.first().expect("tool log");
+    assert_eq!(log.tool_name, "fs.write_file");
+    assert_eq!(log.decision, "allow_once");
+    assert!(log.success);
+
+    // The other session's export sees only its own history.
+    let export_b = store.build_export("sess-b").await.expect("export sess-b");
+    assert_eq!(export_b.tool_logs.len(), 1);
+    assert_eq!(
+        export_b.tool_logs.first().expect("tool log").tool_name,
+        "fs.read_file"
+    );
+}
+
+/// A session with no audit rows still exports cleanly with an empty
+/// `tool_logs` vector (existing NULL-session rows are not leaked in).
+#[tokio::test]
+async fn session_export_without_audit_rows_is_empty() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("lonely", "card"))
+        .await
+        .expect("upsert lonely");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band tool");
+
+    let export = store.build_export("lonely").await.expect("export");
+    assert!(export.tool_logs.is_empty());
+}
