@@ -117,7 +117,7 @@ pub async fn execute_hybrid_recall(
 async fn apply_reflection_to_scored(
     config: &MindConfig,
     input: &ExecuteRecallInput<'_>,
-    scored: &mut Vec<ene_core::ScoredMemory>,
+    scored: &mut [ene_core::ScoredMemory],
 ) {
     let reflection = &config.memory.reflection;
     if !reflection.enabled || scored.is_empty() {
