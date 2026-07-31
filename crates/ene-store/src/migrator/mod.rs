@@ -1,7 +1,9 @@
 #![expect(missing_docs, reason = "sea-orm migration modules are schema-internal")]
 
+mod conversation_logs_search_index;
 mod embeddings_cleanup;
 
+use conversation_logs_search_index::ConversationLogsSearchIndexMigration;
 use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
 use sea_orm_migration::prelude::*;
 
@@ -16,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(SourceRefIndexMigration),
             Box::new(EmbeddingsCleanupIndexMigration),
             Box::new(AuditLogSessionIdMigration),
+            Box::new(ConversationLogsSearchIndexMigration),
         ]
     }
 }
