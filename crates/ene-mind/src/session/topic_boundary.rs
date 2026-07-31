@@ -52,7 +52,7 @@ pub struct TopicBoundaryTracker {
 /// once it reaches the configured threshold. `reason` carries a
 /// [`SplitReason::Composite`] when a boundary is detected so downstream stages
 /// (compression #368, session split #369) can consume a ready-made reason.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TopicBoundarySignal {
     /// Composite boundary score, clamped to `0.0..=1.0`.
     pub score: f32,
