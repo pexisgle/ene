@@ -28,6 +28,11 @@ use tokio::sync::Mutex;
 /// Counter for generating unique socket paths across parallel tests.
 static SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
 
+/// Handshake timeout used by the integration tests. Generous enough that a
+/// well-behaved mock server always responds in time, yet bounded so a
+/// non-responding peer fails the test promptly instead of hanging CI.
+const TEST_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Returns a unique socket path for a test.
 fn test_socket_path(name: &str) -> PathBuf {
     let id = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -318,6 +323,7 @@ async fn spawn_and_connect(name: &str) -> (IpcPluginConnection, Arc<Mutex<MockSt
         &socket_path,
         SandboxConfigData::default(),
         Some(serde_json::json!({"test": true})),
+        TEST_HANDSHAKE_TIMEOUT,
     )
     .await
     .expect("handshake should succeed");
@@ -344,8 +350,13 @@ async fn try_connect_with_plugin_version(
     // Give the server a moment to bind.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let result =
-        IpcPluginConnection::connect(&socket_path, SandboxConfigData::default(), None).await;
+    let result = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+    )
+    .await;
 
     (result, socket_path)
 }
@@ -370,6 +381,65 @@ async fn handshake_succeeds_and_returns_capabilities() {
     // the v4 `CancelStream` feature gate agree.
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_PROTOCOL_VERSION);
     assert!(conn.supports_cancel_stream());
+
+    cleanup_path(&socket_path);
+}
+
+// ── Test: Handshake timeout (issue #430) ─────────────────────────────────
+
+#[tokio::test]
+async fn handshake_times_out_when_plugin_never_responds() {
+    // A plugin that binds its listener and accepts the socket but never
+    // replies to the `Handshake` request must not hang `connect()` forever.
+    // The host applies a bounded timeout and surfaces a `HandshakeFailed`
+    // error instead, so one wedged plugin cannot block startup of the rest.
+    let socket_path = test_socket_path("handshake-timeout");
+    cleanup_path(&socket_path);
+    let mut listener = IpcListener::bind(&socket_path).expect("failed to bind silent server");
+
+    // Accept the connection but never write a response, simulating a plugin
+    // stuck in heavy pre-handshake initialization.
+    tokio::spawn(async move {
+        let Ok(_stream) = listener.accept().await else {
+            return;
+        };
+        // Hold the stream open without responding until the test drops it.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // A short timeout keeps the test fast; the important property is that
+    // `connect` returns (with an error) rather than blocking indefinitely.
+    let short_timeout = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    let result = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        short_timeout,
+    )
+    .await;
+    let elapsed = started.elapsed();
+
+    let Err(err) = result else {
+        panic!("a silent plugin must fail the handshake, but connect() succeeded");
+    };
+    assert!(
+        matches!(err, PluginHostError::HandshakeFailed { .. }),
+        "expected HandshakeFailed, got {err:?}"
+    );
+    // The error message must make the timeout nature explicit.
+    assert!(
+        err.to_string().contains("no HandshakeAck within"),
+        "diagnostic should mention the handshake timeout, got: {err}"
+    );
+    // The failure must be bounded by (roughly) the configured timeout, not
+    // the 30 s the silent server holds the socket open.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "connect returned too slowly ({elapsed:?}); the timeout is not bounding the wait"
+    );
 
     cleanup_path(&socket_path);
 }
@@ -726,9 +796,14 @@ async fn transparent_reconnection_after_transport_failure() {
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let mut conn = IpcPluginConnection::connect(&socket_path, SandboxConfigData::default(), None)
-        .await
-        .expect("initial handshake should succeed");
+    let mut conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+    )
+    .await
+    .expect("initial handshake should succeed");
 
     let result = conn
         .call_tool("mock.echo", "phase1", None)
