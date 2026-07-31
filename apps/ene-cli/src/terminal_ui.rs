@@ -26,7 +26,9 @@ pub fn request_read_cancel() {
     READ_CANCEL.store(true, Ordering::Relaxed);
 }
 
-fn clear_read_cancel() {
+/// Clear a pending read-cancel request (used by the REPL once a
+/// cancelled line editor has fully unwound, before the next read).
+pub(crate) fn clear_read_cancel() {
     READ_CANCEL.store(false, Ordering::Relaxed);
 }
 

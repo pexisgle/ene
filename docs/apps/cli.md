@@ -33,3 +33,9 @@ Inside the `ene-cli` interactive prompt, type `/` to access commands:
 | `/session list` | List active & past sessions in SQLite |
 | `/session split` | Force an immediate session boundary split |
 | `/quit` or `/exit` | Safely shutdown `ene-runtime` and exit |
+
+---
+
+## Proactive (spontaneous) speech
+
+When `mind.proactive.enabled = true`, Ene can speak spontaneously even while you are not typing. The REPL keeps a continuous subscription to the chat event bus, so proactive utterances are rendered above the prompt while the REPL is idle — the same behavior as the desktop app. If a proactive turn starts while you are in the middle of typing, the in-progress line is cancelled (its text is discarded) and the prompt resumes once the utterance finishes.
