@@ -142,6 +142,11 @@ pub enum DbResponse {
 }
 
 /// Error codes returned by the DB IPC server.
+///
+/// Deserialization is forward-compatible: an unknown code (e.g. emitted by a
+/// newer host) maps to [`DbErrorCode::Unknown`] instead of failing, so older
+/// plugins can still surface a diagnostic rather than dropping the error
+/// response wholesale.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DbErrorCode {
     /// The tool does not have permission to access the requested resource.
@@ -154,8 +159,16 @@ pub enum DbErrorCode {
     TypeMismatch,
     /// The filter expression is invalid.
     InvalidFilter,
+    /// The declared schema conflicts with the one already stored for this
+    /// prefix in a way that cannot be applied automatically (e.g. a column
+    /// type change). The plugin must reconcile the difference explicitly.
+    SchemaConflict,
     /// An internal server error occurred.
     Internal,
+    /// An error code this build does not know about (emitted by a newer
+    /// host). Keeps deserialization of error responses forward-compatible.
+    #[serde(other)]
+    Unknown,
 }
 
 impl std::fmt::Display for DbErrorCode {
@@ -166,6 +179,8 @@ impl std::fmt::Display for DbErrorCode {
             Self::UnknownColumn => write!(f, "UNKNOWN_COLUMN"),
             Self::TypeMismatch => write!(f, "TYPE_MISMATCH"),
             Self::InvalidFilter => write!(f, "INVALID_FILTER"),
+            Self::SchemaConflict => write!(f, "SCHEMA_CONFLICT"),
+            Self::Unknown => write!(f, "UNKNOWN"),
             Self::Internal => write!(f, "INTERNAL"),
         }
     }

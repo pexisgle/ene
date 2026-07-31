@@ -76,8 +76,6 @@ struct SupervisedPlugin {
     /// always active — the binary pinned at startup must still be on disk to
     /// restart. There is no "no checksum" state, so no fail-open path (#429).
     pinned_checksum: PinnedChecksum,
-    sandbox: ene_plugin_proto::SandboxConfigData,
-    plugin_config: Option<serde_json::Value>,
     /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
     restart_count: usize,
@@ -320,7 +318,7 @@ fn build_plugin_command(
 struct PluginToolRegistry {
     /// Name of the plugin that owns these tools (used for health events).
     plugin_name: String,
-    conn: Arc<Mutex<IpcPluginConnection>>,
+    conn: Arc<IpcPluginConnection>,
     /// Handle to the supervised process, used to reset the restart budget
     /// after a successful call (restoring the old `ToolHostManager` behavior).
     supervised: Arc<Mutex<SupervisedPlugin>>,
@@ -359,10 +357,7 @@ impl ToolRegistry for PluginToolRegistry {
             }
         }
 
-        let result = {
-            let mut conn = self.conn.lock().await;
-            conn.call_tool(name, arguments, context.cloned()).await
-        };
+        let result = self.conn.call_tool(name, arguments, context.cloned()).await;
 
         if result.is_ok() {
             {
@@ -408,11 +403,10 @@ impl ToolRegistry for PluginToolRegistry {
         arguments: &str,
         context: Option<&ene_plugin_proto::CallContext>,
     ) -> Result<DeferredCallResult, PluginHostError> {
-        let outcome = {
-            let mut conn = self.conn.lock().await;
-            conn.call_tool_deferred(name, arguments, context.cloned())
-                .await?
-        };
+        let outcome = self
+            .conn
+            .call_tool_deferred(name, arguments, context.cloned())
+            .await?;
         Ok(match outcome {
             ene_plugin_proto::DeferredOutcome::Sync(result) => DeferredCallResult::Sync(result),
             ene_plugin_proto::DeferredOutcome::Deferred { task_id } => {
@@ -426,8 +420,7 @@ impl ToolRegistry for PluginToolRegistry {
         _tool_name: &str,
         task_id: &str,
     ) -> ene_plugin_proto::DeferredStatus {
-        let mut conn = self.conn.lock().await;
-        match conn.poll_deferred(task_id).await {
+        match self.conn.poll_deferred(task_id).await {
             Ok(status) => status,
             Err(e) => {
                 tracing::warn!(
@@ -443,8 +436,7 @@ impl ToolRegistry for PluginToolRegistry {
     }
 
     async fn cancel_deferred(&self, _tool_name: &str, task_id: &str) {
-        let mut conn = self.conn.lock().await;
-        if let Err(e) = conn.cancel_deferred(task_id).await {
+        if let Err(e) = self.conn.cancel_deferred(task_id).await {
             tracing::warn!(
                 component = "PluginHostManager",
                 plugin = %self.plugin_name,
@@ -456,8 +448,7 @@ impl ToolRegistry for PluginToolRegistry {
     }
 
     async fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
-        let mut conn = self.conn.lock().await;
-        if let Err(e) = conn.set_call_context(ctx).await {
+        if let Err(e) = self.conn.set_call_context(ctx).await {
             tracing::warn!(
                 component = "PluginHostManager",
                 plugin = %self.plugin_name,
@@ -468,8 +459,7 @@ impl ToolRegistry for PluginToolRegistry {
     }
 
     async fn approve_permission(&self, request_id: &str) {
-        let mut conn = self.conn.lock().await;
-        if let Err(e) = conn.approve_permission(request_id).await {
+        if let Err(e) = self.conn.approve_permission(request_id).await {
             tracing::warn!(
                 component = "PluginHostManager",
                 plugin = %self.plugin_name,
@@ -481,8 +471,7 @@ impl ToolRegistry for PluginToolRegistry {
     }
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
-        let mut conn = self.conn.lock().await;
-        if let Err(e) = conn.allow_pattern(action, target_pattern).await {
+        if let Err(e) = self.conn.allow_pattern(action, target_pattern).await {
             tracing::warn!(
                 component = "PluginHostManager",
                 plugin = %self.plugin_name,
@@ -494,8 +483,7 @@ impl ToolRegistry for PluginToolRegistry {
     }
 
     async fn revoke_pattern(&self, action: &str, target_pattern: &str) {
-        let mut conn = self.conn.lock().await;
-        if let Err(e) = conn.revoke_pattern(action, target_pattern).await {
+        if let Err(e) = self.conn.revoke_pattern(action, target_pattern).await {
             tracing::warn!(
                 component = "PluginHostManager",
                 plugin = %self.plugin_name,
@@ -529,7 +517,7 @@ pub type LlmFactoriesByPlugin = HashMap<String, Vec<(String, LlmFactoryHandle)>>
 /// and includes their tools in [`tool_registries`](Self::tool_registries).
 pub struct PluginHostManager {
     supervised: Vec<Arc<Mutex<SupervisedPlugin>>>,
-    connections: Vec<Arc<Mutex<IpcPluginConnection>>>,
+    connections: Vec<Arc<IpcPluginConnection>>,
     tool_registries: Vec<Arc<dyn ToolRegistry>>,
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     llm_factory_plugins: HashMap<String, String>,
@@ -601,7 +589,7 @@ impl PluginHostManager {
         let (health_tx, health_rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
 
         let mut supervised: Vec<Arc<Mutex<SupervisedPlugin>>> = Vec::new();
-        let mut connections: Vec<Arc<Mutex<IpcPluginConnection>>> = Vec::new();
+        let mut connections: Vec<Arc<IpcPluginConnection>> = Vec::new();
         let mut tool_registries: Vec<Arc<dyn ToolRegistry>> = Vec::new();
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
@@ -660,6 +648,7 @@ impl PluginHostManager {
                 entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
                 Duration::from_millis(plugin_config.handshake_timeout_ms),
+                plugin_config.max_concurrent,
             )
             .await
             {
@@ -668,7 +657,7 @@ impl PluginHostManager {
                         checksums_to_record.insert(name.clone(), checksum);
                     }
 
-                    let caps = conn.lock().await.capabilities().clone();
+                    let caps = conn.capabilities();
 
                     // Route tool capabilities — fetch actual specs via ListTools.
                     if caps.tools > 0 {
@@ -677,7 +666,7 @@ impl PluginHostManager {
                         // register empty tools). The plugin process itself is
                         // still supervised so any LLM providers it offers keep
                         // working.
-                        let tools = match conn.lock().await.list_tools().await {
+                        let tools = match conn.list_tools().await {
                             Ok(tools) => Some(tools),
                             Err(e) => {
                                 tracing::warn!(
@@ -686,7 +675,7 @@ impl PluginHostManager {
                                     error = %e,
                                     "Failed to list tools for plugin; retrying once"
                                 );
-                                match conn.lock().await.list_tools().await {
+                                match conn.list_tools().await {
                                     Ok(tools) => Some(tools),
                                     Err(e) => {
                                         tracing::error!(
@@ -860,7 +849,6 @@ impl PluginHostManager {
 
         // Spawn the periodic health probe loop (disabled when the interval is 0).
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
-        let handshake_timeout = Duration::from_millis(plugin_config.handshake_timeout_ms);
         let health_task = if supervised.is_empty() || health_interval.is_zero() {
             if health_interval.is_zero() && !supervised.is_empty() {
                 tracing::info!(
@@ -872,11 +860,10 @@ impl PluginHostManager {
         } else {
             let probes: Vec<Arc<Mutex<SupervisedPlugin>>> =
                 supervised.iter().map(Arc::clone).collect();
-            let conns: Vec<Arc<Mutex<IpcPluginConnection>>> =
-                connections.iter().map(Arc::clone).collect();
+            let conns: Vec<Arc<IpcPluginConnection>> = connections.iter().map(Arc::clone).collect();
             let tx = health_tx.clone();
             Some(tokio::spawn(async move {
-                health_probe_loop(health_interval, handshake_timeout, probes, conns, tx).await;
+                health_probe_loop(health_interval, probes, conns, tx).await;
             }))
         };
 
@@ -944,8 +931,7 @@ impl PluginHostManager {
             task.abort();
         }
         for conn in &self.connections {
-            let mut c = conn.lock().await;
-            c.shutdown().await;
+            conn.shutdown().await;
         }
         for plugin in &self.supervised {
             let mut p = plugin.lock().await;
@@ -962,10 +948,11 @@ impl PluginHostManager {
         env_passthrough: Vec<String>,
         db_token: Option<String>,
         handshake_timeout: Duration,
+        max_concurrent: usize,
     ) -> Result<
         (
             Arc<Mutex<SupervisedPlugin>>,
-            Arc<Mutex<IpcPluginConnection>>,
+            Arc<IpcPluginConnection>,
             Option<String>,
         ),
         PluginHostError,
@@ -1018,6 +1005,7 @@ impl PluginHostManager {
             sandbox.clone(),
             plugin_config.clone(),
             handshake_timeout,
+            max_concurrent,
         )
         .await
         {
@@ -1056,18 +1044,12 @@ impl PluginHostManager {
             socket_path: socket_path.clone(),
             binary_path: binary_path.clone(),
             pinned_checksum,
-            sandbox,
-            plugin_config,
             env_passthrough,
             restart_count: 0,
             disabled: false,
         };
 
-        Ok((
-            Arc::new(Mutex::new(plugin)),
-            Arc::new(Mutex::new(conn)),
-            tofu_checksum,
-        ))
+        Ok((Arc::new(Mutex::new(plugin)), Arc::new(conn), tofu_checksum))
     }
 }
 
@@ -1204,9 +1186,8 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
 )]
 async fn health_probe_loop(
     interval: Duration,
-    handshake_timeout: Duration,
     plugins: Vec<Arc<Mutex<SupervisedPlugin>>>,
-    connections: Vec<Arc<Mutex<IpcPluginConnection>>>,
+    connections: Vec<Arc<IpcPluginConnection>>,
     health_tx: mpsc::UnboundedSender<PluginHealthEvent>,
 ) {
     let mut ticker = tokio::time::interval(interval);
@@ -1222,10 +1203,10 @@ async fn health_probe_loop(
                 continue;
             }
 
-            let ping_ok = {
-                let mut c = conn.lock().await;
-                c.ping().await.is_ok()
-            };
+            // Ping without any connection lock: `ping` takes `&self` and the
+            // writer lock is held only for the frame write, so a probe is never
+            // queued behind an in-flight tool call (#431).
+            let ping_ok = conn.ping().await.is_ok();
             let alive = {
                 let mut p = plugin.lock().await;
                 p.is_alive()
@@ -1307,23 +1288,14 @@ async fn health_probe_loop(
                 }
                 continue;
             }
-
-            let socket_path = p.socket_path.clone();
-            let sandbox = p.sandbox.clone();
-            let plugin_config = p.plugin_config.clone();
             drop(p);
 
-            match IpcPluginConnection::connect(
-                &socket_path,
-                sandbox,
-                plugin_config,
-                handshake_timeout,
-            )
-            .await
-            {
-                Ok(new_conn) => {
-                    let mut c = conn.lock().await;
-                    *c = new_conn;
+            // Reconnect the shared connection in place: `reconnect` takes
+            // `&self`, re-performs the handshake on the stored socket path, and
+            // swaps the writer/reader under their own locks, so every caller
+            // sharing this `Arc` sees the fresh transport (#431).
+            match conn.reconnect().await {
+                Ok(()) => {
                     drop(health_tx.send(PluginHealthEvent::Restarted {
                         plugin: name.clone(),
                     }));
@@ -1575,8 +1547,6 @@ mod tests {
             socket_path,
             binary_path,
             pinned_checksum,
-            sandbox: ene_plugin_proto::SandboxConfigData::default(),
-            plugin_config: None,
             env_passthrough: Vec::new(),
             restart_count: 0,
             disabled: false,

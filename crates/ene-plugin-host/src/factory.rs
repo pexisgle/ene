@@ -20,7 +20,6 @@ use ene_ai::error::LlmProviderError;
 use ene_ai::traits::{LlmProvider, LlmProviderFactory};
 use ene_ai::{AiProviderDef, TaskRef};
 use ene_plugin_proto::ConcurrencyHint;
-use tokio::sync::Mutex;
 
 use crate::config::PluginConfig;
 use crate::ipc_plugin::IpcPluginConnection;
@@ -30,7 +29,7 @@ use crate::ipc_provider::{ConcurrencyLimiter, IpcLlmProvider};
 /// provider kind served by a plugin binary.
 pub struct IpcLlmProviderFactory {
     kind: String,
-    conn: Arc<Mutex<IpcPluginConnection>>,
+    conn: Arc<IpcPluginConnection>,
     /// Name of the plugin binary serving this provider kind. Used for the
     /// `plugins.list.<name>` trust lookup and diagnostics.
     plugin_name: String,
@@ -59,7 +58,7 @@ impl IpcLlmProviderFactory {
     /// shared by every provider instance this factory subsequently creates.
     pub fn new(
         kind: String,
-        conn: Arc<Mutex<IpcPluginConnection>>,
+        conn: Arc<IpcPluginConnection>,
         plugin_name: String,
         builtin: bool,
         concurrency: ConcurrencyHint,

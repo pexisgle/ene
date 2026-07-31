@@ -692,9 +692,79 @@ pub fn load_full_config() -> Result<EneConfig, EneConfigError> {
     load_full_config_from(&config_path)
 }
 
+/// Reads the on-disk `settings.json`, runs any pending
+/// [config-version migrations](crate::migration), and returns the JSON text
+/// that the figment pipeline should deserialise.
+///
+/// Migration happens on the *raw JSON* — before deserialisation into
+/// [`EneConfig`] — because a schema change may alter a field's type and make
+/// the old file undecodable by the current struct (see the
+/// [`crate::migration`] module docs). When the file's `version` is behind
+/// [`CURRENT_CONFIG_VERSION`](crate::migration::CURRENT_CONFIG_VERSION) the
+/// migrated document is persisted back to disk via [`atomic_write`] so the new
+/// version survives the load; a file already at the current version is left
+/// untouched.
+///
+/// A missing file yields `"{}"`, letting figment fall back to
+/// `Serialized::defaults`. A file that exists but is not valid JSON is an
+/// error, preserving the fail-loud behaviour introduced in #40.
+fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
+    let raw = match std::fs::read_to_string(config_path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("{}".to_string()),
+        Err(e) => return Err(EneConfigError::IoError(e)),
+    };
+
+    let doc: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        EneConfigError::GenericConfigError(format!(
+            "failed to parse {}: {e}",
+            config_path.display()
+        ))
+    })?;
+
+    let migrated = crate::migration::apply_migrations(doc)?;
+    let migrated_text = serde_json::to_string_pretty(&migrated)?;
+
+    // Persist only when the migration actually changed the document, so an
+    // already-current file is never rewritten (and its mtime/permissions left
+    // alone) on every load.
+    if migrated_text != raw {
+        // A read-only filesystem (e.g. a packaged install) must not prevent
+        // the app from starting: the migration already ran in memory, so the
+        // load can proceed with the migrated document; the write is only a
+        // convenience so the next load starts from the new version.
+        if let Err(e) = atomic_write(config_path, &migrated_text) {
+            tracing::warn!(
+                component = "Config",
+                path = %config_path.display(),
+                error = %e,
+                "could not persist migrated settings.json (read-only filesystem?); continuing with in-memory migration"
+            );
+        } else {
+            tracing::info!(
+                component = "Config",
+                path = %config_path.display(),
+                version = crate::migration::CURRENT_CONFIG_VERSION,
+                "migrated settings.json to current config version"
+            );
+        }
+    }
+
+    Ok(migrated_text)
+}
+
 /// Fully loads `EneConfig` from the specified config file path.
 ///
 /// Returns [`EneConfigError`] on any extract failure. See [`load_config`].
+///
+/// # Config-version migration
+///
+/// Before the figment pipeline runs, [`migrate_settings_file`] reads the raw
+/// file and applies any registered
+/// [config-version migrations](crate::migration), persisting the upgraded
+/// document. The (possibly migrated) JSON is then fed to figment as a string
+/// provider rather than re-reading the file, so the in-memory config and the
+/// on-disk file always agree.
 ///
 /// # Env-var case folding
 ///
@@ -710,8 +780,10 @@ pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigE
         providers::{Env, Format, Json, Serialized},
     };
 
+    let settings_json = migrate_settings_file(config_path)?;
+
     let figment = Figment::from(Serialized::defaults(EneConfig::default()))
-        .merge(Json::file(config_path))
+        .merge(Json::string(&settings_json))
         // `.map(...)` makes env vars case-insensitive against the
         // lowercase config keys, matching the documented
         // `ENE_AI__TASKS__CHAT__MODEL` examples.
@@ -1029,6 +1101,17 @@ mod tests {
         );
     }
 
+    /// Acquires the migration test lock so a load-path test cannot run while a
+    /// [`crate::migration::tests::with_test_version`] test has a partially
+    /// installed override (target version bumped, registry not yet populated).
+    /// Without this, `load_full_config_from` — which now runs migrations — could
+    /// observe that window and fail spuriously under parallel test threads.
+    fn migration_guard() -> impl Drop {
+        crate::migration::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Regression for #40: pre-fix, `load_full_config_from` called
     /// `figment.extract().unwrap_or_else(|e| { ... EneConfig::default() })`
     /// which silently reset the entire config to defaults on any
@@ -1036,6 +1119,7 @@ mod tests {
     /// `EneConfigError::GenericConfigError` instead.
     #[test]
     fn malformed_settings_json_returns_error_not_default() {
+        let _guard = migration_guard();
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         // Not valid JSON for an EneConfig.
@@ -1053,12 +1137,115 @@ mod tests {
     /// stays green after the new `?` propagation.
     #[test]
     fn empty_settings_json_extracts_defaults() {
+        let _guard = migration_guard();
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
         let path = tmp.path().join("settings.json");
         std::fs::write(&path, "{}").expect("write empty settings fixture");
 
         let result = load_full_config_from(&path);
         assert!(result.is_ok(), "empty settings.json should extract ok");
+    }
+
+    /// An old-version `settings.json` is migrated to the current version on
+    /// load, the migrated document is persisted back to disk, and the loaded
+    /// [`EneConfig`] reflects the migrated fields (#330).
+    #[test]
+    fn load_migrates_old_version_and_persists() {
+        crate::migration::tests::with_test_version(2, || {
+            // v1 -> v2: rename `name` to `user_name`.
+            crate::migration::register_migration(1, |doc| {
+                if let Some(obj) = doc.as_object_mut()
+                    && let Some(name) = obj.remove("name")
+                {
+                    obj.insert("user_name".to_string(), name);
+                }
+                Ok(())
+            })
+            .expect("registration below current version succeeds");
+
+            let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+            let path = tmp.path().join("settings.json");
+            std::fs::write(&path, r#"{"version": 1, "name": "Hoshino"}"#)
+                .expect("write old-version settings fixture");
+
+            let config = load_full_config_from(&path).expect("old-version config loads");
+            assert_eq!(config.version, 2, "loaded config carries the new version");
+            assert_eq!(config.user_name, "Hoshino", "migrated field is visible");
+
+            let on_disk: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
+                    .expect("persisted JSON is valid");
+            assert_eq!(
+                on_disk.get("version"),
+                Some(&serde_json::json!(2)),
+                "migrated version must be persisted to disk"
+            );
+            assert_eq!(
+                on_disk.get("user_name"),
+                Some(&serde_json::json!("Hoshino"))
+            );
+            assert!(
+                on_disk.get("name").is_none(),
+                "old field must be rewritten away"
+            );
+        });
+    }
+
+    /// A current-version `settings.json` is loaded without being rewritten: the
+    /// on-disk document is logically identical after the load, and because the
+    /// migration is a no-op the file is not re-written (its bytes, mtime, and
+    /// permissions are preserved) (#330).
+    #[test]
+    fn load_leaves_current_version_untouched() {
+        crate::migration::tests::with_test_version(1, || {
+            let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+            let path = tmp.path().join("settings.json");
+            // Written pretty-printed, matching what `atomic_write` produces, so
+            // a no-op migration yields byte-identical output.
+            let original = "{\n  \"version\": 1,\n  \"character\": \"Alicia\"\n}";
+            std::fs::write(&path, original).expect("write current-version settings fixture");
+
+            let config = load_full_config_from(&path).expect("current-version config loads");
+            assert_eq!(config.version, 1);
+            assert_eq!(config.character, "Alicia");
+
+            let after = std::fs::read_to_string(&path).expect("read back");
+            assert_eq!(
+                after, original,
+                "a current-version file must not be rewritten on load"
+            );
+        });
+    }
+
+    /// A `settings.json` newer than the build supports is rejected with
+    /// [`EneConfigError::ConfigVersionTooNew`] and left untouched, so a newer
+    /// build can still read it after a downgrade (#330).
+    #[test]
+    fn load_rejects_newer_version_without_touching_file() {
+        crate::migration::tests::with_test_version(1, || {
+            let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+            let path = tmp.path().join("settings.json");
+            let original = r#"{"version": 99, "character": "Alicia"}"#;
+            std::fs::write(&path, original).expect("write newer-version settings fixture");
+
+            let err = load_full_config_from(&path).expect_err("newer-version config must error");
+            assert!(
+                matches!(
+                    err,
+                    EneConfigError::ConfigVersionTooNew {
+                        found: 99,
+                        supported: 1,
+                    }
+                ),
+                "expected ConfigVersionTooNew, got {err:?}"
+            );
+
+            let after = std::fs::read_to_string(&path).expect("read back");
+            assert_eq!(
+                after, original,
+                "a too-new file must not be modified by a failed load"
+            );
+        });
     }
 
     /// Regression for #47 (bug 3): `set_nested` used to
