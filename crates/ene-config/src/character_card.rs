@@ -689,7 +689,7 @@ pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
     }
 
     // `{{random:…}}` re-rolls on every evaluation.
-    expand_template_macro(&mut result, "{{random:", |inner| random_option(inner));
+    expand_template_macro(&mut result, "{{random:", random_option);
 
     // `{{pick:…}}` is stable within a session: the index is derived from the
     // option text and the per-session seed, never from the thread RNG (#343).
