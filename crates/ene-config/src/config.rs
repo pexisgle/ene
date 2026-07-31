@@ -443,8 +443,10 @@ pub(crate) fn set_nested(
 ///   omits from serialisation) and is removed from the output.
 ///
 /// The env layer cancels out of the comparison because it is present in both
-/// `base` and `current`, so env overrides stay transient. Unknown fields and
-/// the user's key order in `raw` are preserved.
+/// `base` and `current`, so env overrides stay transient. Unknown fields are
+/// preserved, and the output is built in the raw file's key order (user-added
+/// keys are appended after it), so a load→save round-trip does not reorder the
+/// user's `settings.json`.
 ///
 /// This assumes the `ENE_` environment is stable between load and save (the
 /// normal case — the process environment does not change at runtime). If an
@@ -460,39 +462,50 @@ fn three_way_merge(
     match (base, raw, current) {
         (Value::Object(base_obj), Value::Object(raw_obj), Value::Object(cur_obj)) => {
             let mut out = serde_json::Map::new();
-            // Keys present in the current (edited) config: keep the raw value
-            // when unchanged, otherwise take the user's new value.
-            for (key, cur_val) in cur_obj {
-                match base_obj.get(key) {
-                    Some(base_val) if base_val == cur_val => {
-                        if let Some(raw_val) = raw_obj.get(key) {
+            // Iterate the raw on-disk object first so pre-existing keys keep
+            // their file order in the saved document. Per key:
+            // - the raw value stays when the user did not change it;
+            // - the user's value wins when they changed it;
+            // - a key present in base but absent from current was cleared by
+            //   the user and is dropped;
+            // - a key in raw but in neither base nor current is an unknown
+            //   field and is preserved as-is.
+            for (key, raw_val) in raw_obj {
+                match cur_obj.get(key) {
+                    None => {
+                        if !base_obj.contains_key(key) {
                             out.insert(key.clone(), raw_val.clone());
                         }
                     }
-                    Some(base_val) => {
-                        let raw_val = raw_obj
-                            .get(key)
-                            .cloned()
-                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-                        out.insert(key.clone(), three_way_merge(base_val, &raw_val, cur_val));
-                    }
-                    None => {
-                        out.insert(key.clone(), cur_val.clone());
-                    }
+                    Some(cur_val) => match base_obj.get(key) {
+                        Some(base_val) if base_val == cur_val => {
+                            out.insert(key.clone(), raw_val.clone());
+                        }
+                        Some(base_val) => {
+                            out.insert(key.clone(), three_way_merge(base_val, raw_val, cur_val));
+                        }
+                        // Not in base: the user added this key in-session.
+                        None => {
+                            out.insert(key.clone(), cur_val.clone());
+                        }
+                    },
                 }
             }
-            // Keys the user deleted (present in base, absent from current):
-            // drop them so a cleared field does not linger on disk.
-            for (key, raw_val) in raw_obj {
-                if base_obj.contains_key(key) && !cur_obj.contains_key(key) {
-                    continue;
+            // Keys in `current` with no raw counterpart: persist only when the
+            // user actually changed or added them (base == current means the
+            // value came from defaults or the env layer and must not be baked).
+            for (key, cur_val) in cur_obj {
+                if !out.contains_key(key) && base_obj.get(key) != Some(cur_val) {
+                    out.insert(key.clone(), cur_val.clone());
                 }
-                out.entry(key.clone()).or_insert_with(|| raw_val.clone());
             }
             Value::Object(out)
         }
         // Non-object (or shape-mismatched) values: the user's current value
         // wins when it differs from the base, otherwise the raw value stays.
+        // (The `base == current` case is what a scalar that the user never
+        // touched reaches; shape mismatches between the layers fall through
+        // here too and resolve to `current`.)
         _ => {
             if base == current {
                 raw.clone()
@@ -516,15 +529,9 @@ fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String
     let baseline_val = serde_json::to_value(&baseline)?;
     let current_val = serde_json::to_value(config)?;
 
-    let raw_layer = match read_raw_json_layer(config_path) {
-        Ok(raw) => serde_json::from_str::<serde_json::Value>(&raw)?,
-        // A missing file is an empty JSON layer; the user's edits become the
-        // file's initial contents.
-        Err(EneConfigError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            serde_json::Value::Object(serde_json::Map::new())
-        }
-        Err(e) => return Err(e),
-    };
+    // `read_raw_json_layer` already maps a missing file to an empty JSON
+    // object, so the only error path here is an unreadable file.
+    let raw_layer = serde_json::from_str::<serde_json::Value>(&read_raw_json_layer(config_path)?)?;
 
     let merged = three_way_merge(&baseline_val, &raw_layer, &current_val);
     Ok(serde_json::to_string_pretty(&merged)?)
@@ -1097,6 +1104,14 @@ fn fsync_dir(dir: &Path) {
 /// Only the JSON layer is persisted: `ENE_` env-var overrides and defaults are
 /// excluded so a transient env override never becomes permanent (#326). See
 /// [`serialize_json_layer`] for the layer-reconstruction details.
+///
+/// # Concurrent edits
+///
+/// The three-way merge bases the comparison on the file as it was at *load*
+/// time. If the file is modified externally between load and save, those
+/// external edits are treated as if they were never made and are overwritten.
+/// Concurrent writers must coordinate at a higher level (the desktop app
+/// serialises saves on its own thread).
 pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
@@ -1541,6 +1556,43 @@ mod tests {
         assert!(
             saved.get("ai").is_none(),
             "env override must not be persisted, got {json}"
+        );
+    }
+
+    /// The saved document preserves the raw file's top-level key order, with
+    /// keys added during the session appended at the end (#326 / #331).
+    #[test]
+    fn save_preserves_raw_key_order() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        // Deliberately out of alphabetical order: `zeta` before `alpha`.
+        std::fs::write(&path, r#"{"zeta":"first","alpha":"second"}"#).expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
+        // Simulate the desktop UI editing a value and adding a new top-level key.
+        config.user_name = "Edited".to_string();
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let keys: Vec<&String> = saved
+            .as_object()
+            .expect("saved doc is an object")
+            .keys()
+            .collect();
+        let zeta_pos = keys
+            .iter()
+            .position(|k| *k == "zeta")
+            .expect("zeta present");
+        let alpha_pos = keys
+            .iter()
+            .position(|k| *k == "alpha")
+            .expect("alpha present");
+        assert!(
+            zeta_pos < alpha_pos,
+            "raw key order must be preserved, got keys {keys:?}"
         );
     }
 
