@@ -124,6 +124,7 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
       "utility": { "enable": true },
       "web": { "enable": true }
     },
+    "max_concurrent": 8,
     "mcp_servers": [
       {
         "name": "filesystem",
@@ -134,6 +135,13 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
   }
 }
 ```
+
+`max_concurrent` bounds the number of concurrent in-flight IPC requests **per
+plugin connection**, across *all* request types (tool calls, pings,
+`list_tools`, `chat_completion`, …) — not just tool calls. Requests beyond the
+bound queue (bounded by their own timeout) rather than fanning out to the
+plugin. Chat *streams* (`CreateChatStream`) are the exception: they bypass this
+bound and are not counted against it.
 
 ### `tools.*` — Tool-Execution Runtime Behavior
 

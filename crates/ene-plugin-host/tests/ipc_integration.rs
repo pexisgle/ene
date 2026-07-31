@@ -14,7 +14,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use ene_plugin_host::{IpcPluginConnection, PluginHostError};
 use ene_plugin_proto::{
@@ -23,7 +23,7 @@ use ene_plugin_proto::{
     SandboxConfigData, ToolError, ToolName, ToolResult, ToolSpec, VersionRange, cleanup_path,
     read_plugin_request, write_plugin_response,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 /// Counter for generating unique socket paths across parallel tests.
 static SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -32,6 +32,11 @@ static SOCKET_COUNTER: AtomicU32 = AtomicU32::new(0);
 /// well-behaved mock server always responds in time, yet bounded so a
 /// non-responding peer fails the test promptly instead of hanging CI.
 const TEST_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Concurrency bound passed to [`IpcPluginConnection::connect`] in tests.
+/// Generous enough that ordinary sequential tests never hit it; the dedicated
+/// concurrency-bound test uses its own small value.
+const TEST_MAX_CONCURRENT: usize = 8;
 
 /// Returns a unique socket path for a test.
 fn test_socket_path(name: &str) -> PathBuf {
@@ -302,6 +307,262 @@ async fn dispatch_mock(
     }
 }
 
+/// A releasable gate for deterministic concurrency tests.
+///
+/// `mock.slow` tool calls await [`Gate::wait`](Gate::wait) before responding;
+/// a test releases them all at once with [`release`](Gate::release). This lets
+/// tests assert on overlapping in-flight requests without any sleeps.
+///
+/// The gate can also be [`abort`](Gate::abort)ed: blocked calls then return
+/// *without responding* so a test can simulate the plugin disappearing while
+/// calls are in flight (the mock drops the connection instead of answering).
+#[derive(Default)]
+struct Gate {
+    released: AtomicBool,
+    aborted: AtomicBool,
+    notify: Notify,
+}
+
+impl Gate {
+    /// Blocks until the gate is released (returns `true`) or aborted (returns
+    /// `false`).
+    async fn wait(&self) -> bool {
+        loop {
+            if self.aborted.load(Ordering::Acquire) {
+                return false;
+            }
+            if self.released.load(Ordering::Acquire) {
+                return true;
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    /// Releases every current and future waiter.
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    /// Aborts every current and future waiter, making them drop without
+    /// responding.
+    fn abort(&self) {
+        self.aborted.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
+/// Waits (with a generous deadlock backstop) until `in_flight` reaches
+/// `expected`. Polling on a short interval keeps the tests deterministic in
+/// intent — the timeout only guards against a hang.
+///
+/// The counter is a plain [`AtomicUsize`] (not behind the state mutex), so
+/// observing it never awaits: the observation path cannot itself contend with
+/// the mock's request handling.
+async fn wait_for_in_flight(in_flight: &AtomicUsize, expected: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if in_flight.load(Ordering::Acquire) >= expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} in-flight slow call(s)"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// A mock plugin server that dispatches each request in its own spawned task,
+/// mirroring the real `ene-plugin` server's concurrent read loop (#431). A
+/// dedicated writer lock serializes outgoing frames so concurrent handlers
+/// never interleave bytes on the socket.
+///
+/// `mock.slow` tool calls block on `gate` until the test releases it, and
+/// increment `in_flight` while blocked so tests can observe overlapping
+/// in-flight requests. Every `mock.slow` dispatch also increments
+/// `call_count`, so a test can assert each request reached the plugin exactly
+/// once (no duplicate replay across a reconnect).
+async fn run_concurrent_mock_server(
+    socket_path: PathBuf,
+    state: Arc<Mutex<MockState>>,
+    in_flight: Arc<AtomicUsize>,
+    call_count: Arc<AtomicUsize>,
+    gate: Arc<Gate>,
+) {
+    cleanup_path(&socket_path);
+    let mut listener = IpcListener::bind(&socket_path).expect("failed to bind mock server");
+
+    let Ok(stream) = listener.accept().await else {
+        return;
+    };
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut reader = read_half;
+    let writer = Arc::new(Mutex::new(write_half));
+
+    loop {
+        let Ok(Some(req)) = read_plugin_request(&mut reader).await else {
+            break;
+        };
+        let state = Arc::clone(&state);
+        let in_flight = Arc::clone(&in_flight);
+        let call_count = Arc::clone(&call_count);
+        let gate = Arc::clone(&gate);
+        let writer = Arc::clone(&writer);
+        tokio::spawn(async move {
+            let Some(resp) =
+                dispatch_concurrent_mock(&state, &in_flight, &call_count, &gate, req).await
+            else {
+                // The dispatch chose not to respond (e.g. the gate was aborted
+                // to simulate the plugin disappearing mid-call); drop the
+                // request without writing a frame.
+                return;
+            };
+            let mut w = writer.lock().await;
+            // A write failure only means the host dropped the connection; the
+            // mock has nothing to do but stop responding to this request.
+            drop(write_plugin_response(&mut *w, &resp).await);
+        });
+    }
+}
+
+/// Dispatch for [`run_concurrent_mock_server`]: handles the handshake, ping,
+/// and the `mock.slow` / `mock.echo` tool calls used by the concurrency tests.
+///
+/// Returns `None` when a `mock.slow` call is aborted at the gate, signalling
+/// the server to drop the request without responding (simulating a plugin that
+/// disappears while the call is in flight).
+async fn dispatch_concurrent_mock(
+    _state: &Mutex<MockState>,
+    in_flight: &AtomicUsize,
+    call_count: &AtomicUsize,
+    gate: &Gate,
+    req: PluginIpcRequest,
+) -> Option<PluginIpcResponse> {
+    Some(match req {
+        PluginIpcRequest::Handshake {
+            version: host_range,
+            ..
+        } => {
+            let our_range = VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            };
+            let negotiated = our_range
+                .negotiate(&host_range)
+                .expect("test ranges must overlap");
+            PluginIpcResponse::HandshakeAck {
+                version: negotiated,
+                capabilities: PluginCapabilities {
+                    tools: 1,
+                    llm_providers: vec![],
+                    tts_providers: vec![],
+                    stt_providers: vec![],
+                },
+            }
+        }
+        PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong { request_id },
+        PluginIpcRequest::CallTool {
+            request_id,
+            name,
+            arguments,
+            ..
+        } => match name.as_str() {
+            "mock.slow" => {
+                call_count.fetch_add(1, Ordering::AcqRel);
+                in_flight.fetch_add(1, Ordering::AcqRel);
+                let respond = gate.wait().await;
+                in_flight.fetch_sub(1, Ordering::AcqRel);
+                if !respond {
+                    // Aborted at the gate: drop the request without responding,
+                    // simulating a plugin that disappears mid-call.
+                    return None;
+                }
+                PluginIpcResponse::CallResult {
+                    request_id,
+                    result: Ok(ToolResult::text(arguments)),
+                }
+            }
+            "mock.echo" => PluginIpcResponse::CallResult {
+                request_id,
+                result: Ok(ToolResult::text(arguments)),
+            },
+            _ => PluginIpcResponse::CallResult {
+                request_id,
+                result: Err(ToolError::NotFound { tool_name: name }),
+            },
+        },
+        _ => PluginIpcResponse::Error {
+            request_id: String::new(),
+            message: "unsupported request in concurrent mock".to_string(),
+        },
+    })
+}
+
+/// Spawns a concurrent mock server and connects an [`IpcPluginConnection`]
+/// with the given concurrency bound. Returns the connection, the shared mock
+/// state, the in-flight counter for `mock.slow`, the dispatch counter for
+/// `mock.slow`, the gate controlling `mock.slow`, the server task handle (so a
+/// test can abort the accept loop to simulate the plugin process going away),
+/// and the socket path.
+async fn spawn_concurrent_and_connect(
+    name: &str,
+    max_concurrent: usize,
+) -> (
+    Arc<IpcPluginConnection>,
+    Arc<Mutex<MockState>>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<Gate>,
+    tokio::task::JoinHandle<()>,
+    PathBuf,
+) {
+    let socket_path = test_socket_path(name);
+    let state = Arc::new(Mutex::new(MockState::default()));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(Gate::default());
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    let server_in_flight = Arc::clone(&in_flight);
+    let server_call_count = Arc::clone(&call_count);
+    let server_gate = Arc::clone(&gate);
+    let server_handle = tokio::spawn(async move {
+        run_concurrent_mock_server(
+            server_path,
+            server_state,
+            server_in_flight,
+            server_call_count,
+            server_gate,
+        )
+        .await;
+    });
+
+    // Give the server a moment to bind.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        max_concurrent,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    (
+        Arc::new(conn),
+        state,
+        in_flight,
+        call_count,
+        gate,
+        server_handle,
+        socket_path,
+    )
+}
+
 /// Spawns a mock server and connects an [`IpcPluginConnection`] to it.
 ///
 /// Returns the connection, the shared mock state, and the socket path
@@ -324,6 +585,7 @@ async fn spawn_and_connect(name: &str) -> (IpcPluginConnection, Arc<Mutex<MockSt
         SandboxConfigData::default(),
         Some(serde_json::json!({"test": true})),
         TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
     )
     .await
     .expect("handshake should succeed");
@@ -355,6 +617,7 @@ async fn try_connect_with_plugin_version(
         SandboxConfigData::default(),
         None,
         TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
     )
     .await;
 
@@ -365,7 +628,7 @@ async fn try_connect_with_plugin_version(
 
 #[tokio::test]
 async fn handshake_succeeds_and_returns_capabilities() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("handshake").await;
+    let (conn, _state, socket_path) = spawn_and_connect("handshake").await;
 
     let caps = conn.capabilities();
     assert_eq!(caps.tools, 1);
@@ -418,6 +681,7 @@ async fn handshake_times_out_when_plugin_never_responds() {
         SandboxConfigData::default(),
         None,
         short_timeout,
+        TEST_MAX_CONCURRENT,
     )
     .await;
     let elapsed = started.elapsed();
@@ -461,7 +725,7 @@ async fn handshake_negotiates_min_supported_version_for_older_plugin() {
     let (result, socket_path) =
         try_connect_with_plugin_version("old-plugin", old_plugin_range).await;
 
-    let mut conn = result.expect("handshake with an N-1 plugin should succeed");
+    let conn = result.expect("handshake with an N-1 plugin should succeed");
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_MIN_SUPPORTED_VERSION);
 
     // The negotiated version predates `CancelStream` (v4), so the feature
@@ -515,7 +779,7 @@ async fn handshake_below_supported_floor_fails_with_both_ranges_in_diagnostic() 
 
 #[tokio::test]
 async fn call_tool_round_trip() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("call-tool").await;
+    let (conn, _state, socket_path) = spawn_and_connect("call-tool").await;
 
     let result = conn
         .call_tool("mock.echo", r#"{"msg":"hello"}"#, None)
@@ -528,7 +792,7 @@ async fn call_tool_round_trip() {
 
 #[tokio::test]
 async fn call_tool_not_found() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("call-tool-nf").await;
+    let (conn, _state, socket_path) = spawn_and_connect("call-tool-nf").await;
 
     let err = conn
         .call_tool("nonexistent.tool", "{}", None)
@@ -549,7 +813,7 @@ async fn call_tool_not_found() {
 
 #[tokio::test]
 async fn call_tool_permission_required_preserves_structure() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("perm-required").await;
+    let (conn, _state, socket_path) = spawn_and_connect("perm-required").await;
 
     let err = conn
         .call_tool("mock.permission", "{}", None)
@@ -576,7 +840,7 @@ async fn call_tool_permission_required_preserves_structure() {
 
 #[tokio::test]
 async fn call_tool_user_input_required_preserves_structure() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("user-input").await;
+    let (conn, _state, socket_path) = spawn_and_connect("user-input").await;
 
     let err = conn
         .call_tool("mock.user_input", "{}", None)
@@ -600,7 +864,7 @@ async fn call_tool_user_input_required_preserves_structure() {
 
 #[tokio::test]
 async fn call_tool_forwards_context() {
-    let (mut conn, state, socket_path) = spawn_and_connect("call-ctx").await;
+    let (conn, state, socket_path) = spawn_and_connect("call-ctx").await;
 
     let ctx = CallContext {
         conversation_id: "conv-abc".to_string(),
@@ -624,7 +888,7 @@ async fn call_tool_forwards_context() {
 
 #[tokio::test]
 async fn approve_permission_reaches_plugin() {
-    let (mut conn, state, socket_path) = spawn_and_connect("approve").await;
+    let (conn, state, socket_path) = spawn_and_connect("approve").await;
 
     conn.approve_permission("perm-99")
         .await
@@ -640,7 +904,7 @@ async fn approve_permission_reaches_plugin() {
 
 #[tokio::test]
 async fn allow_and_revoke_pattern_reach_plugin() {
-    let (mut conn, state, socket_path) = spawn_and_connect("patterns").await;
+    let (conn, state, socket_path) = spawn_and_connect("patterns").await;
 
     conn.allow_pattern("filesystem_write", "/tmp/**")
         .await
@@ -666,7 +930,7 @@ async fn allow_and_revoke_pattern_reach_plugin() {
 
 #[tokio::test]
 async fn deferred_call_returns_accepted_then_poll_completes() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("deferred").await;
+    let (conn, _state, socket_path) = spawn_and_connect("deferred").await;
 
     let outcome = conn
         .call_tool_deferred("mock.deferred", "{}", None)
@@ -698,7 +962,7 @@ async fn deferred_call_returns_accepted_then_poll_completes() {
 
 #[tokio::test]
 async fn deferred_call_sync_fallback() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("deferred-sync").await;
+    let (conn, _state, socket_path) = spawn_and_connect("deferred-sync").await;
 
     // mock.echo does not support deferred, so the server falls back to sync.
     let outcome = conn
@@ -722,7 +986,7 @@ async fn deferred_call_sync_fallback() {
 
 #[tokio::test]
 async fn deferred_completed_push_is_routed_without_breaking_correlation() {
-    let (mut conn, state, socket_path) = spawn_and_connect("deferred-push").await;
+    let (conn, state, socket_path) = spawn_and_connect("deferred-push").await;
 
     // `mock.push` makes the server emit a `DeferredCompleted` push frame
     // *ahead* of the normal `CallResult`. The single reader task must route
@@ -757,7 +1021,7 @@ async fn deferred_completed_push_is_routed_without_breaking_correlation() {
 
 #[tokio::test]
 async fn cancel_deferred_reaches_plugin() {
-    let (mut conn, state, socket_path) = spawn_and_connect("cancel").await;
+    let (conn, state, socket_path) = spawn_and_connect("cancel").await;
 
     conn.cancel_deferred("task-99")
         .await
@@ -773,7 +1037,7 @@ async fn cancel_deferred_reaches_plugin() {
 
 #[tokio::test]
 async fn ping_returns_pong() {
-    let (mut conn, _state, socket_path) = spawn_and_connect("ping").await;
+    let (conn, _state, socket_path) = spawn_and_connect("ping").await;
 
     conn.ping().await.expect("ping should succeed");
 
@@ -796,11 +1060,12 @@ async fn transparent_reconnection_after_transport_failure() {
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    let mut conn = IpcPluginConnection::connect(
+    let conn = IpcPluginConnection::connect(
         &socket_path,
         SandboxConfigData::default(),
         None,
         TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
     )
     .await
     .expect("initial handshake should succeed");
@@ -830,6 +1095,266 @@ async fn transparent_reconnection_after_transport_failure() {
         .await
         .expect("call after reconnect should succeed");
     assert_eq!(result.text_for_llm(), "phase2");
+
+    cleanup_path(&socket_path);
+}
+
+// ── Test: Request multiplexing (#431) ────────────────────────────────────
+
+/// Two slow tool calls against the *same* connection must be in flight
+/// concurrently: both reach the plugin (the gate observes two in-flight) before
+/// either is released. Under the old per-connection serialization the second
+/// call could not even be written until the first completed, so the in-flight
+/// count would never exceed one.
+#[tokio::test]
+async fn two_slow_tool_calls_overlap_in_flight() {
+    let (conn, _state, in_flight, _call_count, gate, _server, socket_path) =
+        spawn_concurrent_and_connect("overlap", 8).await;
+
+    let c1 = Arc::clone(&conn);
+    let t1 = tokio::spawn(async move { c1.call_tool("mock.slow", "one", None).await });
+    let c2 = Arc::clone(&conn);
+    let t2 = tokio::spawn(async move { c2.call_tool("mock.slow", "two", None).await });
+
+    // Both requests must reach the plugin and be in flight at the same time.
+    wait_for_in_flight(&in_flight, 2).await;
+
+    // Release both and collect results.
+    gate.release();
+    let (r1, r2) = (t1.await.expect("t1 join"), t2.await.expect("t2 join"));
+    assert_eq!(r1.expect("call one").text_for_llm(), "one");
+    assert_eq!(r2.expect("call two").text_for_llm(), "two");
+
+    cleanup_path(&socket_path);
+}
+
+/// A `ping` must complete while a slow tool call is still pending. The probe
+/// shares the connection but is not queued behind the in-flight call — neither
+/// by a host-side lock (there is none on the request path) nor by the plugin
+/// (which dispatches each request concurrently).
+#[tokio::test]
+async fn ping_completes_while_slow_call_pending() {
+    let (conn, _state, in_flight, _call_count, gate, _server, socket_path) =
+        spawn_concurrent_and_connect("ping-during", 8).await;
+
+    let c1 = Arc::clone(&conn);
+    let slow = tokio::spawn(async move { c1.call_tool("mock.slow", "slow", None).await });
+
+    // Wait until the slow call is in flight, then ping. The ping must return
+    // Ok *before* the gate is released (the slow call is still blocked).
+    wait_for_in_flight(&in_flight, 1).await;
+    conn.ping()
+        .await
+        .expect("ping must succeed while a slow call is pending");
+
+    gate.release();
+    assert_eq!(
+        slow.await.expect("join").expect("call").text_for_llm(),
+        "slow"
+    );
+
+    cleanup_path(&socket_path);
+}
+
+/// The connection-level concurrency bound (sourced from `max_concurrent`) caps
+/// in-flight requests: with a bound of 1, a second slow call cannot reach the
+/// plugin until the first completes. This is the host-side protection that
+/// keeps the plugin from being flooded (#431 / #435).
+#[tokio::test]
+async fn in_flight_requests_are_bounded_by_max_concurrent() {
+    // Bound of 1: strictly serial in-flight.
+    let (conn, _state, in_flight, _call_count, gate, _server, socket_path) =
+        spawn_concurrent_and_connect("bounded", 1).await;
+
+    let c1 = Arc::clone(&conn);
+    let t1 = tokio::spawn(async move { c1.call_tool("mock.slow", "one", None).await });
+
+    // The first call occupies the single permit and reaches the plugin.
+    wait_for_in_flight(&in_flight, 1).await;
+
+    // A second call cannot acquire a permit, so it never reaches the plugin:
+    // the in-flight count stays at exactly 1 while the gate is held.
+    let c2 = Arc::clone(&conn);
+    let t2 = tokio::spawn(async move { c2.call_tool("mock.slow", "two", None).await });
+
+    // Give t2 a chance to (incorrectly, if unbounded) reach the plugin. The
+    // in-flight count must remain 1, proving the second call is queued on the
+    // semaphore rather than dispatched. This 50 ms sleep proves a negative
+    // (nothing happened) and is deliberately generous: it is a safety margin
+    // against scheduler jitter, not the mechanism under test — the real
+    // guarantee is the semaphore, asserted by the count staying at 1.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        in_flight.load(Ordering::Acquire),
+        1,
+        "bound of 1 must keep exactly one request in flight"
+    );
+
+    // Release the first; the second may now proceed.
+    gate.release();
+    assert_eq!(t1.await.expect("join").expect("call").text_for_llm(), "one");
+    assert_eq!(t2.await.expect("join").expect("call").text_for_llm(), "two");
+
+    cleanup_path(&socket_path);
+}
+
+/// Dropping the plugin while N calls are in flight must fail every caller
+/// **promptly** — well inside the 2-minute `DEFAULT_TIMEOUT` — rather than
+/// leaving the waiters orphaned until their own timeout (#431 review, items 1
+/// and 3).
+///
+/// `reconnect_from` aborts the old reader task, which is suspended inside
+/// `read_plugin_response` and therefore never reaches the trailing `fail_all()`
+/// in `reader_loop`; the reconnect must fail the waiters itself (item 1). And
+/// because waiter registration is atomic with the frame write under the writer
+/// lock (item 3), no request can be written to the fresh stream and then
+/// replayed by the retry path — so the plugin observes each request exactly
+/// once, preserving the "a transport error means the request never reached the
+/// plugin" invariant for non-idempotent `CallTool`.
+///
+/// Without the item 1 fix the callers would block for the full `DEFAULT_TIMEOUT`
+/// (the mock never comes back, so the reconnect cannot succeed) and this test
+/// would fail on its deadline.
+#[tokio::test]
+async fn in_flight_calls_fail_promptly_when_plugin_drops() {
+    let (conn, _state, in_flight, call_count, gate, server_handle, socket_path) =
+        spawn_concurrent_and_connect("drop-inflight", 8).await;
+
+    const N: usize = 3;
+    let mut handles = Vec::new();
+    for i in 0..N {
+        let c = Arc::clone(&conn);
+        handles.push(tokio::spawn(async move {
+            c.call_tool("mock.slow", &format!("call-{i}"), None).await
+        }));
+    }
+
+    // All N calls must reach the plugin and be blocked on the gate at once.
+    wait_for_in_flight(&in_flight, N).await;
+    assert_eq!(
+        call_count.load(Ordering::Acquire),
+        N,
+        "each request must reach the plugin exactly once before the drop"
+    );
+
+    // Simulate the plugin process disappearing while the calls are in flight:
+    // abort the gate so the in-flight dispatch tasks return without responding
+    // (dropping their writer clones), then abort the accept-loop task (dropping
+    // the reader half and the last writer Arc). With every half of the
+    // connection gone, the host's reader observes EOF.
+    gate.abort();
+    server_handle.abort();
+    cleanup_path(&socket_path);
+
+    // Every caller must fail far inside DEFAULT_TIMEOUT (2 min). On observing
+    // the transport failure each caller attempts a reconnect that cannot
+    // succeed (nothing is listening), running the full connect-retry budget
+    // (~2.5 s) before surfacing the error. Those reconnects serialize on the
+    // writer lock and the generation does not advance on a *failed* reconnect,
+    // so the last of the N callers returns after roughly N × 2.5 s. The bound
+    // below accommodates that with margin while staying an order of magnitude
+    // under DEFAULT_TIMEOUT — without the item 1 `fail_all()` fix the waiters
+    // would instead block for the full 2 min and blow well past this deadline.
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_millis(2_500 * N as u64 + 10_000);
+    for handle in handles {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let result = tokio::time::timeout(remaining, handle)
+            .await
+            .expect("caller must return promptly, not block until DEFAULT_TIMEOUT")
+            .expect("task must not panic");
+        assert!(
+            result.is_err(),
+            "in-flight call must fail once the plugin drops"
+        );
+    }
+
+    // The plugin observed each request exactly once: no request was replayed to
+    // a fresh stream by the retry path (item 3).
+    assert_eq!(
+        call_count.load(Ordering::Acquire),
+        N,
+        "no request may be dispatched to the plugin more than once"
+    );
+
+    cleanup_path(&socket_path);
+}
+
+/// Concurrent transport failures must coalesce into a single reconnect (#431
+/// review, item 4).
+///
+/// Two `mock.echo` calls are issued back to back against a plugin whose socket
+/// has been removed, so both writes fail with a transport error and both enter
+/// the reconnect path. `reconnect_from` re-checks the generation *under the
+/// writer lock*, so only the first caller actually reconnects; the second
+/// observes the advanced generation and returns without tearing the connection
+/// down again. With the server restarted, both retries then succeed on the
+/// single fresh connection.
+///
+/// Without the under-lock re-check the second reconnect would abort the reader
+/// task the first reconnect just spawned and `fail_all()` its already-retried
+/// sibling, surfacing as an error here instead of two successes.
+#[tokio::test]
+async fn concurrent_transport_failures_coalesce_into_one_reconnect() {
+    let socket_path = test_socket_path("coalesce");
+    let state = Arc::new(Mutex::new(MockState::default()));
+
+    // Phase 1: start server, connect, confirm a healthy round-trip.
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    let server_handle = tokio::spawn(async move {
+        run_mock_server(server_path, server_state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = Arc::new(
+        IpcPluginConnection::connect(
+            &socket_path,
+            SandboxConfigData::default(),
+            None,
+            TEST_HANDSHAKE_TIMEOUT,
+            TEST_MAX_CONCURRENT,
+        )
+        .await
+        .expect("initial handshake should succeed"),
+    );
+    conn.call_tool("mock.echo", "warmup", None)
+        .await
+        .expect("warmup call should succeed");
+
+    // Phase 2: kill the server and remove the socket so in-flight writes fail.
+    server_handle.abort();
+    cleanup_path(&socket_path);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Phase 3: restart the server on the same path so the coalesced reconnect
+    // can succeed.
+    let server_path2 = socket_path.clone();
+    let server_state2 = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_mock_server(server_path2, server_state2).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Phase 4: two concurrent calls both fail their first write and race into
+    // the reconnect path. Exactly one reconnect must occur; both must then
+    // succeed on the fresh connection.
+    let c1 = Arc::clone(&conn);
+    let t1 = tokio::spawn(async move { c1.call_tool("mock.echo", "a", None).await });
+    let c2 = Arc::clone(&conn);
+    let t2 = tokio::spawn(async move { c2.call_tool("mock.echo", "b", None).await });
+
+    let (r1, r2) = (t1.await.expect("t1 join"), t2.await.expect("t2 join"));
+    assert_eq!(
+        r1.expect("call a must succeed after coalesced reconnect")
+            .text_for_llm(),
+        "a"
+    );
+    assert_eq!(
+        r2.expect("call b must succeed after coalesced reconnect")
+            .text_for_llm(),
+        "b"
+    );
 
     cleanup_path(&socket_path);
 }

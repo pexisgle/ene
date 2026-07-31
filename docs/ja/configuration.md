@@ -124,6 +124,7 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
       "utility": { "enable": true },
       "web": { "enable": true }
     },
+    "max_concurrent": 8,
     "mcp_servers": [
       {
         "name": "filesystem",
@@ -134,6 +135,8 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
   }
 }
 ```
+
+`max_concurrent` は、**プラグイン接続ごと**の同時進行中 IPC リクエスト数の上限です。ツール呼び出しだけでなく、ping・`list_tools`・`chat_completion` など*すべて*のリクエスト種別を対象とします。上限を超えたリクエストは、プラグインへ無制限に送出されるのではなく（自身のタイムアウトを上限として）キューイングされます。チャット*ストリーム* (`CreateChatStream`) は例外で、この上限をバイパスし、カウントされません。
 
 ### `tools.*` — ツール実行ランタイムの挙動
 
