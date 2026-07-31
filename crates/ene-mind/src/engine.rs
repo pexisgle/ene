@@ -370,9 +370,11 @@ impl CognitionEngine {
         prefetch: ComposePrefetch,
     ) -> Result<ComposedPrompt, CognitionError> {
         // Destructure to move the recalled/commitment vectors into the pack
-        // input without cloning (#review M2).
+        // input without cloning (#review M2). `recall_plan` is no longer needed
+        // here now that packing budgets against the context window, not recall
+        // hints (#370).
         let PreTurnOutput {
-            recall_plan,
+            recall_plan: _,
             affect,
             recalled,
             commitments,
@@ -481,7 +483,7 @@ impl CognitionEngine {
             let provider_advertised = ctx
                 .llm_provider
                 .as_deref()
-                .and_then(|provider| provider.context_window());
+                .and_then(ene_ai::LlmProvider::context_window);
             // Two operator shrinkage caps, combined as a min so configuration
             // can only ever narrow the model's stated window: the per-provider
             // `context_window` override and the mind-level `max_prompt_tokens`
