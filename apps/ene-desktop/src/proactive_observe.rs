@@ -259,7 +259,7 @@ fn looks_like_url(t: &str) -> bool {
 /// characters making up more than half the token — the shape of phone,
 /// account, and card numbers that carry no topical signal.
 fn is_digit_heavy(t: &str) -> bool {
-    let digits = t.chars().filter(|c| c.is_ascii_digit()).count();
+    let digits = t.chars().filter(char::is_ascii_digit).count();
     digits >= 6 && digits * 2 > t.chars().count()
 }
 
