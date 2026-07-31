@@ -884,7 +884,7 @@ fn same_memory_content(candidate: &MemoryCandidate, mem: &MemoryItem) -> bool {
 ///
 /// Embeddings are cached by title for the lifetime of the matcher, so scanning
 /// every existing memory per candidate does not re-embed repeated titles.
-struct TitleMatcher<'a> {
+pub(crate) struct TitleMatcher<'a> {
     /// Embedding provider; `None` selects the exact-match fallback.
     embedder: Option<&'a dyn EmbeddingProvider>,
     /// Cosine-similarity cutoff for a match (embedding path only).
