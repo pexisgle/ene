@@ -68,6 +68,14 @@ pub enum DbError {
         /// Human-readable error message.
         message: String,
     },
+    /// A write was rejected because it would exceed the plugin's configured
+    /// DB storage quota (`plugins.list.<name>.db_quota_mb`). Reads and
+    /// deletes remain available so the plugin can free space (#424).
+    #[error("storage quota exceeded: {message}")]
+    QuotaExceeded {
+        /// Human-readable error message.
+        message: String,
+    },
     /// An internal server error occurred.
     #[error("internal server error: {message}")]
     Internal {
@@ -227,6 +235,7 @@ impl DbClient {
                 DbErrorCode::TypeMismatch => DbError::TypeMismatch { message },
                 DbErrorCode::InvalidFilter => DbError::InvalidFilter { message },
                 DbErrorCode::SchemaConflict => DbError::SchemaConflict { message },
+                DbErrorCode::QuotaExceeded => DbError::QuotaExceeded { message },
                 DbErrorCode::Unknown => DbError::Unknown { message },
                 DbErrorCode::Internal => DbError::Internal { message },
             };

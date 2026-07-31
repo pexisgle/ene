@@ -2734,11 +2734,22 @@ pub(super) fn spawn_db_ipc_servers(
             // Skip plugins explicitly disabled in configuration, mirroring
             // `PluginHostManager::start`'s enable filter (a discovered binary
             // with no config entry is enabled by default).
-            if let Some(entry) = plugin_config.list.get(&name)
+            let entry = plugin_config.list.get(&name);
+            if let Some(entry) = entry
                 && !entry.enable
             {
                 continue;
             }
+
+            // Per-plugin DB storage quota (#424). A discovered binary with no
+            // config entry falls back to `PluginEntry::default()`'s quota so
+            // the enforcement default applies uniformly; an explicit `null` in
+            // config (`None`) disables the cap for that plugin.
+            let quota_mb = match entry {
+                Some(entry) => entry.db_quota_mb,
+                None => ene_plugin_host::PluginEntry::default().db_quota_mb,
+            };
+            let quota_bytes = quota_mb.map(|mb| mb.saturating_mul(1024 * 1024));
 
             let tool_name = name.clone();
             let prefix = format!("{name}_");
@@ -2782,6 +2793,7 @@ pub(super) fn spawn_db_ipc_servers(
                 tool_name.clone(),
                 prefix,
                 auth_token,
+                quota_bytes,
             );
 
             tokio::spawn(async move {

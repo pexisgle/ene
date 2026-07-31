@@ -199,6 +199,32 @@ without the long-held-lock hazard. `Batch` was added as a new request/response
 variant with no protocol-version bump, following the same additive-only
 discipline as the stdio protocol above.
 
+### Per-plugin storage quota
+
+Every stateful plugin writes into the **one shared `memory.db`**, so prefix
+isolation alone does not stop a plugin from filling the disk: a logging loop in
+a third-party (or merely buggy) plugin could grow its tables without bound,
+bloating the database and degrading the memory system's queries, backups, and
+`PRAGMA integrity_check`. To bound this, each plugin carries a storage quota —
+`plugins.list.<name>.db_quota_mb`, default `256` MiB (#424).
+
+Before any storage-growing write (`Insert`/`Upsert`, standalone or inside a
+`Batch`), the host measures the plugin's footprint by summing the byte length
+of every cell across its declared tables — `SUM(length(CAST(col AS BLOB)))` per
+table — and refuses the write with a `QUOTA_EXCEEDED` error once the footprint
+reaches the cap. `SQLite` has no per-table size API (the `dbstat` virtual table
+is not compiled into the bundled `libsqlite3-sys`, see #350), so this payload
+sum is used as a faithful, prefix-scoped proxy; it is a slight underestimate
+(it omits per-row overhead and index pages), which is acceptable for a soft
+cap. The measurement reads only the plugin's own tables, never the whole
+database.
+
+Reads (`Select`/`Count`) and deletes are **never** gated, so a plugin that hits
+its quota can always delete rows to free space and resume writing. A batch that
+would exceed the quota is rolled back atomically and names the failing
+operation. Set `db_quota_mb` to `null` to disable enforcement for a plugin that
+legitimately needs unbounded storage.
+
 ---
 
 ## 6. Plugin Security Model
