@@ -523,6 +523,154 @@ pub(crate) fn set_nested(
     Ok(())
 }
 
+/// Applies the user's in-session edits onto the raw on-disk JSON layer (#326).
+///
+/// This is a three-way merge keyed on `base` — the layered config
+/// (defaults → JSON → env) the loader produced — which is the common ancestor
+/// of both `raw` (the JSON layer on disk) and `current` (the in-memory config
+/// after the user's edits):
+///
+/// - a key whose value is unchanged between `base` and `current` keeps the raw
+///   on-disk value (so env overrides and defaults never reach disk);
+/// - a key the user changed (or added) takes the `current` value;
+/// - a key present in `base` but absent from `current` was cleared by the user
+///   (e.g. an `Option` field reset to `None`, which `skip_serializing_if`
+///   omits from serialisation) and is removed from the output.
+///
+/// The env layer cancels out of the comparison because it is present in both
+/// `base` and `current`, so env overrides stay transient. Unknown fields are
+/// preserved, and the output is built in the raw file's key order (user-added
+/// keys are appended after it), so a load→save round-trip does not reorder the
+/// user's `settings.json`.
+///
+/// This assumes the `ENE_` environment is stable between load and save (the
+/// normal case — the process environment does not change at runtime). If an
+/// override is unset mid-process, the value it injected at load looks like a
+/// user change relative to the rebuilt baseline and would be persisted.
+fn three_way_merge(
+    base: &serde_json::Value,
+    raw: &serde_json::Value,
+    current: &serde_json::Value,
+) -> serde_json::Value {
+    use serde_json::Value;
+
+    match (base, raw, current) {
+        (Value::Object(base_obj), Value::Object(raw_obj), Value::Object(cur_obj)) => {
+            let mut out = serde_json::Map::new();
+            // Iterate the raw on-disk object first so pre-existing keys keep
+            // their file order in the saved document. Per key:
+            // - the raw value stays when the user did not change it;
+            // - the user's value wins when they changed it;
+            // - a key present in base but absent from current was cleared by
+            //   the user and is dropped;
+            // - a key in raw but in neither base nor current is an unknown
+            //   field and is preserved as-is.
+            for (key, raw_val) in raw_obj {
+                match cur_obj.get(key) {
+                    None => {
+                        if !base_obj.contains_key(key) {
+                            out.insert(key.clone(), raw_val.clone());
+                        }
+                    }
+                    Some(cur_val) => match base_obj.get(key) {
+                        Some(base_val) if base_val == cur_val => {
+                            out.insert(key.clone(), raw_val.clone());
+                        }
+                        Some(base_val) => {
+                            out.insert(key.clone(), three_way_merge(base_val, raw_val, cur_val));
+                        }
+                        // Not in base: the user added this key in-session.
+                        None => {
+                            out.insert(key.clone(), cur_val.clone());
+                        }
+                    },
+                }
+            }
+            // Keys in `current` with no raw counterpart: persist only when the
+            // user actually changed or added them (base == current means the
+            // value came from defaults or the env layer and must not be baked).
+            for (key, cur_val) in cur_obj {
+                if !out.contains_key(key) && base_obj.get(key) != Some(cur_val) {
+                    out.insert(key.clone(), cur_val.clone());
+                }
+            }
+            Value::Object(out)
+        }
+        // Non-object (or shape-mismatched) values: the user's current value
+        // wins when it differs from the base, otherwise the raw value stays.
+        // (The `base == current` case is what a scalar that the user never
+        // touched reaches; shape mismatches between the layers fall through
+        // here too and resolve to `current`.)
+        _ => {
+            if base == current {
+                raw.clone()
+            } else {
+                current.clone()
+            }
+        }
+    }
+}
+
+/// Serialises only the JSON layer of `config` for persistence (#326).
+///
+/// The in-memory [`EneConfig`] is the result of layering defaults → JSON file
+/// → `ENE_` env vars, so serialising it directly would bake transient env
+/// overrides (and every default) into `settings.json`. Instead this rebuilds
+/// the same layered baseline the loader produced and three-way merges the
+/// in-memory config onto the **raw** on-disk JSON, so only genuine user edits
+/// are persisted. See [`three_way_merge`] for the merge semantics.
+fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String, EneConfigError> {
+    // Run the same migration the loader runs, so the baseline and the raw
+    // layer agree even when the file is behind the current version (on a
+    // read-only filesystem the migration cannot persist, so reading the
+    // raw file directly would compare a migrated baseline against an
+    // unmigrated raw layer and rewrite the whole document).
+    let raw_layer =
+        serde_json::from_str::<serde_json::Value>(&migrate_settings_file(config_path)?)?;
+
+    let baseline = extract_layered_config(config_path)?;
+    let baseline_val = serde_json::to_value(&baseline)?;
+    let mut current_val = serde_json::to_value(config)?;
+
+    // #331: a stray `$schema` left in the catch-all section must never win.
+    // When the declared field is empty it serialises as absent, so drop any
+    // `extra["$schema"]` from the current layer — the post-merge autofill
+    // below supplies the canonical pointer. When the user set the declared
+    // field, that key (which serialises at the top level) is kept verbatim.
+    if config.schema.is_empty()
+        && let Some(obj) = current_val.as_object_mut()
+    {
+        obj.remove("$schema");
+    }
+
+    let mut merged = three_way_merge(&baseline_val, &raw_layer, &current_val);
+
+    // #331: the persisted file always leads with the `$schema` pointer. The
+    // declared field auto-fills when empty, and any stray `$schema` entry the
+    // user (or an old save) left in the catch-all section is stripped so the
+    // declared field wins and the key is never duplicated.
+    if let Some(obj) = merged.as_object_mut() {
+        let has_declared = obj.get("$schema").is_some();
+        if !has_declared {
+            obj.insert(
+                "$schema".to_string(),
+                serde_json::Value::String(DEFAULT_SETTINGS_SCHEMA.to_string()),
+            );
+        }
+        // Re-insert at the front so `$schema` always leads.
+        if let Some(schema_val) = obj.remove("$schema") {
+            let mut reordered = serde_json::Map::new();
+            reordered.insert("$schema".to_string(), schema_val);
+            for (k, v) in obj.iter() {
+                reordered.insert(k.clone(), v.clone());
+            }
+            *obj = reordered;
+        }
+    }
+
+    Ok(serde_json::to_string_pretty(&merged)?)
+}
+
 /// Generates the JSON representation of the JSON Schema for settings.json
 pub fn generate_schema_json() -> Result<String, serde_json::Error> {
     let schema_gen = schemars::SchemaGenerator::default();
@@ -870,6 +1018,19 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
 /// because `get_section::<AiConfig>()` looks up `T::path() = ["ai"]`
 /// (lowercase).
 pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigError> {
+    let config = extract_layered_config(config_path)?;
+    update_global_config(config.clone());
+    Ok(config)
+}
+
+/// Builds the layered config (defaults → JSON file → `ENE_` env vars) for the
+/// given path **without** touching the global singleton.
+///
+/// Shared by [`load_full_config_from`] (the load path) and
+/// [`serialize_json_layer`] (the save path, #326). The save path needs the
+/// exact same baseline the loader produced so it can isolate the user's
+/// in-session mutations from the defaults and env layers.
+fn extract_layered_config(config_path: &Path) -> Result<EneConfig, EneConfigError> {
     use figment::{
         Figment,
         providers::{Env, Format, Json, Serialized},
@@ -1090,30 +1251,6 @@ fn fsync_dir(dir: &Path) {
     }
 }
 
-/// Serialises `config` for persistence, auto-filling `$schema` when it is
-/// empty (#331).
-///
-/// Operates on a clone so the caller's in-memory config — and the global
-/// snapshot / dirty tracking — is left untouched; only the on-disk file is
-/// guaranteed to carry the schema pointer. Users therefore never need to
-/// hand-write `$schema`.
-///
-/// Any stray `extra["$schema"]` is dropped before serialising so the declared
-/// `schema` field can never be duplicated on disk (a duplicate `$schema` key
-/// fails to reload, and since #325 there is no silent fallback to defaults).
-///
-/// The user's top-level section order is already correct here: it was restored
-/// at load time (see [`load_full_config_from`]), and `IndexMap` preserves it
-/// through mutation, so the serialised sections keep the user's order (#331).
-fn serialize_for_save(config: &EneConfig) -> Result<String, serde_json::Error> {
-    let mut to_save = config.clone();
-    if to_save.schema.is_empty() {
-        to_save.schema = DEFAULT_SETTINGS_SCHEMA.to_string();
-    }
-    to_save.extra.shift_remove("$schema");
-    serde_json::to_string_pretty(&to_save)
-}
-
 /// Reorders `extra` in place so its keys follow `order` (#331).
 ///
 /// Keys listed in `order` come first (in that order); any key absent from
@@ -1142,15 +1279,27 @@ fn restore_top_level_order(extra: &mut IndexMap<String, serde_json::Value>, orde
 /// Saves the config file in a type-safe manner, using an atomic
 /// temp-file-then-rename strategy to avoid partial writes (#325).
 ///
+/// Only the JSON layer is persisted: `ENE_` env-var overrides and defaults are
+/// excluded so a transient env override never becomes permanent (#326). See
+/// [`serialize_json_layer`] for the layer-reconstruction details.
+///
 /// `$schema` is auto-filled on the serialised copy when empty so the persisted
 /// file always leads with the schema pointer (#331).
+///
+/// # Concurrent edits
+///
+/// The three-way merge bases the comparison on the file as it was at *load*
+/// time. If the file is modified externally between load and save, those
+/// external edits are treated as if they were never made and are overwritten.
+/// Concurrent writers must coordinate at a higher level (the desktop app
+/// serialises saves on its own thread).
 pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
     }
-    let json = serialize_for_save(config)?;
+    let json = serialize_json_layer(config, &config_path)?;
     atomic_write(&config_path, &json)?;
     Ok(())
 }
@@ -1466,6 +1615,237 @@ mod tests {
         assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
     }
 
+    /// `three_way_merge` keeps the raw on-disk value for keys the user did not
+    /// change, takes the user's value for changed/added keys, and drops keys
+    /// the user cleared (present in base, absent from current).
+    #[test]
+    fn three_way_merge_keeps_raw_for_unchanged_and_drops_cleared() {
+        use serde_json::json;
+        // base = layered load (defaults + JSON + env); `env_key` is an env
+        // override present in base and current, so it must NOT reach the output.
+        let base = json!({
+            "unchanged": 1,
+            "changed": "old",
+            "env_key": "from-env",
+            "cleared": "was-set",
+        });
+        let raw = json!({
+            "unchanged": 1,
+            "changed": "old",
+            "cleared": "was-set",
+            "unknown": "preserve-me",
+        });
+        let current = json!({
+            "unchanged": 1,
+            "changed": "new",
+            "env_key": "from-env",
+            "added": true,
+        });
+        let merged = three_way_merge(&base, &raw, &current);
+        assert_eq!(
+            merged,
+            json!({
+                "unchanged": 1,
+                "changed": "new",
+                "added": true,
+                "unknown": "preserve-me",
+            }),
+            "env_key must not persist, cleared must be dropped, unknown preserved"
+        );
+    }
+
+    /// `three_way_merge` recurses into nested objects so a cleared nested field
+    /// is removed while untouched siblings keep their raw on-disk values.
+    #[test]
+    fn three_way_merge_recurses_into_nested_objects() {
+        use serde_json::json;
+        let base = json!({"section": {"keep": 1, "drop": 2, "edit": "a"}});
+        let raw = json!({"section": {"keep": 1, "drop": 2, "edit": "a"}});
+        let current = json!({"section": {"keep": 1, "edit": "b"}});
+        let merged = three_way_merge(&base, &raw, &current);
+        assert_eq!(
+            merged,
+            json!({"section": {"keep": 1, "edit": "b"}}),
+            "nested cleared key must be dropped, edit applied"
+        );
+    }
+
+    /// Regression for #326: an `ENE_` env-var override applies at runtime but
+    /// must NOT be baked into `settings.json` on save.
+    #[test]
+    fn env_override_not_persisted_on_save() {
+        let _guard = migration_guard();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("seed empty settings");
+
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
+        unsafe {
+            std::env::set_var("ENE_AI__TASKS__CHAT__MODEL", "gpt-env-override");
+        }
+
+        let config = extract_layered_config(&path).expect("load");
+        assert_eq!(
+            config.get_path("ai.tasks.chat.model"),
+            Some(serde_json::Value::String("gpt-env-override".to_string())),
+            "env override must apply at runtime"
+        );
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        unsafe {
+            std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
+        }
+
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(
+            saved.get("ai").is_none(),
+            "env override must not be persisted, got {json}"
+        );
+    }
+
+    /// Regression for #326: a genuine user change persists (layered onto the
+    /// raw JSON) while a concurrent env override stays transient.
+    #[test]
+    fn genuine_change_persists_but_env_override_does_not() {
+        let _guard = migration_guard();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, r#"{"user_name":"DiskName"}"#).expect("seed settings");
+
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
+        unsafe {
+            std::env::set_var("ENE_AI__TASKS__CHAT__MODEL", "gpt-env");
+        }
+
+        let mut config = extract_layered_config(&path).expect("load");
+        // A genuine user mutation (e.g. the UI changed the display name).
+        config.user_name = "ChangedByUser".to_string();
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        unsafe {
+            std::env::remove_var("ENE_AI__TASKS__CHAT__MODEL");
+        }
+
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            saved.get("user_name"),
+            Some(&serde_json::Value::String("ChangedByUser".to_string())),
+            "genuine user change must persist, got {json}"
+        );
+        assert!(
+            saved.get("ai").is_none(),
+            "env override must not be persisted, got {json}"
+        );
+    }
+
+    /// The saved document preserves the raw file's top-level key order, with
+    /// keys added during the session appended at the end (#326 / #331).
+    #[test]
+    fn save_preserves_raw_key_order() {
+        let _guard = migration_guard();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        // Deliberately out of alphabetical order: `zeta` before `alpha`.
+        std::fs::write(&path, r#"{"zeta":"first","alpha":"second"}"#).expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
+        // Simulate the desktop UI editing a value and adding a new top-level key.
+        config.user_name = "Edited".to_string();
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let keys: Vec<&String> = saved
+            .as_object()
+            .expect("saved doc is an object")
+            .keys()
+            .collect();
+        let zeta_pos = keys
+            .iter()
+            .position(|k| *k == "zeta")
+            .expect("zeta present");
+        let alpha_pos = keys
+            .iter()
+            .position(|k| *k == "alpha")
+            .expect("alpha present");
+        assert!(
+            zeta_pos < alpha_pos,
+            "raw key order must be preserved, got keys {keys:?}"
+        );
+    }
+
+    /// Regression for #326: saving an untouched config must not force default
+    /// values into `settings.json`; the raw JSON layer is written back as-is.
+    ///
+    /// The one exception is the `version` field, which the config-version
+    /// migration mechanism (#330) stamps explicitly on every document; a file
+    /// without it is treated as version 1.
+    #[test]
+    fn defaults_not_forced_to_disk_on_save() {
+        let _guard = migration_guard();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, r#"{"user_name":"OnlyThis"}"#).expect("seed settings");
+
+        let config = extract_layered_config(&path).expect("load");
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let keys: Vec<&str> = saved
+            .as_object()
+            .expect("saved config is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["$schema", "user_name", "version"],
+            "only the on-disk key, the auto-filled $schema, and the version stamp should remain, got {json}"
+        );
+    }
+
+    /// Regression for #326: clearing an optional field (here `user_persona`,
+    /// which `skip_serializing_if` omits when `None`) must be persisted — the
+    /// stale on-disk value must not survive a save/reload cycle.
+    #[test]
+    fn cleared_optional_field_is_removed_from_disk() {
+        let _guard = migration_guard();
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, r#"{"user_persona":{"name":"Alice"}}"#).expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
+        assert!(
+            config.user_persona.is_some(),
+            "persona should load from disk"
+        );
+        config.user_persona = None;
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert!(
+            saved.get("user_persona").is_none(),
+            "cleared optional field must be removed from disk, got {json}"
+        );
+        let mut config = EneConfig::default();
+        config
+            .set_path("ai.tasks.chat.model", "gpt-test")
+            .expect("set_path");
+        let value = config.get_path("ai.tasks.chat.model").expect("get_path");
+        assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
+    }
+
     /// A test-only settings section used to exercise `set_section` without
     /// pulling in another workspace crate (whose `define_config!` impl would
     /// be for a different copy of the `HasConfigKey` trait).
@@ -1564,10 +1944,16 @@ mod tests {
     /// never hand-write it, and the caller's config is left untouched.
     #[test]
     fn save_autofills_schema_without_mutating_caller() {
-        let config = EneConfig::default();
+        let _guard = migration_guard();
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
+        config.schema.clear();
         assert!(config.schema.is_empty(), "default schema starts empty");
 
-        let json = serialize_for_save(&config).expect("serialise for save");
+        let json = serialize_json_layer(&config, &path).expect("serialise for save");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(
             parsed.get("$schema").and_then(serde_json::Value::as_str),
@@ -1584,11 +1970,14 @@ mod tests {
     /// preserved verbatim on save (auto-fill only applies when empty).
     #[test]
     fn save_preserves_user_schema() {
-        let config = EneConfig {
-            schema: "./custom.schema.json".to_string(),
-            ..EneConfig::default()
-        };
-        let json = serialize_for_save(&config).expect("serialise for save");
+        let _guard = migration_guard();
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
+        config.schema = "./custom.schema.json".to_string();
+        let json = serialize_json_layer(&config, &path).expect("serialise for save");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert_eq!(
             parsed.get("$schema").and_then(serde_json::Value::as_str),
@@ -1600,7 +1989,13 @@ mod tests {
     /// preserved across a save (`IndexMap`, not alphabetical `BTreeMap`).
     #[test]
     fn section_order_preserved_on_save() {
-        let mut config = EneConfig::default();
+        let _guard = migration_guard();
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, r#"{"store":{},"ai":{},"mind":{},"desktop":{}}"#)
+            .expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
         // Insert in a deliberately non-alphabetical order.
         for section in ["store", "ai", "mind", "desktop"] {
             config.extra.insert(
@@ -1609,7 +2004,7 @@ mod tests {
             );
         }
 
-        let json = serialize_for_save(&config).expect("serialise for save");
+        let json = serialize_json_layer(&config, &path).expect("serialise for save");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         let keys: Vec<&str> = parsed
             .as_object()
@@ -1650,7 +2045,8 @@ mod tests {
     /// the subsequent save keeps it.
     #[test]
     fn load_then_save_restores_file_section_order() {
-        let _guard = ENV_LOCK
+        let _guard = migration_guard();
+        let _env_guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1669,7 +2065,7 @@ mod tests {
         );
 
         // …and the save keeps it.
-        let json = serialize_for_save(&config).expect("serialise for save");
+        let json = serialize_json_layer(&config, &path).expect("serialise for save");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         let section_keys: Vec<&str> = parsed
             .as_object()
@@ -1690,7 +2086,8 @@ mod tests {
     /// than being sorted into the middle of them.
     #[test]
     fn load_then_save_appends_new_section_after_recorded_order() {
-        let _guard = ENV_LOCK
+        let _guard = migration_guard();
+        let _env_guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1702,7 +2099,7 @@ mod tests {
             .set_path("plugins.enabled", "true")
             .expect("add a new section after load");
 
-        let json = serialize_for_save(&config).expect("serialise for save");
+        let json = serialize_json_layer(&config, &path).expect("serialise for save");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         let section_keys: Vec<&str> = parsed
             .as_object()
@@ -1725,7 +2122,8 @@ mod tests {
     /// fallback to defaults.
     #[test]
     fn set_schema_via_set_path_round_trips() {
-        let _guard = ENV_LOCK
+        let _guard = migration_guard();
+        let _env_guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -1752,24 +2150,30 @@ mod tests {
         );
 
         // Serialize → reload must succeed and carry the new value.
-        let json = serialize_for_save(&config).expect("serialise for save");
+        let json = serialize_json_layer(&config, &path).expect("serialise for save");
         std::fs::write(&path, json).expect("persist settings");
         let reloaded = load_full_config_from(&path).expect("reload must not hit duplicate $schema");
         assert_eq!(reloaded.schema, "./custom.schema.json");
     }
 
     /// Defensive: even if a stray `extra["$schema"]` is present in memory,
-    /// `serialize_for_save` must drop it so the declared field is never
+    /// `serialize_json_layer` must drop it so the declared field is never
     /// duplicated on disk.
     #[test]
     fn serialize_for_save_strips_stray_schema_from_extra() {
-        let mut config = EneConfig::default();
+        let _guard = migration_guard();
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").expect("seed settings");
+
+        let mut config = extract_layered_config(&path).expect("load");
+        config.schema.clear();
         config.extra.insert(
             "$schema".to_string(),
             serde_json::Value::String("./stray.schema.json".to_string()),
         );
 
-        let json = serialize_for_save(&config).expect("serialise for save");
+        let json = serialize_json_layer(&config, &path).expect("serialise for save");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         let obj = parsed.as_object().expect("object");
 

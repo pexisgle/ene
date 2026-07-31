@@ -21,6 +21,8 @@ export ENE_STORE__DB_PATH="/path/to/custom_memory.db"
 export ENE_MIND__PROACTIVE__INTERVAL_SECONDS="300"
 ```
 
+Environment-variable overrides are **transient**: they apply at runtime for the current process only and are never written back to `settings.json`. Saving the configuration persists only the JSON-layer values, so removing an `ENE_*` variable restores the underlying JSON/default value on the next launch (#326).
+
 ---
 
 ## 2. Configuration Sections
