@@ -32,7 +32,7 @@
 )]
 
 use ene_ai::{EmbeddingError, EmbeddingProvider, cosine_similarity, embed, embed_query};
-use ene_core::EmbeddingStorePort;
+use ene_core::{EmbeddingStorePort, ToolFailureSignalPort};
 use ene_plugin_proto::tool_types::EmbeddingField;
 use ene_plugin_proto::{ToolName, ToolRagProfile, ToolSpec};
 use parking_lot::RwLock;
@@ -170,6 +170,10 @@ pub struct ToolRagOptions {
     pub weights: FieldWeights,
     /// Cap how many tools per category may appear (`ToolCategory::config_key`).
     pub per_category_limits: HashMap<String, usize>,
+    /// Whether to down-weight tools with a recent failure memory (#349).
+    pub use_failure_feedback: bool,
+    /// Score multiplier applied to a recently-failed tool (#349).
+    pub failure_penalty: f32,
 }
 
 impl Default for ToolRagOptions {
@@ -189,6 +193,8 @@ impl Default for ToolRagOptions {
             ],
             weights: FieldWeights::default(),
             per_category_limits: HashMap::new(),
+            use_failure_feedback: true,
+            failure_penalty: 0.5,
         }
     }
 }
@@ -228,6 +234,8 @@ impl ToolRagOptions {
             forced,
             weights: FieldWeights::from(c.weights),
             per_category_limits: c.per_category_limits,
+            use_failure_feedback: c.use_failure_feedback,
+            failure_penalty: c.failure_penalty,
         })
     }
 }
@@ -257,6 +265,11 @@ pub struct ToolRag {
         reason = "Arc<Vec> is intentional: select clones the handle, not the embeddings"
     )]
     cached_field_rows: RwLock<Arc<Vec<CachedFieldRow>>>,
+    /// Optional source of recent tool-failure signals (#349). When present and
+    /// [`ToolRagOptions::use_failure_feedback`] is enabled, recently-failed
+    /// tools are down-weighted during selection. Read through a port so this
+    /// crate never depends on `ene-store`/`ene-mind`.
+    failure_signals: Option<Arc<dyn ToolFailureSignalPort>>,
 }
 
 impl ToolRag {
@@ -275,7 +288,19 @@ impl ToolRag {
             profiles: RwLock::new(HashMap::new()),
             last_specs_hash: AtomicU64::new(0),
             cached_field_rows: RwLock::new(Arc::new(Vec::new())),
+            failure_signals: None,
         }
+    }
+
+    /// Attach a source of recent tool-failure signals (#349).
+    ///
+    /// Consumes and returns `self` so it can be chained at construction. When
+    /// set (and [`ToolRagOptions::use_failure_feedback`] is enabled), selection
+    /// down-weights tools that recently failed for the queried character.
+    #[must_use]
+    pub fn with_failure_signals(mut self, source: Arc<dyn ToolFailureSignalPort>) -> Self {
+        self.failure_signals = Some(source);
+        self
     }
 
     /// Construct from a config-level `ToolRagConfig`.
@@ -309,6 +334,31 @@ impl ToolRag {
     /// Whether the pipeline has a backing embedding store.
     pub const fn has_store(&self) -> bool {
         self.store.is_some()
+    }
+
+    /// Tools that recently failed for `character_id`, when feedback is on (#349).
+    ///
+    /// Returns an empty set when failure feedback is disabled, no signal source
+    /// is wired, or the lookup fails — selection then proceeds without any
+    /// penalty rather than failing the whole query.
+    async fn recent_failures(&self, character_id: &str) -> HashSet<String> {
+        if !self.opts.use_failure_feedback {
+            return HashSet::new();
+        }
+        let Some(source) = self.failure_signals.as_ref() else {
+            return HashSet::new();
+        };
+        match source.recent_tool_failures(character_id).await {
+            Ok(tools) => tools.into_iter().collect(),
+            Err(e) => {
+                tracing::warn!(
+                    component = "ToolRag",
+                    error = %e,
+                    "Failed to read recent tool failures; continuing without feedback"
+                );
+                HashSet::new()
+            }
+        }
     }
 
     fn store_specs_and_profiles(&self, specs: &[ToolSpec], profiles: &[ToolRagProfile]) {
@@ -533,9 +583,13 @@ impl ToolRag {
     /// Select the most relevant tools for the given query.
     ///
     /// Pipeline: embed query → per-tool weighted field similarity →
-    /// category limits → `top_k` → optional cosine rerank → `final_n` + forced.
-    /// On embed failure, returns forced tools only (fail-closed).
-    pub async fn select(&self, query: &str) -> Vec<ToolSpec> {
+    /// recent-failure penalty → category limits → `top_k` → optional cosine
+    /// rerank → `final_n` + forced. On embed failure, returns forced tools only
+    /// (fail-closed).
+    ///
+    /// `character_id` scopes the recent-failure feedback (#349): tools that
+    /// recently failed for this character are down-weighted.
+    pub async fn select(&self, query: &str, character_id: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
             Ok(v) => v,
             Err(e) => {
@@ -548,14 +602,18 @@ impl ToolRag {
             }
         };
 
-        self.select_with_embedding(query, &query_vec).await
+        self.select_with_embedding(query, &query_vec, character_id)
+            .await
     }
 
     /// Select the most relevant tools using a pre-computed query embedding.
+    ///
+    /// `character_id` scopes the recent-failure feedback (#349).
     pub async fn select_with_embedding(
         &self,
         query: &str,
         query_embedding: &[f32],
+        character_id: &str,
     ) -> Vec<ToolSpec> {
         if is_zero_norm(query_embedding) {
             return self.forced_only_specs();
@@ -608,7 +666,11 @@ impl ToolRag {
         };
         let t_load = t_start.elapsed();
 
-        let scored = score_tools(
+        // Recent-failure feedback (#349): read the tools that recently failed
+        // for this character so their scores can be down-weighted below.
+        let failed_tools: HashSet<String> = self.recent_failures(character_id).await;
+
+        let mut scored = score_tools(
             &field_rows,
             query_embedding,
             &self.opts.weights,
@@ -617,8 +679,14 @@ impl ToolRag {
             &self.profiles.read(),
         );
 
+        apply_failure_penalty(
+            &mut scored,
+            &failed_tools,
+            self.opts.failure_penalty,
+            self.opts.min_similarity,
+        );
+
         // Cap to top_k before rerank.
-        let mut scored = scored;
         if scored.len() > self.opts.top_k {
             scored.truncate(self.opts.top_k);
         }
@@ -875,6 +943,31 @@ fn score_tools(
     }
 
     scored
+}
+
+/// Down-weight tools that recently failed for the queried character (#349).
+///
+/// Multiplies the score of each recently-failed tool by `penalty` (clamped to
+/// `[0, 1]`), then drops any tool that falls below `min_similarity`. Tools that
+/// stay above the threshold are kept but ranked lower, so a tool that keeps
+/// failing is less likely to be re-selected without being hard-excluded.
+fn apply_failure_penalty(
+    scored: &mut Vec<(String, f32)>,
+    failed_tools: &HashSet<String>,
+    penalty: f32,
+    min_similarity: f32,
+) {
+    if failed_tools.is_empty() {
+        return;
+    }
+    let penalty = penalty.clamp(0.0, 1.0);
+    for (tool, score) in scored.iter_mut() {
+        if failed_tools.contains(tool) {
+            *score *= penalty;
+        }
+    }
+    scored.retain(|(_, score)| *score >= min_similarity);
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 }
 
 /// Compute a content-based version hash for a single field.
@@ -1281,6 +1374,63 @@ mod tests {
             "example count must not change the score: one={} many={}",
             one[0].1,
             many[0].1
+        );
+    }
+
+    // ── #349 failure-feedback tests ────────────────────────────────────────
+
+    #[test]
+    fn apply_failure_penalty_downweights_failed_tool() {
+        let mut scored = vec![("a".to_string(), 0.8), ("b".to_string(), 0.6)];
+        let failed = HashSet::from(["a".to_string()]);
+        apply_failure_penalty(&mut scored, &failed, 0.5, 0.0);
+        // "a" is penalized to 0.4, dropping below "b" (0.6).
+        assert_eq!(scored[0].0, "b");
+        let a = scored.iter().find(|(t, _)| t == "a").map(|(_, s)| *s);
+        assert_eq!(a, Some(0.4));
+    }
+
+    #[test]
+    fn apply_failure_penalty_drops_tool_below_min_similarity() {
+        let mut scored = vec![("a".to_string(), 0.5), ("b".to_string(), 0.6)];
+        let failed = HashSet::from(["a".to_string()]);
+        // Penalty pushes "a" to 0.25, below the 0.3 threshold → removed.
+        apply_failure_penalty(&mut scored, &failed, 0.5, 0.3);
+        assert_eq!(scored.len(), 1);
+        assert_eq!(scored[0].0, "b");
+    }
+
+    #[test]
+    fn apply_failure_penalty_noop_without_failures() {
+        let mut scored = vec![("a".to_string(), 0.8), ("b".to_string(), 0.6)];
+        apply_failure_penalty(&mut scored, &HashSet::new(), 0.5, 0.0);
+        assert_eq!(scored, vec![("a".to_string(), 0.8), ("b".to_string(), 0.6)]);
+    }
+
+    /// #349: a recently-failed tool is down-weighted end-to-end through the
+    /// scoring + penalty composition, so it ranks below an equally-relevant
+    /// tool with no recent failure.
+    #[test]
+    fn recent_failure_lowers_tool_ranking_end_to_end() {
+        let query = vec![1.0, 0.0];
+        // Both tools are equally relevant on their summary field.
+        let rows = vec![
+            row("a", EmbeddingField::Summary, vec![1.0, 0.0]),
+            row("b", EmbeddingField::Summary, vec![1.0, 0.0]),
+        ];
+        let weights = FieldWeights::default();
+        let mut scored = score_tools(
+            &rows,
+            &query,
+            &weights,
+            0.0,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        apply_failure_penalty(&mut scored, &HashSet::from(["a".to_string()]), 0.5, 0.0);
+        assert_eq!(
+            scored[0].0, "b",
+            "the tool without a recent failure must outrank the failed one"
         );
     }
 }

@@ -59,3 +59,35 @@ Memory persistence operates asynchronously to keep turn latencies low:
 
 ### Forgetting Anchor
 Forgetting decay measures from the memory's last **content update** (`updated_at`), not from when it was last recalled (`last_accessed_at`). Recall recency (which ranks candidates) still uses `last_accessed_at`, but the two are deliberately separate: a memory being recalled must not reset the clock on its own forgetting. If it did, a frequently-recalled memory could never reach the fade threshold, and recall would simultaneously raise a memory's score *and* shield it from forgetting — a self-reinforcing loop (#345). Editing a memory's content refreshes `updated_at` and legitimately keeps it alive; merely recalling it does not.
+
+---
+
+## 5. Tool-Derived Memory Guardrails
+
+Memories extracted from tool execution results — most notably the `Reflection`
+records written when a tool call fails (`persist_failure_reflection`, on by
+default) — are inherently noisy: the same tool can fail on every turn with a
+*different* error message, so content-based deduplication alone never matches.
+Left unchecked these records accumulate without bound. Two guardrails keep them
+in check without touching unrelated memory kinds:
+
+- **Stable-key supersede dedup.** Tool-derived candidates are keyed on their
+  stable `(kind, title)` pair (e.g. `Reflection` + `tool failure:{tool_name}`)
+  rather than their volatile content. When a new candidate matches an existing
+  active record on that key, the arbiter *supersedes* the prior record instead
+  of inserting a duplicate, so repeated failures of the same tool collapse into
+  a single, always-current memory row.
+- **Lightweight validity check.** Before a tool-derived candidate is persisted
+  it must pass a validity gate: the tool named in its title must actually have
+  been invoked during the turn, and its content must carry more than boilerplate
+  failure text. Candidates that fail the gate are rejected outright.
+
+### Failure feedback in tool selection
+
+The recall side closes the loop: the tool-selection pipeline in `ene-rag` can
+down-weight tools that have recently failed for the active character. Recent
+failures are read through the `ene_core::ToolFailureSignalPort` abstraction
+(implemented by `ene-store`), and a configurable penalty
+(`tools.rag.use_failure_feedback` / `tools.rag.failure_penalty`) is applied to
+their scores before ranking. This keeps `ene-rag` free of any persistence
+dependency while still letting a consistently-failing tool sink in the ranking.

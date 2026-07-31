@@ -368,6 +368,7 @@ pub(crate) async fn select_relevant_tools(
     user_input: &str,
     query_embedding: Option<&[f32]>,
     tool_calling_enabled: bool,
+    character_id: &str,
 ) -> Vec<ene_plugin_proto::ToolSpec> {
     if !tool_calling_enabled {
         return vec![];
@@ -395,9 +396,9 @@ pub(crate) async fn select_relevant_tools(
         let select_fut: std::pin::Pin<
             Box<dyn std::future::Future<Output = Vec<ene_plugin_proto::ToolSpec>> + Send>,
         > = if let Some(emb) = query_embedding {
-            Box::pin(rag.select_with_embedding(user_input, emb))
+            Box::pin(rag.select_with_embedding(user_input, emb, character_id))
         } else {
-            Box::pin(rag.select(user_input))
+            Box::pin(rag.select(user_input, character_id))
         };
         if let Ok(tools) = tokio::time::timeout(rag_timeout, select_fut).await {
             tools
@@ -1056,7 +1057,7 @@ mod tests {
             }
         }
         let registry = DummyRegistry;
-        let tools = select_relevant_tools(&registry, None, "test", None, true).await;
+        let tools = select_relevant_tools(&registry, None, "test", None, true, "ene").await;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name.as_str(), "system.search_tools");
     }

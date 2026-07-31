@@ -268,6 +268,8 @@ event:
       "enabled": true,
       "top_k": 12,
       "min_similarity": 0.20,
+      "use_failure_feedback": true,
+      "failure_penalty": 0.5,
       "weights": {
         "summary": 1.0,
         "description": 0.6,
@@ -287,6 +289,14 @@ floor for that average; `weights.negative_threshold` (default `0.70`) is the
 gate at which a tool's negative-example embedding excludes it outright — a
 tool that matches its own negative example this strongly is filtered, not
 penalized.
+
+When `use_failure_feedback` (default `true`) is enabled, tools that recently
+failed for the active character are down-weighted: their score is multiplied by
+`(1 - failure_penalty)` (default `0.5`) before ranking, and a tool pushed below
+`min_similarity` by the penalty is dropped. Recent failures are read through
+`ene_core::ToolFailureSignalPort` (implemented by `ene-store`), so the pipeline
+stays free of a persistence dependency — see
+[Memory System §5](concepts/memory-system.md#5-tool-derived-memory-guardrails).
 
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 

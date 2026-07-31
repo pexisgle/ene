@@ -250,6 +250,8 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
       "enabled": true,
       "top_k": 12,
       "min_similarity": 0.20,
+      "use_failure_feedback": true,
+      "failure_penalty": 0.5,
       "weights": {
         "summary": 1.0,
         "description": 0.6,
@@ -269,6 +271,14 @@ Tool RAG は各ツールを、そのフィールドごとの埋め込み類似�
 ツールのネガティブ例埋め込みがこの値以上に一致した場合にそのツールを完全に
 除外するゲートです — 自身のネガティブ例と強く一致するツールはペナルティ
 ではなく除外されます。
+
+`use_failure_feedback`（デフォルト `true`）が有効な場合、アクティブなキャラクターに
+対して最近失敗したツールの重みが下がります：そのスコアはランキング前に
+`(1 - failure_penalty)`（デフォルト `0.5`）倍され、ペナルティによって
+`min_similarity` を下回ったツールは除外されます。最近の失敗は
+`ene_core::ToolFailureSignalPort`（`ene-store` が実装）経由で読み取られるため、
+パイプラインは永続化への依存を持ちません — 詳細は
+[記憶システム §5](concepts/memory-system.md#5-ツール由来記憶のガードレール) を参照してください。
 
 ### `desktop.*` — デスクトップ GUI およびグラフィックスパラメータ
 

@@ -612,6 +612,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     recall_query,
                     query_embedding.as_deref(),
                     tool_calling_enabled,
+                    &card_name,
                 )
                 .instrument(tools_span),
                 CharacterProcessor::select_style_examples(

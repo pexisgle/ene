@@ -330,3 +330,36 @@ pub trait EmbeddingStorePort: Send + Sync {
         source_text: &str,
     ) -> Result<(), EmbeddingStorePortError>;
 }
+
+/// Error type for [`ToolFailureSignalPort`] operations (#349).
+#[derive(Debug, Error)]
+pub enum ToolFailureSignalPortError {
+    /// The backing store rejected or failed an operation.
+    #[error("tool failure signal backend error: {0}")]
+    Backend(String),
+}
+
+/// Read-only access to recent tool-failure signals for tool selection (#349).
+///
+/// Tool-grounding memories (`tool failure:{tool}`) record that a tool failed
+/// for a character. The tool-selection RAG pipeline (`ene-rag`) reads these
+/// signals through this port so it can down-weight tools that recently failed,
+/// learning "this tool failed for this use" without `ene-rag` depending on
+/// `ene-mind` or `ene-store`. The dependency points the safe way: `ene-rag`
+/// depends on `ene-core` (this trait), and `ene-store` implements it — the
+/// same arrangement as [`EmbeddingStorePort`] (#302), which keeps a cycle
+/// compile-time impossible.
+#[async_trait]
+pub trait ToolFailureSignalPort: Send + Sync {
+    /// Returns the namespaced tool names that have a recent, active
+    /// `tool failure:{tool}` reflection memory for `character_id`.
+    ///
+    /// "Recent" and "active" are defined by the implementor (typically:
+    /// `Reflection` memories whose title starts with `tool failure:` and whose
+    /// status is recallable). Failures are returned without ordering or count
+    /// guarantees beyond "recent"; the caller decides how strongly to react.
+    async fn recent_tool_failures(
+        &self,
+        character_id: &str,
+    ) -> Result<Vec<String>, ToolFailureSignalPortError>;
+}

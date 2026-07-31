@@ -18,7 +18,8 @@ use ene_core::{
     ActiveSceneSummaryRow, AffectState, Commitment, EmbeddingStorePort, EmbeddingStorePortError,
     GatheredCandidate, MemoryItem, MemoryKind, MemoryPort, MemoryPortError, MemoryStatus,
     NaturalDecayReport, NewCommitment, NewMemoryItem, NewMemorySpan, PendingAffectProposal,
-    PendingCandidate, PendingMemoryWrite, Query, ToolEmbeddingFieldRow,
+    PendingCandidate, PendingMemoryWrite, Query, ToolEmbeddingFieldRow, ToolFailureSignalPort,
+    ToolFailureSignalPortError,
 };
 
 use crate::error::EneMemoryError;
@@ -319,5 +320,21 @@ impl EmbeddingStorePort for MemoryStore {
             source_text,
         )
         .await?)
+    }
+}
+
+impl From<EneMemoryError> for ToolFailureSignalPortError {
+    fn from(err: EneMemoryError) -> Self {
+        Self::Backend(err.to_string())
+    }
+}
+
+#[async_trait]
+impl ToolFailureSignalPort for MemoryStore {
+    async fn recent_tool_failures(
+        &self,
+        character_id: &str,
+    ) -> Result<Vec<String>, ToolFailureSignalPortError> {
+        Ok(Self::recent_tool_failures(self, character_id).await?)
     }
 }
