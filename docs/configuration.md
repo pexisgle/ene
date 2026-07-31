@@ -91,6 +91,23 @@ available = min(model_window, context_window)
 }
 ```
 
+Local models default `context_size` to 16,384 tokens (#366), calibrated to hold
+the system's own default prompt budget (`mind.context.max_prompt_tokens` =
+12,000) plus the model's reply. The previous default of 2,048 was sized for
+small decision tasks and silently dropped most prompt sections once a local
+model carried the main conversation. 16K is chosen over 32K to keep the
+llama.cpp KV cache realistic (~2.3 GB vs ~4.6 GB for a Gemma-3-4B-class model,
+on top of the weights); a model used only for decision workloads can lower
+`context_size` explicitly.
+
+At startup the runtime validates each generative task's window (`chat`, plus
+`proactive` when configured) against what it needs — the prompt budget plus the
+response reserve (`tasks.<task>.max_tokens`) — and logs a warning when the
+configured window is too small, since prompt sections would otherwise be
+dropped every turn without any visible signal. Cloud tasks without an explicit
+`context_window` override are validated at runtime instead, once the provider
+reports its real window.
+
 #### Token usage accounting (#365)
 
 Every completion carries an optional token-usage record — `prompt_tokens`,

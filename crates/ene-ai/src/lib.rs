@@ -88,9 +88,10 @@ pub use openai::{
     create_chat_provider_from_resolved, create_task_chat_provider,
 };
 pub use resolve::{
-    ChatCandidate, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel, ResolvedStt,
-    ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue, needs_onboarding, resolve_base_url,
-    validate_api_key, validate_provider_kinds, validate_settings,
+    ChatCandidate, ContextBudgetIssue, ResolvedChat, ResolvedEmbedding, ResolvedLocalModel,
+    ResolvedStt, ResolvedTaskRef, ResolvedTts, ResolvedVad, SettingsIssue, needs_onboarding,
+    resolve_base_url, validate_api_key, validate_context_budgets, validate_provider_kinds,
+    validate_settings, warn_on_context_budget_issues,
 };
 pub use retry::RetryPolicy;
 pub use role::Role;

@@ -327,6 +327,15 @@ impl EneHandle {
         let mind = config.get_section::<ene_mind::MindConfig>()?;
         ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
 
+        // Startup validation (#366): warn when a configured context window is
+        // too small for the prompt budget plus output reserve, since prompt
+        // sections would otherwise be silently dropped every turn.
+        {
+            let ai_config = config.get_section::<ene_ai::AiConfig>()?;
+            let prompt_budget = u32::try_from(mind.context.max_prompt_tokens).unwrap_or(u32::MAX);
+            ene_ai::warn_on_context_budget_issues(&ai_config, prompt_budget);
+        }
+
         let mem_config = config.get_section::<ene_store::StoreConfig>()?;
         let plugin_config = config.get_section::<ene_plugin_host::PluginConfig>()?;
         let rag_config = config.get_section::<ToolRagConfig>()?;
