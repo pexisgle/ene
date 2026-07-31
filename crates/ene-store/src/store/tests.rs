@@ -2409,6 +2409,8 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
         .await
         .unwrap();
     assert_eq!(results.len(), 1, "new vectors must be searchable");
+}
+
 // ── #426: audit_log session_id and session export tool history ──
 
 /// Builds a [`crate::NewAuditEntry`] for test use.
