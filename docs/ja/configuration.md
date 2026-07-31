@@ -60,6 +60,38 @@ export ENE_MIND__PROACTIVE__INTERVAL_SECONDS="300"
 }
 ```
 
+各プロバイダエントリには、任意で `context_window`（整数、トークン単位）を設定でき、
+バックエンドが申告するコンテキストウィンドウに上限を設けられます (#364)。
+有効ウィンドウは `min(advertised, context_window)` となるため、オーバーライドは
+モデルの公称上限を「縮小」できるだけであって、決して上回ることはできません。
+省略すれば、完全にプロバイダの申告に従います。プラグインプロバイダは
+`LlmProviderSpec.context_window` 経由でウィンドウを申告し、ローカルモデルは
+`LocalModelDef.context_size` を報告します。ランタイムはこの有効ウィンドウから、
+モデルの応答用の余地としてタスクの `max_tokens`（`tasks.<task>.max_tokens`）を
+予約し、さらにトークン推定の誤差を吸収するための安全マージンを差し引いて、
+残りをプロンプトの予算とします：
+
+```
+available = min(model_window, context_window)
+          − response_reserve    // tasks.<task>.max_tokens
+          − safety_margin       // 推定誤差。usage が計測되면ほぼ 0 (#365)
+```
+
+```json
+{
+  "ai": {
+    "providers": {
+      "openai": {
+        "kind": "openai",
+        "api_key": "sk-...",
+        "base_url": "https://api.openai.com/v1",
+        "context_window": 32000
+      }
+    }
+  }
+}
+```
+
 ### `store.*` — データベースおよびベクトル永続化
 
 SQLite データベースの永続化、整合性チェック、およびバックアップ保持制御 (#239)：

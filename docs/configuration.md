@@ -60,6 +60,37 @@ Contains provider definitions, task routing, retry/fallback rules, and voice (ST
 }
 ```
 
+Each provider entry may set an optional `context_window` (integer, tokens) to
+cap the context window the backend advertises (#364). The effective window is
+`min(advertised, context_window)`, so an override can only *shrink* a model's
+stated limit, never exceed it; omit it to defer entirely to the provider. A
+plugin provider advertises its window through `LlmProviderSpec.context_window`,
+and a local model reports `LocalModelDef.context_size`. From that effective
+window the runtime reserves the task's `max_tokens` (`tasks.<task>.max_tokens`)
+as headroom for the model's reply, plus a safety margin that absorbs
+token-estimation error, and budgets the prompt against what remains:
+
+```
+available = min(model_window, context_window)
+          − response_reserve    // tasks.<task>.max_tokens
+          − safety_margin       // estimation error; ~0 once usage is measured (#365)
+```
+
+```json
+{
+  "ai": {
+    "providers": {
+      "openai": {
+        "kind": "openai",
+        "api_key": "sk-...",
+        "base_url": "https://api.openai.com/v1",
+        "context_window": 32000
+      }
+    }
+  }
+}
+```
+
 ### `store.*` — Database & Memory Persistence
 
 Controls SQLite database persistence, integrity checks, and backup retention (#239):

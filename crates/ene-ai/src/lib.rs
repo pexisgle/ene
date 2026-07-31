@@ -25,6 +25,10 @@
 
 /// Configuration types for AI providers, tasks, and retry policies.
 pub mod config;
+/// Effective context-window computation: reconciling the provider-advertised
+/// and user-configured windows, then reserving headroom for the response and
+/// for token-estimation error (#364).
+pub mod context_window;
 /// Blanket async-provider adapters over `ene-infer::EngineHandle`
 /// (`LocalLlmEngine`, `LocalTtsEngine`, `LocalSttEngine`), plus
 /// `EngineDescriptor` capability/concurrency/resource declarations and the
@@ -57,6 +61,9 @@ pub use config::{
     AiConfig, AiProviderDef, AiTasksConfig, ApiKeyConfig, BUILTIN_PROVIDER_KINDS, FallbackConfig,
     LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
     TtsConfig, VadConfig, is_builtin_kind, kind_typo_suggestion,
+};
+pub use context_window::{
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_SAFETY_MARGIN_FRACTION, EffectiveWindow, effective_window,
 };
 pub use engine_adapter::{
     Capability, CapabilitySet, ConcurrencyHint, DEFAULT_CHUNK_BUFFER, EngineDescriptor, EngineId,

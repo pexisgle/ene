@@ -239,6 +239,8 @@ impl LlmPlugin for AnthropicPlugin {
                 max_in_flight: 8,
                 queue_depth: 16,
             },
+            // Claude models expose a 200k-token context window (#364).
+            context_window: Some(200_000),
         }]
     }
 
