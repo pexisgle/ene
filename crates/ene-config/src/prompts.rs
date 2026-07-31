@@ -1,8 +1,19 @@
 //! Prompt template management with multi-language support.
 //!
-//! Prompt strings are loaded from `assets/prompts/{lang}.json` at runtime,
-//! keeping all user-facing LLM instructions out of compiled code and enabling
-//! future localisation without recompilation.
+//! Prompt strings are loaded at runtime from `assets/lang/{lang}/prompts.json`
+//! (see [`crate::paths::prompt_pack_path`]), keeping all user-facing LLM
+//! instructions out of compiled code and enabling localisation without
+//! recompilation. Adding a language is a matter of dropping a new
+//! `assets/lang/{lang}/` directory containing a `prompts.json` pack — no Rust
+//! code changes to the loading path are required. Listing the code in
+//! [`SUPPORTED_LANGUAGES`] additionally embeds a compile-time fallback so the
+//! language still works when the asset is missing.
+//!
+//! When a runtime pack is missing or unreadable (e.g. during unit tests or CI,
+//! where no assets directory is deployed), [`PromptLibrary::load`] falls back to
+//! the compile-time embedded pack for that language. Only the languages in
+//! [`SUPPORTED_LANGUAGES`] carry an embedded fallback; an unsupported language
+//! code falls back to English.
 //!
 //! # Usage
 //!
@@ -15,7 +26,39 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Strongly typed prompt library layout mapping to `assets/prompts/{lang}.json`.
+/// Language codes that ship a compile-time embedded prompt pack and can
+/// therefore be served even when no runtime asset is present.
+///
+/// This list governs **only** the offline fallback. The runtime loader is fully
+/// data-driven: any language with an `assets/lang/{code}/prompts.json` pack
+/// loads at runtime whether or not it appears here, so adding a runtime-only
+/// language requires no Rust code changes — just a new asset directory. A code
+/// is added here only when it should also survive a missing/corrupt asset.
+pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "ja"];
+
+/// Resolves a free-form language tag to the directory code used under
+/// `assets/lang/`.
+///
+/// Matching is case-insensitive and keeps only the primary subtag, so `"ja"`,
+/// `"JA"`, and `"ja-JP"` all resolve to `"ja"`. The legacy alias `"jp"` also
+/// maps to `"ja"`. The result is not validated against the filesystem; the
+/// caller attempts a runtime load and falls back if the pack is absent.
+fn resolve_language_alias(lang: &str) -> String {
+    let primary = lang.split(['-', '_']).next().unwrap_or_default();
+    let lower = primary.to_ascii_lowercase();
+    if lower == "jp" {
+        "ja".to_string()
+    } else {
+        lower
+    }
+}
+
+/// Whether `code` has a compile-time embedded pack to fall back to.
+fn is_embedded_language(code: &str) -> bool {
+    SUPPORTED_LANGUAGES.contains(&code)
+}
+
+/// Strongly typed prompt library layout mapping to `assets/lang/{lang}/prompts.json`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PromptLibraryData {
     /// System prompts configuration.
@@ -459,299 +502,273 @@ pub struct PromptLibrary {
     lang: String,
 }
 
+/// Builds a [`PromptLibrary`] from the compile-time embedded pack for `$lang`.
+///
+/// The short header strings come from `prompts/{lang}.json`; the longer prompt
+/// bodies are pulled in verbatim from the `prompts/{lang}/**/*.md` files via
+/// `include_str!`. These are the exact inputs used to generate the runtime
+/// `assets/lang/{lang}/prompts.json` packs, so the embedded fallback and the
+/// shipped asset stay byte-for-byte identical.
+macro_rules! embedded_pack {
+    ($lang:literal) => {{
+        // The bundled JSON is checked into the repository and is part of the
+        // build artifact. A parse failure here is a release-blocker bug, not
+        // a runtime condition we can recover from.
+        #[expect(
+            clippy::expect_used,
+            reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
+        )]
+        let raw: RawPromptLibraryData = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/prompts/",
+            $lang,
+            ".json"
+        )))
+        .expect("bundled prompt metadata is a release-blocker if invalid");
+
+        let system = SystemPrompts {
+            mascot_context: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/",
+                $lang,
+                "/system/mascot_context.md"
+            ))
+            .to_string(),
+            behavior_rules_header: raw.system.behavior_rules_header,
+            character_header: raw.system.character_header,
+            personality_header: raw.system.personality_header,
+            background_header: raw.system.background_header,
+            scene_header: raw.system.scene_header,
+            examples_header: raw.system.examples_header,
+        };
+
+        let emotion = EmotionPrompts {
+            header: raw.emotion.header,
+            rule: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/",
+                $lang,
+                "/emotion/rule.md"
+            ))
+            .to_string(),
+            token_header: raw.emotion.token_header,
+            examples_header: raw.emotion.examples_header,
+            example_happy: raw.emotion.example_happy,
+            example_sad: raw.emotion.example_sad,
+            example_angry: raw.emotion.example_angry,
+            example_neutral: raw.emotion.example_neutral,
+            natural_dialogue_contract: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/",
+                $lang,
+                "/emotion/natural_dialogue_contract.md"
+            ))
+            .to_string(),
+        };
+
+        let summarizer = SummarizerPrompts {
+            system: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/",
+                $lang,
+                "/summarizer/system.md"
+            ))
+            .to_string(),
+            user_prompt: include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/prompts/",
+                $lang,
+                "/summarizer/user_prompt.md"
+            ))
+            .to_string(),
+            no_facts_placeholder: raw.summarizer.no_facts_placeholder,
+        };
+
+        let data = PromptLibraryData {
+            system,
+            emotion,
+            memory: raw.memory,
+            summarizer,
+            split: raw.split,
+            extractor: ExtractorPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/extractor/system.md"
+                ))
+                .to_string(),
+                user_prompt: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/extractor/user_prompt.md"
+                ))
+                .to_string(),
+            },
+            affect_classifier: AffectClassifierPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/affect_classifier/system.md"
+                ))
+                .to_string(),
+                user_prompt: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/affect_classifier/user_prompt.md"
+                ))
+                .to_string(),
+            },
+            proactive: ProactivePrompts {
+                decision_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/decision_system.md"
+                ))
+                .to_string(),
+                generation_hint_idle: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/generation_hint_idle.md"
+                ))
+                .to_string(),
+                generation_hint_with_topic: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/generation_hint_with_topic.md"
+                ))
+                .to_string(),
+                screen_summary_system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/screen_summary_system.md"
+                ))
+                .to_string(),
+                screen_summary_user: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/proactive/screen_summary_user.md"
+                ))
+                .to_string(),
+            },
+            compression: CompressionPrompts {
+                system: include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/prompts/",
+                    $lang,
+                    "/compression/system.md"
+                ))
+                .to_string(),
+            },
+        };
+
+        PromptLibrary {
+            data,
+            lang: $lang.to_string(),
+        }
+    }};
+}
+
 impl PromptLibrary {
     /// Loads the prompt library for the given language code (e.g. `"en"`).
     ///
-    /// Falls back to the built-in English defaults if the language code is not supported.
+    /// The runtime pack at `assets/lang/{lang}/prompts.json` is preferred so
+    /// that prompt text can be edited or localised without recompiling. When
+    /// that pack is missing or unreadable, the compile-time embedded pack for
+    /// the language is used instead (see [`SUPPORTED_LANGUAGES`]). Languages
+    /// are matched case-insensitively by primary subtag (the legacy alias
+    /// `"jp"` maps to `"ja"`); a language with neither a runtime pack nor an
+    /// embedded fallback falls back to English.
     pub fn load(lang: &str) -> Self {
-        match lang {
-            "ja" | "jp" => Self::built_in_japanese(),
+        Self::load_from(crate::paths::assets_dir(), lang)
+    }
+
+    /// Loads the prompt library for `lang`, resolving the runtime pack against
+    /// an explicit base assets directory (`base/lang/{code}/prompts.json`).
+    ///
+    /// This is the testable core of [`PromptLibrary::load`]; production callers
+    /// use `load`, which passes the process-wide [`crate::paths::assets_dir`].
+    fn load_from(base: &std::path::Path, lang: &str) -> Self {
+        let code = resolve_language_alias(lang);
+        match Self::load_from_assets(base, &code) {
+            Ok(lib) => lib,
+            Err(err) => {
+                if is_embedded_language(&code) {
+                    tracing::debug!(
+                        language = %code,
+                        error = %err,
+                        "runtime prompt pack unavailable; using embedded fallback"
+                    );
+                    Self::built_in(&code)
+                } else {
+                    tracing::warn!(
+                        language = %code,
+                        error = %err,
+                        "no runtime prompt pack and no embedded fallback; using English"
+                    );
+                    Self::built_in_english()
+                }
+            }
+        }
+    }
+
+    /// Reads and parses the runtime prompt pack for `code` from
+    /// `base/lang/{code}/prompts.json`.
+    fn load_from_assets(base: &std::path::Path, code: &str) -> Result<Self, crate::EneConfigError> {
+        let path = crate::paths::prompt_pack_path_in(base, code);
+        let contents = std::fs::read_to_string(&path).map_err(|source| {
+            crate::EneConfigError::PromptPackRead {
+                path: path.display().to_string(),
+                source,
+            }
+        })?;
+        let data: PromptLibraryData = serde_json::from_str(&contents)?;
+        Ok(Self {
+            data,
+            lang: code.to_string(),
+        })
+    }
+
+    /// Returns the compile-time embedded pack for a language code.
+    ///
+    /// These are the same strings shipped under `assets/lang/{code}/` but
+    /// embedded at compile time as a fallback so the application works even
+    /// when assets are missing (e.g. during unit tests or CI). Embedded packs
+    /// are necessarily static, so only [`SUPPORTED_LANGUAGES`] are available
+    /// here; any other code falls back to English.
+    pub fn built_in(code: &str) -> Self {
+        match resolve_language_alias(code).as_str() {
+            "ja" => Self::built_in_japanese(),
             _ => Self::built_in_english(),
         }
     }
 
     /// Returns the built-in compile-time English defaults.
     ///
-    /// These are the same strings shipped in `assets/prompts/en.json` but
+    /// These are the same strings shipped in `assets/lang/en/prompts.json` but
     /// embedded at compile time as a fallback so the application works even
     /// when assets are missing (e.g. during unit tests or CI).
     pub fn built_in_english() -> Self {
-        // The bundled JSON is checked into the repository and is part of the
-        // build artifact. A parse failure here is a release-blocker bug, not
-        // a runtime condition we can recover from.
-        #[expect(
-            clippy::expect_used,
-            reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
-        )]
-        let raw: RawPromptLibraryData = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/en.json"
-        )))
-        .expect("bundled en.json is a release-blocker if invalid");
-
-        let system = SystemPrompts {
-            mascot_context: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/en/system/mascot_context.md"
-            ))
-            .to_string(),
-            behavior_rules_header: raw.system.behavior_rules_header,
-            character_header: raw.system.character_header,
-            personality_header: raw.system.personality_header,
-            background_header: raw.system.background_header,
-            scene_header: raw.system.scene_header,
-            examples_header: raw.system.examples_header,
-        };
-
-        let emotion = EmotionPrompts {
-            header: raw.emotion.header,
-            rule: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/en/emotion/rule.md"
-            ))
-            .to_string(),
-            token_header: raw.emotion.token_header,
-            examples_header: raw.emotion.examples_header,
-            example_happy: raw.emotion.example_happy,
-            example_sad: raw.emotion.example_sad,
-            example_angry: raw.emotion.example_angry,
-            example_neutral: raw.emotion.example_neutral,
-            natural_dialogue_contract: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/en/emotion/natural_dialogue_contract.md"
-            ))
-            .to_string(),
-        };
-
-        let summarizer = SummarizerPrompts {
-            system: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/en/summarizer/system.md"
-            ))
-            .to_string(),
-            user_prompt: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/en/summarizer/user_prompt.md"
-            ))
-            .to_string(),
-            no_facts_placeholder: raw.summarizer.no_facts_placeholder,
-        };
-
-        let data = PromptLibraryData {
-            system,
-            emotion,
-            memory: raw.memory,
-            summarizer,
-            split: raw.split,
-            extractor: ExtractorPrompts {
-                system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/extractor/system.md"
-                ))
-                .to_string(),
-                user_prompt: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/extractor/user_prompt.md"
-                ))
-                .to_string(),
-            },
-            affect_classifier: AffectClassifierPrompts {
-                system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/affect_classifier/system.md"
-                ))
-                .to_string(),
-                user_prompt: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/affect_classifier/user_prompt.md"
-                ))
-                .to_string(),
-            },
-            proactive: ProactivePrompts {
-                decision_system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/proactive/decision_system.md"
-                ))
-                .to_string(),
-                generation_hint_idle: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/proactive/generation_hint_idle.md"
-                ))
-                .to_string(),
-                generation_hint_with_topic: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/proactive/generation_hint_with_topic.md"
-                ))
-                .to_string(),
-                screen_summary_system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/proactive/screen_summary_system.md"
-                ))
-                .to_string(),
-                screen_summary_user: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/proactive/screen_summary_user.md"
-                ))
-                .to_string(),
-            },
-            compression: CompressionPrompts {
-                system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/en/compression/system.md"
-                ))
-                .to_string(),
-            },
-        };
-
-        Self {
-            data,
-            lang: "en".to_string(),
-        }
+        embedded_pack!("en")
     }
 
     /// Returns the built-in compile-time Japanese defaults.
     ///
-    /// These are the same strings shipped in `assets/prompts/ja.json` but
+    /// These are the same strings shipped in `assets/lang/ja/prompts.json` but
     /// embedded at compile time as a fallback.
-    // TODO(M7): `built_in_english` and `built_in_japanese` share ~125 lines of
-    // identical structure, differing only in the language code and `include_str!`
-    // paths. Parameterise by language code (e.g. a `built_in_lang(lang: &str)`
-    // helper or a macro) to eliminate this duplication.
     pub fn built_in_japanese() -> Self {
-        // The bundled JSON is checked into the repository and is part of the
-        // build artifact. A parse failure here is a release-blocker bug, not
-        // a runtime condition we can recover from.
-        #[expect(
-            clippy::expect_used,
-            reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
-        )]
-        let raw: RawPromptLibraryData = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/prompts/ja.json"
-        )))
-        .expect("bundled ja.json is a release-blocker if invalid");
-
-        let system = SystemPrompts {
-            mascot_context: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/ja/system/mascot_context.md"
-            ))
-            .to_string(),
-            behavior_rules_header: raw.system.behavior_rules_header,
-            character_header: raw.system.character_header,
-            personality_header: raw.system.personality_header,
-            background_header: raw.system.background_header,
-            scene_header: raw.system.scene_header,
-            examples_header: raw.system.examples_header,
-        };
-
-        let emotion = EmotionPrompts {
-            header: raw.emotion.header,
-            rule: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/ja/emotion/rule.md"
-            ))
-            .to_string(),
-            token_header: raw.emotion.token_header,
-            examples_header: raw.emotion.examples_header,
-            example_happy: raw.emotion.example_happy,
-            example_sad: raw.emotion.example_sad,
-            example_angry: raw.emotion.example_angry,
-            example_neutral: raw.emotion.example_neutral,
-            natural_dialogue_contract: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/ja/emotion/natural_dialogue_contract.md"
-            ))
-            .to_string(),
-        };
-
-        let summarizer = SummarizerPrompts {
-            system: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/ja/summarizer/system.md"
-            ))
-            .to_string(),
-            user_prompt: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/prompts/ja/summarizer/user_prompt.md"
-            ))
-            .to_string(),
-            no_facts_placeholder: raw.summarizer.no_facts_placeholder,
-        };
-
-        let data = PromptLibraryData {
-            system,
-            emotion,
-            memory: raw.memory,
-            summarizer,
-            split: raw.split,
-            extractor: ExtractorPrompts {
-                system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/extractor/system.md"
-                ))
-                .to_string(),
-                user_prompt: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/extractor/user_prompt.md"
-                ))
-                .to_string(),
-            },
-            affect_classifier: AffectClassifierPrompts {
-                system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/affect_classifier/system.md"
-                ))
-                .to_string(),
-                user_prompt: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/affect_classifier/user_prompt.md"
-                ))
-                .to_string(),
-            },
-            proactive: ProactivePrompts {
-                decision_system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/proactive/decision_system.md"
-                ))
-                .to_string(),
-                generation_hint_idle: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/proactive/generation_hint_idle.md"
-                ))
-                .to_string(),
-                generation_hint_with_topic: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/proactive/generation_hint_with_topic.md"
-                ))
-                .to_string(),
-                screen_summary_system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/proactive/screen_summary_system.md"
-                ))
-                .to_string(),
-                screen_summary_user: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/proactive/screen_summary_user.md"
-                ))
-                .to_string(),
-            },
-            compression: CompressionPrompts {
-                system: include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/prompts/ja/compression/system.md"
-                ))
-                .to_string(),
-            },
-        };
-
-        Self {
-            data,
-            lang: "ja".to_string(),
-        }
+        embedded_pack!("ja")
     }
 
-    /// Language code (`"en"` or `"ja"`) for this prompt library instance.
+    /// Language code (e.g. `"en"` or `"ja"`) for this prompt library instance.
     pub fn lang(&self) -> &str {
         &self.lang
     }
@@ -910,5 +927,102 @@ mod tests {
             gen_topic.contains("{topic}"),
             "[{source}] proactive.generation_hint_with_topic must contain {{topic}}"
         );
+    }
+
+    /// Writes the embedded pack for `lang` to `base/lang/{lang}/prompts.json`,
+    /// mirroring the on-disk layout the runtime loader expects.
+    fn write_pack(base: &std::path::Path, lang: &str) {
+        let lib = PromptLibrary::built_in(lang);
+        let dir = base.join("lang").join(lang);
+        std::fs::create_dir_all(&dir).expect("create pack dir");
+        let json = serde_json::to_string_pretty(&lib.data).expect("serialize embedded pack");
+        std::fs::write(dir.join("prompts.json"), json).expect("write pack");
+    }
+
+    #[test]
+    fn load_prefers_runtime_asset_over_embedded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_pack(tmp.path(), "en");
+
+        // Mutate the on-disk pack so it is distinguishable from the embedded copy.
+        let pack_path = crate::paths::prompt_pack_path_in(tmp.path(), "en");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&pack_path).expect("read pack"))
+                .expect("parse pack");
+        value["system"]["behavior_rules_header"] =
+            serde_json::Value::String("## RUNTIME OVERRIDE".to_string());
+        std::fs::write(
+            &pack_path,
+            serde_json::to_string_pretty(&value).expect("serialize mutated pack"),
+        )
+        .expect("write mutated pack");
+
+        let lib = PromptLibrary::load_from(tmp.path(), "en");
+        assert_eq!(lib.lang(), "en");
+        assert_eq!(lib.system().behavior_rules_header, "## RUNTIME OVERRIDE");
+    }
+
+    #[test]
+    fn load_falls_back_to_embedded_when_asset_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No pack written: the loader must fall back to the embedded Japanese pack.
+        let lib = PromptLibrary::load_from(tmp.path(), "ja");
+        assert_eq!(lib.lang(), "ja");
+        assert_eq!(
+            lib.system().behavior_rules_header,
+            PromptLibrary::built_in_japanese()
+                .system()
+                .behavior_rules_header
+        );
+    }
+
+    #[test]
+    fn load_falls_back_to_english_for_unknown_language() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // "fr" has neither a runtime pack nor an embedded fallback.
+        let lib = PromptLibrary::load_from(tmp.path(), "fr");
+        assert_eq!(lib.lang(), "en");
+        assert_eq!(
+            lib.system().behavior_rules_header,
+            PromptLibrary::built_in_english()
+                .system()
+                .behavior_rules_header
+        );
+    }
+
+    #[test]
+    fn load_normalizes_language_aliases() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_pack(tmp.path(), "ja");
+
+        for alias in ["ja", "JA", "ja-JP", "jp"] {
+            let lib = PromptLibrary::load_from(tmp.path(), alias);
+            assert_eq!(lib.lang(), "ja", "alias {alias} should resolve to ja");
+        }
+    }
+
+    #[test]
+    fn runtime_asset_matches_embedded_fallback() {
+        // The shipped packs under assets/lang/ are generated from the same
+        // source files as the embedded fallback; keep them in lockstep so the
+        // fallback never silently diverges from what ships.
+        for lang in SUPPORTED_LANGUAGES {
+            let asset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/lang")
+                .join(lang)
+                .join("prompts.json");
+            let asset_json = std::fs::read_to_string(&asset_path)
+                .expect("shipped runtime pack must exist and be readable");
+            let asset: serde_json::Value =
+                serde_json::from_str(&asset_json).expect("parse asset pack");
+            let embedded = PromptLibrary::built_in(lang);
+            let embedded_value =
+                serde_json::to_value(&embedded.data).expect("serialize embedded pack");
+            assert_eq!(
+                asset, embedded_value,
+                "assets/lang/{lang}/prompts.json diverged from the embedded fallback; \
+                 regenerate it from crates/ene-config/prompts/"
+            );
+        }
     }
 }

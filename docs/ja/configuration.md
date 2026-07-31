@@ -111,6 +111,13 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 制御し、`commitment_boost`（デフォルト `0.25`）はクエリとの関連性がゼロでもアクティブな
 約束を表面化させます。
 
+`mind.emotion.classifier_language`（デフォルト `"en"`）は、感情分類器と認知出力契約で
+使用されるプロンプトライブラリの言語を選択します。ユーザー向け LLM 指示文字列は
+`assets/lang/{lang}/prompts.json` から実行時にロードされます。そのパックが存在しない
+場合、`ene_config::SUPPORTED_LANGUAGES`（`en`, `ja`）の言語についてはコンパイル時
+埋め込みパックへ、それ以外は英語へフォールバックします。詳細は
+[ターン・セッション](concepts/turn-and-session.md) §3 を参照してください。
+
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 
 プロセス外ツールプラグインおよび Model Context Protocol (MCP) サーバーを管理します：
