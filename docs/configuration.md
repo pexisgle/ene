@@ -211,7 +211,7 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
     "list": {
       "app": { "enable": true },
       "browser": { "enable": true },
-      "fs": { "enable": true },
+      "fs": { "enable": true, "db_quota_mb": 256 },
       "utility": { "enable": true },
       "web": { "enable": true }
     },
@@ -239,6 +239,20 @@ plugin connection**, across *all* request types (tool calls, pings,
 bound queue (bounded by their own timeout) rather than fanning out to the
 plugin. Chat *streams* (`CreateChatStream`) are the exception: they bypass this
 bound and are not counted against it.
+
+`plugins.list.<name>.db_quota_mb` caps how much of the **shared `memory.db`** a
+plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into
+one shared database, so without a cap a single runaway or malicious plugin
+could exhaust the disk or bloat `memory.db` enough to degrade the memory
+system's queries, backups, and integrity checks. The host measures each
+plugin's footprint (the summed byte length of every cell across its declared
+tables) and rejects any storage-growing write — `Insert`/`Upsert`, including
+those inside a `Batch` — that would push it to or past the cap, returning a
+`QUOTA_EXCEEDED` error. Reads and deletes are never gated, so a plugin over
+quota can always free space. The default is `256` — generous enough that no
+built-in plugin comes close, while still bounding a runaway plugin before it
+does real damage. Set the field to `null` to disable enforcement for a plugin
+that legitimately needs unbounded storage.
 
 ### `tools.*` — Tool-Execution Runtime Behavior
 

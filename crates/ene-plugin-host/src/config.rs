@@ -26,6 +26,21 @@ const fn default_user_input_prompt_timeout_ms() -> u64 {
     600_000
 }
 
+/// Default per-plugin DB storage quota, in MiB (#424).
+///
+/// `256` is deliberately generous: every built-in stateful plugin (`fs`,
+/// `utility`, `browser`) stores kilobytes-to-low-megabytes of bookkeeping, so
+/// the cap never constrains legitimate first-party use, while still bounding
+/// how much of the *shared* `memory.db` a single runaway or malicious plugin
+/// can claim before its writes are refused. It is low enough that a plugin
+/// stuck in a logging loop trips the quota (and surfaces a diagnostic) long
+/// before it can exhaust the disk or bloat the database enough to degrade the
+/// memory system's queries, backups, and integrity checks. `None` disables
+/// enforcement for a plugin that legitimately needs unbounded storage.
+const fn default_db_quota_mb() -> Option<u64> {
+    Some(256)
+}
+
 /// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
     let mut list: HashMap<String, PluginEntry> = ["app", "browser", "fs", "utility", "web"]
@@ -66,6 +81,19 @@ pub struct PluginEntry {
     /// is implemented (#412/#413).
     #[serde(default)]
     pub env_passthrough: Vec<String>,
+    /// Per-plugin cap on how much of the shared `memory.db` this plugin's
+    /// tables may occupy, in mebibytes (#424).
+    ///
+    /// Writes (`Insert`/`Upsert`) that would push the plugin's measured
+    /// footprint past this cap are rejected with a `QuotaExceeded` error;
+    /// reads and deletes remain permitted so the plugin can free space.
+    /// Defaults to `Some(256)` — generous enough that no built-in plugin
+    /// comes close, while still bounding a runaway or malicious plugin
+    /// before it can exhaust the disk or bloat the database. Set to `null`
+    /// (or omit and rely on the default) — `None` disables enforcement for
+    /// a plugin that legitimately needs unbounded storage.
+    #[serde(default = "default_db_quota_mb")]
+    pub db_quota_mb: Option<u64>,
     /// Plugin-specific configuration (flattened into the parent).
     #[serde(flatten)]
     pub config: serde_json::Value,
@@ -77,6 +105,7 @@ impl Default for PluginEntry {
             enable: true,
             checksum: None,
             env_passthrough: Vec::new(),
+            db_quota_mb: default_db_quota_mb(),
             config: serde_json::Value::Object(serde_json::Map::default()),
         }
     }
