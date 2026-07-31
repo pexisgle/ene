@@ -301,6 +301,7 @@ mod tests {
                 conversation: true,
                 activity: true,
                 screen_summary: true,
+                ..ProactiveSourcesConfig::default()
             },
             ..ProactiveConfig::default()
         };
