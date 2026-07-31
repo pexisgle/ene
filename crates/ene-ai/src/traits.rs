@@ -226,6 +226,63 @@ impl LlmProviderRegistry {
         }
     }
 
+    /// Removes a previously registered factory by provider name (#399).
+    ///
+    /// Returns `true` when a factory was actually removed, `false` when no
+    /// factory was registered under `name`. Deregistration is what lets a
+    /// factory whose backing plugin has died or been unloaded be evicted, so
+    /// [`create_provider`](Self::create_provider) can no longer select a
+    /// stale entry that points at a dead process.
+    pub fn deregister(name: &str) -> bool {
+        let Ok(mut guard) = Self::global().factories.lock() else {
+            tracing::warn!(
+                component = "LlmProviderRegistry",
+                provider = %name,
+                "Cannot deregister provider factory because the registry lock is poisoned"
+            );
+            return false;
+        };
+        guard.remove(name).is_some()
+    }
+
+    /// Removes a factory only when `name` still points to `expected`.
+    ///
+    /// The identity check prevents one runtime handle from deregistering a
+    /// replacement factory installed by another handle during concurrent host
+    /// reconfiguration.
+    pub fn deregister_if_matches(name: &str, expected: &Arc<dyn LlmProviderFactory>) -> bool {
+        let Ok(mut guard) = Self::global().factories.lock() else {
+            tracing::warn!(
+                component = "LlmProviderRegistry",
+                provider = %name,
+                "Cannot conditionally deregister provider factory because the registry lock is poisoned"
+            );
+            return false;
+        };
+        if guard
+            .get(name)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
+            guard.remove(name).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Snapshot of the currently registered provider names (#399).
+    ///
+    /// Intended for diagnostics and tests; the registry is process-global, so
+    /// the set can change immediately after this returns.
+    #[must_use]
+    #[cfg(test)]
+    pub fn registered_names() -> Vec<String> {
+        if let Ok(guard) = Self::global().factories.lock() {
+            guard.keys().cloned().collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Tries to instantiate a provider by name using the registered factories.
     ///
     /// `task` is forwarded to the factory so the produced provider can honor
@@ -250,6 +307,145 @@ impl LlmProviderRegistry {
                 "No LlmProviderFactory registered for provider name: '{name}'"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use crate::openai::OpenAiProviderFactory;
+
+    /// A factory whose `create_provider` always fails with a recognizable
+    /// error, so a lookup that resolves it can be told apart from the
+    /// "no factory registered" error path.
+    struct MarkerFactory {
+        name: &'static str,
+    }
+
+    impl LlmProviderFactory for MarkerFactory {
+        fn provider_name(&self) -> &str {
+            self.name
+        }
+
+        fn create_provider(
+            &self,
+            _config: &ene_config::EneConfig,
+            _task: &TaskRef,
+        ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
+            // A variant distinct from the `Provider` error the registry
+            // returns for an unregistered name, so a resolved factory can be
+            // told apart from a missing one.
+            Err(LlmProviderError::LocalLlm("marker factory".to_string()))
+        }
+    }
+
+    fn config() -> ene_config::EneConfig {
+        ene_config::EneConfig::default()
+    }
+
+    fn task() -> TaskRef {
+        TaskRef::default()
+    }
+
+    /// Assert that `result` is an `Err` and return it. Used instead of
+    /// `expect_err` because the boxed provider type is not `Debug`.
+    fn unwrap_err(result: Result<Box<dyn LlmProvider>, LlmProviderError>) -> LlmProviderError {
+        match result {
+            Ok(_) => panic!("expected an error, got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    /// The registry is a process-global singleton shared across tests running
+    /// in the same process, so every test uses a distinct provider name to
+    /// avoid cross-test interference.
+    #[test]
+    fn register_then_deregister_makes_lookup_fail() {
+        const NAME: &str = "registry-test-ephemeral";
+        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
+
+        // Registered: the factory resolves and its own error surfaces (not the
+        // "no factory registered" error).
+        let err = unwrap_err(LlmProviderRegistry::create_provider(
+            NAME,
+            &config(),
+            &task(),
+        ));
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
+
+        // Deregister: the entry is removed and reported as such.
+        assert!(LlmProviderRegistry::deregister(NAME));
+        assert!(!LlmProviderRegistry::registered_names().contains(&NAME.to_string()));
+
+        // Lookup now fails with the "no factory registered" error, proving the
+        // deregistered factory is no longer returned.
+        let err = unwrap_err(LlmProviderRegistry::create_provider(
+            NAME,
+            &config(),
+            &task(),
+        ));
+        match err {
+            LlmProviderError::Provider(msg) => assert!(msg.contains(NAME)),
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deregister_unknown_name_is_false() {
+        assert!(!LlmProviderRegistry::deregister(
+            "registry-test-never-registered"
+        ));
+    }
+
+    #[test]
+    fn conditional_deregister_preserves_a_replacement_factory() {
+        const NAME: &str = "registry-test-replacement";
+        let original: Arc<dyn LlmProviderFactory> = Arc::new(MarkerFactory { name: NAME });
+        let replacement: Arc<dyn LlmProviderFactory> = Arc::new(MarkerFactory { name: NAME });
+
+        LlmProviderRegistry::register(Arc::clone(&original));
+        LlmProviderRegistry::register(Arc::clone(&replacement));
+
+        assert!(!LlmProviderRegistry::deregister_if_matches(NAME, &original));
+        let err = unwrap_err(LlmProviderRegistry::create_provider(
+            NAME,
+            &config(),
+            &task(),
+        ));
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
+        assert!(LlmProviderRegistry::deregister(NAME));
+    }
+
+    #[test]
+    fn built_in_openai_factory_name_remains_stable() {
+        assert_eq!(OpenAiProviderFactory.provider_name(), "openai-compatible");
+    }
+
+    #[test]
+    fn deregister_is_idempotent() {
+        const NAME: &str = "registry-test-idempotent";
+        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
+        assert!(LlmProviderRegistry::deregister(NAME));
+        // A second deregistration of the same name removes nothing.
+        assert!(!LlmProviderRegistry::deregister(NAME));
+    }
+
+    #[test]
+    fn reregister_after_deregister_restores_lookup() {
+        const NAME: &str = "registry-test-reregister";
+        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
+        assert!(LlmProviderRegistry::deregister(NAME));
+
+        LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
+        let err = unwrap_err(LlmProviderRegistry::create_provider(
+            NAME,
+            &config(),
+            &task(),
+        ));
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
+
+        // Clean up so this name does not linger for other tests.
+        assert!(LlmProviderRegistry::deregister(NAME));
     }
 }
 
