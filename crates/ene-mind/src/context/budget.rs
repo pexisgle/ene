@@ -650,13 +650,17 @@ mod tests {
     #[test]
     fn dropped_section_stays_empty_when_total_still_over_budget() {
         // #345 regression: when a memory section is dropped but the total is
-        // still over budget (an undroppable section keeps it over), the dropped
-        // section must stay empty and its memories must not be reported
-        // injected. Clearing the survivors at drop time keeps the section's
-        // (now empty) survivor vector consistent with the rendered content.
+        // still over budget (an oversized *required* section keeps it over),
+        // the dropped section must stay empty and its memories must not be
+        // reported injected. Clearing the survivors at drop time keeps the
+        // section's (now empty) survivor vector consistent with the rendered
+        // content.
         let budget = ContextBudget::with_capacity(10);
         let input = PackInput {
-            behavior_contract: Some("rules ".repeat(200)),
+            // The platform contract is required, so packing never drops it;
+            // its size alone keeps the total over the tiny budget even after
+            // every droppable section is shed.
+            platform_contract: Some("platform ".repeat(100)),
             recalled: vec![
                 sample_memory_with_id(1, MemoryKind::Episodic, 0.9),
                 sample_memory_with_id(2, MemoryKind::Episodic, 0.7),
@@ -673,8 +677,8 @@ mod tests {
             "episodic section should be dropped, dropped={:?}",
             packed.meta.dropped
         );
-        // The undroppable behavior contract keeps `total` over budget even
-        // after the drop pass.
+        // The oversized required platform contract keeps `total` over budget
+        // even after the drop pass.
         assert!(
             packed.meta.packed_tokens > budget.total_tokens,
             "test requires total to remain over budget, got {}",
