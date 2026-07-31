@@ -113,6 +113,116 @@ async fn message_search_is_case_insensitive_and_paginated() {
 }
 
 #[tokio::test]
+async fn message_search_escapes_like_metacharacters() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("s1", "card"))
+        .await
+        .unwrap();
+
+    store
+        .insert_log("s1", "card", "user", "battery at 50% charge")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "value is 500 units")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "snake_case identifier")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "snakeXcase near miss")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", r"path is C:\temp")
+        .await
+        .unwrap();
+
+    // `%` must match literally: only the "50%" row, not "500" (which the
+    // unescaped pattern `%50%%` would also match via the trailing wildcard).
+    let pct = store.search_messages("50%", 10, 0).await.unwrap();
+    assert_eq!(pct.len(), 1);
+    assert!(pct[0].1.content.contains("50%"));
+
+    // `_` must match a literal underscore, not "any single character".
+    let underscore = store.search_messages("snake_case", 10, 0).await.unwrap();
+    assert_eq!(underscore.len(), 1);
+    assert!(underscore[0].1.content.contains("snake_case"));
+
+    // The escape character itself is escaped: a literal backslash matches.
+    let backslash = store.search_messages(r"C:\temp", 10, 0).await.unwrap();
+    assert_eq!(backslash.len(), 1);
+    assert!(backslash[0].1.content.contains(r"C:\temp"));
+}
+
+#[tokio::test]
+async fn message_search_query_plan_uses_created_at_index() {
+    use sea_orm::sea_query::{Expr, Func, LikeExpr};
+    use sea_orm::{
+        DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        Statement,
+    };
+
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("s1", "card"))
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "hello world")
+        .await
+        .unwrap();
+
+    // Build the exact query `search_messages` executes through SeaORM's own
+    // query builder, so the EXPLAIN plan reflects the real SQL (the
+    // hand-written string below it is kept only as documentation). The
+    // leading-wildcard `LIKE` cannot use a B-tree index on `content` (that
+    // requires FTS5, #424), but the ordering must be served by
+    // `idx_log_created_at` so the query walks rows newest-first and stops at
+    // the limit instead of sorting the whole table (#422).
+    let built = crate::entities::conversation_logs::Entity::find()
+        .filter(
+            Func::lower(Expr::col(
+                crate::entities::conversation_logs::Column::Content,
+            ))
+            .like(LikeExpr::new("%hello%".to_string()).escape('\\')),
+        )
+        .order_by_desc(crate::entities::conversation_logs::Column::CreatedAt)
+        .limit(10)
+        .offset(0)
+        .build(DbBackend::Sqlite)
+        .to_string();
+    let explain_sql = format!("EXPLAIN QUERY PLAN {built}");
+
+    let rows = store
+        .connection()
+        .query_all_raw(Statement::from_string(DbBackend::Sqlite, explain_sql))
+        .await
+        .unwrap();
+
+    let plan: String = rows
+        .iter()
+        .map(|row| {
+            row.try_get_by_index::<String>(3)
+                .expect("EXPLAIN QUERY PLAN detail column exists")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        plan.contains("idx_log_created_at"),
+        "expected the search ordering to use idx_log_created_at, plan was:\n{plan}"
+    );
+    assert!(
+        !plan.to_ascii_lowercase().contains("use temp b-tree"),
+        "expected no in-memory sort for the search ordering, plan was:\n{plan}"
+    );
+}
+
+#[tokio::test]
 async fn export_import_roundtrip_and_conflict() {
     let store = setup_store().await;
     store
