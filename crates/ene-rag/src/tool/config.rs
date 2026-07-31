@@ -11,7 +11,7 @@ fn default_forced() -> Vec<String> {
     ]
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 /// Tool RAG pipeline configuration.
 pub struct ToolRagConfig {
@@ -63,7 +63,7 @@ impl Default for ToolRagConfig {
 }
 
 /// Serializable field weights (#436).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FieldWeightsConfig {
     /// Weight for the tool summary embedding.
@@ -119,3 +119,60 @@ const _: () = {
         ene_config::register_config_schema::<ToolRagConfig>(ConfigTarget::Settings, Some("tools"));
     }
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the #438 removal: settings.json files written
+    /// before the `HyDE` knobs were dropped still carry `use_hyde` /
+    /// `weights.hyde` / `weights.hyde_blend`. The backward-compat contract
+    /// (unknown keys ignored, missing fields defaulted — #327) rests on the
+    /// absence of `deny_unknown_fields` plus `#[serde(default)]`; lock it in so
+    /// the legacy payload deserializes cleanly and the defaults hold.
+    #[test]
+    fn legacy_hyde_keys_deserialize_cleanly_and_defaults_hold() {
+        let payload = serde_json::json!({
+            "enabled": true,
+            "top_k": 20,
+            "use_hyde": true,
+            "weights": {
+                "hyde": 0.7,
+                "hyde_blend": 0.6
+            }
+        });
+        let cfg: ToolRagConfig = serde_json::from_value(payload).unwrap();
+
+        // Explicitly-set keys are still honored...
+        assert!(cfg.enabled);
+        assert_eq!(cfg.top_k, 20);
+        // ...while the removed `HyDE` keys and every other absent field fall
+        // back to the struct defaults.
+        assert!(!cfg.use_rerank);
+        assert_eq!(
+            cfg,
+            ToolRagConfig {
+                enabled: true,
+                top_k: 20,
+                ..ToolRagConfig::default()
+            }
+        );
+        assert_eq!(cfg.weights, FieldWeightsConfig::default());
+
+        // A round-trip must not re-introduce the ignored legacy keys.
+        let round_tripped = serde_json::to_value(&cfg).unwrap();
+        assert!(round_tripped.get("use_hyde").is_none());
+        let weights = round_tripped["weights"].as_object().unwrap();
+        assert!(!weights.contains_key("hyde"));
+        assert!(!weights.contains_key("hyde_blend"));
+    }
+
+    /// Direct check that a legacy `FieldWeightsConfig` payload with only
+    /// `HyDE` keys present still yields the field defaults.
+    #[test]
+    fn legacy_field_weights_payload_defaults() {
+        let payload = serde_json::json!({ "hyde": 0.7, "hyde_blend": 0.6 });
+        let weights: FieldWeightsConfig = serde_json::from_value(payload).unwrap();
+        assert_eq!(weights, FieldWeightsConfig::default());
+    }
+}
