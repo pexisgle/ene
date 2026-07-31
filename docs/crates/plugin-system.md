@@ -18,6 +18,7 @@ This family of crates forms Ene's unified, out-of-process IPC plugin infrastruct
 - **Why out-of-process plugins instead of dynamic loading or in-process trait objects**: process isolation means a crashing or misbehaving tool/provider cannot take down the host, and each plugin can be sandboxed, restarted, or version-mismatched independently. The cost is IPC framing and a handshake protocol, which `ene-plugin-proto` centralizes so it isn't reimplemented per plugin.
 - **Why a versioned handshake (`VersionRange` negotiation)** rather than a fixed protocol version: it lets the host and a plugin binary compiled against an older/newer `ene-plugin-proto` still agree on a common protocol version instead of hard-failing on any mismatch.
 - **Why a circuit breaker in `ene-plugin-host`**: a plugin process that fails repeatedly (e.g. a misconfigured provider) would otherwise be retried on every call; the breaker fails fast after a threshold of consecutive failures and cools down before retrying, instead of hammering a broken process.
+- **Why one supervisor task per plugin instead of a single sequential health loop**: each supervised plugin is monitored by its own independent task, so one plugin's restart backoff (exponential, capped at 30 s) or a slow reconnect can never stall the health monitoring of any other plugin. A single loop that pinged every plugin in turn would let one unhealthy plugin delay probes — and thus detection and restart — for all of them (#432).
 
 ## API reference
 

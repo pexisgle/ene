@@ -32,6 +32,11 @@ Where:
 ### Maximal Marginal Relevance (MMR) Diversification
 To prevent injecting duplicate or redundant facts into the prompt packet, candidate memories pass through MMR reranking to maximize diversity.
 
+### Access Bump Policy
+When a memory is recalled, its `access_count` and `last_accessed_at` are bumped — but **only if it actually makes it into the prompt**. The budget manager may drop a recalled memory's whole section or trim it within the section when over the token budget; such a memory is recalled by search yet never seen by the model, so it is *not* bumped. The set of memories that survive packing is tracked (`PromptPacketMeta::injected_memory_ids`) and only those are bumped after composition. This prevents "ranked high in search but dropped" from reinforcing a memory (#345).
+
+The bump's effect on ranking is also bounded: the access boost fades with the age of the most recent access (a half-life decay), so accesses from long ago stop counting and a memory cannot lock in a permanent ranking advantage.
+
 ---
 
 ## 3. The Commitment Ledger
@@ -49,4 +54,7 @@ Memory persistence operates asynchronously to keep turn latencies low:
 
 1. **Synchronous Turn Completion**: When a turn finishes, `EneEvent::Terminal` is emitted immediately.
 2. **Deferred Memory Extraction**: A background task inspects the turn transcript, extracts candidate facts, generates embeddings, and saves them to SQLite.
-3. **Forgetting & Decay**: Unaccessed, low-salience memories gradually decay in score and are archived or purged according to retention rules.
+3. **Forgetting & Decay**: Low-salience memories gradually decay in score and are archived or purged according to retention rules.
+
+### Forgetting Anchor
+Forgetting decay measures from the memory's last **content update** (`updated_at`), not from when it was last recalled (`last_accessed_at`). Recall recency (which ranks candidates) still uses `last_accessed_at`, but the two are deliberately separate: a memory being recalled must not reset the clock on its own forgetting. If it did, a frequently-recalled memory could never reach the fade threshold, and recall would simultaneously raise a memory's score *and* shield it from forgetting — a self-reinforcing loop (#345). Editing a memory's content refreshes `updated_at` and legitimately keeps it alive; merely recalling it does not.

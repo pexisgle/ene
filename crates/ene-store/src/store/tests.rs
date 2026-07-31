@@ -2982,3 +2982,60 @@ async fn session_export_without_audit_rows_is_empty() {
     let export = store.build_export("lonely").await.expect("export");
     assert!(export.tool_logs.is_empty());
 }
+
+/// #345 regression: bumping a memory's access counters (as recall does) must
+/// not shield it from the forgetting lifecycle. Before the fix the decay anchor
+/// was `last_accessed_at`, so a recently-recalled memory reset its age to zero
+/// and could never reach `FADE_THRESHOLD`. The anchor is now `updated_at`, so a
+/// stale-but-recalled memory still fades.
+#[tokio::test]
+async fn recall_bump_does_not_prevent_forgetting() {
+    let store = setup_store().await;
+    let now = Utc::now();
+
+    let id = store
+        .insert_typed_memory(&crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind: crate::MemoryKind::Semantic,
+            title: "recalled but stale".into(),
+            content: "an old fact that keeps getting recalled".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.1),
+            salience: crate::MemorySalience::new(0.1),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        })
+        .await
+        .unwrap();
+    store.test_backdate_typed_memory(id, 365).await.unwrap();
+
+    // Simulate a recall that just happened: bump access counters repeatedly.
+    for _ in 0..10 {
+        assert!(store.bump_typed_memory_access(id).await.unwrap());
+    }
+    let recalled = store.get_typed_memory(id).await.unwrap().unwrap();
+    assert_eq!(recalled.access_count, 10);
+    assert!(recalled.last_accessed_at.is_some());
+
+    // Despite the fresh accesses, the stale content must still fade.
+    let report = store
+        .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+        .await
+        .unwrap();
+    assert_eq!(
+        report.faded_count, 1,
+        "a recalled-but-stale memory must still fade (anchor = updated_at)"
+    );
+    let after = store.get_typed_memory(id).await.unwrap().unwrap();
+    assert_eq!(after.status, crate::MemoryStatus::Faded);
+}
