@@ -2,10 +2,12 @@
 
 mod conversation_logs_search_index;
 mod embeddings_cleanup;
+mod pending_candidates;
 mod vec0_memory;
 
 use conversation_logs_search_index::ConversationLogsSearchIndexMigration;
 use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
+use pending_candidates::PendingCandidatesMigration;
 use sea_orm_migration::prelude::*;
 use vec0_memory::Vec0EmbeddingIndexMigration;
 
@@ -19,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(PendingMemoryWritesMigration),
             Box::new(SourceRefIndexMigration),
             Box::new(EmbeddingsCleanupIndexMigration),
+            Box::new(PendingCandidatesMigration),
             Box::new(AuditLogSessionIdMigration),
             Box::new(ConversationLogsSearchIndexMigration),
             Box::new(Vec0EmbeddingIndexMigration),

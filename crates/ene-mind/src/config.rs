@@ -174,6 +174,9 @@ pub struct MindMemoryConfig {
     /// Self-reflection pipeline configuration (#210).
     #[serde(default)]
     pub reflection: ReflectionConfig,
+    /// Pending memory-candidate retention policy (#420).
+    #[serde(default)]
+    pub pending_candidate_retention: PendingCandidateRetentionConfig,
 }
 
 /// Tool-result grounding and guardrail settings.
@@ -250,6 +253,45 @@ impl Default for MindMemoryConfig {
             journal_similarity_threshold: 0.45,
             journal_min_score: 0.10,
             reflection: ReflectionConfig::default(),
+            pending_candidate_retention: PendingCandidateRetentionConfig::default(),
+        }
+    }
+}
+
+/// Retention policy for the pending memory-candidate approval queue (#420).
+///
+/// Candidates now persist to the `pending_candidates` table so they survive
+/// restarts; without a policy that table would grow without bound. Both limits
+/// are enforced together on the post-turn forgetting sweep
+/// (`ForgettingLifecycle`), and each can be disabled independently with `0`.
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct PendingCandidateRetentionConfig {
+    /// Auto-expire candidates older than this many days (`Faded`-equivalent).
+    ///
+    /// Applies to candidates of **every status, including unanswered
+    /// (`pending`) ones**: a candidate left unreviewed past this age is
+    /// dropped so the queue cannot grow without bound even when the count cap
+    /// is disabled, and a resolved candidate older than this has no further UI
+    /// value anyway. `0` disables age expiry.
+    pub max_age_days: u32,
+    /// Maximum pending (unresolved) candidates kept per character per user.
+    ///
+    /// When the live queue exceeds this cap the oldest overflow is dropped.
+    /// The cap is scoped to the acting user (plus character-shared rows), so
+    /// on a multi-user database one user's overflow cannot evict another
+    /// user's candidates. `0` disables the count cap.
+    pub max_per_character: usize,
+}
+
+impl Default for PendingCandidateRetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_age_days: 14,
+            max_per_character: 200,
         }
     }
 }

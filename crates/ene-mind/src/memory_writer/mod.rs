@@ -539,7 +539,7 @@ fn record_arbiter_outcomes(
                     "Memory candidate persisted"
                 );
             }
-            crate::memory_writer::ArbiterAction::AskConfirmationLater => {
+            crate::memory_writer::ArbiterAction::AskConfirmationLater { .. } => {
                 summary.deferred = summary.deferred.saturating_add(1);
                 tracing::debug!(
                     component = "MemoryWriter",
