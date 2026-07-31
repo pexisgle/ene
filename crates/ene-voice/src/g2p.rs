@@ -11,15 +11,6 @@
 //! - **Japanese**: a kana → phoneme lookup table (hiragana/katakana → IPA).
 //!
 //! Unknown characters are dropped, matching the reference Kokoro tokenizer.
-#![allow(
-    clippy::arithmetic_side_effects,
-    reason = "phoneme tokenization uses bounded counter arithmetic over VOCAB indices"
-)]
-#![allow(
-    clippy::indexing_slicing,
-    reason = "vocab lookup indexes into the bounded static VOCAB table"
-)]
-
 /// A single Kokoro vocabulary entry: phoneme character → token id.
 const VOCAB: &[(char, u8)] = &[
     (';', 1),

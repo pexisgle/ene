@@ -14,15 +14,6 @@
 //! [`ene_ai::DEFAULT_CHUNK_SAMPLES`]-sized chunks pushed through an `mpsc`
 //! channel (H10) — this is not, and must not become, true streaming
 //! synthesis.
-#![allow(
-    clippy::arithmetic_side_effects,
-    reason = "voice indexing and PCM chunk arithmetic use bounded counters"
-)]
-#![allow(
-    clippy::indexing_slicing,
-    reason = "voice embedding slicing indexes into bounds-checked `voices.bin` floats"
-)]
-
 use ene_ai::{
     AudioProviderError, Capability, CapabilitySet, EngineDescriptor, LocalTtsEngine, ResourceClass,
 };
@@ -433,7 +424,7 @@ pub(super) fn open(
 
 #[cfg(test)]
 mod tests {
-    #![allow(
+    #![expect(
         clippy::float_cmp,
         reason = "voice embeddings are written and read back as exact f32 bit patterns"
     )]
