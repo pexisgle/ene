@@ -490,7 +490,9 @@ pub(crate) async fn perform_tool_executions(
             .collect();
 
         let mut results: Vec<Option<Result<String, PluginHostError>>> =
-            vec![None; tool_calls.len()];
+            std::iter::repeat_with(|| None)
+                .take(tool_calls.len())
+                .collect();
         if !parallel_indices.is_empty() {
             let stream = futures::stream::iter(parallel_indices.into_iter().map(|idx| {
                 let call = tool_calls[idx].clone();
@@ -525,7 +527,9 @@ pub(crate) async fn perform_tool_executions(
         }
         results
     } else {
-        vec![None; tool_calls.len()]
+        std::iter::repeat_with(|| None)
+            .take(tool_calls.len())
+            .collect()
     };
 
     // Phase 2 — finalize in the original order, preserving event / undo /
