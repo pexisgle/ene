@@ -130,24 +130,47 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 
 ---
 
-## 5. プラグイン状態データベース (DB IPC)
+## 5. ツール DB スキーマの宣言と進化
 
-ステートフルなツールプラグイン (`ene-plugin-fs`, `ene-plugin-utility`) は、
-自前で SQLite コネクションを開くのではなく、ツールごとの DB IPC サーバー
-(`ene-store` の `db_server`) を通じて状態を永続化します。プラグインは
-`ene-plugin-db` をリンクし、その `DbClient` が length-prefixed JSON の Unix
-ソケット越しにサーバーと通信します。サーバーはすべての接続を事前共有トークンで
-認証し、プラグインが `DeclareSchema` で宣言したスキーマを強制し、テーブルを
-プレフィックスで分離することで、プラグインが自前のテーブル (例: `fs_*`) にしか
-触れられないようにします。
+ステートフルなツールプラグイン (`ene-plugin-fs`、`ene-plugin-utility`) は、
+ツールごとの DB IPC サーバー (`ene-store` の `db_server` モジュール) を
+介してデータをホストの `memory.db` に永続化します。プラグインが直接 DDL
+を発行することはありません。`DeclareSchema` リクエストでテーブル・列・
+インデックスを宣言し、ホストが物理テーブルを作成・所有します。すべての
+テーブル名はプラグインのプレフィックス (`fs_`、`utility_`) で始まる必要が
+あり、後続のリクエストはすべて宣言に対して検証されます。
 
-### メッセージセット
+### フィンガープリントベースの変更検知
 
-`DbRequest` / `DbResponse` (`crates/ene-plugin-db/src/messages.rs` 内) は CRUD の
-表面を覆います: `Handshake`, `DeclareSchema`, `Insert`, `Upsert`, `Select`,
-`Update`, `Delete`, `Count`, `Batch`, `LastInsertRowId`, `Ping`, `Shutdown`。
-DDL は露出されません — プラグインは宣言済みスキーマの外でテーブルの作成・変更・
-削除を行えません。
+`DeclareSchema` のたびに、ホストは宣言をハッシュ化 (BLAKE3) し、内部テーブル
+`__tool_schemas` に保存された `fingerprint` と比較します。
+
+| 変更内容 | 挙動 |
+|---|---|
+| 変更なし | 保存済み行は変更されず、既存テーブルが再利用されます。同一スキーマの再宣言は行を**無駄に書き換えません**。 |
+| 列の追加 | `ALTER TABLE ... ADD COLUMN` でその場で適用され、既存行には列の `DEFAULT` (または `NULL`) が入ります。保存済み宣言は更新されます。 |
+| テーブルの追加 | `CREATE TABLE IF NOT EXISTS` で作成されます。保存済み宣言は更新されます。 |
+| インデックスの追加 | `CREATE INDEX IF NOT EXISTS` で適用されます。 |
+| 列の型変更 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
+| テーブル/列の削除 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
+| `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` 付き列の追加 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
+| `DEFAULT` なしの `NOT NULL` 列の追加 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
+
+`SQLite` は列の型変更、列・テーブルの削除、制約付き列の追加をその場で行えず、
+`NOT NULL` 列の追加には既存行を埋める `DEFAULT` が必要です。検証層と物理
+テーブルが暗黙に食い違う——検証は通るのに後で `INSERT` が
+`no such column` で失敗するという #423 の症状——のを防ぐため、ホストは互換性の
+ない変更を拒否し、プラグイン作者に明示的な調整を求めます。追加のみの変更
+(通常の新しい列とテーブル) は安全であり、自動的に適用されます。
+
+### プラグイン作者向けガイド
+
+- 列やテーブルの追加は安全であり、次回の `DeclareSchema` 時に既存データベースへ
+  自動的に適用されます。
+- 列の型を変更したりテーブルを削除したりする場合は、新しいプレフィックス付き
+  テーブルを用意して自分でデータを移行するか、プラグイン自身のロジック内で差分を
+  調整してください。ホストが作者の代わりにデータを書き換えたり削除したりすること
+  はありません。
 
 ### 原子的バッチ (`Batch`)
 

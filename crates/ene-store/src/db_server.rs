@@ -11,6 +11,25 @@
 //! - Table names must start with the tool's prefix (e.g. `fs_`, `utility_`).
 //! - DDL (CREATE/ALTER/DROP) is **not** exposed to tools.
 //! - `sqlite_master` and other internal tables are blocked.
+//!
+//! ## Schema evolution
+//!
+//! On every `DeclareSchema` the server hashes the declaration (BLAKE3) and
+//! compares it against the `fingerprint` stored in `__tool_schemas`:
+//!
+//! - **Unchanged** — the stored row is left untouched (no needless rewrite) and
+//!   the existing tables are reused as-is.
+//! - **Additive change** (new table, or a new column on an existing table) —
+//!   the new column is applied with `ALTER TABLE ... ADD COLUMN`, the stored
+//!   declaration is refreshed, and the tool proceeds. `SQLite` fills existing
+//!   rows with the column's `DEFAULT` (or `NULL`).
+//! - **Conflicting change** (a column type change, a previously declared
+//!   table or column dropped from the declaration, or a new column that
+//!   carries a `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` constraint) — rejected
+//!   with [`DbServerError::SchemaConflict`]. `SQLite` cannot alter or drop
+//!   columns in place, nor add a constrained column, so the host refuses to
+//!   let the validation layer and the actual tables silently diverge; the
+//!   plugin author must reconcile the difference.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,8 +37,8 @@ use std::sync::Arc;
 
 use crate::entities::tool_schemas;
 use ene_plugin_db::{
-    DbBatchOpResult, DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable,
-    DbValue, DbWriteOp, Row,
+    DbBatchOpResult, DbColumn, DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema,
+    DbTable, DbType, DbValue, DbWriteOp, Row,
 };
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
@@ -76,6 +95,12 @@ pub enum DbServerError {
         /// The underlying error.
         source: Box<DbServerError>,
     },
+    /// The declared schema conflicts with the one already stored for this
+    /// prefix in a way that cannot be applied automatically (e.g. a column
+    /// type change or a removed table). The plugin must reconcile the
+    /// difference explicitly rather than having the host silently diverge.
+    #[error("Schema conflict: {0}")]
+    SchemaConflict(String),
     /// An internal server error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -99,6 +124,7 @@ impl DbServerError {
                 DbErrorCode::UnknownColumn,
                 format!("Unknown column: {table}.{column}"),
             ),
+            Self::SchemaConflict(msg) => (DbErrorCode::SchemaConflict, msg.clone()),
             Self::Io(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Json(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Db(e) => (DbErrorCode::Internal, e.to_string()),
@@ -813,30 +839,98 @@ impl DbIpcServer {
 
         let fingerprint = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
-        let mut created_indexes = Vec::new();
-
-        // Use SeaORM ActiveModel to insert into tool_schemas
-        let active_model = tool_schemas::ActiveModel {
-            prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
-            schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
-            fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
-            created_at: sea_orm::ActiveValue::Set(chrono::Utc::now()),
-        };
-
-        tool_schemas::Entity::insert(active_model)
-            .on_conflict(
-                sea_orm::sea_query::OnConflict::column(tool_schemas::Column::Prefix)
-                    .update_columns([
-                        tool_schemas::Column::SchemaJson,
-                        tool_schemas::Column::Fingerprint,
-                        tool_schemas::Column::CreatedAt,
-                    ])
-                    .to_owned(),
-            )
-            .exec(db)
+        // Compare against the previously stored declaration, if any. The
+        // fingerprint was historically written but never read (#423); it now
+        // gates whether the stored row is rewritten and whether the physical
+        // tables need additive migration.
+        let stored = tool_schemas::Entity::find_by_id(prefix)
+            .one(db)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
+        let mut created_indexes = Vec::new();
+
+        match &stored {
+            // Unchanged schema: reuse the existing tables verbatim and leave
+            // the stored row untouched so an unchanged declaration does not
+            // rewrite it needlessly.
+            Some(row) if row.fingerprint == fingerprint => {
+                debug!(
+                    tool = %tool_name,
+                    prefix = %prefix,
+                    "Schema unchanged; reusing stored declaration"
+                );
+            }
+            // First declaration, or the schema changed: reconcile the
+            // physical tables with the new declaration, then refresh the
+            // stored row. Both steps run in a single transaction so a
+            // failure part-way through cannot leave the physical tables
+            // ahead of the stored fingerprint (which would make the next
+            // DeclareSchema re-apply — and fail on — the same ALTERs).
+            _ => {
+                let txn = db
+                    .begin()
+                    .await
+                    .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+                let result = async {
+                    let previous = stored
+                        .as_ref()
+                        .map(|row| {
+                            serde_json::from_str::<DbSchema>(&row.schema_json).map_err(|e| {
+                                DbServerError::Internal(format!(
+                                    "stored schema for prefix '{prefix}' is corrupt: {e}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+
+                    Self::apply_schema_change(&txn, tool_name, prefix, previous.as_ref(), &schema)
+                        .await?;
+
+                    let active_model = tool_schemas::ActiveModel {
+                        prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
+                        schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
+                        fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
+                        created_at: sea_orm::ActiveValue::Set(chrono::Utc::now()),
+                    };
+
+                    tool_schemas::Entity::insert(active_model)
+                        .on_conflict(
+                            sea_orm::sea_query::OnConflict::column(tool_schemas::Column::Prefix)
+                                .update_columns([
+                                    tool_schemas::Column::SchemaJson,
+                                    tool_schemas::Column::Fingerprint,
+                                    tool_schemas::Column::CreatedAt,
+                                ])
+                                .to_owned(),
+                        )
+                        .exec(&txn)
+                        .await
+                        .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+                    Ok::<_, DbServerError>(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => txn
+                        .commit()
+                        .await
+                        .map_err(|e| DbServerError::Internal(e.to_string()))?,
+                    Err(e) => {
+                        txn.rollback().await.map_err(|rb| {
+                            DbServerError::Internal(format!("{e}; rollback: {rb}"))
+                        })?;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Idempotent regardless of the branch above: `CREATE TABLE IF NOT
+        // EXISTS` / `CREATE INDEX IF NOT EXISTS` are no-ops on existing
+        // objects and create any that are missing.
         for table in &schema.tables {
             let create_sql = Self::build_create_table_sql(table);
             db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, create_sql))
@@ -874,6 +968,206 @@ impl DbIpcServer {
             tables: schema.tables.iter().map(|t| t.name.clone()).collect(),
             indexes: created_indexes,
         })
+    }
+
+    /// Reconciles the physical tables with a changed schema declaration.
+    ///
+    /// `previous` is the last stored declaration for this prefix, if any.
+    /// Additive changes (new tables, new columns) are applied in place;
+    /// changes `SQLite` cannot perform in place (a column type change, or a
+    /// previously declared table removed from the declaration) are rejected
+    /// with [`DbServerError::SchemaConflict`] so the validation layer and the
+    /// actual tables never silently diverge.
+    ///
+    /// `db` is generic over [`ConnectionTrait`] so the caller can run this
+    /// inside a transaction: the ALTERs and the stored-declaration upsert
+    /// must commit atomically, otherwise a failure between them would leave
+    /// the physical table ahead of the stored fingerprint and every
+    /// subsequent `DeclareSchema` would re-apply (and fail on) the same
+    /// ALTER.
+    async fn apply_schema_change(
+        db: &impl ConnectionTrait,
+        tool_name: &str,
+        prefix: &str,
+        previous: Option<&DbSchema>,
+        new: &DbSchema,
+    ) -> Result<(), DbServerError> {
+        let Some(previous) = previous else {
+            // First declaration for this prefix: nothing to migrate. The
+            // caller's `CREATE TABLE IF NOT EXISTS` pass creates the tables.
+            return Ok(());
+        };
+
+        let diff = Self::diff_schemas(previous, new)?;
+
+        if diff.added_columns.is_empty() && diff.added_tables.is_empty() {
+            // The fingerprint differs but there is nothing additive to apply
+            // (e.g. only an index changed). Indexes are reconciled by the
+            // caller's `CREATE INDEX IF NOT EXISTS` pass.
+            return Ok(());
+        }
+
+        for (table, column) in &diff.added_columns {
+            let alter_sql = Self::build_alter_add_column_sql(table, column);
+            db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, alter_sql))
+                .await
+                .map_err(|e| {
+                    DbServerError::Internal(format!(
+                        "failed to add column '{}.{}': {e}",
+                        table.name, column.name
+                    ))
+                })?;
+            info!(
+                tool = %tool_name,
+                prefix = %prefix,
+                table = %table.name,
+                column = %column.name,
+                "Applied additive schema change (ALTER TABLE ADD COLUMN)"
+            );
+        }
+
+        for table in &diff.added_tables {
+            info!(
+                tool = %tool_name,
+                prefix = %prefix,
+                table = %table.name,
+                "New table declared; will be created"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Computes the additive diff between a stored schema and a new one.
+    ///
+    /// Returns the tables and columns that were added. Returns
+    /// [`DbServerError::SchemaConflict`] if the new declaration removes a
+    /// previously declared table or changes an existing column's type, since
+    /// neither can be applied to the live `SQLite` tables in place.
+    fn diff_schemas(previous: &DbSchema, new: &DbSchema) -> Result<SchemaDiff, DbServerError> {
+        let previous_tables: HashMap<&str, &DbTable> = previous
+            .tables
+            .iter()
+            .map(|t| (t.name.as_str(), t))
+            .collect();
+
+        let mut diff = SchemaDiff::default();
+
+        for table in &new.tables {
+            let Some(old_table) = previous_tables.get(table.name.as_str()) else {
+                diff.added_tables.push(table.clone());
+                continue;
+            };
+
+            let old_columns: HashMap<&str, &DbColumn> = old_table
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c))
+                .collect();
+
+            for column in &table.columns {
+                match old_columns.get(column.name.as_str()) {
+                    // Brand-new column. `ALTER TABLE ADD COLUMN` can only add
+                    // a plain column: SQLite forbids adding one that carries a
+                    // PRIMARY KEY, UNIQUE, or AUTOINCREMENT constraint, so such
+                    // an addition is rejected explicitly rather than failing
+                    // with a cryptic error at execution time.
+                    None => {
+                        if column.primary_key || column.auto_increment || column.unique {
+                            return Err(DbServerError::SchemaConflict(format!(
+                                "column '{}.{}' was added with a PRIMARY KEY/UNIQUE/AUTOINCREMENT constraint; SQLite cannot add such a column via ALTER TABLE, so the plugin must reconcile this change explicitly",
+                                table.name, column.name
+                            )));
+                        }
+                        // A NOT NULL column needs a DEFAULT: SQLite requires a
+                        // default to populate pre-existing rows when a
+                        // non-nullable column is added via `ALTER TABLE`.
+                        // Silently dropping the constraint (as the previous
+                        // emission logic did) would let validation and storage
+                        // diverge — refuse instead so the author reconciles
+                        // this explicitly.
+                        if !column.nullable && column.default.is_none() {
+                            return Err(DbServerError::SchemaConflict(format!(
+                                "column '{}.{}' was added NOT NULL without a DEFAULT; SQLite cannot add such a column via ALTER TABLE (existing rows would violate the constraint), so the plugin must either add a DEFAULT or make the column nullable",
+                                table.name, column.name
+                            )));
+                        }
+                        diff.added_columns.push((table.clone(), column.clone()));
+                    }
+                    // Existing column with a changed type: SQLite cannot
+                    // change a column type in place, so refuse rather than
+                    // let validation and storage diverge.
+                    Some(old_column) if old_column.ty != column.ty => {
+                        return Err(DbServerError::SchemaConflict(format!(
+                            "column '{}.{}' changed type from {:?} to {:?}; SQLite cannot alter column types in place, so the plugin must reconcile this change explicitly",
+                            table.name, column.name, old_column.ty, column.ty
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+
+            // A column present in the stored table but absent from the new
+            // declaration would leave the physical column behind while
+            // validation stops referencing it. Refuse so the author handles
+            // the removal explicitly.
+            let new_column_names: HashSet<&str> =
+                table.columns.iter().map(|c| c.name.as_str()).collect();
+            for old_column in &old_table.columns {
+                if !new_column_names.contains(old_column.name.as_str()) {
+                    return Err(DbServerError::SchemaConflict(format!(
+                        "column '{}.{}' was removed from the schema declaration; SQLite cannot drop columns in place, so the plugin must reconcile this change explicitly",
+                        table.name, old_column.name
+                    )));
+                }
+            }
+        }
+
+        // A table present in the stored declaration but absent from the new
+        // one would leave the physical table behind while validation stops
+        // referencing it. Refuse so the author handles the removal explicitly.
+        let new_table_names: HashSet<&str> = new.tables.iter().map(|t| t.name.as_str()).collect();
+        for old_table in &previous.tables {
+            if !new_table_names.contains(old_table.name.as_str()) {
+                return Err(DbServerError::SchemaConflict(format!(
+                    "table '{}' was removed from the schema declaration; SQLite cannot drop tables in place, so the plugin must reconcile this change explicitly",
+                    old_table.name
+                )));
+            }
+        }
+
+        Ok(diff)
+    }
+
+    /// Builds an `ALTER TABLE ... ADD COLUMN` statement for an added column.
+    ///
+    /// `SQLite` forbids adding a column that carries a `PRIMARY KEY`,
+    /// `UNIQUE`, or `AUTOINCREMENT` constraint, so none are emitted here;
+    /// [`Self::diff_schemas`] rejects such additions before this is reached.
+    /// `NOT NULL` is only emitted alongside a `DEFAULT`, matching `SQLite`'s
+    /// `ADD COLUMN` requirement that a non-nullable added column have a
+    /// default to populate existing rows.
+    fn build_alter_add_column_sql(table: &DbTable, column: &DbColumn) -> String {
+        let mut sql = format!("ALTER TABLE {} ADD COLUMN {} ", table.name, column.name);
+
+        sql.push_str(match column.ty {
+            DbType::Integer | DbType::Boolean => "INTEGER",
+            DbType::Real => "REAL",
+            DbType::Text => "TEXT",
+            DbType::Blob => "BLOB",
+        });
+
+        // SQLite requires a DEFAULT for a NOT NULL column added via ALTER.
+        if !column.nullable && column.default.is_some() {
+            sql.push_str(" NOT NULL");
+        }
+
+        if let Some(default) = &column.default {
+            sql.push_str(" DEFAULT ");
+            sql.push_str(&Self::db_value_to_sql(default));
+        }
+
+        sql
     }
 
     /// Validates a SQL identifier (table, column, or index name).
@@ -1352,6 +1646,20 @@ impl DbIpcServer {
             }
         }
     }
+}
+
+/// Additive differences between a stored schema declaration and a new one.
+///
+/// Produced by [`DbIpcServer::diff_schemas`]; consumed by
+/// [`DbIpcServer::apply_schema_change`] to migrate the physical tables in
+/// place. Only additions are representable — removals and type changes are
+/// reported as errors before a `SchemaDiff` is built.
+#[derive(Debug, Default)]
+struct SchemaDiff {
+    /// Tables present in the new declaration but absent from the stored one.
+    added_tables: Vec<DbTable>,
+    /// Columns added to already-existing tables, paired with their table.
+    added_columns: Vec<(DbTable, DbColumn)>,
 }
 
 #[cfg(test)]
@@ -2094,5 +2402,412 @@ mod tests {
             other => panic!("expected LastInsertRowId, got {other:?}"),
         };
         assert_eq!(lookup_id, insert_rowid);
+    }
+
+    // --- Schema fingerprint / evolution tests (#423) ---
+
+    fn test_column(name: &str, ty: ene_plugin_db::DbType) -> ene_plugin_db::DbColumn {
+        ene_plugin_db::DbColumn {
+            name: name.to_string(),
+            ty,
+            nullable: true,
+            primary_key: false,
+            auto_increment: false,
+            unique: false,
+            default: None,
+        }
+    }
+
+    fn test_schema_v1() -> ene_plugin_db::DbSchema {
+        ene_plugin_db::DbSchema {
+            prefix: "fs_".to_string(),
+            tables: vec![ene_plugin_db::DbTable {
+                name: "fs_undo".to_string(),
+                columns: vec![
+                    test_column("id", ene_plugin_db::DbType::Integer),
+                    test_column("path", ene_plugin_db::DbType::Text),
+                ],
+            }],
+            indexes: Vec::new(),
+        }
+    }
+
+    /// Creates an in-memory DB with the `__tool_schemas` bookkeeping table.
+    async fn test_db_with_tool_schemas() -> sea_orm::DatabaseConnection {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE __tool_schemas (prefix TEXT PRIMARY KEY NOT NULL, schema_json TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    async fn declare(
+        db: &sea_orm::DatabaseConnection,
+        schema: ene_plugin_db::DbSchema,
+    ) -> DbResponse {
+        let mut declared_tables = HashMap::new();
+        let mut declared_columns = HashMap::new();
+        DbIpcServer::handle_declare_schema(
+            db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            schema,
+        )
+        .await
+        .unwrap_or_else(|e| e.to_error_response())
+    }
+
+    async fn stored_row(
+        db: &sea_orm::DatabaseConnection,
+        prefix: &str,
+    ) -> Option<tool_schemas::Model> {
+        tool_schemas::Entity::find_by_id(prefix)
+            .one(db)
+            .await
+            .unwrap()
+    }
+
+    async fn table_columns(db: &sea_orm::DatabaseConnection, table: &str) -> Vec<String> {
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!("PRAGMA table_info({table})"),
+            ))
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|r| r.try_get::<String>("", "name").unwrap())
+            .collect()
+    }
+
+    async fn insert_row(
+        db: &sea_orm::DatabaseConnection,
+        table: &str,
+        row: Row,
+        declared_tables: &HashMap<String, ene_plugin_db::DbTable>,
+        declared_columns: &HashMap<String, HashSet<String>>,
+    ) -> DbResponse {
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
+        let mut declared_tables = declared_tables.clone();
+        let mut declared_columns = declared_columns.clone();
+        DbIpcServer::handle_request(
+            db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Insert {
+                table: table.to_string(),
+                row,
+            },
+        )
+        .await
+    }
+
+    /// Registering a changed schema refreshes the stored row (fingerprint +
+    /// `schema_json`) and applies the new column to the existing table.
+    #[tokio::test]
+    async fn changed_schema_updates_stored_row_and_applies_column() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let row_v1 = stored_row(&db, "fs_").await.expect("row stored after v1");
+        assert_eq!(
+            table_columns(&db, "fs_undo").await,
+            ["id".to_string(), "path".to_string()]
+        );
+
+        // v2 adds a `checksum` column to the existing `fs_undo` table.
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0]
+            .columns
+            .push(test_column("checksum", ene_plugin_db::DbType::Text));
+
+        let resp = declare(&db, schema_v2.clone()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // The stored declaration was refreshed to the new fingerprint/json.
+        let row_v2 = stored_row(&db, "fs_").await.expect("row stored after v2");
+        assert_ne!(row_v1.fingerprint, row_v2.fingerprint);
+        assert_eq!(
+            row_v2.schema_json,
+            serde_json::to_string(&schema_v2).unwrap()
+        );
+
+        // The physical table gained the column, and existing rows survived.
+        assert_eq!(
+            table_columns(&db, "fs_undo").await,
+            ["id".to_string(), "path".to_string(), "checksum".to_string()]
+        );
+    }
+
+    /// Re-declaring an identical schema must not rewrite the stored row.
+    #[tokio::test]
+    async fn unchanged_schema_does_not_rewrite_stored_row() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let first = stored_row(&db, "fs_").await.expect("row stored");
+
+        // Ensure a rewrite would produce a different `created_at`.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let second = stored_row(&db, "fs_").await.expect("row still stored");
+
+        assert_eq!(first.fingerprint, second.fingerprint);
+        assert_eq!(first.schema_json, second.schema_json);
+        assert_eq!(first.created_at, second.created_at);
+    }
+
+    /// A column type change cannot be applied in place and is rejected.
+    #[tokio::test]
+    async fn type_change_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let before = stored_row(&db, "fs_").await.expect("row stored");
+
+        // v2 changes `path` from TEXT to INTEGER.
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0].columns[1].ty = ene_plugin_db::DbType::Integer;
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+
+        // The stored declaration is untouched after the rejected change.
+        let after = stored_row(&db, "fs_").await.expect("row still stored");
+        assert_eq!(before.fingerprint, after.fingerprint);
+        assert_eq!(before.schema_json, after.schema_json);
+    }
+
+    /// Adding a NOT NULL column without a DEFAULT is rejected: `SQLite` cannot
+    /// add such a column via `ALTER TABLE` (existing rows would violate the
+    /// constraint), and silently dropping the constraint would let validation
+    /// and storage diverge.
+    #[tokio::test]
+    async fn not_null_column_without_default_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let before = stored_row(&db, "fs_").await.expect("row stored");
+
+        // v2 adds a NOT NULL column without a DEFAULT.
+        let mut schema_v2 = test_schema_v1();
+        let mut col = test_column("checksum", ene_plugin_db::DbType::Text);
+        col.nullable = false;
+        schema_v2.tables[0].columns.push(col);
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+
+        // The stored declaration is untouched after the rejected change.
+        let after = stored_row(&db, "fs_").await.expect("row still stored");
+        assert_eq!(before.fingerprint, after.fingerprint);
+    }
+
+    /// Removing a previously declared table is rejected rather than silently
+    /// leaving the physical table orphaned.
+    #[tokio::test]
+    async fn removed_table_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 drops the `fs_undo` table entirely.
+        let schema_v2 = ene_plugin_db::DbSchema {
+            prefix: "fs_".to_string(),
+            tables: Vec::new(),
+            indexes: Vec::new(),
+        };
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// Removing a column from an existing table is rejected rather than
+    /// leaving the physical column orphaned.
+    #[tokio::test]
+    async fn removed_column_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 drops the `path` column from `fs_undo`.
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0].columns.pop();
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// Adding a column that carries a `UNIQUE` constraint is rejected, since
+    /// `SQLite` cannot add a constrained column via `ALTER TABLE`.
+    #[tokio::test]
+    async fn added_unique_column_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 adds a UNIQUE column, which ALTER TABLE ADD COLUMN forbids.
+        let mut schema_v2 = test_schema_v1();
+        let mut unique_col = test_column("slug", ene_plugin_db::DbType::Text);
+        unique_col.unique = true;
+        schema_v2.tables[0].columns.push(unique_col);
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// An additive migration preserves existing rows and accepts new data in
+    /// the added column — the exact scenario from #423.
+    #[tokio::test]
+    async fn additive_migration_preserves_existing_rows() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // Insert a row under the v1 schema.
+        let declared_tables: HashMap<String, ene_plugin_db::DbTable> = test_schema_v1()
+            .tables
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect();
+        let declared_columns: HashMap<String, HashSet<String>> = declared_tables
+            .iter()
+            .map(|(name, t)| {
+                (
+                    name.clone(),
+                    t.columns.iter().map(|c| c.name.clone()).collect(),
+                )
+            })
+            .collect();
+        let resp = insert_row(
+            &db,
+            "fs_undo",
+            std::collections::BTreeMap::from([(
+                "path".to_string(),
+                ene_plugin_db::DbValue::Text("/tmp/a".to_string()),
+            )]),
+            &declared_tables,
+            &declared_columns,
+        )
+        .await;
+        assert!(matches!(resp, DbResponse::Insert { .. }));
+
+        // Migrate to v2 (adds `checksum`).
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0]
+            .columns
+            .push(test_column("checksum", ene_plugin_db::DbType::Text));
+        let resp = declare(&db, schema_v2).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // The existing row survived; the new column reads back as NULL.
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT path, checksum FROM fs_undo".to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].try_get::<String>("", "path").unwrap(),
+            "/tmp/a".to_string()
+        );
+        assert!(
+            rows[0]
+                .try_get::<Option<String>>("", "checksum")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn build_alter_add_column_sql_renders_type_and_default() {
+        let table = ene_plugin_db::DbTable {
+            name: "fs_undo".to_string(),
+            columns: Vec::new(),
+        };
+
+        let nullable = test_column("checksum", ene_plugin_db::DbType::Text);
+        assert_eq!(
+            DbIpcServer::build_alter_add_column_sql(&table, &nullable),
+            "ALTER TABLE fs_undo ADD COLUMN checksum TEXT"
+        );
+
+        let with_default = ene_plugin_db::DbColumn {
+            name: "count".to_string(),
+            ty: ene_plugin_db::DbType::Integer,
+            nullable: false,
+            primary_key: false,
+            auto_increment: false,
+            unique: false,
+            default: Some(ene_plugin_db::DbValue::Int(0)),
+        };
+        assert_eq!(
+            DbIpcServer::build_alter_add_column_sql(&table, &with_default),
+            "ALTER TABLE fs_undo ADD COLUMN count INTEGER NOT NULL DEFAULT 0"
+        );
     }
 }

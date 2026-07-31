@@ -432,7 +432,14 @@ pub enum MemoryCandidateSource {
     Commitment,
 }
 
-/// Weights for hybrid memory search scoring components.
+/// Weights for hybrid memory search scoring components (#346).
+///
+/// The hybrid score is *relevance-driven*: `vector` and `lexical` form the
+/// relevance base that decides whether a memory is a candidate at all, while
+/// `recency`, `salience`, `confidence`, `emotional_match`, `relationship`, and
+/// `access_boost` form a multiplicative quality factor that only reorders
+/// memories *within* the relevant set. Quality can therefore never lift an
+/// irrelevant memory above a relevant one.
 ///
 /// Product defaults are supplied by `mind.memory.hybrid_weights`
 /// (`ene_mind::MindMemoryConfig`); the store only applies caller-provided
@@ -441,21 +448,21 @@ pub enum MemoryCandidateSource {
 #[serde(rename_all = "snake_case", default)]
 #[schemars(crate = "schemars")]
 pub struct HybridSearchWeights {
-    /// Weight for vector cosine similarity.
+    /// Relevance weight for vector cosine similarity.
     pub vector: f32,
-    /// Weight for lexical token overlap.
+    /// Relevance weight for lexical token overlap.
     pub lexical: f32,
-    /// Weight for recency decay score.
+    /// Quality weight for recency decay score.
     pub recency: f32,
-    /// Weight for memory salience.
+    /// Quality weight for memory salience.
     pub salience: f32,
-    /// Weight for memory confidence.
+    /// Quality weight for memory confidence.
     pub confidence: f32,
-    /// Weight for emotional/affect match.
+    /// Quality weight for emotional/affect match.
     pub emotional_match: f32,
-    /// Weight for relationship impact.
+    /// Quality weight for relationship impact.
     pub relationship: f32,
-    /// Weight for prior access boost.
+    /// Quality weight for prior access boost.
     pub access_boost: f32,
 }
 
@@ -554,6 +561,7 @@ pub struct MemoryJournalListOptions<'a> {
 
 /// Explainable score breakdown for a recalled memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MemoryScoreBreakdown {
     /// Raw vector cosine similarity.
     pub vector_similarity: f32,
@@ -571,6 +579,12 @@ pub struct MemoryScoreBreakdown {
     pub relationship: f32,
     /// Access-frequency boost.
     pub access_boost: f32,
+    /// Combined query-relevance signal in `[0, 1]` — the weighted blend of
+    /// vector similarity and lexical overlap that forms the score base (#346).
+    pub relevance: f32,
+    /// Multiplicative quality factor `>= 1.0` built from the salience,
+    /// confidence, recency, affect, relationship, and access signals (#346).
+    pub quality_factor: f32,
     /// Penalty for disputed status.
     pub contradiction_penalty: f32,
     /// Penalty for faded or expired memories.
@@ -579,6 +593,27 @@ pub struct MemoryScoreBreakdown {
     pub commitment_boost: f32,
     /// Final hybrid total score.
     pub total: f32,
+}
+
+impl Default for MemoryScoreBreakdown {
+    fn default() -> Self {
+        Self {
+            vector_similarity: 0.0,
+            lexical_score: 0.0,
+            recency_score: 0.0,
+            salience: 0.0,
+            confidence: 0.0,
+            emotional_match: 0.0,
+            relationship: 0.0,
+            access_boost: 0.0,
+            relevance: 0.0,
+            quality_factor: 1.0,
+            contradiction_penalty: 0.0,
+            stale_penalty: 0.0,
+            commitment_boost: 0.0,
+            total: 0.0,
+        }
+    }
 }
 
 /// A typed memory with hybrid score breakdown and recall sources.

@@ -61,9 +61,24 @@ pub enum DbError {
         /// Human-readable error message.
         message: String,
     },
+    /// The declared schema conflicts with the stored schema in a way that
+    /// cannot be applied automatically (e.g. a column type change).
+    #[error("schema conflict: {message}")]
+    SchemaConflict {
+        /// Human-readable error message.
+        message: String,
+    },
     /// An internal server error occurred.
     #[error("internal server error: {message}")]
     Internal {
+        /// Human-readable error message.
+        message: String,
+    },
+    /// An error code this build does not know about (emitted by a newer
+    /// host). The error is surfaced as a diagnostic rather than being
+    /// dropped wholesale.
+    #[error("unknown database error: {message}")]
+    Unknown {
         /// Human-readable error message.
         message: String,
     },
@@ -211,6 +226,8 @@ impl DbClient {
                 DbErrorCode::UnknownColumn => DbError::UnknownColumn { message },
                 DbErrorCode::TypeMismatch => DbError::TypeMismatch { message },
                 DbErrorCode::InvalidFilter => DbError::InvalidFilter { message },
+                DbErrorCode::SchemaConflict => DbError::SchemaConflict { message },
+                DbErrorCode::Unknown => DbError::Unknown { message },
                 DbErrorCode::Internal => DbError::Internal { message },
             };
             return Err(err);
@@ -439,6 +456,7 @@ mod tests {
             (DbErrorCode::UnknownColumn, "Unknown Column message"),
             (DbErrorCode::TypeMismatch, "Type Mismatch message"),
             (DbErrorCode::InvalidFilter, "Invalid Filter message"),
+            (DbErrorCode::SchemaConflict, "Schema Conflict message"),
             (DbErrorCode::Internal, "Internal message"),
         ];
 
@@ -464,6 +482,9 @@ mod tests {
                     }
                     (DbErrorCode::InvalidFilter, DbError::InvalidFilter { message }) => {
                         assert_eq!(message, "Invalid Filter message");
+                    }
+                    (DbErrorCode::SchemaConflict, DbError::SchemaConflict { message }) => {
+                        assert_eq!(message, "Schema Conflict message");
                     }
                     (DbErrorCode::Internal, DbError::Internal { message }) => {
                         assert_eq!(message, "Internal message");

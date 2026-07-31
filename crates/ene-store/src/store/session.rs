@@ -15,6 +15,27 @@ fn log_row_to_message(row: entities::conversation_logs::Model) -> crate::export:
     }
 }
 
+/// Escapes SQL `LIKE` metacharacters so `query` matches as a literal
+/// substring rather than a pattern (#422).
+///
+/// `%` and `_` are `LIKE` wildcards (match-any and match-one), and `\` is
+/// the escape character declared by the `ESCAPE '\'` clause in
+/// [`MemoryStore::search_messages`]. All three are prefixed with `\` so the
+/// database treats them literally. The escape character itself must be
+/// escaped first; iterating char-by-char handles that in a single pass.
+fn escape_like_pattern(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len());
+    for ch in query.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '%' => escaped.push_str("\\%"),
+            '_' => escaped.push_str("\\_"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 impl MemoryStore {
     // ── Conversation Logs ─────────────────────────────────────────────────────
 
@@ -264,9 +285,23 @@ impl MemoryStore {
 
     /// Case-insensitive substring search over conversation message content.
     ///
-    /// Returns `(session_id, message)` pairs, paginated by `limit`/`offset`.
-    /// The query is bound as a parameter (never concatenated into SQL), so it
-    /// is injection-safe. An empty query returns an empty result set.
+    /// Returns `(session_id, message)` pairs, paginated by `limit`/`offset`,
+    /// newest message first. The query is bound as a parameter (never
+    /// concatenated into SQL), so it is injection-safe. `LIKE` metacharacters
+    /// (`%`, `_`, `\`) in `query` are escaped and matched literally via an
+    /// explicit `ESCAPE '\'` clause, so searching for e.g. `50%` or `a_b`
+    /// finds those exact substrings instead of acting as wildcards (#422).
+    /// An empty query returns an empty result set.
+    ///
+    /// # Performance
+    ///
+    /// A leading-wildcard `LOWER(content) LIKE '%…%'` cannot use a B-tree
+    /// index on `content`, so the filter still examines candidate rows. The
+    /// `ORDER BY created_at DESC` + `LIMIT`/`OFFSET` is served by the
+    /// `idx_log_created_at` index (see the `conversation_logs_search_index`
+    /// migration), which lets `SQLite` walk rows newest-first and stop after
+    /// enough matches instead of sorting the entire table. Full-index
+    /// substring search requires FTS5, tracked separately (#424).
     pub async fn search_messages(
         &self,
         query: &str,
@@ -278,14 +313,15 @@ impl MemoryStore {
         }
 
         use sea_orm::ExprTrait;
+        use sea_orm::sea_query::LikeExpr;
 
-        let pattern = format!("%{}%", query.to_ascii_lowercase());
+        let pattern = format!("%{}%", escape_like_pattern(&query.to_ascii_lowercase()));
         let rows = entities::conversation_logs::Entity::find()
             .filter(
                 sea_orm::sea_query::Func::lower(sea_orm::sea_query::Expr::col(
                     entities::conversation_logs::Column::Content,
                 ))
-                .like(pattern),
+                .like(LikeExpr::new(pattern).escape('\\')),
             )
             .order_by_desc(entities::conversation_logs::Column::CreatedAt)
             .limit(limit as u64)
@@ -305,16 +341,11 @@ impl MemoryStore {
     /// Assembles a redacted, self-contained export for one session.
     ///
     /// Message content is passed through [`crate::export::redact_secrets`] so
-    /// obvious credentials never leave the store in the clear.
-    ///
-    /// # Limitation
-    ///
-    /// `tool_logs` is always empty: the `audit_log` table records a `turn_id`
-    /// but has no column linking a row back to its session, so audit entries
-    /// cannot be associated with a session reliably. Rather than guess (and
-    /// risk leaking another session's tool calls or fabricating data), the
-    /// export omits tool logs. A future schema revision could add a
-    /// `session_id` column to `audit_log` to enable this.
+    /// obvious credentials never leave the store in the clear. Tool-audit
+    /// logs are filtered by `session_id` (#426); their arguments were already
+    /// redacted by [`crate::audit::redact_arguments`] at write time, so no
+    /// secret material is re-exposed here. Rows with a `NULL` `session_id`
+    /// (pre-migration or out-of-band diagnostics calls) are never included.
     ///
     /// # Errors
     ///
@@ -338,12 +369,28 @@ impl MemoryStore {
             })
             .collect();
 
+        let tool_logs = self
+            .list_audit_entries_by_session(session_id)
+            .await?
+            .into_iter()
+            .map(|entry| crate::export::ExportedToolLog {
+                turn_id: entry.turn_id,
+                tool_name: entry.tool_name,
+                action: entry.action,
+                target: entry.target,
+                decision: entry.decision.as_str().to_string(),
+                success: entry.success,
+                redacted_args: entry.redacted_args,
+                created_at: entry.created_at,
+            })
+            .collect();
+
         Ok(crate::export::SessionExport {
             format_version: crate::export::SESSION_EXPORT_FORMAT_VERSION,
             exported_at: Utc::now(),
             session,
             messages,
-            tool_logs: Vec::new(),
+            tool_logs,
         })
     }
 

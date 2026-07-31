@@ -300,7 +300,7 @@ mod tests {
         let store = ConfigStore::from_config(EneConfig::default());
 
         let config = CharacterConfig {
-            extra: std::collections::BTreeMap::from([(
+            extra: indexmap::IndexMap::from([(
                 "motion".to_string(),
                 serde_json::Value::String("wave".to_string()),
             )]),

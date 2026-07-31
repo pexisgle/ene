@@ -76,6 +76,8 @@ mod tests {
                 emotional_match: 0.0,
                 relationship: 0.0,
                 access_boost: 0.0,
+                relevance: 0.0,
+                quality_factor: 1.0,
                 contradiction_penalty: 0.0,
                 stale_penalty: 0.0,
                 commitment_boost: 0.0,
