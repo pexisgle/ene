@@ -2045,7 +2045,8 @@ mod tests {
     /// the subsequent save keeps it.
     #[test]
     fn load_then_save_restores_file_section_order() {
-        let _guard = ENV_LOCK
+        let _guard = migration_guard();
+        let _env_guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -2085,7 +2086,8 @@ mod tests {
     /// than being sorted into the middle of them.
     #[test]
     fn load_then_save_appends_new_section_after_recorded_order() {
-        let _guard = ENV_LOCK
+        let _guard = migration_guard();
+        let _env_guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -2120,7 +2122,8 @@ mod tests {
     /// fallback to defaults.
     #[test]
     fn set_schema_via_set_path_round_trips() {
-        let _guard = ENV_LOCK
+        let _guard = migration_guard();
+        let _env_guard = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
