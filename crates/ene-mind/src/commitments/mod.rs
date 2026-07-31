@@ -503,7 +503,7 @@ mod tests {
             3
         }
 
-        fn model_name(&self) -> &str {
+        fn model_name(&self) -> &'static str {
             "keyword-test"
         }
     }
@@ -866,7 +866,7 @@ mod tests {
                 3
             }
 
-            fn model_name(&self) -> &str {
+            fn model_name(&self) -> &'static str {
                 "failing-test"
             }
         }
