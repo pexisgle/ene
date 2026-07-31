@@ -590,6 +590,15 @@ impl TurnActor {
                             {
                                 self.proactive.on_proactive_completed();
                             }
+                            // Retroactive topic-boundary compression (#368): a
+                            // boundary detected on the just-completed turn
+                            // compresses the span before it. Runs here (after
+                            // Terminal, in the actor) so the response is never
+                            // delayed; the summary is applied at the start of
+                            // the next turn via `apply_pending_compression`.
+                            if let Some(score) = outcome.topic_boundary_score {
+                                self.perform_retroactive_compression(score).await;
+                            }
                         } else if self
                             .terminal_emitted
                             .compare_exchange(
@@ -2026,6 +2035,7 @@ impl TurnActor {
             turn_end,
             level: CompressionLevel::Scene,
             config: mind.context.clone(),
+            drop_leading: None,
         };
         let result = ene_mind::ContextManager::execute_manual(store, provider, input).await?;
         if compression_has_usable_summary(&result) {
@@ -2081,7 +2091,17 @@ impl TurnActor {
                         level = ?compression.level,
                         "Rolling compression completed"
                     );
-                    self.trim_history_after_compression();
+                    // Retroactive topic-boundary compression drops the
+                    // pre-boundary prefix (keeping the boundary turn onward);
+                    // window-pressure/manual compression trims to the
+                    // configured recent window (#368).
+                    match compression.drop_leading {
+                        Some(drop) => {
+                            let keep = self.session.history().len().saturating_sub(drop);
+                            self.trim_history_to_keep(keep);
+                        }
+                        None => self.trim_history_after_compression(),
+                    }
                     self.spawn_chapter_rollup_if_needed().await;
                 }
                 Ok(compression) => {
@@ -2108,10 +2128,60 @@ impl TurnActor {
             .config
             .get_section::<ene_mind::MindConfig>()
             .map_or(16, |c| c.context.recent_turns.saturating_mul(2).max(2));
+        self.trim_history_to_keep(recent_cap);
+    }
+
+    /// Trim the in-memory history down to the most recent `keep` messages.
+    ///
+    /// Used after a compression span is persisted: the compressed messages are
+    /// dropped from the ring (the summary is served from the DB as the scene
+    /// section), leaving the retained tail. `keep` is the recent window for
+    /// window-pressure compression, or the boundary turn onward for
+    /// retroactive topic-boundary compression (#368).
+    fn trim_history_to_keep(&mut self, keep: usize) {
         let history_len = self.session.history().len();
-        if history_len > recent_cap {
-            self.session.trim_history_keep_last(recent_cap);
+        if history_len > keep {
+            self.session.trim_history_keep_last(keep);
         }
+    }
+
+    /// Spawn a retroactive compression for a detected topic boundary (#368).
+    ///
+    /// Called from the actor's event loop once the stream task reports a
+    /// boundary on the completed turn. The span before the boundary is
+    /// summarized into a scene span; the resulting task is polled by
+    /// [`Self::apply_pending_compression`] at the start of the next turn, which
+    /// trims the history to the boundary turn onward. Never blocks the
+    /// just-finished turn's response (Terminal was already emitted).
+    async fn perform_retroactive_compression(&mut self, boundary_score: f32) {
+        let Ok(mem_config) = self.config.get_section::<ene_store::StoreConfig>() else {
+            return;
+        };
+        if !mem_config.enabled {
+            return;
+        }
+        let Ok(mind) = self.config.get_section::<ene_mind::MindConfig>() else {
+            return;
+        };
+        let Some(store) = self.session.memory.memory_store.clone() else {
+            return;
+        };
+        let Ok(provider) = self.create_provider().await else {
+            return;
+        };
+        let turn_count = self.session.current_turn_count();
+        let history = self.session.history().to_vec();
+        self.context.check_and_trigger_retroactive(
+            &mind.context,
+            turn_count,
+            &history,
+            boundary_score,
+            self.session.memory.session_id.as_str(),
+            self.session.card_name(),
+            &self.config.user_name,
+            store,
+            provider,
+        );
     }
 
     async fn spawn_chapter_rollup_if_needed(&self) {

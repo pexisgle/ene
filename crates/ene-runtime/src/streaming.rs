@@ -252,6 +252,10 @@ pub struct StreamOutcome {
     pub session: ene_mind::ConversationSession,
     /// Why the stream ended (for proactive cooldown accounting).
     pub terminal: TerminalReason,
+    /// Composite score of a topic boundary detected retroactively on the
+    /// completed turn (#367/#368), if any. The actor consumes this to compress
+    /// the span before the boundary without delaying the response.
+    pub topic_boundary_score: Option<f32>,
 }
 
 /// Emit terminal and return [`StreamOutcome`] for the actor oneshot.
@@ -262,11 +266,13 @@ pub(crate) fn stream_finish(
     turn: &TurnId,
     origin: TurnOrigin,
     reason: TerminalReason,
+    topic_boundary_score: Option<f32>,
 ) -> StreamOutcome {
     emit_terminal(event_tx, guard, turn, origin, reason.clone());
     StreamOutcome {
         session,
         terminal: reason,
+        topic_boundary_score,
     }
 }
 

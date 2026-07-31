@@ -130,6 +130,47 @@ The detector only produces a signal and a composite score (surfaced as a
 `SplitReason::Composite`); acting on it belongs to #368 and #369. All
 thresholds and weights are configurable under `mind.topic_boundary`.
 
+### Retroactive Topic Compression (#368)
+
+A topic change is hard to judge instantly and is not worth delaying the
+response for, so compression is applied **retroactively** after the turn
+completes rather than before the response:
+
+1. Turn N arrives → the response is produced immediately using the history
+   as-is; nothing waits on boundary detection.
+2. After the turn completes — in the same deferred slot as memory writing and
+   affect classification — #367's detector scores the completed turn, now with
+   both the user input and the assistant response available as judgment
+   material.
+3. If a boundary is detected, the span *before* the boundary (the previous
+   topic) is summarized into a single scene span.
+4. Turn N+1's history is "previous-topic summary" (injected as the
+   `## Current Scene` section) plus "turn N onward".
+
+The result is history that looks as if the topic had already been switched at
+the boundary — applied one turn late, but imperceptible in practice. Running
+detection and summarization behind the response keeps latency unaffected, and
+seeing the assistant response makes it easier to tell a temporary digression
+from a genuine topic change. The centroid is **not** reset by compression
+(compression is a physical operation, not a topic boundary); only a session
+split (#369) resets it.
+
+Two compression triggers now coexist:
+
+| Trigger | Condition | Unit |
+|---|---|---|
+| **Topic boundary (primary)** | The retroactive compression above | One topic = one span |
+| **Window pressure (secondary)** | Retained history reaches the token ceiling | Oldest span |
+
+Because boundaries compress naturally, window-pressure compression is a safety
+net for a topic that runs too long without a detected boundary. Its trigger is
+now **token-based** — an estimate of the retained history's tokens against a
+configurable ceiling (`ContextConfig::context_pressure_tokens`) — replacing the
+former message-count ratio heuristic and its hard-coded `1.25` factor. The
+existing `CompressionLevel` hierarchy (Scene → Chapter → Arc) is preserved: one
+topic maps to one Scene summary, and chapter/arc rollups aggregate multiple
+scenes as before.
+
 ---
 
 ## 3. Prompt Packet Composition

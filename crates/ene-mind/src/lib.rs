@@ -112,9 +112,10 @@ pub use config::{
 pub use context::{
     ActiveSceneSummary, CompressionLevel, CompressionReason, CompressionResult,
     CompressionTaskInput, ContextBudget, ContextManager, MIN_MESSAGES_TO_COMPRESS, PackInput,
-    PackedPrompt, PendingCompressionTask, compression_has_usable_summary,
-    evaluate_compression_trigger, execute_compression, load_active_scene_summary,
-    maybe_roll_up_chapter, pack_prompt, poll_compression_result, spawn_compression_task,
+    PackedPrompt, PendingCompressionTask, RetroactiveCompressionPlan,
+    compression_has_usable_summary, estimate_history_tokens, evaluate_compression_trigger,
+    execute_compression, load_active_scene_summary, maybe_roll_up_chapter, pack_prompt,
+    plan_retroactive_compression, poll_compression_result, spawn_compression_task,
     validate_context_config,
 };
 /// Emotion engine types.

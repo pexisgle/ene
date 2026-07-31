@@ -52,10 +52,12 @@ pub enum CompressionReason {
         /// Number of turns in session.
         turn_count: usize,
     },
-    /// Context pressure from history length.
+    /// Window pressure: the retained history's estimated token count reached
+    /// the configured ceiling (#368). This is the token-based replacement for
+    /// the former message-count ratio heuristic.
     ContextPressure {
-        /// Ratio of history used (0.0–1.0).
-        ratio: f32,
+        /// Estimated tokens of the retained history when the trigger fired.
+        history_tokens: usize,
     },
     /// Manual trigger from CLI or API.
     Manual,
@@ -91,6 +93,11 @@ pub struct CompressionTaskInput {
     pub level: CompressionLevel,
     /// Context configuration snapshot.
     pub config: ContextConfig,
+    /// Number of *leading* history messages the compressed span occupies (#368).
+    /// `None` trims to the configured recent window on apply; `Some(n)` drops
+    /// the `n` leading messages (used by retroactive topic-boundary
+    /// compression to keep the boundary turn onward).
+    pub drop_leading: Option<usize>,
 }
 
 /// Result of a completed compression task.
@@ -104,6 +111,12 @@ pub struct CompressionResult {
     pub summary: String,
     /// Compression level written.
     pub level: CompressionLevel,
+    /// Number of *leading* history messages the compressed span occupied (#368).
+    /// `None` for window-pressure/manual compression, which trims to the
+    /// configured recent window; `Some(n)` for retroactive topic-boundary
+    /// compression, which drops the `n` leading messages (the pre-boundary
+    /// span) and keeps the boundary turn onward.
+    pub drop_leading: Option<usize>,
 }
 
 /// Whether a compression result produced a usable summary for prompt injection.
@@ -161,23 +174,94 @@ pub fn poll_compression_result(
     }
 }
 
-/// Evaluate whether compression should run for the current turn.
+/// Evaluate whether window-pressure compression should run for the current
+/// turn (#368).
+///
+/// This is the *secondary* trigger — a token-based safety net for topics that
+/// run long without a detected boundary. The *primary* trigger is the
+/// retroactive topic-boundary compression planned by
+/// [`plan_retroactive_compression`]. The window-pressure term compares the
+/// retained history's estimated token count against
+/// [`ContextConfig::context_pressure_tokens`] (replacing the former
+/// message-count ratio heuristic, which ignored token cost entirely); the
+/// turn-count term is retained as a coarse backstop.
 pub fn evaluate_compression_trigger(
     config: &ContextConfig,
     turn_count: usize,
-    history_len: usize,
+    history_tokens: usize,
 ) -> Option<CompressionReason> {
     if turn_count >= config.scene_turn_threshold {
         return Some(CompressionReason::TurnThreshold { turn_count });
     }
-    let recent_cap = config.recent_turns.saturating_mul(2).max(2);
-    if history_len > recent_cap {
-        let ratio = history_len as f32 / recent_cap as f32;
-        if ratio >= 1.25 {
-            return Some(CompressionReason::ContextPressure { ratio });
-        }
+    if history_tokens >= config.context_pressure_tokens {
+        return Some(CompressionReason::ContextPressure { history_tokens });
     }
     None
+}
+
+/// A planned retroactive compression: the span of history *before* a detected
+/// topic boundary, to be summarized into a single scene span (#368).
+///
+/// The boundary turn itself is the first turn of the *new* topic, so it is
+/// retained; everything strictly before it is compressed. The resulting
+/// history is "previous-topic summary" (injected as the scene section at
+/// composition time) plus "the boundary turn onward".
+#[derive(Debug, Clone)]
+pub struct RetroactiveCompressionPlan {
+    /// History entries before the boundary, to be summarized.
+    pub turns: Vec<HistoryEntry>,
+    /// Turn index range start (inclusive) of the compressed span.
+    pub turn_start: i32,
+    /// Turn index range end (inclusive) of the compressed span.
+    pub turn_end: i32,
+    /// Number of *leading* history messages the span occupies. Once the summary
+    /// is usable, exactly this many leading messages are dropped, leaving the
+    /// boundary turn onward. Expressed as a leading-drop count (not an absolute
+    /// keep count) so it stays correct even if the summary completes after
+    /// later turns have appended to history.
+    pub drop_leading: usize,
+}
+
+/// Plan a retroactive compression for a detected topic boundary (#368).
+///
+/// `history` is the committed history *including* the boundary turn (the last
+/// user/assistant exchange), and `turn_count` is the session's completed turn
+/// count. The boundary turn opens the new topic, so the compressible span is
+/// everything before the final exchange. Returns `None` when there is no
+/// pre-boundary span worth compressing (fewer than [`MIN_MESSAGES_TO_COMPRESS`]
+/// messages before the boundary), so a boundary on the first topic is a no-op.
+pub fn plan_retroactive_compression(
+    history: &[HistoryEntry],
+    turn_count: usize,
+) -> Option<RetroactiveCompressionPlan> {
+    // The boundary turn is the final exchange; everything before it is the
+    // previous topic. Guard against a trailing partial (user-only) exchange.
+    let has_final_exchange = history.len() >= 2
+        && matches!(
+            history[history.len() - 2].role,
+            ene_ai::Role::User | ene_ai::Role::System
+        )
+        && matches!(history[history.len() - 1].role, ene_ai::Role::Assistant);
+    let boundary_start = if has_final_exchange {
+        history.len() - 2
+    } else {
+        history.len().saturating_sub(1)
+    };
+    if boundary_start < MIN_MESSAGES_TO_COMPRESS {
+        return None;
+    }
+
+    let turns = history[..boundary_start].to_vec();
+    let turn_end = i32::try_from(turn_count.saturating_sub(1)).unwrap_or(i32::MAX);
+    let span_turns = i32::try_from(boundary_start / 2).unwrap_or(i32::MAX).max(1);
+    let turn_start = (turn_end - span_turns).max(0);
+
+    Some(RetroactiveCompressionPlan {
+        turns,
+        turn_start,
+        turn_end,
+        drop_leading: boundary_start,
+    })
 }
 
 /// Load the active scene summary for prompt injection.
@@ -232,6 +316,7 @@ async fn run_compression(
         span_id,
         summary: summary.unwrap_or_default(),
         level: input.level,
+        drop_leading: input.drop_leading,
     })
 }
 
@@ -364,6 +449,7 @@ pub async fn maybe_roll_up_chapter(
         span_id,
         summary: summary.unwrap_or_default(),
         level: CompressionLevel::Chapter,
+        drop_leading: None,
     }))
 }
 
@@ -371,14 +457,87 @@ pub async fn maybe_roll_up_chapter(
 mod tests {
     use super::*;
 
+    fn entry(role: ene_ai::Role, content: &str) -> HistoryEntry {
+        HistoryEntry {
+            role,
+            content: content.to_string(),
+        }
+    }
+
+    /// An alternating user/assistant history of `turns` exchanges.
+    fn exchanges(turns: usize) -> Vec<HistoryEntry> {
+        let mut history = Vec::with_capacity(turns * 2);
+        for i in 0..turns {
+            history.push(entry(ene_ai::Role::User, &format!("user {i}")));
+            history.push(entry(ene_ai::Role::Assistant, &format!("assistant {i}")));
+        }
+        history
+    }
+
     #[test]
     fn trigger_fires_on_turn_threshold() {
         let config = ContextConfig::default();
-        let reason = evaluate_compression_trigger(&config, config.scene_turn_threshold, 4);
+        let reason = evaluate_compression_trigger(&config, config.scene_turn_threshold, 0);
         assert!(matches!(
             reason,
             Some(CompressionReason::TurnThreshold { .. })
         ));
+    }
+
+    #[test]
+    fn trigger_fires_on_token_pressure() {
+        let config = ContextConfig {
+            scene_turn_threshold: 999,
+            context_pressure_tokens: 100,
+            ..ContextConfig::default()
+        };
+        let reason = evaluate_compression_trigger(&config, 1, 100);
+        assert!(matches!(
+            reason,
+            Some(CompressionReason::ContextPressure {
+                history_tokens: 100
+            })
+        ));
+        // Below the token ceiling and the turn threshold: no trigger.
+        assert!(evaluate_compression_trigger(&config, 1, 99).is_none());
+    }
+
+    #[test]
+    fn retroactive_plan_compresses_span_before_boundary_turn() {
+        // Three completed exchanges; the last is the boundary turn. The span
+        // before it (exchanges 0 and 1) is the previous topic.
+        let history = exchanges(3);
+        let plan = plan_retroactive_compression(&history, 3).expect("span before boundary");
+
+        assert_eq!(plan.turns.len(), 4);
+        assert_eq!(plan.drop_leading, 4, "drops the two pre-boundary exchanges");
+        assert_eq!(plan.turn_start, 0);
+        assert_eq!(plan.turn_end, 2);
+        // The compressed span is exactly the pre-boundary prefix.
+        assert_eq!(plan.turns, history[..4]);
+    }
+
+    #[test]
+    fn retroactive_plan_is_none_when_topic_too_short() {
+        // Only one exchange before the boundary turn: below the floor.
+        let history = exchanges(2);
+        assert!(plan_retroactive_compression(&history, 2).is_none());
+        // A boundary on the very first topic has nothing before it.
+        let first = exchanges(1);
+        assert!(plan_retroactive_compression(&first, 1).is_none());
+    }
+
+    #[test]
+    fn retroactive_plan_handles_trailing_partial_exchange() {
+        // A trailing user-only message (mid-turn snapshot) is not treated as
+        // the boundary exchange; the span still ends before the last complete
+        // exchange.
+        let mut history = exchanges(3);
+        history.push(entry(ene_ai::Role::User, "partial"));
+        let plan = plan_retroactive_compression(&history, 3).expect("span before boundary");
+        // boundary_start = len - 1 (partial); compress everything before it.
+        assert_eq!(plan.drop_leading, 6);
+        assert_eq!(plan.turns.len(), 6);
     }
 
     #[test]
@@ -388,6 +547,7 @@ mod tests {
             span_id: 1,
             summary: "   ".into(),
             level: CompressionLevel::Scene,
+            drop_leading: None,
         };
         assert!(!compression_has_usable_summary(&result));
         let ok = CompressionResult {
@@ -395,5 +555,121 @@ mod tests {
             ..result
         };
         assert!(compression_has_usable_summary(&ok));
+    }
+
+    /// A summarizer stub that always produces a fixed, non-empty summary so
+    /// the compression result is usable and the span is persisted.
+    struct SummaryLlm;
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for SummaryLlm {
+        fn name(&self) -> &str {
+            "summary-llm"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn tokio_stream::Stream<
+                            Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                        > + Send,
+                >,
+            >,
+            ene_ai::LlmProviderError,
+        > {
+            Err(ene_ai::LlmProviderError::Provider(
+                "not used in compression tests".into(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+            Ok(ene_ai::LlmCompletion::text_only(
+                "summary of the previous topic".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn retroactive_compression_persists_pre_boundary_span() {
+        let store = std::sync::Arc::new(ene_store::MemoryStore::open_in_memory(4).await.unwrap());
+        let provider: std::sync::Arc<dyn ene_ai::LlmProvider> = std::sync::Arc::new(SummaryLlm);
+        let mut manager = crate::context::ContextManager::default();
+        let config = ContextConfig::default();
+        let history = exchanges(3);
+
+        manager.check_and_trigger_retroactive(
+            &config,
+            3,
+            &history,
+            0.9,
+            "sess-retro",
+            "Ene",
+            "user",
+            store.clone(),
+            provider,
+        );
+        assert!(manager.has_pending(), "boundary should spawn a compression");
+
+        let result = loop {
+            if let Some(polled) = manager.poll_pending() {
+                break polled.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        };
+        assert!(compression_has_usable_summary(&result));
+        assert_eq!(result.level, CompressionLevel::Scene);
+
+        let spans = store
+            .list_memory_spans_by_session_and_level("sess-retro", CompressionLevel::Scene.as_i32())
+            .await
+            .unwrap();
+        assert_eq!(spans.len(), 1, "one topic = one summary span");
+        let span = &spans[0];
+        assert_eq!(span.turn_start, 0);
+        assert_eq!(span.turn_end, 2);
+        assert_eq!(
+            span.compressed_summary.as_deref(),
+            Some("summary of the previous topic")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_boundary_leaves_history_and_store_untouched() {
+        let store = std::sync::Arc::new(ene_store::MemoryStore::open_in_memory(4).await.unwrap());
+        let provider: std::sync::Arc<dyn ene_ai::LlmProvider> = std::sync::Arc::new(SummaryLlm);
+        let mut manager = crate::context::ContextManager::default();
+        let config = ContextConfig::default();
+        // A boundary on the first topic has no pre-boundary span to compress.
+        let history = exchanges(1);
+
+        manager.check_and_trigger_retroactive(
+            &config,
+            1,
+            &history,
+            0.9,
+            "sess-none",
+            "Ene",
+            "user",
+            store.clone(),
+            provider,
+        );
+        assert!(
+            !manager.has_pending(),
+            "no pre-boundary span means no compression task"
+        );
+
+        let spans = store
+            .list_memory_spans_by_session_and_level("sess-none", CompressionLevel::Scene.as_i32())
+            .await
+            .unwrap();
+        assert!(spans.is_empty(), "history must be unchanged");
     }
 }
