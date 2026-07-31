@@ -19,6 +19,7 @@ ene-ai = { workspace = true }
 ene-config = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "time", "process", "sync", "rt", "macros"] }
 tokio-stream = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
