@@ -440,16 +440,23 @@ pub(crate) async fn select_relevant_tools(
 /// Tool calls the LLM returns in a single round are split by their declared
 /// side effects:
 ///
-/// - **Side-effect-free** calls (`SideEffects::ReadOnly`, non-background) run
-///   first, concurrently, in a bounded batch of at most
+/// - When **every** call in the round is side-effect-free
+///   (`SideEffects::ReadOnly`, non-background), they run first, concurrently,
+///   in a bounded batch of at most
 ///   [`ToolExecutionContext::parallel_tool_calls_max`] at once. Only the raw
 ///   dispatch runs in parallel — no events are emitted and no permission /
 ///   user-input prompts are resolved in this phase.
+/// - **Mixed rounds are strictly sequential.** Parallelizing only the
+///   read-only calls of a mixed round would let a later read overtake an
+///   earlier write in the same response (the classic read-after-write: the
+///   model edits a file, then asks to read it back — the read must observe the
+///   write). The model's edit-then-verify pattern is real, so correctness wins
+///   over the modest speedup of a mixed round.
 /// - **All** calls are then finalized in the *original* order: each emits
 ///   `ToolCallStart`, consumes its precomputed parallel result (or runs
-///   sequentially when it was not parallelized), resolves any chained
-///   permission / user-input prompts, records the audit entry and undo
-///   checkpoint, and emits `ToolCallResult`.
+///   sequentially when the round was mixed), resolves any chained permission /
+///   user-input prompts, records the audit entry and undo checkpoint, and
+///   emits `ToolCallResult`.
 ///
 /// Finalizing in order preserves every ordering-sensitive invariant:
 /// `EneEvent::ToolCallStart` / `ToolCallResult` ordering for the UI, the undo
@@ -481,7 +488,15 @@ pub(crate) async fn perform_tool_executions(
 
     // Phase 1 — run side-effect-free calls concurrently (bounded). Results are
     // collected in the original order so Phase 2 can finalize deterministically.
-    let mut parallel_results = if ctx.parallel_tool_calls_max > 0 {
+    //
+    // Parallelism applies only when the whole round is side-effect-free: a
+    // mixed round runs strictly sequentially in original order so a read can
+    // never overtake an earlier write from the same response (#400).
+    let all_parallelizable = !tool_calls.is_empty()
+        && tool_calls
+            .iter()
+            .all(|call| ctx.parallelizable.contains(&call.name));
+    let mut parallel_results = if ctx.parallel_tool_calls_max > 0 && all_parallelizable {
         let parallel_indices: Vec<usize> = tool_calls
             .iter()
             .enumerate()
@@ -560,28 +575,27 @@ pub(crate) async fn perform_tool_executions(
         // the call now on the sequential path. `.take()` moves the result out
         // (each index is visited exactly once, and `PluginHostError` is not
         // `Clone`).
-        let mut result = match parallel_results[idx].take() {
-            Some(outcome) => outcome,
-            None => {
-                let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                if name == "system.search_tools" {
-                    let query = serde_json::from_str::<serde_json::Value>(&args)
-                        .ok()
-                        .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
-                        .unwrap_or_default();
-                    execute_system_search_tool(ctx.registry, ctx.tool_rag, &query).await
-                } else {
-                    dispatch_tool_call(
-                        ctx.registry,
-                        ctx.background_capable,
-                        ctx.deferred_tool_tx,
-                        &name,
-                        &args,
-                        &call_ctx,
-                        tool_timeout,
-                    )
-                    .await
-                }
+        let mut result = if let Some(outcome) = parallel_results[idx].take() {
+            outcome
+        } else {
+            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+            if name == "system.search_tools" {
+                let query = serde_json::from_str::<serde_json::Value>(&args)
+                    .ok()
+                    .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
+                    .unwrap_or_default();
+                execute_system_search_tool(ctx.registry, ctx.tool_rag, &query).await
+            } else {
+                dispatch_tool_call(
+                    ctx.registry,
+                    ctx.background_capable,
+                    ctx.deferred_tool_tx,
+                    &name,
+                    &args,
+                    &call_ctx,
+                    tool_timeout,
+                )
+                .await
             }
         };
 
@@ -1467,7 +1481,7 @@ mod tests {
                         // itself trip `clippy::dropping_copy_types`.
                         #[expect(
                             clippy::let_underscore_must_use,
-                            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                            reason = "ignoring the send error is intentional: the consumer may already have dropped the receiver"
                         )]
                         let _ = tx.send(PermissionDecision::AllowOnce);
                     }
@@ -1616,7 +1630,7 @@ mod tests {
                             // itself trip `clippy::dropping_copy_types`.
                             #[expect(
                                 clippy::let_underscore_must_use,
-                                reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                                reason = "ignoring the send error is intentional: the consumer may already have dropped the receiver"
                             )]
                             let _ = tx.send(PermissionDecision::AllowOnce);
                         }
@@ -2092,7 +2106,7 @@ mod tests {
         // `drop()` would itself trip `clippy::dropping_copy_types`.
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+            reason = "ignoring the send error is intentional: the consumer may already have dropped the receiver"
         )]
         let _ = tx.send(PermissionDecision::AllowOnce);
         let decision = await_permission_decision(
@@ -2176,7 +2190,7 @@ mod tests {
         // `drop()` would itself trip `clippy::dropping_copy_types`.
         #[expect(
             clippy::let_underscore_must_use,
-            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+            reason = "ignoring the send error is intentional: the consumer may already have dropped the receiver"
         )]
         let _ = tx.send(PermissionDecision::AllowOnce);
 
@@ -2548,7 +2562,7 @@ mod tests {
                     if let Some(tx) = guard.remove(&request_id) {
                         #[expect(
                             clippy::let_underscore_must_use,
-                            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                            reason = "ignoring the send error is intentional: the consumer may already have dropped the receiver"
                         )]
                         let _ = tx.send(PermissionDecision::AllowOnce);
                     }
