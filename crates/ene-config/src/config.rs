@@ -525,26 +525,20 @@ fn three_way_merge(
 /// in-memory config onto the **raw** on-disk JSON, so only genuine user edits
 /// are persisted. See [`three_way_merge`] for the merge semantics.
 fn serialize_json_layer(config: &EneConfig, config_path: &Path) -> Result<String, EneConfigError> {
+    // Run the same migration the loader runs, so the baseline and the raw
+    // layer agree even when the file is behind the current version (on a
+    // read-only filesystem the migration cannot persist, so reading the
+    // raw file directly would compare a migrated baseline against an
+    // unmigrated raw layer and rewrite the whole document).
+    let raw_layer =
+        serde_json::from_str::<serde_json::Value>(&migrate_settings_file(config_path)?)?;
+
     let baseline = extract_layered_config(config_path)?;
     let baseline_val = serde_json::to_value(&baseline)?;
     let current_val = serde_json::to_value(config)?;
 
-    // `read_raw_json_layer` already maps a missing file to an empty JSON
-    // object, so the only error path here is an unreadable file.
-    let raw_layer = serde_json::from_str::<serde_json::Value>(&read_raw_json_layer(config_path)?)?;
-
     let merged = three_way_merge(&baseline_val, &raw_layer, &current_val);
     Ok(serde_json::to_string_pretty(&merged)?)
-}
-
-/// Reads the raw on-disk `settings.json` as a string, falling back to an empty
-/// JSON object when the file does not exist yet.
-fn read_raw_json_layer(config_path: &Path) -> Result<String, EneConfigError> {
-    match std::fs::read_to_string(config_path) {
-        Ok(raw) => Ok(raw),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".to_string()),
-        Err(e) => Err(EneConfigError::IoError(e)),
-    }
 }
 
 /// Generates the JSON representation of the JSON Schema for settings.json
@@ -1598,6 +1592,10 @@ mod tests {
 
     /// Regression for #326: saving an untouched config must not force default
     /// values into `settings.json`; the raw JSON layer is written back as-is.
+    ///
+    /// The one exception is the `version` field, which the config-version
+    /// migration mechanism (#330) stamps explicitly on every document; a file
+    /// without it is treated as version 1.
     #[test]
     fn defaults_not_forced_to_disk_on_save() {
         let _guard = ENV_LOCK
@@ -1619,8 +1617,8 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            vec!["user_name"],
-            "only the on-disk key should remain, got {json}"
+            vec!["user_name", "version"],
+            "only the on-disk key and the version stamp should remain, got {json}"
         );
     }
 
