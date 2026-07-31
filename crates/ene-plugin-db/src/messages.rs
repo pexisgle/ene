@@ -260,6 +260,11 @@ pub enum DbErrorCode {
     /// prefix in a way that cannot be applied automatically (e.g. a column
     /// type change). The plugin must reconcile the difference explicitly.
     SchemaConflict,
+    /// A write was rejected because it would push the plugin's storage in the
+    /// shared `memory.db` past its configured quota
+    /// (`plugins.list.<name>.db_quota_mb`). Reads and deletes are still
+    /// permitted so the plugin can free space (#424).
+    QuotaExceeded,
     /// An internal server error occurred.
     Internal,
     /// An error code this build does not know about (emitted by a newer
@@ -277,6 +282,7 @@ impl std::fmt::Display for DbErrorCode {
             Self::TypeMismatch => write!(f, "TYPE_MISMATCH"),
             Self::InvalidFilter => write!(f, "INVALID_FILTER"),
             Self::SchemaConflict => write!(f, "SCHEMA_CONFLICT"),
+            Self::QuotaExceeded => write!(f, "QUOTA_EXCEEDED"),
             Self::Unknown => write!(f, "UNKNOWN"),
             Self::Internal => write!(f, "INTERNAL"),
         }

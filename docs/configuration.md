@@ -91,6 +91,23 @@ available = min(model_window, context_window)
 }
 ```
 
+Local models default `context_size` to 16,384 tokens (#366), calibrated to hold
+the system's own default prompt budget (`mind.context.max_prompt_tokens` =
+12,000) plus the model's reply. The previous default of 2,048 was sized for
+small decision tasks and silently dropped most prompt sections once a local
+model carried the main conversation. 16K is chosen over 32K to keep the
+llama.cpp KV cache realistic (~2.3 GB vs ~4.6 GB for a Gemma-3-4B-class model,
+on top of the weights); a model used only for decision workloads can lower
+`context_size` explicitly.
+
+At startup the runtime validates each generative task's window (`chat`, plus
+`proactive` when configured) against what it needs — the prompt budget plus the
+response reserve (`tasks.<task>.max_tokens`) — and logs a warning when the
+configured window is too small, since prompt sections would otherwise be
+dropped every turn without any visible signal. Cloud tasks without an explicit
+`context_window` override are validated at runtime instead, once the provider
+reports its real window.
+
 #### Token usage accounting (#365)
 
 Every completion carries an optional token-usage record — `prompt_tokens`,
@@ -154,7 +171,8 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
       "commitment_boost": 0.25,
-      "commitment_title_similarity_threshold": 0.82
+      "commitment_title_similarity_threshold": 0.82,
+      "contradiction_title_similarity_threshold": 0.82
     }
   }
 }
@@ -200,6 +218,15 @@ supersedes the existing commitment instead of being registered as a duplicate.
 With no embedding provider configured, the ledger falls back to exact
 normalized-title matching and this threshold is unused.
 
+The memory arbiter decides whether an incoming candidate contradicts an existing
+memory of the same kind by comparing the *similarity of their title embeddings*
+(#351): `contradiction_title_similarity_threshold` (default `0.82`) is the
+cosine-similarity cutoff above which synonymous titles ("職業" vs "仕事",
+"住んでいる場所" vs "居住地") are treated as the same subject and checked for
+contradiction, instead of being persisted as unrelated duplicates. With no
+embedding provider configured, the arbiter falls back to exact normalized-title
+matching and this threshold is unused.
+
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 
 Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
@@ -211,7 +238,7 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
     "list": {
       "app": { "enable": true },
       "browser": { "enable": true },
-      "fs": { "enable": true },
+      "fs": { "enable": true, "db_quota_mb": 256 },
       "utility": { "enable": true },
       "web": { "enable": true }
     },
@@ -239,6 +266,20 @@ plugin connection**, across *all* request types (tool calls, pings,
 bound queue (bounded by their own timeout) rather than fanning out to the
 plugin. Chat *streams* (`CreateChatStream`) are the exception: they bypass this
 bound and are not counted against it.
+
+`plugins.list.<name>.db_quota_mb` caps how much of the **shared `memory.db`** a
+plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into
+one shared database, so without a cap a single runaway or malicious plugin
+could exhaust the disk or bloat `memory.db` enough to degrade the memory
+system's queries, backups, and integrity checks. The host measures each
+plugin's footprint (the summed byte length of every cell across its declared
+tables) and rejects any storage-growing write — `Insert`/`Upsert`, including
+those inside a `Batch` — that would push it to or past the cap, returning a
+`QUOTA_EXCEEDED` error. Reads and deletes are never gated, so a plugin over
+quota can always free space. The default is `256` — generous enough that no
+built-in plugin comes close, while still bounding a runaway plugin before it
+does real damage. Set the field to `null` to disable enforcement for a plugin
+that legitimately needs unbounded storage.
 
 ### `tools.*` — Tool-Execution Runtime Behavior
 
@@ -268,6 +309,8 @@ event:
       "enabled": true,
       "top_k": 12,
       "min_similarity": 0.20,
+      "use_failure_feedback": true,
+      "failure_penalty": 0.5,
       "weights": {
         "summary": 1.0,
         "description": 0.6,
@@ -287,6 +330,15 @@ floor for that average; `weights.negative_threshold` (default `0.70`) is the
 gate at which a tool's negative-example embedding excludes it outright — a
 tool that matches its own negative example this strongly is filtered, not
 penalized.
+
+When `use_failure_feedback` (default `true`) is enabled, tools that recently
+failed for the active character are down-weighted: their score is multiplied by
+`failure_penalty` (default `0.5`, so a failed tool halves its score) before
+ranking, and a tool pushed below
+`min_similarity` by the penalty is dropped. Recent failures are read through
+`ene_core::ToolFailureSignalPort` (implemented by `ene-store`), so the pipeline
+stays free of a persistence dependency — see
+[Memory System §5](concepts/memory-system.md#5-tool-derived-memory-guardrails).
 
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 

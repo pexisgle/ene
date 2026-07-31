@@ -101,6 +101,7 @@ const fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
 fn merge_hybrid_candidate(
     gathered: &mut std::collections::HashMap<i64, ene_core::GatheredCandidate>,
     user_id: Option<&str>,
+    exclude_kinds: &[ene_core::MemoryKind],
     item: crate::MemoryItem,
     vector_similarity: f32,
     source: crate::MemoryCandidateSource,
@@ -109,6 +110,9 @@ fn merge_hybrid_candidate(
     use ene_rag::is_recallable_status;
 
     if !is_recallable_status(item.status) {
+        return;
+    }
+    if exclude_kinds.contains(&item.kind) {
         return;
     }
     if let Some(uid) = user_id
@@ -426,6 +430,45 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    /// List the namespaced tool names with a recent, recallable
+    /// `tool failure:{tool}` reflection memory for a character (#349).
+    ///
+    /// Backs [`ene_core::ToolFailureSignalPort`] so the tool-selection RAG
+    /// pipeline can down-weight tools that recently failed, without depending
+    /// on this crate. Each tool name appears at most once, ordered by the most
+    /// recent failure first.
+    pub async fn recent_tool_failures(
+        &self,
+        character_id: &str,
+    ) -> Result<Vec<String>, EneMemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder};
+
+        let models = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(
+                entities::typed_memories::Column::Kind.eq(crate::MemoryKind::Reflection.as_str()),
+            )
+            .filter(entities::typed_memories::Column::Status.is_in([
+                crate::MemoryStatus::Active.as_str(),
+                crate::MemoryStatus::Faded.as_str(),
+            ]))
+            .filter(entities::typed_memories::Column::Title.starts_with("tool failure:"))
+            .order_by_desc(entities::typed_memories::Column::CreatedAt)
+            .all(&self.db)
+            .await?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut tools = Vec::new();
+        for model in models {
+            if let Some(tool) = model.title.strip_prefix("tool failure:")
+                && seen.insert(tool.to_string())
+            {
+                tools.push(tool.to_string());
+            }
+        }
+        Ok(tools)
+    }
+
     /// Count typed memories for a character, optionally filtered by kind.
     pub async fn count_typed_memories(
         &self,
@@ -586,6 +629,7 @@ impl MemoryStore {
                 merge_hybrid_candidate(
                     &mut gathered,
                     query.user_id,
+                    &query.exclude_kinds,
                     item,
                     similarity,
                     MemoryCandidateSource::Vector,
@@ -608,6 +652,7 @@ impl MemoryStore {
                 merge_hybrid_candidate(
                     &mut gathered,
                     query.user_id,
+                    &query.exclude_kinds,
                     item,
                     0.0,
                     MemoryCandidateSource::Lexical,
@@ -632,6 +677,7 @@ impl MemoryStore {
             merge_hybrid_candidate(
                 &mut gathered,
                 query.user_id,
+                &query.exclude_kinds,
                 item,
                 0.0,
                 MemoryCandidateSource::Commitment,
@@ -675,6 +721,7 @@ impl MemoryStore {
             merge_hybrid_candidate(
                 &mut gathered,
                 query.user_id,
+                &query.exclude_kinds,
                 item,
                 0.0,
                 MemoryCandidateSource::Commitment,
@@ -704,6 +751,7 @@ impl MemoryStore {
                 merge_hybrid_candidate(
                     &mut gathered,
                     query.user_id,
+                    &query.exclude_kinds,
                     item,
                     0.0,
                     MemoryCandidateSource::Recent,

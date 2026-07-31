@@ -43,6 +43,22 @@ pub struct ToolRagConfig {
     /// values (e.g. `"Filesystem"`).
     #[serde(default)]
     pub per_category_limits: HashMap<String, usize>,
+    /// Whether to down-weight tools with a recent failure memory (#349).
+    ///
+    /// When enabled, the pipeline reads recent `tool failure:{tool}` memories
+    /// through [`ene_core::ToolFailureSignalPort`] and multiplies the relevance
+    /// score of a recently-failed tool by [`failure_penalty`](Self::failure_penalty),
+    /// so a tool that keeps failing for this character is less likely to be
+    /// re-selected. Requires a failure-signal source to be wired in.
+    #[serde(default = "default_use_failure_feedback")]
+    pub use_failure_feedback: bool,
+    /// Score multiplier applied to a tool with a recent failure (#349).
+    ///
+    /// Range `[0, 1]`; `1.0` disables the penalty. Only applied when
+    /// [`use_failure_feedback`](Self::use_failure_feedback) is enabled and the
+    /// penalty keeps the tool at or above `min_similarity`.
+    #[serde(default = "default_failure_penalty")]
+    pub failure_penalty: f32,
 }
 
 impl Default for ToolRagConfig {
@@ -58,8 +74,18 @@ impl Default for ToolRagConfig {
             forced: default_forced(),
             weights: FieldWeightsConfig::default(),
             per_category_limits: HashMap::new(),
+            use_failure_feedback: default_use_failure_feedback(),
+            failure_penalty: default_failure_penalty(),
         }
     }
+}
+
+const fn default_use_failure_feedback() -> bool {
+    true
+}
+
+const fn default_failure_penalty() -> f32 {
+    0.5
 }
 
 /// Serializable field weights (#436).

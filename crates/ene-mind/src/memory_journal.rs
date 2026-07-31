@@ -103,6 +103,7 @@ impl MemoryJournal {
             commitment_boost: mind_memory.commitment_boost,
             recent_fallback_limit: mind_memory.recent_fallback_limit,
             time_range: None,
+            exclude_kinds: Vec::new(),
         }
     }
 }

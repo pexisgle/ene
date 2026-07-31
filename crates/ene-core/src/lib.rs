@@ -76,6 +76,7 @@ pub use memory::{
 pub use pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
 pub use pending_write::{PendingMemoryWrite, PendingMemoryWriteStatus};
 pub use port::{
-    EmbeddingStorePort, EmbeddingStorePortError, MemoryPort, MemoryPortError, ToolEmbeddingFieldRow,
+    EmbeddingStorePort, EmbeddingStorePortError, MemoryPort, MemoryPortError,
+    ToolEmbeddingFieldRow, ToolFailureSignalPort, ToolFailureSignalPortError,
 };
 pub use span::{ActiveSceneSummaryRow, NewMemorySpan};

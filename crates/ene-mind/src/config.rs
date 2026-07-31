@@ -116,6 +116,22 @@ pub struct MindMemoryConfig {
     /// provider does not respond within this budget the extraction fails and
     /// the pipeline falls back to deterministic candidates (issue #66).
     pub extraction_timeout_secs: u64,
+    /// Minimum title-embedding cosine similarity for the arbiter to treat two
+    /// memories as sharing a contradiction key (#351).
+    ///
+    /// Kind-specific contradiction checks (`Preference`, `UserProfile`,
+    /// `Semantic`, `Relationship`) decide whether an incoming candidate talks
+    /// about the *same* subject as an existing memory by comparing the cosine
+    /// similarity of their **title embeddings**. A candidate whose title is at
+    /// least this similar to an existing memory of the same kind is checked for
+    /// contradiction instead of being persisted as a separate row, so synonymous
+    /// titles ("職業" vs "仕事", "住んでいる場所" vs "居住地") collapse into one
+    /// subject rather than accumulating contradictory duplicates. When no
+    /// embedding provider is available the arbiter falls back to exact
+    /// normalized-title equality, so this threshold only applies on the
+    /// embedding path.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub contradiction_title_similarity_threshold: f32,
     /// Tool-result grounding and guardrail settings (#92).
     pub tool_grounding: ToolGroundingConfig,
     /// Maximum number of typed memories requested by recall planning.
@@ -251,6 +267,7 @@ impl Default for MindMemoryConfig {
             default_forgetting_half_life_days: 30.0,
             min_confidence_to_persist: 0.65,
             extraction_timeout_secs: 30,
+            contradiction_title_similarity_threshold: 0.82,
             tool_grounding: ToolGroundingConfig::default(),
             recall_result_limit: 8,
             recall_similarity_threshold: 0.35,
@@ -855,6 +872,19 @@ mod tests {
             serde_json::from_str(r#"{"commitment_title_similarity_threshold": -0.3}"#)
                 .expect("deserialize");
         assert!(low.commitment_title_similarity_threshold < f32::EPSILON);
+    }
+
+    #[test]
+    fn contradiction_title_similarity_threshold_out_of_range_is_clamped() {
+        let high: MindMemoryConfig =
+            serde_json::from_str(r#"{"contradiction_title_similarity_threshold": 1.7}"#)
+                .expect("deserialize");
+        assert!((high.contradiction_title_similarity_threshold - 1.0).abs() < f32::EPSILON);
+
+        let low: MindMemoryConfig =
+            serde_json::from_str(r#"{"contradiction_title_similarity_threshold": -0.3}"#)
+                .expect("deserialize");
+        assert!(low.contradiction_title_similarity_threshold < f32::EPSILON);
     }
 
     #[test]
