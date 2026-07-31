@@ -1888,8 +1888,8 @@ mod tests {
         assert_eq!(before.schema_json, after.schema_json);
     }
 
-    /// Adding a NOT NULL column without a DEFAULT is rejected: SQLite cannot
-    /// add such a column via ALTER TABLE (existing rows would violate the
+    /// Adding a NOT NULL column without a DEFAULT is rejected: `SQLite` cannot
+    /// add such a column via `ALTER TABLE` (existing rows would violate the
     /// constraint), and silently dropping the constraint would let validation
     /// and storage diverge.
     #[tokio::test]
