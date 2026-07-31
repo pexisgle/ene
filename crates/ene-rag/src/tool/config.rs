@@ -21,12 +21,12 @@ pub struct ToolRagConfig {
     pub top_k: usize,
     /// Final number of tools returned after reranking and filtering.
     pub final_n: usize,
-    /// Reserved for LLM `HyDE` expansion.
-    ///
-    /// Deprecated: no-op; scheduled for removal.
-    #[deprecated(note = "LLM HyDE is disabled (no-op); this knob is scheduled for removal")]
-    pub use_hyde: bool,
     /// Whether to cosine-rerank candidates (embedding similarity; no LLM).
+    ///
+    /// Defaults to `false`: the weighted field-similarity score (#436) is
+    /// already normalized and field-count-independent, so the extra
+    /// `rerank_candidates` description re-embeddings per query are not worth
+    /// their cost by default. Opt in to evaluate reranking on a workload.
     pub use_rerank: bool,
     /// Number of candidates to pass to the reranker.
     pub rerank_candidates: usize,
@@ -46,16 +46,11 @@ pub struct ToolRagConfig {
 }
 
 impl Default for ToolRagConfig {
-    #[expect(
-        deprecated,
-        reason = "initialize deprecated use_hyde until it is removed"
-    )]
     fn default() -> Self {
         Self {
             enabled: true,
             top_k: 12,
             final_n: 6,
-            use_hyde: false,
             use_rerank: false,
             rerank_candidates: 24,
             min_similarity: 0.20,
@@ -91,28 +86,6 @@ pub struct FieldWeightsConfig {
     /// negative examples).
     #[serde(default = "default_negative_threshold")]
     pub negative_threshold: f32,
-    /// Weight for the `HyDE` (hypothetical document embedding).
-    ///
-    /// Deprecated: unused; scheduled for removal.
-    #[deprecated(note = "LLM HyDE is disabled; this weight is unused and scheduled for removal")]
-    pub hyde: f32,
-    /// Weight for the `HyDE` blend factor — the fraction
-    /// of the final score contributed by the `HyDE`
-    /// similarity, with the remainder from the direct
-    /// per-field cosine similarity. Range `[0.0, 1.0]`;
-    /// 0.0 disables `HyDE` blending, 1.0 uses only the
-    /// `HyDE` similarity.
-    ///
-    /// Deprecated: unused; scheduled for removal.
-    #[deprecated(
-        note = "LLM HyDE is disabled; this blend factor is unused and scheduled for removal"
-    )]
-    #[serde(default = "default_hyde_blend")]
-    pub hyde_blend: f32,
-}
-
-const fn default_hyde_blend() -> f32 {
-    0.6
 }
 
 const fn default_negative_threshold() -> f32 {
@@ -120,10 +93,6 @@ const fn default_negative_threshold() -> f32 {
 }
 
 impl Default for FieldWeightsConfig {
-    #[expect(
-        deprecated,
-        reason = "initialize deprecated HyDE weight fields until they are removed"
-    )]
     fn default() -> Self {
         Self {
             summary: 1.0,
@@ -132,8 +101,6 @@ impl Default for FieldWeightsConfig {
             example: 0.4,
             negative: -0.5,
             negative_threshold: default_negative_threshold(),
-            hyde: 0.7,
-            hyde_blend: default_hyde_blend(),
         }
     }
 }
