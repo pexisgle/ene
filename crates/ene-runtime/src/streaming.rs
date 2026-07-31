@@ -1590,6 +1590,10 @@ mod tests {
     /// `permission_prompt_timeout_ms` / `user_input_prompt_timeout_ms` are
     /// kept tiny so the bounded waits fire quickly; `cancel_token` lets a
     /// test cancel mid-wait.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test helper mirrors the borrowed ToolExecutionContext fields one-to-one"
+    )]
     fn prompt_wait_ctx<'a>(
         registry: &'a dyn ene_plugin_host::ToolRegistry,
         event_tx: &'a tokio::sync::broadcast::Sender<EneEvent>,
