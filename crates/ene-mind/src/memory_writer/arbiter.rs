@@ -1146,7 +1146,7 @@ mod tests {
             4
         }
 
-        fn model_name(&self) -> &str {
+        fn model_name(&self) -> &'static str {
             "topic-test"
         }
     }
@@ -1170,7 +1170,7 @@ mod tests {
             4
         }
 
-        fn model_name(&self) -> &str {
+        fn model_name(&self) -> &'static str {
             "failing-test"
         }
     }
