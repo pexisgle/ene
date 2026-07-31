@@ -50,10 +50,10 @@ fn format_context_block(context: &ProactiveContext) -> String {
         json!(context.suppression.proactive_turns_this_session),
     );
 
-    if let Some(affect) = &context.affect_summary {
-        if let Some(value) = affect_value(affect) {
-            map.insert("affect".to_string(), value);
-        }
+    if let Some(affect) = &context.affect_summary
+        && let Some(value) = affect_value(affect)
+    {
+        map.insert("affect".to_string(), value);
     }
 
     if let Some(activity) = &context.activity {
