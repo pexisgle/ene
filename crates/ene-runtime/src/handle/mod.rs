@@ -1805,9 +1805,10 @@ mod tests {
                     assert!(permanent_count.is_none());
                     saw_memory_write = true;
                 }
-                Ok(Ok(_)) => {} // e.g. TaskRejected; keep scanning
                 Ok(Err(e)) => panic!("diagnostic channel closed early: {e}"),
-                Err(_) => {} // timeout on this poll; loop until deadline
+                // An unrelated diagnostic (e.g. TaskRejected) or a poll
+                // timeout: keep scanning until the deadline.
+                Ok(Ok(_)) | Err(_) => {}
             }
         }
         assert!(
