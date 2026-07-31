@@ -151,7 +151,8 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
     "memory": {
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
-      "commitment_boost": 0.25
+      "commitment_boost": 0.25,
+      "commitment_title_similarity_threshold": 0.82
     }
   }
 }
@@ -164,6 +165,12 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 フィルタリングし、`recall_similarity_threshold`（デフォルト `0.35`）はベクトル収集を
 制御し、`commitment_boost`（デフォルト `0.25`）はクエリとの関連性がゼロでもアクティブな
 約束を表面化させます。
+
+コミットメント台帳は、着信したコミットメントをタイトル埋め込みの類似度でアクティブな
+コミットメントと照合します (#387)。`commitment_title_similarity_threshold`（デフォルト
+`0.82`）はコサイン類似度の閾値で、これを上回ると言い回しの異なる約束は二重登録ではなく
+既存コミットメントの更新（supersede）として扱われます。埋め込みプロバイダーが未設定の
+場合、台帳は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
 
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 
