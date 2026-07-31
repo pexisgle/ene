@@ -654,6 +654,7 @@ impl PluginHostManager {
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
+                Duration::from_millis(plugin_config.handshake_timeout_ms),
             )
             .await
             {
@@ -848,6 +849,7 @@ impl PluginHostManager {
 
         // Spawn the periodic health probe loop (disabled when the interval is 0).
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
+        let handshake_timeout = Duration::from_millis(plugin_config.handshake_timeout_ms);
         let health_task = if supervised.is_empty() || health_interval.is_zero() {
             if health_interval.is_zero() && !supervised.is_empty() {
                 tracing::info!(
@@ -863,7 +865,7 @@ impl PluginHostManager {
                 connections.iter().map(Arc::clone).collect();
             let tx = health_tx.clone();
             Some(tokio::spawn(async move {
-                health_probe_loop(health_interval, probes, conns, tx).await;
+                health_probe_loop(health_interval, handshake_timeout, probes, conns, tx).await;
             }))
         };
 
@@ -935,6 +937,7 @@ impl PluginHostManager {
         expected_checksum: Option<String>,
         env_passthrough: Vec<String>,
         db_token: Option<String>,
+        handshake_timeout: Duration,
     ) -> Result<
         (
             Arc<Mutex<SupervisedPlugin>>,
@@ -979,16 +982,34 @@ impl PluginHostManager {
             }
         }
 
-        let child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)
+        let mut child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)
             .spawn()
             .map_err(|e| PluginHostError::SpawnFailed {
                 name: name.to_string(),
                 reason: e.to_string(),
             })?;
 
-        let conn =
-            IpcPluginConnection::connect(&socket_path, sandbox.clone(), plugin_config.clone())
-                .await?;
+        let conn = match IpcPluginConnection::connect(
+            &socket_path,
+            sandbox.clone(),
+            plugin_config.clone(),
+            handshake_timeout,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(e) => {
+                // A handshake failure (e.g. the handshake timeout firing on a
+                // stalling plugin) leaves the just-spawned child running;
+                // dropping a std `Child` does not kill it. Kill and reap it so
+                // a wedged plugin does not leak a process and its socket file
+                // across launches.
+                drop(child.kill());
+                drop(child.wait());
+                ene_plugin_proto::cleanup_path(&socket_path);
+                return Err(e);
+            }
+        };
 
         // The pinned checksum for restart-time verification: the configured
         // checksum when present, otherwise the trust-on-first-use checksum
@@ -1159,6 +1180,7 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
 )]
 async fn health_probe_loop(
     interval: Duration,
+    handshake_timeout: Duration,
     plugins: Vec<Arc<Mutex<SupervisedPlugin>>>,
     connections: Vec<Arc<Mutex<IpcPluginConnection>>>,
     health_tx: mpsc::UnboundedSender<PluginHealthEvent>,
@@ -1267,7 +1289,14 @@ async fn health_probe_loop(
             let plugin_config = p.plugin_config.clone();
             drop(p);
 
-            match IpcPluginConnection::connect(&socket_path, sandbox, plugin_config).await {
+            match IpcPluginConnection::connect(
+                &socket_path,
+                sandbox,
+                plugin_config,
+                handshake_timeout,
+            )
+            .await
+            {
                 Ok(new_conn) => {
                     let mut c = conn.lock().await;
                     *c = new_conn;

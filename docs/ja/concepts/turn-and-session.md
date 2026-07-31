@@ -36,6 +36,15 @@
 - **音声チャネル** (`AudioChunk`、`EneHandle::take_audio_stream` 経由) — 合成された TTS PCM を流す bounded `mpsc` チャネル。単一コンシューマ専用で、最初の呼び出しで receiver の所有権が移譲され、以降の呼び出しはすべて `None` を返します。PCM ペイロードはチャットイベントに比べて重量級であり、同居させると全チャットsubscriberの `broadcast` バッファを膨張させてしまうため、チャットバスから分離しています。
 - **ライフサイクルバス** (`LifecycleEvent`、`EneHandle::subscribe_lifecycle` 経由) — `StatusChanged` / `PendingCandidateAvailable` / `ToolBackgroundCompleted` といったターン非依存の通知を流す、小容量の `broadcast` チャネル。チャットバスと同様に複数 subscriber を許容します。
 
+### ブロードキャスト lag からの回復
+
+`broadcast` のチャットバスとライフサイクルバスは非可逆です。subscriber が処理に追いつけない場合、`recv` は `RecvError::Lagged(n)` を返し、取りこぼした `n` 個のイベントは永久に失われます。進行中ターンの `Terminal` がそれに含まれている可能性があります。ギャップが黙って見過ごされることはなく（`DiagnosticEvent::Lagged` も発行されます）、回復手順は消費者間で統一されています：
+
+- **チャットバスの lag** — 進行中ターンのストリーム表示はもはや信頼できません。`EneHandle::active_turn()`（単一飛行ゲートの軽量な、メールボックスを経由しない読み取り）を問い合わせてください。`Some(turn)` が返った場合、そのターンを `EneHandle::cancel` でキャンセルし、アクターに新しい `Terminal` を発行させてゲートを解放します。そうしないと次の `run` は `RunError::Busy` で失敗します。その後、ローカルのターン単位 UI 状態を破棄します。
+- **ライフサイクルバスの lag** — キャンセルすべきターンはありません（ライフサイクル通知はターン非依存です）。逃した通知が運んでいたはずの状態を再取得するだけで済みます。たとえば、保留中の候補数は `EneHandle::candidates()` を引き直します。
+
+正確な手順は `cargo doc -p ene-runtime --open` で `EneHandle::active_turn` を参照してください。
+
 ---
 
 ## 2. セッションのライフサイクルとセッション分割

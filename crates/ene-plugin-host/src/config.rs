@@ -14,6 +14,10 @@ const fn default_health_interval_ms() -> u64 {
     30_000
 }
 
+const fn default_handshake_timeout_ms() -> u64 {
+    10_000
+}
+
 /// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
     let mut list: HashMap<String, PluginEntry> = ["app", "browser", "fs", "utility", "web"]
@@ -108,6 +112,19 @@ ene_config::define_config!(
         /// Set to `0` to disable periodic health checks.
         #[serde(default = "default_health_interval_ms")]
         pub health_interval_ms: u64 = default_health_interval_ms(),
+        /// Timeout for the plugin handshake response in milliseconds.
+        ///
+        /// A plugin that accepts the socket connection but never replies to
+        /// the `Handshake` request will fail after this duration instead of
+        /// blocking startup indefinitely. Plugins that perform heavy
+        /// initialization (model loading, etc.) should respond to the
+        /// handshake promptly and defer expensive work until afterwards.
+        ///
+        /// Unlike `health_interval_ms`, `0` does **not** disable the timeout:
+        /// it makes the handshake fail immediately. Use a large value if a
+        /// plugin legitimately needs a long time before answering.
+        #[serde(default = "default_handshake_timeout_ms")]
+        pub handshake_timeout_ms: u64 = default_handshake_timeout_ms(),
         /// MCP servers to connect to.
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig> = Vec::new(),
     }

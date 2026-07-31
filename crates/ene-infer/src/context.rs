@@ -112,11 +112,15 @@ impl JobContext {
     /// *this* job returns — a stall cannot be preempted, only observed from
     /// the outside once it's already too late for this job. What it does
     /// affect is every *later* call to [`crate::EngineHandle::submit`] on
-    /// the same handle: once the watchdog confirms a stall it marks the
-    /// whole engine down (see [`crate::EngineError::EngineDown`]) rather
-    /// than letting the queue fill up and report
-    /// [`crate::EngineError::Busy`] forever. Call `tick` at the same
-    /// interruption points where [`Self::should_stop`] is checked.
+    /// the same handle: once the watchdog *confirms* a stall (the silence
+    /// persists to `stall_timeout × stall_escalation_factor`, see
+    /// [`crate::EngineConfig::stall_escalation_factor`]) it marks the whole
+    /// engine down (see [`crate::EngineError::EngineDown`]) rather than
+    /// letting the queue fill up and report [`crate::EngineError::Busy`]
+    /// forever. A merely *suspected* stall (one silence window that later
+    /// resolves because the job completes) does not disable the engine.
+    /// Call `tick` at the same interruption points where
+    /// [`Self::should_stop`] is checked.
     pub fn tick(&self) {
         let Some(heartbeat) = &self.heartbeat else {
             return;

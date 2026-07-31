@@ -11,6 +11,12 @@ use crate::terminal_ui::TerminalUi;
 /// (single-flight hosts should only see one turn, but this keeps the stream
 /// safe if a lagged subscriber still holds an older id).
 /// Returns when the matching stream finishes or an error occurs.
+///
+/// On a chat-bus lag (`RecvError::Lagged`) the stream follows the runtime's
+/// documented recovery (#403): it cancels the still-in-flight turn reported
+/// by [`ene_runtime::EneHandle::active_turn`] so the single-flight gate is
+/// released, then returns. A closed channel (`RecvError::Closed`) means the
+/// actor is gone and also returns, without a cancel.
 pub async fn process_stream(
     rx: &mut EneEventReceiver,
     handle: &EneHandle,
@@ -248,8 +254,40 @@ pub async fn process_stream(
                 drop(handle.submit_user_input(request_id, decision));
                 tracing::info!("User input submitted; resuming processing");
             }
-            Err(e) => {
-                tracing::warn!(error = ?e, "Event receive error");
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                // Chat-bus lag: one or more events — possibly this turn's
+                // `Terminal` — were dropped, so the streamed view is no longer
+                // trustworthy. Follow the runtime's documented recovery
+                // (`EneHandle::active_turn`): if a turn is still in flight,
+                // cancel it so the actor emits a fresh `Terminal` and releases
+                // the single-flight gate. Without this the gate stays held and
+                // the next `run` fails with `RunError::Busy` (#403). Mirrors
+                // the desktop `ai_bridge` recovery.
+                tracing::warn!(
+                    skipped,
+                    "Chat bus lagged; resynchronizing via active_turn/cancel"
+                );
+                eprintln!(
+                    "{}",
+                    crate::style::warning(i18n_embed_fl::fl!(
+                        crate::i18n::loader(),
+                        "stream-lag-resync",
+                        skipped = skipped
+                    ))
+                );
+                if let Some(turn) = handle.active_turn()
+                    && let Err(e) = handle.cancel(&turn)
+                {
+                    tracing::warn!(error = %e, "Lag-recovery cancel failed");
+                }
+                ui.end_stream();
+                break;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // The actor's broadcast sender is gone: the runtime is dead.
+                // Distinct from lag — there is nothing to resynchronize to.
+                tracing::error!("Event channel closed; runtime disconnected");
+                ui.end_stream();
                 break;
             }
         }

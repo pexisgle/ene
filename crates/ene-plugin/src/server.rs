@@ -71,6 +71,17 @@ impl PluginDispatch {
 /// on Windows) and listens for requests over IPC. Shuts down upon receiving
 /// a `Shutdown` request, `SIGINT`, or `SIGTERM`.
 ///
+/// # Handshake latency
+///
+/// The host bounds how long it waits for the handshake response
+/// (`plugins.handshake_timeout_ms`, default 10 s). A plugin that performs
+/// heavy initialization (loading model weights, opening databases, etc.)
+/// **before** answering the `Handshake` request risks exceeding that bound,
+/// which makes the host fail the plugin's startup and skip it. Plugins
+/// should answer the handshake promptly and defer expensive work until
+/// afterwards (e.g. lazily on first use, or on a background task spawned
+/// once the server is listening).
+///
 /// # Usage
 ///
 /// ```rust,no_run

@@ -36,6 +36,7 @@ tool = [
 [dependencies]
 ene-core = { workspace = true }
 chrono = { workspace = true }
+unicode-normalization = { workspace = true }
 
 # tool-selection pipeline (feature = "tool")
 ene-ai = { workspace = true, optional = true }

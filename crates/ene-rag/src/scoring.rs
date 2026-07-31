@@ -11,16 +11,107 @@ use ene_core::{
     Query,
 };
 use std::collections::HashSet;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::decay::recency_score;
 
-/// Tokenize text for lexical overlap (lowercase alphanumeric tokens).
+/// Whether a character belongs to a CJK script that is written without spaces
+/// between words (Han ideographs, Hiragana, Katakana, Hangul), plus the CJK
+/// iteration/ideographic marks (e.g. `々`, `〇`, `〆`).
+///
+/// These are the ranges relevant to Japanese (plus Hangul for Korean); half-width
+/// and compatibility forms are folded into these ranges by NFKC normalization in
+/// [`tokenize`] before this is consulted. The iteration marks are included because
+/// `char::is_alphanumeric()` returns `true` for them (category `Lm`), so without
+/// this they would be misrouted through the non-CJK word path and split common
+/// words like `人々` / `時々` into lone unigrams.
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x3005..=0x3007   // Ideographic iteration (々), closing (〆), zero (〇) marks
+        | 0x3031..=0x3035 // Vertical kana repeat marks (〱–〵)
+        | 0x303B..=0x303C // Vertical ideographic iteration (〻) and masu (〼) marks
+        | 0x3040..=0x309F // Hiragana
+        | 0x30A0..=0x30FF // Katakana
+        | 0x31F0..=0x31FF // Katakana phonetic extensions
+        | 0x3400..=0x4DBF // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF // CJK Unified Ideographs
+        | 0xF900..=0xFAFF // CJK Compatibility Ideographs
+        | 0xAC00..=0xD7AF // Hangul Syllables
+        | 0x2_0000..=0x2_A6DF // CJK Extension B
+        | 0x2_A700..=0x2_EBEF // CJK Extensions C–F
+    )
+}
+
+/// Flush a pending non-CJK alphanumeric word run as a single token.
+fn flush_word(run: &mut String, tokens: &mut HashSet<String>) {
+    if !run.is_empty() {
+        tokens.insert(std::mem::take(run));
+    }
+}
+
+/// Flush a pending CJK run as overlapping bigrams (or a lone unigram).
+fn flush_cjk(run: &mut Vec<char>, tokens: &mut HashSet<String>) {
+    match run.len() {
+        0 => {}
+        // A single CJK character cannot form a bigram; keep it as a unigram so
+        // lone-character terms still participate in matching.
+        1 => {
+            tokens.insert(run[0].to_string());
+        }
+        _ => {
+            for pair in run.windows(2) {
+                let mut bigram = String::with_capacity(pair[0].len_utf8() + pair[1].len_utf8());
+                bigram.push(pair[0]);
+                bigram.push(pair[1]);
+                tokens.insert(bigram);
+            }
+        }
+    }
+    run.clear();
+}
+
+/// Tokenize text for lexical overlap.
+///
+/// Text is NFKC-normalized (folding full-width alphanumerics and half-width
+/// kana into their canonical forms) and lowercased, then split into terms:
+///
+/// - Runs of non-CJK alphanumerics (Latin, Cyrillic, …) become whole-word
+///   tokens, as before — `"hello world"` → `{hello, world}`.
+/// - Runs of CJK characters (which are written without inter-word spaces) are
+///   decomposed into overlapping bigrams, the standard dictionary-free
+///   approach for Japanese/Chinese — `"今日は良い天気"` →
+///   `{今日, 日は, は良, 良い, い天, 天気}`. A lone CJK character becomes a
+///   unigram.
+///
+/// This restores the lexical (term-overlap) component of hybrid search for
+/// Japanese, which the previous whitespace/ASCII splitter reduced to a single
+/// opaque token per sentence (#303). Bigram tokenization is deliberately
+/// dictionary-free (no MeCab/lindera) so it adds no native build dependency or
+/// dictionary download to CI; the trade-off is that single-character queries
+/// only match documents where that character appears alone.
 pub fn tokenize(text: &str) -> HashSet<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .collect()
+    let normalized: String = text.nfkc().collect::<String>().to_lowercase();
+    let mut tokens = HashSet::new();
+    let mut word = String::new();
+    let mut cjk_run: Vec<char> = Vec::new();
+
+    for ch in normalized.chars() {
+        if is_cjk(ch) {
+            flush_word(&mut word, &mut tokens);
+            cjk_run.push(ch);
+        } else {
+            flush_cjk(&mut cjk_run, &mut tokens);
+            if ch.is_alphanumeric() {
+                word.push(ch);
+            } else {
+                flush_word(&mut word, &mut tokens);
+            }
+        }
+    }
+    flush_word(&mut word, &mut tokens);
+    flush_cjk(&mut cjk_run, &mut tokens);
+    tokens
 }
 
 /// Jaccard similarity between two memory documents (title + content tokens).
@@ -331,6 +422,115 @@ mod tests {
         let score = lexical_overlap_score("pizza favorite", "favorite food", "likes pizza");
         assert!(score > 0.0);
         assert!(lexical_overlap_score("", "a", "b") < f32::EPSILON);
+    }
+
+    #[test]
+    fn tokenize_splits_japanese_into_bigrams() {
+        // The whole point of #303: a Japanese sentence must not collapse into a
+        // single opaque token.
+        let tokens = tokenize("今日は良い天気ですね");
+        assert!(
+            tokens.len() > 1,
+            "Japanese text must produce multiple tokens, got {tokens:?}"
+        );
+        assert!(tokens.contains("今日"));
+        assert!(tokens.contains("天気"));
+    }
+
+    #[test]
+    fn tokenize_keeps_english_words_whole() {
+        // Regression guard: the CJK path must not disturb ASCII word tokens.
+        let tokens = tokenize("hello world foo");
+        assert_eq!(tokens.len(), 3);
+        assert!(tokens.contains("hello"));
+        assert!(tokens.contains("world"));
+        assert!(tokens.contains("foo"));
+    }
+
+    #[test]
+    fn tokenize_handles_katakana() {
+        let tokens = tokenize("エネは可愛い、とても可愛い");
+        assert!(
+            tokens.len() > 2,
+            "katakana/hiragana runs must be bigram-split, got {tokens:?}"
+        );
+        assert!(tokens.contains("エネ"));
+        assert!(tokens.contains("可愛"));
+    }
+
+    #[test]
+    fn tokenize_lone_cjk_char_is_unigram() {
+        let tokens = tokenize("猫");
+        assert!(tokens.contains("猫"));
+        assert_eq!(tokens.len(), 1);
+    }
+
+    #[test]
+    fn tokenize_keeps_iteration_mark_in_bigrams() {
+        // The ideographic iteration mark `々` (category Lm) is alphanumeric, so it
+        // must be classified as CJK or it would split words like 人々/時々 into
+        // lone unigrams (Bugbot regression guard).
+        let tokens = tokenize("人々時々色々");
+        assert!(tokens.contains("人々"));
+        assert!(tokens.contains("時々"));
+        assert!(tokens.contains("色々"));
+        assert!(
+            !tokens.contains("々"),
+            "々 must not be emitted as a standalone token, got {tokens:?}"
+        );
+    }
+
+    #[test]
+    fn tokenize_folds_fullwidth_alphanumerics() {
+        // NFKC folds full-width forms into ASCII so they match ASCII queries.
+        let tokens = tokenize("Ｈｅｌｌｏ１２３");
+        assert!(tokens.contains("hello123"));
+    }
+
+    #[test]
+    fn tokenize_mixed_japanese_and_english() {
+        let tokens = tokenize("Rustで書く hello");
+        assert!(tokens.contains("rust"));
+        assert!(tokens.contains("hello"));
+        // "で書く" is a 3-char CJK run → two bigrams.
+        assert!(tokens.contains("で書"));
+        assert!(tokens.contains("書く"));
+    }
+
+    #[test]
+    fn lexical_overlap_scores_japanese() {
+        // Before #303 this returned 0.0 for Japanese queries.
+        let score = lexical_overlap_score("良い天気", "天気予報", "今日は良い天気ですね");
+        assert!(
+            score > 0.0,
+            "Japanese query must contribute lexical overlap"
+        );
+    }
+
+    #[test]
+    fn document_lexical_similarity_japanese_overlap() {
+        let sim = document_lexical_similarity(
+            "天気",
+            "今日は良い天気ですね",
+            "天気予報",
+            "明日の天気は晴れです",
+        );
+        assert!(
+            sim > 0.0,
+            "Japanese documents sharing terms must have positive similarity"
+        );
+        assert!(sim < 1.0);
+    }
+
+    #[test]
+    fn document_lexical_similarity_japanese_identical() {
+        let sim = document_lexical_similarity(
+            "好きな食べ物",
+            "ユーザーはピザが好き",
+            "好きな食べ物",
+            "ユーザーはピザが好き",
+        );
+        assert!((sim - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

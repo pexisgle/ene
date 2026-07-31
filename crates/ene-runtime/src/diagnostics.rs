@@ -344,18 +344,21 @@ pub enum DiagnosticEvent {
     },
     /// A broadcast subscriber lagged and skipped events (#189).
     ///
-    /// Consumers must not treat the stream as gap-free after this; emit
-    /// implies a [`Self::ResyncNeeded`] on the same channel.
+    /// Consumers must not treat the stream as gap-free after this. The lag is
+    /// also surfaced synchronously as the
+    /// [`tokio::sync::broadcast::error::RecvError::Lagged`] return value of the
+    /// offending `recv`/`try_recv`, which is the signal consumers actually act
+    /// on — this diagnostic is the opt-in observability twin of that error.
+    ///
+    /// The recovery procedure is documented on
+    /// [`crate::EneHandle::active_turn`]: for a chat-bus (`events`) lag,
+    /// query the in-flight turn and cancel it to release the single-flight
+    /// gate; for a lifecycle (`lifecycle`) lag, re-derive the affected state.
     Lagged {
-        /// Channel that lagged: `events` or `diagnostics`.
+        /// Channel that lagged: `events`, `lifecycle`, or `diagnostics`.
         channel: String,
         /// Number of messages skipped by the broadcast ring.
         skipped: u64,
-    },
-    /// Subscriber should resynchronize from a snapshot (#189).
-    ResyncNeeded {
-        /// Channel that requires resync: `events` or `diagnostics`.
-        channel: String,
     },
     /// A background task was refused admission because its actor-owned
     /// `JoinSet` was already at its configured capacity (Stage 8).
@@ -390,8 +393,9 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 
 /// Event receiver for [`DiagnosticEvent`].
 ///
-/// On lag, emits [`DiagnosticEvent::Lagged`] / [`DiagnosticEvent::ResyncNeeded`]
-/// onto the same channel before returning the lag error (#189).
+/// On lag, emits [`DiagnosticEvent::Lagged`] onto the same channel before
+/// returning the lag error (#189). Diagnostics are observability-only, so a
+/// diagnostics-bus lag needs no state recovery beyond noting the gap.
 pub struct DiagnosticEventReceiver {
     inner: broadcast::Receiver<DiagnosticEvent>,
     diag_tx: broadcast::Sender<DiagnosticEvent>,
@@ -408,9 +412,6 @@ impl DiagnosticEventReceiver {
         drop(self.diag_tx.send(DiagnosticEvent::Lagged {
             channel: "diagnostics".to_string(),
             skipped,
-        }));
-        drop(self.diag_tx.send(DiagnosticEvent::ResyncNeeded {
-            channel: "diagnostics".to_string(),
         }));
     }
 

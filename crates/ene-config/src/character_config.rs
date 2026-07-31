@@ -142,6 +142,9 @@ impl CharacterConfig {
 
     /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
     ///
+    /// Serialisation goes through [`section_to_value`](crate::config::section_to_value)
+    /// to avoid the f32→f64 widening artefact (#329).
+    ///
     /// Reuses [`set_nested`](crate::config::set_nested) for direct `BTreeMap` mutation
     /// instead of rebuilding the entire map from a JSON `Value`.
     pub fn set_section<T>(&mut self, section: &T) -> Result<(), EneConfigError>
@@ -149,11 +152,7 @@ impl CharacterConfig {
         T: serde::Serialize + HasConfigKey,
     {
         debug_assert_eq!(T::TARGET, ConfigTarget::Character);
-        let val = serde_json::to_value(section).map_err(|e| {
-            EneConfigError::GenericConfigError(format!(
-                "Failed to serialize character section: {e}"
-            ))
-        })?;
+        let val = crate::config::section_to_value(section)?;
         crate::config::set_nested(&mut self.extra, T::path(), val)?;
         Ok(())
     }
