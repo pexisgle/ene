@@ -1539,6 +1539,7 @@ impl TurnActor {
                 }
                 let registry = self.registry.clone();
                 let tool_rag = self.tool_rag.clone();
+                let card_name = self.session.card_name().to_string();
                 self.search_tasks.spawn(async move {
                     let result = if let Some(rag) = tool_rag {
                         let all_tools = registry.list_tools();
@@ -1546,7 +1547,7 @@ impl TurnActor {
                         if let Err(e) = rag.ensure_index(&all_tools, &profiles).await {
                             tracing::warn!(component = "ToolRag", error = %e, "ensure_index failed");
                         }
-                        rag.select(&query).await
+                        rag.select(&query, &card_name).await
                     } else {
                         let query_lower = query.to_lowercase();
                         registry
@@ -1583,6 +1584,7 @@ impl TurnActor {
                 let registry = self.registry.clone();
                 let tool_rag = self.tool_rag.clone();
                 let session_id = self.session.memory.session_id.to_string();
+                let card_name = self.session.card_name().to_string();
                 self.call_tool_tasks.spawn(async move {
                     let context = turn.as_ref().map(|turn| ene_plugin_proto::CallContext {
                         conversation_id: session_id,
@@ -1597,6 +1599,7 @@ impl TurnActor {
                             registry.as_ref(),
                             tool_rag.as_deref(),
                             &query,
+                            &card_name,
                         )
                         .await
                         .map_err(EneRuntimeError::from)
@@ -3009,10 +3012,17 @@ pub(super) fn init_tool_rag(
 
     // The tool RAG persists embeddings through the `EmbeddingStorePort`
     // abstraction (#302) so `ene-rag` never depends on `ene-store`.
-    let store: Option<Arc<dyn ene_core::EmbeddingStorePort>> =
-        concrete_store.map(|s| s as Arc<dyn ene_core::EmbeddingStorePort>);
+    let store: Option<Arc<dyn ene_core::EmbeddingStorePort>> = concrete_store
+        .clone()
+        .map(|s| s as Arc<dyn ene_core::EmbeddingStorePort>);
     let opts = ToolRagOptions::from_config(rag_config)?;
-    Ok(Some(Arc::new(ToolRag::new(embedder.clone(), store, opts))))
+    let mut rag = ToolRag::new(embedder.clone(), store, opts);
+    // Recent tool-failure feedback (#349): let selection down-weight tools that
+    // recently failed, read through a port so `ene-rag` stays store-agnostic.
+    if let Some(store) = concrete_store {
+        rag = rag.with_failure_signals(store as Arc<dyn ene_core::ToolFailureSignalPort>);
+    }
+    Ok(Some(Arc::new(rag)))
 }
 
 #[cfg(test)]

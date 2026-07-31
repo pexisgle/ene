@@ -617,6 +617,73 @@ async fn typed_memory_crud() {
 }
 
 #[tokio::test]
+async fn recent_tool_failures_lists_recallable_reflections_only() {
+    let store = setup_store().await;
+
+    let reflection = |title: &str, status: crate::MemoryStatus| crate::NewMemoryItem {
+        scope: crate::MemoryScope::Shared,
+        character_id: "ene".into(),
+        user_id: String::new(),
+        kind: crate::MemoryKind::Reflection,
+        title: title.into(),
+        content: format!("failure record for {title}"),
+        source: crate::MemorySource::Inferred,
+        source_ref: None,
+        confidence: crate::MemoryConfidence::new(0.65),
+        salience: crate::MemorySalience::default(),
+        affect: crate::AffectAnnotation::default(),
+        relationship_impact: 0.0,
+        valid_from: None,
+        valid_until: None,
+        status,
+        supersedes_id: None,
+        pinned: false,
+        created_at: None,
+        commitment_id: None,
+    };
+
+    // Two active failures for distinct tools.
+    store
+        .insert_typed_memory(&reflection("tool failure:web", crate::MemoryStatus::Active))
+        .await
+        .unwrap();
+    store
+        .insert_typed_memory(&reflection("tool failure:fs", crate::MemoryStatus::Active))
+        .await
+        .unwrap();
+    // A superseded failure must not be reported.
+    store
+        .insert_typed_memory(&reflection(
+            "tool failure:git",
+            crate::MemoryStatus::Superseded,
+        ))
+        .await
+        .unwrap();
+    // A Faded failure is still recallable and keeps penalizing the tool:
+    // fading is a decay signal for recall relevance, not an un-failure.
+    store
+        .insert_typed_memory(&reflection("tool failure:db", crate::MemoryStatus::Faded))
+        .await
+        .unwrap();
+    // A non-Reflection memory with a matching title must not be reported.
+    let mut semantic = reflection("tool failure:sqlite", crate::MemoryStatus::Active);
+    semantic.kind = crate::MemoryKind::Semantic;
+    store.insert_typed_memory(&semantic).await.unwrap();
+
+    let failures = store.recent_tool_failures("ene").await.unwrap();
+    assert_eq!(
+        failures.len(),
+        3,
+        "only recallable Reflection failures: {failures:?}"
+    );
+    assert!(failures.contains(&"web".to_string()));
+    assert!(failures.contains(&"fs".to_string()));
+    assert!(failures.contains(&"db".to_string()));
+    assert!(!failures.contains(&"git".to_string()));
+    assert!(!failures.contains(&"sqlite".to_string()));
+}
+
+#[tokio::test]
 async fn typed_memory_search_with_embedding() {
     let store = setup_store().await;
 

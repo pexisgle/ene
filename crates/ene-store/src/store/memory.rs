@@ -430,6 +430,45 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
+    /// List the namespaced tool names with a recent, recallable
+    /// `tool failure:{tool}` reflection memory for a character (#349).
+    ///
+    /// Backs [`ene_core::ToolFailureSignalPort`] so the tool-selection RAG
+    /// pipeline can down-weight tools that recently failed, without depending
+    /// on this crate. Each tool name appears at most once, ordered by the most
+    /// recent failure first.
+    pub async fn recent_tool_failures(
+        &self,
+        character_id: &str,
+    ) -> Result<Vec<String>, EneMemoryError> {
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder};
+
+        let models = entities::typed_memories::Entity::find()
+            .filter(entities::typed_memories::Column::CharacterId.eq(character_id))
+            .filter(
+                entities::typed_memories::Column::Kind.eq(crate::MemoryKind::Reflection.as_str()),
+            )
+            .filter(entities::typed_memories::Column::Status.is_in([
+                crate::MemoryStatus::Active.as_str(),
+                crate::MemoryStatus::Faded.as_str(),
+            ]))
+            .filter(entities::typed_memories::Column::Title.starts_with("tool failure:"))
+            .order_by_desc(entities::typed_memories::Column::CreatedAt)
+            .all(&self.db)
+            .await?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut tools = Vec::new();
+        for model in models {
+            if let Some(tool) = model.title.strip_prefix("tool failure:")
+                && seen.insert(tool.to_string())
+            {
+                tools.push(tool.to_string());
+            }
+        }
+        Ok(tools)
+    }
+
     /// Count typed memories for a character, optionally filtered by kind.
     pub async fn count_typed_memories(
         &self,
