@@ -68,7 +68,6 @@ const RULES: &[AppraisalRule] = &[
             "死ね",
             "バカ",
             "うざい",
-            "嫌い",
         ],
         valence: -0.25,
         arousal: 0.1,
@@ -176,13 +175,37 @@ fn ascii_tokens(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether a character is katakana (full-width or half-width).
+fn is_katakana(c: char) -> bool {
+    matches!(c, '\u{30A0}'..='\u{30FF}' | '\u{FF65}'..='\u{FF9F}')
+}
+
+/// Whether a character is a CJK ideograph (kanji).
+fn is_kanji(c: char) -> bool {
+    matches!(
+        c,
+        '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}' | '\u{F900}'..='\u{FAFF}'
+    )
+}
+
+/// Japanese negative suffixes that flip a keyword's polarity when they follow it.
+///
+/// Deliberately conservative: bare `ない` is excluded because it also appears in
+/// unrelated words (e.g. `死ねない` "cannot"), which would mask genuine signals.
+const JA_NEGATION_SUFFIXES: &[&str] = &["じゃない", "ではない", "くない", "ありません"];
+
 /// Match a pattern against normalized user text.
 ///
-/// ASCII single-word patterns use token boundaries; multi-word ASCII and
-/// non-ASCII patterns use substring matching.
+/// ASCII single-word patterns use token boundaries; multi-word ASCII patterns
+/// use substring matching. Non-ASCII (Japanese) patterns use script-aware
+/// boundary matching: the pattern must not be embedded inside a longer run of
+/// its own script (so `バカ` does not fire inside `バカンス`), and a trailing
+/// negation suffix suppresses the match (so `嫌いじゃない` reads as a preference,
+/// not an insult). This keeps Japanese and ASCII matching comparably strict
+/// (#360).
 fn pattern_matches(normalized: &str, pattern: &str) -> bool {
     if !pattern.is_ascii() {
-        return normalized.contains(pattern);
+        return japanese_pattern_matches(normalized, pattern);
     }
     let pattern_lower = pattern.to_lowercase();
     if pattern_lower.contains(' ') {
@@ -192,6 +215,47 @@ fn pattern_matches(normalized: &str, pattern: &str) -> bool {
             .iter()
             .any(|token| token == &pattern_lower)
     }
+}
+
+/// Match a non-ASCII pattern with script-run boundaries and negation awareness.
+fn japanese_pattern_matches(normalized: &str, pattern: &str) -> bool {
+    normalized.match_indices(pattern).any(|(start, matched)| {
+        let end = start + matched.len();
+        !embedded_in_script_run(normalized, pattern, start, end)
+            && !negation_follows(&normalized[end..])
+    })
+}
+
+/// Whether the match at `[start, end)` is glued into a larger word of the same script.
+///
+/// Japanese has no whitespace, so a keyword fused to a neighbouring character of
+/// its *own* script is part of a longer word rather than a standalone term:
+/// `バカ` inside the katakana run `バカンス`, or a kanji keyword inside a longer
+/// kanji compound. A script change (kana ↔ kanji), hiragana grammatical glue, and
+/// punctuation all count as boundaries, so `大バカ` and `最高の気分` still match.
+fn embedded_in_script_run(text: &str, pattern: &str, start: usize, end: usize) -> bool {
+    let prev = text[..start].chars().next_back();
+    let next = text[end..].chars().next();
+    let glued_before = matches!((prev, pattern.chars().next()),
+        (Some(adjacent), Some(edge)) if same_script_run(adjacent, edge));
+    let glued_after = matches!((next, pattern.chars().next_back()),
+        (Some(adjacent), Some(edge)) if same_script_run(adjacent, edge));
+    glued_before || glued_after
+}
+
+/// Whether `adjacent` continues the same script run as the keyword edge `edge`.
+///
+/// Only katakana and kanji form runs that fuse words; hiragana (particles,
+/// okurigana, copula) is grammatical glue and always acts as a boundary.
+fn same_script_run(adjacent: char, edge: char) -> bool {
+    (is_katakana(edge) && is_katakana(adjacent)) || (is_kanji(edge) && is_kanji(adjacent))
+}
+
+/// Whether the text immediately after a match begins with a Japanese negation.
+fn negation_follows(rest: &str) -> bool {
+    JA_NEGATION_SUFFIXES
+        .iter()
+        .any(|suffix| rest.starts_with(suffix))
 }
 
 fn apply_field_delta(
@@ -301,6 +365,52 @@ mod tests {
         let reasons = apply_appraisal(&mut state, "This is thankless work", 2);
         assert!(!reasons.iter().any(|r| r.category == "gratitude"));
         assert!((state.valence - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn stated_preference_is_not_an_insult() {
+        let mut state = AffectState::neutral("ene");
+        let reasons = apply_appraisal(&mut state, "きのこが嫌いなんだよね", 2);
+        assert!(!reasons.iter().any(|r| r.category == "insult"));
+        assert!((state.valence - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn negated_dislike_is_not_an_insult() {
+        let mut state = AffectState::neutral("ene");
+        let reasons = apply_appraisal(&mut state, "この曲嫌いじゃない", 2);
+        assert!(!reasons.iter().any(|r| r.category == "insult"));
+    }
+
+    #[test]
+    fn katakana_substring_bakansu_is_not_an_insult() {
+        let mut state = AffectState::neutral("ene");
+        let reasons = apply_appraisal(&mut state, "バカンスの予定を立てたい", 2);
+        assert!(!reasons.iter().any(|r| r.category == "insult"));
+        assert!((state.valence - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn negated_insult_is_suppressed() {
+        let mut state = AffectState::neutral("ene");
+        let reasons = apply_appraisal(&mut state, "別にバカじゃないよ", 2);
+        assert!(!reasons.iter().any(|r| r.category == "insult"));
+    }
+
+    #[test]
+    fn genuine_japanese_insult_still_detected() {
+        let mut state = AffectState::neutral("ene");
+        let reasons = apply_appraisal(&mut state, "ほんとにバカだな", 2);
+        assert!(reasons.iter().any(|r| r.category == "insult"));
+        assert!(state.valence < 0.0);
+        assert!(state.irritation > 0.0);
+    }
+
+    #[test]
+    fn japanese_insult_across_script_boundary_still_detected() {
+        let mut state = AffectState::neutral("ene");
+        let reasons = apply_appraisal(&mut state, "大バカ者", 2);
+        assert!(reasons.iter().any(|r| r.category == "insult"));
     }
 
     #[test]
