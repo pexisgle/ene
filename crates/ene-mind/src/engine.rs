@@ -397,10 +397,18 @@ impl CognitionEngine {
         // Load user persona from global config so the identity kernel can expand
         // the `{{user_persona}}` CBS macro at compile time (#H-3).
         let user_persona = ene_config::get_global_config().user_persona;
+        // Seed `{{pick}}` from the character+session so a trait chosen once
+        // (hair colour, hometown, …) stays fixed across per-turn kernel
+        // recompilations instead of re-rolling every turn (#343).
+        let pick_seed = Some(ene_config::session_pick_seed(&format!(
+            "{}:{}",
+            ctx.character_id, ctx.session_id
+        )));
         let kernel = CharacterProcessor::compile_kernel(
             ctx.card,
             ctx.user_name,
             user_persona.as_ref(),
+            pick_seed,
             max_kernel_tokens,
         );
 

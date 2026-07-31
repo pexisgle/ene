@@ -38,18 +38,29 @@ impl CharacterProcessor {
     ///
     /// `user_persona`, when provided, expands the `{{user_persona}}` CBS macro
     /// in card-derived fields (#H-3).
+    ///
+    /// `pick_seed`, when provided, keeps `{{pick}}` stable for the lifetime of
+    /// the chat instead of re-rolling on each per-turn recompilation (#343);
+    /// derive it with [`ene_config::session_pick_seed`].
     pub fn compile_kernel(
         card: &CharacterCardV3,
         user_name: &str,
         user_persona: Option<&UserPersona>,
+        pick_seed: Option<u64>,
         max_tokens: usize,
     ) -> IdentityKernel {
-        CharacterCompiler::compile(card, user_name, user_persona, max_tokens)
+        CharacterCompiler::compile(card, user_name, user_persona, pick_seed, max_tokens)
     }
 
     /// Compile the identity kernel using default token budget.
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
-        Self::compile_kernel(card, user_name, None, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS)
+        Self::compile_kernel(
+            card,
+            user_name,
+            None,
+            None,
+            DEFAULT_IDENTITY_KERNEL_MAX_TOKENS,
+        )
     }
 
     /// Synchronize `CCv3` lorebook and style indices into typed memory.

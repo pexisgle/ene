@@ -1,3 +1,4 @@
+use chrono::{DateTime, Datelike, Local};
 use indexmap::IndexMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -514,12 +515,71 @@ pub struct EneExtension {
     pub expressions: Option<Vec<ExpressionDefinition>>,
 }
 
+/// Context for expanding CBS (Character Book Spec) template macros.
+///
+/// Bundles every input a macro may need so that expansion is a pure function
+/// of the context: the same context always yields the same output. This is
+/// what makes `{{pick}}` stable across the per-turn recompilations of the
+/// identity kernel (#343) and what keeps time macros testable via an
+/// injectable clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MacroContext<'a> {
+    /// The character's display name (`{{char}}` / `<char>` / `<bot>`).
+    pub char_name: &'a str,
+    /// The user's display name (`{{user}}`).
+    pub user_name: &'a str,
+    /// Optional user persona (`{{user_persona}}`).
+    pub user_persona: Option<&'a UserPersona>,
+    /// The character card whose fields back the card-reference macros
+    /// (`{{description}}`, `{{personality}}`, …). `None` leaves them unexpanded.
+    pub card: Option<&'a CharacterCardV3>,
+    /// Stable per-session seed. `{{pick}}` combines this with the option text
+    /// so the same choice is returned on every evaluation within a session,
+    /// while `{{random}}` ignores it and re-rolls. `None` makes `{{pick}}`
+    /// fall back to a fresh random draw (legacy behaviour).
+    pub pick_seed: Option<u64>,
+    /// Wall-clock instant used by the time macros. `None` means "now"
+    /// (the local system clock).
+    pub now: Option<DateTime<Local>>,
+    /// Last user-activity instant used by `{{idle_duration}}`. `None` leaves
+    /// the macro unexpanded (no activity record available).
+    pub last_activity: Option<DateTime<Local>>,
+}
+
+impl<'a> MacroContext<'a> {
+    /// A minimal context with just the two display names.
+    #[must_use]
+    pub fn names(char_name: &'a str, user_name: &'a str) -> Self {
+        Self {
+            char_name,
+            user_name,
+            ..Self::default()
+        }
+    }
+}
+
+/// Derives a stable `{{pick}}` seed from a session-scoped key.
+///
+/// Pass a value that is constant for the lifetime of a chat (e.g.
+/// `"{character_id}:{session_id}"`) so that `{{pick}}` resolves to the same
+/// choice on every turn of that chat (#343). The digest is truncated to the
+/// leading eight bytes; the result is deterministic for a given key.
+#[must_use]
+pub fn session_pick_seed(key: &str) -> u64 {
+    let digest = blake3::hash(key.as_bytes());
+    let bytes = digest.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
+}
+
 /// Expands CBS (Character Book Spec) template macros in `text`.
 ///
 /// Supported macros:
-/// - `{{char}}`, `<char>`, `<bot>` → `char_name`
-/// - `{{user}}` → `user_name`
-/// - `{{random:a,b,c}}`, `{{pick:a,b,c}}` → random selection
+/// - `{{char}}`, `<char>`, `<bot>` → character name
+/// - `{{user}}` → user name
+/// - `{{random:a,b,c}}` → random selection, re-rolled on every evaluation
+/// - `{{pick:a,b,c}}` → stable selection (see [`expand_cbs_macros_with`])
 /// - `{{roll:d20}}` → random dice roll (1..N)
 /// - `{{//...}}`, `{{comment:...}}` → removed
 /// - `{{reverse:text}}` → reversed string
@@ -532,26 +592,84 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
 /// In addition to the macros supported by [`expand_cbs_macros`], this variant
 /// also expands `{{user_persona}}` into a structured text block describing the
 /// user persona (name, description, relationship, pronouns, notes).
+///
+/// `{{pick:a,b,c}}` is **stable within a session**: the choice is derived
+/// deterministically from the option text plus a per-session seed, so a
+/// character trait chosen once (hair colour, hometown, …) does not change when
+/// the identity kernel is recompiled on later turns (#343). `{{random:a,b,c}}`
+/// keeps re-rolling on every evaluation. Without a seed (the default here)
+/// `{{pick}}` falls back to a random draw; pass a seed through
+/// [`expand_cbs_macros_ctx`] to get stable behaviour.
 pub fn expand_cbs_macros_with(
     text: &str,
     char_name: &str,
     user_name: &str,
     user_persona: Option<&UserPersona>,
 ) -> String {
+    expand_cbs_macros_ctx(
+        text,
+        &MacroContext {
+            char_name,
+            user_name,
+            user_persona,
+            ..MacroContext::default()
+        },
+    )
+}
+
+/// Expands CBS macros using a full [`MacroContext`].
+///
+/// This is the most general entry point: it additionally expands the
+/// card-field reference macros (`{{description}}`, `{{personality}}`,
+/// `{{scenario}}`, `{{persona}}`, `{{mesExamples}}`), the time macros
+/// (`{{time}}`, `{{date}}`, `{{isotime}}`, `{{isodate}}`, `{{weekday}}`,
+/// `{{idle_duration}}`), and honours a stable `{{pick}}` seed. See
+/// [`MacroContext`] for the meaning of each field.
+///
+/// Unknown macros are left untouched so card authors can spot typos, matching
+/// the long-standing behaviour of the simpler entry points.
+pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
     let mut result = text.to_string();
 
-    result = result.replace("{{char}}", char_name);
-    result = result.replace("<char>", char_name);
-    result = result.replace("<bot>", char_name);
+    result = result.replace("{{char}}", ctx.char_name);
+    result = result.replace("<char>", ctx.char_name);
+    result = result.replace("<bot>", ctx.char_name);
 
-    result = result.replace("{{user}}", user_name);
+    result = result.replace("{{user}}", ctx.user_name);
 
     // Expand {{user_persona}} if persona data is available
-    if let Some(persona) = user_persona {
+    if let Some(persona) = ctx.user_persona {
         let rendered = persona.render_lines("");
         result = result.replace("{{user_persona}}", &rendered);
     } else {
         result = result.replace("{{user_persona}}", "");
+    }
+
+    // Card-field reference macros (#343). Only expanded when a card is present;
+    // otherwise the literal macro is left in place.
+    if let Some(card) = ctx.card {
+        let data = &card.data;
+        result = result.replace("{{description}}", data.description.trim());
+        result = result.replace("{{personality}}", data.personality.trim());
+        result = result.replace("{{scenario}}", data.scenario.trim());
+        result = result.replace("{{persona}}", data.creator_notes.trim());
+        result = result.replace("{{mesExamples}}", data.mes_example.trim());
+    }
+
+    // Time macros (#343), evaluated against an injectable clock so they are
+    // deterministic in tests.
+    let now = ctx.now.unwrap_or_else(Local::now);
+    result = result.replace("{{isotime}}", &now.format("%H:%M:%S").to_string());
+    result = result.replace("{{isodate}}", &now.format("%Y-%m-%d").to_string());
+    result = result.replace("{{time}}", &now.format("%H:%M").to_string());
+    result = result.replace("{{date}}", &now.format("%Y/%m/%d").to_string());
+    result = result.replace("{{weekday}}", weekday_name(now.weekday()));
+
+    // `{{idle_duration}}` needs a last-activity anchor; leave it untouched when
+    // none is available rather than emitting a misleading "0 minutes".
+    if let Some(last) = ctx.last_activity {
+        let idle = format_idle_duration(now.signed_duration_since(last));
+        result = result.replace("{{idle_duration}}", &idle);
     }
 
     fn expand_template_macro(result: &mut String, prefix: &str, handler: impl Fn(&str) -> String) {
@@ -570,21 +688,33 @@ pub fn expand_cbs_macros_with(
         }
     }
 
-    let pick_handler = |inner: &str| -> String {
-        let options: Vec<&str> = inner.split(',').collect();
-        if options.is_empty() || inner.trim().is_empty() {
-            String::new()
-        } else {
-            let idx = rand::random_range(0..options.len());
-            options
-                .get(idx)
-                .map(|s| (*s).to_string())
-                .unwrap_or_default()
-        }
-    };
+    // `{{random:…}}` re-rolls on every evaluation.
+    expand_template_macro(&mut result, "{{random:", |inner| random_option(inner));
 
-    expand_template_macro(&mut result, "{{random:", pick_handler);
-    expand_template_macro(&mut result, "{{pick:", pick_handler);
+    // `{{pick:…}}` is stable within a session: the index is derived from the
+    // option text and the per-session seed, never from the thread RNG (#343).
+    let pick_seed = ctx.pick_seed;
+    expand_template_macro(&mut result, "{{pick:", move |inner| {
+        let options = split_options(inner);
+        if options.is_empty() {
+            return String::new();
+        }
+        let idx = match pick_seed {
+            Some(seed) => {
+                let digest = blake3::hash(format!("{seed}:{inner}").as_bytes());
+                let bytes = digest.as_bytes();
+                let hash = u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                usize::try_from(hash % options.len() as u64).unwrap_or(0)
+            }
+            None => rand::random_range(0..options.len()),
+        };
+        options
+            .get(idx)
+            .map(|s| (*s).to_string())
+            .unwrap_or_default()
+    });
 
     expand_template_macro(&mut result, "{{roll:", |inner| {
         let num_str = inner.trim().to_lowercase();
@@ -604,6 +734,71 @@ pub fn expand_cbs_macros_with(
     });
 
     result
+}
+
+/// Splits a `{{random:…}}` / `{{pick:…}}` argument list into trimmed options.
+///
+/// Returns an empty vector when the argument is blank so callers can treat
+/// "no options" uniformly.
+fn split_options(inner: &str) -> Vec<&str> {
+    if inner.trim().is_empty() {
+        Vec::new()
+    } else {
+        inner.split(',').map(str::trim).collect()
+    }
+}
+
+/// Picks one option at random, re-rolling on every call (`{{random:…}}`).
+fn random_option(inner: &str) -> String {
+    let options = split_options(inner);
+    if options.is_empty() {
+        return String::new();
+    }
+    let idx = rand::random_range(0..options.len());
+    options
+        .get(idx)
+        .map(|s| (*s).to_string())
+        .unwrap_or_default()
+}
+
+/// English weekday name for `{{weekday}}`.
+fn weekday_name(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "Monday",
+        chrono::Weekday::Tue => "Tuesday",
+        chrono::Weekday::Wed => "Wednesday",
+        chrono::Weekday::Thu => "Thursday",
+        chrono::Weekday::Fri => "Friday",
+        chrono::Weekday::Sat => "Saturday",
+        chrono::Weekday::Sun => "Sunday",
+    }
+}
+
+/// Renders an idle span as a coarse, human-friendly phrase for
+/// `{{idle_duration}}` (e.g. `"just now"`, `"45 minutes"`, `"3 hours"`,
+/// `"2 days"`). Negative spans (a clock skew) clamp to `"just now"`.
+fn format_idle_duration(span: chrono::Duration) -> String {
+    let minutes = span.num_minutes().max(0);
+    if minutes < 1 {
+        return String::from("just now");
+    }
+    if minutes < 60 {
+        return format!("{minutes} minutes");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return if hours == 1 {
+            String::from("1 hour")
+        } else {
+            format!("{hours} hours")
+        };
+    }
+    let days = hours / 24;
+    if days == 1 {
+        String::from("1 day")
+    } else {
+        format!("{days} days")
+    }
 }
 
 #[cfg(test)]
@@ -706,6 +901,180 @@ mod tests {
             keys,
             vec!["ene", "zeta", "alpha", "mid"],
             "extension key order must be preserved, got {keys:?}"
+        );
+    }
+
+    /// A fixed instant for the time-macro tests (2026-08-01 09:05:07 local).
+    fn fixed_now() -> DateTime<Local> {
+        use chrono::TimeZone;
+        Local
+            .with_ymd_and_hms(2026, 8, 1, 9, 5, 7)
+            .single()
+            .expect("valid local datetime")
+    }
+
+    #[test]
+    fn pick_is_stable_across_repeated_expansions() {
+        let text = "Hair: {{pick:red,blue,green,gold,silver}}";
+        let ctx = MacroContext {
+            char_name: "Ene",
+            user_name: "Alice",
+            pick_seed: Some(0xDEAD_BEEF),
+            ..MacroContext::default()
+        };
+        let first = expand_cbs_macros_ctx(text, &ctx);
+        for _ in 0..32 {
+            assert_eq!(
+                expand_cbs_macros_ctx(text, &ctx),
+                first,
+                "{{pick}} must return the same option on every evaluation"
+            );
+        }
+        // The chosen option is one of the declared choices.
+        assert!(
+            ["red", "blue", "green", "gold", "silver"]
+                .iter()
+                .any(|c| first.contains(c)),
+            "unexpected pick output: {first}"
+        );
+    }
+
+    #[test]
+    fn pick_differs_across_seeds_for_some_input() {
+        // With five options and two distinct seeds, at least one of several
+        // option lists should resolve to a different choice.
+        let lists = ["a,b,c,d,e", "v,w,x,y,z", "1,2,3,4,5", "p,q,r,s,t"];
+        let mut any_differ = false;
+        for list in lists {
+            let text = format!("{{{{pick:{list}}}}}");
+            let a = expand_cbs_macros_ctx(
+                &text,
+                &MacroContext {
+                    pick_seed: Some(1),
+                    ..MacroContext::default()
+                },
+            );
+            let b = expand_cbs_macros_ctx(
+                &text,
+                &MacroContext {
+                    pick_seed: Some(2),
+                    ..MacroContext::default()
+                },
+            );
+            if a != b {
+                any_differ = true;
+            }
+        }
+        assert!(any_differ, "distinct seeds should change at least one pick");
+    }
+
+    #[test]
+    fn random_varies_across_repeated_expansions() {
+        let text = "{{random:a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p}}";
+        let ctx = MacroContext::names("Ene", "Alice");
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            seen.insert(expand_cbs_macros_ctx(text, &ctx));
+        }
+        assert!(
+            seen.len() > 1,
+            "{{random}} should re-roll and produce varied output"
+        );
+    }
+
+    #[test]
+    fn time_macros_render_expected_formats() {
+        let ctx = MacroContext {
+            now: Some(fixed_now()),
+            ..MacroContext::default()
+        };
+        assert_eq!(expand_cbs_macros_ctx("{{time}}", &ctx), "09:05");
+        assert_eq!(expand_cbs_macros_ctx("{{date}}", &ctx), "2026/08/01");
+        assert_eq!(expand_cbs_macros_ctx("{{isotime}}", &ctx), "09:05:07");
+        assert_eq!(expand_cbs_macros_ctx("{{isodate}}", &ctx), "2026-08-01");
+        assert_eq!(expand_cbs_macros_ctx("{{weekday}}", &ctx), "Saturday");
+    }
+
+    #[test]
+    fn idle_duration_formats_human_readable_span() {
+        let now = fixed_now();
+        let ctx = |mins: i64| MacroContext {
+            now: Some(now),
+            last_activity: Some(now - chrono::Duration::minutes(mins)),
+            ..MacroContext::default()
+        };
+        assert_eq!(
+            expand_cbs_macros_ctx("{{idle_duration}}", &ctx(0)),
+            "just now"
+        );
+        assert_eq!(
+            expand_cbs_macros_ctx("{{idle_duration}}", &ctx(45)),
+            "45 minutes"
+        );
+        assert_eq!(
+            expand_cbs_macros_ctx("{{idle_duration}}", &ctx(90)),
+            "1 hour"
+        );
+        assert_eq!(
+            expand_cbs_macros_ctx("{{idle_duration}}", &ctx(180)),
+            "3 hours"
+        );
+        assert_eq!(
+            expand_cbs_macros_ctx("{{idle_duration}}", &ctx(60 * 24 * 2)),
+            "2 days"
+        );
+    }
+
+    #[test]
+    fn idle_duration_left_unexpanded_without_anchor() {
+        let ctx = MacroContext {
+            now: Some(fixed_now()),
+            last_activity: None,
+            ..MacroContext::default()
+        };
+        assert_eq!(
+            expand_cbs_macros_ctx("idle {{idle_duration}}", &ctx),
+            "idle {{idle_duration}}"
+        );
+    }
+
+    #[test]
+    fn card_field_reference_macros_expand() {
+        let mut card = CharacterCardV3::default();
+        card.data.description = "A bright AI.".to_string();
+        card.data.personality = "Cheerful".to_string();
+        card.data.scenario = "In a lab".to_string();
+        card.data.creator_notes = "Be kind".to_string();
+        card.data.mes_example = "Hi!".to_string();
+        let ctx = MacroContext {
+            card: Some(&card),
+            ..MacroContext::default()
+        };
+        assert_eq!(
+            expand_cbs_macros_ctx("{{description}}", &ctx),
+            "A bright AI."
+        );
+        assert_eq!(expand_cbs_macros_ctx("{{personality}}", &ctx), "Cheerful");
+        assert_eq!(expand_cbs_macros_ctx("{{scenario}}", &ctx), "In a lab");
+        assert_eq!(expand_cbs_macros_ctx("{{persona}}", &ctx), "Be kind");
+        assert_eq!(expand_cbs_macros_ctx("{{mesExamples}}", &ctx), "Hi!");
+    }
+
+    #[test]
+    fn card_field_macros_left_unexpanded_without_card() {
+        let ctx = MacroContext::default();
+        assert_eq!(
+            expand_cbs_macros_ctx("{{description}}", &ctx),
+            "{{description}}"
+        );
+    }
+
+    #[test]
+    fn unknown_macro_is_preserved() {
+        let ctx = MacroContext::names("Ene", "Alice");
+        assert_eq!(
+            expand_cbs_macros_ctx("{{not_a_macro}}", &ctx),
+            "{{not_a_macro}}"
         );
     }
 }

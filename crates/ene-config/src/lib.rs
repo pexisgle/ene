@@ -38,8 +38,8 @@ pub mod store;
 
 pub use character_card::{
     CharacterAsset, CharacterCardData, CharacterCardV3, EneExtension, ExpressionDefinition,
-    Lorebook, LorebookEntry, ResolvedExpression, UserPersona, expand_cbs_macros,
-    expand_cbs_macros_with, resolve_expressions,
+    Lorebook, LorebookEntry, MacroContext, ResolvedExpression, UserPersona, expand_cbs_macros,
+    expand_cbs_macros_ctx, expand_cbs_macros_with, resolve_expressions, session_pick_seed,
 };
 
 pub use character_config::{CharacterConfig, MotionCatalog, MotionEntry, MotionLayer};

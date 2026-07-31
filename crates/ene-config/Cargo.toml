@@ -14,6 +14,7 @@ crate-type = ["lib"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }
 indexmap = { workspace = true }
