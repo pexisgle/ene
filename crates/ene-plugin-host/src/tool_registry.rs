@@ -495,21 +495,20 @@ impl ToolRegistry for CompositeToolRegistry {
         // Route the approval straight to the plugin that owns the tool which
         // raised the request: a single round-trip instead of a broadcast, so
         // an unrelated plugin mid-long-tool-call can no longer delay it (#434).
-        match self.registry_for(tool_name) {
-            Ok(registry) => registry.approve_permission(request_id).await,
-            Err(_) => {
-                // The owning registry is gone (e.g. an external source was
-                // unregistered between the request and the approval). Fall
-                // back to a broadcast so a still-pending request elsewhere is
-                // not silently dropped.
-                tracing::warn!(
-                    component = "CompositeToolRegistry",
-                    tool = %tool_name,
-                    request_id = %request_id,
-                    "Owning registry not found for permission approval; broadcasting"
-                );
-                self.approve_permission(request_id).await;
-            }
+        if let Ok(registry) = self.registry_for(tool_name) {
+            registry.approve_permission(request_id).await;
+        } else {
+            // The owning registry is gone (e.g. an external source was
+            // unregistered between the request and the approval). Fall
+            // back to a broadcast so a still-pending request elsewhere is
+            // not silently dropped.
+            tracing::warn!(
+                component = "CompositeToolRegistry",
+                tool = %tool_name,
+                request_id = %request_id,
+                "Owning registry not found for permission approval; broadcasting"
+            );
+            self.approve_permission(request_id).await;
         }
     }
 
