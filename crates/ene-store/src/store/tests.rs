@@ -933,6 +933,7 @@ fn hybrid_search_options<'a>(
         min_score: 0.0,
         commitment_boost: 0.25,
         recent_fallback_limit: 5,
+        exclude_kinds: Vec::new(),
     }
 }
 
@@ -995,6 +996,50 @@ async fn hybrid_search_ranks_by_salience_and_recency_not_vector_alone() {
     let second = results.get(1).expect("second hybrid result");
     assert_eq!(top.item.title, "important fact");
     assert!(top.breakdown.total >= second.breakdown.total);
+}
+
+#[tokio::test]
+async fn hybrid_search_exclude_kinds_drops_reflection_memories() {
+    let store = setup_store().await;
+    let now = Utc::now();
+    let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+
+    let normal = test_memory_item("favorite food", "the user likes pizza");
+    let reflection = crate::NewMemoryItem {
+        kind: crate::MemoryKind::Reflection,
+        title: "Successful strategies".into(),
+        content: "Successful interaction strategies: favorite food".into(),
+        ..test_memory_item("base", "base")
+    };
+
+    insert_memory_with_embedding(&store, &normal, &query_emb).await;
+    insert_memory_with_embedding(&store, &reflection, &query_emb).await;
+
+    // Without exclusion, the reflection memory competes as an ordinary result.
+    let mut options = hybrid_search_options("pizza", &query_emb, now);
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
+    assert!(
+        results
+            .iter()
+            .any(|m| m.item.kind == crate::MemoryKind::Reflection),
+        "reflection memory is gathered when not excluded"
+    );
+
+    // With the kind excluded, it never reaches the candidate pool.
+    options.exclude_kinds = vec![crate::MemoryKind::Reflection];
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
+    assert!(
+        results
+            .iter()
+            .all(|m| m.item.kind != crate::MemoryKind::Reflection),
+        "excluded kinds must not appear in recall candidates"
+    );
+    assert!(
+        results.iter().any(|m| m.item.title == "favorite food"),
+        "normal memories are unaffected by the reflection exclusion"
+    );
 }
 
 #[tokio::test]

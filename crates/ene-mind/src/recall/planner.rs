@@ -1,5 +1,7 @@
 use chrono::{DateTime, Utc};
-use ene_core::{ActiveCommitmentPrompt, AffectAnnotation, AffectState, Query, ScoredMemory};
+use ene_core::{
+    ActiveCommitmentPrompt, AffectAnnotation, AffectState, MemoryKind, Query, ScoredMemory,
+};
 
 use super::input::RecallPlannerInput;
 use super::intent::{RecallIntent, infer_intents, kinds_for_intents};
@@ -135,6 +137,11 @@ impl RecallPlanner {
             commitment_boost: memory.commitment_boost,
             recent_fallback_limit: memory.recent_fallback_limit,
             time_range: None,
+            // Reflection memories are a scoring signal applied separately by
+            // the self-reflection pipeline (#347), never ordinary recall
+            // results — exclude them from every gather path so they cannot
+            // compete with normal memories or leak into the LLM context.
+            exclude_kinds: vec![MemoryKind::Reflection],
         }
     }
 
@@ -435,6 +442,11 @@ mod tests {
         assert_eq!(search.limit, 3);
         assert!((search.similarity_threshold - 0.42).abs() < f32::EPSILON);
         assert!((search.min_score - 0.21).abs() < f32::EPSILON);
+        assert_eq!(
+            search.exclude_kinds,
+            vec![ene_store::MemoryKind::Reflection],
+            "recall queries must exclude reflection memories (#347)"
+        );
     }
 
     #[test]

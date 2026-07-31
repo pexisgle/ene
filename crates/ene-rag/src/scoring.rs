@@ -426,6 +426,7 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
         contradiction_penalty: contradiction,
         stale_penalty: stale,
         commitment_boost,
+        reflection_multiplier: 1.0,
         total,
     }
 }
@@ -568,6 +569,7 @@ mod tests {
             min_score: 0.0,
             commitment_boost: 0.25,
             recent_fallback_limit: 5,
+            exclude_kinds: Vec::new(),
         }
     }
 

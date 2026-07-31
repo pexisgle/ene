@@ -8,6 +8,7 @@ use super::lorebook_boost::merge_lorebook_recall;
 use crate::commitments::CommitmentLedger;
 use crate::config::MindConfig;
 use crate::error::CognitionError;
+use crate::memory_writer::reflection::{apply_reflection_adjustment, load_reflection_memories};
 use crate::recall::{
     MemoryDiversifyOptions, MemoryDiversifyPipeline, RecallPlanner, RecallPlannerInput,
     RecallPlannerOptions, RecallResultMapper, RecallTurn, RecalledMemory,
@@ -86,7 +87,13 @@ pub async fn execute_hybrid_recall(
         .search(&search_options)
         .await
         .map_err(CognitionError::MemoryPort)?;
-    let scored = ene_rag::score_and_rank(&search_options, gathered);
+    let mut scored = ene_rag::score_and_rank(&search_options, gathered);
+
+    // Close the self-reflection feedback loop (#347): reflections are excluded
+    // from the search query above (they are a scoring signal, not recall
+    // results), so load them separately and apply their boost/penalty to the
+    // scored memories. Gated by the reflection `enabled` config.
+    apply_reflection_to_scored(config, input, &mut scored).await;
 
     let diversify_options = MemoryDiversifyOptions::from_config(&config.memory);
     let diversified = MemoryDiversifyPipeline::diversify(scored, &plan, diversify_options);
@@ -96,6 +103,63 @@ pub async fn execute_hybrid_recall(
     recalled = maybe_merge_lorebook_recall(config, input, recalled).await?;
 
     Ok((plan, recalled))
+}
+
+/// Load reflection memories and apply their boost/penalty to scored recall
+/// candidates, closing the self-reflection feedback loop (#347).
+///
+/// Reflections are a scoring signal, not recall results — the search query
+/// already excludes [`ene_core::MemoryKind::Reflection`], so this loads them
+/// through a dedicated path and adjusts the hybrid totals in place. The
+/// adjustment records a `reflection_multiplier` in each affected breakdown,
+/// keeping the explainable score consistent. No-op when the pipeline is
+/// disabled or there are no scored candidates.
+async fn apply_reflection_to_scored(
+    config: &MindConfig,
+    input: &ExecuteRecallInput<'_>,
+    scored: &mut Vec<ene_core::ScoredMemory>,
+) {
+    let reflection = &config.memory.reflection;
+    if !reflection.enabled || scored.is_empty() {
+        return;
+    }
+
+    let reflections = load_reflection_memories(input.store, input.character_id).await;
+    if reflections.is_empty() {
+        return;
+    }
+
+    apply_reflection_adjustment(
+        scored,
+        &reflections,
+        reflection.success_boost,
+        reflection.failure_penalty,
+    );
+
+    // Totals changed, so restore the descending-total ordering that
+    // `score_and_rank` produced before diversification consumes it.
+    scored.sort_by(|a, b| {
+        b.breakdown
+            .total
+            .total_cmp(&a.breakdown.total)
+            .then_with(|| {
+                b.breakdown
+                    .vector_similarity
+                    .total_cmp(&a.breakdown.vector_similarity)
+            })
+            .then_with(|| b.item.updated_at.cmp(&a.item.updated_at))
+    });
+
+    tracing::debug!(
+        component = "RecallRunner",
+        character_id = %input.character_id,
+        reflection_count = reflections.len(),
+        adjusted_count = scored
+            .iter()
+            .filter(|m| (m.breakdown.reflection_multiplier - 1.0).abs() > f32::EPSILON)
+            .count(),
+        "Applied self-reflection adjustment to recall scores"
+    );
 }
 
 async fn maybe_merge_lorebook_recall(
@@ -233,6 +297,166 @@ mod tests {
                 .iter()
                 .any(|m| m.item.content.contains("always sunny")),
             "constant lorebook should merge after hybrid recall"
+        );
+    }
+
+    async fn insert_with_embedding(
+        store: &MemoryStore,
+        item: &NewMemoryItem,
+        embedding: &[f32],
+    ) -> i64 {
+        let id = store.insert_typed_memory(item).await.unwrap();
+        store
+            .upsert_memory_embedding(id, "mock", "content", embedding)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn reflection_boosts_recall_without_surfacing_as_result() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+
+        // A normal memory that the reflection strategy names.
+        let normal = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: String::new(),
+            kind: MemoryKind::Semantic,
+            title: "warm greeting".into(),
+            content: "greet the user warmly".into(),
+            source: MemorySource::Conversation,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.8),
+            salience: MemorySalience::new(0.6),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        insert_with_embedding(&store, &normal, &embedding).await;
+
+        // A reflection memory naming "warm greeting" as a successful strategy.
+        let reflection = NewMemoryItem {
+            kind: MemoryKind::Reflection,
+            title: "Successful strategies".into(),
+            content: "Successful interaction strategies: warm greeting".into(),
+            source: MemorySource::Inferred,
+            ..normal.clone()
+        };
+        insert_with_embedding(&store, &reflection, &embedding).await;
+
+        let mut config = MindConfig::default();
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory.reflection.enabled = true;
+        config.memory.reflection.success_boost = 1.5;
+        config.memory.reflection.failure_penalty = 0.5;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "warm greeting",
+            recent_turns: &[],
+            query_embedding: &embedding,
+            embedding_model: "mock",
+            affect: None,
+            card: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+
+        // The reflection memory is a scoring signal, never a recall result.
+        assert!(
+            recalled
+                .iter()
+                .all(|m| m.item.kind != MemoryKind::Reflection),
+            "reflection memories must not surface as ordinary recall results"
+        );
+
+        // The matching normal memory carries the reflection boost.
+        let boosted = recalled
+            .iter()
+            .find(|m| m.item.title == "warm greeting")
+            .expect("normal memory recalled");
+        assert!(
+            (boosted.score_breakdown.reflection_multiplier - 1.5).abs() < f32::EPSILON,
+            "reflection success_boost must be recorded in the breakdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn reflection_disabled_leaves_scores_untouched() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedding = [1.0, 0.0, 0.0, 0.0];
+
+        let normal = NewMemoryItem {
+            scope: MemoryScope::Character,
+            character_id: "Ene".into(),
+            user_id: String::new(),
+            kind: MemoryKind::Semantic,
+            title: "warm greeting".into(),
+            content: "greet the user warmly".into(),
+            source: MemorySource::Conversation,
+            source_ref: None,
+            confidence: MemoryConfidence::new(0.8),
+            salience: MemorySalience::new(0.6),
+            affect: Default::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        };
+        insert_with_embedding(&store, &normal, &embedding).await;
+
+        let reflection = NewMemoryItem {
+            kind: MemoryKind::Reflection,
+            title: "Successful strategies".into(),
+            content: "Successful interaction strategies: warm greeting".into(),
+            source: MemorySource::Inferred,
+            ..normal.clone()
+        };
+        insert_with_embedding(&store, &reflection, &embedding).await;
+
+        let mut config = MindConfig::default();
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory.reflection.enabled = false;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "warm greeting",
+            recent_turns: &[],
+            query_embedding: &embedding,
+            embedding_model: "mock",
+            affect: None,
+            card: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+
+        assert!(
+            recalled
+                .iter()
+                .all(|m| (m.score_breakdown.reflection_multiplier - 1.0).abs() < f32::EPSILON),
+            "disabled reflection must not adjust recall scores"
         );
     }
 }
