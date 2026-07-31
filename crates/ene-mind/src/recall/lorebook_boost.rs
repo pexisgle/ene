@@ -174,6 +174,12 @@ mod tests {
             commitment_id: None,
         };
         let book = ene_config::Lorebook {
+            name: None,
+            description: None,
+            scan_depth: None,
+            token_budget: None,
+            recursive_scanning: None,
+            extensions: Default::default(),
             entries: vec![LorebookEntry {
                 keys: vec!["dragon".into()],
                 content: "A dragon.".into(),
@@ -194,7 +200,6 @@ mod tests {
                 sticky_turns: None,
                 turns_since_match: None,
             }],
-            ..Default::default()
         };
         let regex_cache = compile_lorebook_regex_cache(&book);
         assert!(lorebook_entry_matches(

@@ -561,6 +561,7 @@ pub struct MemoryJournalListOptions<'a> {
 
 /// Explainable score breakdown for a recalled memory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MemoryScoreBreakdown {
     /// Raw vector cosine similarity.
     pub vector_similarity: f32,
@@ -592,6 +593,27 @@ pub struct MemoryScoreBreakdown {
     pub commitment_boost: f32,
     /// Final hybrid total score.
     pub total: f32,
+}
+
+impl Default for MemoryScoreBreakdown {
+    fn default() -> Self {
+        Self {
+            vector_similarity: 0.0,
+            lexical_score: 0.0,
+            recency_score: 0.0,
+            salience: 0.0,
+            confidence: 0.0,
+            emotional_match: 0.0,
+            relationship: 0.0,
+            access_boost: 0.0,
+            relevance: 0.0,
+            quality_factor: 1.0,
+            contradiction_penalty: 0.0,
+            stale_penalty: 0.0,
+            commitment_boost: 0.0,
+            total: 0.0,
+        }
+    }
 }
 
 /// A typed memory with hybrid score breakdown and recall sources.

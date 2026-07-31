@@ -10,17 +10,18 @@
 //! The combination is *relevance-driven*, not additive:
 //!
 //! ```text
-//! total = relevance × quality_factor × penalty_multiplier + commitment_boost
+//! total = (relevance × quality_factor + commitment_boost) × penalty_multiplier
 //! ```
 //!
 //! - `relevance` blends vector similarity and lexical overlap — it decides
 //!   whether a memory is a candidate at all.
 //! - `quality_factor` (`>= 1.0`) rescales relevant memories by their intrinsic
 //!   quality; it can reorder candidates but never lift an irrelevant one.
+//! - `commitment_boost` is added *inside* the penalty multiplier, so an active
+//!   promise still surfaces with zero query relevance but a disputed/faded/
+//!   expired commitment is discounted along with the rest of its score.
 //! - `penalty_multiplier` (`(0, 1]`) applies contradiction/stale penalties as a
 //!   scale-invariant fraction rather than an absolute subtraction.
-//! - `commitment_boost` stays additive so an active promise surfaces even with
-//!   zero query relevance.
 //!
 //! This replaces the previous weighted sum, in which the quality components
 //! collectively outweighed relevance roughly 2:1 and could push an unrelated
@@ -219,7 +220,7 @@ pub fn access_boost_score(access_count: i64) -> f32 {
 /// Penalty for disputed memories.
 pub fn contradiction_penalty(status: MemoryStatus) -> f32 {
     if status == MemoryStatus::Disputed {
-        0.15
+        0.30
     } else {
         0.0
     }
@@ -233,12 +234,12 @@ pub fn stale_penalty(
 ) -> f32 {
     let mut penalty = 0.0;
     if status == MemoryStatus::Faded {
-        penalty += 0.10;
+        penalty += 0.20;
     }
     if let Some(until) = valid_until
         && until < now
     {
-        penalty += 0.20;
+        penalty += 0.40;
     }
     penalty
 }
@@ -320,11 +321,12 @@ pub fn penalty_multiplier(contradiction: f32, stale: f32) -> f32 {
 
 /// Compute the hybrid score breakdown for a gathered candidate (#346).
 ///
-/// Total is `relevance × quality_factor × penalty_multiplier + commitment_boost`,
+/// Total is `(relevance × quality_factor + commitment_boost) × penalty_multiplier`,
 /// clamped to be non-negative. Relevance (vector similarity plus lexical overlap)
 /// is the multiplicative base, quality only rescales it, penalties are a
-/// scale-invariant multiplier, and the commitment boost stays additive so an
-/// active promise surfaces even with zero query relevance.
+/// scale-invariant multiplier, and the commitment boost — added before the
+/// penalty multiplier — lets an active promise surface even with zero query
+/// relevance while still being discounted for disputed/faded/expired status.
 pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> MemoryScoreBreakdown {
     let item = &candidate.item;
     let lexical = lexical_overlap_score(options.query_text, &item.title, &item.content);
@@ -359,7 +361,7 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
         0.0
     };
 
-    let total = relevance.mul_add(quality * penalty, commitment_boost);
+    let total = (relevance.mul_add(quality, commitment_boost)) * penalty;
     let total = if total.is_nan() || total < 0.0 {
         0.0
     } else {
@@ -391,6 +393,11 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
 /// order by total (then vector similarity, then recency), and cap at
 /// `query.limit`. Time-range filtering is applied here too so callers get the
 /// same result set the store previously returned.
+///
+/// Recent-fallback candidates are exempt from the `min_score` gate: they are
+/// deliberately injected conversational context (bounded by
+/// `recent_fallback_limit`), not relevance matches, so their hybrid total is
+/// `0.0` by construction. Filtering them out would defeat the fallback.
 pub fn score_and_rank(
     options: &Query<'_>,
     candidates: Vec<GatheredCandidate>,
@@ -408,7 +415,10 @@ pub fn score_and_rank(
                 sources: candidate.sources,
             }
         })
-        .filter(|scored| scored.breakdown.total >= options.min_score)
+        .filter(|scored| {
+            scored.breakdown.total >= options.min_score
+                || scored.sources.contains(&MemoryCandidateSource::Recent)
+        })
         .collect();
 
     scored.sort_by(|a, b| {
@@ -791,6 +801,30 @@ mod tests {
         assert!(ranked[0].breakdown.vector_similarity > 0.5);
     }
 
+    #[test]
+    fn recent_fallback_candidates_survive_min_score_gate() {
+        // Recent-fallback rows are deliberately injected context with total 0.0
+        // under the multiplicative formula; they must not be dropped by
+        // min_score, or the fallback would be a no-op.
+        let now = Utc::now();
+        let mut options = sample_query(now);
+        options.min_score = 0.5;
+
+        let recent = GatheredCandidate {
+            item: item_with_quality(1.0, 1.0, 100),
+            vector_similarity: 0.0,
+            sources: vec![MemoryCandidateSource::Recent],
+        };
+        let vector = GatheredCandidate {
+            item: item_with_quality(0.1, 0.1, 0),
+            vector_similarity: 0.4,
+            sources: vec![MemoryCandidateSource::Vector],
+        };
+        let ranked = score_and_rank(&options, vec![recent, vector]);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].sources, vec![MemoryCandidateSource::Recent]);
+    }
+
     fn item_with_quality(salience: f32, confidence: f32, access_count: i64) -> MemoryItem {
         let mut item = sample_item(MemoryStatus::Active);
         // Neutral text with no overlap against the "pizza" query, so relevance
@@ -856,6 +890,39 @@ mod tests {
         let breakdown = score_candidate(&options, &candidate);
         assert!(breakdown.commitment_boost > 0.0);
         assert!(breakdown.total >= breakdown.commitment_boost);
+    }
+
+    #[test]
+    fn commitment_boost_is_discounted_by_penalties() {
+        // The boost is applied *inside* the penalty multiplier, so a disputed
+        // or faded commitment no longer surfaces at full strength.
+        let now = Utc::now();
+        let options = sample_query(now);
+
+        let mut faded_item = item_with_quality(0.5, 0.5, 0);
+        faded_item.status = MemoryStatus::Faded;
+        let clean = score_candidate(
+            &options,
+            &GatheredCandidate {
+                item: item_with_quality(0.5, 0.5, 0),
+                vector_similarity: 0.0,
+                sources: vec![MemoryCandidateSource::Commitment],
+            },
+        );
+        let faded = score_candidate(
+            &options,
+            &GatheredCandidate {
+                item: faded_item,
+                vector_similarity: 0.0,
+                sources: vec![MemoryCandidateSource::Commitment],
+            },
+        );
+        assert!(clean.total >= clean.commitment_boost);
+        assert!(faded.total > 0.0);
+        assert!(
+            faded.total < clean.total,
+            "a faded commitment must be discounted below its clean score"
+        );
     }
 
     #[test]

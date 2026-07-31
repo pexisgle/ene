@@ -58,7 +58,7 @@ impl Default for ToolRagConfig {
             use_hyde: false,
             use_rerank: false,
             rerank_candidates: 24,
-            min_similarity: 0.25,
+            min_similarity: 0.20,
             background_index_on_startup: true,
             forced: default_forced(),
             weights: FieldWeightsConfig::default(),
@@ -87,7 +87,8 @@ pub struct FieldWeightsConfig {
     pub negative: f32,
     /// Similarity at or above which a tool's negative-example embedding excludes
     /// it from selection (#436). Range `[0, 1]`; `1.0` effectively disables the
-    /// gate.
+    /// gate. Default `0.70` (a value this high only fires on clearly matching
+    /// negative examples).
     #[serde(default = "default_negative_threshold")]
     pub negative_threshold: f32,
     /// Weight for the `HyDE` (hypothetical document embedding).
@@ -115,7 +116,7 @@ const fn default_hyde_blend() -> f32 {
 }
 
 const fn default_negative_threshold() -> f32 {
-    0.85
+    0.70
 }
 
 impl Default for FieldWeightsConfig {

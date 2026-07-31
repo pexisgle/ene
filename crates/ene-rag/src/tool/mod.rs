@@ -94,6 +94,21 @@ pub struct FieldWeights {
 }
 
 impl FieldWeights {
+    /// The weight for a given embedding field (#436).
+    ///
+    /// Retained for compatibility with the pre-#436 additive API; the
+    /// scoring pipeline uses [`Self::averaging_weight`] so the negative
+    /// field is handled as a gate rather than a subtracted component.
+    pub const fn for_field(&self, field: EmbeddingField) -> f32 {
+        match field {
+            EmbeddingField::Summary => self.summary,
+            EmbeddingField::Description => self.description,
+            EmbeddingField::Capability => self.capability,
+            EmbeddingField::Example => self.example,
+            EmbeddingField::Negative => self.negative,
+        }
+    }
+
     /// The averaging weight for a positive embedding field (#436).
     ///
     /// Returns `None` for [`EmbeddingField::Negative`], which is handled as an
@@ -121,7 +136,7 @@ impl Default for FieldWeights {
             capability: 0.8,
             example: 0.4,
             negative: -0.5,
-            negative_threshold: 0.85,
+            negative_threshold: 0.70,
             hyde: 0.7,
             hyde_blend: 0.6,
         }
@@ -191,7 +206,7 @@ impl Default for ToolRagOptions {
             use_hyde: false,
             use_rerank: false,
             rerank_candidates: 24,
-            min_similarity: 0.25,
+            min_similarity: 0.20,
             background_index_on_startup: true,
             forced: vec![
                 ToolName::new("utility.question"),
