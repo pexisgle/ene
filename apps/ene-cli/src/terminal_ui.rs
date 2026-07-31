@@ -12,7 +12,7 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 use parking_lot::Mutex;
-use std::io::{self, Stderr, Write};
+use std::io::{self, IsTerminal, Stderr, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -335,6 +335,19 @@ impl TerminalUi {
         let mut inner = self.inner.lock();
         inner.mode = UiMode::Idle;
         inner.backend.flush_all();
+    }
+
+    /// Whether the REPL line editor runs in raw (interactive) mode.
+    ///
+    /// When stdin is piped or redirected, [`Self::read_line`] falls back to
+    /// a blocking `stdin::read_line` that cannot observe
+    /// `request_read_cancel`; callers that must interrupt an in-flight read
+    /// (the proactive-turn path in the REPL) check this first so they don't
+    /// hang until the next input line or EOF (#477).
+    #[must_use]
+    pub fn is_interactive(&self) -> bool {
+        let inner = self.inner.lock();
+        inner.backend.is_interactive() || io::stdin().is_terminal()
     }
 
     /// Async REPL line read (blocking editor on a worker thread).
