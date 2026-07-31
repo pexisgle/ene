@@ -17,7 +17,7 @@
 
 use ene_config::{load_character_card, load_config};
 use ene_runtime::{
-    CueSource, EneEvent, EneHandle, EneStatus, LifecycleEvent, MultiAnswer, PermissionDecision,
+    CueSource, EneEvent, EneHandle, LifecycleEvent, MultiAnswer, PermissionDecision,
     TerminalReason, UserInputResponse,
 };
 use std::io::{self, Write};
@@ -50,10 +50,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut lifecycle_rx = handle.subscribe_lifecycle();
     tokio::spawn(async move {
         while let Ok(event) = lifecycle_rx.recv().await {
-            if let LifecycleEvent::StatusChanged { status } = event
-                && status == EneStatus::Error
-            {
-                eprintln!("\n[Status: Error]");
+            // Status only ever reports `Idle` / `Running` (#404 removed the
+            // never-emitted `Error` variant): failures surface on the chat
+            // bus as `EneEvent::Terminal { reason: Failed }`, handled below.
+            if let LifecycleEvent::StatusChanged { status } = event {
+                eprintln!("\n[Status: {status:?}]");
             }
         }
     });

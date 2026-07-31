@@ -412,7 +412,7 @@ impl TurnActor {
             let lifecycle_tx = self.lifecycle_tx.clone();
             let store = self.concrete_store.clone();
             if admit_task(
-                &self.memory_writer_tasks,
+                &mut self.memory_writer_tasks,
                 self.task_caps.memory_writer_cap,
                 "MemoryWriter",
                 None,
@@ -504,7 +504,7 @@ impl TurnActor {
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {
                 if !admit_task(
-                    &self.classifier_tasks,
+                    &mut self.classifier_tasks,
                     self.task_caps.classifier_cap,
                     "Classifier",
                     None,
@@ -536,7 +536,7 @@ impl TurnActor {
             // Spawn a polling task for each that awaits completion.
             while let Ok(task) = self.deferred_tool_rx.try_recv() {
                 if !admit_task(
-                    &self.deferred_tool_tasks,
+                    &mut self.deferred_tool_tasks,
                     self.task_caps.deferred_tool_cap,
                     "DeferredTool",
                     Some(format!("{}:{}", task.tool_name, task.task_id)),
@@ -756,7 +756,7 @@ impl TurnActor {
     ///   serves each plugin.
     fn spawn_reconfigure_plugin_host(&mut self) {
         if !admit_task(
-            &self.bg_command_tasks,
+            &mut self.bg_command_tasks,
             self.task_caps.bg_command_cap,
             "BgCommand",
             Some("PluginHostReconfigure".to_string()),
@@ -819,7 +819,7 @@ impl TurnActor {
             }
         };
         if !admit_task(
-            &self.bg_command_tasks,
+            &mut self.bg_command_tasks,
             self.task_caps.bg_command_cap,
             "BgCommand",
             Some("ProactiveLlmInit".to_string()),
@@ -951,7 +951,7 @@ impl TurnActor {
             return;
         }
         if !admit_task(
-            &self.bg_command_tasks,
+            &mut self.bg_command_tasks,
             self.task_caps.bg_command_cap,
             "BgCommand",
             Some("PrepareVisionSummary".to_string()),
@@ -1192,10 +1192,19 @@ impl TurnActor {
                 // Single-flight: Busy is enforced on the handle via TurnGate.
                 // Never abort an in-flight turn here.
                 if self.stream_handle.is_some() {
-                    tracing::warn!(
+                    // Invariant violation: `EneHandle::run` only sends `Run`
+                    // after `TurnGate::try_begin` succeeds, so reaching here
+                    // means the gate is held for this new turn *and* a stream
+                    // is already active. Release the gate we just acquired so
+                    // a later `run()` is not stuck returning `Busy` forever
+                    // (#404); the alternative — leaving it held — would
+                    // permanently wedge the single-flight gate.
+                    tracing::error!(
                         component = "TurnActor",
-                        "Run received while stream active; turn gate should have returned Busy"
+                        "Run received while stream active; releasing turn gate \
+                         (single-flight invariant violated)"
                     );
+                    self.turn_gate.end();
                     return true;
                 }
                 // Discard any in-flight proactive decision and cancel any
@@ -1328,6 +1337,14 @@ impl TurnActor {
                 self.abort_proactive_decision();
                 self.shutdown_proactive_llm_once().await;
                 self.drain_pending().await;
+                // Release the single-flight gate so a `run()` that races the
+                // actor's teardown is not reported `Busy` by a gate the dying
+                // actor never releases (#404). `EneHandle::run` additionally
+                // checks the (now closing) command channel first and reports
+                // `ActorDead`; releasing here covers the drain window before
+                // the channel fully closes. Idempotent: `end()` just clears
+                // the active turn.
+                self.turn_gate.end();
                 false
             }
             EneCommand::SetCharacter { card, reply } => {
@@ -1526,7 +1543,7 @@ impl TurnActor {
             }
             EneCommand::SearchTools { query, reply } => {
                 if !admit_task(
-                    &self.search_tasks,
+                    &mut self.search_tasks,
                     self.task_caps.search_cap,
                     "SearchTools",
                     Some(query.clone()),
@@ -1569,7 +1586,7 @@ impl TurnActor {
                 reply,
             } => {
                 if !admit_task(
-                    &self.call_tool_tasks,
+                    &mut self.call_tool_tasks,
                     self.task_caps.call_tool_cap,
                     "CallTool",
                     Some(name.clone()),
@@ -1617,7 +1634,7 @@ impl TurnActor {
                 reply,
             } => {
                 if !admit_task(
-                    &self.call_tool_tasks,
+                    &mut self.call_tool_tasks,
                     self.task_caps.call_tool_cap,
                     "CallTool",
                     Some(format!("cancel:{tool_name}:{task_id}")),
@@ -1702,7 +1719,7 @@ impl TurnActor {
                 // host restart) being in flight (#397). The actor loop must
                 // keep processing subsequent commands while this sleeps.
                 if admit_task(
-                    &self.bg_command_tasks,
+                    &mut self.bg_command_tasks,
                     self.task_caps.bg_command_cap,
                     "BgCommand",
                     Some("TestSlowBgTask".to_string()),
@@ -2517,13 +2534,32 @@ async fn consume_memory_write_outcome(
 /// so the rejection fails fast for the caller too, matching
 /// `ene_infer::EngineError::Busy` / [`ene_ai::LlmProviderError::Busy`]
 /// semantics.
+///
+/// ## Reaping before the capacity check (#404)
+///
+/// `JoinSet::len()` counts tasks that have *completed* but not yet been
+/// joined (reaped). The run loop only reaps at the top of each iteration,
+/// before it blocks in `select!`, so a task that finishes *during* the
+/// block stays counted until the next iteration. A `CallTool` /
+/// `SearchTools` command handled right after such a burst would then see a
+/// stale, over-counted length and be rejected with a spurious
+/// [`crate::error::EneRuntimeError::Busy`] that clears on the next
+/// iteration. Reaping the set here — immediately before the capacity check
+/// — removes finished tasks first so admission sees the true in-flight
+/// count. `try_join_next` is non-blocking, so this is cheap, and it is
+/// idempotent with the loop-top reap (a task is only ever joined once).
 pub(super) fn admit_task(
-    set: &tokio::task::JoinSet<()>,
+    set: &mut tokio::task::JoinSet<()>,
     cap: usize,
     component: &str,
     detail: Option<String>,
     diag_tx: &broadcast::Sender<DiagnosticEvent>,
 ) -> bool {
+    // Drop finished-but-unjoined tasks so `len()` reflects only tasks that
+    // are actually still running (#404). Without this, a burst that
+    // completed during the actor's `select!` block would over-count and
+    // spuriously reject the next admission.
+    reap_join_set(set, component, "background task panicked", diag_tx);
     let queue_depth = set.len();
     if queue_depth < cap {
         return true;
@@ -3118,6 +3154,40 @@ mod tests {
         assert_eq!(
             after_shutdown, later,
             "aux worker kept ticking after shutdown: the abort did not propagate"
+        );
+    }
+
+    /// Regression test for #404 (item 5): `EneCommand::Shutdown` must release
+    /// the single-flight [`TurnGate`].
+    ///
+    /// Before the fix, a `run()` racing the actor's teardown could see a gate
+    /// the dying actor still held and be reported `RunError::Busy` instead of
+    /// `RunError::ActorDead`. Releasing the gate on shutdown (combined with
+    /// `EneHandle::run` checking the closed channel first) ensures a dead
+    /// actor is reported as dead, not busy.
+    #[tokio::test]
+    async fn shutdown_releases_single_flight_gate() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor_with_gate};
+
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx, _lifecycle_rx, gate) =
+            build_bare_actor_with_gate(registry, &task_caps);
+
+        // Simulate a turn having claimed the gate (as `EneHandle::run` does
+        // via `try_begin`) and not yet released it.
+        let turn = TurnId::new();
+        assert!(gate.try_begin(&turn), "gate must be free before the turn");
+        assert!(gate.active.lock().is_some(), "gate is held mid-turn");
+
+        assert!(
+            !actor.handle_command(EneCommand::Shutdown).await,
+            "Shutdown must signal the run loop to exit"
+        );
+        assert!(
+            gate.active.lock().is_none(),
+            "Shutdown must release the single-flight gate so a racing run() \
+             reports ActorDead, not a stale Busy (#404)"
         );
     }
 }
