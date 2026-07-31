@@ -83,10 +83,10 @@ pub use decay::{
     faded_decay_anchor, half_life_decay, recency_score, target_status_after_decay,
 };
 pub use scoring::{
-    access_boost_score, contradiction_penalty, document_lexical_similarity, emotional_match_score,
-    is_recallable_status, lexical_overlap_score, penalty_multiplier, quality_factor,
-    relationship_score, relevance_score, score_and_rank, score_candidate, stale_penalty, tokenize,
-    within_time_range,
+    ACCESS_BOOST_HALF_LIFE_DAYS, access_boost_score, contradiction_penalty,
+    document_lexical_similarity, emotional_match_score, is_recallable_status,
+    lexical_overlap_score, penalty_multiplier, quality_factor, relationship_score, relevance_score,
+    score_and_rank, score_candidate, stale_penalty, tokenize, within_time_range,
 };
 #[cfg(feature = "tool")]
 pub use tool::{

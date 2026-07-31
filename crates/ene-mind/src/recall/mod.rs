@@ -36,4 +36,4 @@ pub use result::{
     infer_recall_reason,
 };
 /// Hybrid recall execution for streaming integration (#100).
-pub use runner::{ExecuteRecallInput, execute_hybrid_recall};
+pub use runner::{ExecuteRecallInput, bump_injected_memory_access, execute_hybrid_recall};

@@ -72,6 +72,14 @@ pub struct BudgetMeta {
     pub history_messages_dropped: usize,
     /// Approximate total tokens after packing (sections + history).
     pub packed_tokens: usize,
+    /// IDs of recalled memories that actually survived into the packed prompt.
+    ///
+    /// A memory recalled by search may still be dropped by the budget manager
+    /// (its whole section dropped, or trimmed within the section). Only the
+    /// survivors — the ones the model will actually see — should have their
+    /// access counters bumped (#345), so recall does not reinforce memories it
+    /// never surfaced.
+    pub injected_memory_ids: Vec<i64>,
 }
 
 /// Result of packing a prompt under budget constraints.
@@ -456,6 +464,8 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
 
     let packed_tokens = total;
 
+    let injected_memory_ids = collect_injected_memory_ids(&dropped, &semantic, &profile, &episodic);
+
     let packet = PromptPacket { sections, history };
 
     PackedPrompt {
@@ -464,8 +474,39 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
             dropped,
             history_messages_dropped,
             packed_tokens,
+            injected_memory_ids,
         },
     }
+}
+
+/// IDs of recalled memories that survived budget packing into the prompt (#345).
+///
+/// A memory's section may be dropped wholesale (its kind lands in `dropped`) or
+/// trimmed within the section (low-confidence rows removed from the owned
+/// vectors). Only the survivors — what the model will actually read — are
+/// returned, so the access bump can be gated on real prompt inclusion rather
+/// than on "ranked high in search".
+fn collect_injected_memory_ids(
+    dropped: &[PromptSectionKind],
+    semantic: &[RecalledMemory],
+    profile: &[RecalledMemory],
+    episodic: &[RecalledMemory],
+) -> Vec<i64> {
+    let mut ids = Vec::new();
+    let mut extend_from = |kind: PromptSectionKind, memories: &[RecalledMemory]| {
+        if dropped.contains(&kind) {
+            return;
+        }
+        for memory in memories {
+            if let Some(id) = memory.item.id {
+                ids.push(id);
+            }
+        }
+    };
+    extend_from(PromptSectionKind::SemanticContext, semantic);
+    extend_from(PromptSectionKind::UserProfile, profile);
+    extend_from(PromptSectionKind::EpisodicMemories, episodic);
+    ids
 }
 
 fn classify_recalled_memories_owned(
@@ -539,6 +580,105 @@ mod tests {
             },
             sources: vec![],
         }
+    }
+
+    /// Like [`sample_memory`] but with a distinct, settable ID and confidence,
+    /// so tests can assert exactly which memories survive into the prompt (#345).
+    fn sample_memory_with_id(id: i64, kind: MemoryKind, confidence: f32) -> RecalledMemory {
+        let mut memory = sample_memory(kind, confidence, &format!("content-{id}"));
+        memory.item.id = Some(id);
+        memory
+    }
+
+    fn default_test_budget() -> ContextBudget {
+        ContextBudget::from_config(&ContextConfig::default())
+    }
+
+    fn kernel_only_input(recalled: Vec<RecalledMemory>) -> PackInput {
+        PackInput {
+            platform_contract: None,
+            identity_kernel: IdentityKernel {
+                name: "Ene".into(),
+                text: "KERNEL".into(),
+                post_history_instructions: None,
+            },
+            behavior_contract: None,
+            style_examples: vec![],
+            recalled,
+            commitments: vec![],
+            affect_summary: None,
+            scene_summary: None,
+            history: vec![],
+            output_contract: None,
+            interruption_note: None,
+            authors_note: None,
+            user_persona: None,
+            user_input: "hello".into(),
+        }
+    }
+
+    #[test]
+    fn injected_memory_ids_track_survivors_under_generous_budget() {
+        // #345: with room for everything, every recalled memory is injected.
+        let budget = default_test_budget();
+        let input = kernel_only_input(vec![
+            sample_memory_with_id(1, MemoryKind::Episodic, 0.9),
+            sample_memory_with_id(2, MemoryKind::Preference, 0.9),
+            sample_memory_with_id(3, MemoryKind::Affective, 0.9),
+        ]);
+        let packed = pack_prompt(input, &budget);
+        let mut ids = packed.meta.injected_memory_ids.clone();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn injected_memory_ids_empty_when_section_dropped() {
+        // #345: a recalled memory whose section is dropped by the budget must
+        // not be reported as injected. A tiny total budget plus a large
+        // episodic section guarantees the drop regardless of exact token
+        // estimates.
+        let config = ContextConfig {
+            max_prompt_tokens: 30,
+            ..ContextConfig::default()
+        };
+        let budget = ContextBudget::from_config(&config);
+        let mut memory = sample_memory_with_id(10, MemoryKind::Episodic, 0.9);
+        memory.item.content = "episodic filler content ".repeat(100);
+        let input = kernel_only_input(vec![memory]);
+        let packed = pack_prompt(input, &budget);
+        assert!(
+            packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::EpisodicMemories),
+            "episodic section should be dropped under a tight budget, dropped={:?}",
+            packed.meta.dropped
+        );
+        assert!(
+            packed.meta.injected_memory_ids.is_empty(),
+            "a dropped memory must not be injected"
+        );
+    }
+
+    #[test]
+    fn collect_injected_memory_ids_respects_dropped_sections() {
+        // Direct, deterministic check of the survivor computation (#345): IDs
+        // are collected per section, and any section listed in `dropped`
+        // contributes nothing.
+        let semantic = vec![sample_memory_with_id(1, MemoryKind::Semantic, 0.9)];
+        let profile = vec![sample_memory_with_id(2, MemoryKind::Preference, 0.9)];
+        let episodic = vec![sample_memory_with_id(3, MemoryKind::Episodic, 0.9)];
+
+        let mut all = collect_injected_memory_ids(&[], &semantic, &profile, &episodic);
+        all.sort_unstable();
+        assert_eq!(all, vec![1, 2, 3]);
+
+        let dropped = [PromptSectionKind::EpisodicMemories];
+        let ids = collect_injected_memory_ids(&dropped, &semantic, &profile, &episodic);
+        assert!(!ids.contains(&3), "dropped episodic id must be excluded");
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
     }
 
     #[test]

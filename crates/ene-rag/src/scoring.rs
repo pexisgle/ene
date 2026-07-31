@@ -26,6 +26,14 @@
 //! This replaces the previous weighted sum, in which the quality components
 //! collectively outweighed relevance roughly 2:1 and could push an unrelated
 //! memory above a strongly relevant one.
+//!
+//! ## Access boost is time-decayed (#345)
+//!
+//! The access component of [`quality_factor`] still rewards frequently-used
+//! memories, but the reward now fades with the age of the most recent access
+//! (see [`access_boost_score`]). Combined with the recall bump being gated on
+//! actual prompt inclusion, this stops a memory's accumulated access count from
+//! permanently inflating its score — old accesses stop counting.
 
 use chrono::{DateTime, Utc};
 use ene_core::{
@@ -36,6 +44,14 @@ use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::decay::recency_score;
+
+/// Half-life in days for the access-boost recency decay (#345).
+///
+/// Access history fades on this timescale so that old accesses stop boosting a
+/// memory's recall score. Chosen shorter than the typical content-forgetting
+/// half-life so the ranking reward for being "well-used" recedes well before
+/// the memory itself would fade.
+pub const ACCESS_BOOST_HALF_LIFE_DAYS: f64 = 14.0;
 
 /// Whether a character belongs to a CJK script that is written without spaces
 /// between words (Han ideographs, Hiragana, Katakana, Hangul), plus the CJK
@@ -209,12 +225,33 @@ pub fn relationship_score(impact: f32) -> f32 {
     }
 }
 
-/// Diminishing returns boost from prior accesses.
-pub fn access_boost_score(access_count: i64) -> f32 {
+/// Diminishing-returns access boost that decays with time since last access (#345).
+///
+/// The count contribution is the same saturating curve as before
+/// (`1 − exp(−count·0.25)`, ~0.92 at ten accesses), but it is multiplied by a
+/// half-life decay on the *age* of the most recent access. Old accesses stop
+/// mattering: a memory recalled ten times a year ago no longer carries a near
+/// full boost, so access history cannot lock a memory into the top of the
+/// ranking forever. A memory that has never been accessed (`last_accessed_at`
+/// `None`) scores `0.0` regardless of its stored count.
+pub fn access_boost_score(
+    access_count: i64,
+    last_accessed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    access_half_life_days: f64,
+) -> f32 {
     if access_count <= 0 {
         return 0.0;
     }
-    (1.0 - (-(access_count as f32) * 0.25).exp()).clamp(0.0, 1.0)
+    let Some(last_accessed) = last_accessed_at else {
+        return 0.0;
+    };
+    let count_factor = (1.0 - (-(access_count as f32) * 0.25).exp()).clamp(0.0, 1.0);
+    let recency = crate::decay::half_life_decay(
+        crate::decay::age_in_days(now, last_accessed),
+        access_half_life_days,
+    );
+    (count_factor * recency).clamp(0.0, 1.0)
 }
 
 /// Penalty for disputed memories.
@@ -335,7 +372,12 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
     let confidence = item.confidence.get();
     let emotional = emotional_match_score(options.query_affect, item.affect);
     let relationship = relationship_score(item.relationship_impact);
-    let access = access_boost_score(item.access_count);
+    let access = access_boost_score(
+        item.access_count,
+        item.last_accessed_at,
+        options.now,
+        ACCESS_BOOST_HALF_LIFE_DAYS,
+    );
     let contradiction = contradiction_penalty(item.status);
     let stale = stale_penalty(item.status, options.now, item.valid_until);
 
@@ -991,5 +1033,41 @@ mod tests {
         // total = relevance * quality * penalty (no commitment here).
         let expected = breakdown.relevance * breakdown.quality_factor;
         assert!((breakdown.total - expected).abs() < 1e-5);
+    }
+
+    #[test]
+    fn access_boost_is_zero_without_accesses() {
+        let now = Utc::now();
+        assert!(access_boost_score(0, Some(now), now, 14.0) < f32::EPSILON);
+        // A stored count with no recorded access time scores nothing: the
+        // reward is gated on a real, datable access.
+        assert!(access_boost_score(10, None, now, 14.0) < f32::EPSILON);
+    }
+
+    #[test]
+    fn access_boost_fades_with_age_of_last_access() {
+        // #345 regression: the same access count must not lock in a permanent
+        // boost — an access from long ago fades toward zero.
+        let now = Utc::now();
+        let recent = now - chrono::Duration::days(1);
+        let stale = now - chrono::Duration::days(365);
+        let fresh_boost = access_boost_score(10, Some(recent), now, 14.0);
+        let stale_boost = access_boost_score(10, Some(stale), now, 14.0);
+        assert!(fresh_boost > 0.5, "recent accesses should still boost");
+        assert!(
+            stale_boost < 0.01,
+            "year-old accesses must have decayed away, got {stale_boost}"
+        );
+        assert!(stale_boost < fresh_boost);
+    }
+
+    #[test]
+    fn access_boost_is_half_at_one_half_life() {
+        let now = Utc::now();
+        let one_half_life_ago = now - chrono::Duration::days(14);
+        // Saturating count factor ≈ 0.918 at count=10; half-life decay halves it.
+        let full = access_boost_score(10, Some(now), now, 14.0);
+        let half = access_boost_score(10, Some(one_half_life_ago), now, 14.0);
+        assert!((half - full * 0.5).abs() < 1e-3);
     }
 }

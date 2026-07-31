@@ -484,6 +484,16 @@ impl CognitionEngine {
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections.clone_from(&packed.meta.dropped);
         meta.packed_tokens = packed.meta.packed_tokens;
+        meta.injected_memory_ids
+            .clone_from(&packed.meta.injected_memory_ids);
+
+        // Bump access counters only for memories that actually made it into the
+        // prompt (#345). This moved out of `execute_hybrid_recall` (which bumped
+        // every recalled memory) so that being recalled-but-dropped no longer
+        // reinforces a memory's score and shields it from forgetting.
+        if let Some(store) = ctx.store {
+            crate::recall::bump_injected_memory_access(store, &meta.injected_memory_ids).await;
+        }
         tracing::debug!(
             component = "CognitionEngine",
             event = "prompt packet composed",
@@ -494,6 +504,7 @@ impl CognitionEngine {
             message_count = messages.len(),
             packed_tokens = meta.packed_tokens,
             dropped_sections = meta.dropped_sections.len(),
+            injected_memory_ids = meta.injected_memory_ids.len(),
             "Prompt packet composed"
         );
 

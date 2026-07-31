@@ -116,6 +116,9 @@ impl PromptPacket {
             scene_summary_included: self.section_included(PromptSectionKind::SceneState),
             dropped_sections: Vec::new(),
             packed_tokens: 0,
+            // Populated by the budget packer in the engine; this conversion
+            // only renders an already-packed packet and cannot recover IDs.
+            injected_memory_ids: Vec::new(),
         };
 
         (messages, meta)
