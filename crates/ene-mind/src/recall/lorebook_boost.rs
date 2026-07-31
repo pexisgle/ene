@@ -97,6 +97,8 @@ fn recalled_memory_from_item(item: MemoryItem) -> RecalledMemory {
             emotional_match: 0.0,
             relationship: 0.0,
             access_boost: 0.0,
+            relevance: 1.0,
+            quality_factor: 1.0,
             contradiction_penalty: 0.0,
             stale_penalty: 0.0,
             commitment_boost: 0.0,
@@ -172,6 +174,12 @@ mod tests {
             commitment_id: None,
         };
         let book = ene_config::Lorebook {
+            name: None,
+            description: None,
+            scan_depth: None,
+            token_budget: None,
+            recursive_scanning: None,
+            extensions: Default::default(),
             entries: vec![LorebookEntry {
                 keys: vec!["dragon".into()],
                 content: "A dragon.".into(),
@@ -192,7 +200,6 @@ mod tests {
                 sticky_turns: None,
                 turns_since_match: None,
             }],
-            ..Default::default()
         };
         let regex_cache = compile_lorebook_regex_cache(&book);
         assert!(lorebook_entry_matches(

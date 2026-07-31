@@ -113,6 +113,116 @@ async fn message_search_is_case_insensitive_and_paginated() {
 }
 
 #[tokio::test]
+async fn message_search_escapes_like_metacharacters() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("s1", "card"))
+        .await
+        .unwrap();
+
+    store
+        .insert_log("s1", "card", "user", "battery at 50% charge")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "value is 500 units")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "snake_case identifier")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "snakeXcase near miss")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", r"path is C:\temp")
+        .await
+        .unwrap();
+
+    // `%` must match literally: only the "50%" row, not "500" (which the
+    // unescaped pattern `%50%%` would also match via the trailing wildcard).
+    let pct = store.search_messages("50%", 10, 0).await.unwrap();
+    assert_eq!(pct.len(), 1);
+    assert!(pct[0].1.content.contains("50%"));
+
+    // `_` must match a literal underscore, not "any single character".
+    let underscore = store.search_messages("snake_case", 10, 0).await.unwrap();
+    assert_eq!(underscore.len(), 1);
+    assert!(underscore[0].1.content.contains("snake_case"));
+
+    // The escape character itself is escaped: a literal backslash matches.
+    let backslash = store.search_messages(r"C:\temp", 10, 0).await.unwrap();
+    assert_eq!(backslash.len(), 1);
+    assert!(backslash[0].1.content.contains(r"C:\temp"));
+}
+
+#[tokio::test]
+async fn message_search_query_plan_uses_created_at_index() {
+    use sea_orm::sea_query::{Expr, Func, LikeExpr};
+    use sea_orm::{
+        DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        Statement,
+    };
+
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("s1", "card"))
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "hello world")
+        .await
+        .unwrap();
+
+    // Build the exact query `search_messages` executes through SeaORM's own
+    // query builder, so the EXPLAIN plan reflects the real SQL (the
+    // hand-written string below it is kept only as documentation). The
+    // leading-wildcard `LIKE` cannot use a B-tree index on `content` (that
+    // requires FTS5, #424), but the ordering must be served by
+    // `idx_log_created_at` so the query walks rows newest-first and stops at
+    // the limit instead of sorting the whole table (#422).
+    let built = crate::entities::conversation_logs::Entity::find()
+        .filter(
+            Func::lower(Expr::col(
+                crate::entities::conversation_logs::Column::Content,
+            ))
+            .like(LikeExpr::new("%hello%".to_string()).escape('\\')),
+        )
+        .order_by_desc(crate::entities::conversation_logs::Column::CreatedAt)
+        .limit(10)
+        .offset(0)
+        .build(DbBackend::Sqlite)
+        .to_string();
+    let explain_sql = format!("EXPLAIN QUERY PLAN {built}");
+
+    let rows = store
+        .connection()
+        .query_all_raw(Statement::from_string(DbBackend::Sqlite, explain_sql))
+        .await
+        .unwrap();
+
+    let plan: String = rows
+        .iter()
+        .map(|row| {
+            row.try_get_by_index::<String>(3)
+                .expect("EXPLAIN QUERY PLAN detail column exists")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        plan.contains("idx_log_created_at"),
+        "expected the search ordering to use idx_log_created_at, plan was:\n{plan}"
+    );
+    assert!(
+        !plan.to_ascii_lowercase().contains("use temp b-tree"),
+        "expected no in-memory sort for the search ordering, plan was:\n{plan}"
+    );
+}
+
+#[tokio::test]
 async fn export_import_roundtrip_and_conflict() {
     let store = setup_store().await;
     store
@@ -333,25 +443,21 @@ async fn upsert_memory_embedding_rejects_bad_embedding() {
 /// `busy_timeout` are still meaningful.
 #[tokio::test]
 async fn pragmas_are_applied_on_open() {
-    use sea_orm::ConnectionTrait;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
     let store = setup_store().await;
-    // `execute_unprepared` returns a `ExecResult`
-    // whose `rows_affected` field is populated for
-    // some statements; for `PRAGMA foreign_keys` it
-    // returns the current value of the pragma (0 or
-    // 1) as `rows_affected`. This is a pragmatic
-    // way to assert the PRAGMA took effect without
-    // pulling in a full query API.
-    let res = store
+    // Query the PRAGMA value directly instead of relying on rows_affected()
+    // which is unreliable for PRAGMA statements.
+    let row = store
         .connection()
-        .execute_unprepared("PRAGMA foreign_keys")
+        .query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            "PRAGMA foreign_keys".to_string(),
+        ))
         .await
-        .unwrap();
-    assert_eq!(
-        res.rows_affected(),
-        1,
-        "foreign_keys PRAGMA should report 1 (ON)"
-    );
+        .unwrap()
+        .expect("PRAGMA foreign_keys should return a row");
+    let value: i32 = row.try_get_by_index(0).unwrap();
+    assert_eq!(value, 1, "foreign_keys PRAGMA should report 1 (ON)");
 }
 
 #[tokio::test]
@@ -1715,8 +1821,10 @@ fn sample_pending_candidate(character_id: &str, title: &str) -> PendingCandidate
         confidence: 0.8,
         reason_detail: "extracted from conversation".to_string(),
         existing_memory_title: None,
+        existing_memory_id: None,
         source_quote: "I like tea".to_string(),
         status: PendingCandidateStatus::Pending,
+        created_at: Utc::now(),
     }
 }
 
@@ -1726,11 +1834,13 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
 
     let id = store
         .insert_pending_candidate(sample_pending_candidate("ene", "likes tea"))
+        .await
         .expect("insert");
     assert_eq!(id, 1);
 
     let listed = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
         .expect("list");
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].title, "likes tea");
@@ -1750,10 +1860,12 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
     // The candidate is now approved and no longer pending.
     let pending = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
         .expect("list pending");
     assert!(pending.is_empty());
     let approved = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Approved))
+        .await
         .expect("list approved");
     assert_eq!(approved.len(), 1);
 
@@ -1767,6 +1879,7 @@ async fn pending_candidate_reject_does_not_persist() {
 
     let id = store
         .insert_pending_candidate(sample_pending_candidate("ene", "rejected fact"))
+        .await
         .expect("insert");
     store
         .resolve_pending_candidate(id, false)
@@ -1775,6 +1888,7 @@ async fn pending_candidate_reject_does_not_persist() {
 
     let rejected = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Rejected))
+        .await
         .expect("list rejected");
     assert_eq!(rejected.len(), 1);
 
@@ -1786,25 +1900,460 @@ async fn pending_candidate_reject_does_not_persist() {
     assert_eq!(count, 0);
 }
 
+/// #420: candidates persist to the `pending_candidates` table, so they
+/// survive a restart (a fresh store instance on the same file) and are
+/// shared across instances — the inverse of the old in-memory behaviour.
+/// Listing remains isolated per character.
 #[tokio::test]
-async fn pending_candidates_are_isolated_per_store_instance() {
-    let store_a = setup_store().await;
-    let store_b = setup_store().await;
+async fn pending_candidates_persist_across_instances_and_isolate_per_character() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
 
-    store_a
-        .insert_pending_candidate(sample_pending_candidate("ene", "only in A"))
-        .expect("insert A");
+    let store = MemoryStore::open(&path, 4).await.expect("open");
+    store
+        .insert_pending_candidate(sample_pending_candidate("ene", "ene fact"))
+        .await
+        .expect("insert ene");
+    store
+        .insert_pending_candidate(sample_pending_candidate("mira", "mira fact"))
+        .await
+        .expect("insert mira");
+    drop(store);
 
-    let in_a = store_a
+    // Reopen a fresh instance on the same database file (simulated restart).
+    let reopened = MemoryStore::open(&path, 4).await.expect("reopen");
+
+    // Candidates survived the restart and are shared via the DB.
+    let ene = reopened
         .list_pending_candidates("ene", None)
-        .expect("list A");
-    assert_eq!(in_a.len(), 1);
+        .await
+        .expect("list ene");
+    assert_eq!(ene.len(), 1);
+    assert_eq!(ene[0].title, "ene fact");
 
-    // The second store instance must not see store A's candidates.
-    let in_b = store_b
+    // Listing is isolated per character: "ene" does not see "mira"'s queue.
+    let mira = reopened
+        .list_pending_candidates("mira", None)
+        .await
+        .expect("list mira");
+    assert_eq!(mira.len(), 1);
+    assert_eq!(mira[0].title, "mira fact");
+}
+
+// ── #420: pending-candidate retention policy ──
+
+#[tokio::test]
+async fn pending_candidate_age_prune_removes_expired() {
+    let store = setup_store().await;
+
+    let old_id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "stale"))
+        .await
+        .expect("insert old");
+    store
+        .test_backdate_pending_candidate(old_id, 30)
+        .await
+        .expect("backdate");
+    store
+        .insert_pending_candidate(sample_pending_candidate("ene", "fresh"))
+        .await
+        .expect("insert fresh");
+
+    let removed = store
+        .prune_pending_candidates("ene", Some("user1"), 14, 0, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 1);
+
+    let remaining = store
         .list_pending_candidates("ene", None)
-        .expect("list B");
-    assert!(in_b.is_empty());
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].title, "fresh");
+}
+
+#[tokio::test]
+async fn pending_candidate_count_prune_caps_queue() {
+    let store = setup_store().await;
+
+    for i in 0..5 {
+        store
+            .insert_pending_candidate(sample_pending_candidate("ene", &format!("cand {i}")))
+            .await
+            .expect("insert");
+    }
+
+    // Cap at 3: the two oldest pending candidates are dropped.
+    let removed = store
+        .prune_pending_candidates("ene", Some("user1"), 0, 3, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 2);
+
+    let remaining = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 3);
+    // Oldest-first ordering means "cand 0" and "cand 1" were culled.
+    assert_eq!(remaining[0].title, "cand 2");
+}
+
+#[tokio::test]
+async fn pending_candidate_prune_disabled_with_zero() {
+    let store = setup_store().await;
+
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "ancient"))
+        .await
+        .expect("insert");
+    store
+        .test_backdate_pending_candidate(id, 365)
+        .await
+        .expect("backdate");
+
+    // Both limits disabled (0): nothing is removed despite the age.
+    let removed = store
+        .prune_pending_candidates("ene", Some("user1"), 0, 0, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 0);
+
+    let remaining = store
+        .list_pending_candidates("ene", None)
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 1);
+}
+
+/// Build a sample candidate for a specific user, optionally recording a
+/// conflicting existing memory (#420 review tests).
+fn sample_pending_candidate_for(
+    character_id: &str,
+    user_id: &str,
+    title: &str,
+    existing_memory_id: Option<i64>,
+) -> PendingCandidate {
+    PendingCandidate {
+        id: 0,
+        character_id: character_id.to_string(),
+        user_id: user_id.to_string(),
+        title: title.to_string(),
+        content: format!("{title} content"),
+        kind: crate::MemoryKind::Preference,
+        confidence: 0.8,
+        reason_detail: "extracted from conversation".to_string(),
+        existing_memory_title: None,
+        existing_memory_id,
+        source_quote: "I like tea".to_string(),
+        status: PendingCandidateStatus::Pending,
+        created_at: Utc::now(),
+    }
+}
+
+/// #420 review: pruning is character-scoped — pruning "ene" must leave
+/// "mira"'s queue untouched.
+#[tokio::test]
+async fn pending_candidate_prune_is_character_scoped() {
+    let store = setup_store().await;
+
+    for i in 0..5 {
+        store
+            .insert_pending_candidate(sample_pending_candidate("ene", &format!("ene {i}")))
+            .await
+            .expect("insert ene");
+    }
+    store
+        .insert_pending_candidate(sample_pending_candidate("mira", "mira 0"))
+        .await
+        .expect("insert mira");
+
+    // Cap "ene" at 2 (drops 3); "mira" is a different character and is ignored.
+    let removed = store
+        .prune_pending_candidates("ene", Some("user1"), 0, 2, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 3);
+
+    assert_eq!(
+        store
+            .list_pending_candidates("ene", None)
+            .await
+            .expect("list ene")
+            .len(),
+        2
+    );
+    assert_eq!(
+        store
+            .list_pending_candidates("mira", None)
+            .await
+            .expect("list mira")
+            .len(),
+        1
+    );
+}
+
+/// #420 review (MEDIUM 4): the count cap is scoped to the acting user (plus
+/// character-shared rows), so one user's overflow cannot evict another's.
+#[tokio::test]
+async fn pending_candidate_prune_count_cap_is_user_scoped() {
+    let store = setup_store().await;
+
+    for i in 0..5 {
+        store
+            .insert_pending_candidate(sample_pending_candidate_for(
+                "ene",
+                "alice",
+                &format!("alice {i}"),
+                None,
+            ))
+            .await
+            .expect("insert alice");
+    }
+    for i in 0..2 {
+        store
+            .insert_pending_candidate(sample_pending_candidate_for(
+                "ene",
+                "bob",
+                &format!("bob {i}"),
+                None,
+            ))
+            .await
+            .expect("insert bob");
+    }
+
+    // Cap at 2 as alice: only alice's queue overflows (5 -> 2), bob is intact.
+    let removed = store
+        .prune_pending_candidates("ene", Some("alice"), 0, 2, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 3);
+
+    let all = store
+        .list_pending_candidates("ene", None)
+        .await
+        .expect("list");
+    let alice_rows = all.iter().filter(|c| c.user_id == "alice").count();
+    let bob_rows = all.iter().filter(|c| c.user_id == "bob").count();
+    assert_eq!(alice_rows, 2);
+    assert_eq!(bob_rows, 2);
+}
+
+/// #420 review: the age sweep removes *resolved* (approved / rejected) rows
+/// too, not just pending ones — resolved rows have no further UI value once
+/// stale.
+#[tokio::test]
+async fn pending_candidate_age_prune_removes_resolved_rows() {
+    let store = setup_store().await;
+
+    let approved_id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "approved stale"))
+        .await
+        .expect("insert approved");
+    store
+        .approve_pending_candidate(approved_id)
+        .await
+        .expect("approve");
+    let rejected_id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "rejected stale"))
+        .await
+        .expect("insert rejected");
+    store
+        .resolve_pending_candidate(rejected_id, false)
+        .await
+        .expect("reject");
+
+    // Backdate both resolved rows past the age limit.
+    store
+        .test_backdate_pending_candidate(approved_id, 30)
+        .await
+        .expect("backdate approved");
+    store
+        .test_backdate_pending_candidate(rejected_id, 30)
+        .await
+        .expect("backdate rejected");
+    // A fresh pending row that must survive.
+    store
+        .insert_pending_candidate(sample_pending_candidate("ene", "fresh pending"))
+        .await
+        .expect("insert fresh");
+
+    let removed = store
+        .prune_pending_candidates("ene", Some("user1"), 14, 0, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 2);
+
+    let remaining = store
+        .list_pending_candidates("ene", None)
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].title, "fresh pending");
+}
+
+/// #420 review: with both limits active, `removed` must not double-count a row
+/// the age pass already deleted when the count pass runs afterwards.
+#[tokio::test]
+async fn pending_candidate_prune_both_limits_no_double_count() {
+    let store = setup_store().await;
+
+    // Two ancient pending rows (removed by the age pass) ...
+    for i in 0..2 {
+        let id = store
+            .insert_pending_candidate(sample_pending_candidate("ene", &format!("ancient {i}")))
+            .await
+            .expect("insert ancient");
+        store
+            .test_backdate_pending_candidate(id, 30)
+            .await
+            .expect("backdate");
+    }
+    // ... plus four fresh pending rows.
+    for i in 0..4 {
+        store
+            .insert_pending_candidate(sample_pending_candidate("ene", &format!("fresh {i}")))
+            .await
+            .expect("insert fresh");
+    }
+
+    // Age pass removes the 2 ancient rows; the count pass then sees 4 fresh
+    // pending rows and caps to 3, removing 1 more. Total = 3, not 4.
+    let removed = store
+        .prune_pending_candidates("ene", Some("user1"), 14, 3, Utc::now())
+        .await
+        .expect("prune");
+    assert_eq!(removed, 3);
+
+    let remaining = store
+        .list_pending_candidates("ene", None)
+        .await
+        .expect("list");
+    assert_eq!(remaining.len(), 3);
+}
+
+/// #420 review (MEDIUM 5): approving a candidate that recorded a conflicting
+/// existing memory propagates it to the typed memory's `supersedes_id`.
+#[tokio::test]
+async fn pending_candidate_approve_propagates_existing_memory_id() {
+    let store = setup_store().await;
+
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate_for(
+            "ene",
+            "user1",
+            "supersedes old",
+            Some(42),
+        ))
+        .await
+        .expect("insert");
+
+    let memory_id = store.approve_pending_candidate(id).await.expect("approve");
+    let memory = store
+        .get_typed_memory(memory_id)
+        .await
+        .expect("get memory")
+        .expect("memory exists");
+    assert_eq!(memory.supersedes_id, Some(42));
+}
+
+/// #420 review (HIGH 1): resolving a candidate across a simulated restart —
+/// insert on one instance, then approve / reject on a fresh instance over the
+/// same file, which is what #420's shared-queue design promises.
+#[tokio::test]
+async fn pending_candidate_resolve_across_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+
+    let store = MemoryStore::open(&path, 4).await.expect("open");
+    let approve_id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "approve me"))
+        .await
+        .expect("insert approve");
+    let reject_id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "reject me"))
+        .await
+        .expect("insert reject");
+    drop(store);
+
+    // Fresh instance on the same database (simulated restart).
+    let reopened = MemoryStore::open(&path, 4).await.expect("reopen");
+    let memory_id = reopened
+        .approve_pending_candidate(approve_id)
+        .await
+        .expect("approve across restart");
+    let memory = reopened
+        .get_typed_memory(memory_id)
+        .await
+        .expect("get memory")
+        .expect("memory exists");
+    assert_eq!(memory.title, "approve me");
+
+    reopened
+        .resolve_pending_candidate(reject_id, false)
+        .await
+        .expect("reject across restart");
+
+    let approved = reopened
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Approved))
+        .await
+        .expect("list approved");
+    assert_eq!(approved.len(), 1);
+    let rejected = reopened
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Rejected))
+        .await
+        .expect("list rejected");
+    assert_eq!(rejected.len(), 1);
+    let pending = reopened
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
+        .await
+        .expect("list pending");
+    assert!(pending.is_empty());
+}
+
+/// #420 review (HIGH 1): concurrent approvals of the same candidate must insert
+/// exactly one typed memory — one call wins the conditional status flip, the
+/// other errors.
+#[tokio::test]
+async fn pending_candidate_concurrent_approve_inserts_once() {
+    let store = std::sync::Arc::new(setup_store().await);
+
+    let id = store
+        .insert_pending_candidate(sample_pending_candidate("ene", "contested"))
+        .await
+        .expect("insert");
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let store = std::sync::Arc::clone(&store);
+        handles.push(tokio::spawn(async move {
+            store.approve_pending_candidate(id).await
+        }));
+    }
+
+    let mut successes = 0usize;
+    for handle in handles {
+        let result = handle.await.expect("join");
+        if result.is_ok() {
+            successes += 1;
+        }
+    }
+    assert_eq!(successes, 1, "exactly one concurrent approval may win");
+
+    // Exactly one typed memory was created.
+    let count = store
+        .count_typed_memories("ene", None)
+        .await
+        .expect("count");
+    assert_eq!(count, 1);
+
+    // The candidate is approved, not left pending.
+    let approved = store
+        .list_pending_candidates("ene", Some(PendingCandidateStatus::Approved))
+        .await
+        .expect("list approved");
+    assert_eq!(approved.len(), 1);
 }
 
 // ── #419: PRAGMAs must reach every pooled connection ──
@@ -1976,4 +2525,460 @@ async fn upsert_memory_embedding_does_not_create_duplicates() {
         embedding_to_bytes(&emb2),
         "stored embedding must be the second (updated) value"
     );
+}
+
+// ── #304: vec0 ANN index tests ──
+
+/// The vec0 indexed search must return the same results as the brute-force
+/// scan for a small dataset where both paths are exhaustive.
+#[tokio::test]
+async fn vec0_search_matches_brute_force() {
+    let store = setup_store().await;
+
+    let items = [
+        (
+            "tea preferences",
+            "user likes green tea",
+            vec![1.0, 0.0, 0.0, 0.0],
+        ),
+        (
+            "movie night",
+            "user enjoys sci-fi movies",
+            vec![0.8, 0.6, 0.0, 0.0],
+        ),
+        (
+            "work schedule",
+            "user works 9 to 5",
+            vec![0.5, 0.5, 0.5, 0.5],
+        ),
+        (
+            "pet cat",
+            "user has a cat named Luna",
+            vec![0.0, 0.0, 0.0, 1.0],
+        ),
+    ];
+
+    for (title, content, emb) in &items {
+        let item = test_memory_item(title, content);
+        let id = store.insert_typed_memory(&item).await.unwrap();
+        store
+            .upsert_memory_embedding(id, "test-model", "content", emb)
+            .await
+            .unwrap();
+    }
+
+    let query = vec![0.9, 0.1, 0.0, 0.0];
+    let statuses: &[&str] = &["active"];
+
+    let indexed = store
+        .search_typed_memories_vector(&query, "ene", "test-model", None, statuses, 10, 0.0)
+        .await
+        .unwrap();
+
+    let brute = store
+        .search_typed_memories_vector_brute_force(
+            &query,
+            "ene",
+            "test-model",
+            None,
+            statuses,
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        indexed.len(),
+        brute.len(),
+        "indexed and brute-force must return the same number of results"
+    );
+
+    for (i, (b_item, b_sim)) in brute.iter().enumerate() {
+        let (i_item, i_sim) = &indexed[i];
+        assert_eq!(i_item.id, b_item.id, "result {i}: same memory id expected");
+        assert!(
+            (i_sim - b_sim).abs() < 1e-5,
+            "result {i}: similarity mismatch: indexed={i_sim}, brute={b_sim}"
+        );
+    }
+}
+
+/// The vec0 index must be kept in sync when embeddings are upserted
+/// (insert and update paths).
+#[tokio::test]
+async fn vec0_sync_on_upsert() {
+    let store = setup_store().await;
+
+    let item = test_memory_item("sync test", "content for sync");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+
+    // Insert path: first upsert creates the vec0 row.
+    let emb1 = vec![1.0, 0.0, 0.0, 0.0];
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &emb1)
+        .await
+        .unwrap();
+
+    let results = store
+        .search_typed_memories_vector(&emb1, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1, "vec0 must contain the inserted embedding");
+    assert_eq!(results[0].0.id, Some(id));
+
+    // Update path: second upsert replaces the vec0 row.
+    let emb2 = vec![0.0, 1.0, 0.0, 0.0];
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &emb2)
+        .await
+        .unwrap();
+
+    // Search with the old vector should still find the row (it's the only one).
+    let results = store
+        .search_typed_memories_vector(&emb1, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "vec0 must still contain exactly one row after update"
+    );
+
+    // Search with the new vector should find it with higher similarity.
+    let results_new = store
+        .search_typed_memories_vector(&emb2, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(results_new.len(), 1);
+    assert!(
+        results_new[0].1 > results[0].1,
+        "updated embedding must be more similar to the new vector"
+    );
+}
+
+/// Deleting a typed memory (FK cascade) must remove the vec0 row.
+#[tokio::test]
+async fn vec0_sync_on_cascade_delete() {
+    use sea_orm::ConnectionTrait;
+
+    let store = setup_store().await;
+
+    let item = test_memory_item("cascade vec0", "content to delete");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &[1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+
+    // Verify the vec0 row exists.
+    let before = store
+        .search_typed_memories_vector(
+            &[1.0, 0.0, 0.0, 0.0],
+            "ene",
+            "test-model",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 1, "vec0 row must exist before delete");
+
+    // Delete the parent typed_memories row; FK cascade deletes memory_embeddings,
+    // and the AFTER DELETE trigger removes the vec0 row.
+    store
+        .connection()
+        .execute_unprepared(&format!("DELETE FROM typed_memories WHERE id = {id}"))
+        .await
+        .unwrap();
+
+    let after = store
+        .search_typed_memories_vector(
+            &[1.0, 0.0, 0.0, 0.0],
+            "ene",
+            "test-model",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        after.len(),
+        0,
+        "vec0 row must be removed after cascade delete"
+    );
+}
+
+/// The vec0 tool embedding index must be kept in sync with
+/// `tool_embedding_index` writes and deletes.
+#[tokio::test]
+async fn vec0_tool_search_sync() {
+    let store = setup_store().await;
+
+    let emb = vec![1.0, 0.0, 0.0, 0.0];
+    store
+        .upsert_tool_embedding_field(
+            "weather",
+            "summary",
+            "s0",
+            "hash1",
+            "test-model",
+            &emb,
+            "weather tool",
+        )
+        .await
+        .unwrap();
+
+    let results = store.search_tools(&emb, 10, 0.0).await.unwrap();
+    assert_eq!(results.len(), 1, "tool must be found via vec0");
+    assert_eq!(results[0].0, "weather");
+
+    // Delete and verify removal.
+    store.delete_tool_embeddings("weather").await.unwrap();
+    let results = store.search_tools(&emb, 10, 0.0).await.unwrap();
+    assert_eq!(
+        results.len(),
+        0,
+        "tool must be removed from vec0 after delete"
+    );
+}
+
+/// The similarity threshold must filter results in the vec0 path.
+#[tokio::test]
+async fn vec0_search_respects_threshold() {
+    let store = setup_store().await;
+
+    let item = test_memory_item("threshold test", "content");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+    // Orthogonal vector: cosine similarity to query [1,0,0,0] is 0.
+    store
+        .upsert_memory_embedding(id, "test-model", "content", &[0.0, 1.0, 0.0, 0.0])
+        .await
+        .unwrap();
+
+    let query = vec![1.0, 0.0, 0.0, 0.0];
+
+    // With threshold 0.0, the orthogonal vector (similarity ≈ 0) should appear.
+    let results = store
+        .search_typed_memories_vector(&query, "ene", "test-model", None, &["active"], 10, 0.0)
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "orthogonal vector must pass threshold 0.0"
+    );
+
+    // With threshold 0.5, it should be filtered out.
+    let results = store
+        .search_typed_memories_vector(&query, "ene", "test-model", None, &["active"], 10, 0.5)
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        0,
+        "orthogonal vector must be filtered by threshold 0.5"
+    );
+}
+
+/// Changing the embedding dimension must not brick the store: the vec0
+/// shadow tables are dropped and recreated empty at the new dimension, the
+/// old-dimension vectors are left out (they cannot fit the new `float[N]`
+/// schema), and KNN search returns no rows instead of erroring.
+#[tokio::test]
+async fn vec0_dimension_change_rebuilds_empty_not_fail() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+
+    // Open with dim=4 and populate embeddings.
+    let store = MemoryStore::open(&path, 4).await.expect("open dim=4");
+    let item = test_memory_item("dim change", "content before model switch");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+    store
+        .upsert_memory_embedding(id, "model-a", "content", &[1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    drop(store);
+
+    // Reopen with a different embedding model (dim=8). This must succeed —
+    // previously the backfill of 4-dim vectors into the recreated float[8]
+    // table failed and `MemoryStore::open` errored forever after (#304).
+    let store = MemoryStore::open(&path, 8).await.expect("reopen dim=8");
+    let results = store
+        .search_typed_memories_vector(
+            &[1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "ene",
+            "model-b",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    // Stale old-dimension vectors are not in the index until re-embedded.
+    assert_eq!(
+        results.len(),
+        0,
+        "old vectors must not appear after dim change"
+    );
+
+    // The store must still accept new-dimension embeddings.
+    let item2 = test_memory_item("dim change 2", "content after model switch");
+    let id2 = store.insert_typed_memory(&item2).await.unwrap();
+    store
+        .upsert_memory_embedding(
+            id2,
+            "model-b",
+            "content",
+            &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await
+        .unwrap();
+    let results = store
+        .search_typed_memories_vector(
+            &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "ene",
+            "model-b",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1, "new vectors must be searchable");
+}
+
+// ── #426: audit_log session_id and session export tool history ──
+
+/// Builds a [`crate::NewAuditEntry`] for test use.
+fn test_audit_entry(session_id: &str, tool_name: &str) -> crate::NewAuditEntry {
+    crate::NewAuditEntry {
+        turn_id: format!("turn-{tool_name}"),
+        session_id: Some(session_id.to_string()),
+        tool_name: tool_name.to_string(),
+        action: "write".to_string(),
+        target: "/tmp/x".to_string(),
+        decision: crate::AuditDecision::AllowOnce,
+        success: true,
+        arguments: r#"{"path":"/tmp/x"}"#.to_string(),
+    }
+}
+
+/// Audit rows written within a session carry that session's id; rows
+/// with an empty session id (out-of-band diagnostics) persist as `NULL`.
+#[tokio::test]
+async fn audit_rows_carry_session_id() {
+    let store = setup_store().await;
+
+    store
+        .insert_audit_entry(&test_audit_entry("sess-a", "fs.write_file"))
+        .await
+        .expect("insert sess-a");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band");
+
+    let by_session = store
+        .list_audit_entries_by_session("sess-a")
+        .await
+        .expect("list by session");
+    assert_eq!(by_session.len(), 1);
+    let entry = by_session.first().expect("sess-a entry");
+    assert_eq!(entry.session_id.as_deref(), Some("sess-a"));
+    assert_eq!(entry.tool_name, "fs.write_file");
+
+    // The out-of-band row has a NULL session_id and is never attributed
+    // to any session.
+    let all = store.list_audit_entries(10).await.expect("list all");
+    assert_eq!(all.len(), 2);
+    let diag = all
+        .iter()
+        .find(|e| e.tool_name == "diag.ping")
+        .expect("diag entry");
+    assert_eq!(diag.session_id, None);
+    assert!(
+        store
+            .list_audit_entries_by_session("")
+            .await
+            .expect("list empty session")
+            .is_empty(),
+        "NULL-session rows must not match an empty session filter"
+    );
+}
+
+/// `build_export` returns the session's own tool history and never
+/// another session's (or NULL-session) rows.
+#[tokio::test]
+async fn session_export_includes_only_own_tool_history() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("sess-a", "card"))
+        .await
+        .expect("upsert sess-a");
+    store
+        .upsert_session(&new_session_meta("sess-b", "card"))
+        .await
+        .expect("upsert sess-b");
+
+    store
+        .insert_audit_entry(&test_audit_entry("sess-a", "fs.write_file"))
+        .await
+        .expect("insert sess-a tool");
+    store
+        .insert_audit_entry(&test_audit_entry("sess-b", "fs.read_file"))
+        .await
+        .expect("insert sess-b tool");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band tool");
+
+    let export = store.build_export("sess-a").await.expect("export sess-a");
+    assert_eq!(export.tool_logs.len(), 1);
+    let log = export.tool_logs.first().expect("tool log");
+    assert_eq!(log.tool_name, "fs.write_file");
+    assert_eq!(log.decision, "allow_once");
+    assert!(log.success);
+
+    // The other session's export sees only its own history.
+    let export_b = store.build_export("sess-b").await.expect("export sess-b");
+    assert_eq!(export_b.tool_logs.len(), 1);
+    assert_eq!(
+        export_b.tool_logs.first().expect("tool log").tool_name,
+        "fs.read_file"
+    );
+}
+
+/// A session with no audit rows still exports cleanly with an empty
+/// `tool_logs` vector (existing NULL-session rows are not leaked in).
+#[tokio::test]
+async fn session_export_without_audit_rows_is_empty() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("lonely", "card"))
+        .await
+        .expect("upsert lonely");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band tool");
+
+    let export = store.build_export("lonely").await.expect("export");
+    assert!(export.tool_logs.is_empty());
 }

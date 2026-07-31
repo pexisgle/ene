@@ -121,13 +121,17 @@ pub struct MindMemoryConfig {
     ///
     /// Distinct from `journal_similarity_threshold` — recall uses a more
     /// lenient similarity gate (default 0.35 vs 0.45 for journal) paired with
-    /// a stricter hybrid score floor (default 0.20 vs 0.10 for journal).
+    /// the same hybrid score floor (default 0.10 for both).
     pub recall_similarity_threshold: f32,
     /// Minimum hybrid score required for cognitive recall results.
     ///
-    /// Distinct from `journal_min_score` — the recall path uses a stricter
-    /// cutoff (default 0.20 vs 0.10 for journal) to ensure high-quality
-    /// memories for LLM context injection.
+    /// Distinct from `journal_min_score` — the recall path uses a slightly
+    /// stricter cutoff (default 0.10 vs 0.05 for journal) to favor
+    /// high-quality memories for LLM context injection. The hybrid formula
+    /// scales with relevance × quality, so the threshold sits well below the
+    /// maximum (a fresh, strongly relevant memory scores ~1.0); the default
+    /// keeps recent/lexical-only candidates (`total` ≈ 0.1–0.5) while
+    /// excluding unrelated noise.
     pub recall_min_score: f32,
     /// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`; higher favors relevance.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
@@ -158,18 +162,21 @@ pub struct MindMemoryConfig {
     ///
     /// Distinct from `recall_similarity_threshold` — journal search is
     /// user-facing and uses a stricter similarity gate (default 0.45 vs 0.35
-    /// for recall) while accepting a lower hybrid score floor (default 0.10 vs
-    /// 0.20 for recall).
+    /// for recall) while accepting the same hybrid score floor (default 0.10
+    /// for both).
     pub journal_similarity_threshold: f32,
     /// Minimum hybrid score for journal / diagnostics search (#123).
     ///
-    /// Distinct from `recall_min_score`. The journal defaults to a lower floor
-    /// (0.10 vs 0.20 for recall) so user-facing search returns broader results
-    /// while the cognitive recall path applies a stricter quality cutoff.
+    /// Distinct from `recall_min_score`. The journal defaults to the same
+    /// floor (0.10) so user-facing search returns broad results; the cognitive
+    /// recall path can raise it per-character if needed.
     pub journal_min_score: f32,
     /// Self-reflection pipeline configuration (#210).
     #[serde(default)]
     pub reflection: ReflectionConfig,
+    /// Pending memory-candidate retention policy (#420).
+    #[serde(default)]
+    pub pending_candidate_retention: PendingCandidateRetentionConfig,
 }
 
 /// Tool-result grounding and guardrail settings.
@@ -231,7 +238,7 @@ impl Default for MindMemoryConfig {
             tool_grounding: ToolGroundingConfig::default(),
             recall_result_limit: 8,
             recall_similarity_threshold: 0.35,
-            recall_min_score: 0.20,
+            recall_min_score: 0.10,
             mmr_lambda: 0.7,
             mmr_duplicate_cluster_threshold: 0.75,
             mmr_min_slots_semantic: 1,
@@ -246,6 +253,45 @@ impl Default for MindMemoryConfig {
             journal_similarity_threshold: 0.45,
             journal_min_score: 0.10,
             reflection: ReflectionConfig::default(),
+            pending_candidate_retention: PendingCandidateRetentionConfig::default(),
+        }
+    }
+}
+
+/// Retention policy for the pending memory-candidate approval queue (#420).
+///
+/// Candidates now persist to the `pending_candidates` table so they survive
+/// restarts; without a policy that table would grow without bound. Both limits
+/// are enforced together on the post-turn forgetting sweep
+/// (`ForgettingLifecycle`), and each can be disabled independently with `0`.
+#[derive(
+    Debug, Clone, Copy, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct PendingCandidateRetentionConfig {
+    /// Auto-expire candidates older than this many days (`Faded`-equivalent).
+    ///
+    /// Applies to candidates of **every status, including unanswered
+    /// (`pending`) ones**: a candidate left unreviewed past this age is
+    /// dropped so the queue cannot grow without bound even when the count cap
+    /// is disabled, and a resolved candidate older than this has no further UI
+    /// value anyway. `0` disables age expiry.
+    pub max_age_days: u32,
+    /// Maximum pending (unresolved) candidates kept per character per user.
+    ///
+    /// When the live queue exceeds this cap the oldest overflow is dropped.
+    /// The cap is scoped to the acting user (plus character-shared rows), so
+    /// on a multi-user database one user's overflow cannot evict another
+    /// user's candidates. `0` disables the count cap.
+    pub max_per_character: usize,
+}
+
+impl Default for PendingCandidateRetentionConfig {
+    fn default() -> Self {
+        Self {
+            max_age_days: 14,
+            max_per_character: 200,
         }
     }
 }

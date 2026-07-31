@@ -11,6 +11,25 @@
 //! - Table names must start with the tool's prefix (e.g. `fs_`, `utility_`).
 //! - DDL (CREATE/ALTER/DROP) is **not** exposed to tools.
 //! - `sqlite_master` and other internal tables are blocked.
+//!
+//! ## Schema evolution
+//!
+//! On every `DeclareSchema` the server hashes the declaration (BLAKE3) and
+//! compares it against the `fingerprint` stored in `__tool_schemas`:
+//!
+//! - **Unchanged** — the stored row is left untouched (no needless rewrite) and
+//!   the existing tables are reused as-is.
+//! - **Additive change** (new table, or a new column on an existing table) —
+//!   the new column is applied with `ALTER TABLE ... ADD COLUMN`, the stored
+//!   declaration is refreshed, and the tool proceeds. `SQLite` fills existing
+//!   rows with the column's `DEFAULT` (or `NULL`).
+//! - **Conflicting change** (a column type change, a previously declared
+//!   table or column dropped from the declaration, or a new column that
+//!   carries a `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` constraint) — rejected
+//!   with [`DbServerError::SchemaConflict`]. `SQLite` cannot alter or drop
+//!   columns in place, nor add a constrained column, so the host refuses to
+//!   let the validation layer and the actual tables silently diverge; the
+//!   plugin author must reconcile the difference.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -18,14 +37,24 @@ use std::sync::Arc;
 
 use crate::entities::tool_schemas;
 use ene_plugin_db::{
-    DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema, DbTable, DbValue, Row,
+    DbBatchOpResult, DbColumn, DbErrorCode, DbFilter, DbOrderBy, DbRequest, DbResponse, DbSchema,
+    DbTable, DbType, DbValue, DbWriteOp, Row,
 };
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, ExprTrait, Statement,
+    TransactionTrait,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
+
+/// Maximum number of operations accepted in a single [`DbRequest::Batch`].
+///
+/// The server holds the `SQLite` write lock for the whole batch, and each
+/// operation carries a full [`Row`](crate::Row) of values, so an unbounded
+/// batch would let a plugin pin the write lock and memory for an arbitrarily
+/// long time. Requests above this limit are rejected up front.
+const MAX_BATCH_OPS: usize = 10_000;
 
 /// Errors from the DB IPC server.
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +82,25 @@ pub enum DbServerError {
         /// Column name.
         column: String,
     },
+    /// An operation inside a [`DbRequest::Batch`] failed at `index`.
+    ///
+    /// Wraps the underlying error so the failing operation index can be
+    /// reported in the *message* while the wire error code of the underlying
+    /// error is preserved — clients that match on the typed error they would
+    /// get from a standalone request still catch it.
+    #[error("batch op {index}: {source}")]
+    BatchOp {
+        /// Index of the failing operation within the batch.
+        index: usize,
+        /// The underlying error.
+        source: Box<DbServerError>,
+    },
+    /// The declared schema conflicts with the one already stored for this
+    /// prefix in a way that cannot be applied automatically (e.g. a column
+    /// type change or a removed table). The plugin must reconcile the
+    /// difference explicitly rather than having the host silently diverge.
+    #[error("Schema conflict: {0}")]
+    SchemaConflict(String),
     /// An internal server error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -60,19 +108,32 @@ pub enum DbServerError {
 
 impl DbServerError {
     fn to_error_response(&self) -> DbResponse {
-        let (code, message) = match self {
+        let (code, message) = self.error_parts();
+        DbResponse::Error { code, message }
+    }
+
+    /// Splits this error into its wire [`DbErrorCode`] and human-readable
+    /// message, recursing through [`Self::BatchOp`] so the batch operation
+    /// index is prefixed to the message without corrupting any structured
+    /// fields (e.g. `UnknownColumn`'s `table`).
+    fn error_parts(&self) -> (DbErrorCode, String) {
+        match self {
             Self::PermissionDenied(msg) => (DbErrorCode::PermissionDenied, msg.clone()),
             Self::UnknownTable(msg) => (DbErrorCode::UnknownTable, msg.clone()),
             Self::UnknownColumn { table, column } => (
                 DbErrorCode::UnknownColumn,
                 format!("Unknown column: {table}.{column}"),
             ),
+            Self::SchemaConflict(msg) => (DbErrorCode::SchemaConflict, msg.clone()),
             Self::Io(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Json(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Db(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Internal(msg) => (DbErrorCode::Internal, msg.clone()),
-        };
-        DbResponse::Error { code, message }
+            Self::BatchOp { index, source } => {
+                let (code, message) = source.error_parts();
+                (code, format!("batch op {index}: {message}"))
+            }
+        }
     }
 }
 
@@ -453,6 +514,14 @@ impl DbIpcServer {
                     Err(e) => e.to_error_response(),
                 }
             }
+            DbRequest::Batch { ops } => {
+                match Self::handle_batch(db, declared_tables, declared_columns, last_rowid, ops)
+                    .await
+                {
+                    Ok(results) => DbResponse::Batch { results },
+                    Err(e) => e.to_error_response(),
+                }
+            }
             DbRequest::LastInsertRowId => {
                 // Return the rowid of the most recent
                 // Insert on this logical connection. SQLite's
@@ -473,6 +542,141 @@ impl DbIpcServer {
                 message: "Handshake already completed".to_string(),
             },
         }
+    }
+
+    /// Validates a single [`DbWriteOp`] against the declared schema without
+    /// touching the database. Mirrors the per-request validation performed in
+    /// [`handle_request`](Self::handle_request) for the standalone
+    /// `Insert`/`Upsert`/`Update`/`Delete` requests, so a batch is rejected
+    /// before any statement runs.
+    fn validate_write_op(
+        declared_tables: &HashMap<String, DbTable>,
+        declared_columns: &HashMap<String, HashSet<String>>,
+        op: &DbWriteOp,
+    ) -> Result<(), DbServerError> {
+        match op {
+            DbWriteOp::Insert { table, row } => Self::validate_table_access(declared_tables, table)
+                .and_then(|()| Self::validate_row_columns(declared_columns, table, row)),
+            DbWriteOp::Upsert { table, row, .. } => {
+                Self::validate_table_access(declared_tables, table)
+                    .and_then(|()| Self::validate_row_columns(declared_columns, table, row))
+            }
+            DbWriteOp::Update { table, set, filter } => {
+                Self::validate_table_access(declared_tables, table)
+                    .and_then(|()| Self::validate_row_columns(declared_columns, table, set))
+                    .and_then(|()| Self::validate_filter_columns(declared_columns, table, filter))
+            }
+            DbWriteOp::Delete { table, filter } => {
+                Self::validate_table_access(declared_tables, table)
+                    .and_then(|()| Self::validate_filter_columns(declared_columns, table, filter))
+            }
+        }
+    }
+
+    /// Executes a [`DbRequest::Batch`] atomically.
+    ///
+    /// Every operation is validated against the declared schema up front, then
+    /// applied inside a single `SQLite` transaction opened on `db`. If all
+    /// operations succeed the transaction commits and one [`DbBatchOpResult`]
+    /// per operation is returned in request order. If any operation fails, the
+    /// transaction is rolled back and an error naming the failing operation is
+    /// returned — nothing from the batch is persisted.
+    ///
+    /// The transaction is scoped entirely to this call: it is never held across
+    /// IPC round-trips, so a plugin cannot pin the `SQLite` write lock open, and
+    /// a dropped connection cannot leave a half-applied batch (the transaction
+    /// either commits before the response is sent or rolls back on drop).
+    async fn handle_batch(
+        db: &DatabaseConnection,
+        declared_tables: &HashMap<String, DbTable>,
+        declared_columns: &HashMap<String, HashSet<String>>,
+        last_rowid: &Arc<std::sync::Mutex<Option<i64>>>,
+        ops: Vec<DbWriteOp>,
+    ) -> Result<Vec<DbBatchOpResult>, DbServerError> {
+        if ops.len() > MAX_BATCH_OPS {
+            return Err(DbServerError::Internal(format!(
+                "batch too large: {} operations exceeds the limit of {MAX_BATCH_OPS}",
+                ops.len()
+            )));
+        }
+
+        for (idx, op) in ops.iter().enumerate() {
+            Self::validate_write_op(declared_tables, declared_columns, op).map_err(|e| {
+                DbServerError::BatchOp {
+                    index: idx,
+                    source: Box::new(e),
+                }
+            })?;
+        }
+
+        let txn = db.begin().await.map_err(DbServerError::Db)?;
+
+        let mut results = Vec::with_capacity(ops.len());
+        for (idx, op) in ops.into_iter().enumerate() {
+            let result = match op {
+                DbWriteOp::Insert { table, row } => Self::handle_insert(&txn, &table, row)
+                    .await
+                    .map(|rowid| DbBatchOpResult::Insert { rowid }),
+                DbWriteOp::Upsert {
+                    table,
+                    row,
+                    conflict_columns,
+                } => Self::handle_upsert(&txn, &table, row, conflict_columns)
+                    .await
+                    .map(|rowid| DbBatchOpResult::Upsert { rowid }),
+                DbWriteOp::Update { table, set, filter } => {
+                    Self::handle_update(&txn, &table, set, filter)
+                        .await
+                        .map(|affected| DbBatchOpResult::Update { affected })
+                }
+                DbWriteOp::Delete { table, filter } => Self::handle_delete(&txn, &table, filter)
+                    .await
+                    .map(|affected| DbBatchOpResult::Delete { affected }),
+            };
+            match result {
+                Ok(res) => results.push(res),
+                Err(e) => {
+                    // Explicit rollback for a prompt, deterministic release of
+                    // the write lock; dropping `txn` would roll back too.
+                    if let Err(rollback_err) = txn.rollback().await {
+                        // Surface the rollback failure but keep the original
+                        // statement error as the primary one.
+                        error!(
+                            error = %rollback_err,
+                            "failed to roll back batch transaction after statement error"
+                        );
+                    }
+                    return Err(DbServerError::BatchOp {
+                        index: idx,
+                        source: Box::new(e),
+                    });
+                }
+            }
+        }
+
+        txn.commit().await.map_err(DbServerError::Db)?;
+
+        // Mirror the standalone `Insert` behavior: only inserts update the
+        // connection-scoped `LastInsertRowId` cell (standalone `Upsert`
+        // deliberately does not — an upsert that resolves via the
+        // conflict-update path performs no insert, so its `last_insert_id()`
+        // would be stale). Record the batch's final insert rowid so the tool's
+        // view stays consistent.
+        {
+            // A poisoned mutex means a panic happened while holding the lock;
+            // recover the value rather than silently skipping the update.
+            let mut guard = last_rowid
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for res in results.iter().rev() {
+                if let DbBatchOpResult::Insert { rowid } = res {
+                    *guard = Some(*rowid);
+                    break;
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     fn validate_table_access(
@@ -635,30 +839,98 @@ impl DbIpcServer {
 
         let fingerprint = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
-        let mut created_indexes = Vec::new();
-
-        // Use SeaORM ActiveModel to insert into tool_schemas
-        let active_model = tool_schemas::ActiveModel {
-            prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
-            schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
-            fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
-            created_at: sea_orm::ActiveValue::Set(chrono::Utc::now()),
-        };
-
-        tool_schemas::Entity::insert(active_model)
-            .on_conflict(
-                sea_orm::sea_query::OnConflict::column(tool_schemas::Column::Prefix)
-                    .update_columns([
-                        tool_schemas::Column::SchemaJson,
-                        tool_schemas::Column::Fingerprint,
-                        tool_schemas::Column::CreatedAt,
-                    ])
-                    .to_owned(),
-            )
-            .exec(db)
+        // Compare against the previously stored declaration, if any. The
+        // fingerprint was historically written but never read (#423); it now
+        // gates whether the stored row is rewritten and whether the physical
+        // tables need additive migration.
+        let stored = tool_schemas::Entity::find_by_id(prefix)
+            .one(db)
             .await
             .map_err(|e| DbServerError::Internal(e.to_string()))?;
 
+        let mut created_indexes = Vec::new();
+
+        match &stored {
+            // Unchanged schema: reuse the existing tables verbatim and leave
+            // the stored row untouched so an unchanged declaration does not
+            // rewrite it needlessly.
+            Some(row) if row.fingerprint == fingerprint => {
+                debug!(
+                    tool = %tool_name,
+                    prefix = %prefix,
+                    "Schema unchanged; reusing stored declaration"
+                );
+            }
+            // First declaration, or the schema changed: reconcile the
+            // physical tables with the new declaration, then refresh the
+            // stored row. Both steps run in a single transaction so a
+            // failure part-way through cannot leave the physical tables
+            // ahead of the stored fingerprint (which would make the next
+            // DeclareSchema re-apply — and fail on — the same ALTERs).
+            _ => {
+                let txn = db
+                    .begin()
+                    .await
+                    .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+                let result = async {
+                    let previous = stored
+                        .as_ref()
+                        .map(|row| {
+                            serde_json::from_str::<DbSchema>(&row.schema_json).map_err(|e| {
+                                DbServerError::Internal(format!(
+                                    "stored schema for prefix '{prefix}' is corrupt: {e}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+
+                    Self::apply_schema_change(&txn, tool_name, prefix, previous.as_ref(), &schema)
+                        .await?;
+
+                    let active_model = tool_schemas::ActiveModel {
+                        prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
+                        schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
+                        fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
+                        created_at: sea_orm::ActiveValue::Set(chrono::Utc::now()),
+                    };
+
+                    tool_schemas::Entity::insert(active_model)
+                        .on_conflict(
+                            sea_orm::sea_query::OnConflict::column(tool_schemas::Column::Prefix)
+                                .update_columns([
+                                    tool_schemas::Column::SchemaJson,
+                                    tool_schemas::Column::Fingerprint,
+                                    tool_schemas::Column::CreatedAt,
+                                ])
+                                .to_owned(),
+                        )
+                        .exec(&txn)
+                        .await
+                        .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+                    Ok::<_, DbServerError>(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => txn
+                        .commit()
+                        .await
+                        .map_err(|e| DbServerError::Internal(e.to_string()))?,
+                    Err(e) => {
+                        txn.rollback().await.map_err(|rb| {
+                            DbServerError::Internal(format!("{e}; rollback: {rb}"))
+                        })?;
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        // Idempotent regardless of the branch above: `CREATE TABLE IF NOT
+        // EXISTS` / `CREATE INDEX IF NOT EXISTS` are no-ops on existing
+        // objects and create any that are missing.
         for table in &schema.tables {
             let create_sql = Self::build_create_table_sql(table);
             db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, create_sql))
@@ -696,6 +968,206 @@ impl DbIpcServer {
             tables: schema.tables.iter().map(|t| t.name.clone()).collect(),
             indexes: created_indexes,
         })
+    }
+
+    /// Reconciles the physical tables with a changed schema declaration.
+    ///
+    /// `previous` is the last stored declaration for this prefix, if any.
+    /// Additive changes (new tables, new columns) are applied in place;
+    /// changes `SQLite` cannot perform in place (a column type change, or a
+    /// previously declared table removed from the declaration) are rejected
+    /// with [`DbServerError::SchemaConflict`] so the validation layer and the
+    /// actual tables never silently diverge.
+    ///
+    /// `db` is generic over [`ConnectionTrait`] so the caller can run this
+    /// inside a transaction: the ALTERs and the stored-declaration upsert
+    /// must commit atomically, otherwise a failure between them would leave
+    /// the physical table ahead of the stored fingerprint and every
+    /// subsequent `DeclareSchema` would re-apply (and fail on) the same
+    /// ALTER.
+    async fn apply_schema_change(
+        db: &impl ConnectionTrait,
+        tool_name: &str,
+        prefix: &str,
+        previous: Option<&DbSchema>,
+        new: &DbSchema,
+    ) -> Result<(), DbServerError> {
+        let Some(previous) = previous else {
+            // First declaration for this prefix: nothing to migrate. The
+            // caller's `CREATE TABLE IF NOT EXISTS` pass creates the tables.
+            return Ok(());
+        };
+
+        let diff = Self::diff_schemas(previous, new)?;
+
+        if diff.added_columns.is_empty() && diff.added_tables.is_empty() {
+            // The fingerprint differs but there is nothing additive to apply
+            // (e.g. only an index changed). Indexes are reconciled by the
+            // caller's `CREATE INDEX IF NOT EXISTS` pass.
+            return Ok(());
+        }
+
+        for (table, column) in &diff.added_columns {
+            let alter_sql = Self::build_alter_add_column_sql(table, column);
+            db.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, alter_sql))
+                .await
+                .map_err(|e| {
+                    DbServerError::Internal(format!(
+                        "failed to add column '{}.{}': {e}",
+                        table.name, column.name
+                    ))
+                })?;
+            info!(
+                tool = %tool_name,
+                prefix = %prefix,
+                table = %table.name,
+                column = %column.name,
+                "Applied additive schema change (ALTER TABLE ADD COLUMN)"
+            );
+        }
+
+        for table in &diff.added_tables {
+            info!(
+                tool = %tool_name,
+                prefix = %prefix,
+                table = %table.name,
+                "New table declared; will be created"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Computes the additive diff between a stored schema and a new one.
+    ///
+    /// Returns the tables and columns that were added. Returns
+    /// [`DbServerError::SchemaConflict`] if the new declaration removes a
+    /// previously declared table or changes an existing column's type, since
+    /// neither can be applied to the live `SQLite` tables in place.
+    fn diff_schemas(previous: &DbSchema, new: &DbSchema) -> Result<SchemaDiff, DbServerError> {
+        let previous_tables: HashMap<&str, &DbTable> = previous
+            .tables
+            .iter()
+            .map(|t| (t.name.as_str(), t))
+            .collect();
+
+        let mut diff = SchemaDiff::default();
+
+        for table in &new.tables {
+            let Some(old_table) = previous_tables.get(table.name.as_str()) else {
+                diff.added_tables.push(table.clone());
+                continue;
+            };
+
+            let old_columns: HashMap<&str, &DbColumn> = old_table
+                .columns
+                .iter()
+                .map(|c| (c.name.as_str(), c))
+                .collect();
+
+            for column in &table.columns {
+                match old_columns.get(column.name.as_str()) {
+                    // Brand-new column. `ALTER TABLE ADD COLUMN` can only add
+                    // a plain column: SQLite forbids adding one that carries a
+                    // PRIMARY KEY, UNIQUE, or AUTOINCREMENT constraint, so such
+                    // an addition is rejected explicitly rather than failing
+                    // with a cryptic error at execution time.
+                    None => {
+                        if column.primary_key || column.auto_increment || column.unique {
+                            return Err(DbServerError::SchemaConflict(format!(
+                                "column '{}.{}' was added with a PRIMARY KEY/UNIQUE/AUTOINCREMENT constraint; SQLite cannot add such a column via ALTER TABLE, so the plugin must reconcile this change explicitly",
+                                table.name, column.name
+                            )));
+                        }
+                        // A NOT NULL column needs a DEFAULT: SQLite requires a
+                        // default to populate pre-existing rows when a
+                        // non-nullable column is added via `ALTER TABLE`.
+                        // Silently dropping the constraint (as the previous
+                        // emission logic did) would let validation and storage
+                        // diverge — refuse instead so the author reconciles
+                        // this explicitly.
+                        if !column.nullable && column.default.is_none() {
+                            return Err(DbServerError::SchemaConflict(format!(
+                                "column '{}.{}' was added NOT NULL without a DEFAULT; SQLite cannot add such a column via ALTER TABLE (existing rows would violate the constraint), so the plugin must either add a DEFAULT or make the column nullable",
+                                table.name, column.name
+                            )));
+                        }
+                        diff.added_columns.push((table.clone(), column.clone()));
+                    }
+                    // Existing column with a changed type: SQLite cannot
+                    // change a column type in place, so refuse rather than
+                    // let validation and storage diverge.
+                    Some(old_column) if old_column.ty != column.ty => {
+                        return Err(DbServerError::SchemaConflict(format!(
+                            "column '{}.{}' changed type from {:?} to {:?}; SQLite cannot alter column types in place, so the plugin must reconcile this change explicitly",
+                            table.name, column.name, old_column.ty, column.ty
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+
+            // A column present in the stored table but absent from the new
+            // declaration would leave the physical column behind while
+            // validation stops referencing it. Refuse so the author handles
+            // the removal explicitly.
+            let new_column_names: HashSet<&str> =
+                table.columns.iter().map(|c| c.name.as_str()).collect();
+            for old_column in &old_table.columns {
+                if !new_column_names.contains(old_column.name.as_str()) {
+                    return Err(DbServerError::SchemaConflict(format!(
+                        "column '{}.{}' was removed from the schema declaration; SQLite cannot drop columns in place, so the plugin must reconcile this change explicitly",
+                        table.name, old_column.name
+                    )));
+                }
+            }
+        }
+
+        // A table present in the stored declaration but absent from the new
+        // one would leave the physical table behind while validation stops
+        // referencing it. Refuse so the author handles the removal explicitly.
+        let new_table_names: HashSet<&str> = new.tables.iter().map(|t| t.name.as_str()).collect();
+        for old_table in &previous.tables {
+            if !new_table_names.contains(old_table.name.as_str()) {
+                return Err(DbServerError::SchemaConflict(format!(
+                    "table '{}' was removed from the schema declaration; SQLite cannot drop tables in place, so the plugin must reconcile this change explicitly",
+                    old_table.name
+                )));
+            }
+        }
+
+        Ok(diff)
+    }
+
+    /// Builds an `ALTER TABLE ... ADD COLUMN` statement for an added column.
+    ///
+    /// `SQLite` forbids adding a column that carries a `PRIMARY KEY`,
+    /// `UNIQUE`, or `AUTOINCREMENT` constraint, so none are emitted here;
+    /// [`Self::diff_schemas`] rejects such additions before this is reached.
+    /// `NOT NULL` is only emitted alongside a `DEFAULT`, matching `SQLite`'s
+    /// `ADD COLUMN` requirement that a non-nullable added column have a
+    /// default to populate existing rows.
+    fn build_alter_add_column_sql(table: &DbTable, column: &DbColumn) -> String {
+        let mut sql = format!("ALTER TABLE {} ADD COLUMN {} ", table.name, column.name);
+
+        sql.push_str(match column.ty {
+            DbType::Integer | DbType::Boolean => "INTEGER",
+            DbType::Real => "REAL",
+            DbType::Text => "TEXT",
+            DbType::Blob => "BLOB",
+        });
+
+        // SQLite requires a DEFAULT for a NOT NULL column added via ALTER.
+        if !column.nullable && column.default.is_some() {
+            sql.push_str(" NOT NULL");
+        }
+
+        if let Some(default) = &column.default {
+            sql.push_str(" DEFAULT ");
+            sql.push_str(&Self::db_value_to_sql(default));
+        }
+
+        sql
     }
 
     /// Validates a SQL identifier (table, column, or index name).
@@ -836,7 +1308,7 @@ impl DbIpcServer {
         reason = "indexes into request-owned row map with validated column keys"
     )]
     async fn handle_insert(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         row: Row,
     ) -> Result<i64, DbServerError> {
@@ -871,7 +1343,7 @@ impl DbIpcServer {
         reason = "indexes into request-owned row map with validated column keys"
     )]
     async fn handle_upsert(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         row: Row,
         conflict_columns: Vec<String>,
@@ -1043,7 +1515,7 @@ impl DbIpcServer {
         reason = "indexes into request-owned set map with validated column keys"
     )]
     async fn handle_update(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         set: Row,
         filter: DbFilter,
@@ -1076,7 +1548,7 @@ impl DbIpcServer {
     }
 
     async fn handle_delete(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         table: &str,
         filter: DbFilter,
     ) -> Result<u64, DbServerError> {
@@ -1174,6 +1646,20 @@ impl DbIpcServer {
             }
         }
     }
+}
+
+/// Additive differences between a stored schema declaration and a new one.
+///
+/// Produced by [`DbIpcServer::diff_schemas`]; consumed by
+/// [`DbIpcServer::apply_schema_change`] to migrate the physical tables in
+/// place. Only additions are representable — removals and type changes are
+/// reported as errors before a `SchemaDiff` is built.
+#[derive(Debug, Default)]
+struct SchemaDiff {
+    /// Tables present in the new declaration but absent from the stored one.
+    added_tables: Vec<DbTable>,
+    /// Columns added to already-existing tables, paired with their table.
+    added_columns: Vec<(DbTable, DbColumn)>,
 }
 
 #[cfg(test)]
@@ -1381,5 +1867,947 @@ mod tests {
             other => panic!("expected LastInsertRowId, got {other:?}"),
         };
         assert_eq!(lookup2_id, second_id);
+    }
+
+    /// Sets up an in-memory DB with a single pooled connection (mirroring the
+    /// store's in-memory setup, so reads and writes hit the same connection),
+    /// a declared `fs_test` table, and the connection-scoped state that
+    /// [`DbIpcServer::handle_request`] threads through.
+    async fn setup_batch_fixture() -> (
+        sea_orm::DatabaseConnection,
+        HashMap<String, ene_plugin_db::DbTable>,
+        HashMap<String, HashSet<String>>,
+        Arc<std::sync::Mutex<Option<i64>>>,
+    ) {
+        use sea_orm::ConnectionTrait;
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1);
+        let db = sea_orm::Database::connect(opt).await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE fs_test (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             name TEXT NOT NULL UNIQUE, qty INTEGER)",
+        )
+        .await
+        .unwrap();
+
+        let mut declared_tables: HashMap<String, ene_plugin_db::DbTable> = HashMap::new();
+        declared_tables.insert(
+            "fs_test".to_string(),
+            ene_plugin_db::DbTable {
+                name: "fs_test".to_string(),
+                columns: vec![
+                    ene_plugin_db::DbColumn {
+                        name: "id".to_string(),
+                        ty: ene_plugin_db::DbType::Integer,
+                        nullable: false,
+                        primary_key: true,
+                        auto_increment: true,
+                        unique: false,
+                        default: None,
+                    },
+                    ene_plugin_db::DbColumn {
+                        name: "name".to_string(),
+                        ty: ene_plugin_db::DbType::Text,
+                        nullable: false,
+                        primary_key: false,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                    ene_plugin_db::DbColumn {
+                        name: "qty".to_string(),
+                        ty: ene_plugin_db::DbType::Integer,
+                        nullable: true,
+                        primary_key: false,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                ],
+            },
+        );
+        let mut declared_columns: HashMap<String, HashSet<String>> = HashMap::new();
+        declared_columns.insert(
+            "fs_test".to_string(),
+            ["id".to_string(), "name".to_string(), "qty".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
+        (db, declared_tables, declared_columns, last_rowid)
+    }
+
+    /// Counts rows in `fs_test` via the request dispatcher.
+    async fn count_test_rows(
+        db: &sea_orm::DatabaseConnection,
+        declared_tables: &mut HashMap<String, ene_plugin_db::DbTable>,
+        declared_columns: &mut HashMap<String, HashSet<String>>,
+        last_rowid: &Arc<std::sync::Mutex<Option<i64>>>,
+    ) -> i64 {
+        match DbIpcServer::handle_request(
+            db,
+            "fs",
+            "fs_",
+            declared_tables,
+            declared_columns,
+            last_rowid,
+            ene_plugin_db::DbRequest::Count {
+                table: "fs_test".to_string(),
+                filter: ene_plugin_db::DbFilter::Always,
+            },
+        )
+        .await
+        {
+            ene_plugin_db::DbResponse::Count { count } => count,
+            other => panic!("expected Count, got {other:?}"),
+        }
+    }
+
+    /// A batch of valid writes commits atomically: every operation is applied
+    /// and one [`ene_plugin_db::DbBatchOpResult`] is returned per operation, in
+    /// request order.
+    #[tokio::test]
+    async fn batch_commits_all_ops_atomically() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        ene_plugin_db::DbValue::Text("alpha".to_string()),
+                    ),
+                    ("qty".to_string(), ene_plugin_db::DbValue::Int(1)),
+                ]),
+            },
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        ene_plugin_db::DbValue::Text("beta".to_string()),
+                    ),
+                    ("qty".to_string(), ene_plugin_db::DbValue::Int(2)),
+                ]),
+            },
+            ene_plugin_db::DbWriteOp::Update {
+                table: "fs_test".to_string(),
+                set: std::collections::BTreeMap::from([(
+                    "qty".to_string(),
+                    ene_plugin_db::DbValue::Int(99),
+                )]),
+                filter: ene_plugin_db::DbFilter::eq("name", "alpha"),
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        let results = match resp {
+            ene_plugin_db::DbResponse::Batch { results } => results,
+            other => panic!("expected Batch, got {other:?}"),
+        };
+        assert_eq!(results.len(), 3);
+        assert!(
+            matches!(results[0], ene_plugin_db::DbBatchOpResult::Insert { rowid } if rowid > 0)
+        );
+        assert!(
+            matches!(results[1], ene_plugin_db::DbBatchOpResult::Insert { rowid } if rowid > 0)
+        );
+        assert_eq!(
+            results[2],
+            ene_plugin_db::DbBatchOpResult::Update { affected: 1 }
+        );
+
+        // Both inserts committed.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            2
+        );
+    }
+
+    /// A failing statement rolls the whole batch back: the valid insert that
+    /// preceded the NOT NULL violation is not persisted, and the error names
+    /// the failing operation index.
+    #[tokio::test]
+    async fn batch_rolls_back_on_failing_statement() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            // Valid insert.
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("ok".to_string()),
+                )]),
+            },
+            // Violates `name TEXT NOT NULL`; the whole batch must roll back.
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Null,
+                )]),
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::Internal);
+                assert!(
+                    message.contains("batch op 1"),
+                    "error should name the failing op: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // The first (valid) insert must have been rolled back.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
+    }
+
+    /// Schema validation runs before any statement executes, so a batch that
+    /// references an undeclared table is rejected wholesale and nothing — not
+    /// even the valid operations before it — is applied.
+    #[tokio::test]
+    async fn batch_rejects_undeclared_table_before_executing() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("ok".to_string()),
+                )]),
+            },
+            ene_plugin_db::DbWriteOp::Delete {
+                table: "fs_undeclared".to_string(),
+                filter: ene_plugin_db::DbFilter::Always,
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::UnknownTable);
+                assert!(
+                    message.contains("batch op 1"),
+                    "error should name the failing op: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // Validation precedes execution, so the valid insert never ran.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
+    }
+
+    /// A committed batch updates the connection-scoped `LastInsertRowId` cell
+    /// to the batch's final insert rowid, matching standalone `Insert` behavior.
+    #[tokio::test]
+    async fn batch_updates_last_insert_rowid() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("one".to_string()),
+                )]),
+            },
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("two".to_string()),
+                )]),
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+        let results = match resp {
+            ene_plugin_db::DbResponse::Batch { results } => results,
+            other => panic!("expected Batch, got {other:?}"),
+        };
+        let second_rowid = match results[1] {
+            ene_plugin_db::DbBatchOpResult::Insert { rowid } => rowid,
+            ref other => panic!("expected Insert result, got {other:?}"),
+        };
+
+        let lookup = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::LastInsertRowId,
+        )
+        .await;
+        let lookup_id = match lookup {
+            ene_plugin_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            other => panic!("expected LastInsertRowId, got {other:?}"),
+        };
+        assert_eq!(lookup_id, second_rowid);
+    }
+
+    /// An empty batch is a no-op that commits successfully with no results.
+    #[tokio::test]
+    async fn empty_batch_commits_nothing() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops: vec![] },
+        )
+        .await;
+        match resp {
+            ene_plugin_db::DbResponse::Batch { results } => assert!(results.is_empty()),
+            other => panic!("expected Batch, got {other:?}"),
+        }
+    }
+
+    /// A batch larger than [`MAX_BATCH_OPS`] is rejected up front so a plugin
+    /// cannot pin the write lock and memory for an arbitrarily long time.
+    #[tokio::test]
+    async fn oversized_batch_is_rejected() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("x".to_string()),
+                )]),
+            };
+            MAX_BATCH_OPS + 1
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::Internal);
+                assert!(
+                    message.contains("batch too large"),
+                    "expected size-limit error, got: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // Nothing was persisted.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
+    }
+
+    /// A batch op referencing an undeclared column preserves the structured
+    /// `UnknownColumn` wire code (rather than being downgraded to `Internal`),
+    /// so clients matching on the typed error still catch it, while the message
+    /// names the failing operation index.
+    #[tokio::test]
+    async fn batch_unknown_column_preserves_error_code() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![ene_plugin_db::DbWriteOp::Insert {
+            table: "fs_test".to_string(),
+            row: std::collections::BTreeMap::from([(
+                "no_such_column".to_string(),
+                ene_plugin_db::DbValue::Text("x".to_string()),
+            )]),
+        }];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::UnknownColumn);
+                assert!(
+                    message.contains("batch op 0"),
+                    "error should name the failing op: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    /// A committed batch whose final write is an upsert does **not** overwrite
+    /// the connection-scoped `LastInsertRowId` cell: only inserts do, matching
+    /// the standalone `Upsert` path (which never records a rowid, since an
+    /// upsert resolving via conflict-update performs no insert and its
+    /// `last_insert_id()` would be stale).
+    #[tokio::test]
+    async fn batch_upsert_does_not_update_last_insert_rowid() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("seed".to_string()),
+                )]),
+            },
+            // Conflict-update on the existing `name = "seed"` row: no insert.
+            ene_plugin_db::DbWriteOp::Upsert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([
+                    (
+                        "name".to_string(),
+                        ene_plugin_db::DbValue::Text("seed".to_string()),
+                    ),
+                    ("qty".to_string(), ene_plugin_db::DbValue::Int(5)),
+                ]),
+                conflict_columns: vec!["name".to_string()],
+            },
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+        let results = match resp {
+            ene_plugin_db::DbResponse::Batch { results } => results,
+            other => panic!("expected Batch, got {other:?}"),
+        };
+        let insert_rowid = match results[0] {
+            ene_plugin_db::DbBatchOpResult::Insert { rowid } => rowid,
+            ref other => panic!("expected Insert result, got {other:?}"),
+        };
+
+        // The upsert must not have clobbered the insert's rowid.
+        let lookup = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::LastInsertRowId,
+        )
+        .await;
+        let lookup_id = match lookup {
+            ene_plugin_db::DbResponse::LastInsertRowId { rowid } => rowid,
+            other => panic!("expected LastInsertRowId, got {other:?}"),
+        };
+        assert_eq!(lookup_id, insert_rowid);
+    }
+
+    // --- Schema fingerprint / evolution tests (#423) ---
+
+    fn test_column(name: &str, ty: ene_plugin_db::DbType) -> ene_plugin_db::DbColumn {
+        ene_plugin_db::DbColumn {
+            name: name.to_string(),
+            ty,
+            nullable: true,
+            primary_key: false,
+            auto_increment: false,
+            unique: false,
+            default: None,
+        }
+    }
+
+    fn test_schema_v1() -> ene_plugin_db::DbSchema {
+        ene_plugin_db::DbSchema {
+            prefix: "fs_".to_string(),
+            tables: vec![ene_plugin_db::DbTable {
+                name: "fs_undo".to_string(),
+                columns: vec![
+                    test_column("id", ene_plugin_db::DbType::Integer),
+                    test_column("path", ene_plugin_db::DbType::Text),
+                ],
+            }],
+            indexes: Vec::new(),
+        }
+    }
+
+    /// Creates an in-memory DB with the `__tool_schemas` bookkeeping table.
+    async fn test_db_with_tool_schemas() -> sea_orm::DatabaseConnection {
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE __tool_schemas (prefix TEXT PRIMARY KEY NOT NULL, schema_json TEXT NOT NULL, fingerprint TEXT NOT NULL, created_at TEXT NOT NULL)",
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    async fn declare(
+        db: &sea_orm::DatabaseConnection,
+        schema: ene_plugin_db::DbSchema,
+    ) -> DbResponse {
+        let mut declared_tables = HashMap::new();
+        let mut declared_columns = HashMap::new();
+        DbIpcServer::handle_declare_schema(
+            db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            schema,
+        )
+        .await
+        .unwrap_or_else(|e| e.to_error_response())
+    }
+
+    async fn stored_row(
+        db: &sea_orm::DatabaseConnection,
+        prefix: &str,
+    ) -> Option<tool_schemas::Model> {
+        tool_schemas::Entity::find_by_id(prefix)
+            .one(db)
+            .await
+            .unwrap()
+    }
+
+    async fn table_columns(db: &sea_orm::DatabaseConnection, table: &str) -> Vec<String> {
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                format!("PRAGMA table_info({table})"),
+            ))
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|r| r.try_get::<String>("", "name").unwrap())
+            .collect()
+    }
+
+    async fn insert_row(
+        db: &sea_orm::DatabaseConnection,
+        table: &str,
+        row: Row,
+        declared_tables: &HashMap<String, ene_plugin_db::DbTable>,
+        declared_columns: &HashMap<String, HashSet<String>>,
+    ) -> DbResponse {
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
+        let mut declared_tables = declared_tables.clone();
+        let mut declared_columns = declared_columns.clone();
+        DbIpcServer::handle_request(
+            db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Insert {
+                table: table.to_string(),
+                row,
+            },
+        )
+        .await
+    }
+
+    /// Registering a changed schema refreshes the stored row (fingerprint +
+    /// `schema_json`) and applies the new column to the existing table.
+    #[tokio::test]
+    async fn changed_schema_updates_stored_row_and_applies_column() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let row_v1 = stored_row(&db, "fs_").await.expect("row stored after v1");
+        assert_eq!(
+            table_columns(&db, "fs_undo").await,
+            ["id".to_string(), "path".to_string()]
+        );
+
+        // v2 adds a `checksum` column to the existing `fs_undo` table.
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0]
+            .columns
+            .push(test_column("checksum", ene_plugin_db::DbType::Text));
+
+        let resp = declare(&db, schema_v2.clone()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // The stored declaration was refreshed to the new fingerprint/json.
+        let row_v2 = stored_row(&db, "fs_").await.expect("row stored after v2");
+        assert_ne!(row_v1.fingerprint, row_v2.fingerprint);
+        assert_eq!(
+            row_v2.schema_json,
+            serde_json::to_string(&schema_v2).unwrap()
+        );
+
+        // The physical table gained the column, and existing rows survived.
+        assert_eq!(
+            table_columns(&db, "fs_undo").await,
+            ["id".to_string(), "path".to_string(), "checksum".to_string()]
+        );
+    }
+
+    /// Re-declaring an identical schema must not rewrite the stored row.
+    #[tokio::test]
+    async fn unchanged_schema_does_not_rewrite_stored_row() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let first = stored_row(&db, "fs_").await.expect("row stored");
+
+        // Ensure a rewrite would produce a different `created_at`.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let second = stored_row(&db, "fs_").await.expect("row still stored");
+
+        assert_eq!(first.fingerprint, second.fingerprint);
+        assert_eq!(first.schema_json, second.schema_json);
+        assert_eq!(first.created_at, second.created_at);
+    }
+
+    /// A column type change cannot be applied in place and is rejected.
+    #[tokio::test]
+    async fn type_change_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let before = stored_row(&db, "fs_").await.expect("row stored");
+
+        // v2 changes `path` from TEXT to INTEGER.
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0].columns[1].ty = ene_plugin_db::DbType::Integer;
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+
+        // The stored declaration is untouched after the rejected change.
+        let after = stored_row(&db, "fs_").await.expect("row still stored");
+        assert_eq!(before.fingerprint, after.fingerprint);
+        assert_eq!(before.schema_json, after.schema_json);
+    }
+
+    /// Adding a NOT NULL column without a DEFAULT is rejected: `SQLite` cannot
+    /// add such a column via `ALTER TABLE` (existing rows would violate the
+    /// constraint), and silently dropping the constraint would let validation
+    /// and storage diverge.
+    #[tokio::test]
+    async fn not_null_column_without_default_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let before = stored_row(&db, "fs_").await.expect("row stored");
+
+        // v2 adds a NOT NULL column without a DEFAULT.
+        let mut schema_v2 = test_schema_v1();
+        let mut col = test_column("checksum", ene_plugin_db::DbType::Text);
+        col.nullable = false;
+        schema_v2.tables[0].columns.push(col);
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+
+        // The stored declaration is untouched after the rejected change.
+        let after = stored_row(&db, "fs_").await.expect("row still stored");
+        assert_eq!(before.fingerprint, after.fingerprint);
+    }
+
+    /// Removing a previously declared table is rejected rather than silently
+    /// leaving the physical table orphaned.
+    #[tokio::test]
+    async fn removed_table_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 drops the `fs_undo` table entirely.
+        let schema_v2 = ene_plugin_db::DbSchema {
+            prefix: "fs_".to_string(),
+            tables: Vec::new(),
+            indexes: Vec::new(),
+        };
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// Removing a column from an existing table is rejected rather than
+    /// leaving the physical column orphaned.
+    #[tokio::test]
+    async fn removed_column_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 drops the `path` column from `fs_undo`.
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0].columns.pop();
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// Adding a column that carries a `UNIQUE` constraint is rejected, since
+    /// `SQLite` cannot add a constrained column via `ALTER TABLE`.
+    #[tokio::test]
+    async fn added_unique_column_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // v2 adds a UNIQUE column, which ALTER TABLE ADD COLUMN forbids.
+        let mut schema_v2 = test_schema_v1();
+        let mut unique_col = test_column("slug", ene_plugin_db::DbType::Text);
+        unique_col.unique = true;
+        schema_v2.tables[0].columns.push(unique_col);
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+    }
+
+    /// An additive migration preserves existing rows and accepts new data in
+    /// the added column — the exact scenario from #423.
+    #[tokio::test]
+    async fn additive_migration_preserves_existing_rows() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // Insert a row under the v1 schema.
+        let declared_tables: HashMap<String, ene_plugin_db::DbTable> = test_schema_v1()
+            .tables
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect();
+        let declared_columns: HashMap<String, HashSet<String>> = declared_tables
+            .iter()
+            .map(|(name, t)| {
+                (
+                    name.clone(),
+                    t.columns.iter().map(|c| c.name.clone()).collect(),
+                )
+            })
+            .collect();
+        let resp = insert_row(
+            &db,
+            "fs_undo",
+            std::collections::BTreeMap::from([(
+                "path".to_string(),
+                ene_plugin_db::DbValue::Text("/tmp/a".to_string()),
+            )]),
+            &declared_tables,
+            &declared_columns,
+        )
+        .await;
+        assert!(matches!(resp, DbResponse::Insert { .. }));
+
+        // Migrate to v2 (adds `checksum`).
+        let mut schema_v2 = test_schema_v1();
+        schema_v2.tables[0]
+            .columns
+            .push(test_column("checksum", ene_plugin_db::DbType::Text));
+        let resp = declare(&db, schema_v2).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+
+        // The existing row survived; the new column reads back as NULL.
+        let rows = db
+            .query_all_raw(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                "SELECT path, checksum FROM fs_undo".to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].try_get::<String>("", "path").unwrap(),
+            "/tmp/a".to_string()
+        );
+        assert!(
+            rows[0]
+                .try_get::<Option<String>>("", "checksum")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn build_alter_add_column_sql_renders_type_and_default() {
+        let table = ene_plugin_db::DbTable {
+            name: "fs_undo".to_string(),
+            columns: Vec::new(),
+        };
+
+        let nullable = test_column("checksum", ene_plugin_db::DbType::Text);
+        assert_eq!(
+            DbIpcServer::build_alter_add_column_sql(&table, &nullable),
+            "ALTER TABLE fs_undo ADD COLUMN checksum TEXT"
+        );
+
+        let with_default = ene_plugin_db::DbColumn {
+            name: "count".to_string(),
+            ty: ene_plugin_db::DbType::Integer,
+            nullable: false,
+            primary_key: false,
+            auto_increment: false,
+            unique: false,
+            default: Some(ene_plugin_db::DbValue::Int(0)),
+        };
+        assert_eq!(
+            DbIpcServer::build_alter_add_column_sql(&table, &with_default),
+            "ALTER TABLE fs_undo ADD COLUMN count INTEGER NOT NULL DEFAULT 0"
+        );
     }
 }

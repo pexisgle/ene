@@ -8,12 +8,14 @@
 //!
 //! A single reader task per connection demultiplexes every incoming response
 //! by `request_id`/variant into per-request waiters and stream channels (H-12).
-//! The connection `Mutex` is therefore held only for the duration of individual
-//! IPC writes, never for the lifetime of an entire stream: stream chunks arrive
-//! on a dedicated channel routed by the reader, so tool calls and other
-//! requests are never serialized behind a long-running LLM stream (#D2). The
-//! stream's translation task [`JoinHandle`] is tracked and aborted when the
-//! stream is dropped, ensuring prompt cleanup on cancellation.
+//! The connection is shared as a plain `Arc<IpcPluginConnection>` with **no
+//! external lock**: every request-path method takes `&self`, and the socket
+//! write half is guarded by its own short-lived lock released *before* the
+//! response is awaited (#431). Stream chunks arrive on a dedicated channel
+//! routed by the reader, so tool calls and other requests are never serialized
+//! behind a long-running LLM stream (#D2). The stream's translation task
+//! [`JoinHandle`] is tracked and aborted when the stream is dropped, ensuring
+//! prompt cleanup on cancellation.
 //!
 //! ## Retry
 //!
@@ -53,7 +55,7 @@ use ene_ai::RetryPolicy;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk};
 use ene_plugin_proto::{ConcurrencyHint, PluginIpcResponse};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 
@@ -145,7 +147,7 @@ impl ConcurrencyLimiter {
 /// during `PluginHostManager` startup.
 pub struct IpcLlmProvider {
     kind: String,
-    conn: Arc<Mutex<IpcPluginConnection>>,
+    conn: Arc<IpcPluginConnection>,
     model: String,
     max_tokens: Option<u32>,
     provider_config: serde_json::Value,
@@ -166,7 +168,7 @@ impl IpcLlmProvider {
     /// pair — see the module docs.
     pub fn new(
         kind: String,
-        conn: Arc<Mutex<IpcPluginConnection>>,
+        conn: Arc<IpcPluginConnection>,
         model: String,
         max_tokens: Option<u32>,
         provider_config: serde_json::Value,
@@ -218,7 +220,7 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
 struct IpcChatStream {
     rx: ReceiverStream<Result<LlmResponseChunk, LlmProviderError>>,
     reader: Option<JoinHandle<()>>,
-    conn: Arc<Mutex<IpcPluginConnection>>,
+    conn: Arc<IpcPluginConnection>,
     request_id: String,
     completed: Arc<std::sync::atomic::AtomicBool>,
     _permit: OwnedSemaphorePermit,
@@ -239,12 +241,11 @@ impl Drop for IpcChatStream {
         // server-side (Cr-4). Natural completion sets `completed` to avoid a
         // pointless cancel round-trip after `StreamEnd`/`StreamError`.
         tokio::spawn(async move {
-            let mut guard = conn.lock().await;
-            guard.close_chat_stream(&request_id);
+            conn.close_chat_stream(&request_id);
             if completed {
                 return;
             }
-            if let Err(e) = guard.cancel_stream(&request_id).await {
+            if let Err(e) = conn.cancel_stream(&request_id).await {
                 tracing::debug!(
                     component = "IpcLlmProvider",
                     error = %e,
@@ -299,7 +300,8 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
 
         // Establish the stream with retry on transient (transport) failures,
         // matching the OpenAI provider's `establish_sse_connection` (#C2).
-        // The connection Mutex is held only for the duration of the write.
+        // `send_create_chat_stream` takes `&self` and holds the writer lock
+        // only for the duration of the write (#431).
         let mut stream_rx = self
             .retry_policy
             .run_with_retry_after(
@@ -315,7 +317,6 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                     let messages_json = messages_json.clone();
                     let tools_json = tools_json.clone();
                     async move {
-                        let mut conn = conn.lock().await;
                         match conn
                             .send_create_chat_stream(
                                 request_id,
@@ -471,7 +472,6 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                     let json_schema = json_schema.clone();
                     async move {
                         let request_id = uuid::Uuid::new_v4().to_string();
-                        let mut conn = conn.lock().await;
                         conn.chat_completion(
                             request_id,
                             kind,

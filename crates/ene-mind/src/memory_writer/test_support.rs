@@ -244,7 +244,7 @@ impl MemoryPort for InMemoryMemoryPort {
         Ok(())
     }
 
-    fn insert_pending_candidate(
+    async fn insert_pending_candidate(
         &self,
         candidate: PendingCandidate,
     ) -> Result<i64, MemoryPortError> {
@@ -253,6 +253,57 @@ impl MemoryPort for InMemoryMemoryPort {
         stored.id = id;
         self.pending.lock().push(stored);
         Ok(id)
+    }
+
+    async fn prune_pending_candidates(
+        &self,
+        character_id: &str,
+        user_id: Option<&str>,
+        max_age_days: u32,
+        max_per_character: usize,
+        now: DateTime<Utc>,
+    ) -> Result<usize, MemoryPortError> {
+        // Mirror the store's visibility rule: the character plus, when a user
+        // is given, that user's rows and character-shared rows (`user_id = ""`).
+        let in_scope = |c: &PendingCandidate| {
+            c.character_id == character_id
+                && user_id.is_none_or(|uid| c.user_id == uid || c.user_id.is_empty())
+        };
+
+        let mut pending = self.pending.lock();
+        let before = pending.len();
+
+        if max_age_days > 0 {
+            let cutoff = now
+                .checked_sub_signed(chrono::Duration::days(i64::from(max_age_days)))
+                .unwrap_or(now);
+            pending.retain(|c| !(in_scope(c) && c.created_at < cutoff));
+        }
+
+        if max_per_character > 0 {
+            let mut indices: Vec<usize> = pending
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    in_scope(c) && c.status == ene_core::PendingCandidateStatus::Pending
+                })
+                .map(|(i, _)| i)
+                .collect();
+            // Oldest first; drop the overflow beyond the cap.
+            indices.sort_by(|&a, &b| pending[a].created_at.cmp(&pending[b].created_at));
+            if indices.len() > max_per_character {
+                let overflow = indices.len() - max_per_character;
+                let drop: HashSet<usize> = indices.into_iter().take(overflow).collect();
+                let mut idx = 0usize;
+                pending.retain(|_| {
+                    let keep = !drop.contains(&idx);
+                    idx += 1;
+                    keep
+                });
+            }
+        }
+
+        Ok(before - pending.len())
     }
 
     async fn list_active_commitments(
@@ -364,5 +415,258 @@ impl MemoryPort for InMemoryMemoryPort {
         _level: i32,
     ) -> Result<Vec<NewMemorySpan>, MemoryPortError> {
         Ok(Vec::new())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InMemoryMemoryPort;
+    use chrono::{DateTime, Duration, Utc};
+    use ene_core::{MemoryKind, MemoryPort, PendingCandidate, PendingCandidateStatus};
+
+    fn candidate(
+        character_id: &str,
+        user_id: &str,
+        title: &str,
+        created_at: DateTime<Utc>,
+        status: PendingCandidateStatus,
+    ) -> PendingCandidate {
+        PendingCandidate {
+            id: 0,
+            character_id: character_id.to_string(),
+            user_id: user_id.to_string(),
+            title: title.to_string(),
+            content: format!("{title} content"),
+            kind: MemoryKind::Preference,
+            confidence: 0.8,
+            reason_detail: String::new(),
+            existing_memory_title: None,
+            existing_memory_id: None,
+            source_quote: String::new(),
+            status,
+            created_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn prune_age_removes_old_rows_of_any_status() {
+        let port = InMemoryMemoryPort::new();
+        let now = Utc::now();
+        let old = now - Duration::days(30);
+
+        port.insert_pending_candidate(candidate(
+            "ene",
+            "u1",
+            "old pending",
+            old,
+            PendingCandidateStatus::Pending,
+        ))
+        .await
+        .unwrap();
+        port.insert_pending_candidate(candidate(
+            "ene",
+            "u1",
+            "old approved",
+            old,
+            PendingCandidateStatus::Approved,
+        ))
+        .await
+        .unwrap();
+        port.insert_pending_candidate(candidate(
+            "ene",
+            "u1",
+            "fresh",
+            now,
+            PendingCandidateStatus::Pending,
+        ))
+        .await
+        .unwrap();
+
+        let removed = port
+            .prune_pending_candidates("ene", Some("u1"), 14, 0, now)
+            .await
+            .unwrap();
+        assert_eq!(removed, 2);
+
+        let remaining = port.pending_candidates();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].title, "fresh");
+    }
+
+    #[tokio::test]
+    async fn prune_count_cap_drops_oldest_pending_overflow() {
+        let port = InMemoryMemoryPort::new();
+        let now = Utc::now();
+        for i in 0..5i64 {
+            // i = 0 is the oldest.
+            let created = now - Duration::minutes(5 - i);
+            port.insert_pending_candidate(candidate(
+                "ene",
+                "u1",
+                &format!("cand {i}"),
+                created,
+                PendingCandidateStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        }
+        // A resolved row that must not count toward the pending cap.
+        port.insert_pending_candidate(candidate(
+            "ene",
+            "u1",
+            "approved",
+            now,
+            PendingCandidateStatus::Approved,
+        ))
+        .await
+        .unwrap();
+
+        let removed = port
+            .prune_pending_candidates("ene", Some("u1"), 0, 3, now)
+            .await
+            .unwrap();
+        assert_eq!(removed, 2);
+
+        let remaining = port.pending_candidates();
+        // 3 pending survivors + the untouched approved row.
+        assert_eq!(remaining.len(), 4);
+        let mut pending_titles: Vec<_> = remaining
+            .iter()
+            .filter(|c| c.status == PendingCandidateStatus::Pending)
+            .map(|c| c.title.clone())
+            .collect();
+        pending_titles.sort();
+        assert_eq!(pending_titles, vec!["cand 2", "cand 3", "cand 4"]);
+    }
+
+    #[tokio::test]
+    async fn prune_is_character_scoped() {
+        let port = InMemoryMemoryPort::new();
+        let now = Utc::now();
+        for i in 0..5i64 {
+            port.insert_pending_candidate(candidate(
+                "ene",
+                "u1",
+                &format!("ene {i}"),
+                now - Duration::minutes(5 - i),
+                PendingCandidateStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        }
+        port.insert_pending_candidate(candidate(
+            "mira",
+            "u1",
+            "mira 0",
+            now,
+            PendingCandidateStatus::Pending,
+        ))
+        .await
+        .unwrap();
+
+        let removed = port
+            .prune_pending_candidates("ene", Some("u1"), 0, 2, now)
+            .await
+            .unwrap();
+        assert_eq!(removed, 3);
+
+        let remaining = port.pending_candidates();
+        assert_eq!(
+            remaining.iter().filter(|c| c.character_id == "ene").count(),
+            2
+        );
+        assert_eq!(
+            remaining
+                .iter()
+                .filter(|c| c.character_id == "mira")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_count_cap_is_user_scoped() {
+        let port = InMemoryMemoryPort::new();
+        let now = Utc::now();
+        for i in 0..5i64 {
+            port.insert_pending_candidate(candidate(
+                "ene",
+                "alice",
+                &format!("alice {i}"),
+                now - Duration::minutes(5 - i),
+                PendingCandidateStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        }
+        for i in 0..2i64 {
+            port.insert_pending_candidate(candidate(
+                "ene",
+                "bob",
+                &format!("bob {i}"),
+                now - Duration::minutes(2 - i),
+                PendingCandidateStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        }
+
+        // Cap as alice: only alice's queue overflows (5 -> 2); bob is intact.
+        let removed = port
+            .prune_pending_candidates("ene", Some("alice"), 0, 2, now)
+            .await
+            .unwrap();
+        assert_eq!(removed, 3);
+
+        let remaining = port.pending_candidates();
+        assert_eq!(remaining.iter().filter(|c| c.user_id == "alice").count(), 2);
+        assert_eq!(remaining.iter().filter(|c| c.user_id == "bob").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn prune_both_limits_do_not_double_count() {
+        let port = InMemoryMemoryPort::new();
+        let now = Utc::now();
+        let old = now - Duration::days(30);
+        // Two ancient pending rows (age pass removes them) ...
+        port.insert_pending_candidate(candidate(
+            "ene",
+            "u1",
+            "ancient 0",
+            old,
+            PendingCandidateStatus::Pending,
+        ))
+        .await
+        .unwrap();
+        port.insert_pending_candidate(candidate(
+            "ene",
+            "u1",
+            "ancient 1",
+            old,
+            PendingCandidateStatus::Pending,
+        ))
+        .await
+        .unwrap();
+        // ... plus four fresh pending rows.
+        for i in 0..4i64 {
+            port.insert_pending_candidate(candidate(
+                "ene",
+                "u1",
+                &format!("fresh {i}"),
+                now - Duration::minutes(4 - i),
+                PendingCandidateStatus::Pending,
+            ))
+            .await
+            .unwrap();
+        }
+
+        // Age pass removes the 2 ancient rows; the count pass then sees 4 fresh
+        // pending rows and caps to 3, removing 1 more. Total = 3, not 4.
+        let removed = port
+            .prune_pending_candidates("ene", Some("u1"), 14, 3, now)
+            .await
+            .unwrap();
+        assert_eq!(removed, 3);
+        assert_eq!(port.pending_candidates().len(), 3);
     }
 }
