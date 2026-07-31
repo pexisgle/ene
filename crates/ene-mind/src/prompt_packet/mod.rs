@@ -457,6 +457,7 @@ mod tests {
                 contradiction_penalty: 0.0,
                 stale_penalty: 0.0,
                 commitment_boost: 0.0,
+                reflection_multiplier: 1.0,
                 total: 0.8,
             },
             sources: vec![],

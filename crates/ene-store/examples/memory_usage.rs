@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         min_score: 0.0,
         commitment_boost: 0.0,
         recent_fallback_limit: 5,
+        exclude_kinds: Vec::new(),
     };
     let gathered = store.search(&query).await?;
     let results = ene_rag::score_and_rank(&query, gathered);
