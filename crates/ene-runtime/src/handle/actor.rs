@@ -132,17 +132,25 @@ pub(super) struct TurnActor {
     /// (#397): GGUF model loads, plugin host restarts. Reaped alongside the
     /// other `JoinSet`s so panics surface as diagnostics.
     bg_command_tasks: tokio::task::JoinSet<()>,
+    /// Auxiliary stream-task handles (e.g. the TTS synthesis worker) handed
+    /// back by the stream so shutdown can abort them (#401). Reaped like the
+    /// other `JoinSet`s; aborted on teardown so they cannot outlive the actor.
+    aux_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx:
         mpsc::UnboundedReceiver<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
     /// Receiver for deferred (background) tool tasks accepted by the stream (#196).
     deferred_tool_rx: mpsc::UnboundedReceiver<DeferredToolTask>,
+    /// Receiver for auxiliary stream-task handles (e.g. the TTS worker, #401).
+    aux_task_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     /// Sender for classifier `JoinHandles` from the stream task.
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Sender for deferred memory-writer `JoinHandles` from the stream task.
     memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
     /// Sender for deferred (background) tool tasks accepted by the stream (#196).
     deferred_tool_tx: mpsc::UnboundedSender<DeferredToolTask>,
+    /// Sender for auxiliary stream-task handles from the stream task (#401).
+    aux_task_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
     /// Held so the broadcast channel retains buffered diagnostic events until the
@@ -255,6 +263,7 @@ impl TurnActor {
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
         let (deferred_tool_tx, deferred_tool_rx) = mpsc::unbounded_channel();
+        let (aux_task_tx, aux_task_rx) = mpsc::unbounded_channel();
         let task_caps = config
             .get_section::<crate::task_config::ToolRuntimeConfig>()
             .unwrap_or_default();
@@ -288,13 +297,16 @@ impl TurnActor {
             search_tasks: tokio::task::JoinSet::new(),
             deferred_tool_tasks: tokio::task::JoinSet::new(),
             bg_command_tasks: tokio::task::JoinSet::new(),
+            aux_tasks: tokio::task::JoinSet::new(),
             classifier_rx,
             memory_writer_rx,
             deferred_tool_rx,
+            aux_task_rx,
             terminal_emitted: Arc::new(AtomicBool::new(false)),
             classifier_tx,
             memory_writer_tx,
             deferred_tool_tx,
+            aux_task_tx,
             _diag_rx: diag_rx,
             proactive: crate::proactive::ProactiveScheduler::default(),
             proactive_decision_rx: None,
@@ -372,6 +384,28 @@ impl TurnActor {
                 "Background command task panicked",
                 &self.diag_tx,
             );
+            reap_join_set(
+                &mut self.aux_tasks,
+                "AuxTaskReaper",
+                "Auxiliary stream task panicked",
+                &self.diag_tx,
+            );
+
+            // Drain auxiliary stream-task JoinHandles (e.g. the TTS worker)
+            // sent from the stream so shutdown can abort them (#401). No
+            // admission cap: at most a handful are spawned per turn and they
+            // are bounded by the turn's own lifecycle.
+            while let Ok(handle) = self.aux_task_rx.try_recv() {
+                self.aux_tasks.spawn(async move {
+                    if let Err(e) = handle.await {
+                        tracing::warn!(
+                            component = "TurnActor",
+                            error = %e,
+                            "Auxiliary stream task failed"
+                        );
+                    }
+                });
+            }
 
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {
@@ -649,6 +683,7 @@ impl TurnActor {
         self.call_tool_tasks.abort_all();
         self.search_tasks.abort_all();
         self.bg_command_tasks.abort_all();
+        self.aux_tasks.abort_all();
         self.drain_pending().await;
     }
 
@@ -1260,6 +1295,7 @@ impl TurnActor {
                 self.memory_writer_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
                 self.bg_command_tasks.abort_all();
+                self.aux_tasks.abort_all();
                 self.abort_proactive_decision();
                 self.shutdown_proactive_llm_once().await;
                 self.drain_pending().await;
@@ -1732,6 +1768,7 @@ impl TurnActor {
         let classifier_tx = self.classifier_tx.clone();
         let memory_writer_tx = self.memory_writer_tx.clone();
         let deferred_tool_tx = self.deferred_tool_tx.clone();
+        let aux_task_tx = self.aux_task_tx.clone();
         let tts_provider = self.tts_provider.clone();
         // Reset the shared partial-text buffer for this turn and hand a clone
         // to the stream task so a hard-abort can recover streamed text (#H5).
@@ -1781,6 +1818,7 @@ impl TurnActor {
                         classifier_tx,
                         memory_writer_tx,
                         deferred_tool_tx,
+                        aux_task_tx,
                         tts_provider,
                         partial_text,
                         concrete_store: concrete_store_for_stream,

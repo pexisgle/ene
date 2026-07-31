@@ -18,6 +18,14 @@ const fn default_handshake_timeout_ms() -> u64 {
     10_000
 }
 
+const fn default_permission_prompt_timeout_ms() -> u64 {
+    300_000
+}
+
+const fn default_user_input_prompt_timeout_ms() -> u64 {
+    600_000
+}
+
 /// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
     let mut list: HashMap<String, PluginEntry> = ["app", "browser", "fs", "utility", "web"]
@@ -115,6 +123,25 @@ ene_config::define_config!(
         /// Tool call execution timeout in milliseconds.
         #[serde(default = "default_timeout_ms")]
         pub timeout_ms: u64 = default_timeout_ms(),
+        /// How long the runtime waits for a consumer to answer a tool
+        /// *permission* prompt before failing safe (#401).
+        ///
+        /// The wait is bounded by this timeout **and** selected against the
+        /// turn's cancel token, so a consumer that never responds (a lost
+        /// event, a headless/automation consumer, a closed window) cannot
+        /// hold the turn open forever: on expiry the prompt is treated as
+        /// denied and the turn still reaches `Terminal`, releasing the turn
+        /// gate. Defaults to 300000 ms (5 minutes).
+        #[serde(default = "default_permission_prompt_timeout_ms")]
+        pub permission_prompt_timeout_ms: u64 = default_permission_prompt_timeout_ms(),
+        /// How long the runtime waits for a consumer to answer an interactive
+        /// *user-input* prompt before failing safe (#401).
+        ///
+        /// Same fail-safe semantics as `permission_prompt_timeout_ms`. Typing
+        /// an answer takes longer than clicking approve/deny, so this defaults
+        /// higher: 600000 ms (10 minutes).
+        #[serde(default = "default_user_input_prompt_timeout_ms")]
+        pub user_input_prompt_timeout_ms: u64 = default_user_input_prompt_timeout_ms(),
         /// Interval between health probe pings in milliseconds.
         ///
         /// Set to `0` to disable periodic health checks.
