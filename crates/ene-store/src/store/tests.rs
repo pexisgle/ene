@@ -113,6 +113,116 @@ async fn message_search_is_case_insensitive_and_paginated() {
 }
 
 #[tokio::test]
+async fn message_search_escapes_like_metacharacters() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("s1", "card"))
+        .await
+        .unwrap();
+
+    store
+        .insert_log("s1", "card", "user", "battery at 50% charge")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "value is 500 units")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "snake_case identifier")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "snakeXcase near miss")
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", r"path is C:\temp")
+        .await
+        .unwrap();
+
+    // `%` must match literally: only the "50%" row, not "500" (which the
+    // unescaped pattern `%50%%` would also match via the trailing wildcard).
+    let pct = store.search_messages("50%", 10, 0).await.unwrap();
+    assert_eq!(pct.len(), 1);
+    assert!(pct[0].1.content.contains("50%"));
+
+    // `_` must match a literal underscore, not "any single character".
+    let underscore = store.search_messages("snake_case", 10, 0).await.unwrap();
+    assert_eq!(underscore.len(), 1);
+    assert!(underscore[0].1.content.contains("snake_case"));
+
+    // The escape character itself is escaped: a literal backslash matches.
+    let backslash = store.search_messages(r"C:\temp", 10, 0).await.unwrap();
+    assert_eq!(backslash.len(), 1);
+    assert!(backslash[0].1.content.contains(r"C:\temp"));
+}
+
+#[tokio::test]
+async fn message_search_query_plan_uses_created_at_index() {
+    use sea_orm::sea_query::{Expr, Func, LikeExpr};
+    use sea_orm::{
+        DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        Statement,
+    };
+
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("s1", "card"))
+        .await
+        .unwrap();
+    store
+        .insert_log("s1", "card", "user", "hello world")
+        .await
+        .unwrap();
+
+    // Build the exact query `search_messages` executes through SeaORM's own
+    // query builder, so the EXPLAIN plan reflects the real SQL (the
+    // hand-written string below it is kept only as documentation). The
+    // leading-wildcard `LIKE` cannot use a B-tree index on `content` (that
+    // requires FTS5, #424), but the ordering must be served by
+    // `idx_log_created_at` so the query walks rows newest-first and stops at
+    // the limit instead of sorting the whole table (#422).
+    let built = crate::entities::conversation_logs::Entity::find()
+        .filter(
+            Func::lower(Expr::col(
+                crate::entities::conversation_logs::Column::Content,
+            ))
+            .like(LikeExpr::new("%hello%".to_string()).escape('\\')),
+        )
+        .order_by_desc(crate::entities::conversation_logs::Column::CreatedAt)
+        .limit(10)
+        .offset(0)
+        .build(DbBackend::Sqlite)
+        .to_string();
+    let explain_sql = format!("EXPLAIN QUERY PLAN {built}");
+
+    let rows = store
+        .connection()
+        .query_all_raw(Statement::from_string(DbBackend::Sqlite, explain_sql))
+        .await
+        .unwrap();
+
+    let plan: String = rows
+        .iter()
+        .map(|row| {
+            row.try_get_by_index::<String>(3)
+                .expect("EXPLAIN QUERY PLAN detail column exists")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        plan.contains("idx_log_created_at"),
+        "expected the search ordering to use idx_log_created_at, plan was:\n{plan}"
+    );
+    assert!(
+        !plan.to_ascii_lowercase().contains("use temp b-tree"),
+        "expected no in-memory sort for the search ordering, plan was:\n{plan}"
+    );
+}
+
+#[tokio::test]
 async fn export_import_roundtrip_and_conflict() {
     let store = setup_store().await;
     store
@@ -2299,4 +2409,131 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
         .await
         .unwrap();
     assert_eq!(results.len(), 1, "new vectors must be searchable");
+// ── #426: audit_log session_id and session export tool history ──
+
+/// Builds a [`crate::NewAuditEntry`] for test use.
+fn test_audit_entry(session_id: &str, tool_name: &str) -> crate::NewAuditEntry {
+    crate::NewAuditEntry {
+        turn_id: format!("turn-{tool_name}"),
+        session_id: Some(session_id.to_string()),
+        tool_name: tool_name.to_string(),
+        action: "write".to_string(),
+        target: "/tmp/x".to_string(),
+        decision: crate::AuditDecision::AllowOnce,
+        success: true,
+        arguments: r#"{"path":"/tmp/x"}"#.to_string(),
+    }
+}
+
+/// Audit rows written within a session carry that session's id; rows
+/// with an empty session id (out-of-band diagnostics) persist as `NULL`.
+#[tokio::test]
+async fn audit_rows_carry_session_id() {
+    let store = setup_store().await;
+
+    store
+        .insert_audit_entry(&test_audit_entry("sess-a", "fs.write_file"))
+        .await
+        .expect("insert sess-a");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band");
+
+    let by_session = store
+        .list_audit_entries_by_session("sess-a")
+        .await
+        .expect("list by session");
+    assert_eq!(by_session.len(), 1);
+    let entry = by_session.first().expect("sess-a entry");
+    assert_eq!(entry.session_id.as_deref(), Some("sess-a"));
+    assert_eq!(entry.tool_name, "fs.write_file");
+
+    // The out-of-band row has a NULL session_id and is never attributed
+    // to any session.
+    let all = store.list_audit_entries(10).await.expect("list all");
+    assert_eq!(all.len(), 2);
+    let diag = all
+        .iter()
+        .find(|e| e.tool_name == "diag.ping")
+        .expect("diag entry");
+    assert_eq!(diag.session_id, None);
+    assert!(
+        store
+            .list_audit_entries_by_session("")
+            .await
+            .expect("list empty session")
+            .is_empty(),
+        "NULL-session rows must not match an empty session filter"
+    );
+}
+
+/// `build_export` returns the session's own tool history and never
+/// another session's (or NULL-session) rows.
+#[tokio::test]
+async fn session_export_includes_only_own_tool_history() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("sess-a", "card"))
+        .await
+        .expect("upsert sess-a");
+    store
+        .upsert_session(&new_session_meta("sess-b", "card"))
+        .await
+        .expect("upsert sess-b");
+
+    store
+        .insert_audit_entry(&test_audit_entry("sess-a", "fs.write_file"))
+        .await
+        .expect("insert sess-a tool");
+    store
+        .insert_audit_entry(&test_audit_entry("sess-b", "fs.read_file"))
+        .await
+        .expect("insert sess-b tool");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band tool");
+
+    let export = store.build_export("sess-a").await.expect("export sess-a");
+    assert_eq!(export.tool_logs.len(), 1);
+    let log = export.tool_logs.first().expect("tool log");
+    assert_eq!(log.tool_name, "fs.write_file");
+    assert_eq!(log.decision, "allow_once");
+    assert!(log.success);
+
+    // The other session's export sees only its own history.
+    let export_b = store.build_export("sess-b").await.expect("export sess-b");
+    assert_eq!(export_b.tool_logs.len(), 1);
+    assert_eq!(
+        export_b.tool_logs.first().expect("tool log").tool_name,
+        "fs.read_file"
+    );
+}
+
+/// A session with no audit rows still exports cleanly with an empty
+/// `tool_logs` vector (existing NULL-session rows are not leaked in).
+#[tokio::test]
+async fn session_export_without_audit_rows_is_empty() {
+    let store = setup_store().await;
+    store
+        .upsert_session(&new_session_meta("lonely", "card"))
+        .await
+        .expect("upsert lonely");
+    store
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
+        .await
+        .expect("insert out-of-band tool");
+
+    let export = store.build_export("lonely").await.expect("export");
+    assert!(export.tool_logs.is_empty());
 }
