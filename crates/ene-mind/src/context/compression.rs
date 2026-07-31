@@ -568,7 +568,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ene_ai::LlmProvider for SummaryLlm {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "summary-llm"
         }
 
