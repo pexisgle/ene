@@ -162,7 +162,7 @@ pub(crate) async fn await_permission_decision(
             );
             None
         }
-        _ = tokio::time::sleep(deadline) => {
+        () = tokio::time::sleep(deadline) => {
             tracing::warn!(
                 component = "streaming",
                 request_id = %request_id,
@@ -171,16 +171,15 @@ pub(crate) async fn await_permission_decision(
             );
             None
         }
-        res = rx => match res {
-            Ok(decision) => Some(decision),
-            Err(_) => {
-                tracing::debug!(
-                    component = "streaming",
-                    request_id = %request_id,
-                    "permission decision sender dropped; treating as denied"
-                );
-                None
-            }
+        res = rx => if let Ok(decision) = res {
+            Some(decision)
+        } else {
+            tracing::debug!(
+                component = "streaming",
+                request_id = %request_id,
+                "permission decision sender dropped; treating as denied"
+            );
+            None
         },
     }
 }
@@ -210,7 +209,7 @@ pub(crate) async fn await_user_input_response(
             );
             None
         }
-        _ = tokio::time::sleep(deadline) => {
+        () = tokio::time::sleep(deadline) => {
             tracing::warn!(
                 component = "streaming",
                 request_id = %request_id,
@@ -689,7 +688,7 @@ pub(crate) async fn perform_tool_executions(
 
                     // Bounded, fail-safe wait, mirroring the permission branch
                     // above (#401).
-                    match await_user_input_response(
+                    if let Some(answers) = await_user_input_response(
                         resp_rx,
                         &ctx.cancel_token,
                         ctx.user_input_prompt_timeout_ms,
@@ -697,35 +696,32 @@ pub(crate) async fn perform_tool_executions(
                     )
                     .await
                     {
-                        Some(answers) => {
-                            let new_args = inject_user_answers(&args, &answers);
-                            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                            result = tokio::time::timeout(
-                                tool_timeout,
-                                ctx.registry.call_tool(&name, &new_args, Some(&call_ctx)),
-                            )
-                            .await
-                            .map_or_else(
-                                |_| {
-                                    Err(PluginHostError::ExecutionFailed {
-                                        message: format!(
-                                            "Tool '{}' timed out after {:.2} seconds",
-                                            name,
-                                            tool_timeout.as_secs_f64()
-                                        ),
-                                    })
-                                },
-                                |r| r.map(|r| r.text_for_llm()),
-                            );
-                        }
-                        None => {
-                            result = Err(PluginHostError::ExecutionFailed {
-                                message: "User cancelled the question".to_string(),
-                            });
-                            // Decision resolved; no further
-                            // pending rounds needed.
-                            break;
-                        }
+                        let new_args = inject_user_answers(&args, &answers);
+                        let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+                        result = tokio::time::timeout(
+                            tool_timeout,
+                            ctx.registry.call_tool(&name, &new_args, Some(&call_ctx)),
+                        )
+                        .await
+                        .map_or_else(
+                            |_| {
+                                Err(PluginHostError::ExecutionFailed {
+                                    message: format!(
+                                        "Tool '{}' timed out after {:.2} seconds",
+                                        name,
+                                        tool_timeout.as_secs_f64()
+                                    ),
+                                })
+                            },
+                            |r| r.map(|r| r.text_for_llm()),
+                        );
+                    } else {
+                        result = Err(PluginHostError::ExecutionFailed {
+                            message: "User cancelled the question".to_string(),
+                        });
+                        // Decision resolved; no further
+                        // pending rounds needed.
+                        break;
                     }
                 }
                 _ => break, // Ok or other Err; stop resolving.
@@ -1590,10 +1586,6 @@ mod tests {
     /// `permission_prompt_timeout_ms` / `user_input_prompt_timeout_ms` are
     /// kept tiny so the bounded waits fire quickly; `cancel_token` lets a
     /// test cancel mid-wait.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "test helper mirrors the borrowed ToolExecutionContext fields one-to-one"
-    )]
     fn prompt_wait_ctx<'a>(
         registry: &'a dyn ene_plugin_host::ToolRegistry,
         event_tx: &'a tokio::sync::broadcast::Sender<EneEvent>,
@@ -1936,7 +1928,13 @@ mod tests {
     #[tokio::test]
     async fn await_permission_decision_passes_through_approval() {
         let (tx, rx) = oneshot::channel::<PermissionDecision>();
-        drop(tx.send(PermissionDecision::AllowOnce));
+        // A oneshot send error is `Copy` here (just the unsent decision), so
+        // `drop()` would itself trip `clippy::dropping_copy_types`.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = tx.send(PermissionDecision::AllowOnce);
         let decision = await_permission_decision(
             rx,
             &CancellationToken::new(),
