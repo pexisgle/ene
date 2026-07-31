@@ -25,6 +25,8 @@ pub mod character_config;
 pub mod config;
 /// Configuration-related error types.
 pub mod error;
+/// Config-version migration for `settings.json`.
+pub mod migration;
 /// Platform-aware directory and file path resolution.
 pub mod paths;
 /// Prompt template management with multi-language support.
@@ -50,6 +52,7 @@ pub use config::{
 };
 pub use error::ConfigError;
 pub use error::EneConfigError;
+pub use migration::{CURRENT_CONFIG_VERSION, MigrationFn, apply_migrations, register_migration};
 pub use paths::{
     IS_DEV_BUILD, app_data_dir, assets_dir, builtin_plugins_dir, builtin_tools_dir,
     character_card_schema_file_path, character_schema_file_path, character_settings_path,

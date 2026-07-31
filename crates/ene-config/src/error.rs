@@ -29,6 +29,20 @@ pub enum EneConfigError {
     /// Catch-all configuration error with a free-form message.
     #[error("Configuration error: {0}")]
     GenericConfigError(String),
+    /// The on-disk config declares a schema version newer than this build
+    /// understands. This typically means the file was written by a newer
+    /// application version (a downgrade). The file is left untouched so a
+    /// newer build can still read it.
+    #[error(
+        "config version {found} is newer than the supported version {supported}; \
+         refusing to load to avoid corrupting data written by a newer build"
+    )]
+    ConfigVersionTooNew {
+        /// The version number found in the on-disk file.
+        found: u32,
+        /// The highest version this build can read.
+        supported: u32,
+    },
     /// General I/O error.
     #[error("I/O error: {0}")]
     IoError(#[source] std::io::Error),
