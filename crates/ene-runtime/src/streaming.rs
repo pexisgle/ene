@@ -458,7 +458,12 @@ pub(crate) async fn perform_tool_executions(
                     match decide_rx.await {
                         Ok(PermissionDecision::AllowOnce) => {
                             audit_decision = ene_store::AuditDecision::AllowOnce;
-                            ctx.registry.approve_permission(req_id.as_str()).await;
+                            // Route the approval to the plugin that owns the
+                            // tool which raised the request, so an unrelated
+                            // plugin mid-long-tool-call cannot delay it (#434).
+                            ctx.registry
+                                .approve_permission_for(&name, req_id.as_str())
+                                .await;
                             result = tokio::time::timeout(
                                 tool_timeout,
                                 ctx.registry.call_tool(&name, &args, Some(&call_ctx)),
@@ -480,7 +485,12 @@ pub(crate) async fn perform_tool_executions(
                         Ok(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
                             ctx.registry.allow_pattern(action, target).await;
-                            ctx.registry.approve_permission(req_id.as_str()).await;
+                            // Route the approval to the owning plugin (#434);
+                            // the session-wide pattern above is still broadcast
+                            // to every plugin.
+                            ctx.registry
+                                .approve_permission_for(&name, req_id.as_str())
+                                .await;
                             {
                                 let mut guard = ctx.permission_scopes.lock().await;
                                 let next_id = guard
