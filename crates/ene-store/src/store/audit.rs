@@ -33,9 +33,9 @@ impl MemoryStore {
         use sea_orm::ActiveValue::Set;
 
         let now = Utc::now();
-        // An empty session_id marks out-of-band diagnostics calls; persist
-        // those as NULL so they are never attributed to a session (#426).
-        let session_id = (!entry.session_id.is_empty()).then(|| entry.session_id.clone());
+        // `None` marks out-of-band diagnostics calls; persist those as NULL
+        // so they are never attributed to a session (#426).
+        let session_id = entry.session_id.clone();
         let model = entities::audit_log::ActiveModel {
             turn_id: Set(entry.turn_id.clone()),
             session_id: Set(session_id),

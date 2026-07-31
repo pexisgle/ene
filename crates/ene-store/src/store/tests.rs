@@ -1984,7 +1984,7 @@ async fn upsert_memory_embedding_does_not_create_duplicates() {
 fn test_audit_entry(session_id: &str, tool_name: &str) -> crate::NewAuditEntry {
     crate::NewAuditEntry {
         turn_id: format!("turn-{tool_name}"),
-        session_id: session_id.to_string(),
+        session_id: Some(session_id.to_string()),
         tool_name: tool_name.to_string(),
         action: "write".to_string(),
         target: "/tmp/x".to_string(),
@@ -2005,7 +2005,10 @@ async fn audit_rows_carry_session_id() {
         .await
         .expect("insert sess-a");
     store
-        .insert_audit_entry(&test_audit_entry("", "diag.ping"))
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
         .await
         .expect("insert out-of-band");
 
@@ -2060,7 +2063,10 @@ async fn session_export_includes_only_own_tool_history() {
         .await
         .expect("insert sess-b tool");
     store
-        .insert_audit_entry(&test_audit_entry("", "diag.ping"))
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
         .await
         .expect("insert out-of-band tool");
 
@@ -2090,7 +2096,10 @@ async fn session_export_without_audit_rows_is_empty() {
         .await
         .expect("upsert lonely");
     store
-        .insert_audit_entry(&test_audit_entry("", "diag.ping"))
+        .insert_audit_entry(&crate::NewAuditEntry {
+            session_id: None,
+            ..test_audit_entry("", "diag.ping")
+        })
         .await
         .expect("insert out-of-band tool");
 

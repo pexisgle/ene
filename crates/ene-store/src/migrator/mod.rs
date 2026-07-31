@@ -1233,6 +1233,10 @@ impl MigrationTrait for SourceRefIndexMigration {
 /// migration are never misattributed to a session. New rows record the
 /// originating session so `build_export` can filter tool history per
 /// session instead of omitting it entirely.
+///
+/// The `down` migration uses `DROP COLUMN`, which requires `SQLite` ≥ 3.35
+/// (2021-03-12); the bundled `SQLite` is newer, and the column is only ever
+/// dropped in a deliberate rollback, never in normal operation.
 pub struct AuditLogSessionIdMigration;
 
 impl MigrationName for AuditLogSessionIdMigration {
