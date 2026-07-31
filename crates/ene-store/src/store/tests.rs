@@ -617,6 +617,73 @@ async fn typed_memory_crud() {
 }
 
 #[tokio::test]
+async fn recent_tool_failures_lists_recallable_reflections_only() {
+    let store = setup_store().await;
+
+    let reflection = |title: &str, status: crate::MemoryStatus| crate::NewMemoryItem {
+        scope: crate::MemoryScope::Shared,
+        character_id: "ene".into(),
+        user_id: String::new(),
+        kind: crate::MemoryKind::Reflection,
+        title: title.into(),
+        content: format!("failure record for {title}"),
+        source: crate::MemorySource::Inferred,
+        source_ref: None,
+        confidence: crate::MemoryConfidence::new(0.65),
+        salience: crate::MemorySalience::default(),
+        affect: crate::AffectAnnotation::default(),
+        relationship_impact: 0.0,
+        valid_from: None,
+        valid_until: None,
+        status,
+        supersedes_id: None,
+        pinned: false,
+        created_at: None,
+        commitment_id: None,
+    };
+
+    // Two active failures for distinct tools.
+    store
+        .insert_typed_memory(&reflection("tool failure:web", crate::MemoryStatus::Active))
+        .await
+        .unwrap();
+    store
+        .insert_typed_memory(&reflection("tool failure:fs", crate::MemoryStatus::Active))
+        .await
+        .unwrap();
+    // A superseded failure must not be reported.
+    store
+        .insert_typed_memory(&reflection(
+            "tool failure:git",
+            crate::MemoryStatus::Superseded,
+        ))
+        .await
+        .unwrap();
+    // A Faded failure is still recallable and keeps penalizing the tool:
+    // fading is a decay signal for recall relevance, not an un-failure.
+    store
+        .insert_typed_memory(&reflection("tool failure:db", crate::MemoryStatus::Faded))
+        .await
+        .unwrap();
+    // A non-Reflection memory with a matching title must not be reported.
+    let mut semantic = reflection("tool failure:sqlite", crate::MemoryStatus::Active);
+    semantic.kind = crate::MemoryKind::Semantic;
+    store.insert_typed_memory(&semantic).await.unwrap();
+
+    let failures = store.recent_tool_failures("ene").await.unwrap();
+    assert_eq!(
+        failures.len(),
+        3,
+        "only recallable Reflection failures: {failures:?}"
+    );
+    assert!(failures.contains(&"web".to_string()));
+    assert!(failures.contains(&"fs".to_string()));
+    assert!(failures.contains(&"db".to_string()));
+    assert!(!failures.contains(&"git".to_string()));
+    assert!(!failures.contains(&"sqlite".to_string()));
+}
+
+#[tokio::test]
 async fn typed_memory_search_with_embedding() {
     let store = setup_store().await;
 
@@ -933,6 +1000,7 @@ fn hybrid_search_options<'a>(
         min_score: 0.0,
         commitment_boost: 0.25,
         recent_fallback_limit: 5,
+        exclude_kinds: Vec::new(),
     }
 }
 
@@ -995,6 +1063,50 @@ async fn hybrid_search_ranks_by_salience_and_recency_not_vector_alone() {
     let second = results.get(1).expect("second hybrid result");
     assert_eq!(top.item.title, "important fact");
     assert!(top.breakdown.total >= second.breakdown.total);
+}
+
+#[tokio::test]
+async fn hybrid_search_exclude_kinds_drops_reflection_memories() {
+    let store = setup_store().await;
+    let now = Utc::now();
+    let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+
+    let normal = test_memory_item("favorite food", "the user likes pizza");
+    let reflection = crate::NewMemoryItem {
+        kind: crate::MemoryKind::Reflection,
+        title: "Successful strategies".into(),
+        content: "Successful interaction strategies: favorite food".into(),
+        ..test_memory_item("base", "base")
+    };
+
+    insert_memory_with_embedding(&store, &normal, &query_emb).await;
+    insert_memory_with_embedding(&store, &reflection, &query_emb).await;
+
+    // Without exclusion, the reflection memory competes as an ordinary result.
+    let mut options = hybrid_search_options("pizza", &query_emb, now);
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
+    assert!(
+        results
+            .iter()
+            .any(|m| m.item.kind == crate::MemoryKind::Reflection),
+        "reflection memory is gathered when not excluded"
+    );
+
+    // With the kind excluded, it never reaches the candidate pool.
+    options.exclude_kinds = vec![crate::MemoryKind::Reflection];
+    let gathered = store.search(&options).await.unwrap();
+    let results = ene_rag::score_and_rank(&options, gathered);
+    assert!(
+        results
+            .iter()
+            .all(|m| m.item.kind != crate::MemoryKind::Reflection),
+        "excluded kinds must not appear in recall candidates"
+    );
+    assert!(
+        results.iter().any(|m| m.item.title == "favorite food"),
+        "normal memories are unaffected by the reflection exclusion"
+    );
 }
 
 #[tokio::test]

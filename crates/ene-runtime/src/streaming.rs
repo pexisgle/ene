@@ -89,6 +89,9 @@ pub(crate) struct ToolExecutionContext<'a> {
     pub tool_rag: Option<&'a ToolRag>,
     /// Conversation session identifier.
     pub session_id: &'a str,
+    /// Active character identifier, used to scope tool-selection failure
+    /// feedback (#349).
+    pub character_id: &'a str,
     /// Broadcast channel for emitting tool events.
     pub event_tx: &'a broadcast::Sender<EneEvent>,
     /// Active turn id.
@@ -384,6 +387,7 @@ pub(crate) async fn select_relevant_tools(
     user_input: &str,
     query_embedding: Option<&[f32]>,
     tool_calling_enabled: bool,
+    character_id: &str,
 ) -> Vec<ene_plugin_proto::ToolSpec> {
     if !tool_calling_enabled {
         return vec![];
@@ -411,9 +415,9 @@ pub(crate) async fn select_relevant_tools(
         let select_fut: std::pin::Pin<
             Box<dyn std::future::Future<Output = Vec<ene_plugin_proto::ToolSpec>> + Send>,
         > = if let Some(emb) = query_embedding {
-            Box::pin(rag.select_with_embedding(user_input, emb))
+            Box::pin(rag.select_with_embedding(user_input, emb, character_id))
         } else {
-            Box::pin(rag.select(user_input))
+            Box::pin(rag.select(user_input, character_id))
         };
         if let Ok(tools) = tokio::time::timeout(rag_timeout, select_fut).await {
             tools
@@ -584,7 +588,8 @@ pub(crate) async fn perform_tool_executions(
                     .ok()
                     .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
                     .unwrap_or_default();
-                execute_system_search_tool(ctx.registry, ctx.tool_rag, &query).await
+                execute_system_search_tool(ctx.registry, ctx.tool_rag, &query, ctx.character_id)
+                    .await
             } else {
                 dispatch_tool_call(
                     ctx.registry,
@@ -1065,6 +1070,7 @@ pub(crate) async fn execute_system_search_tool(
     registry: &dyn ene_plugin_host::ToolRegistry,
     tool_rag: Option<&ToolRag>,
     query: &str,
+    character_id: &str,
 ) -> Result<String, PluginHostError> {
     if query.is_empty() {
         return Ok("Please provide a search query.".to_string());
@@ -1083,7 +1089,8 @@ pub(crate) async fn execute_system_search_tool(
                 tracing::warn!(component = "ToolRag", "ensure_index timed out");
             }
         }
-        if let Ok(tools) = tokio::time::timeout(rag_timeout, rag.select(query)).await {
+        if let Ok(tools) = tokio::time::timeout(rag_timeout, rag.select(query, character_id)).await
+        {
             tools
         } else {
             tracing::warn!(
@@ -1174,7 +1181,7 @@ mod tests {
             }
         }
         let registry = DummyRegistry;
-        let tools = select_relevant_tools(&registry, None, "test", None, true).await;
+        let tools = select_relevant_tools(&registry, None, "test", None, true, "ene").await;
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name.as_str(), "system.search_tools");
     }
@@ -1228,6 +1235,7 @@ mod tests {
                 registry: &registry,
                 tool_rag: None,
                 session_id: "session_123",
+                character_id: "ene",
                 event_tx: &event_tx,
                 turn: &turn,
                 origin: TurnOrigin::User,
@@ -1364,6 +1372,7 @@ mod tests {
                 registry: &registry,
                 tool_rag: None,
                 session_id: "session-1",
+                character_id: "ene",
                 event_tx: &event_tx,
                 turn: &turn,
                 origin: TurnOrigin::User,
@@ -1499,6 +1508,7 @@ mod tests {
             registry: &registry,
             tool_rag: None,
             session_id: "session-1",
+            character_id: "ene",
             event_tx: &event_tx,
             turn: &turn,
             origin: TurnOrigin::User,
@@ -1662,6 +1672,7 @@ mod tests {
             registry: &registry,
             tool_rag: None,
             session_id: "session-1",
+            character_id: "ene",
             event_tx: &event_tx,
             turn: &turn,
             origin: TurnOrigin::User,
@@ -1764,6 +1775,7 @@ mod tests {
             registry,
             tool_rag: None,
             session_id: "session-1",
+            character_id: "ene",
             event_tx,
             turn,
             origin: TurnOrigin::User,
@@ -2316,6 +2328,7 @@ mod tests {
                 tool_rag: None,
                 session_id: "session-1",
                 event_tx: &event_tx,
+                character_id: "ene",
                 turn: &turn,
                 origin: TurnOrigin::User,
                 pending_permissions: &pending_permissions,
@@ -2393,6 +2406,7 @@ mod tests {
                 tool_rag: None,
                 session_id: "session-1",
                 event_tx: &event_tx,
+                character_id: "ene",
                 turn: &turn,
                 origin: TurnOrigin::User,
                 pending_permissions: &pending_permissions,
@@ -2466,6 +2480,7 @@ mod tests {
                 tool_rag: None,
                 session_id: "session-1",
                 event_tx: &event_tx,
+                character_id: "ene",
                 turn: &turn,
                 origin: TurnOrigin::User,
                 pending_permissions: &pending_permissions,
@@ -2584,6 +2599,7 @@ mod tests {
             tool_rag: None,
             session_id: "session-1",
             event_tx: &event_tx,
+            character_id: "ene",
             turn: &turn,
             origin: TurnOrigin::User,
             pending_permissions: &pending_permissions,

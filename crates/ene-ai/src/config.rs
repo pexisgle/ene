@@ -211,7 +211,13 @@ pub struct LocalModelDef {
     // at the config boundary instead of silently falling back at load time.
     #[serde(default = "default_gpu_layers")]
     pub gpu_layers: String,
-    /// Context size for decision workloads.
+    /// Context window for this model, in tokens.
+    ///
+    /// Sized to hold the full main-conversation prompt when the model backs a
+    /// `tasks.chat` / `tasks.proactive` workload (see [`default_context_size`]
+    /// for the rationale and VRAM trade-off). A model used only for small
+    /// decision tasks (classification, proactive triggers) can lower this to
+    /// shrink its KV cache.
     #[serde(default = "default_context_size")]
     pub context_size: u32,
 }
@@ -239,10 +245,25 @@ fn default_gpu_layers() -> String {
     "auto".to_string()
 }
 
-/// Default context size for local decision workloads.
-/// This is a minimum; larger contexts may be needed for long prompts.
+/// Default context window for a local model, in tokens (#366).
+///
+/// Calibrated to hold the system's own default prompt budget
+/// (`mind.context.max_prompt_tokens` = 12,000) with room left for the model's
+/// reply. The previous default (2,048) was sized for small decision tasks
+/// (classification, proactive triggers) and silently dropped most prompt
+/// sections once a local model was assigned to `tasks.chat`, whose full
+/// conversation prompt needs ~12,000 tokens.
+///
+/// 16,384 is deliberately chosen over 32,768: llama.cpp's KV cache grows
+/// linearly with context length, so for a `Gemma-3-4B`-class model (34 layers,
+/// GQA with 4 KV heads, `head_dim` 256, fp16) the cache is roughly 2.3 GB at
+/// 16K versus ~4.6 GB at 32K — on top of the model weights — which does not
+/// fit many environments. A model used only for decision workloads can set a
+/// smaller `context_size` explicitly to shrink its KV cache; the startup
+/// validation ([`crate::resolve::validate_context_budgets`]) warns whenever a
+/// configured window is too small for the prompt budget plus output reserve.
 const fn default_context_size() -> u32 {
-    2048
+    16_384
 }
 
 /// Task routing: which provider and model to use for a cognitive workload.
@@ -542,6 +563,14 @@ mod tests {
         assert!(cfg.tasks.classifier.is_none());
         assert!(cfg.tasks.proactive.is_none());
         assert_eq!(ApiKeyConfig::default().source, "env");
+    }
+
+    #[test]
+    fn local_model_default_context_size_is_16k() {
+        // #366: the default must hold the 12,000-token prompt budget plus a
+        // response reserve, not the old decision-only 2,048.
+        assert_eq!(default_context_size(), 16_384);
+        assert_eq!(LocalModelDef::default().context_size, 16_384);
     }
 
     #[test]

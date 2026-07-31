@@ -105,7 +105,7 @@ pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 pub use config::{
     CharacterMemoryConfig, ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig,
     ProactiveConfig, ProactiveDecisionConfig, ProactiveSourcesConfig, ToolGroundingConfig,
-    WindowTitleLevel,
+    TopicBoundaryConfig, WindowTitleLevel,
 };
 /// Context budget and compression types.
 #[doc(no_inline)]
@@ -175,8 +175,9 @@ pub use recall::{
 pub use session::{
     CardName, CharacterAsset, CharacterCardData, CharacterCardV3, ConversationSession,
     EneSessionError, ExpressionDefinition, InterruptedState, ResolvedExpression, Role, SessionId,
-    SplitReason, SplitResult, Truncate, expand_cbs_macros, generate_session_id,
-    parse_performance_marker, resolve_expressions, split_text_and_special_tokens, strip_markers,
+    SplitReason, SplitResult, TopicBoundarySignal, TopicBoundaryTracker, Truncate,
+    expand_cbs_macros, generate_session_id, parse_performance_marker, resolve_expressions,
+    split_text_and_special_tokens, strip_markers,
 };
 /// Conversation summary result and LLM summarization entry point.
 #[doc(no_inline)]
