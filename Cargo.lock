@@ -2852,6 +2852,7 @@ dependencies = [
  "ene-config",
  "ene-core",
  "ene-plugin-proto",
+ "parking_lot",
  "schemars",
  "serde",
  "serde_json",
