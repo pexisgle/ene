@@ -35,8 +35,14 @@ const fn default_user_input_prompt_timeout_ms() -> u64 {
 /// can claim before its writes are refused. It is low enough that a plugin
 /// stuck in a logging loop trips the quota (and surfaces a diagnostic) long
 /// before it can exhaust the disk or bloat the database enough to degrade the
-/// memory system's queries, backups, and integrity checks. `None` disables
-/// enforcement for a plugin that legitimately needs unbounded storage.
+/// memory system's queries, backups, and integrity checks. The field is an
+/// `Option` so `null` can disable enforcement for a plugin that legitimately
+/// needs unbounded storage.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "serde default function must return the field type Option<u64>; \
+              the Some(256) default is the documented enforcement default"
+)]
 const fn default_db_quota_mb() -> Option<u64> {
     Some(256)
 }

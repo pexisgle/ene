@@ -426,12 +426,6 @@ impl DbIpcServer {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "request dispatcher threads per-connection state (declared schema, last \
-                  rowid, quota) through to each handler; an internal function where a context \
-                  struct would only add indirection"
-    )]
     async fn handle_request(
         db: &DatabaseConnection,
         tool_name: &str,
@@ -653,11 +647,6 @@ impl DbIpcServer {
     /// IPC round-trips, so a plugin cannot pin the `SQLite` write lock open, and
     /// a dropped connection cannot leave a half-applied batch (the transaction
     /// either commits before the response is sent or rolls back on drop).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "mirrors handle_request's per-connection state threading (declared schema, \
-                  last rowid, quota) into the batch path; an internal function"
-    )]
     async fn handle_batch(
         db: &DatabaseConnection,
         tool_name: &str,
