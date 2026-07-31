@@ -163,6 +163,11 @@ gate is released instead of leaving every later `run()` stuck on
 `RunError::Busy`. The input timeout defaults higher because typing an answer
 takes longer than clicking approve/deny.
 
+Setting either timeout to `0` does **not** disable the wait: the prompt times
+out immediately (fail-safe denied/cancelled unless the consumer has already
+answered). Use a large value if the consumer legitimately needs a long time
+to answer.
+
 ### `tools.*` — Tool-Execution Runtime Behavior
 
 Distinct from `plugins.*` (which manages the plugin *process*/IPC layer):

@@ -151,7 +151,11 @@ pub(crate) async fn await_permission_decision(
     timeout_ms: u64,
     request_id: &RequestId,
 ) -> Option<PermissionDecision> {
-    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    // `biased` with `cancel → rx → sleep` ordering: a cancel always beats a
+    // simultaneously-ready answer, and a genuine answer beats a deadline that
+    // becomes ready in the same poll — the real decision is never silently
+    // dropped on a tie with the timeout.
     tokio::select! {
         biased;
         () = cancel_token.cancelled() => {
@@ -159,15 +163,6 @@ pub(crate) async fn await_permission_decision(
                 component = "streaming",
                 request_id = %request_id,
                 "permission prompt cancelled by turn cancel"
-            );
-            None
-        }
-        () = tokio::time::sleep(deadline) => {
-            tracing::warn!(
-                component = "streaming",
-                request_id = %request_id,
-                timeout_ms,
-                "permission prompt timed out with no consumer response; treating as denied (#401)"
             );
             None
         }
@@ -181,6 +176,15 @@ pub(crate) async fn await_permission_decision(
             );
             None
         },
+        () = tokio::time::sleep(timeout) => {
+            tracing::warn!(
+                component = "streaming",
+                request_id = %request_id,
+                timeout_ms,
+                "permission prompt timed out with no consumer response; treating as denied (#401)"
+            );
+            None
+        }
     }
 }
 
@@ -198,7 +202,11 @@ pub(crate) async fn await_user_input_response(
     timeout_ms: u64,
     request_id: &RequestId,
 ) -> Option<Vec<MultiAnswer>> {
-    let deadline = std::time::Duration::from_millis(timeout_ms);
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    // `biased` with `cancel → rx → sleep` ordering: a cancel always beats a
+    // simultaneously-ready answer, and a genuine answer beats a deadline that
+    // becomes ready in the same poll — the real answer is never silently
+    // dropped on a tie with the timeout.
     tokio::select! {
         biased;
         () = cancel_token.cancelled() => {
@@ -206,15 +214,6 @@ pub(crate) async fn await_user_input_response(
                 component = "streaming",
                 request_id = %request_id,
                 "user-input prompt cancelled by turn cancel"
-            );
-            None
-        }
-        () = tokio::time::sleep(deadline) => {
-            tracing::warn!(
-                component = "streaming",
-                request_id = %request_id,
-                timeout_ms,
-                "user-input prompt timed out with no consumer response; treating as cancelled (#401)"
             );
             None
         }
@@ -230,6 +229,15 @@ pub(crate) async fn await_user_input_response(
                 None
             }
         },
+        () = tokio::time::sleep(timeout) => {
+            tracing::warn!(
+                component = "streaming",
+                request_id = %request_id,
+                timeout_ms,
+                "user-input prompt timed out with no consumer response; treating as cancelled (#401)"
+            );
+            None
+        }
     }
 }
 
@@ -1979,5 +1987,85 @@ mod tests {
                 text: "hello".to_string()
             }])
         );
+    }
+
+    /// Regression test for the `biased` branch order (#401): a genuine
+    /// permission decision that is ready at the same instant the deadline
+    /// elapses must win over the timeout.
+    ///
+    /// The helper future is driven manually (noop waker) under `start_paused`
+    /// so the clock and the oneshot are fully controlled: the future registers
+    /// its timeout timer, the clock jumps straight to the deadline (firing the
+    /// timer via `advance`'s internal yield), and *then* the decision is
+    /// delivered — so on the decisive poll both the deadline and the decision
+    /// are ready, and the biased select must prefer the decision. With the
+    /// previous `cancel → sleep → rx` order the timeout branch would win and
+    /// the real decision would be silently dropped.
+    #[tokio::test(start_paused = true)]
+    async fn await_permission_decision_takes_decision_at_deadline_instant() {
+        use std::task::{Context, Poll};
+
+        let (tx, rx) = oneshot::channel::<PermissionDecision>();
+        let token = CancellationToken::new();
+        let request_id = RequestId::from("req-1");
+        let wait = await_permission_decision(rx, &token, 100, &request_id);
+        tokio::pin!(wait);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: registers the 100 ms timeout timer; nothing is ready.
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+
+        // Jump the clock to the deadline so the timeout timer fires, then
+        // deliver a genuine decision. Both are now ready in the same poll.
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        // A oneshot send error is `Copy` here (just the unsent decision), so
+        // `drop()` would itself trip `clippy::dropping_copy_types`.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = tx.send(PermissionDecision::AllowOnce);
+
+        assert!(matches!(
+            wait.as_mut().poll(&mut cx),
+            Poll::Ready(Some(PermissionDecision::AllowOnce))
+        ));
+    }
+
+    /// Regression test for the `biased` branch order (#401): a genuine
+    /// user-input answer that is ready at the same instant the deadline
+    /// elapses must win over the timeout.
+    ///
+    /// Same controlled-clock/manual-poll setup as
+    /// [`await_permission_decision_takes_decision_at_deadline_instant`].
+    #[tokio::test(start_paused = true)]
+    async fn await_user_input_response_takes_answer_at_deadline_instant() {
+        use std::task::{Context, Poll};
+
+        let (tx, rx) = oneshot::channel::<UserInputResponse>();
+        let token = CancellationToken::new();
+        let request_id = RequestId::from("req-1");
+        let wait = await_user_input_response(rx, &token, 100, &request_id);
+        tokio::pin!(wait);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: registers the 100 ms timeout timer; nothing is ready.
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+
+        // Jump the clock to the deadline so the timeout timer fires, then
+        // deliver a genuine answer. Both are now ready in the same poll.
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        drop(tx.send(UserInputResponse::Multi(vec![MultiAnswer::Answer {
+            text: "hello".to_string(),
+        }])));
+
+        assert!(matches!(
+            wait.as_mut().poll(&mut cx),
+            Poll::Ready(Some(ref answers)) if answers == &[MultiAnswer::Answer { text: "hello".to_string() }]
+        ));
     }
 }

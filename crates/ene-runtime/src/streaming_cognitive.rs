@@ -902,12 +902,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             .instrument(tracing::info_span!("tts_pipeline")),
         );
         // Hand the TTS worker to the actor so a `Shutdown` (or actor teardown)
-        // can abort it. The worker already watches the turn's cancel token, so
-        // a normal `Cancel` stops it cooperatively; routing the handle through
-        // `aux_task_tx` additionally guarantees it cannot outlive the actor on
-        // the shutdown path (#401). A send failure means the actor is already
-        // gone, in which case the worker runs to completion as a detached
-        // orphan — acceptable at shutdown.
+        // can stop it. The worker already watches the turn's cancel token, so
+        // a normal `Cancel` stops it cooperatively; on shutdown the actor
+        // cancels the token **and** aborts the worker task itself — handles
+        // that arrive after the run loop's last drain are still admitted and
+        // aborted, so the worker genuinely cannot outlive the actor (#401). A
+        // send failure means the actor is already gone, in which case the
+        // worker runs to completion as a detached orphan — acceptable at
+        // shutdown.
         drop(aux_task_tx.send(tts_handle));
     }
     let mut tts_sentence_buf = String::new();

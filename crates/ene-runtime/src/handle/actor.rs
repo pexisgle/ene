@@ -133,8 +133,10 @@ pub(super) struct TurnActor {
     /// other `JoinSet`s so panics surface as diagnostics.
     bg_command_tasks: tokio::task::JoinSet<()>,
     /// Auxiliary stream-task handles (e.g. the TTS synthesis worker) handed
-    /// back by the stream so shutdown can abort them (#401). Reaped like the
-    /// other `JoinSet`s; aborted on teardown so they cannot outlive the actor.
+    /// back by the stream so shutdown can abort them (#401). Each handle is
+    /// wrapped in an [`AbortOnDrop`] guard inside a wrapper task, so aborting
+    /// the set (or dropping it on teardown) aborts the underlying worker too
+    /// — they cannot outlive the actor. Reaped like the other `JoinSet`s.
     aux_tasks: tokio::task::JoinSet<()>,
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx:
@@ -142,6 +144,11 @@ pub(super) struct TurnActor {
     /// Receiver for deferred (background) tool tasks accepted by the stream (#196).
     deferred_tool_rx: mpsc::UnboundedReceiver<DeferredToolTask>,
     /// Receiver for auxiliary stream-task handles (e.g. the TTS worker, #401).
+    /// Drained by [`TurnActor::admit_aux_handles`] from the run loop, the
+    /// `Shutdown` command handler, and the post-loop teardown so a handle
+    /// that arrives after the loop's last drain is still admitted and aborted
+    /// on shutdown rather than dropped (which would only detach, not cancel,
+    /// the worker).
     aux_task_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     /// Sender for classifier `JoinHandles` from the stream task.
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
@@ -339,6 +346,37 @@ impl TurnActor {
             .unwrap_or(true)
     }
 
+    /// Drains auxiliary stream-task handles (e.g. the TTS worker) sent from
+    /// the stream so shutdown can abort them (#401).
+    ///
+    /// Each handle is wrapped in an [`AbortOnDrop`] guard inside a wrapper
+    /// task: aborting the wrapper (via `aux_tasks.abort_all()`) drops the
+    /// guard, which aborts the underlying worker instead of merely detaching
+    /// it. Called from the run loop, the `Shutdown` command handler, and the
+    /// post-loop teardown so a handle that arrives after the loop's last
+    /// drain is still admitted and aborted on shutdown. No admission cap: at
+    /// most a handful are spawned per turn and they are bounded by the turn's
+    /// own lifecycle.
+    fn admit_aux_handles(&mut self) {
+        while let Ok(handle) = self.aux_task_rx.try_recv() {
+            // Construct the guard *outside* the wrapper future so it becomes
+            // part of the future's captured state: even if the wrapper is
+            // aborted before its first poll (a shutdown right after the
+            // handle was admitted), dropping the future drops the guard and
+            // aborts the inner worker rather than merely detaching it.
+            let mut worker = AbortOnDrop(handle);
+            self.aux_tasks.spawn(async move {
+                if let Err(e) = (&mut worker.0).await {
+                    tracing::warn!(
+                        component = "TurnActor",
+                        error = %e,
+                        "Auxiliary stream task failed"
+                    );
+                }
+            });
+        }
+    }
+
     pub(super) async fn run(mut self) {
         loop {
             // Reap completed background tasks so the JoinSets shrink again
@@ -391,21 +429,9 @@ impl TurnActor {
                 &self.diag_tx,
             );
 
-            // Drain auxiliary stream-task JoinHandles (e.g. the TTS worker)
-            // sent from the stream so shutdown can abort them (#401). No
-            // admission cap: at most a handful are spawned per turn and they
-            // are bounded by the turn's own lifecycle.
-            while let Ok(handle) = self.aux_task_rx.try_recv() {
-                self.aux_tasks.spawn(async move {
-                    if let Err(e) = handle.await {
-                        tracing::warn!(
-                            component = "TurnActor",
-                            error = %e,
-                            "Auxiliary stream task failed"
-                        );
-                    }
-                });
-            }
+            // Drain auxiliary stream-task handles (e.g. the TTS worker) so
+            // shutdown can abort them (#401).
+            self.admit_aux_handles();
 
             // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {
@@ -676,6 +702,13 @@ impl TurnActor {
             handle.abort();
         }
         self.shutdown_proactive_llm_once().await;
+        // Cooperative cancel first: aux workers watching the turn's token
+        // (the TTS pipeline) exit gracefully instead of being force-aborted.
+        self.cancel_token.cancel();
+        // Admit aux handles that arrived after the run loop's last drain so
+        // teardown aborts them rather than dropping them (which would only
+        // detach, not cancel, the worker) (#401).
+        self.admit_aux_handles();
         // Abort any in-flight direct CallTool, classifier, and memory-writer tasks,
         // and clear any pending prompt oneshot senders.
         self.classifier_tasks.abort_all();
@@ -1291,10 +1324,18 @@ impl TurnActor {
                 true
             }
             EneCommand::Shutdown => {
+                // Cooperative cancel first: aux workers watching the turn's
+                // token (the TTS pipeline) exit gracefully instead of being
+                // force-aborted mid-flight.
+                self.cancel_token.cancel();
                 self.classifier_tasks.abort_all();
                 self.memory_writer_tasks.abort_all();
                 self.call_tool_tasks.abort_all();
                 self.bg_command_tasks.abort_all();
+                // Admit aux handles that arrived after the run loop's last
+                // drain so shutdown aborts them rather than dropping them
+                // (which would only detach, not cancel, the worker) (#401).
+                self.admit_aux_handles();
                 self.aux_tasks.abort_all();
                 self.abort_proactive_decision();
                 self.shutdown_proactive_llm_once().await;
@@ -2354,6 +2395,29 @@ where
 ///
 /// Keeps the actor's background task sets from growing without bound while
 /// surfacing panics through structured diagnostics (#236).
+/// A `tokio::task::JoinHandle` that aborts its task when dropped.
+///
+/// A bare `JoinHandle` is "detach on drop": dropping it (for example because
+/// the wrapper task that owned it was aborted by `JoinSet::abort_all()` on
+/// shutdown) stops *supervising* the task but does not cancel it. Wrapping
+/// the handle in this guard makes the abort propagate (#401): dropping the
+/// guard calls [`tokio::task::JoinHandle::abort`], so aborting (or dropping)
+/// the wrapper aborts the underlying worker. Aborting a task that already
+/// completed is a no-op, so wrapping a normally-finishing worker is harmless.
+///
+/// The guard must be constructed *outside* the wrapper future so it is part
+/// of the future's captured state: if the wrapper is aborted before its first
+/// poll, its future is dropped without ever running the body, and only
+/// captured state is dropped. A guard created inside the body would never be
+/// constructed in that case, leaving the inner handle merely detached.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn reap_join_set(
     set: &mut tokio::task::JoinSet<()>,
     component: &str,
@@ -2929,5 +2993,62 @@ mod tests {
             vec!["stale-plugin"]
         );
         assert_eq!(stale_llm_factory_names(&old_kinds, None), old_kinds);
+    }
+
+    /// Regression test for #401: a worker routed through `aux_task_tx` is
+    /// actually aborted on shutdown, not merely detached.
+    ///
+    /// The stand-in for the TTS worker never exits on its own — it loops
+    /// forever ticking a counter — so only the shutdown drain + `abort_all`
+    /// (the [`AbortOnDrop`] guard inside the wrapper task) can stop it. The
+    /// counter must stop advancing after [`EneCommand::Shutdown`], and the
+    /// actor's cancel token must be cancelled so cooperative workers (the
+    /// real TTS pipeline watches it) see the shutdown too.
+    #[tokio::test]
+    async fn shutdown_aborts_aux_worker_and_cancels_token() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor};
+        use std::sync::atomic::AtomicUsize;
+
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx) = build_bare_actor(registry, &task_caps);
+
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticks_in_worker = Arc::clone(&ticks);
+        let worker = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                ticks_in_worker.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        // Route the worker through the actor's aux channel, exactly as the
+        // TTS pipeline does with `aux_task_tx`.
+        drop(actor.aux_task_tx.send(worker));
+
+        // Let the worker actually start ticking.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(ticks.load(Ordering::SeqCst) > 0, "worker never started");
+
+        // Shutdown: drain + `abort_all` must stop the worker, and the turn
+        // token must be cancelled so cooperative workers notice too.
+        assert!(
+            !actor.handle_command(EneCommand::Shutdown).await,
+            "Shutdown must signal the run loop to exit"
+        );
+        assert!(
+            actor.cancel_token.is_cancelled(),
+            "Shutdown must cancel the turn's cancel token"
+        );
+
+        // The abort is delivered at the worker's next yield (its 1 ms sleep),
+        // so let it land before sampling, then verify the counter is stable.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let after_shutdown = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let later = ticks.load(Ordering::SeqCst);
+        assert_eq!(
+            after_shutdown, later,
+            "aux worker kept ticking after shutdown: the abort did not propagate"
+        );
     }
 }

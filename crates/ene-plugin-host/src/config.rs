@@ -132,6 +132,11 @@ ene_config::define_config!(
         /// hold the turn open forever: on expiry the prompt is treated as
         /// denied and the turn still reaches `Terminal`, releasing the turn
         /// gate. Defaults to 300000 ms (5 minutes).
+        ///
+        /// Unlike `health_interval_ms`, `0` does **not** disable the wait: it
+        /// makes the prompt time out immediately (fail-safe denied unless the
+        /// consumer has already answered). Use a large value if a consumer
+        /// legitimately needs a long time to answer.
         #[serde(default = "default_permission_prompt_timeout_ms")]
         pub permission_prompt_timeout_ms: u64 = default_permission_prompt_timeout_ms(),
         /// How long the runtime waits for a consumer to answer an interactive
@@ -140,6 +145,11 @@ ene_config::define_config!(
         /// Same fail-safe semantics as `permission_prompt_timeout_ms`. Typing
         /// an answer takes longer than clicking approve/deny, so this defaults
         /// higher: 600000 ms (10 minutes).
+        ///
+        /// Unlike `health_interval_ms`, `0` does **not** disable the wait: it
+        /// makes the prompt time out immediately (fail-safe cancelled unless
+        /// the consumer has already answered). Use a large value if a consumer
+        /// legitimately needs a long time to answer.
         #[serde(default = "default_user_input_prompt_timeout_ms")]
         pub user_input_prompt_timeout_ms: u64 = default_user_input_prompt_timeout_ms(),
         /// Interval between health probe pings in milliseconds.

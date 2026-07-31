@@ -1560,8 +1560,8 @@ mod tests {
     /// A `ToolRegistry` with no tools, whose `call_tool` always succeeds.
     /// Good enough for admission-cap tests below, which only care about how
     /// many times a `JoinSet` was asked to admit a task, not about real tool
-    /// behavior.
-    struct EmptyRegistry;
+    /// behavior. `pub(super)` so `actor::tests` can reuse it.
+    pub(super) struct EmptyRegistry;
 
     #[async_trait::async_trait]
     impl ene_plugin_host::ToolRegistry for EmptyRegistry {
@@ -1587,8 +1587,9 @@ mod tests {
     /// ever shrinks when something reaps it; calling `handle_command`
     /// directly means the length seen by `admit_task` across two successive
     /// calls in a test is fully deterministic regardless of how fast the
-    /// mock tool call actually completes.
-    fn build_bare_actor(
+    /// mock tool call actually completes. `pub(super)` so `actor::tests` can
+    /// reuse it.
+    pub(super) fn build_bare_actor(
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,
         task_caps: &crate::task_config::ToolRuntimeConfig,
     ) -> (actor::TurnActor, broadcast::Receiver<DiagnosticEvent>) {
