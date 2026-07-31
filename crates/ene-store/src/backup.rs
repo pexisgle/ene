@@ -192,14 +192,27 @@ fn unique_backup_path(db_path: &Path) -> PathBuf {
         .unwrap_or_default()
         .as_secs();
     let pid = std::process::id();
-    let mut name = db_path
+    let mut base = db_path
         .file_name()
         .map_or_else(|| "memory.db".into(), std::ffi::OsStr::to_os_string);
-    name.push(BACKUP_SUFFIX);
-    name.push(format!("{ts}.{pid}"));
-    match db_path.parent() {
-        Some(parent) => parent.join(name),
-        None => PathBuf::from(name),
+    base.push(BACKUP_SUFFIX);
+    // `VACUUM INTO` refuses to overwrite an existing file, so the name must be
+    // unique even when two backups land in the same second (e.g. the open-time
+    // backup followed by an explicit `MemoryStore::backup`). Append a counter
+    // until the path is free.
+    let mut candidate = format!("{ts}.{pid}");
+    let parent = match db_path.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => PathBuf::from("."),
+    };
+    loop {
+        let mut name = base.clone();
+        name.push(&candidate);
+        let path = parent.join(&name);
+        if !path.exists() {
+            return path;
+        }
+        candidate.push_str(".1");
     }
 }
 
