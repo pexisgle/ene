@@ -1,17 +1,14 @@
 //! Typed-memory, memory-embedding, memory-span, and pending-write queries.
 
 use super::{
-    EneMemoryError, MemoryStore, NaturalDecayReport, NewMemorySpan, cosine_similarity_expr,
-    cosine_similarity_filter, embedding_to_bytes, validate_embedding,
+    EneMemoryError, MemoryStore, NaturalDecayReport, NewMemorySpan, embedding_to_bytes,
+    validate_embedding,
 };
 use crate::entities;
 use chrono::{DateTime, Utc};
 use ene_core::{ActiveSceneSummaryRow, PendingMemoryWrite, PendingMemoryWriteStatus};
 use sea_orm::sea_query::Expr;
-use sea_orm::{
-    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
-    QuerySelect,
-};
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 
 /// Memory statuses eligible for hybrid recall: `active`, `faded`, and `disputed`.
 ///
@@ -741,7 +738,11 @@ impl MemoryStore {
     }
 
     /// Vector similarity search with configurable recallable statuses.
-    async fn search_typed_memories_vector(
+    ///
+    /// Uses the `vec0` ANN index (`vec_memory_embeddings`) for candidate
+    /// retrieval, then joins back to `typed_memories` for status and
+    /// user-visibility filtering (#304).
+    pub(crate) async fn search_typed_memories_vector(
         &self,
         query_embedding: &[f32],
         character_id: &str,
@@ -751,6 +752,166 @@ impl MemoryStore {
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<(crate::MemoryItem, f32)>, EneMemoryError> {
+        use sea_orm::{DbBackend, FromQueryResult, Statement};
+
+        #[derive(Debug, FromQueryResult)]
+        struct VecSearchRow {
+            id: i64,
+            scope: String,
+            character_id: String,
+            user_id: String,
+            kind: String,
+            title: String,
+            content: String,
+            source: String,
+            source_ref: Option<String>,
+            confidence: f32,
+            salience: f32,
+            affective_valence: f32,
+            affective_arousal: f32,
+            relationship_impact: f32,
+            access_count: i64,
+            last_accessed_at: Option<DateTime<Utc>>,
+            created_at: DateTime<Utc>,
+            updated_at: DateTime<Utc>,
+            valid_from: Option<DateTime<Utc>>,
+            valid_until: Option<DateTime<Utc>>,
+            status: String,
+            supersedes_id: Option<i64>,
+            pinned: i32,
+            faded_at: Option<DateTime<Utc>>,
+            commitment_id: Option<i64>,
+            similarity: f64,
+        }
+
+        validate_embedding(query_embedding, self.embedding_dim)?;
+
+        let query_bytes = embedding_to_bytes(query_embedding);
+        let max_distance = 1.0_f64 - f64::from(similarity_threshold);
+        // Over-fetch from the ANN index to survive post-KNN status/user
+        // filtering. Factor of 4 matches the tool-search heuristic.
+        let knn_k = (limit as u64).saturating_mul(4).max(limit as u64).max(1);
+
+        let status_placeholders: Vec<&str> = statuses.iter().map(|_| "?").collect();
+        let status_list = status_placeholders.join(", ");
+
+        let user_filter = if user_id.is_some() {
+            "AND (tm.user_id = ? OR tm.user_id = '')"
+        } else {
+            ""
+        };
+
+        let sql = format!(
+            "WITH knn AS ( \
+                 SELECT memory_embedding_id, distance \
+                 FROM vec_memory_embeddings \
+                 WHERE embedding MATCH ? \
+                   AND k = ? \
+                   AND character_id = ? \
+                   AND model_name = ? \
+                   AND field = 'content' \
+                   AND distance <= ? \
+             ) \
+             SELECT \
+                 tm.id, tm.scope, tm.character_id, tm.user_id, tm.kind, \
+                 tm.title, tm.content, tm.source, tm.source_ref, \
+                 tm.confidence, tm.salience, \
+                 tm.affective_valence, tm.affective_arousal, \
+                 tm.relationship_impact, tm.access_count, \
+                 tm.last_accessed_at, tm.created_at, tm.updated_at, \
+                 tm.valid_from, tm.valid_until, tm.status, \
+                 tm.supersedes_id, tm.pinned, tm.faded_at, tm.commitment_id, \
+                 1.0 - knn.distance AS similarity \
+             FROM knn \
+             INNER JOIN memory_embeddings me ON me.id = knn.memory_embedding_id \
+             INNER JOIN typed_memories tm ON tm.id = me.memory_item_id \
+             WHERE tm.character_id = ? \
+               AND tm.status IN ({status_list}) \
+               {user_filter} \
+             ORDER BY knn.distance ASC \
+             LIMIT ?"
+        );
+
+        let mut values: Vec<sea_orm::Value> = vec![
+            sea_orm::Value::from(query_bytes),
+            sea_orm::Value::from(knn_k),
+            sea_orm::Value::from(character_id.to_string()),
+            sea_orm::Value::from(model_name.to_string()),
+            sea_orm::Value::from(max_distance),
+            sea_orm::Value::from(character_id.to_string()),
+        ];
+        for s in statuses {
+            values.push(sea_orm::Value::from((*s).to_string()));
+        }
+        if let Some(uid) = user_id {
+            values.push(sea_orm::Value::from(uid.to_string()));
+        }
+        values.push(sea_orm::Value::from(limit as u64));
+
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                &sql,
+                values,
+            ))
+            .await?;
+
+        rows.iter()
+            .map(|row| {
+                let r = VecSearchRow::from_query_result(row, "")?;
+                Ok((
+                    crate::MemoryItem {
+                        id: Some(r.id),
+                        scope: crate::MemoryScope::from_db_str(&r.scope),
+                        character_id: r.character_id,
+                        user_id: r.user_id,
+                        kind: crate::MemoryKind::from_db_str(&r.kind),
+                        title: r.title,
+                        content: r.content,
+                        source: crate::MemorySource::from_db_str(&r.source),
+                        source_ref: r.source_ref,
+                        confidence: crate::MemoryConfidence::new(r.confidence),
+                        salience: crate::MemorySalience::new(r.salience),
+                        affect: crate::AffectAnnotation {
+                            valence: r.affective_valence,
+                            arousal: r.affective_arousal,
+                        },
+                        relationship_impact: r.relationship_impact,
+                        access_count: r.access_count,
+                        last_accessed_at: r.last_accessed_at,
+                        created_at: r.created_at,
+                        updated_at: r.updated_at,
+                        valid_from: r.valid_from,
+                        valid_until: r.valid_until,
+                        status: crate::MemoryStatus::from_db_str(&r.status),
+                        supersedes_id: r.supersedes_id,
+                        pinned: r.pinned != 0,
+                        faded_at: r.faded_at,
+                        commitment_id: r.commitment_id,
+                    },
+                    r.similarity as f32,
+                ))
+            })
+            .collect()
+    }
+
+    /// Brute-force vector search (full-row scan) — retained for test
+    /// comparison against the ANN-indexed path (#304).
+    #[cfg(test)]
+    pub(crate) async fn search_typed_memories_vector_brute_force(
+        &self,
+        query_embedding: &[f32],
+        character_id: &str,
+        model_name: &str,
+        user_id: Option<&str>,
+        statuses: &[&str],
+        limit: usize,
+        similarity_threshold: f32,
+    ) -> Result<Vec<(crate::MemoryItem, f32)>, EneMemoryError> {
+        use super::{cosine_similarity_expr, cosine_similarity_filter};
+        use sea_orm::{FromQueryResult, QueryOrder, QuerySelect};
+
         #[derive(Debug, FromQueryResult)]
         struct SearchMemoryRow {
             id: i64,
@@ -783,8 +944,6 @@ impl MemoryStore {
 
         let query_bytes = embedding_to_bytes(query_embedding);
         let similarity_expr = cosine_similarity_expr("memory_embeddings.embedding", &query_bytes);
-
-        validate_embedding(query_embedding, self.embedding_dim)?;
 
         let threshold_val = f64::from(similarity_threshold);
         let limit_val = limit as u64;

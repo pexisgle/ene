@@ -1,13 +1,15 @@
 //! Tool-embedding index queries.
 
 use super::{
-    EneMemoryError, MemoryStore, ToolEmbeddingFieldRow, bytes_to_embedding, cosine_similarity_expr,
-    cosine_similarity_filter, embedding_to_bytes, validate_embedding,
+    EneMemoryError, MemoryStore, ToolEmbeddingFieldRow, bytes_to_embedding, embedding_to_bytes,
+    validate_embedding,
 };
 use crate::entities;
 use chrono::Utc;
-use sea_orm::sea_query::{Expr, OnConflict};
-use sea_orm::{ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, EntityTrait, FromQueryResult, QueryFilter, QuerySelect,
+};
 
 impl MemoryStore {
     // ── Tool Embeddings (multi-vector) ──────────────────────────────────────
@@ -153,45 +155,54 @@ impl MemoryStore {
     /// fields, then aggregates the per-field similarity scores for each tool
     /// using max-pool (the strongest signal wins). Returns tools sorted by
     /// aggregated similarity.
+    ///
+    /// Uses the `vec0` ANN index (`vec_tool_embeddings`) for candidate
+    /// retrieval (#304).
     pub async fn search_tools(
         &self,
         query_embedding: &[f32],
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<(String, f32)>, EneMemoryError> {
-        #[derive(Debug, FromQueryResult)]
-        struct SearchToolRow {
-            tool_name: String,
-            similarity: f64,
-        }
+        use sea_orm::{DbBackend, Statement};
 
         validate_embedding(query_embedding, self.embedding_dim)?;
 
         let query_bytes = embedding_to_bytes(query_embedding);
-        let similarity_expr = cosine_similarity_expr("embedding", &query_bytes);
-
+        let max_distance = 1.0_f64 - f64::from(similarity_threshold);
         let factor = 4u64;
-        let row_cap = (limit as u64).saturating_mul(factor).max(limit as u64);
+        let row_cap = (limit as u64)
+            .saturating_mul(factor)
+            .max(limit as u64)
+            .max(1);
 
-        let select = entities::tool_embedding_index::Entity::find()
-            .select_only()
-            .column(entities::tool_embedding_index::Column::ToolName)
-            .expr_as(similarity_expr, "similarity")
-            .filter(cosine_similarity_filter(
-                "embedding",
-                &query_bytes,
-                f64::from(similarity_threshold),
+        let sql = "SELECT tool_name, 1.0 - distance AS similarity \
+                   FROM vec_tool_embeddings \
+                   WHERE embedding MATCH ? \
+                     AND k = ? \
+                     AND distance <= ? \
+                   ORDER BY distance ASC";
+
+        let rows = self
+            .db
+            .query_all_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                sql,
+                vec![
+                    sea_orm::Value::from(query_bytes),
+                    sea_orm::Value::from(row_cap),
+                    sea_orm::Value::from(max_distance),
+                ],
             ))
-            .order_by_desc(Expr::col("similarity"))
-            .limit(row_cap);
-
-        let rows = select.into_model::<SearchToolRow>().all(&self.db).await?;
+            .await?;
 
         use std::collections::HashMap;
         let mut by_tool: HashMap<String, f32> = HashMap::new();
-        for row in rows {
-            let sim = row.similarity as f32;
-            let entry = by_tool.entry(row.tool_name).or_insert(f32::MIN);
+        for row in &rows {
+            let tool_name: String = row.try_get_by_index(0).map_err(EneMemoryError::from)?;
+            let sim: f64 = row.try_get_by_index(1).map_err(EneMemoryError::from)?;
+            let sim = sim as f32;
+            let entry = by_tool.entry(tool_name).or_insert(f32::MIN);
             if sim > *entry {
                 *entry = sim;
             }
