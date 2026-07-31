@@ -499,6 +499,12 @@ pub struct TopicBoundaryConfig {
     /// Weight of the silence term in the composite score.
     pub weight_silence: f32,
     /// Weight of the topic-length (turn-count) term in the composite score.
+    ///
+    /// Invariant: this must stay **below** `boundary_threshold`. The topic-length
+    /// factor saturates at `1.0` once a topic reaches `max_topic_turns`, so a
+    /// weight at or above the threshold would fire a boundary on its own —
+    /// turning the soft cap into a hard cap that force-splits every coherent
+    /// topic at `max_topic_turns` regardless of drift or silence (#367).
     pub weight_topic_length: f32,
     /// Moving-average blend factor for the centroid: the fraction of a new
     /// qualifying embedding folded in each turn. A small value keeps the
@@ -524,9 +530,9 @@ impl Default for TopicBoundaryConfig {
         Self {
             enabled: true,
             boundary_threshold: 0.30,
-            weight_centroid: 0.50,
+            weight_centroid: 0.60,
             weight_silence: 0.15,
-            weight_topic_length: 0.35,
+            weight_topic_length: 0.25,
             centroid_alpha: 0.15,
             min_utterance_chars: 6,
             silence_saturation_secs: 300,

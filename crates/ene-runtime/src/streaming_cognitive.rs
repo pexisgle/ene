@@ -1219,10 +1219,11 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             session.record_assistant_response();
 
             // Topic-boundary detection (#367): score the completed turn against
-            // the running topic centroid in the same deferred slot as memory
-            // writing and affect classification, so it never delays the
-            // response. Detection only — retrospective compression (#368) and
-            // session splitting (#369) consume the signal in later stages.
+            // the running topic centroid after the response text has streamed
+            // (so the user-facing reply is never delayed) and before the
+            // deferred memory-writing slot spawns. Detection only —
+            // retrospective compression (#368) and session splitting (#369)
+            // consume the signal in later stages.
             if !is_proactive {
                 let utterance_chars = user_input.chars().count();
                 if let Some(signal) =

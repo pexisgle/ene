@@ -104,16 +104,21 @@ completed turn is scored with a composite of three signals:
 
 The turn-count term is the accumulator that makes **gradual** drift detectable:
 a centroid that tracks its topic closely keeps the distance term small, but an
-over-long topic is still flagged through its turn count. Utterances shorter
+over-long topic accumulates turn-count pressure that pushes an already
+suspicious topic (drift or silence) across the threshold. It is a *soft* cap:
+`weight_topic_length` must stay below `boundary_threshold`, so the turn-count
+term can never fire a boundary on its own — a perfectly coherent, long-running
+topic is not force-split. Utterances shorter
 than `mind.topic_boundary.min_utterance_chars` are treated as backchannels —
 they neither score a boundary nor update the centroid, so a "うん" cannot
 corrupt the topic model. No hard-coded keyword list ("ところで", "話は変わるけど",
 …) is used; the embeddings carry the signal, which keeps the detector working
 across languages.
 
-Detection runs in the same deferred post-turn slot as memory writing and affect
-classification, so it never delays the response, and it considers the user
-input embedding of the completed turn. The centroid lifecycle is:
+Detection runs after the response text has streamed (so it never delays the
+user-facing reply) and before the deferred memory-writing slot spawns, and it
+considers the user input embedding of the completed turn. The centroid
+lifecycle is:
 
 | Trigger | Centroid |
 |---|---|

@@ -224,6 +224,12 @@ impl TopicBoundaryTracker {
 /// the soft cap, saturating at `1.0`. An over-long topic is likely to contain
 /// multiple topics, so this term accumulates even when the centroid keeps
 /// tracking the drift closely — this is what makes gradual drift detectable.
+///
+/// The term alone can never cross the boundary: [`TopicBoundaryConfig`]
+/// requires `weight_topic_length < boundary_threshold` (the default 0.25 vs
+/// 0.30), so the length component only pushes an already-suspicious topic
+/// (drift or silence) over the line instead of force-splitting every coherent
+/// topic at the cap.
 fn topic_length_factor(turns_in_topic: usize, config: &TopicBoundaryConfig) -> f32 {
     let cap = config.max_topic_turns.max(1) as f32;
     (turns_in_topic as f32 / cap).clamp(0.0, 1.0)
@@ -321,25 +327,64 @@ mod tests {
         let mut tracker = TopicBoundaryTracker::new();
         let cfg = config();
         let dim = 4;
-        // Drift slowly from axis 0 toward axis 1 across many turns. Each step
-        // stays close enough to the (tracking) centroid that the distance term
-        // alone never trips the threshold; the accumulating turn count does.
-        let steps = 40;
-        let mut detected = false;
+        // Drift slowly from axis 0 toward axis 1 across a full `max_topic_turns`
+        // topic. Each step stays close enough to the (tracking) centroid that
+        // the distance term alone never trips the threshold — the lag between
+        // the centroid and the drifting input yields a cosine distance of
+        // roughly 0.26 here, far below the 0.30 threshold. The accumulating
+        // turn-count term provides the remaining push, so the boundary fires at
+        // the soft cap. A naive consecutive-pair similarity check would miss
+        // this: adjacent utterances are ~0.99 similar.
+        let steps = cfg.max_topic_turns;
+        let mut detected_at = None;
+        let mut peak_centroid_term = 0.0_f32;
         for i in 0..=steps {
             let t = i as f32 / steps as f32;
             let emb = blend(dim, 0, 1, t);
             let signal = tracker.observe_turn(&cfg, &emb, 40, t0());
             if signal.boundary {
-                detected = true;
+                detected_at = Some(i);
                 assert!(
                     signal.topic_length_factor > signal.centroid_distance,
                     "gradual drift should be caught by the turn-count term"
                 );
                 break;
             }
+            peak_centroid_term =
+                peak_centroid_term.max(cfg.weight_centroid * signal.centroid_distance);
         }
-        assert!(detected, "gradual drift was never flagged");
+        assert!(
+            peak_centroid_term < cfg.boundary_threshold,
+            "the distance term alone never crosses the threshold — the turn count provides the final push"
+        );
+        assert!(
+            detected_at.is_some_and(|i| i >= steps.saturating_sub(4)),
+            "gradual drift should cross the threshold only as the turn-count term accumulates, got {detected_at:?}"
+        );
+    }
+
+    #[test]
+    fn stable_topic_never_fires_boundary_at_the_soft_cap() {
+        let mut tracker = TopicBoundaryTracker::new();
+        let cfg = config();
+        let topic = axis(4, 0);
+        // A perfectly coherent topic: identical utterances, no silence. The
+        // turn-count term saturates at the soft cap, but with
+        // `weight_topic_length < boundary_threshold` (the documented invariant)
+        // it can never cross the threshold on its own (#367).
+        let mut seen = 0;
+        for _ in 0..=cfg.max_topic_turns.saturating_mul(2) {
+            let signal = tracker.observe_turn(&cfg, &topic, 40, t0());
+            assert!(!signal.boundary);
+            seen += 1;
+            if seen > cfg.max_topic_turns {
+                // Past the soft cap the term is saturated, yet the score must
+                // stay below the threshold — the invariant that makes the cap
+                // soft rather than a hard force-split.
+                assert!(signal.topic_length_factor > 0.99);
+            }
+        }
+        assert!(seen > cfg.max_topic_turns, "test must exceed the soft cap");
     }
 
     #[test]
