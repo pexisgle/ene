@@ -4,13 +4,10 @@
 //! wire protocol to a [`Plugin`] trait implementation. A minimal server loop
 //! (mirroring [`ene_plugin::run_plugin_server`]) accepts connections on a
 //! Unix socket, dispatches requests to the plugin, and writes responses.
-#![allow(
+#![expect(
     clippy::unwrap_used,
-    clippy::unwrap_in_result,
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing,
-    clippy::manual_let_else,
     reason = "integration tests use unwrap/expect/panic for assertions"
 )]
 
@@ -201,14 +198,11 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             request_id: request_id.clone(),
         },
         PluginIpcRequest::GetConfigSchema { request_id } => {
-            let tool = match &dispatch.tool {
-                Some(t) => t,
-                None => {
-                    return PluginIpcResponse::ConfigSchema {
-                        request_id: request_id.clone(),
-                        schema: None,
-                    };
-                }
+            let Some(tool) = &dispatch.tool else {
+                return PluginIpcResponse::ConfigSchema {
+                    request_id: request_id.clone(),
+                    schema: None,
+                };
             };
             PluginIpcResponse::ConfigSchema {
                 request_id: request_id.clone(),
@@ -229,14 +223,11 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             deferred,
             context,
         } => {
-            let tool = match &dispatch.tool {
-                Some(t) => t,
-                None => {
-                    return PluginIpcResponse::Error {
-                        request_id: request_id.clone(),
-                        message: "no tool plugin".to_string(),
-                    };
-                }
+            let Some(tool) = &dispatch.tool else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no tool plugin".to_string(),
+                };
             };
             let ctx_ref = context.as_ref();
             if *deferred {
@@ -275,14 +266,11 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             request_id,
             permission_request_id,
         } => {
-            let tool = match &dispatch.tool {
-                Some(t) => t,
-                None => {
-                    return PluginIpcResponse::Error {
-                        request_id: request_id.clone(),
-                        message: "no tool plugin".to_string(),
-                    };
-                }
+            let Some(tool) = &dispatch.tool else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no tool plugin".to_string(),
+                };
             };
             match tool.approve_permission(permission_request_id) {
                 Ok(()) => PluginIpcResponse::Ack {
@@ -299,14 +287,11 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             action,
             target_pattern,
         } => {
-            let tool = match &dispatch.tool {
-                Some(t) => t,
-                None => {
-                    return PluginIpcResponse::Error {
-                        request_id: request_id.clone(),
-                        message: "no tool plugin".to_string(),
-                    };
-                }
+            let Some(tool) = &dispatch.tool else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no tool plugin".to_string(),
+                };
             };
             match tool.allow_pattern(action, target_pattern) {
                 Ok(()) => PluginIpcResponse::Ack {
@@ -323,14 +308,11 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             action,
             target_pattern,
         } => {
-            let tool = match &dispatch.tool {
-                Some(t) => t,
-                None => {
-                    return PluginIpcResponse::Error {
-                        request_id: request_id.clone(),
-                        message: "no tool plugin".to_string(),
-                    };
-                }
+            let Some(tool) = &dispatch.tool else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no tool plugin".to_string(),
+                };
             };
             match tool.revoke_pattern(action, target_pattern) {
                 Ok(()) => PluginIpcResponse::Ack {
@@ -346,14 +328,11 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             request_id,
             task_id,
         } => {
-            let tool = match &dispatch.tool {
-                Some(t) => t,
-                None => {
-                    return PluginIpcResponse::Error {
-                        request_id: request_id.clone(),
-                        message: "no tool plugin".to_string(),
-                    };
-                }
+            let Some(tool) = &dispatch.tool else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no tool plugin".to_string(),
+                };
             };
             match tool.poll_deferred(task_id) {
                 Ok(status) => PluginIpcResponse::DeferredStatus {
@@ -371,14 +350,11 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             request_id,
             task_id,
         } => {
-            let tool = match &dispatch.tool {
-                Some(t) => t,
-                None => {
-                    return PluginIpcResponse::Error {
-                        request_id: request_id.clone(),
-                        message: "no tool plugin".to_string(),
-                    };
-                }
+            let Some(tool) = &dispatch.tool else {
+                return PluginIpcResponse::Error {
+                    request_id: request_id.clone(),
+                    message: "no tool plugin".to_string(),
+                };
             };
             match tool.cancel_deferred(task_id) {
                 Ok(()) => PluginIpcResponse::Ack {

@@ -40,15 +40,6 @@
 //! here needed migrating; if a future change makes `process_chunk` slow
 //! enough to need a dedicated worker thread and cooperative timeouts, this
 //! doc comment is the note that it stopped being the exception.
-#![allow(
-    clippy::arithmetic_side_effects,
-    reason = "VAD chunk and failure-counter arithmetic uses bounded counters"
-)]
-#![allow(
-    clippy::indexing_slicing,
-    reason = "VAD indexes into fixed-size recurrent state buffers"
-)]
-
 #[cfg(feature = "silero-vad")]
 use ene_ai::VadEvent;
 use ene_ai::{AudioProviderError, AudioProviderRegistry, VadEngine, VadFactory};

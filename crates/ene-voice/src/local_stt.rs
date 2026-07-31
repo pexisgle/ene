@@ -22,15 +22,6 @@
 //! for it. There is no `Arc`, no `Mutex`, and no take/put-back — a cancelled
 //! or panicking job simply leaves the field where it is (or the whole model
 //! is rebuilt from the factory on panic).
-#![allow(
-    clippy::arithmetic_side_effects,
-    reason = "FIR filter and resampler use bounded counter arithmetic over PCM buffers"
-)]
-#![allow(
-    clippy::indexing_slicing,
-    reason = "resampler indexes into bounded PCM buffers with clamped positions"
-)]
-
 #[cfg(feature = "local-stt")]
 use std::sync::Arc;
 #[cfg(feature = "local-stt")]

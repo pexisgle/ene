@@ -130,54 +130,43 @@ ene-vrm = { path = "crates/ene-vrm" }
 run-for-all = true
 
 [workspace.lints.clippy]
-# `all` and `pedantic` are legitimate groups meant for blanket enabling.
-# `restriction` is NOT: clippy documents it as an opt-in menu of mutually
-# contradictory lints, not a group to deny wholesale (that's what the
-# built-in `blanket_clippy_restriction_lints` warning exists to flag). Only
-# the individual `restriction` lints that encode a real project convention
-# are enabled below, each denied by name with a reason.
+# `restriction` is an opt-in menu, not a group to deny wholesale; its lints are
+# adopted one by one below.
 all      = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 cargo    = { level = "deny", priority = -1 }
 
-# ── `pedantic` lints this codebase has decided not to follow ──
+# ── `pedantic` / `cargo` opt-outs ──
+cargo_common_metadata = "allow"
 cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
-cast_possible_wrap = "allow"
-missing_panics_doc = "allow"
-missing_errors_doc = "allow"
-too_many_lines = "allow"
 items_after_statements = "allow"
-module_name_repetitions = "allow"
-struct_excessive_bools = "allow"
 large_futures = "allow"
-must_use_candidate = "allow"
-
-# ── `cargo` lints this codebase has decided not to follow ──
-cargo_common_metadata = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
+must_use_candidate = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
 
-# ── `restriction` lints adopted individually: real conventions with teeth ──
-# Test code is exempted crate-by-crate via
-# `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` (see
-# crates/ene-runtime/src/lib.rs for the pattern), not a workspace allow.
-unwrap_used = "deny"
+# ── `restriction` lints adopted individually ──
+# Exceptions are `#[expect(lint, reason = "...")]`, scoped as narrowly as
+# possible — never a workspace-wide allow.
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
 expect_used = "deny"
+let_underscore_must_use = "deny"
+mem_forget = "deny"
 panic = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
 todo = "deny"
 unimplemented = "deny"
-# `apps/ene-cli` allows these at the crate level since CLI output is its whole job.
-print_stdout = "deny"
-print_stderr = "deny"
-# Catches debug scaffolding left behind.
-dbg_macro = "deny"
-# Resource-leak prevention.
-mem_forget = "deny"
-# Catches silently dropped `Result`s.
-let_underscore_must_use = "deny"
-
-allow_attributes_without_reason = "deny"
+unwrap_used = "deny"
 
 [profile.dev]
 debug = "line-tables-only"
@@ -223,13 +212,8 @@ debug = true
 opt-level = 3
 lto = true
 codegen-units = 1
-# panic = "abort" intentionally omitted (defaults to "unwind"): ene-runtime's
-# actor relies on catch_unwind-based panic isolation (see
-# `isolate_panic()`/`run_command_isolated()` in
-# crates/ene-runtime/src/handle/actor.rs) to stop a panicking command or
-# background task from taking down the whole actor/process. `panic = "abort"`
-# would silently disable that guarantee in release builds. See
-# docs/architecture.md "Fault tolerance" section. Do not re-add this without
-# reading that section first.
+# `panic = "abort"` is deliberately omitted: ene-runtime's actor relies on
+# catch_unwind isolation (crates/ene-runtime/src/handle/actor.rs, and
+# docs/architecture.md "Fault tolerance"). Do not add it.
 strip = true
 overflow-checks = true

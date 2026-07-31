@@ -3,13 +3,10 @@
 //! These tests spin up a mock plugin server on a Unix domain socket and
 //! exercise [`IpcPluginConnection`] against it, verifying the full
 //! request/response cycle over the v3 wire protocol.
-#![allow(
-    clippy::unwrap_used,
-    clippy::unwrap_in_result,
+#![expect(
     clippy::expect_used,
     clippy::panic,
-    clippy::indexing_slicing,
-    reason = "integration tests use unwrap/expect/panic for assertions"
+    reason = "integration tests use expect/panic for assertions"
 )]
 
 use std::path::PathBuf;

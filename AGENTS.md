@@ -34,13 +34,15 @@ CI additionally runs `cargo doc --workspace --no-deps`. It is deliberately *not*
 `[workspace.lints.clippy]` in the root `Cargo.toml` denies `all`, `pedantic`, and `cargo` as
 whole groups, plus these individually: `unwrap_used`, `expect_used`, `panic`, `todo`,
 `unimplemented`, `dbg_macro`, `mem_forget`, `let_underscore_must_use`, `print_stdout`,
-`print_stderr`. Clippy failures are build failures.
+`print_stderr`, `allow_attributes`, `allow_attributes_without_reason`. Clippy failures are
+build failures.
 
 - No `unwrap`/`expect`/panic paths in production code. Tests opt out per-crate via
   `#![cfg_attr(test, expect(clippy::unwrap_used, ...))]` — see `crates/ene-runtime/src/lib.rs`.
-- `allow_attributes_without_reason` is denied: every exception must be
-  `#[expect(lint, reason = "...")]`, scoped as narrowly as possible. Never widen a lint
-  workspace-wide to make an error go away.
+- `allow_attributes` and `allow_attributes_without_reason` are denied: every exception must be
+  `#[expect(lint, reason = "...")]`, scoped as narrowly as possible — `#[allow]` is rejected
+  outright, so a stale exception surfaces as `unfulfilled_lint_expectations` instead of
+  silently lingering. Never widen a lint workspace-wide to make an error go away.
 - `clippy::restriction` is intentionally *not* blanket-enabled; adopt lints from it one at a
   time with a reason comment.
 
