@@ -21,7 +21,7 @@ pub struct Vec0EmbeddingIndexMigration;
 
 impl MigrationName for Vec0EmbeddingIndexMigration {
     fn name(&self) -> &'static str {
-        "m20260731_000004_vec0_embedding_index"
+        "m20260731_000006_vec0_embedding_index"
     }
 }
 

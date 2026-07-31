@@ -71,13 +71,17 @@ pub fn init_sqlite_vec() {
 ///
 /// Called during store initialization after migrations. For databases
 /// upgraded from a pre-vec0 schema the migration
-/// `m20260731_000004_vec0_embedding_index` already created and backfilled
+/// `m20260731_000006_vec0_embedding_index` already created and backfilled
 /// the tables; this function is a no-op in that case (`IF NOT EXISTS`).
 /// For fresh databases (no embeddings at migration time) this is where
 /// the tables are first created.
 ///
 /// If the embedding dimension changes (e.g. user switches embedding models),
-/// the vec0 tables are dropped and recreated to match the new dimension.
+/// the vec0 tables are dropped and recreated empty at the new dimension.
+/// Existing vectors of the old dimension cannot be inserted into the
+/// recreated `float[N]` table, so they are left out and a re-embedding pass
+/// is required (a warning is logged). KNN search returns no rows for the
+/// stale vectors until then; the store itself stays usable.
 ///
 /// Sync triggers on `memory_embeddings` and `tool_embedding_index` keep
 /// the `vec0` shadow tables consistent through all write paths, including
@@ -94,22 +98,52 @@ pub(crate) async fn ensure_vec0_index(
     // The vec0 column definition bakes in `float[N]` at creation time, so a
     // dimension change (e.g. switching embedding models) requires a rebuild.
     // We read the stored CREATE statement from sqlite_master and check for
-    // the expected `float[{dim}]` substring.
-    let needs_recreate = if let Some(row) = db
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Sqlite,
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_memory_embeddings'",
-            [],
-        ))
-        .await?
-    {
-        let sql: String = row.try_get_by_index(0).map_err(|e| {
-            EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
-        })?;
-        !sql.contains(&format!("float[{dim}]"))
-    } else {
-        false
+    // the expected `float[{dim}]` substring. Both shadow tables are checked:
+    // a dimension change rebuilds both, and only re-creating one of them
+    // would leave the pair inconsistent.
+    let needs_recreate = {
+        let check = |table: &str| {
+            db.query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                [table.into()],
+            ))
+        };
+        let mem_sql = match check("vec_memory_embeddings").await? {
+            Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
+                EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
+            })?),
+            None => None,
+        };
+        let tool_sql = match check("vec_tool_embeddings").await? {
+            Some(row) => Some(row.try_get_by_index::<String>(0).map_err(|e| {
+                EneMemoryError::MemoryStoreConnectionError(format!("read sqlite_master: {e}"))
+            })?),
+            None => None,
+        };
+        match (mem_sql, tool_sql) {
+            (Some(m), Some(t)) => {
+                !m.contains(&format!("float[{dim}]")) || !t.contains(&format!("float[{dim}]"))
+            }
+            // One or both tables missing: recreate path below creates them.
+            _ => true,
+        }
     };
+
+    // Whether the shadow tables existed at all before this call. A dimension
+    // change drops them, but the old-dimension vectors cannot be inserted
+    // into the recreated `float[N]` table, so the backfill below only runs
+    // when the tables are being created for the *first* time (fresh DB or
+    // upgrade path with no prior vec0 tables).
+    let existed_before = needs_recreate
+        && db
+            .query_one_raw(Statement::from_sql_and_values(
+                DbBackend::Sqlite,
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                ["vec_memory_embeddings".into()],
+            ))
+            .await?
+            .is_some();
 
     if needs_recreate {
         db.execute_unprepared("DROP TABLE IF EXISTS vec_memory_embeddings")
@@ -142,8 +176,12 @@ pub(crate) async fn ensure_vec0_index(
     ))
     .await?;
 
-    // Backfill if we recreated the tables
-    if needs_recreate {
+    // Backfill the freshly-created tables. This only happens when the
+    // shadow tables did not exist before (first creation): after a
+    // dimension change the old-dimension vectors are incompatible with the
+    // new `float[N]` definition and are left out, requiring a re-embedding
+    // pass (logged below).
+    if needs_recreate && !existed_before {
         db.execute_unprepared(
             "INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
              SELECT me.id, me.embedding, tm.character_id, me.model_name, me.field \
@@ -157,6 +195,17 @@ pub(crate) async fn ensure_vec0_index(
              SELECT id, embedding, tool_name FROM tool_embedding_index",
         )
         .await?;
+    } else if needs_recreate {
+        // Dimension change: the old vectors cannot be re-inserted into the
+        // recreated tables. The store remains usable (KNN simply returns no
+        // rows until re-embedding), which is strictly better than failing
+        // startup forever on a model switch.
+        tracing::warn!(
+            component = "ene-store",
+            new_dimension = dim,
+            "Embedding dimension changed; vec0 index recreated empty, \
+             re-embedding of existing memories/tools required"
+        );
     }
 
     // ── Sync triggers: memory_embeddings → vec_memory_embeddings ──

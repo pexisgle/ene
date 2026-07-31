@@ -2231,3 +2231,72 @@ async fn vec0_search_respects_threshold() {
         "orthogonal vector must be filtered by threshold 0.5"
     );
 }
+
+/// Changing the embedding dimension must not brick the store: the vec0
+/// shadow tables are dropped and recreated empty at the new dimension, the
+/// old-dimension vectors are left out (they cannot fit the new `float[N]`
+/// schema), and KNN search returns no rows instead of erroring.
+#[tokio::test]
+async fn vec0_dimension_change_rebuilds_empty_not_fail() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("memory.db");
+
+    // Open with dim=4 and populate embeddings.
+    let store = MemoryStore::open(&path, 4).await.expect("open dim=4");
+    let item = test_memory_item("dim change", "content before model switch");
+    let id = store.insert_typed_memory(&item).await.unwrap();
+    store
+        .upsert_memory_embedding(id, "model-a", "content", &[1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    drop(store);
+
+    // Reopen with a different embedding model (dim=8). This must succeed —
+    // previously the backfill of 4-dim vectors into the recreated float[8]
+    // table failed and `MemoryStore::open` errored forever after (#304).
+    let store = MemoryStore::open(&path, 8).await.expect("reopen dim=8");
+    let results = store
+        .search_typed_memories_vector(
+            &vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "ene",
+            "model-b",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    // Stale old-dimension vectors are not in the index until re-embedded.
+    assert_eq!(
+        results.len(),
+        0,
+        "old vectors must not appear after dim change"
+    );
+
+    // The store must still accept new-dimension embeddings.
+    let item2 = test_memory_item("dim change 2", "content after model switch");
+    let id2 = store.insert_typed_memory(&item2).await.unwrap();
+    store
+        .upsert_memory_embedding(
+            id2,
+            "model-b",
+            "content",
+            &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await
+        .unwrap();
+    let results = store
+        .search_typed_memories_vector(
+            &vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "ene",
+            "model-b",
+            None,
+            &["active"],
+            10,
+            0.0,
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1, "new vectors must be searchable");
+}
