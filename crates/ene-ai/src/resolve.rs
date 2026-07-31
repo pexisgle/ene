@@ -1122,8 +1122,10 @@ mod tests {
     }
 
     /// Build an [`AiConfig`] whose chat and proactive tasks both route to a
-    /// local model with the given context size (#366 test helper).
-    fn local_chat_config(context_size: u32) -> AiConfig {
+    /// local model with the given context size and chat output reserve (#366
+    /// test helper). The proactive reserve is fixed at 2,048 (a typical local
+    /// companion utterance).
+    fn local_chat_config(context_size: u32, chat_max_tokens: u32) -> AiConfig {
         let mut cfg = AiConfig::default();
         cfg.local_models.insert(
             "gemma".to_string(),
@@ -1135,7 +1137,7 @@ mod tests {
         cfg.tasks.chat = TaskRef {
             provider: crate::config::LOCAL_PROVIDER.to_string(),
             model: Some("gemma".to_string()),
-            max_tokens: Some(8_192),
+            max_tokens: Some(chat_max_tokens),
             ..TaskRef::default()
         };
         cfg.tasks.proactive = Some(TaskRef {
@@ -1149,8 +1151,9 @@ mod tests {
 
     #[test]
     fn validate_context_budgets_flags_undersized_local_window() {
-        // 2,048-token window cannot hold a 12,000 prompt + 8,192 reserve.
-        let cfg = local_chat_config(2_048);
+        // The old 2,048-token window cannot hold a 12,000 prompt even with a
+        // modest local reserve.
+        let cfg = local_chat_config(2_048, 2_048);
         let issues = validate_context_budgets(&cfg, 12_000);
         // Both the chat and proactive tasks share the undersized model.
         assert_eq!(issues.len(), 2);
@@ -1161,21 +1164,37 @@ mod tests {
         assert_eq!(chat.model, "gemma");
         assert_eq!(chat.effective_window, 2_048);
         assert_eq!(chat.prompt_budget, 12_000);
-        assert_eq!(chat.response_reserve, 8_192);
-        assert_eq!(chat.required, 20_192);
+        assert_eq!(chat.response_reserve, 2_048);
+        assert_eq!(chat.required, 14_048);
         // The message carries the current value, required value, and breakdown.
         let msg = chat.message();
         assert!(msg.contains("2048"), "message: {msg}");
-        assert!(msg.contains("20192"), "message: {msg}");
+        assert!(msg.contains("14048"), "message: {msg}");
         assert!(msg.contains("12000"), "message: {msg}");
-        assert!(msg.contains("8192"), "message: {msg}");
     }
 
     #[test]
     fn validate_context_budgets_passes_with_default_local_window() {
-        // The raised 16,384 default holds a 12,000 prompt + small reserve.
-        let cfg = local_chat_config(16_384);
+        // The raised 16,384 default holds a 12,000 prompt plus a local-sized
+        // reserve (the issue's guidance: lower max_tokens for local chat).
+        let cfg = local_chat_config(16_384, 2_048);
         assert!(validate_context_budgets(&cfg, 12_000).is_empty());
+    }
+
+    #[test]
+    fn validate_context_budgets_warns_when_cloud_reserve_kept_on_local() {
+        // 16,384 is enough for the prompt but NOT for a cloud-sized 8,192
+        // output reserve (12,000 + 8,192 = 20,192). Keeping the cloud default
+        // on a local chat model is exactly the misconfiguration the startup
+        // warning targets, so chat is flagged while the modest-reserve
+        // proactive task is not.
+        let cfg = local_chat_config(16_384, 8_192);
+        let issues = validate_context_budgets(&cfg, 12_000);
+        assert_eq!(issues.len(), 1);
+        let issue = issues.first().expect("one issue");
+        assert_eq!(issue.task, "chat");
+        assert_eq!(issue.effective_window, 16_384);
+        assert_eq!(issue.required, 20_192);
     }
 
     #[test]
@@ -1207,7 +1226,7 @@ mod tests {
     fn validate_context_budgets_ignores_classifier_and_embedding() {
         // Only generative tasks (chat, proactive) are checked; a tiny
         // embedding/classifier window must not produce an issue.
-        let mut cfg = local_chat_config(16_384);
+        let mut cfg = local_chat_config(16_384, 2_048);
         cfg.tasks.embedding = TaskRef {
             provider: crate::config::LOCAL_PROVIDER.to_string(),
             model: Some("gemma".to_string()),
