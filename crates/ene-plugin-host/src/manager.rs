@@ -1824,7 +1824,7 @@ mod tests {
             };
             tokio::spawn(async move {
                 let (mut read_half, write_half) = tokio::io::split(stream);
-                let mut writer = Mutex::new(write_half);
+                let writer = Mutex::new(write_half);
                 // Answer only the handshake, then drop the stream so the host
                 // observes a closed connection on its next request.
                 if let Ok(Some(PluginIpcRequest::Handshake { .. })) =
