@@ -335,11 +335,27 @@ impl TurnActor {
     /// here only bounds how many *outcome consumers* the actor supervises —
     /// it never cancels the write. A rejected handle is therefore **not**
     /// dropped on the floor (#398): its outcome is still consumed by a
-    /// detached task so [`LifecycleEvent::PendingCandidateAvailable`] and
+    /// detached `tokio::spawn` task so
+    /// [`LifecycleEvent::PendingCandidateAvailable`] and
     /// [`DiagnosticEvent::MemoryWrite`] fire exactly as they would for an
-    /// admitted handle. The only thing a rejection loses is panic
-    /// supervision of the consumer (the detached task is not reaped), which
-    /// is a quality degradation, not a correctness bug.
+    /// admitted handle.
+    ///
+    /// Two consequences follow from the rejection path being a detached task
+    /// rather than a supervised `JoinSet` slot:
+    ///
+    /// 1. `memory_writer_cap` bounds only the *supervised* consumer count
+    ///    (the `JoinSet` length that [`admit_task`] checks), not the number
+    ///    of detached consumers — a burst of rejected writes spawns one
+    ///    detached task each with no cap applied.
+    /// 2. On shutdown, [`Self::run`] calls `memory_writer_tasks.abort_all()`,
+    ///    which aborts only *admitted* consumers. Detached consumers keep
+    ///    running and may emit events after teardown; this is benign because
+    ///    their `lifecycle_tx` / `diag_tx` sends fail with a closed-channel
+    ///    error that [`consume_memory_write_outcome`] drops.
+    ///
+    /// The only thing a rejection loses is panic supervision of the consumer
+    /// (the detached task is not reaped), which is a quality degradation, not
+    /// a correctness bug.
     fn drain_memory_writers(&mut self) {
         while let Ok(handle) = self.memory_writer_rx.try_recv() {
             let diag_tx = self.diag_tx.clone();
