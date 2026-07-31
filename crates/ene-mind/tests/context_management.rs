@@ -1,4 +1,8 @@
 //! Context management integration tests (compression, prompt packing, config validation).
+#![expect(
+    clippy::expect_used,
+    reason = "integration tests use expect for concise assertions"
+)]
 
 use ene_mind::character::IdentityKernel;
 use ene_mind::{

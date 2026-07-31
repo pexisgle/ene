@@ -513,8 +513,13 @@ mod tests {
         assert_eq!(plan.drop_leading, 4, "drops the two pre-boundary exchanges");
         assert_eq!(plan.turn_start, 0);
         assert_eq!(plan.turn_end, 2);
-        // The compressed span is exactly the pre-boundary prefix.
-        assert_eq!(plan.turns, history[..4]);
+        // The compressed span is exactly the pre-boundary prefix. `HistoryEntry`
+        // intentionally does not derive `PartialEq`, so compare field by field.
+        assert_eq!(plan.turns.len(), history[..4].len());
+        for (got, want) in plan.turns.iter().zip(&history[..4]) {
+            assert_eq!(got.role_label(), want.role_label());
+            assert_eq!(got.content, want.content);
+        }
     }
 
     #[test]
