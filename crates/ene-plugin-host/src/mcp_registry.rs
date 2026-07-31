@@ -27,7 +27,7 @@ use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::process::Command;
 
 /// The transport used to reach an MCP server.
@@ -71,7 +71,7 @@ impl McpServerConnection {
 /// Registry for MCP server connections and their tools.
 #[derive(Default)]
 pub struct McpToolRegistry {
-    servers: Arc<RwLock<Vec<McpServerConnection>>>,
+    servers: Arc<parking_lot::RwLock<Vec<McpServerConnection>>>,
 }
 
 impl McpToolRegistry {
@@ -125,15 +125,12 @@ impl McpToolRegistry {
             ));
         }
 
-        self.servers
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(McpServerConnection {
-                name: name.to_string(),
-                client: Arc::new(client.peer().clone()),
-                tools,
-                transport: McpTransportKind::Stdio,
-            });
+        self.servers.write().push(McpServerConnection {
+            name: name.to_string(),
+            client: Arc::new(client.peer().clone()),
+            tools,
+            transport: McpTransportKind::Stdio,
+        });
 
         Ok(())
     }
@@ -224,15 +221,12 @@ impl McpToolRegistry {
             ));
         }
 
-        self.servers
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(McpServerConnection {
-                name: name.to_string(),
-                client: Arc::new(client.peer().clone()),
-                tools,
-                transport: McpTransportKind::Http,
-            });
+        self.servers.write().push(McpServerConnection {
+            name: name.to_string(),
+            client: Arc::new(client.peer().clone()),
+            tools,
+            transport: McpTransportKind::Http,
+        });
 
         Ok(())
     }
@@ -242,7 +236,6 @@ impl McpToolRegistry {
         let tools = self
             .servers
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .flat_map(|s| s.tools.clone())
             .collect();
@@ -273,10 +266,7 @@ impl McpToolRegistry {
 
     /// Disconnect from all MCP servers.
     pub fn disconnect(&self) -> Result<(), PluginHostError> {
-        let mut servers = self
-            .servers
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut servers = self.servers.write();
         servers.clear();
         Ok(())
     }
@@ -290,10 +280,7 @@ impl McpToolRegistry {
         // Clone the server handles out and drop the (non-Send) read guard
         // before awaiting, so the future stays `Send`.
         let servers: Vec<(String, Arc<rmcp::Peer<rmcp::RoleClient>>, McpTransportKind)> = {
-            let guard = self
-                .servers
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = self.servers.read();
             if guard.is_empty() {
                 return Err(PluginHostError::ExecutionFailed {
                     message: "No MCP servers connected".to_string(),
@@ -334,10 +321,7 @@ impl McpToolRegistry {
     /// liveness is [`ping`](Self::ping)). Pruning requires a write lock, so
     /// callers that only hold a read lock must drop it first.
     fn prune_dead_servers(&self) {
-        let mut servers = self
-            .servers
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut servers = self.servers.write();
         let before = servers.len();
         servers.retain(|s| {
             let alive = s.is_transport_alive();
@@ -532,10 +516,7 @@ impl ToolRegistry for McpToolRegistry {
         // prune while holding the read lock, so collect the dead names and
         // prune in a second (write-locked) pass only when needed.
         let (tools, dead) = {
-            let servers = self
-                .servers
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let servers = self.servers.read();
             let mut tools = Vec::new();
             let mut dead = Vec::new();
             for s in servers.iter() {
@@ -562,10 +543,7 @@ impl ToolRegistry for McpToolRegistry {
         _context: Option<&CallContext>,
     ) -> Result<ToolResult, PluginHostError> {
         let client_opt = {
-            let servers = self
-                .servers
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let servers = self.servers.read();
             let mut found = None;
             for s in servers.iter() {
                 if s.tools.iter().any(|t| t.name.as_str() == name) {
