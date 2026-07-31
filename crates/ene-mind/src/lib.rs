@@ -105,6 +105,7 @@ pub use commitments::{CommitmentLedger, CommitmentSyncContext};
 pub use config::{
     CharacterMemoryConfig, ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig,
     ProactiveConfig, ProactiveDecisionConfig, ProactiveSourcesConfig, ToolGroundingConfig,
+    WindowTitleLevel,
 };
 /// Context budget and compression types.
 #[doc(no_inline)]

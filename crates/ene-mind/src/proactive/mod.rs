@@ -27,9 +27,17 @@ use crate::lifecycle::HistoryEntry;
 pub struct ActivitySnapshot {
     /// Seconds since the last OS activity signal when available.
     pub idle_seconds: Option<u64>,
-    /// Privacy-safe app label (never a raw window title).
+    /// Privacy-aware label for the focused window (#378).
+    ///
+    /// Depending on the configured `mind.proactive.sources.window_title_level`
+    /// this is the app name only, the app name plus a redacted window title,
+    /// or the app name plus the raw title. It is re-redacted defensively in
+    /// [`build_proactive_context`] before reaching the decision prompt.
     pub active_window_label: String,
-    /// Short description of recent activity change (optional).
+    /// Short description of the change since the previous observation (#378).
+    ///
+    /// Empty when nothing changed; otherwise a phrase such as
+    /// `"focused firefox"` or `"switched from firefox to code"`.
     pub recent_change: String,
 }
 
@@ -485,6 +493,7 @@ mod tests {
             conversation: false,
             activity: false,
             screen_summary: false,
+            window_title_level: crate::config::WindowTitleLevel::AppOnly,
         };
         let history = vec![HistoryEntry {
             role: Role::User,

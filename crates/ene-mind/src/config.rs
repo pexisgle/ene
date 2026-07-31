@@ -457,6 +457,42 @@ impl Default for CharacterMemoryConfig {
     }
 }
 
+/// How much of the focused window's title the activity observer captures (#378).
+///
+/// Window titles routinely contain private data — document and file names
+/// (which can embed customer or project names), page URLs, chat contact
+/// names, and email subjects. This text is fed to the proactive-speech
+/// decision LLM and, when a cloud provider is configured, leaves the local
+/// machine. The level is therefore a privacy knob: it defaults to
+/// [`WindowTitleLevel::AppOnly`] (the historical app-name-only behaviour) and
+/// higher levels are an explicit opt-in.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
+#[schemars(crate = "::ene_config::schemars")]
+pub enum WindowTitleLevel {
+    /// Capture only the application name (the historical, most-private
+    /// behaviour). The window title is never read.
+    #[default]
+    AppOnly,
+    /// Capture the window title with obvious sensitive fragments removed:
+    /// filesystem paths, email addresses, URLs, and digit runs that resemble
+    /// phone / account numbers.
+    RedactedTitle,
+    /// Capture the raw window title verbatim. Only choose this with a local
+    /// model; with a cloud provider the full title is sent off-machine.
+    FullTitle,
+}
+
 /// Input sources for proactive speech decisions (#103).
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
@@ -470,6 +506,12 @@ pub struct ProactiveSourcesConfig {
     pub activity: bool,
     /// Include a short-lived screen text summary (never raw image bytes).
     pub screen_summary: bool,
+    /// Window-title capture level for the activity source (#378).
+    ///
+    /// Only consulted when [`Self::activity`] is enabled. Defaults to
+    /// [`WindowTitleLevel::AppOnly`]; see that type for the privacy
+    /// implications of raising it.
+    pub window_title_level: WindowTitleLevel,
 }
 
 impl Default for ProactiveSourcesConfig {
@@ -478,6 +520,7 @@ impl Default for ProactiveSourcesConfig {
             conversation: true,
             activity: true,
             screen_summary: false,
+            window_title_level: WindowTitleLevel::default(),
         }
     }
 }
@@ -750,6 +793,37 @@ mod tests {
         let json = serde_json::to_value(&cfg).expect("serialize");
         assert_eq!(json["sources"]["conversation"], false);
         assert_eq!(json["sources"]["screen_summary"], true);
+    }
+
+    /// The window-title capture level defaults to the most-private
+    /// `app_only` when absent, so existing configs keep the historical
+    /// app-name-only behaviour (#378).
+    #[test]
+    fn proactive_window_title_level_defaults_to_app_only() {
+        let cfg: ProactiveConfig =
+            serde_json::from_str(r#"{"sources": {"activity": true}}"#).expect("deserialize");
+        assert_eq!(cfg.sources.window_title_level, WindowTitleLevel::AppOnly);
+        assert_eq!(
+            MindConfig::default().proactive.sources.window_title_level,
+            WindowTitleLevel::AppOnly
+        );
+    }
+
+    /// All three window-title levels round-trip through the public schema
+    /// using their `snake_case` wire names (#378).
+    #[test]
+    fn proactive_window_title_level_round_trips() {
+        for (raw, level) in [
+            ("app_only", WindowTitleLevel::AppOnly),
+            ("redacted_title", WindowTitleLevel::RedactedTitle),
+            ("full_title", WindowTitleLevel::FullTitle),
+        ] {
+            let json = format!(r#"{{"sources": {{"window_title_level": "{raw}"}}}}"#);
+            let cfg: ProactiveConfig = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(cfg.sources.window_title_level, level);
+            let out = serde_json::to_value(&cfg).expect("serialize");
+            assert_eq!(out["sources"]["window_title_level"], raw);
+        }
     }
 
     #[test]

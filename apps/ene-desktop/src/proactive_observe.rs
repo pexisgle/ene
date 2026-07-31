@@ -14,7 +14,9 @@ mod screen_summary;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ene_mind::{ActivitySnapshot, MindConfig, ProactiveObservation, ScreenSummaryStatus};
+use ene_mind::{
+    ActivitySnapshot, MindConfig, ProactiveObservation, ScreenSummaryStatus, WindowTitleLevel,
+};
 use ene_runtime::EneHandle;
 use parking_lot::Mutex;
 
@@ -34,6 +36,7 @@ struct ObserveConfig {
     screen_summary: bool,
     interval_seconds: u64,
     max_screen_summary_chars: usize,
+    window_title_level: WindowTitleLevel,
 }
 
 impl ProactiveObserveControl {
@@ -47,6 +50,7 @@ impl ProactiveObserveControl {
                 screen_summary: mind.proactive.sources.screen_summary,
                 interval_seconds: mind.proactive.interval_seconds.max(1),
                 max_screen_summary_chars: mind.proactive.max_screen_summary_chars.max(32),
+                window_title_level: mind.proactive.sources.window_title_level,
             })),
         }
     }
@@ -59,6 +63,7 @@ impl ProactiveObserveControl {
         guard.screen_summary = mind.proactive.sources.screen_summary;
         guard.interval_seconds = mind.proactive.interval_seconds.max(1);
         guard.max_screen_summary_chars = mind.proactive.max_screen_summary_chars.max(32);
+        guard.window_title_level = mind.proactive.sources.window_title_level;
     }
 
     fn snapshot(&self) -> ObserveConfig {
@@ -77,7 +82,7 @@ pub fn spawn_proactive_observer(
     let observe_handle = handle.clone();
     runtime.spawn(async move {
         let screen_provider = ScreenSummaryProvider::new(observe_handle.clone());
-        let mut last_app = String::new();
+        let mut last_label = String::new();
         loop {
             let cfg = control_task.snapshot();
             let sleep_for = Duration::from_secs(cfg.interval_seconds.max(1));
@@ -86,7 +91,7 @@ pub fn spawn_proactive_observer(
                 continue;
             }
 
-            let observation = collect_observation(&cfg, &screen_provider, &mut last_app).await;
+            let observation = collect_observation(&cfg, &screen_provider, &mut last_label).await;
             if let Err(e) = handle.update_proactive_observation(observation) {
                 tracing::debug!(
                     component = "ProactiveObserve",
@@ -104,14 +109,14 @@ pub fn spawn_proactive_observer(
 async fn collect_observation(
     cfg: &ObserveConfig,
     screen_provider: &ScreenSummaryProvider,
-    last_app: &mut String,
+    last_label: &mut String,
 ) -> ProactiveObservation {
     let captured_at_unix_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
 
     let activity = if cfg.activity {
-        Some(collect_activity(last_app))
+        Some(collect_activity(cfg.window_title_level, last_label))
     } else {
         None
     };
@@ -137,19 +142,10 @@ async fn collect_observation(
     }
 }
 
-fn collect_activity(last_app: &mut String) -> ActivitySnapshot {
-    match active_app_label() {
+fn collect_activity(level: WindowTitleLevel, last_label: &mut String) -> ActivitySnapshot {
+    match active_window_label(level) {
         Some(label) => {
-            let recent_change = if last_app == &label {
-                String::new()
-            } else if last_app.is_empty() {
-                last_app.clone_from(&label);
-                "focus".to_string()
-            } else {
-                let change = format!("switched from {last_app}");
-                last_app.clone_from(&label);
-                change
-            };
+            let recent_change = describe_change(last_label, &label);
             ActivitySnapshot {
                 idle_seconds: None,
                 active_window_label: truncate(&label, 120),
@@ -164,17 +160,44 @@ fn collect_activity(last_app: &mut String) -> ActivitySnapshot {
     }
 }
 
-fn active_app_label() -> Option<String> {
-    match active_win_pos_rs::get_active_window() {
-        Ok(win) => {
-            let app = win.app_name.trim();
-            if app.is_empty() {
-                None
-            } else {
-                Some(redact_paths(app))
-            }
-        }
-        Err(()) => None,
+/// Summarize the change from the previous observation's label to the current
+/// one (#378). Returns an empty string when nothing changed so the decision
+/// prompt is not padded with noise; otherwise a short phrase naming the
+/// previous and/or current focus.
+fn describe_change(last_label: &mut String, label: &str) -> String {
+    if last_label == label {
+        return String::new();
+    }
+    let change = if last_label.is_empty() {
+        format!("focused {label}")
+    } else {
+        format!("switched from {last_label} to {label}")
+    };
+    label.clone_into(last_label);
+    change
+}
+
+/// Build the privacy-aware label for the focused window at `level` (#378).
+///
+/// Returns `None` when no window is focused or the app name is empty. The app
+/// name is always included; the window title is appended only at
+/// [`WindowTitleLevel::RedactedTitle`] (sanitized) or
+/// [`WindowTitleLevel::FullTitle`] (verbatim).
+fn active_window_label(level: WindowTitleLevel) -> Option<String> {
+    let win = active_win_pos_rs::get_active_window().ok()?;
+    let app = redact_paths(win.app_name.trim());
+    if app.is_empty() {
+        return None;
+    }
+    let title = match level {
+        WindowTitleLevel::AppOnly => return Some(app),
+        WindowTitleLevel::RedactedTitle => redact_title(win.title.trim()),
+        WindowTitleLevel::FullTitle => collapse_whitespace(win.title.trim()),
+    };
+    if title.is_empty() {
+        Some(app)
+    } else {
+        Some(format!("{app}: {title}"))
     }
 }
 
@@ -194,6 +217,73 @@ pub(crate) fn redact_paths(input: &str) -> String {
         .filter(|t| !looks_like_path_or_email(t))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Redact a window title for [`WindowTitleLevel::RedactedTitle`] (#378).
+///
+/// Reuses the path / email filter from [`redact_paths`] and additionally drops
+/// URL-like tokens and digit-heavy numbers (phone / account / card numbers),
+/// then strips long interior digit runs from the tokens that are kept.
+/// Standalone document names such as `顧客リスト.xlsx` are intentionally
+/// preserved — only the surrounding path is sensitive. The result may be empty
+/// when every token looked sensitive.
+fn redact_title(input: &str) -> String {
+    input
+        .split_whitespace()
+        .filter(|t| !looks_like_path_or_email(t) && !looks_like_url(t) && !is_digit_heavy(t))
+        .map(strip_digit_runs)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Collapse interior runs of whitespace to single ASCII spaces so a raw title
+/// ([`WindowTitleLevel::FullTitle`]) cannot smuggle control characters or
+/// padded layout into the decision prompt.
+fn collapse_whitespace(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Returns `true` when a token is unambiguously a URL: it carries an explicit
+/// scheme (`https://…`, `file://…`) or starts with `www.`.
+///
+/// Bare domains (`example.com`) are deliberately *not* matched — they are
+/// indistinguishable from document filenames (`report.docx`) at the token
+/// level, and dropping filenames would defeat the purpose of the
+/// [`WindowTitleLevel::RedactedTitle`] level.
+fn looks_like_url(t: &str) -> bool {
+    let lower = t.to_ascii_lowercase();
+    lower.contains("://") || lower.starts_with("www.")
+}
+
+/// Returns `true` when a token is dominated by digits — at least 6 digit
+/// characters making up more than half the token — the shape of phone,
+/// account, and card numbers that carry no topical signal.
+fn is_digit_heavy(t: &str) -> bool {
+    let digits = t.chars().filter(|c| c.is_ascii_digit()).count();
+    digits >= 6 && digits * 2 > t.chars().count()
+}
+
+/// Remove runs of 4+ ASCII digits from a token (e.g. `report2024final` →
+/// `reportfinal`, `call 03-1234-5678` fragments), while keeping short ordinals
+/// like `v2` or `page3` intact.
+fn strip_digit_runs(t: &str) -> String {
+    let mut out = String::with_capacity(t.len());
+    let mut digits = String::new();
+    for c in t.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else {
+            if digits.len() < 4 {
+                out.push_str(&digits);
+            }
+            digits.clear();
+            out.push(c);
+        }
+    }
+    if digits.len() < 4 {
+        out.push_str(&digits);
+    }
+    out
 }
 
 /// Returns `true` when a token is likely a filesystem path or email
@@ -292,15 +382,80 @@ mod tests {
         assert!(!snap.enabled);
         assert!(snap.activity);
         assert!(!snap.screen_summary);
+        assert_eq!(snap.window_title_level, WindowTitleLevel::AppOnly);
     }
 
     #[test]
-    fn activity_uses_app_name_only() {
-        let snap = ActivitySnapshot {
-            idle_seconds: None,
-            active_window_label: "firefox".into(),
-            recent_change: String::new(),
-        };
-        assert!(!snap.active_window_label.contains(':'));
+    fn redact_title_drops_sensitive_tokens() {
+        let cleaned = redact_title(
+            "Inbox me@example.com https://mail.example.com/a C:\\Users\\me report 0312345678",
+        );
+        assert!(!cleaned.contains("me@example.com"));
+        assert!(!cleaned.contains("https://"));
+        assert!(!cleaned.contains("C:\\"));
+        assert!(!cleaned.contains("0312345678"));
+        assert!(cleaned.contains("Inbox"));
+        assert!(cleaned.contains("report"));
+    }
+
+    #[test]
+    fn redact_title_preserves_document_names() {
+        // The motivating case: a standalone document name carries topical
+        // signal and must survive redaction (only the path around it is
+        // sensitive).
+        let cleaned = redact_title("顧客リスト.xlsx - Excel");
+        assert!(cleaned.contains("顧客リスト.xlsx"));
+        assert!(cleaned.contains("Excel"));
+
+        let cleaned = redact_title("report.docx - Word");
+        assert!(cleaned.contains("report.docx"));
+    }
+
+    #[test]
+    fn redact_title_strips_long_digit_runs_only() {
+        // Long interior runs (years, ids) are stripped; short ordinals kept.
+        let cleaned = redact_title("report2024final v2 page3");
+        assert!(cleaned.contains("reportfinal"));
+        assert!(cleaned.contains("v2"));
+        assert!(cleaned.contains("page3"));
+    }
+
+    #[test]
+    fn looks_like_url_matches_scheme_and_www_only() {
+        assert!(looks_like_url("https://example.com/page"));
+        assert!(looks_like_url("www.example.com"));
+        // Bare domains are indistinguishable from filenames and must not match.
+        assert!(!looks_like_url("report.docx"));
+        assert!(!looks_like_url("example.com"));
+    }
+
+    #[test]
+    fn is_digit_heavy_flags_numbers_only() {
+        assert!(is_digit_heavy("0312345678"));
+        assert!(is_digit_heavy("4111-1111-2222"));
+        assert!(!is_digit_heavy("v2"));
+        assert!(!is_digit_heavy("report2024"));
+    }
+
+    #[test]
+    fn collapse_whitespace_normalizes_runs() {
+        assert_eq!(collapse_whitespace("a\t b\n\n c"), "a b c");
+    }
+
+    #[test]
+    fn describe_change_tracks_focus_and_switches() {
+        let mut last = String::new();
+        assert_eq!(describe_change(&mut last, "firefox"), "focused firefox");
+        assert_eq!(last, "firefox");
+
+        // No change → empty string.
+        assert!(describe_change(&mut last, "firefox").is_empty());
+
+        // Switch names both the previous and current focus.
+        assert_eq!(
+            describe_change(&mut last, "code: main.rs"),
+            "switched from firefox to code: main.rs"
+        );
+        assert_eq!(last, "code: main.rs");
     }
 }

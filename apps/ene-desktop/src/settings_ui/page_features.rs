@@ -6,6 +6,7 @@
 use crate::ai_bridge::AiBridge;
 use crate::settings::CharacterSettings;
 use bevy_ecs::world::World;
+use ene_mind::WindowTitleLevel;
 use ene_plugin_host::PluginConfig;
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
@@ -156,6 +157,10 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             persist_mind(settings, ai, &mind);
         }
 
+        ui.add_enabled_ui(mind.proactive.sources.activity, |ui| {
+            render_window_title_level(ui, settings, ai, &mut mind);
+        });
+
         let mut screen = mind.proactive.sources.screen_summary;
         if ui
             .checkbox(
@@ -172,6 +177,68 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
             "proactive-source-screen-hint"
         ));
     });
+}
+
+/// Window-title capture level combo for the activity source (#378).
+///
+/// Raising the level lets the proactive observer read the focused window's
+/// title; the hint warns that title text is sent to the decision LLM (and to
+/// a cloud provider when one is configured).
+fn render_window_title_level(
+    ui: &mut egui::Ui,
+    settings: &mut CharacterSettings,
+    ai: &Arc<AiBridge>,
+    mind: &mut ene_mind::MindConfig,
+) {
+    let current = mind.proactive.sources.window_title_level;
+    ui.horizontal(|ui| {
+        ui.label(i18n_embed_fl::fl!(
+            crate::i18n::loader(),
+            "proactive-window-title-level"
+        ));
+        let mut selected = current;
+        egui::ComboBox::from_id_salt("proactive_window_title_level")
+            .selected_text(window_title_level_label(selected))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut selected,
+                    WindowTitleLevel::AppOnly,
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-app-only"),
+                );
+                ui.selectable_value(
+                    &mut selected,
+                    WindowTitleLevel::RedactedTitle,
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-redacted"),
+                );
+                ui.selectable_value(
+                    &mut selected,
+                    WindowTitleLevel::FullTitle,
+                    i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-full"),
+                );
+            });
+        if selected != current {
+            mind.proactive.sources.window_title_level = selected;
+            persist_mind(settings, ai, mind);
+        }
+    });
+    ui.weak(i18n_embed_fl::fl!(
+        crate::i18n::loader(),
+        "proactive-window-title-hint"
+    ));
+}
+
+fn window_title_level_label(level: WindowTitleLevel) -> String {
+    match level {
+        WindowTitleLevel::AppOnly => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-app-only")
+        }
+        WindowTitleLevel::RedactedTitle => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-redacted")
+        }
+        WindowTitleLevel::FullTitle => {
+            i18n_embed_fl::fl!(crate::i18n::loader(), "proactive-title-full")
+        }
+    }
 }
 
 fn persist_mind(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, mind: &ene_mind::MindConfig) {
