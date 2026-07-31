@@ -1,8 +1,16 @@
 use crate::character_card::UserPersona;
 use crate::error::EneConfigError;
+use indexmap::IndexMap;
 use schemars::JsonSchema;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Relative `$schema` pointer auto-filled into `settings.json` on save (#331).
+///
+/// Matches the on-disk convention and the `schema/settings.schema.json` layout
+/// produced by [`write_schemas`], so editors resolve completions without the
+/// user hand-writing the key.
+pub const DEFAULT_SETTINGS_SCHEMA: &str = "./schema/settings.schema.json";
 
 /// Global singleton holding the active [`EneConfig`].
 ///
@@ -147,6 +155,13 @@ fn runtime_rules_is_default(rules: &str) -> bool {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct EneConfig {
+    /// JSON Schema pointer for editor tooling.
+    ///
+    /// Declared first so it always serialises at the top of `settings.json`
+    /// (ahead of `version`), and skipped while empty so in-memory defaults
+    /// carry no bogus path. [`save_full_config`] auto-fills it on save (#331).
+    #[serde(rename = "$schema", default, skip_serializing_if = "String::is_empty")]
+    pub schema: String,
     /// Schema version number.
     pub version: u32,
     /// Character card name or path.
@@ -165,18 +180,30 @@ pub struct EneConfig {
     #[serde(flatten)]
     #[schemars(skip)]
     /// Catch-all for provider, tool, and other sub-configurations.
-    pub extra: BTreeMap<String, serde_json::Value>,
+    ///
+    /// An [`IndexMap`] so the user's hand-arranged section order is preserved
+    /// across a save and newly added sections append at the end (#331). Its
+    /// `PartialEq` is order-insensitive, so the "skip if unchanged" guards keep
+    /// their previous behaviour.
+    ///
+    /// figment 0.10's `Dict` is unconditionally a `BTreeMap`, so the extract
+    /// hands this map back in alphabetical order; [`load_full_config_from`]
+    /// re-sorts it into the file's original top-level key order immediately
+    /// after loading so the user's order survives the load → mutate → save
+    /// cycle (#331).
+    pub extra: IndexMap<String, serde_json::Value>,
 }
 
 impl Default for EneConfig {
     fn default() -> Self {
         Self {
+            schema: String::new(),
             version: 1,
             character: "Alicia".to_string(),
             user_name: "User".to_string(),
             runtime_rules: DEFAULT_RUNTIME_RULES.to_string(),
             user_persona: None,
-            extra: BTreeMap::new(),
+            extra: IndexMap::new(),
         }
     }
 }
@@ -201,12 +228,11 @@ impl EneConfig {
                 T::KEY
             )));
         }
-        // Walk the path directly through the
-        // BTreeMap, descending into nested objects one
-        // level at a time. The previous form rebuilt
-        // the entire `extra` map into a JSON object
-        // on every call (O(n) per read) and required
-        // cloning every value.
+        // Walk the path directly through the map,
+        // descending into nested objects one level at a
+        // time. The previous form rebuilt the entire
+        // `extra` map into a JSON object on every call
+        // (O(n) per read) and required cloning every value.
         let mut current: Option<&serde_json::Value> = None;
         for (i, key) in T::path().iter().enumerate() {
             if i == 0 {
@@ -232,7 +258,15 @@ impl EneConfig {
         })
     }
 
-    /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
+    /// Serialise and merge a sub-section into the `extra` map using the type's associated path.
+    ///
+    /// Only the section's *declared* fields are written; unknown *immediate
+    /// child* keys already present at the section path are preserved (#327).
+    /// The merge is one level deep: declared fields that are themselves objects
+    /// (e.g. `plugins.list`, `ai.tasks`) are replaced wholesale, so unknown
+    /// keys nested *beneath* them do not survive. This replaces the previous
+    /// whole-subtree replacement, which silently wiped nested sibling sections
+    /// such as `tools.rag` when writing `ToolRuntimeConfig`.
     ///
     /// Serialisation goes through [`section_to_value`] to avoid the f32→f64
     /// widening artefact that `serde_json::to_value` introduces (#329).
@@ -253,24 +287,17 @@ impl EneConfig {
             )));
         }
         let val = section_to_value(section)?;
-        // Skip the write if the serialised value is already identical
-        // to what sits at this path. This avoids redundant BTreeMap
-        // mutations and prevents unnecessary dirty-flag flips.
         let path = T::path();
-        let mut current: Option<&serde_json::Value> = None;
-        for (i, key) in path.iter().enumerate() {
-            if i == 0 {
-                current = self.extra.get(*key);
-            } else {
-                current = current
-                    .and_then(|v| v.as_object())
-                    .and_then(|o| o.get(*key));
-            }
-        }
-        if current.is_some_and(|existing| *existing == val) {
+        // Merge the declared fields over the existing subtree so unknown
+        // immediate child keys survive, then skip the write when the merged
+        // result is identical to what already sits at this path. This avoids
+        // redundant map mutations and prevents unnecessary dirty-flag flips.
+        let existing = read_at_path(&self.extra, path);
+        let merged = merge_section(existing, &val);
+        if existing.is_some_and(|current| current == &merged) {
             return Ok(());
         }
-        set_nested(&mut self.extra, path, val)?;
+        set_nested(&mut self.extra, path, merged)?;
         Ok(())
     }
 
@@ -278,6 +305,11 @@ impl EneConfig {
     ///
     /// `value` is parsed as JSON when possible; otherwise treated as a string.
     /// Used by CLI `/config set` (#241).
+    ///
+    /// `$schema` is routed to the declared [`schema`](Self::schema) field
+    /// rather than `extra`; writing it into `extra` would put a second
+    /// `$schema` key on disk next to the declared field, and the resulting
+    /// duplicate field would fail to reload (#331).
     pub fn set_path(&mut self, dotted_path: &str, raw_value: &str) -> Result<(), EneConfigError> {
         let path: Vec<&str> = dotted_path
             .split('.')
@@ -293,17 +325,28 @@ impl EneConfig {
             Ok(v) => v,
             Err(_) => serde_json::Value::String(raw_value.to_string()),
         };
+        if path == ["$schema"] {
+            self.schema = match value {
+                serde_json::Value::String(s) => s,
+                other => other.to_string(),
+            };
+            return Ok(());
+        }
         set_nested(&mut self.extra, &path, value)
     }
 
     /// Read a value at a dotted JSON path under `extra` (#241).
     ///
-    /// Walks the `BTreeMap` directly instead of serialising the entire `extra`
-    /// map into a JSON `Value` tree.
+    /// Walks the map directly instead of serialising the entire `extra`
+    /// map into a JSON `Value` tree. `$schema` reads from the declared
+    /// [`schema`](Self::schema) field, mirroring [`set_path`](Self::set_path).
     pub fn get_path(&self, dotted_path: &str) -> Option<serde_json::Value> {
         let keys: Vec<&str> = dotted_path.split('.').filter(|s| !s.is_empty()).collect();
         if keys.is_empty() {
             return None;
+        }
+        if keys == ["$schema"] {
+            return Some(serde_json::Value::String(self.schema.clone()));
         }
         let mut current: Option<&serde_json::Value> = None;
         for (i, key) in keys.iter().enumerate() {
@@ -343,16 +386,68 @@ pub(crate) fn section_to_value<T: serde::Serialize>(
     })
 }
 
+/// Reads the value at a nested `path` under `extra`, descending one object
+/// level per key. Returns `None` when any key is absent or a non-object is
+/// encountered before the final key.
+pub(crate) fn read_at_path<'a>(
+    extra: &'a IndexMap<String, serde_json::Value>,
+    path: &[&str],
+) -> Option<&'a serde_json::Value> {
+    let mut current: Option<&serde_json::Value> = None;
+    for (i, key) in path.iter().enumerate() {
+        if i == 0 {
+            current = extra.get(*key);
+        } else {
+            current = current
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get(*key));
+        }
+    }
+    current
+}
+
+/// Merges a serialised section (`incoming`) over the existing subtree at the
+/// section path (#327).
+///
+/// When both sides are JSON objects, the section's declared fields are layered
+/// on top of the existing object so unknown sibling sub-keys survive; the
+/// section struct only ever serialises its declared fields, so a shallow merge
+/// is exactly "write declared fields, keep everything else". In every other
+/// case (no existing value, or a non-object on either side) the incoming value
+/// replaces the subtree outright.
+///
+/// # Caveat: `skip_serializing_if` fields cannot be deleted through merge
+///
+/// A field annotated with `skip_serializing_if` is *absent* from `incoming`
+/// when it holds its skip value, so the merge keeps whatever stale value the
+/// on-disk subtree already had — the field can never be cleared back to its
+/// skipped state this way. No `define_config!` section struct uses
+/// `skip_serializing_if` today, so this is a latent trap rather than a live
+/// bug; adding one to a merged section would silently defeat deletion.
+pub(crate) fn merge_section(
+    existing: Option<&serde_json::Value>,
+    incoming: &serde_json::Value,
+) -> serde_json::Value {
+    match (existing, incoming) {
+        (Some(serde_json::Value::Object(base)), serde_json::Value::Object(overlay)) => {
+            let mut merged = base.clone();
+            for (key, value) in overlay {
+                merged.insert(key.clone(), value.clone());
+            }
+            serde_json::Value::Object(merged)
+        }
+        _ => incoming.clone(),
+    }
+}
+
 pub(crate) fn set_nested(
-    extra: &mut BTreeMap<String, serde_json::Value>,
+    extra: &mut IndexMap<String, serde_json::Value>,
     path: &[&str],
     value: serde_json::Value,
 ) -> Result<(), EneConfigError> {
-    // Descend through the BTreeMap, mutating the path
-    // in place. The previous form rebuilt the entire
-    // `extra` map into a JSON object (O(n) on every
-    // write) and silently dropped the write if `cur`
-    // ever landed on a non-object leaf.
+    // Descend through the map, mutating the path in place. The previous form
+    // rebuilt the entire `extra` map into a JSON object (O(n) on every write)
+    // and silently dropped the write if `cur` ever landed on a non-object leaf.
     let Some((head, rest)) = path.split_first() else {
         return Err(EneConfigError::GenericConfigError(
             "Empty path for nested config".to_string(),
@@ -793,12 +888,38 @@ pub fn load_full_config_from(config_path: &Path) -> Result<EneConfig, EneConfigE
                 .map(|k| k.as_str().to_lowercase().into()),
         );
 
-    let config: EneConfig = figment.extract().map_err(|e| {
+    let mut config: EneConfig = figment.extract().map_err(|e| {
         EneConfigError::GenericConfigError(format!("configuration extract failed: {e}"))
     })?;
 
+    // figment's `Dict` is a `BTreeMap`, so `config.extra` comes back in
+    // alphabetical order and the user's hand-arranged section order is lost.
+    // Re-read the raw file once with serde_json (whose `preserve_order` feature
+    // keeps insertion order) to recover the original top-level key order, then
+    // re-sort `extra` into that order right here. Because the app lifecycle is
+    // always load → mutate → save, fixing the order at load means the in-memory
+    // `IndexMap` — and therefore every later save — keeps the user's order
+    // (#331). Newly added sections append at the end.
+    restore_top_level_order(&mut config.extra, &read_top_level_order(config_path));
+
     update_global_config(config.clone());
     Ok(config)
+}
+
+/// Reads the top-level key order of the JSON object at `config_path`.
+///
+/// Returns an empty `Vec` when the file is missing, unreadable, not valid
+/// JSON, or not an object — ordering restoration then simply leaves `extra`
+/// in the order figment produced, which is the pre-fix behaviour. This is
+/// best-effort: it must never turn a successful config load into a failure.
+fn read_top_level_order(config_path: &Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    map.keys().cloned().collect()
 }
 
 /// Auto-generates and writes out settings and character schemas under the assets schema directory.
@@ -969,15 +1090,67 @@ fn fsync_dir(dir: &Path) {
     }
 }
 
+/// Serialises `config` for persistence, auto-filling `$schema` when it is
+/// empty (#331).
+///
+/// Operates on a clone so the caller's in-memory config — and the global
+/// snapshot / dirty tracking — is left untouched; only the on-disk file is
+/// guaranteed to carry the schema pointer. Users therefore never need to
+/// hand-write `$schema`.
+///
+/// Any stray `extra["$schema"]` is dropped before serialising so the declared
+/// `schema` field can never be duplicated on disk (a duplicate `$schema` key
+/// fails to reload, and since #325 there is no silent fallback to defaults).
+///
+/// The user's top-level section order is already correct here: it was restored
+/// at load time (see [`load_full_config_from`]), and `IndexMap` preserves it
+/// through mutation, so the serialised sections keep the user's order (#331).
+fn serialize_for_save(config: &EneConfig) -> Result<String, serde_json::Error> {
+    let mut to_save = config.clone();
+    if to_save.schema.is_empty() {
+        to_save.schema = DEFAULT_SETTINGS_SCHEMA.to_string();
+    }
+    to_save.extra.shift_remove("$schema");
+    serde_json::to_string_pretty(&to_save)
+}
+
+/// Reorders `extra` in place so its keys follow `order` (#331).
+///
+/// Keys listed in `order` come first (in that order); any key absent from
+/// `order` — a section added after load — keeps its existing relative position
+/// but sorts after the recorded ones. An empty `order` (e.g. a config built in
+/// memory, or a load where the file order could not be recovered) leaves
+/// `extra` untouched.
+fn restore_top_level_order(extra: &mut IndexMap<String, serde_json::Value>, order: &[String]) {
+    if order.is_empty() {
+        return;
+    }
+    extra.sort_by(|a, _, b, _| {
+        let rank = |key: &String| order.iter().position(|o| o == key);
+        match (rank(a), rank(b)) {
+            // Both recorded: follow the on-disk order.
+            (Some(a_pos), Some(b_pos)) => a_pos.cmp(&b_pos),
+            // Recorded keys precede newly added ones…
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            // …and two unrecorded keys keep their relative (insertion) order.
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+}
+
 /// Saves the config file in a type-safe manner, using an atomic
 /// temp-file-then-rename strategy to avoid partial writes (#325).
+///
+/// `$schema` is auto-filled on the serialised copy when empty so the persisted
+/// file always leads with the schema pointer (#331).
 pub fn save_full_config(config: &EneConfig) -> Result<(), EneConfigError> {
     update_global_config(config.clone());
     let config_path = crate::paths::config_file_path();
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(EneConfigError::IoError)?;
     }
-    let json = serde_json::to_string_pretty(config)?;
+    let json = serialize_for_save(config)?;
     atomic_write(&config_path, &json)?;
     Ok(())
 }
@@ -1007,7 +1180,9 @@ mod tests {
 
     /// env-var tests in this module call `set_var`, which is process-global
     /// and panics if invoked concurrently from multiple threads. A static
-    /// mutex serializes them.
+    /// mutex serializes them. The `load_full_config_from` tests also take it:
+    /// their `ENE_`-prefixed provider would otherwise pick up a concurrent
+    /// test's `ENE_TEST_*` variable and grow `extra` with a stray key.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Direct re-implementation of the `load_full_config_from` env-var
@@ -1256,7 +1431,7 @@ mod tests {
     /// Now the write returns a typed error.
     #[test]
     fn set_nested_through_non_object_leaf_errors() {
-        let mut extra: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let mut extra: IndexMap<String, serde_json::Value> = IndexMap::new();
         // Pre-populate a leaf where the path expects an
         // object.
         extra.insert(
@@ -1289,6 +1464,322 @@ mod tests {
             .expect("set_path");
         let value = config.get_path("ai.tasks.chat.model").expect("get_path");
         assert_eq!(value, serde_json::Value::String("gpt-test".to_string()));
+    }
+
+    /// A test-only settings section used to exercise `set_section` without
+    /// pulling in another workspace crate (whose `define_config!` impl would
+    /// be for a different copy of the `HasConfigKey` trait).
+    ///
+    /// Modelled on the real `ToolRuntimeConfig` (`tools`, owned by
+    /// `ene-runtime`), which sits at the same path as the nested
+    /// `ToolRagConfig` (`tools.rag`, owned by `ene-tool-rag`). Writing
+    /// `tools` must not wipe the sibling `tools.rag` subtree — the exact
+    /// regression #327's merge fixes.
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    struct TestSection {
+        enabled: bool,
+    }
+
+    impl HasConfigKey for TestSection {
+        const KEY: &'static str = "tools";
+        const TARGET: ConfigTarget = ConfigTarget::Settings;
+        fn path() -> &'static [&'static str] {
+            &["tools"]
+        }
+    }
+
+    /// Regression for #327: writing a section must merge its declared fields
+    /// into the existing subtree rather than replacing it, so an unknown
+    /// sibling sub-key (here `tools.rag`, which `ToolRuntimeConfig` does not
+    /// declare) survives the write.
+    #[test]
+    fn set_section_preserves_unknown_subkeys() {
+        let mut config = EneConfig::default();
+        config
+            .set_path("tools.rag.enabled", "true")
+            .expect("seed unknown sibling sub-key");
+        config
+            .set_path("tools.enabled", "false")
+            .expect("seed declared field");
+
+        config
+            .set_section(&TestSection { enabled: true })
+            .expect("set_section succeeds");
+
+        assert_eq!(
+            config.get_path("tools.enabled"),
+            Some(serde_json::Value::Bool(true)),
+            "declared field must be updated"
+        );
+        assert_eq!(
+            config.get_path("tools.rag.enabled"),
+            Some(serde_json::Value::Bool(true)),
+            "unknown sibling sub-key must survive the section write"
+        );
+    }
+
+    /// Regression for #327: re-writing an identical section must be a no-op so
+    /// the "skip if unchanged" guard still holds after the merge change.
+    #[test]
+    fn set_section_identical_write_is_noop() {
+        let mut config = EneConfig::default();
+        config
+            .set_section(&TestSection { enabled: true })
+            .expect("first write");
+        let before = config.extra.clone();
+        config
+            .set_section(&TestSection { enabled: true })
+            .expect("second write");
+        assert_eq!(before, config.extra, "identical write must not mutate");
+    }
+
+    /// Regression for #331: `$schema` is the first declared field, so it must
+    /// serialise ahead of `version` (which is second).
+    #[test]
+    fn schema_is_first_and_version_second() {
+        let config = EneConfig {
+            schema: DEFAULT_SETTINGS_SCHEMA.to_string(),
+            ..EneConfig::default()
+        };
+        let value = serde_json::to_value(&config).expect("config serialises");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("config is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys.first().copied(),
+            Some("$schema"),
+            "$schema must be the first key, got {keys:?}"
+        );
+        assert_eq!(
+            keys.get(1).copied(),
+            Some("version"),
+            "version must be the second key, got {keys:?}"
+        );
+    }
+
+    /// Regression for #331: an empty `$schema` is auto-filled on save so users
+    /// never hand-write it, and the caller's config is left untouched.
+    #[test]
+    fn save_autofills_schema_without_mutating_caller() {
+        let config = EneConfig::default();
+        assert!(config.schema.is_empty(), "default schema starts empty");
+
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            parsed.get("$schema").and_then(serde_json::Value::as_str),
+            Some(DEFAULT_SETTINGS_SCHEMA),
+            "saved JSON must carry the auto-filled $schema"
+        );
+        assert!(
+            config.schema.is_empty(),
+            "the caller's config must not be mutated by save"
+        );
+    }
+
+    /// Regression for #331: a non-empty `$schema` provided by the user is
+    /// preserved verbatim on save (auto-fill only applies when empty).
+    #[test]
+    fn save_preserves_user_schema() {
+        let config = EneConfig {
+            schema: "./custom.schema.json".to_string(),
+            ..EneConfig::default()
+        };
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            parsed.get("$schema").and_then(serde_json::Value::as_str),
+            Some("./custom.schema.json")
+        );
+    }
+
+    /// Regression for #331: the user's hand-arranged top-level section order is
+    /// preserved across a save (`IndexMap`, not alphabetical `BTreeMap`).
+    #[test]
+    fn section_order_preserved_on_save() {
+        let mut config = EneConfig::default();
+        // Insert in a deliberately non-alphabetical order.
+        for section in ["store", "ai", "mind", "desktop"] {
+            config.extra.insert(
+                section.to_string(),
+                serde_json::Value::Object(serde_json::Map::new()),
+            );
+        }
+
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let keys: Vec<&str> = parsed
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // Declared fields lead; then the flattened sections in insertion order.
+        let section_keys: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|k| matches!(*k, "store" | "ai" | "mind" | "desktop"))
+            .collect();
+        assert_eq!(
+            section_keys,
+            vec!["store", "ai", "mind", "desktop"],
+            "section order must survive the save, got {section_keys:?}"
+        );
+    }
+
+    /// Writes a `settings.json` fixture with a deliberately non-alphabetical
+    /// top-level section order, for the load-path ordering regressions.
+    fn write_ordered_settings_fixture(path: &Path) {
+        let json = r#"{
+  "version": 1,
+  "store": { "enabled": true },
+  "ai": { "tasks": {} },
+  "mind": { "emotion": {} },
+  "desktop": { "language": "en" }
+}"#;
+        std::fs::write(path, json).expect("write ordered settings fixture");
+    }
+
+    /// Regression for #331: figment 0.10's `Dict` is a `BTreeMap`, so the
+    /// extract hands `extra` back in alphabetical order. Going through the
+    /// *real* load path (`load_full_config_from`, not in-memory construction),
+    /// the load must re-sort `extra` into the file's original section order so
+    /// the subsequent save keeps it.
+    #[test]
+    fn load_then_save_restores_file_section_order() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        write_ordered_settings_fixture(&path);
+
+        let config = load_full_config_from(&path).expect("settings load");
+
+        // The load re-sorts the alphabetical figment extract back into the
+        // file's original order…
+        let loaded: Vec<String> = config.extra.keys().cloned().collect();
+        assert_eq!(
+            loaded,
+            vec!["store", "ai", "mind", "desktop"],
+            "load must restore the file's section order, got {loaded:?}"
+        );
+
+        // …and the save keeps it.
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let section_keys: Vec<&str> = parsed
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .filter(|k| matches!(*k, "store" | "ai" | "mind" | "desktop"))
+            .collect();
+        assert_eq!(
+            section_keys,
+            vec!["store", "ai", "mind", "desktop"],
+            "saved file must keep the user's section order, got {section_keys:?}"
+        );
+    }
+
+    /// Regression for #331: a section added after load (not present in the
+    /// recorded order) must append after the file's original sections rather
+    /// than being sorted into the middle of them.
+    #[test]
+    fn load_then_save_appends_new_section_after_recorded_order() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        write_ordered_settings_fixture(&path);
+
+        let mut config = load_full_config_from(&path).expect("settings load");
+        config
+            .set_path("plugins.enabled", "true")
+            .expect("add a new section after load");
+
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let section_keys: Vec<&str> = parsed
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .filter(|k| matches!(*k, "store" | "ai" | "mind" | "desktop" | "plugins"))
+            .collect();
+        assert_eq!(
+            section_keys,
+            vec!["store", "ai", "mind", "desktop", "plugins"],
+            "new section must append after the recorded order, got {section_keys:?}"
+        );
+    }
+
+    /// Regression for #331: setting `$schema` via `set_path` (reachable from
+    /// CLI `/config set $schema …`) must route to the declared field, not
+    /// `extra`. Otherwise two `$schema` keys land on disk and the reload fails
+    /// with a "duplicate field" error — fatal since #325 removed the silent
+    /// fallback to defaults.
+    #[test]
+    fn set_schema_via_set_path_round_trips() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        write_ordered_settings_fixture(&path);
+
+        let mut config = load_full_config_from(&path).expect("settings load");
+        config
+            .set_path("$schema", "./custom.schema.json")
+            .expect("set $schema via set_path");
+
+        // Routed to the declared field, not `extra`.
+        assert_eq!(config.schema, "./custom.schema.json");
+        assert!(
+            !config.extra.contains_key("$schema"),
+            "$schema must not leak into extra"
+        );
+        assert_eq!(
+            config.get_path("$schema"),
+            Some(serde_json::Value::String(
+                "./custom.schema.json".to_string()
+            )),
+            "get_path must read the declared field"
+        );
+
+        // Serialize → reload must succeed and carry the new value.
+        let json = serialize_for_save(&config).expect("serialise for save");
+        std::fs::write(&path, json).expect("persist settings");
+        let reloaded = load_full_config_from(&path).expect("reload must not hit duplicate $schema");
+        assert_eq!(reloaded.schema, "./custom.schema.json");
+    }
+
+    /// Defensive: even if a stray `extra["$schema"]` is present in memory,
+    /// `serialize_for_save` must drop it so the declared field is never
+    /// duplicated on disk.
+    #[test]
+    fn serialize_for_save_strips_stray_schema_from_extra() {
+        let mut config = EneConfig::default();
+        config.extra.insert(
+            "$schema".to_string(),
+            serde_json::Value::String("./stray.schema.json".to_string()),
+        );
+
+        let json = serialize_for_save(&config).expect("serialise for save");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let obj = parsed.as_object().expect("object");
+
+        let schema_count = obj.keys().filter(|k| k.as_str() == "$schema").count();
+        assert_eq!(schema_count, 1, "exactly one $schema key on disk");
+        assert_eq!(
+            obj.get("$schema").and_then(serde_json::Value::as_str),
+            Some(DEFAULT_SETTINGS_SCHEMA),
+            "the declared (auto-filled) field wins over the stray extra entry"
+        );
     }
 
     /// `atomic_write` must leave the target with exactly the requested

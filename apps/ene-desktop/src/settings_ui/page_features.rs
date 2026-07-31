@@ -203,7 +203,9 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
         .changed()
     {
         tools.enabled = tools_enabled;
-        persist_tools(settings, ai, &tools);
+        settings.set_config_section(&tools);
+        settings.mark_dirty();
+        sync_features(settings, ai);
     }
 
     ui.add_enabled_ui(tools.enabled, |ui| {
@@ -247,18 +249,11 @@ fn render_tools(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<Ai
             }
         }
         if list_changed {
-            persist_tools(settings, ai, &tools);
+            settings.set_config_section(&tools);
+            settings.mark_dirty();
+            sync_features(settings, ai);
         }
     });
-}
-
-/// `PluginConfig` serializes at `plugins` and would wipe sibling `plugins.rag`.
-fn persist_tools(settings: &mut CharacterSettings, ai: &Arc<AiBridge>, tools: &PluginConfig) {
-    let rag = settings.config_section::<ToolRagConfig>();
-    settings.set_config_section(tools);
-    settings.set_config_section(&rag);
-    settings.mark_dirty();
-    sync_features(settings, ai);
 }
 
 fn render_audio(
