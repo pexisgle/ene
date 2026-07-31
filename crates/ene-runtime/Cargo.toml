@@ -44,6 +44,11 @@ cargo-husky = { workspace = true }
 async-trait = { workspace = true }
 tokio-stream = { workspace = true }
 tracing-subscriber = { workspace = true }
+# `test-util` gates `tokio::time::pause`/`advance` and the
+# `#[tokio::test(start_paused = ...)]` attribute used by the #401 prompt-wait
+# branch-ordering regression tests. Dev-only: unified in, and only compiled
+# for, test builds.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

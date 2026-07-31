@@ -7,7 +7,7 @@ use tokio_stream::{Stream, StreamExt};
 
 use crate::config::TaskRef;
 use crate::error::LlmProviderError;
-use crate::message::{LlmMessage, LlmResponseChunk};
+use crate::message::{LlmCompletion, LlmMessage, LlmResponseChunk};
 
 /// Trait implemented by LLM providers to interface with Ene.
 #[async_trait]
@@ -26,29 +26,43 @@ pub trait LlmProvider: Send + Sync {
     >;
 
     /// Executes a non-streaming chat completion with optional JSON schema response.
+    ///
+    /// Returns an [`LlmCompletion`] carrying the assistant text plus any token
+    /// usage the provider reported (#365); `usage` is `None` when the provider
+    /// does not report it.
     async fn chat_completion(
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError>;
+    ) -> Result<LlmCompletion, LlmProviderError>;
 
     /// Collect a full assistant reply from a streaming chat completion.
     ///
     /// `OpenRouter` and some OpenAI-compatible models respond reliably to streaming
     /// requests but may hang or exceed budgets on non-streaming `chat().create()`.
+    ///
+    /// Returns an [`LlmCompletion`]: the concatenated text plus any usage the
+    /// provider attached to the stream's final chunk (#365).
     async fn collect_stream_completion(
         &self,
         messages: &[LlmMessage],
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         let mut stream = self.create_chat_stream(messages, &[]).await?;
         let mut content = String::new();
+        let mut usage = None;
         while let Some(chunk_res) = stream.next().await {
             let chunk = chunk_res?;
             if let Some(delta) = chunk.text_delta {
                 content.push_str(&delta);
             }
+            if chunk.usage.is_some() {
+                usage = chunk.usage;
+            }
         }
-        Ok(content)
+        Ok(LlmCompletion {
+            text: content,
+            usage,
+        })
     }
 }
 

@@ -10,7 +10,7 @@ mod load;
 
 pub(crate) use backend::with_backend;
 pub(crate) use embed::embed_text;
-pub(crate) use generate::{generate_chat, generate_vision};
+pub(crate) use generate::{LlamaStreamChunk, generate_chat, generate_vision};
 pub(crate) use load::{LoadSpec, LoadedModel, resource_class_for};
 
 use ene_ai::error::LlmProviderError;

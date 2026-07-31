@@ -15,8 +15,8 @@
 
 use async_trait::async_trait;
 use ene_ai::{
-    EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
-    LlmToolCallChunk,
+    EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
+    LlmResponseChunk, LlmToolCallChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_plugin_host::{DeferredCallResult, PluginHostError, ToolRegistry};
@@ -82,11 +82,13 @@ impl LlmProvider for MockLlmWithToolCall {
                     name: Some("background.sleep".into()),
                     arguments: Some(r#"{"seconds": 1}"#.into()),
                 }]),
+                usage: None,
             })]
         } else {
             vec![Ok(LlmResponseChunk {
                 text_delta: Some("All done.".into()),
                 tool_calls_delta: None,
+                usage: None,
             })]
         };
         Ok(Box::pin(tokio_stream::iter(chunks)))
@@ -96,8 +98,8 @@ impl LlmProvider for MockLlmWithToolCall {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok("done".into())
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only("done".into()))
     }
 }
 
@@ -235,6 +237,7 @@ async fn deferred_tool_execution_emits_completion_event() {
         classifier_tx: mpsc::unbounded_channel().0,
         memory_writer_tx: mpsc::unbounded_channel().0,
         deferred_tool_tx,
+        aux_task_tx: mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: Some(store),

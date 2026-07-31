@@ -9,7 +9,8 @@
 
 use async_trait::async_trait;
 use ene_ai::{
-    EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
+    EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
+    LlmResponseChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_plugin_host::{PluginHostError, ToolRegistry};
@@ -72,6 +73,7 @@ impl LlmProvider for MockLlm {
         let chunks = vec![Ok(LlmResponseChunk {
             text_delta: Some(response),
             tool_calls_delta: None,
+            usage: None,
         })];
         Ok(Box::pin(tokio_stream::iter(chunks)))
     }
@@ -80,8 +82,8 @@ impl LlmProvider for MockLlm {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok(self.response.clone())
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only(self.response.clone()))
     }
 }
 
@@ -155,6 +157,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: Some(store.clone()),

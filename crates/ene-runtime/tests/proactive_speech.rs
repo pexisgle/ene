@@ -7,7 +7,7 @@
 )]
 
 use async_trait::async_trait;
-use ene_ai::{LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
+use ene_ai::{LlmCompletion, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_mind::MindConfig;
 use ene_plugin_proto::ToolResult;
@@ -43,6 +43,7 @@ impl LlmProvider for EchoProvider {
         let stream = tokio_stream::once(Ok(LlmResponseChunk {
             text_delta: Some(self.response.clone()),
             tool_calls_delta: None,
+            usage: None,
         }));
         Ok(Box::pin(stream))
     }
@@ -51,8 +52,8 @@ impl LlmProvider for EchoProvider {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok(self.response.clone())
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only(self.response.clone()))
     }
 }
 
@@ -132,6 +133,7 @@ async fn proactive_stream_does_not_add_user_history() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: None,
@@ -219,6 +221,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: None,
@@ -290,6 +293,7 @@ async fn proactive_stream_without_memory_store() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: None,

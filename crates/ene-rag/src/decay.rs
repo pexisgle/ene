@@ -6,6 +6,12 @@
 //! single [`half_life_decay`] primitive. The two callers keep their distinct
 //! anchors and post-processing; only the shared `exp(-λ·age)` kernel is unified.
 //!
+//! The anchors are deliberately different (#345): recall recency
+//! ([`recency_score`]) measures from the last *access* (`last_accessed_at`),
+//! while lifecycle forgetting ([`active_decay_anchor`]) measures from the last
+//! *content update* (`updated_at`). Recall must never push the forgetting
+//! anchor forward, or a frequently-recalled memory could never fade.
+//!
 //! Pure functions — no DB I/O. The state-machine validators
 //! (`validate_transition` / `validate_user_restore`) remain in `ene-store`.
 
@@ -37,15 +43,18 @@ pub fn half_life_decay(age_days: f64, half_life_days: f64) -> f32 {
 }
 
 /// Age in days of `anchor` relative to `reference` (negative ages clamped to 0).
-fn age_in_days(reference: DateTime<Utc>, anchor: DateTime<Utc>) -> f64 {
+pub(crate) fn age_in_days(reference: DateTime<Utc>, anchor: DateTime<Utc>) -> f64 {
     let age_secs = reference.signed_duration_since(anchor).num_seconds().max(0) as f64;
     age_secs / 86_400.0
 }
 
 /// Exponential recency score in `[0.0, 1.0]` using half-life decay in days.
 ///
-/// Anchor: `last_accessed_at → updated_at`. Used for recall
-/// ranking among recallable rows.
+/// Anchor: `last_accessed_at → updated_at`. Used for recall ranking among
+/// recallable rows. This intentionally differs from the forgetting anchor
+/// ([`active_decay_anchor`], which keys off `updated_at` only): recall rewards
+/// memories that were recently *used*, while forgetting measures staleness of
+/// the memory's *content* (#345).
 pub fn recency_score(reference: DateTime<Utc>, item: &MemoryItem, half_life_days: f64) -> f32 {
     let anchor = item.last_accessed_at.unwrap_or(item.updated_at);
     half_life_decay(age_in_days(reference, anchor), half_life_days)
@@ -57,9 +66,18 @@ pub fn emotional_impact(affect: AffectAnnotation) -> f32 {
     (dist / 2.83).clamp(0.0, 1.0)
 }
 
-/// Anchor for active-memory fade decisions (`last_accessed_at → updated_at`).
+/// Anchor for active-memory fade decisions: the last *content* update (#345).
+///
+/// Forgetting keys off `updated_at`, deliberately **not** `last_accessed_at`.
+/// Recall bumps `last_accessed_at` on prompt inclusion, but that must not push
+/// the decay anchor back to "now": otherwise a frequently-recalled memory could
+/// never reach [`FADE_THRESHOLD`], and recall would simultaneously raise a
+/// memory's score *and* shield it from forgetting — the self-reinforcing loop
+/// this separation breaks. "Last recalled" and "last edited" are distinct
+/// concepts; forgetting tracks the latter, recall recency
+/// ([`recency_score`]) the former.
 pub fn active_decay_anchor(item: &MemoryItem) -> DateTime<Utc> {
-    item.last_accessed_at.unwrap_or(item.updated_at)
+    item.updated_at
 }
 
 /// Anchor for faded-memory archive decisions (`faded_at → created_at`).
@@ -215,11 +233,31 @@ mod tests {
     }
 
     #[test]
-    fn active_decay_anchor_prefers_last_accessed_at() {
+    fn active_decay_anchor_ignores_last_accessed_at() {
+        // #345: forgetting keys off content-update time, never recall time.
         let now = Utc::now();
         let mut item = sample_item(MemoryStatus::Active, false, 30);
         item.last_accessed_at = Some(now - chrono::Duration::days(5));
-        assert_eq!(active_decay_anchor(&item), item.last_accessed_at.unwrap());
+        assert_eq!(active_decay_anchor(&item), item.updated_at);
+    }
+
+    #[test]
+    fn recalled_memory_still_fades_over_time() {
+        // #345 regression: bumping `last_accessed_at` (as recall does) must not
+        // reset the decay anchor, so a frequently-recalled-but-stale memory
+        // still decays and can reach `FADE_THRESHOLD`.
+        let now = Utc::now();
+        let mut item = sample_item(MemoryStatus::Active, false, 120);
+        // Simulate a recall that happened just now.
+        item.last_accessed_at = Some(now);
+        let score = decay_score(&item, now, 30.0);
+        // 120 days = 4 half-lives of base decay (~0.0625) before retention
+        // factors; a fresh anchor would score ~1.0. The recent access must not
+        // rescue it.
+        assert!(
+            score < FADE_THRESHOLD,
+            "a stale memory must fade despite a recent recall, got {score}"
+        );
     }
 
     #[test]

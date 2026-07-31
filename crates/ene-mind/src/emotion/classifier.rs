@@ -246,10 +246,12 @@ async fn call_provider(
         ClassifierTransport::NonStreaming => provider
             .chat_completion(messages, Some(json_schema.clone()))
             .await
+            .map(|completion| completion.text)
             .map_err(ClassifierError::Provider),
         ClassifierTransport::Streaming => provider
             .collect_stream_completion(messages)
             .await
+            .map(|completion| completion.text)
             .map_err(ClassifierError::Provider),
     }
 }

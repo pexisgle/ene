@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ene_plugin::{
-    ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginError, PluginStream, PluginStreamChunk,
+    ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginCompletion, PluginError, PluginStream,
+    PluginStreamChunk, TokenUsage,
 };
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -239,6 +240,8 @@ impl LlmPlugin for AnthropicPlugin {
                 max_in_flight: 8,
                 queue_depth: 16,
             },
+            // Claude models expose a 200k-token context window (#364).
+            context_window: Some(200_000),
         }]
     }
 
@@ -289,7 +292,7 @@ impl LlmPlugin for AnthropicPlugin {
         max_tokens: Option<u32>,
         messages: Vec<Value>,
         json_schema: Option<Value>,
-    ) -> Result<String, PluginError> {
+    ) -> Result<PluginCompletion, PluginError> {
         if kind != "anthropic" {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
@@ -330,12 +333,42 @@ impl LlmPlugin for AnthropicPlugin {
             .await
             .map_err(|e| PluginError::provider(format!("failed to parse response: {e}")))?;
 
-        if forced_tool.is_some() {
-            extract_tool_input(&body)
+        let text = if forced_tool.is_some() {
+            extract_tool_input(&body)?
         } else {
-            extract_text_content(&body)
-        }
+            extract_text_content(&body)?
+        };
+        Ok(PluginCompletion {
+            text,
+            usage: usage_from_anthropic_body(&body),
+        })
     }
+}
+
+/// Extract [`TokenUsage`] from an Anthropic message response body (#365).
+///
+/// Anthropic reports `usage.input_tokens` and `usage.output_tokens` (it has no
+/// single `total` field, so the total is derived as their sum). Returns `None`
+/// when the body carries no `usage` object.
+fn usage_from_anthropic_body(body: &Value) -> Option<TokenUsage> {
+    let usage = body.get("usage")?;
+    let input = usage.get("input_tokens").and_then(Value::as_u64);
+    let output = usage.get("output_tokens").and_then(Value::as_u64);
+    if input.is_none() && output.is_none() {
+        return None;
+    }
+    let to_u32 = |v: Option<u64>| v.map(|n| n as u32);
+    let prompt = to_u32(input);
+    let completion = to_u32(output);
+    let total = match (prompt, completion) {
+        (Some(p), Some(c)) => Some(p.saturating_add(c)),
+        _ => None,
+    };
+    Some(TokenUsage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+    })
 }
 
 /// Maps Anthropic content-block indices to dense tool-call indices.
@@ -475,6 +508,7 @@ fn process_sse_event(
                         "name": name,
                         "arguments": "",
                     })]),
+                    usage: None,
                 }))
             } else {
                 None
@@ -489,6 +523,7 @@ fn process_sse_event(
                     Some(Ok(PluginStreamChunk {
                         text_delta: Some(text),
                         tool_calls_delta: None,
+                        usage: None,
                     }))
                 }
                 "input_json_delta" => {
@@ -503,10 +538,27 @@ fn process_sse_event(
                             "index": tool_index,
                             "arguments": partial,
                         })]),
+                        usage: None,
                     }))
                 }
                 _ => None,
             }
+        }
+        "message_delta" => {
+            // Anthropic reports the cumulative output token count on the final
+            // `message_delta` event (#365); emit it as a usage-only chunk so
+            // the host can attach it to the stream's final chunk.
+            let usage = parsed.get("usage")?;
+            let output = usage.get("output_tokens").and_then(Value::as_u64)?;
+            Some(Ok(PluginStreamChunk {
+                text_delta: None,
+                tool_calls_delta: None,
+                usage: Some(TokenUsage {
+                    prompt_tokens: None,
+                    completion_tokens: Some(output as u32),
+                    total_tokens: None,
+                }),
+            }))
         }
         "error" => {
             let message = parsed

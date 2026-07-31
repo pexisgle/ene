@@ -116,7 +116,8 @@ pub async fn extract_with_timeout(
     .map_err(|_| {
         CognitionError::ExtractionFailed(format!("LLM extraction timed out after {timeout_secs}s"))
     })?
-    .map_err(|e| CognitionError::ExtractionFailed(format!("LLM provider error: {e}")))?;
+    .map_err(|e| CognitionError::ExtractionFailed(format!("LLM provider error: {e}")))?
+    .text;
 
     parse_candidates_json(&raw, locale)
 }
@@ -374,6 +375,7 @@ fn locale_mismatch(text: &str, locale: Locale) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ene_ai::LlmCompletion;
 
     type StreamResult = std::pin::Pin<
         Box<
@@ -416,8 +418,8 @@ mod tests {
             &self,
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, ene_ai::LlmProviderError> {
-            Ok(self.response.clone())
+        ) -> Result<LlmCompletion, ene_ai::LlmProviderError> {
+            Ok(LlmCompletion::text_only(self.response.clone()))
         }
     }
 
@@ -444,11 +446,11 @@ mod tests {
             &self,
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, ene_ai::LlmProviderError> {
+        ) -> Result<LlmCompletion, ene_ai::LlmProviderError> {
             // Simulate a slow provider. The extract() timeout cancels this
             // future long before the sleep elapses, so the test stays fast.
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            Ok("{}".to_string())
+            Ok(LlmCompletion::text_only("{}".to_string()))
         }
     }
 
@@ -475,8 +477,10 @@ mod tests {
             &self,
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, ene_ai::LlmProviderError> {
-            Ok("I'm sorry, I can't extract memories from that.".to_string())
+        ) -> Result<LlmCompletion, ene_ai::LlmProviderError> {
+            Ok(LlmCompletion::text_only(
+                "I'm sorry, I can't extract memories from that.".to_string(),
+            ))
         }
     }
 
@@ -810,7 +814,7 @@ mod tests {
             &self,
             messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, ene_ai::LlmProviderError> {
+        ) -> Result<LlmCompletion, ene_ai::LlmProviderError> {
             if let Some(LlmMessage::User { parts }) = messages.last() {
                 let text = parts
                     .iter()
@@ -822,7 +826,7 @@ mod tests {
                     .join("\n");
                 *self.last_user.lock().expect("lock") = text;
             }
-            Ok(self.response.clone())
+            Ok(LlmCompletion::text_only(self.response.clone()))
         }
     }
 

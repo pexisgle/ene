@@ -60,6 +60,59 @@ Contains provider definitions, task routing, retry/fallback rules, and voice (ST
 }
 ```
 
+Each provider entry may set an optional `context_window` (integer, tokens) to
+cap the context window the backend advertises (#364). The effective window is
+`min(advertised, context_window)`, so an override can only *shrink* a model's
+stated limit, never exceed it; omit it to defer entirely to the provider. A
+plugin provider advertises its window through `LlmProviderSpec.context_window`,
+and a local model reports `LocalModelDef.context_size`. From that effective
+window the runtime reserves the task's `max_tokens` (`tasks.<task>.max_tokens`)
+as headroom for the model's reply, plus a safety margin that absorbs
+token-estimation error, and budgets the prompt against what remains:
+
+```
+available = min(model_window, context_window)
+          − response_reserve    // tasks.<task>.max_tokens
+          − safety_margin       // estimation error; ~0 once usage is measured (#365)
+```
+
+```json
+{
+  "ai": {
+    "providers": {
+      "openai": {
+        "kind": "openai",
+        "api_key": "sk-...",
+        "base_url": "https://api.openai.com/v1",
+        "context_window": 32000
+      }
+    }
+  }
+}
+```
+
+#### Token usage accounting (#365)
+
+Every completion carries an optional token-usage record — `prompt_tokens`,
+`completion_tokens`, and `total_tokens` — through all three provider layers
+(`ene-ai`'s in-process types, the plugin IPC, and the streaming chunk). How it
+is filled depends on the backend:
+
+- **Providers that report usage** (OpenAI-compatible, Anthropic) populate it
+  directly from the API response. For streaming, usage arrives on the
+  **final** chunk only; intermediate chunks leave it empty.
+- **Local models** (llama.cpp) count tokens themselves — the exact prompt
+  length fed into the context and the number of tokens sampled — so they
+  report real usage for both one-shot and streaming completions.
+- **Providers that report nothing** fall back to a coarse character-based
+  estimate (roughly one token per three characters), which over-counts English
+  and under-counts Japanese less than a naive four-chars-per-token rule.
+
+Because a measured count has no estimation error, the `safety_margin` above can
+be driven toward zero once usage is available; the estimate keeps a conservative
+margin only while a backend reports nothing. There is no configuration for this
+behavior — it is automatic per provider.
+
 ### `store.*` — Database & Memory Persistence
 
 Controls SQLite database persistence, integrity checks, and backup retention (#239):

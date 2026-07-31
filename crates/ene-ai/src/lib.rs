@@ -25,6 +25,10 @@
 
 /// Configuration types for AI providers, tasks, and retry policies.
 pub mod config;
+/// Effective context-window computation: reconciling the provider-advertised
+/// and user-configured windows, then reserving headroom for the response and
+/// for token-estimation error (#364).
+pub mod context_window;
 /// Blanket async-provider adapters over `ene-infer::EngineHandle`
 /// (`LocalLlmEngine`, `LocalTtsEngine`, `LocalSttEngine`), plus
 /// `EngineDescriptor` capability/concurrency/resource declarations and the
@@ -58,6 +62,9 @@ pub use config::{
     LOCAL_PROVIDER, LocalModelDef, ProactiveAcceleration, RetryConfig, SttConfig, TaskRef,
     TtsConfig, VadConfig, is_builtin_kind, kind_typo_suggestion,
 };
+pub use context_window::{
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_SAFETY_MARGIN_FRACTION, EffectiveWindow, effective_window,
+};
 pub use engine_adapter::{
     Capability, CapabilitySet, ConcurrencyHint, DEFAULT_CHUNK_BUFFER, EngineDescriptor, EngineId,
     LlmChatRequest, LlmChatResponse, LocalLlmEngine, LocalSttEngine, LocalTtsEngine,
@@ -69,7 +76,9 @@ pub use health::{
     FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
     ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
-pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
+pub use message::{
+    LlmCompletion, LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart,
+};
 pub use model_fetch::{
     MagicBytesValidator, ModelFetchError, ModelFetcher, ModelValidator, PrefixPredicateValidator,
     SizeMultipleValidator, sanitize_basename, strip_url_path, validate_https_url,
@@ -91,3 +100,10 @@ pub use traits::{
     SttResult, TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
     cosine_similarity, embed, embed_query,
 };
+
+/// Token usage accounting for LLM responses (#365).
+///
+/// Re-exported from `ene-plugin-proto` (the wire-ABI crate every provider
+/// layer depends on) so in-process providers, the plugin IPC bridge, and the
+/// wire format all share one definition rather than converting between two.
+pub use ene_plugin_proto::TokenUsage;

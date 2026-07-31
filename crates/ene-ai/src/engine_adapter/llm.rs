@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use super::descriptor::{Capability, EngineDescriptor};
 use super::resource::ResourceRegistry;
 use crate::error::LlmProviderError;
-use crate::message::{LlmMessage, LlmResponseChunk, UserMessagePart};
+use crate::message::{LlmCompletion, LlmMessage, LlmResponseChunk, UserMessagePart};
 use crate::traits::LlmProvider;
 
 /// Owned chat-completion request, built from whatever [`LlmProvider`]
@@ -45,6 +45,11 @@ pub struct LlmChatRequest {
 pub struct LlmChatResponse {
     /// The full assistant reply text.
     pub text: String,
+    /// Token usage the local engine counted itself, if any (#365). Local
+    /// models (llama.cpp) know their exact prompt/completion token counts;
+    /// engines that cannot count leave this `None` and callers fall back to a
+    /// character-based estimate.
+    pub usage: Option<ene_plugin_proto::TokenUsage>,
 }
 
 /// Maps an [`ene_infer::EngineError`] to [`LlmProviderError`], preserving
@@ -152,10 +157,11 @@ where
         // `StreamingLocalLlmEngine` instead (see that type's docs, and
         // `crate::engine_adapter`'s module docs on why this had to be a
         // separate type rather than a second `impl` here).
-        let text = self.chat_completion(messages, None).await?;
+        let completion = self.chat_completion(messages, None).await?;
         Ok(Box::pin(tokio_stream::once(Ok(LlmResponseChunk {
-            text_delta: Some(text),
+            text_delta: Some(completion.text),
             tool_calls_delta: None,
+            usage: completion.usage,
         }))))
     }
 
@@ -163,7 +169,7 @@ where
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         if has_vision_input(messages) && !self.descriptor.capabilities.contains(Capability::Vision)
         {
             return Err(LlmProviderError::Provider(format!(
@@ -190,7 +196,11 @@ where
         drop(permit);
 
         let response = outcome.map_err(map_engine_error)?;
-        Ok(response.into().text)
+        let response: LlmChatResponse = response.into();
+        Ok(LlmCompletion {
+            text: response.text,
+            usage: response.usage,
+        })
     }
 }
 
@@ -377,7 +387,7 @@ where
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         self.inner.chat_completion(messages, json_schema).await
     }
 }
@@ -440,7 +450,10 @@ mod tests {
 
     impl From<MockChatResponse> for LlmChatResponse {
         fn from(r: MockChatResponse) -> Self {
-            Self { text: r.0 }
+            Self {
+                text: r.0,
+                usage: None,
+            }
         }
     }
 
@@ -523,7 +536,8 @@ mod tests {
             .chat_completion(&[text_message("hello")], None)
             .await
             .expect("chat completion succeeds");
-        assert_eq!(reply, "hello");
+        assert_eq!(reply.text, "hello");
+        assert_eq!(reply.usage, None);
     }
 
     #[tokio::test]
@@ -805,7 +819,10 @@ mod tests {
 
     impl From<MockStreamChatResponse> for LlmChatResponse {
         fn from(r: MockStreamChatResponse) -> Self {
-            Self { text: r.0 }
+            Self {
+                text: r.0,
+                usage: None,
+            }
         }
     }
 
@@ -975,6 +992,6 @@ mod tests {
             .chat_completion(&[text_message("solo")], None)
             .await
             .expect("chat completion succeeds");
-        assert_eq!(reply, "solo");
+        assert_eq!(reply.text, "solo");
     }
 }

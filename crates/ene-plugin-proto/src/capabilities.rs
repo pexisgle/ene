@@ -58,6 +58,19 @@ pub struct LlmProviderSpec {
     /// docs for the rationale.
     #[serde(default)]
     pub concurrency: ConcurrencyHint,
+
+    /// Maximum context window in tokens, if the provider knows it.
+    ///
+    /// This is the model's hard limit on `prompt + completion` tokens. The
+    /// host combines it with any user-configured override to derive the
+    /// effective window it budgets prompts against (see #364). `None` means
+    /// the provider does not advertise a limit — either because it genuinely
+    /// has none, or because an older plugin binary predates this field and
+    /// omitted it on the wire (`#[serde(default)]` keeps that a `None`
+    /// rather than a deserialization error, so no protocol version bump is
+    /// required).
+    #[serde(default)]
+    pub context_window: Option<u32>,
 }
 
 /// Specification of a TTS provider (reserved for future use).
@@ -179,6 +192,7 @@ mod tests {
                     max_in_flight: 4,
                     queue_depth: 8,
                 },
+                context_window: Some(200_000),
             }],
             tts_providers: vec![],
             stt_providers: vec![],
@@ -206,6 +220,7 @@ mod tests {
                 max_in_flight: 4,
                 queue_depth: 8,
             },
+            context_window: Some(200_000),
         };
         let json = serde_json::to_string(&spec).unwrap();
         let deser: LlmProviderSpec = serde_json::from_str(&json).unwrap();
@@ -248,6 +263,24 @@ mod tests {
         assert_eq!(spec.concurrency, ConcurrencyHint::default());
         assert_eq!(spec.concurrency.max_in_flight, 1);
         assert_eq!(spec.concurrency.queue_depth, 2);
+    }
+
+    /// Load-bearing contract: an unset `context_window` field (as an old
+    /// plugin binary built before #364 would send) must deserialize to
+    /// `None` — "provider does not advertise a limit" — not an error. This is
+    /// what lets the field ship without a protocol version bump.
+    #[test]
+    fn llm_provider_spec_missing_context_window_defaults_to_none() {
+        let json = r#"{"kind":"anthropic","supported_models":[],"supports_streaming":true,"supports_vision":false}"#;
+        let spec: LlmProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.context_window, None);
+    }
+
+    #[test]
+    fn llm_provider_spec_context_window_roundtrips() {
+        let json = r#"{"kind":"anthropic","supported_models":[],"supports_streaming":true,"supports_vision":false,"context_window":200000}"#;
+        let spec: LlmProviderSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.context_window, Some(200_000));
     }
 
     #[test]

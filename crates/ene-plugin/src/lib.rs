@@ -57,8 +57,8 @@ pub mod tool_provider;
 pub use action::{ToolAction, ToolSpecArgs};
 pub use compat::ToolProviderPlugin;
 pub use plugin::{
-    EmbedPlugin, LlmPlugin, PluginStream, PluginStreamChunk, SttPlugin, ToolPlugin,
-    ToolPluginCapabilities, TtsPlugin,
+    EmbedPlugin, LlmPlugin, PluginCompletion, PluginStream, PluginStreamChunk, SttPlugin,
+    ToolPlugin, ToolPluginCapabilities, TtsPlugin,
 };
 pub use server::{PluginDispatch, run_plugin_server};
 pub use tool_provider::{ActionSetProvider, SingleActionProvider};
@@ -67,7 +67,8 @@ pub use tool_provider::{ActionSetProvider, SingleActionProvider};
 // to depend on `ene-plugin` for the full authoring surface.
 pub use ene_plugin_proto::{
     ConcurrencyHint, LlmProviderSpec, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginError,
-    PluginIpcRequest, PluginIpcResponse, SttProviderSpec, TtsProviderSpec, VersionRange,
+    PluginIpcRequest, PluginIpcResponse, SttProviderSpec, TokenUsage, TtsProviderSpec,
+    VersionRange,
 };
 /// Cross-platform IPC transport (re-exported from `ene-plugin-proto`).
 pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};
@@ -149,9 +150,10 @@ pub mod prelude {
 
         #[doc(no_inline)]
         pub use crate::{
-            ConcurrencyHint, EmbedPlugin, LlmPlugin, LlmProviderSpec, PluginDispatch, PluginError,
-            PluginStream, PluginStreamChunk, SttPlugin, SttProviderSpec, ToolPlugin,
-            ToolPluginCapabilities, TtsPlugin, TtsProviderSpec, run_plugin_server,
+            ConcurrencyHint, EmbedPlugin, LlmPlugin, LlmProviderSpec, PluginCompletion,
+            PluginDispatch, PluginError, PluginStream, PluginStreamChunk, SttPlugin,
+            SttProviderSpec, TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+            TtsProviderSpec, run_plugin_server,
         };
     }
 

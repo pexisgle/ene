@@ -9,7 +9,8 @@
 
 use async_trait::async_trait;
 use ene_ai::{
-    EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
+    EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
+    LlmResponseChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_mind::MindConfig;
@@ -66,6 +67,7 @@ impl LlmProvider for SlowExtractionLlm {
         let chunks = vec![Ok(LlmResponseChunk {
             text_delta: Some("Hello back.".into()),
             tool_calls_delta: None,
+            usage: None,
         })];
         Ok(Box::pin(tokio_stream::iter(chunks)))
     }
@@ -74,9 +76,9 @@ impl LlmProvider for SlowExtractionLlm {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         tokio::time::sleep(self.extraction_delay).await;
-        Ok(r#"{"candidates": []}"#.into())
+        Ok(LlmCompletion::text_only(r#"{"candidates": []}"#.into()))
     }
 }
 
@@ -155,6 +157,7 @@ async fn terminal_does_not_wait_for_deferred_memory_extraction() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: Some(store),

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::TokenUsage;
+
 /// Unified chat message formats for LLM providers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "role")]
@@ -63,17 +65,52 @@ pub struct LlmResponseChunk {
     pub text_delta: Option<String>,
     /// Tool call updates generated in this chunk, if any.
     pub tool_calls_delta: Option<Vec<LlmToolCallChunk>>,
+    /// Token usage for the whole completion, carried on the **final** chunk
+    /// when the provider reports it (#365). Intermediate chunks leave this
+    /// `None`; providers that never report usage leave every chunk `None` and
+    /// the caller falls back to a character-based estimate.
+    pub usage: Option<TokenUsage>,
 }
 
 impl From<String> for LlmResponseChunk {
     /// The common case for a [`crate::engine_adapter::llm::StreamingLocalLlmEngine`]-wrapped
     /// model whose `Chunk` is a plain detokenized text piece (e.g. llama.cpp's
-    /// `LlamaChatModel`): one text delta, no tool call data.
+    /// `LlamaChatModel`): one text delta, no tool call data, no usage.
     fn from(text_delta: String) -> Self {
         Self {
             text_delta: Some(text_delta),
             tool_calls_delta: None,
+            usage: None,
         }
+    }
+}
+
+/// A completed (non-streaming) chat response: the assistant text plus any
+/// token usage the provider reported (#365).
+///
+/// Returned by [`crate::LlmProvider::chat_completion`]. `usage` is `None` when
+/// the provider does not report usage, in which case callers that need a count
+/// fall back to a character-based estimate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmCompletion {
+    /// The generated assistant text.
+    pub text: String,
+    /// Token usage reported by the provider, if any.
+    pub usage: Option<TokenUsage>,
+}
+
+impl LlmCompletion {
+    /// A completion with no usage information.
+    #[must_use]
+    pub fn text_only(text: String) -> Self {
+        Self { text, usage: None }
+    }
+}
+
+impl From<String> for LlmCompletion {
+    /// Wrap a bare text response as a completion with no usage.
+    fn from(text: String) -> Self {
+        Self::text_only(text)
     }
 }
 
