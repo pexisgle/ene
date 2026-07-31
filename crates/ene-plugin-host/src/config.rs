@@ -133,6 +133,17 @@ ene_config::define_config!(
         /// plugin legitimately needs a long time before answering.
         #[serde(default = "default_handshake_timeout_ms")]
         pub handshake_timeout_ms: u64 = default_handshake_timeout_ms(),
+        /// Allow insecure MCP HTTP URLs (local development opt-in).
+        ///
+        /// Defaults to `false` (deny). When `false`, MCP HTTP servers must use
+        /// HTTPS and loopback addresses (`127.0.0.0/8`, `::1`) are refused.
+        /// Setting this to `true` permits plain-`http://` URLs and loopback
+        /// endpoints so a locally-running MCP server can be reached during
+        /// development.
+        ///
+        /// This opt-in never relaxes the link-local block: cloud-metadata
+        /// addresses (`169.254.0.0/16`, `fe80::/10`) are always refused.
+        pub mcp_allow_insecure_urls: bool = false,
         /// MCP servers to connect to.
         pub mcp_servers: Vec<crate::mcp_config::McpServerConfig> = Vec::new(),
     }

@@ -39,7 +39,7 @@ Ene Workspace
 │   ├── ene-ai-local       (Local LLM inference via llama-cpp-4)
 │   ├── ene-voice          (Local STT/TTS/VAD audio pipeline)
 │   ├── ene-rag            (RAG policy: memory scoring/decay, tool selection)
-│   ├── ene-connector      (Shared connector framework & MCP bridge)
+│   ├── ene-connector      (External-service credential & identity authority)
 │   ├── ene-util           (Pure utilities: truncation, HTML-to-Markdown)
 │   └── ene-vrm            (3D VRM 1.0 loader & wgpu renderer)
 ├── Plugin Architecture

@@ -20,15 +20,13 @@ use tokio::sync::{Mutex, mpsc};
 
 use sha2::Digest;
 
-use ene_connector::ConnectorRegistry;
-
 use crate::circuit_breaker::CircuitBreaker;
 use crate::error::PluginHostError;
 use crate::factory::IpcLlmProviderFactory;
 use crate::health::PluginHealthEvent;
 use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
-use crate::mcp_connector::McpConnector;
+use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 
 /// Maximum number of restart attempts before a plugin is disabled.
@@ -528,8 +526,6 @@ pub struct PluginHostManager {
     /// When true (default), Drop will attempt a best-effort graceful shutdown
     /// by killing child processes with a brief wait for reaping.
     shutdown_on_drop: bool,
-    /// Connector registry for MCP servers (`WS7`: wire `McpConnector` into lifecycle).
-    connector_registry: Arc<ConnectorRegistry>,
 }
 
 impl Drop for PluginHostManager {
@@ -587,7 +583,6 @@ impl PluginHostManager {
                 health_task: None,
                 health_rx: None,
                 shutdown_on_drop: true,
-                connector_registry: Arc::new(ConnectorRegistry::new()),
             });
         }
 
@@ -775,27 +770,18 @@ impl PluginHostManager {
             }
         }
 
-        // Connect to configured MCP servers via McpConnector (WS7: wire into lifecycle).
-        let connector_registry = Arc::new(ConnectorRegistry::new());
+        // Connect to configured MCP servers. Each server gets its own
+        // McpToolRegistry, which is added to the tool registries regardless of
+        // whether the connection succeeds (a failed server simply advertises no
+        // tools). Server names are used verbatim — no charset validation — so
+        // hyphenated and other names connect identically (#417).
         if !plugin_config.mcp_servers.is_empty() {
             for server in &plugin_config.mcp_servers {
                 if !server.enabled {
                     continue;
                 }
 
-                let connector = McpConnector::new(server.clone());
-                let registry = connector.registry();
-
-                // Register the connector for lifecycle management
-                if let Err(err) = connector_registry.register(Box::new(connector)) {
-                    tracing::warn!(
-                        component = "PluginHostManager",
-                        server = %server.name,
-                        error = %err,
-                        "Failed to register MCP connector"
-                    );
-                    continue;
-                }
+                let registry = Arc::new(McpToolRegistry::new());
 
                 // Connect the MCP server
                 match &server.transport {
@@ -820,21 +806,35 @@ impl PluginHostManager {
                         }
                     }
                     McpTransport::Http { url, auth_header } => {
-                        tracing::warn!(
+                        // Log scheme/host/port only — the URL may embed userinfo
+                        // credentials (`https://user:token@host/sse`).
+                        let (scheme, host, port) = redacted_endpoint(url);
+                        tracing::info!(
                             component = "PluginHostManager",
                             server = %server.name,
-                            url = %url,
-                            "Attempting MCP server connection via HTTP (streamable HTTP transport); \
-                             this path may fail if the server is unreachable or incompatible"
+                            scheme = %scheme,
+                            host = %host,
+                            port = ?port,
+                            "Connecting to MCP server via streamable HTTP transport"
                         );
                         if let Err(err) = registry
-                            .connect_http(&server.name, url, auth_header.as_deref())
+                            .connect_http(
+                                &server.name,
+                                url,
+                                auth_header.as_deref(),
+                                plugin_config.mcp_allow_insecure_urls,
+                            )
                             .await
                         {
-                            tracing::warn!(
+                            // A rejected server is a configuration error the user
+                            // must act on — its tools silently disappear — so log
+                            // at error level rather than warn.
+                            tracing::error!(
                                 component = "PluginHostManager",
                                 server = %server.name,
-                                url = %url,
+                                scheme = %scheme,
+                                host = %host,
+                                port = ?port,
                                 error = %err,
                                 "MCP HTTP connection failed"
                             );
@@ -876,7 +876,6 @@ impl PluginHostManager {
             health_task,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
-            connector_registry,
         })
     }
 
@@ -907,11 +906,6 @@ impl PluginHostManager {
             }
         }
         grouped
-    }
-
-    /// Returns the connector registry managing MCP server connectors (WS7).
-    pub fn connector_registry(&self) -> &Arc<ConnectorRegistry> {
-        &self.connector_registry
     }
 
     /// Takes ownership of the health-event receiver.

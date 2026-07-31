@@ -136,6 +136,12 @@ Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:
 }
 ```
 
+HTTP MCP endpoints validate their URL before connecting (HTTPS-only by default;
+loopback and cloud-metadata/link-local addresses refused). Set
+`"mcp_allow_insecure_urls": true` inside `plugins` to permit plain-`http://` and
+loopback URLs for local development; link-local addresses stay refused. See
+[Plugins & MCP](concepts/plugins-and-mcp.md).
+
 `max_concurrent` bounds the number of concurrent in-flight IPC requests **per
 plugin connection**, across *all* request types (tool calls, pings,
 `list_tools`, `chat_completion`, …) — not just tool calls. Requests beyond the
