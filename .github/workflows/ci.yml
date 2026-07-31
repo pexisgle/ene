@@ -48,7 +48,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cmd-format: "nix develop --command {0}"
-          cache-on-failure: true
+          # Failed runs must not persist partial caches.
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run clippy
         run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
@@ -76,7 +77,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cmd-format: "nix develop --command {0}"
-          cache-on-failure: true
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         run: nix develop --command cargo test --workspace
@@ -104,7 +105,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cmd-format: "nix develop --command {0}"
-          cache-on-failure: true
+          cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
       # pre-existing broken-intra-doc-link warnings unrelated to #273 (e.g.
@@ -114,3 +115,31 @@ jobs:
       - name: Build docs
         run: nix develop --command cargo doc --workspace --no-deps
 
+  # Keep the two newest rust-cache generations per job, run after the
+  # caching jobs save theirs.
+  cache-prune:
+    name: Prune rust caches
+    if: github.ref == 'refs/heads/main'
+    needs: [clippy, test, docs]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Prune stale rust-cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          keep_per_job=2
+          gh api --paginate "repos/${{ github.repository }}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | [.id, .key, .created_at] | @tsv' \
+          | sort -k3,3r \
+          | awk -v keep="$keep_per_job" '
+              { job = $2; sub(/^v0-rust-/, "", job); sub(/-Linux-.*/, "", job) }
+              count[job]++ < keep { next }
+              { print $1 }' \
+          | while read -r id; do
+              gh api -X DELETE "repos/${{ github.repository }}/actions/caches/$id" >/dev/null
+              deleted=$((deleted + 1))
+            done
+          echo "Deleted ${deleted} stale rust-cache entries."
