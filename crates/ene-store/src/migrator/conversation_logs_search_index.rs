@@ -22,7 +22,7 @@ pub struct ConversationLogsSearchIndexMigration;
 
 impl MigrationName for ConversationLogsSearchIndexMigration {
     fn name(&self) -> &'static str {
-        "m20260731_000004_conversation_logs_search_index"
+        "m20260731_000005_conversation_logs_search_index"
     }
 }
 

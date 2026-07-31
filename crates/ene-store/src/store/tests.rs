@@ -160,7 +160,11 @@ async fn message_search_escapes_like_metacharacters() {
 
 #[tokio::test]
 async fn message_search_query_plan_uses_created_at_index() {
-    use sea_orm::{DbBackend, Statement};
+    use sea_orm::sea_query::{Expr, Func, LikeExpr};
+    use sea_orm::{
+        DbBackend, EntityTrait, ExprTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+        Statement,
+    };
 
     let store = setup_store().await;
     store
@@ -172,27 +176,39 @@ async fn message_search_query_plan_uses_created_at_index() {
         .await
         .unwrap();
 
-    // Mirror the shape of `search_messages`: a leading-wildcard `LIKE` filter
-    // plus `ORDER BY created_at DESC` + `LIMIT`/`OFFSET`. The leading
-    // wildcard cannot use a B-tree index on `content` (that requires FTS5,
-    // #424), but the ordering must be served by `idx_log_created_at` so the
-    // query walks rows newest-first and stops at the limit instead of sorting
-    // the whole table (#422).
+    // Build the exact query `search_messages` executes through SeaORM's own
+    // query builder, so the EXPLAIN plan reflects the real SQL (the
+    // hand-written string below it is kept only as documentation). The
+    // leading-wildcard `LIKE` cannot use a B-tree index on `content` (that
+    // requires FTS5, #424), but the ordering must be served by
+    // `idx_log_created_at` so the query walks rows newest-first and stops at
+    // the limit instead of sorting the whole table (#422).
+    let built = crate::entities::conversation_logs::Entity::find()
+        .filter(
+            Func::lower(Expr::col(
+                crate::entities::conversation_logs::Column::Content,
+            ))
+            .like(LikeExpr::new("%hello%".to_string()).escape('\\')),
+        )
+        .order_by_desc(crate::entities::conversation_logs::Column::CreatedAt)
+        .limit(10)
+        .offset(0)
+        .build(DbBackend::Sqlite)
+        .to_string();
+    let explain_sql = format!("EXPLAIN QUERY PLAN {built}");
+
     let rows = store
         .connection()
-        .query_all_raw(Statement::from_string(
-            DbBackend::Sqlite,
-            "EXPLAIN QUERY PLAN SELECT * FROM conversation_logs \
-             WHERE lower(content) LIKE '%hello%' ESCAPE '\\' \
-             ORDER BY created_at DESC LIMIT 10 OFFSET 0"
-                .to_string(),
-        ))
+        .query_all_raw(Statement::from_string(DbBackend::Sqlite, explain_sql))
         .await
         .unwrap();
 
     let plan: String = rows
         .iter()
-        .map(|row| row.try_get_by_index::<String>(3).unwrap_or_default())
+        .map(|row| {
+            row.try_get_by_index::<String>(3)
+                .expect("EXPLAIN QUERY PLAN detail column exists")
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
