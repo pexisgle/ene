@@ -130,7 +130,54 @@ automatically on fresh installs.
 
 ---
 
-## 5. Plugin Security Model
+## 5. Tool Database Schema Declaration & Evolution
+
+Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) persist their
+data into the host's `memory.db` through a per-tool DB IPC server
+(`ene-store`'s `db_server` module). A plugin never issues DDL directly: it
+declares its tables, columns, and indexes with a `DeclareSchema` request, and
+the host creates and owns the physical tables. Every table name must start
+with the plugin's prefix (`fs_`, `utility_`), and all subsequent requests are
+validated against the declaration.
+
+### Fingerprint-based change detection
+
+On every `DeclareSchema`, the host hashes the declaration (BLAKE3) and
+compares it against the `fingerprint` stored in the internal `__tool_schemas`
+table:
+
+| Change | Behavior |
+|---|---|
+| No change | The stored row is left untouched and the existing tables are reused. Re-declaring an identical schema does **not** rewrite the row needlessly. |
+| Column added | Applied in place with `ALTER TABLE ... ADD COLUMN`; existing rows receive the column's `DEFAULT` (or `NULL`). The stored declaration is refreshed. |
+| Table added | Created via `CREATE TABLE IF NOT EXISTS`. The stored declaration is refreshed. |
+| Index added | Applied via `CREATE INDEX IF NOT EXISTS`. |
+| Column type changed | **Rejected** with a `SCHEMA_CONFLICT` error. |
+| Table/column removed | **Rejected** with a `SCHEMA_CONFLICT` error. |
+| Column added with `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` | **Rejected** with a `SCHEMA_CONFLICT` error. |
+| Column added as `NOT NULL` without a `DEFAULT` | **Rejected** with a `SCHEMA_CONFLICT` error. |
+
+`SQLite` cannot change a column's type, drop columns/tables, or add a
+constrained column in place, and adding a `NOT NULL` column requires a
+`DEFAULT` to populate pre-existing rows — so rather than letting the
+validation layer and the physical tables silently diverge — the #423
+symptom, where validation passes but an `INSERT` later fails with
+`no such column` — the host rejects incompatible changes and asks the
+plugin author to reconcile them explicitly.
+Additive changes (plain new columns and tables) are safe and applied
+automatically.
+
+### Guidance for plugin authors
+
+- Adding columns or tables is safe and is applied automatically to existing
+  databases on the next `DeclareSchema`.
+- To change a column's type or remove a table, ship a new prefixed table and
+  migrate the data yourself, or reconcile the difference in your plugin's own
+  logic. The host will not rewrite or drop data on your behalf.
+
+---
+
+## 6. Plugin Security Model
 
 ### Opt-in discovery
 
@@ -199,7 +246,7 @@ up the new binary and re-pin its checksum.
 
 ---
 
-## 6. MCP (Model Context Protocol) Integration
+## 7. MCP (Model Context Protocol) Integration
 
 `ene-connector` and `ene-plugin-host` seamlessly integrate external MCP servers:
 
@@ -209,7 +256,7 @@ up the new binary and re-pin its checksum.
 
 ---
 
-## 7. Writing a Custom Tool Plugin
+## 8. Writing a Custom Tool Plugin
 
 Developers can quickly author new tool plugins using `ene-plugin`'s `#[derive(ToolAction)]` (via `ene-tool-macros`) and server entry point. This sketch is illustrative — see an existing plugin under `plugins/tool/*` (e.g. `plugins/tool/app/src/main.rs`) for the current, compiling pattern, or `cargo doc -p ene-tool-macros --open` for the derive macro's exact requirements:
 
