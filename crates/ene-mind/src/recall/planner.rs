@@ -6,7 +6,7 @@ use super::intent::{RecallIntent, infer_intents, kinds_for_intents};
 use super::plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 use super::result::RecalledMemory;
 use super::topic::{current_topic, normalize_text, recent_user_turn};
-use crate::config::{ContextConfig, MindMemoryConfig};
+use crate::config::MindMemoryConfig;
 use crate::error::CognitionError;
 
 const DEFAULT_CANDIDATE_POOL_MULTIPLIER: usize = 4;
@@ -22,10 +22,6 @@ pub struct RecallPlanner;
 /// Options controlling deterministic recall-plan generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallPlannerOptions {
-    /// Token budget for recalled typed memories.
-    pub memory_budget_tokens: usize,
-    /// Token budget for semantic character/lorebook memory.
-    pub semantic_budget_tokens: usize,
     /// Maximum number of memory results requested by the plan.
     pub result_limit: usize,
     /// Minimum vector similarity for vector-sourced candidates.
@@ -37,11 +33,9 @@ pub struct RecallPlannerOptions {
 }
 
 impl RecallPlannerOptions {
-    /// Build recall-planner options from mind context and memory config.
-    pub fn from_config(context: &ContextConfig, memory: &MindMemoryConfig) -> Self {
+    /// Build recall-planner options from mind memory config.
+    pub fn from_config(memory: &MindMemoryConfig) -> Self {
         Self {
-            memory_budget_tokens: context.memory_budget_tokens,
-            semantic_budget_tokens: context.semantic_budget_tokens,
             result_limit: memory.recall_result_limit.max(1),
             similarity_threshold: memory.recall_similarity_threshold.clamp(0.0, 1.0),
             min_score: memory.recall_min_score.clamp(0.0, 1.0),
@@ -52,7 +46,7 @@ impl RecallPlannerOptions {
 
 impl Default for RecallPlannerOptions {
     fn default() -> Self {
-        Self::from_config(&ContextConfig::default(), &MindMemoryConfig::default())
+        Self::from_config(&MindMemoryConfig::default())
     }
 }
 
@@ -87,8 +81,6 @@ impl RecallPlanner {
                 user_id: input.user_id.map(ToOwned::to_owned),
             },
             budget: RecallBudgetHints {
-                memory_budget_tokens: options.memory_budget_tokens,
-                semantic_budget_tokens: options.semantic_budget_tokens,
                 result_limit: options.result_limit,
             },
             search: RecallSearchHints {
@@ -385,17 +377,12 @@ mod tests {
     }
 
     #[test]
-    fn budget_hints_follow_context_config() {
-        let context = ContextConfig {
-            memory_budget_tokens: 333,
-            semantic_budget_tokens: 222,
-            ..ContextConfig::default()
-        };
+    fn budget_hints_follow_memory_config() {
         let memory = MindMemoryConfig {
             recall_result_limit: 11,
             ..MindMemoryConfig::default()
         };
-        let options = RecallPlannerOptions::from_config(&context, &memory);
+        let options = RecallPlannerOptions::from_config(&memory);
 
         let plan = RecallPlanner::plan(
             &input_with_defaults("Tell me about our project", &[], None, &[]),
@@ -403,8 +390,6 @@ mod tests {
         )
         .expect("plan");
 
-        assert_eq!(plan.budget.memory_budget_tokens, 333);
-        assert_eq!(plan.budget.semantic_budget_tokens, 222);
         assert_eq!(plan.budget.result_limit, 11);
     }
 
@@ -416,7 +401,7 @@ mod tests {
             recall_min_score: 0.21,
             ..MindMemoryConfig::default()
         };
-        let options = RecallPlannerOptions::from_config(&ContextConfig::default(), &memory);
+        let options = RecallPlannerOptions::from_config(&memory);
         let plan = RecallPlanner::plan(
             &input_with_defaults("Remember our design discussion", &[], None, &[]),
             &options,

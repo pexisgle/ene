@@ -88,7 +88,7 @@ User Message
   │
   ├─> 1. Runtime receives request & generates TurnId (returns Busy if turn active)
   ├─> 2. Mind: before_turn (recall planning + affect update; parallel prefetch)
-  ├─> 3. Mind: compose_prompt_packet (budget allocation across prompt sections)
+  ├─> 3. Mind: compose_prompt_packet (priority-ordered packing into the context window)
   ├─> 4. AI Provider: LLM streaming token generation
   │     └─> (Optional) Mid-turn IPC Tool Execution via PluginHostManager
   ├─> 5. Mind: Output arbitration (Performance cues generated for avatar)
@@ -129,7 +129,7 @@ Out-of-process plugins (tools, custom LLM providers, MCP servers) communicate wi
 | Crate | Responsibility |
 |---|---|
 | `ene-runtime` | Actor-based runtime facade, turn manager, event bus (chat/audio/lifecycle channels), DB IPC socket server |
-| `ene-mind` | Session manager, prompt budgeting, affect (PAD model), memory recall, proactive speech, performance arbitration |
+| `ene-mind` | Session manager, prompt packing, affect (PAD model), memory recall, proactive speech, performance arbitration |
 | `ene-store` | SQLite / SeaORM database entities, migrations, vector recall (`sqlite-vec`), commitment ledger |
 | `ene-core` | Persistence-agnostic domain vocabulary (`AffectState`, typed-memory kinds/statuses/queries, commitment ledger types) and the `MemoryPort` trait abstraction |
 | `ene-ai` | `AiProvider` trait, OpenAI provider, Anthropic IPC provider adapter, provider factory |

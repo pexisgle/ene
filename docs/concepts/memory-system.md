@@ -33,7 +33,7 @@ Where:
 To prevent injecting duplicate or redundant facts into the prompt packet, candidate memories pass through MMR reranking to maximize diversity.
 
 ### Access Bump Policy
-When a memory is recalled, its `access_count` and `last_accessed_at` are bumped — but **only if it actually makes it into the prompt**. The budget manager may drop a recalled memory's whole section or trim it within the section when over the token budget; such a memory is recalled by search yet never seen by the model, so it is *not* bumped. The set of memories that survive packing is tracked (`PromptPacketMeta::injected_memory_ids`) and only those are bumped after composition. This prevents "ranked high in search but dropped" from reinforcing a memory (#345).
+When a memory is recalled, its `access_count` and `last_accessed_at` are bumped — but **only if it actually makes it into the prompt**. The budget manager may drop a recalled memory's whole section when the prompt overflows the context window; such a memory is recalled by search yet never seen by the model, so it is *not* bumped. The set of memories that survive packing is tracked (`PromptPacketMeta::injected_memory_ids`) and only those are bumped after composition. This prevents "ranked high in search but dropped" from reinforcing a memory (#345).
 
 The bump's effect on ranking is also bounded: the access boost fades with the age of the most recent access (a half-life decay), so accesses from long ago stop counting and a memory cannot lock in a permanent ranking advantage.
 

@@ -144,6 +144,7 @@ async fn run_before_turn(
         embedder: Some(&embedder),
         llm_provider: Some(llm),
         post_history_block: None,
+        packing_budget_override: None,
     };
     engine.before_turn(ctx).await.unwrap()
 }
@@ -264,6 +265,7 @@ async fn scenario_identity_kernel_survives_long_history() {
                 embedder: Some(&embedder),
                 llm_provider: Some(llm),
                 post_history_block: None,
+                packing_budget_override: None,
             },
             pre,
             ene_mind::ComposePrefetch::default(),

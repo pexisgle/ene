@@ -152,6 +152,11 @@ pub struct IpcLlmProvider {
     max_tokens: Option<u32>,
     provider_config: serde_json::Value,
     retry_policy: RetryPolicy,
+    /// Context window the plugin advertised for this provider kind
+    /// (`LlmProviderSpec.context_window`), surfaced through
+    /// [`LlmProvider::context_window`] so prompt packing can budget against the
+    /// model's real limit (#364, #370). `None` when the plugin declared none.
+    context_window: Option<u32>,
     /// Shared with every other `IpcLlmProvider` instance created by the same
     /// factory for the same (plugin, kind) pair, so the concurrency bound
     /// holds across the many short-lived provider instances
@@ -173,6 +178,7 @@ impl IpcLlmProvider {
         max_tokens: Option<u32>,
         provider_config: serde_json::Value,
         retry_policy: RetryPolicy,
+        context_window: Option<u32>,
         limiter: Arc<ConcurrencyLimiter>,
     ) -> Self {
         Self {
@@ -182,6 +188,7 @@ impl IpcLlmProvider {
             max_tokens,
             provider_config,
             retry_policy,
+            context_window,
             limiter,
         }
     }
@@ -269,6 +276,10 @@ impl Stream for IpcChatStream {
 impl ene_ai::LlmProvider for IpcLlmProvider {
     fn name(&self) -> &str {
         &self.kind
+    }
+
+    fn context_window(&self) -> Option<u32> {
+        self.context_window
     }
 
     async fn create_chat_stream(

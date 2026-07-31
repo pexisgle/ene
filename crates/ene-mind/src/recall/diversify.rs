@@ -434,8 +434,6 @@ mod tests {
                 user_id: None,
             },
             budget: RecallBudgetHints {
-                memory_budget_tokens: 1000,
-                semantic_budget_tokens: 500,
                 result_limit: limit,
             },
             search: RecallSearchHints {

@@ -87,23 +87,32 @@ A **session** is a contiguous dialogue history stored in SQLite (`ene-store`).
 
 ## 3. Prompt Packet Composition
 
-Rather than sending raw chat arrays to the LLM, `PromptComposer` builds structured `PromptPacket`s with strict budget boundaries:
+Rather than sending raw chat arrays to the LLM, `PromptComposer` builds structured `PromptPacket`s and packs them against the model's context window:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│ Protected System Identity (Character card & core rules)  │  (High Priority)
+│ Protected System Identity (Character card & core rules)  │  (Required — never dropped)
 ├──────────────────────────────────────────────────────────┤
 │ Current PAD Affect State & Presentation Cues             │
 ├──────────────────────────────────────────────────────────┤
-│ Recalled Memories (Hybrid vector + lexical facts)        │  (Budget Constrained)
+│ Recalled Memories (Hybrid vector + lexical facts)        │  (Droppable by priority)
 ├──────────────────────────────────────────────────────────┤
 │ Tool Capabilities & IPC Specifications                   │
 ├──────────────────────────────────────────────────────────┤
-│ Recent Session Dialogue History                           │  (Truncated as needed)
+│ Recent Session Dialogue History                           │  (Trimmed oldest-first)
 └──────────────────────────────────────────────────────────┘
 ```
 
-Budget allocation dynamically truncates oldest dialogue messages while maintaining identity and safety rules under token pressure.
+Packing is a **priority-ordered fill** against the model's effective context
+window (#364, #370): the available window is `effective_window − response_reserve
+− safety_margin`, and `pack_prompt` keeps the required sections (platform
+contract, identity kernel, output contract, user input) unconditionally, then
+fills the remaining capacity by section priority, dropping the lowest-priority
+droppable sections first when the prompt overflows. There are no per-section
+sub-budgets — each section's *size* is bounded by its content producer (recall
+result limit, lorebook token budget, identity-kernel cap), so packing only
+decides *which* sections survive. As a last resort the oldest dialogue messages
+are trimmed.
 
 ### Prompt Library & Language Packs
 

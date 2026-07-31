@@ -37,6 +37,11 @@ pub struct IpcLlmProviderFactory {
     /// [`builtin_plugins_dir`](ene_config::builtin_plugins_dir). Built-in
     /// plugins are always trusted to receive credentials.
     builtin: bool,
+    /// Context window the plugin advertised for this provider kind
+    /// (`LlmProviderSpec.context_window`), forwarded to every
+    /// [`IpcLlmProvider`] this factory creates so prompt packing can budget
+    /// against the model's real limit (#364, #370).
+    context_window: Option<u32>,
     /// Shared across every [`IpcLlmProvider`] this factory creates, since a
     /// fresh provider instance is built per call
     /// (`create_task_chat_provider`) — see `ipc_provider`'s module docs for
@@ -61,6 +66,7 @@ impl IpcLlmProviderFactory {
         conn: Arc<IpcPluginConnection>,
         plugin_name: String,
         builtin: bool,
+        context_window: Option<u32>,
         concurrency: ConcurrencyHint,
     ) -> Self {
         Self {
@@ -68,6 +74,7 @@ impl IpcLlmProviderFactory {
             conn,
             plugin_name,
             builtin,
+            context_window,
             limiter: Arc::new(ConcurrencyLimiter::new(concurrency)),
         }
     }
@@ -138,6 +145,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
             max_tokens,
             provider_config,
             retry_policy,
+            self.context_window,
             Arc::clone(&self.limiter),
         );
 

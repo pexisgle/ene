@@ -43,6 +43,34 @@ impl PromptSectionKind {
         )
     }
 
+    /// Packing priority: higher values are kept longer when the prompt must be
+    /// shrunk to fit the model's context window (#370).
+    ///
+    /// Required sections report [`u8::MAX`] — packing never drops them
+    /// regardless of this value (it checks [`Self::is_required`] directly).
+    /// Among droppable sections, packing sheds the lowest priority first, so
+    /// the advisory [`Self::InterruptionNote`] goes before the structural
+    /// [`Self::BehaviorContract`]. Content producers — not packing — bound each
+    /// section's size (recall result limit, lorebook token budget, identity
+    /// kernel cap), so packing only decides *which* sections survive.
+    pub const fn priority(self) -> u8 {
+        match self {
+            Self::PlatformContract
+            | Self::IdentityKernel
+            | Self::OutputContract
+            | Self::UserInput => u8::MAX,
+            Self::InterruptionNote => 10,
+            Self::StyleExamples => 20,
+            Self::EpisodicMemories => 30,
+            Self::SemanticContext => 40,
+            Self::UserProfile => 50,
+            Self::ActiveCommitments => 60,
+            Self::CharacterState => 70,
+            Self::SceneState => 80,
+            Self::BehaviorContract => 90,
+        }
+    }
+
     /// Default markdown heading for system-block sections.
     pub const fn heading(self) -> Option<&'static str> {
         match self {
@@ -82,7 +110,7 @@ impl PromptSectionKind {
     }
 }
 
-/// A single prompt section with optional token budget metadata.
+/// A single prompt section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptSection {
     /// Section classification.
@@ -91,19 +119,16 @@ pub struct PromptSection {
     pub content: String,
     /// Whether the section is required and must not be dropped.
     pub required: bool,
-    /// Token budget hint used during packing (#81).
-    pub budget_tokens: usize,
 }
 
 impl PromptSection {
     /// Create a new section.
-    pub fn new(kind: PromptSectionKind, content: impl Into<String>, budget_tokens: usize) -> Self {
+    pub fn new(kind: PromptSectionKind, content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
             kind,
             required: kind.is_required(),
             content,
-            budget_tokens,
         }
     }
 

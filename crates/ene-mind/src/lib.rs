@@ -115,7 +115,6 @@ pub use context::{
     PackedPrompt, PendingCompressionTask, compression_has_usable_summary,
     evaluate_compression_trigger, execute_compression, load_active_scene_summary,
     maybe_roll_up_chapter, pack_prompt, poll_compression_result, spawn_compression_task,
-    validate_context_config,
 };
 /// Emotion engine types.
 #[doc(no_inline)]

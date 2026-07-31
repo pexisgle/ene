@@ -325,7 +325,6 @@ impl EneHandle {
         ene_voice::register_providers();
 
         let mind = config.get_section::<ene_mind::MindConfig>()?;
-        ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
 
         let mem_config = config.get_section::<ene_store::StoreConfig>()?;
         let plugin_config = config.get_section::<ene_plugin_host::PluginConfig>()?;

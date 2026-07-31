@@ -70,6 +70,13 @@ pub struct TurnContext<'a> {
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
     /// Expression PHI block (emotion protocol + card post-history instructions).
     pub post_history_block: Option<&'a str>,
+    /// Optional override for the prompt packing budget (in tokens).
+    ///
+    /// When `None` (production), the budget is derived from the model's
+    /// effective context window (#364, #370). Tests set this to inject a
+    /// deterministic budget and force drop/trim behaviour without depending on
+    /// the global AI config or a live provider.
+    pub packing_budget_override: Option<usize>,
 }
 
 /// Output of pre-turn analysis and recall planning.

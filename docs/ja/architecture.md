@@ -88,7 +88,7 @@ flowchart TD
   │
   ├─> 1. Runtime: リクエストを受信し TurnId を発行 (実行中の場合は Busy を返却)
   ├─> 2. Mind: before_turn (想起計画 + 感情更新; 並行プリフェッチ)
-  ├─> 3. Mind: compose_prompt_packet (プロンプトセクションごとの予算割り当て)
+  ├─> 3. Mind: compose_prompt_packet (コンテキストウィンドウへの優先度順パッキング)
   ├─> 4. AI Provider: LLM によるストリーミングトークン生成
   │     └─> (任意) PluginHostManager 経由のターン中 IPC ツール実行
   ├─> 5. Mind: 出力調停 (アバター向け Performance キューの生成)
@@ -129,7 +129,7 @@ flowchart TD
 | クレート | 主な責務 |
 |---|---|
 | `ene-runtime` | アクターベースのランタイムファサード、ターン管理、イベントバス（チャット / 音声 / ライフサイクルの3チャネル）、DB IPC ソケットサーバー |
-| `ene-mind` | セッション管理、プロンプト予算配分、感情 (PADモデル)、記憶想起、プロアクティブ発話、演出調停 |
+| `ene-mind` | セッション管理、プロンプトパッキング、感情 (PADモデル)、記憶想起、プロアクティブ発話、演出調停 |
 | `ene-store` | SQLite / SeaORM エンティティ、マイグレーション、ベクトル検索 (`sqlite-vec`)、コミットメント台帳 |
 | `ene-core` | 永続化に依存しないドメイン語彙 (`AffectState`、typed-memory の種別/ステータス/クエリ、コミットメント台帳の型) および `MemoryPort` トレイト抽象 |
 | `ene-ai` | `AiProvider` トレイト、OpenAI プロバイダ、Anthropic IPC アダプタ、プロバイダファクトリ |

@@ -130,14 +130,13 @@ Controls SQLite database persistence, integrity checks, and backup retention (#2
 
 ### `mind.*` — Cognitive Engine & Emotion Parameters
 
-Configures token context budget, hybrid memory recall, emotion decay, character compilation, and proactive speech policy (#103):
+Configures context-window packing, hybrid memory recall, emotion decay, character compilation, and proactive speech policy (#103):
 
 ```json
 {
   "mind": {
     "context": {
-      "max_tokens": 4096,
-      "recall_limit": 10
+      "max_prompt_tokens": 4096
     },
     "emotion": {
       "enabled": true,
@@ -159,6 +158,14 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
   }
 }
 ```
+
+Prompt packing no longer allocates per-section token budgets (#370). Instead it
+fills the model's effective context window (#364) in priority order: required
+sections (identity kernel, output contract, user input) are always kept, and
+when the prompt overflows the window the lowest-priority droppable sections are
+shed first. `mind.context.max_prompt_tokens` is an optional operator cap that
+shrinks the window as `min(advertised, max_prompt_tokens)`; omit it (the
+default) to let the prompt auto-follow the model's advertised context size.
 
 The proactive activity observer captures the focused application to inform spontaneous
 speech. `mind.proactive.sources.window_title_level` controls how much of the focused

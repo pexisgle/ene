@@ -148,6 +148,7 @@ fn build_turn_context<'a>(
         embedder,
         llm_provider: Some(provider.clone()),
         post_history_block,
+        packing_budget_override: None,
     }
 }
 
