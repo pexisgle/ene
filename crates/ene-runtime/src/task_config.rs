@@ -22,13 +22,21 @@
 //!   pins a task for up to `deferred_max_polls * 100ms` (~60s by
 //!   default), so this is the most expensive slot per admitted task and
 //!   the most exposed to a burst.
-//! - `classifier_cap` / `memory_writer_cap` — post-turn affect
-//!   classification and deferred memory writes. Losing admission here
-//!   degrades quality (a turn's emotional/memory bookkeeping is skipped)
-//!   but never correctness: the underlying work was already spawned by
-//!   the stream task before its `JoinHandle` reached the actor, so a
-//!   rejected admission only means the actor stops supervising it for
-//!   panics, not that the work itself is cancelled.
+//! - `classifier_cap` — post-turn affect classification. The classifier
+//!   was already spawned by the stream task before its `JoinHandle`
+//!   reached the actor, so a rejected admission only stops the actor
+//!   supervising it for panics — it does not cancel the work. The
+//!   classifier produces no lifecycle/diagnostic event of its own (only a
+//!   panic log), so losing admission degrades quality (a turn's emotional
+//!   bookkeeping goes unsupervised) but never correctness.
+//! - `memory_writer_cap` — deferred memory writes. The write itself is
+//!   likewise spawned detached by the stream task, but — unlike the
+//!   classifier — its outcome drives user-visible events
+//!   (`LifecycleEvent::PendingCandidateAvailable` and
+//!   `DiagnosticEvent::MemoryWrite`). A rejected admission therefore
+//!   still consumes the outcome via a detached task (#398), so those
+//!   events fire regardless of admission; the only loss is panic
+//!   supervision of that consumer, not the events themselves.
 //! - `search_cap` — `EneCommand::SearchTools` / tool-search jobs.
 //! - `bg_command_cap` — heavy command-handler work (GGUF model load,
 //!   plugin host restart) spawned off the actor's main loop to prevent
