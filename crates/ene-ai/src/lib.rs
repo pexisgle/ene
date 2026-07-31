@@ -76,7 +76,9 @@ pub use health::{
     FailoverSelection, FallbackRecord, HealthCheckError, ProviderHealthMonitor,
     ProviderHealthReport, ProviderHealthStatus, check_provider_health, select_healthy_chat,
 };
-pub use message::{LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart};
+pub use message::{
+    LlmCompletion, LlmMessage, LlmResponseChunk, LlmToolCall, LlmToolCallChunk, UserMessagePart,
+};
 pub use model_fetch::{
     MagicBytesValidator, ModelFetchError, ModelFetcher, ModelValidator, PrefixPredicateValidator,
     SizeMultipleValidator, sanitize_basename, strip_url_path, validate_https_url,
@@ -98,3 +100,10 @@ pub use traits::{
     SttResult, TtsChunk, TtsProvider, TtsProviderFactory, VadEngine, VadEvent, VadFactory,
     cosine_similarity, embed, embed_query,
 };
+
+/// Token usage accounting for LLM responses (#365).
+///
+/// Re-exported from `ene-plugin-proto` (the wire-ABI crate every provider
+/// layer depends on) so in-process providers, the plugin IPC bridge, and the
+/// wire format all share one definition rather than converting between two.
+pub use ene_plugin_proto::TokenUsage;

@@ -584,7 +584,7 @@ fn record_arbiter_outcomes(
 mod tests {
     use super::*;
     use crate::memory_writer::candidate::TurnInput;
-    use ene_ai::LlmMessage;
+    use ene_ai::{LlmCompletion, LlmMessage};
     use ene_store::{
         AffectAnnotation, AffectState, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,
         MemorySource, MemoryStatus, MemoryStore, NewMemoryItem,
@@ -630,8 +630,8 @@ mod tests {
             &self,
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, ene_ai::LlmProviderError> {
-            Ok(self.response.clone())
+        ) -> Result<LlmCompletion, ene_ai::LlmProviderError> {
+            Ok(LlmCompletion::text_only(self.response.clone()))
         }
     }
 
@@ -657,7 +657,7 @@ mod tests {
             &self,
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, ene_ai::LlmProviderError> {
+        ) -> Result<LlmCompletion, ene_ai::LlmProviderError> {
             Err(ene_ai::LlmProviderError::Provider(
                 "forced extraction failure".to_string(),
             ))

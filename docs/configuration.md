@@ -91,6 +91,28 @@ available = min(model_window, context_window)
 }
 ```
 
+#### Token usage accounting (#365)
+
+Every completion carries an optional token-usage record — `prompt_tokens`,
+`completion_tokens`, and `total_tokens` — through all three provider layers
+(`ene-ai`'s in-process types, the plugin IPC, and the streaming chunk). How it
+is filled depends on the backend:
+
+- **Providers that report usage** (OpenAI-compatible, Anthropic) populate it
+  directly from the API response. For streaming, usage arrives on the
+  **final** chunk only; intermediate chunks leave it empty.
+- **Local models** (llama.cpp) count tokens themselves — the exact prompt
+  length fed into the context and the number of tokens sampled — so they
+  report real usage for both one-shot and streaming completions.
+- **Providers that report nothing** fall back to a coarse character-based
+  estimate (roughly one token per three characters), which over-counts English
+  and under-counts Japanese less than a naive four-chars-per-token rule.
+
+Because a measured count has no estimation error, the `safety_margin` above can
+be driven toward zero once usage is available; the estimate keeps a conservative
+margin only while a backend reports nothing. There is no configuration for this
+behavior — it is automatic per provider.
+
 ### `store.*` — Database & Memory Persistence
 
 Controls SQLite database persistence, integrity checks, and backup retention (#239):

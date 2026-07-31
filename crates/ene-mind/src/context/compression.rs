@@ -279,8 +279,8 @@ async fn summarize_span(
     let result = timeout(duration, provider.chat_completion(&messages, None)).await;
 
     match result {
-        Ok(Ok(text)) => {
-            let trimmed = text.trim();
+        Ok(Ok(completion)) => {
+            let trimmed = completion.text.trim();
             if trimmed.is_empty() || trimmed == excerpt.trim() {
                 None
             } else {

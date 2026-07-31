@@ -3,12 +3,12 @@
 //! [`ene_ai::StreamingLocalLlmEngine`].
 
 use ene_ai::error::LlmProviderError;
-use ene_ai::{LlmChatRequest, LlmChatResponse};
+use ene_ai::{LlmChatRequest, LlmChatResponse, LlmResponseChunk};
 use ene_infer::{ChunkSink, JobContext, LocalModel, StreamingLocalModel};
 use llama_cpp_4::context::LlamaContext;
 use llama_cpp_4::context::params::LlamaContextParams;
 
-use crate::llama_cpp::{self, LoadSpec, LoadedModel};
+use crate::llama_cpp::{self, LlamaStreamChunk, LoadSpec, LoadedModel};
 
 /// This crate's [`ene_infer::LocalModel::Request`] for [`LlamaChatModel`]:
 /// either an ordinary chat turn (routed through
@@ -45,11 +45,23 @@ impl From<LlmChatRequest> for LlamaCppRequest {
 /// This crate's [`ene_infer::LocalModel::Response`] for [`LlamaChatModel`].
 pub(crate) struct LlamaCppResponse {
     pub(crate) text: String,
+    /// Tokens the prompt occupied in the context (#365).
+    pub(crate) prompt_tokens: u32,
+    /// Tokens sampled for the completion (#365).
+    pub(crate) completion_tokens: u32,
 }
 
 impl From<LlamaCppResponse> for LlmChatResponse {
     fn from(r: LlamaCppResponse) -> Self {
-        Self { text: r.text }
+        let total = r.prompt_tokens.saturating_add(r.completion_tokens);
+        Self {
+            text: r.text,
+            usage: Some(ene_ai::TokenUsage::new(
+                r.prompt_tokens,
+                r.completion_tokens,
+                total,
+            )),
+        }
     }
 }
 
@@ -177,7 +189,7 @@ impl LocalModel for LlamaChatModel {
         })?;
         let loaded_ref: &LoadedModel = loaded.as_ref();
 
-        let text = match req {
+        let generated = match req {
             LlamaCppRequest::Chat(chat) => llama_cpp::generate_chat(
                 loaded_ref,
                 ctx,
@@ -196,7 +208,11 @@ impl LocalModel for LlamaChatModel {
                 loaded_ref, ctx, &system, &user, width, height, &rgb, job, None,
             )?,
         };
-        Ok(LlamaCppResponse { text })
+        Ok(LlamaCppResponse {
+            text: generated.text,
+            prompt_tokens: generated.prompt_tokens,
+            completion_tokens: generated.completion_tokens,
+        })
     }
 
     fn reset(&mut self) {
@@ -206,11 +222,33 @@ impl LocalModel for LlamaChatModel {
     }
 }
 
+impl From<LlamaStreamChunk> for LlmResponseChunk {
+    /// Maps a local llama.cpp stream chunk onto the generic
+    /// [`LlmResponseChunk`] (#365): a [`LlamaStreamChunk::Delta`] becomes a
+    /// text delta with no usage, and the single trailing
+    /// [`LlamaStreamChunk::Usage`] becomes an empty-text chunk carrying the
+    /// generation's exact token counts — the "usage on the final chunk"
+    /// contract remote providers satisfy with their last SSE event.
+    fn from(chunk: LlamaStreamChunk) -> Self {
+        match chunk {
+            LlamaStreamChunk::Delta(text) => Self {
+                text_delta: Some(text),
+                tool_calls_delta: None,
+                usage: None,
+            },
+            LlamaStreamChunk::Usage(usage) => Self {
+                text_delta: None,
+                tool_calls_delta: None,
+                usage: Some(usage),
+            },
+        }
+    }
+}
+
 impl StreamingLocalModel for LlamaChatModel {
-    /// One detokenized text piece, exactly as `llama_cpp::generate::sample_tokens`
-    /// already produces per token internally — this trait just gives that
-    /// existing per-token loop somewhere to push each piece to.
-    type Chunk = String;
+    /// One incremental unit of output: a detokenized text piece, plus a single
+    /// trailing usage chunk — see [`LlamaStreamChunk`].
+    type Chunk = LlamaStreamChunk;
 
     fn run_streaming(
         &mut self,

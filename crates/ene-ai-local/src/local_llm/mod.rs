@@ -11,7 +11,7 @@ pub use routing::{
 use async_trait::async_trait;
 use ene_ai::config::ProactiveAcceleration;
 use ene_ai::error::LlmProviderError;
-use ene_ai::message::{LlmMessage, LlmResponseChunk};
+use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk};
 use ene_ai::traits::LlmProvider;
 use ene_ai::{
     Capability, CapabilitySet, EngineDescriptor, ResourceRegistry, StreamingLocalLlmEngine,
@@ -274,7 +274,7 @@ impl LlmProvider for LocalLlamaCppProvider {
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         self.engine.chat_completion(messages, json_schema).await
     }
 }
@@ -422,7 +422,7 @@ mod tests {
             .expect("plain completion");
         eprintln!("smoke plain: {plain:?}");
         assert!(
-            !plain.trim().is_empty(),
+            !plain.text.trim().is_empty(),
             "expected non-empty plain completion"
         );
 
@@ -443,7 +443,7 @@ mod tests {
             .expect("grammar completion");
         eprintln!("smoke grammar: {out:?}");
         assert!(
-            !out.trim().is_empty(),
+            !out.text.trim().is_empty(),
             "expected non-empty grammar completion"
         );
     }

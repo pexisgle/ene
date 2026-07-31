@@ -4,9 +4,12 @@ use std::pin::Pin;
 use std::time::Duration;
 use tokio_stream::{Stream, StreamExt};
 
+use crate::TokenUsage;
 use crate::config::{AiConfig, TaskRef};
 use crate::error::{LlmProviderError, map_openai_error};
-use crate::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart};
+use crate::message::{
+    LlmCompletion, LlmMessage, LlmResponseChunk, LlmToolCallChunk, UserMessagePart,
+};
 use crate::resolve::ResolvedChat;
 use crate::retry::RetryPolicy;
 use crate::traits::{
@@ -276,6 +279,16 @@ fn merge_request_body(
             "invalid chat request body".to_string(),
         ));
     };
+    if stream {
+        // Ask the provider to append a `usage` object to the final SSE chunk
+        // (#365). Providers that do not recognize the option ignore it; those
+        // that do report token counts there, which `run_direct_sse_stream`
+        // picks up. Without this, streaming responses carry no usage at all.
+        obj.insert(
+            "stream_options".into(),
+            serde_json::json!({"include_usage": true}),
+        );
+    }
     if thinking_disabled {
         obj.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
     }
@@ -460,7 +473,7 @@ impl LlmProvider for OpenAiProvider {
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         use async_openai::types::chat::FinishReason;
 
         let oa_messages: Vec<ChatCompletionRequestMessage> = messages
@@ -516,7 +529,10 @@ impl LlmProvider for OpenAiProvider {
                 .and_then(text_from_message_value)
                 .unwrap_or_default();
 
-            return Ok(content);
+            return Ok(LlmCompletion {
+                text: content,
+                usage: usage_from_json_value(response.get("usage")),
+            });
         }
 
         let response = self
@@ -563,8 +579,49 @@ impl LlmProvider for OpenAiProvider {
 
         let content = choice.message.content.clone().unwrap_or_default();
 
-        Ok(content)
+        Ok(LlmCompletion {
+            text: content,
+            usage: response.usage.as_ref().map(usage_from_openai),
+        })
     }
+}
+
+/// Extract [`TokenUsage`] from an `async-openai`
+/// [`CompletionUsage`](async_openai::types::chat::CompletionUsage) value.
+///
+/// `async-openai`'s `prompt_tokens`/`completion_tokens` are plain `u32`
+/// (always present), while `total_tokens` is likewise always present; we still
+/// carry them as `Option` to match the wire type and to stay robust to
+/// providers that zero-fill counts they do not actually track.
+fn usage_from_openai(usage: &async_openai::types::chat::CompletionUsage) -> TokenUsage {
+    TokenUsage {
+        prompt_tokens: Some(usage.prompt_tokens),
+        completion_tokens: Some(usage.completion_tokens),
+        total_tokens: Some(usage.total_tokens),
+    }
+}
+
+/// Extract [`TokenUsage`] from a raw JSON `usage` object (the BYOT / HTTP
+/// path, where the response is an untyped `serde_json::Value`).
+///
+/// Returns `None` when the object is absent or carries no recognizable count,
+/// so a provider that omits usage falls through to the caller's estimate.
+fn usage_from_json_value(value: Option<&serde_json::Value>) -> Option<TokenUsage> {
+    let obj = value?;
+    let prompt = obj.get("prompt_tokens").and_then(serde_json::Value::as_u64);
+    let completion = obj
+        .get("completion_tokens")
+        .and_then(serde_json::Value::as_u64);
+    let total = obj.get("total_tokens").and_then(serde_json::Value::as_u64);
+    if prompt.is_none() && completion.is_none() && total.is_none() {
+        return None;
+    }
+    let to_u32 = |v: Option<u64>| v.map(|n| n as u32);
+    Some(TokenUsage {
+        prompt_tokens: to_u32(prompt),
+        completion_tokens: to_u32(completion),
+        total_tokens: to_u32(total),
+    })
 }
 
 /// Factory for the default `OpenAI` provider.
@@ -935,6 +992,10 @@ async fn run_direct_sse_stream(
 
         let mut text_delta = None;
         let mut tool_calls_delta = None;
+        // Usage arrives only on the final SSE chunk (and only when the
+        // provider is asked for it via `stream_options.include_usage`); every
+        // other chunk leaves it `None` (#365).
+        let usage = usage_from_json_value(chunk.get("usage"));
 
         if let Some(choices) = chunk.get("choices").and_then(serde_json::Value::as_array)
             && let Some(choice) = choices.first()
@@ -979,11 +1040,12 @@ async fn run_direct_sse_stream(
             }
         }
 
-        if text_delta.is_some() || tool_calls_delta.is_some() {
+        if text_delta.is_some() || tool_calls_delta.is_some() || usage.is_some() {
             drop(
                 tx.send(Ok(LlmResponseChunk {
                     text_delta,
                     tool_calls_delta,
+                    usage,
                 }))
                 .await,
             );

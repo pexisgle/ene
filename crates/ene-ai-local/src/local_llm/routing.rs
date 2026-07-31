@@ -5,7 +5,7 @@ use crate::gguf::{ensure_gguf_available, ensure_mmproj_available};
 use async_trait::async_trait;
 use ene_ai::config::{AiConfig, AiProviderDef};
 use ene_ai::error::LlmProviderError;
-use ene_ai::message::{LlmMessage, LlmResponseChunk};
+use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk};
 use ene_ai::openai::OpenAiProvider;
 use ene_ai::resolve::ResolvedChat;
 use ene_ai::traits::LlmProvider;
@@ -59,11 +59,11 @@ impl LlmProvider for DisabledDecisionProvider {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok(
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only(
             r#"{"should_speak":false,"confidence":0.0,"reason":"decision backend disabled","topic_hint":"","urgency":"normal"}"#
                 .to_string(),
-        )
+        ))
     }
 }
 
@@ -311,8 +311,9 @@ mod smoke {
             .await
             .expect("decision completion");
         assert!(
-            out.contains("should_speak"),
-            "expected decision json, got: {out}"
+            out.text.contains("should_speak"),
+            "expected decision json, got: {}",
+            out.text
         );
         handles.shutdown().await;
     }

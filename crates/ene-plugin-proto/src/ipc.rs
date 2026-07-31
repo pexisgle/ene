@@ -10,6 +10,7 @@ use crate::sandbox::SandboxConfigData;
 use crate::tool_error::ToolError;
 use crate::tool_ipc::{CallContext, DeferredStatus};
 use crate::tool_types::{ToolResult, ToolSpec};
+use crate::usage::TokenUsage;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -430,6 +431,11 @@ pub enum PluginIpcResponse {
         /// Incremental tool-call JSON (partial function-call arguments).
         #[serde(default)]
         tool_calls_delta: Vec<serde_json::Value>,
+        /// Token usage, carried on the final chunk of the stream when the
+        /// provider reports it (#365). Intermediate chunks leave this `None`;
+        /// older plugins omit the field entirely and deserialize to `None`.
+        #[serde(default)]
+        usage: Option<TokenUsage>,
     },
     /// Terminal message indicating a stream completed successfully.
     StreamEnd {
@@ -449,6 +455,12 @@ pub enum PluginIpcResponse {
         request_id: String,
         /// The generated content.
         content: String,
+        /// Token usage reported by the provider, if any (#365). `None` when
+        /// the provider does not report usage (the host then falls back to a
+        /// character-based estimate); older plugins omit the field and
+        /// deserialize to `None`.
+        #[serde(default)]
+        usage: Option<TokenUsage>,
     },
     /// Result of speech synthesis.
     SpeechResult {
@@ -940,6 +952,7 @@ mod tests {
             request_id: "req-uuid-1".into(),
             text_delta: "Hello, ".into(),
             tool_calls_delta: vec![],
+            usage: None,
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
@@ -953,6 +966,7 @@ mod tests {
             tool_calls_delta: vec![
                 serde_json::json!({"id": "tc_1", "name": "read", "arguments": "{\"pa"}),
             ],
+            usage: None,
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
@@ -982,6 +996,30 @@ mod tests {
         let resp = PluginIpcResponse::ChatCompletionResult {
             request_id: "req-uuid-2".into(),
             content: "The answer is 42.".into(),
+            usage: None,
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_chat_completion_result_with_usage_roundtrip() {
+        let resp = PluginIpcResponse::ChatCompletionResult {
+            request_id: "req-uuid-2".into(),
+            content: "The answer is 42.".into(),
+            usage: Some(TokenUsage::new(12, 8, 20)),
+        };
+        let got = send_recv_response(&resp).await;
+        assert_eq!(got, resp);
+    }
+
+    #[tokio::test]
+    async fn response_stream_chunk_with_usage_roundtrip() {
+        let resp = PluginIpcResponse::StreamChunk {
+            request_id: "req-uuid-1".into(),
+            text_delta: String::new(),
+            tool_calls_delta: vec![],
+            usage: Some(TokenUsage::new(100, 50, 150)),
         };
         let got = send_recv_response(&resp).await;
         assert_eq!(got, resp);
@@ -1149,11 +1187,13 @@ mod tests {
                 request_id: "stream-1".into(),
                 text_delta: "Hello".into(),
                 tool_calls_delta: vec![],
+                usage: None,
             },
             PluginIpcResponse::StreamChunk {
                 request_id: "stream-1".into(),
                 text_delta: ", world!".into(),
                 tool_calls_delta: vec![],
+                usage: Some(TokenUsage::new(5, 2, 7)),
             },
             PluginIpcResponse::StreamEnd {
                 request_id: "stream-1".into(),
@@ -1190,6 +1230,7 @@ mod tests {
         let resp = PluginIpcResponse::ChatCompletionResult {
             request_id: "big-1".into(),
             content: big_content.clone(),
+            usage: None,
         };
         let (mut a, mut b) = tokio::io::duplex(256 * 1024);
         write_plugin_response(&mut a, &resp).await.unwrap();
@@ -1262,6 +1303,7 @@ mod tests {
         let resp = PluginIpcResponse::ChatCompletionResult {
             request_id: "big-1".into(),
             content: "x".repeat(MAX_MESSAGE_SIZE + 1),
+            usage: None,
         };
         let mut buf = Vec::new();
         let result = write_plugin_response(&mut buf, &resp).await;

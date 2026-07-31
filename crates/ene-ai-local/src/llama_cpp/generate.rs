@@ -23,6 +23,54 @@ use llama_cpp_4::token::detokenizer::StreamDetokenizer;
 const MAX_DECISION_TOKENS: i32 = 320;
 const MAX_VISION_TOKENS: i32 = 256;
 
+/// The text a local llama.cpp generation produced, plus the exact token
+/// counts the engine observed while producing it (#365).
+///
+/// llama.cpp knows both numbers precisely — the prompt length in tokens at
+/// decode time and the number of tokens it sampled — so a local model reports
+/// real usage instead of the character-based estimate remote callers fall back
+/// to. `prompt_tokens` is the count fed into the context (for the vision path
+/// this is the mtmd-evaluated chunk count, the closest available proxy);
+/// `completion_tokens` is how many tokens `sample_tokens` emitted before the
+/// end-of-generation token or the max-token cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Generated {
+    /// The full detokenized assistant text.
+    pub(crate) text: String,
+    /// Tokens the prompt occupied in the context.
+    pub(crate) prompt_tokens: u32,
+    /// Tokens sampled for the completion.
+    pub(crate) completion_tokens: u32,
+}
+
+impl Generated {
+    /// The exact token usage this generation observed (#365).
+    pub(crate) fn usage(&self) -> ene_ai::TokenUsage {
+        ene_ai::TokenUsage::new(
+            self.prompt_tokens,
+            self.completion_tokens,
+            self.prompt_tokens.saturating_add(self.completion_tokens),
+        )
+    }
+}
+
+/// One incremental unit a streaming llama.cpp chat job hands back (#365).
+///
+/// Mostly detokenized text pieces — exactly what [`sample_tokens`] already
+/// produced per token before this type existed — plus a single trailing
+/// [`LlamaStreamChunk::Usage`] carrying the generation's exact token counts,
+/// so [`ene_ai::StreamingLocalLlmEngine`]'s stream ends on a chunk whose
+/// `usage` is populated. That mirrors how remote providers report usage on
+/// their final SSE chunk and is what lets a local model satisfy the "streaming
+/// usage arrives on the final chunk" contract without a second round trip.
+#[derive(Debug, Clone)]
+pub(crate) enum LlamaStreamChunk {
+    /// A detokenized text piece.
+    Delta(String),
+    /// Token usage for the whole completion, sent once as the final chunk.
+    Usage(ene_ai::TokenUsage),
+}
+
 /// Generate a completion for `messages` on the caller's cached `ctx`,
 /// optionally constrained by JSON schema grammar.
 ///
@@ -36,8 +84,8 @@ pub(crate) fn generate_chat(
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
-    sink: Option<&ChunkSink<String, LlmProviderError>>,
-) -> Result<String, LlmProviderError> {
+    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
+) -> Result<Generated, LlmProviderError> {
     if messages_have_images(messages) {
         return generate_chat_vision(loaded, ctx, messages, json_schema, job, sink);
     }
@@ -56,8 +104,8 @@ pub(crate) fn generate_vision(
     height: u32,
     rgb: &[u8],
     job: &JobContext,
-    sink: Option<&ChunkSink<String, LlmProviderError>>,
-) -> Result<String, LlmProviderError> {
+    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
+) -> Result<Generated, LlmProviderError> {
     // Fold system into a single user turn; Image part alone inserts the mtmd marker.
     let mut text = String::new();
     if !system.trim().is_empty() {
@@ -92,8 +140,8 @@ fn generate_chat_text(
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
-    sink: Option<&ChunkSink<String, LlmProviderError>>,
-) -> Result<String, LlmProviderError> {
+    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
+) -> Result<Generated, LlmProviderError> {
     let prompt = apply_messages_template(loaded, messages, false)?;
     let tokens = loaded
         .model
@@ -105,6 +153,8 @@ fn generate_chat_text(
             "prompt tokenized to empty sequence".to_string(),
         ));
     }
+
+    let prompt_tokens = u32::try_from(tokens.len()).unwrap_or(u32::MAX);
 
     let n_ctx = i32::try_from(ctx.n_ctx())
         .map_err(|_| LlmProviderError::LocalLlm("n_ctx does not fit in i32".to_string()))?;
@@ -140,7 +190,10 @@ fn generate_chat_text(
     job.tick();
 
     let n_cur = batch.n_tokens();
-    sample_tokens(
+    let Sampled {
+        text,
+        completion_tokens,
+    } = sample_tokens(
         loaded,
         ctx,
         &mut batch,
@@ -149,7 +202,36 @@ fn generate_chat_text(
         MAX_DECISION_TOKENS,
         n_cur,
         sink,
-    )
+    )?;
+    let generated = Generated {
+        text,
+        prompt_tokens,
+        completion_tokens,
+    };
+    send_usage_chunk(sink, &generated, job)?;
+    Ok(generated)
+}
+
+/// Pushes the generation's exact token usage through `sink` as a single
+/// trailing [`LlamaStreamChunk::Usage`] (#365), so a streaming consumer sees
+/// usage on its final chunk exactly as it would from a remote provider. A
+/// `None` sink (the one-shot `run` path) does nothing. A stop condition while
+/// sending is surfaced like any other, so the caller returns promptly.
+fn send_usage_chunk(
+    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
+    generated: &Generated,
+    job: &JobContext,
+) -> Result<(), LlmProviderError> {
+    if let Some(sink) = sink
+        && sink
+            .send(LlamaStreamChunk::Usage(generated.usage()), job)
+            .is_err()
+    {
+        return Err(LlmProviderError::LocalLlm(
+            "generation stopped while streaming the usage chunk".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn generate_chat_vision(
@@ -158,8 +240,8 @@ fn generate_chat_vision(
     messages: &[LlmMessage],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
-    sink: Option<&ChunkSink<String, LlmProviderError>>,
-) -> Result<String, LlmProviderError> {
+    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
+) -> Result<Generated, LlmProviderError> {
     let bitmaps = extract_rgb_images(messages)?;
     if bitmaps.is_empty() {
         return generate_chat_text(loaded, ctx, messages, json_schema, job, sink);
@@ -178,8 +260,8 @@ fn generate_chat_vision_with_bitmaps(
     images: &[(u32, u32, &[u8])],
     json_schema: Option<&serde_json::Value>,
     job: &JobContext,
-    sink: Option<&ChunkSink<String, LlmProviderError>>,
-) -> Result<String, LlmProviderError> {
+    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
+) -> Result<Generated, LlmProviderError> {
     let mtmd = loaded.mtmd.as_ref().ok_or_else(|| {
         LlmProviderError::LocalLlm(
             "vision requested but mmproj is not loaded for this local model".to_string(),
@@ -220,8 +302,16 @@ fn generate_chat_vision_with_bitmaps(
         .map_err(|e| LlmProviderError::LocalLlm(format!("mtmd eval: {e}")))?;
     job.tick();
 
+    // `n_past` is how many positions the mtmd eval consumed in the context —
+    // text plus expanded image patches — and is the closest available proxy
+    // for the vision path's prompt token count.
+    let prompt_tokens = u32::try_from(n_past).unwrap_or(u32::MAX);
+
     let mut batch = LlamaBatch::new(512, 1);
-    sample_tokens(
+    let Sampled {
+        text,
+        completion_tokens,
+    } = sample_tokens(
         loaded,
         ctx,
         &mut batch,
@@ -230,7 +320,21 @@ fn generate_chat_vision_with_bitmaps(
         MAX_VISION_TOKENS,
         n_past,
         sink,
-    )
+    )?;
+    let generated = Generated {
+        text,
+        prompt_tokens,
+        completion_tokens,
+    };
+    send_usage_chunk(sink, &generated, job)?;
+    Ok(generated)
+}
+
+/// The output of [`sample_tokens`]: the accumulated text plus how many tokens
+/// were sampled to produce it (#365).
+struct Sampled {
+    text: String,
+    completion_tokens: u32,
 }
 
 /// Samples tokens one at a time until an end-of-generation token or
@@ -253,8 +357,8 @@ fn sample_tokens(
     job: &JobContext,
     max_tokens: i32,
     mut n_cur: i32,
-    sink: Option<&ChunkSink<String, LlmProviderError>>,
-) -> Result<String, LlmProviderError> {
+    sink: Option<&ChunkSink<LlamaStreamChunk, LlmProviderError>>,
+) -> Result<Sampled, LlmProviderError> {
     let sampler = build_sampler(&loaded.model, json_schema)?;
     let mut detok = StreamDetokenizer::new(&loaded.model, Special::Plaintext);
     let mut output = String::new();
@@ -290,7 +394,9 @@ fn sample_tokens(
             .map_err(|e| map_llama_err("detokenize", e))?;
         if let Some(sink) = sink
             && !piece.is_empty()
-            && sink.send(piece.clone(), job).is_err()
+            && sink
+                .send(LlamaStreamChunk::Delta(piece.clone()), job)
+                .is_err()
         {
             return Err(LlmProviderError::LocalLlm(
                 "generation stopped while streaming a chunk".to_string(),
@@ -313,7 +419,9 @@ fn sample_tokens(
         .map_err(|e| map_llama_err("detokenize finish", e))?;
     if let Some(sink) = sink
         && !tail.is_empty()
-        && sink.send(tail.clone(), job).is_err()
+        && sink
+            .send(LlamaStreamChunk::Delta(tail.clone()), job)
+            .is_err()
     {
         return Err(LlmProviderError::LocalLlm(
             "generation stopped while streaming the final chunk".to_string(),
@@ -321,7 +429,10 @@ fn sample_tokens(
     }
     output.push_str(&tail);
 
-    Ok(output)
+    Ok(Sampled {
+        text: output,
+        completion_tokens: u32::try_from(n_decode).unwrap_or(u32::MAX),
+    })
 }
 
 fn build_sampler(

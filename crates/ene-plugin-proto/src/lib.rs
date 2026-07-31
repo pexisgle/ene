@@ -61,6 +61,8 @@ pub mod tool_provider;
 pub mod tool_types;
 /// UDS / Named Pipe transport layer.
 pub mod transport;
+/// Token usage accounting for LLM responses (#365).
+pub mod usage;
 
 /// Capability and provider spec types.
 pub use capabilities::{
@@ -101,3 +103,5 @@ pub use tool_types::{
 // depend on `ene-plugin-proto` for the wire + transport.
 /// Cross-platform IPC stream.
 pub use transport::{IpcListener, IpcStream, cleanup_path};
+/// Token usage accounting.
+pub use usage::TokenUsage;
