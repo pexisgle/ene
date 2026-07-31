@@ -37,6 +37,9 @@ When a memory is recalled, its `access_count` and `last_accessed_at` are bumped 
 
 The bump's effect on ranking is also bounded: the access boost fades with the age of the most recent access (a half-life decay), so accesses from long ago stop counting and a memory cannot lock in a permanent ranking advantage.
 
+### Contradiction Resolution (Memory Arbiter)
+Before a candidate memory is persisted, the memory arbiter checks whether it contradicts an existing memory of the same kind (`Preference`, `UserProfile`, `Semantic`, `Relationship`). Two memories are treated as the same subject when the cosine similarity of their **title embeddings** reaches `mind.memory.contradiction_title_similarity_threshold` (default `0.82`) (#351), so synonymous titles ("職業" vs "仕事") collapse into one subject instead of accumulating contradictory duplicates. When no embedding provider is configured, the arbiter falls back to exact normalized-title matching.
+
 ### Self-Reflection Feedback Loop
 When `mind.memory.reflection.enabled` is set, the post-turn pipeline periodically reviews persisted memory outcomes and writes `Reflection` memories summarizing successful and unsuccessful interaction strategies. These reflections **close the loop during recall**: they are loaded and applied as a scoring signal that boosts memories matching successful strategies and penalizes those matching strategies to avoid. Reflections are deliberately **excluded from the recall candidate set** (via a kind filter on the search query), so they adjust scores without ever surfacing as ordinary recall results or leaking into the LLM context. Each applied adjustment is recorded in the score breakdown's `reflection_multiplier`, keeping the explainable score consistent with its displayed total.
 

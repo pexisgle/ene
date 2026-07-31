@@ -289,6 +289,7 @@ impl MemoryWriter {
                 options: options.clone(),
                 semantic_matches,
                 affect_valence: input.affect.valence,
+                embedder: providers.embedder,
             };
 
             let mut regular = Vec::new();

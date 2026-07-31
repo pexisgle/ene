@@ -674,6 +674,7 @@ mod tests {
             },
             semantic_matches: Default::default(),
             affect_valence: 0.0,
+            embedder: None,
         };
         let candidate = commitment_candidate(0.9);
 
