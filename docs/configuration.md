@@ -145,7 +145,10 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
     },
     "proactive": {
       "enabled": true,
-      "interval_seconds": 600
+      "interval_seconds": 600,
+      "sources": {
+        "window_title_level": "app_only"
+      }
     },
     "memory": {
       "recall_min_score": 0.10,
@@ -156,6 +159,23 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
   }
 }
 ```
+
+The proactive activity observer captures the focused application to inform spontaneous
+speech. `mind.proactive.sources.window_title_level` controls how much of the focused
+window's title it reads (#378). It defaults to `app_only` (the app name only — the
+historical behaviour), because window titles routinely contain private data: document and
+file names (which can embed customer or project names), page URLs, chat contact names, and
+email subjects. This text is fed to the proactive-speech decision model and, when a cloud
+provider is configured, **leaves the local machine**. The levels are:
+
+| Level | Captured |
+|---|---|
+| `app_only` | App name only (default; the title is never read) |
+| `redacted_title` | App name + window title with filesystem paths, email addresses, URLs, and number sequences stripped (standalone document names such as `report.xlsx` are preserved) |
+| `full_title` | App name + the raw window title |
+
+Choose `full_title` only with a local model; with a cloud provider the raw title is sent
+off-machine.
 
 Memory recall uses a hybrid score `(relevance × quality + commitment_boost) × penalty`
 (see `crates/ene-rag/src/scoring.rs`). A fresh, strongly relevant memory scores
