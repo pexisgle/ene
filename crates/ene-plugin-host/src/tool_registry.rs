@@ -111,7 +111,8 @@ pub trait ToolRegistry: Send + Sync {
 
     /// Approves a pending destructive-operation permission request by ID.
     ///
-    /// Broadcasts the approval to every sub-registry. Prefer
+    /// On composite registries this broadcasts the approval to every
+    /// sub-registry; a leaf registry approves the request locally. Prefer
     /// [`approve_permission_for`](Self::approve_permission_for) when the
     /// owning tool is known: a permission request originates from a single
     /// tool call, so routing the approval straight to its owner avoids
@@ -495,8 +496,19 @@ impl ToolRegistry for CompositeToolRegistry {
         // Route the approval straight to the plugin that owns the tool which
         // raised the request: a single round-trip instead of a broadcast, so
         // an unrelated plugin mid-long-tool-call can no longer delay it (#434).
+        //
+        // Ownership is resolved against the *current* tool index: if the
+        // owning external source is re-registered between the request being
+        // raised and the approval arriving, the lookup can return a different
+        // live registry that never saw this `request_id`, so the fallback
+        // broadcast below is not triggered. That is still equal-or-better than
+        // broadcasting to the pre-re-registration set (which would skip the
+        // tombstoned original), hence no special handling is needed.
         if let Ok(registry) = self.registry_for(tool_name) {
-            registry.approve_permission(request_id).await;
+            // Forward one level deeper so a nested composite sub-registry can
+            // route to its own owner; leaf registries fall back to approving
+            // locally via the default trait implementation.
+            registry.approve_permission_for(tool_name, request_id).await;
         } else {
             // The owning registry is gone (e.g. an external source was
             // unregistered between the request and the approval). Fall
@@ -629,6 +641,40 @@ mod tests {
 
         async fn approve_permission(&self, _request_id: &str) {
             tokio::time::sleep(self.delay).await;
+        }
+    }
+
+    /// A registry whose control methods record entry and then block on a
+    /// shared barrier, used to prove composite broadcasts run concurrently
+    /// without any wall-clock timing (#434).
+    struct BarrierRegistry {
+        tools: Vec<ToolSpec>,
+        barrier: Arc<tokio::sync::Barrier>,
+        entered: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ToolRegistry for BarrierRegistry {
+        fn list_tools(&self) -> Vec<ToolSpec> {
+            self.tools.clone()
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _arguments: &str,
+            _context: Option<&ene_plugin_proto::CallContext>,
+        ) -> Result<ene_plugin_proto::ToolResult, PluginHostError> {
+            Ok(ene_plugin_proto::ToolResult::text("ok"))
+        }
+
+        async fn approve_permission(&self, request_id: &str) {
+            // Record entry *before* waiting: a barrier of N parties only
+            // releases when every party has arrived, so a sequential fan-out
+            // would deadlock here (only the first registry would ever arrive)
+            // and the test's timeout converts that deadlock into a failure.
+            self.entered.lock().unwrap().push(request_id.to_string());
+            let _ = self.barrier.wait().await;
         }
     }
 
@@ -888,5 +934,45 @@ mod tests {
             "broadcast took {elapsed:?}; expected concurrent fan-out bounded by the \
              slowest registry (~200ms), not the sequential sum (~600ms)"
         );
+    }
+
+    #[tokio::test]
+    async fn composite_broadcast_runs_concurrently_deterministic() {
+        // Three registries each record entry and then block on a 3-party
+        // barrier. A barrier releases only once every party has arrived, so
+        // the broadcast can only complete if all three registries are entered
+        // *concurrently*; a sequential fan-out would leave the first registry
+        // waiting forever. The timeout only guards against that deadlock — it
+        // is not the assertion, so this test is independent of wall-clock
+        // timing (#434).
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let entered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let registries: Vec<Arc<dyn ToolRegistry>> = (0..3)
+            .map(|i| {
+                Arc::new(BarrierRegistry {
+                    tools: vec![make_tool(&format!("tool{i}"))],
+                    barrier: Arc::clone(&barrier),
+                    entered: Arc::clone(&entered),
+                }) as Arc<dyn ToolRegistry>
+            })
+            .collect();
+        let composite = CompositeToolRegistry::try_new(registries).unwrap();
+
+        let broadcast = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            composite.approve_permission("req-barrier"),
+        )
+        .await;
+        assert!(
+            broadcast.is_ok(),
+            "broadcast did not run concurrently: a sequential fan-out deadlocks \
+             on the barrier and is caught by the timeout"
+        );
+
+        // All three registries must have entered (and, per the barrier
+        // semantics, were still blocked) before any of them completed.
+        let entered = entered.lock().unwrap();
+        assert_eq!(entered.len(), 3);
+        assert!(entered.iter().all(|id| id == "req-barrier"));
     }
 }
