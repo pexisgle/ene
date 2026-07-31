@@ -28,6 +28,8 @@ pub mod session;
 pub mod session_split;
 /// Performance-marker (`<|perf:…|>`) parsing.
 pub mod special_token;
+/// Topic-boundary detection via topic centroid + composite score (#367).
+pub mod topic_boundary;
 /// Type-safe identifiers for sessions and cards.
 pub mod types;
 
@@ -50,5 +52,7 @@ pub use session::{ConversationSession, InterruptedState};
 pub use session_split::{SplitReason, SplitResult, generate_session_id};
 /// Performance-marker parsing utilities.
 pub use special_token::{parse_performance_marker, split_text_and_special_tokens, strip_markers};
+/// Topic-boundary detection types (#367).
+pub use topic_boundary::{TopicBoundarySignal, TopicBoundaryTracker};
 /// Type-safe identifiers.
 pub use types::{CardName, SessionId};

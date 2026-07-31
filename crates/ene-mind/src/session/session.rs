@@ -101,6 +101,8 @@ pub struct SessionState {
     pub last_resolved_expression: String,
     /// When the last expression change occurred.
     pub last_expression_changed_at: Option<DateTime<Utc>>,
+    /// Running state of the topic-boundary detector (#367).
+    pub topic_boundary: super::topic_boundary::TopicBoundaryTracker,
 }
 
 /// Central session container holding conversation history, display state, memory context,
@@ -172,6 +174,7 @@ impl ConversationSession {
                 current_turn_count: 0,
                 last_resolved_expression: String::new(),
                 last_expression_changed_at: None,
+                topic_boundary: super::topic_boundary::TopicBoundaryTracker::new(),
             },
             character_card: None,
             current_card_path: String::new(),
@@ -343,6 +346,7 @@ impl ConversationSession {
         self.state.current_turn_count = 0;
         self.state.last_resolved_expression.clear();
         self.state.last_expression_changed_at = None;
+        self.state.topic_boundary.reset_topic();
         self.interrupted = None;
         new_id
     }
@@ -355,6 +359,29 @@ impl ConversationSession {
     /// Stores the embedding of the most recent user input (used for topic boundary detection).
     pub fn set_last_input_embedding(&mut self, embedding: Vec<f32>) {
         self.state.last_input_embedding = Some(embedding);
+    }
+
+    /// Runs topic-boundary detection for the just-completed turn (#367).
+    ///
+    /// Consumes the stored [`last_input_embedding`](Self::set_last_input_embedding)
+    /// as the turn's embedding, scores it against the running topic centroid,
+    /// and updates the detector state. `utterance_chars` is the length of the
+    /// user utterance in characters (short backchannels are ignored). Returns
+    /// `None` when detection is disabled or no embedding is available for the
+    /// turn. The returned signal carries a [`SplitReason`] when a boundary is
+    /// detected, for downstream compression (#368) and splitting (#369).
+    pub fn detect_topic_boundary(
+        &mut self,
+        config: &crate::config::TopicBoundaryConfig,
+        utterance_chars: usize,
+    ) -> Option<super::topic_boundary::TopicBoundarySignal> {
+        let embedding = self.state.last_input_embedding.clone()?;
+        Some(self.state.topic_boundary.observe_turn(
+            config,
+            &embedding,
+            utterance_chars,
+            Utc::now(),
+        ))
     }
 
     /// Tracks timing and turn count after a user sends a message.
