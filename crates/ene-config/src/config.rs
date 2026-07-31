@@ -729,13 +729,25 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
     // already-current file is never rewritten (and its mtime/permissions left
     // alone) on every load.
     if migrated_text != raw {
-        atomic_write(config_path, &migrated_text)?;
-        tracing::info!(
-            component = "Config",
-            path = %config_path.display(),
-            version = crate::migration::CURRENT_CONFIG_VERSION,
-            "migrated settings.json to current config version"
-        );
+        // A read-only filesystem (e.g. a packaged install) must not prevent
+        // the app from starting: the migration already ran in memory, so the
+        // load can proceed with the migrated document; the write is only a
+        // convenience so the next load starts from the new version.
+        if let Err(e) = atomic_write(config_path, &migrated_text) {
+            tracing::warn!(
+                component = "Config",
+                path = %config_path.display(),
+                error = %e,
+                "could not persist migrated settings.json (read-only filesystem?); continuing with in-memory migration"
+            );
+        } else {
+            tracing::info!(
+                component = "Config",
+                path = %config_path.display(),
+                version = crate::migration::CURRENT_CONFIG_VERSION,
+                "migrated settings.json to current config version"
+            );
+        }
     }
 
     Ok(migrated_text)
@@ -1148,7 +1160,8 @@ mod tests {
                     obj.insert("user_name".to_string(), name);
                 }
                 Ok(())
-            });
+            })
+            .expect("registration below current version succeeds");
 
             let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
             let path = tmp.path().join("settings.json");

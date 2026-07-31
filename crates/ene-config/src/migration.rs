@@ -83,6 +83,15 @@ pub type MigrationFn = fn(&mut serde_json::Value) -> Result<(), EneConfigError>;
 /// lock strategy elsewhere in this crate.
 static MIGRATIONS: OnceLock<parking_lot::Mutex<HashMap<u32, MigrationFn>>> = OnceLock::new();
 
+/// Set once [`apply_migrations`] has run for a document.
+///
+/// Registration after the first application is a programming error (the
+/// migration can no longer have any effect for this process), so
+/// [`register_migration`] rejects it loudly instead of silently storing a
+/// step that will never run. This makes registration-order bugs detectable
+/// at startup rather than on a later load.
+static APPLIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Test-only override for the current version, so multi-step migration chains
 /// can be exercised without bumping the real [`CURRENT_CONFIG_VERSION`].
 /// A value of `0` means "no override; use the constant".
@@ -119,20 +128,36 @@ fn current_version() -> u32 {
 /// version `from + 1`.
 ///
 /// Registering a second step for the same `from` version replaces the previous
-/// one, so startup registration is idempotent. Registering a step for
-/// `from >= CURRENT_CONFIG_VERSION` is a programming error (there is no version
-/// to migrate *to*) and is ignored with a warning.
-pub fn register_migration(from: u32, step: MigrationFn) {
+/// one, so startup registration is idempotent.
+///
+/// # Errors
+///
+/// Returns [`EneConfigError::GenericConfigError`] for programming errors that
+/// would otherwise be silently swallowed:
+///
+/// * registering a step for `from >= CURRENT_CONFIG_VERSION` — there is no
+///   version to migrate *to*; and
+/// * registering a step after [`apply_migrations`] has already run in this
+///   process — the step could never take effect.
+///
+/// Callers (typically `ctor` initialisers in schema-owning crates) should
+/// propagate or log the error at startup, where it is still visible.
+pub fn register_migration(from: u32, step: MigrationFn) -> Result<(), EneConfigError> {
     if from >= current_version() {
-        tracing::warn!(
-            component = "Config",
-            from,
-            current = current_version(),
-            "ignoring migration registered at or above the current config version"
-        );
-        return;
+        return Err(EneConfigError::GenericConfigError(format!(
+            "cannot register config migration from version {from}: \
+             no version to migrate to (current is {})",
+            current_version()
+        )));
+    }
+    if APPLIED.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(EneConfigError::GenericConfigError(format!(
+            "cannot register config migration from version {from} after \
+             migrations have already been applied in this process"
+        )));
     }
     registry().lock().insert(from, step);
+    Ok(())
 }
 
 /// Reads the `version` field out of a raw settings document.
@@ -220,6 +245,11 @@ pub fn apply_migrations(mut doc: serde_json::Value) -> Result<serde_json::Value,
         );
     }
 
+    // From here on, any migration registered later in this process could
+    // never run for a document that has already been migrated — record that
+    // so register_migration can reject late registration loudly.
+    APPLIED.store(true, std::sync::atomic::Ordering::Release);
+
     // Guarantee the invariant that a migrated document always carries an
     // explicit, current `version` field — even when no steps ran (e.g. a file
     // that omits the field entirely, treated as version 1). Idempotent with the
@@ -246,11 +276,13 @@ pub(crate) mod tests {
 
         TEST_VERSION_OVERRIDE.store(version, std::sync::atomic::Ordering::Release);
         registry().lock().clear();
+        APPLIED.store(false, std::sync::atomic::Ordering::Release);
 
         body();
 
         TEST_VERSION_OVERRIDE.store(0, std::sync::atomic::Ordering::Release);
         registry().lock().clear();
+        APPLIED.store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// A document already at the current version passes through unchanged.
@@ -314,7 +346,8 @@ pub(crate) mod tests {
                     obj.insert("user_name".to_string(), name);
                 }
                 Ok(())
-            });
+            })
+            .expect("registration below current version succeeds");
 
             let doc = serde_json::json!({ "version": 1, "name": "Hoshino" });
             let migrated = apply_migrations(doc).expect("old version migrates ok");
@@ -357,7 +390,8 @@ pub(crate) mod tests {
     fn migrations_run_in_order() {
         with_test_version(4, || {
             for from in 1..4 {
-                register_migration(from, trail_step);
+                register_migration(from, trail_step)
+                    .expect("registration below current version succeeds");
             }
 
             let doc = serde_json::json!({ "version": 1 });
@@ -378,7 +412,7 @@ pub(crate) mod tests {
     fn missing_intermediate_step_errors() {
         with_test_version(3, || {
             // Register 1 -> 2 but not 2 -> 3.
-            register_migration(1, |_| Ok(()));
+            register_migration(1, |_| Ok(())).expect("registration below current version succeeds");
 
             let doc = serde_json::json!({ "version": 1 });
             let err = apply_migrations(doc).expect_err("gap in chain must error");
@@ -408,9 +442,11 @@ pub(crate) mod tests {
     #[test]
     fn register_at_or_above_current_is_rejected() {
         with_test_version(2, || {
-            register_migration(1, |_| Ok(()));
-            register_migration(2, |_| Ok(()));
-            register_migration(5, |_| Ok(()));
+            register_migration(1, |_| Ok(())).expect("registration below current version succeeds");
+            register_migration(2, |_| Ok(()))
+                .expect_err("registration at current version must error");
+            register_migration(5, |_| Ok(()))
+                .expect_err("registration above current version must error");
             let reg = registry().lock();
             assert!(
                 reg.get(&1).is_some(),
