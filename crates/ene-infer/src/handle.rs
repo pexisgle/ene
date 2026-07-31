@@ -181,11 +181,18 @@ impl<M: LocalModel> EngineHandle<M> {
         let heartbeat = cfg.stall_timeout.map(|_| Arc::new(AtomicU64::new(0)));
 
         if let (Some(stall_timeout), Some(heartbeat)) = (cfg.stall_timeout, heartbeat.clone()) {
+            // Re-coerce here (not just in `with_stall_escalation_factor`):
+            // the field is `pub` on a non-`#[non_exhaustive]` struct, so a
+            // struct literal could set it to 0, which would make
+            // `confirm_threshold` zero and mark every active job as a
+            // confirmed stall on the first poll.
+            let escalation_factor = cfg.stall_escalation_factor.max(1);
             spawn_stall_watchdog(
                 Arc::clone(&job_active),
                 heartbeat,
                 epoch,
                 stall_timeout,
+                escalation_factor,
                 Arc::clone(&engine_name),
                 Arc::clone(&down_reason),
             );
@@ -234,12 +241,14 @@ impl<M: LocalModel> EngineHandle<M> {
     /// [`EngineConfig::job_timeout`] is enforced only inside the worker,
     /// starting when the job begins executing.
     ///
-    /// If [`EngineConfig::stall_timeout`] previously caught a wedged
-    /// worker, this returns [`EngineError::EngineDown`] immediately rather
-    /// than [`EngineError::Busy`] — a permanently stuck worker fills the
-    /// queue forever, and a caller needs to be able to tell "briefly
-    /// saturated, retry shortly" apart from "this handle will never make
-    /// progress again".
+    /// If [`EngineConfig::stall_timeout`] previously confirmed a wedged
+    /// worker (a suspected stall that persisted to the escalation
+    /// threshold), this returns [`EngineError::EngineDown`] immediately
+    /// rather than [`EngineError::Busy`] — a permanently stuck worker
+    /// fills the queue forever, and a caller needs to be able to tell
+    /// "briefly saturated, retry shortly" apart from "this handle will
+    /// never make progress again". A merely *suspected* stall (one silence
+    /// window that later resolved) does not affect this call.
     ///
     /// # Errors
     ///
@@ -634,22 +643,35 @@ fn worker_loop<M: LocalModel>(
 }
 
 /// A long-lived thread (one per [`EngineHandle`], not one per job) that
-/// watches for stalled jobs.
+/// watches for stalled jobs, with graduated escalation.
 ///
 /// A genuine stall means the worker thread is stuck inside a synchronous
 /// `run` call that is never going to check `should_stop`/call `tick` again
-/// — there is no way to preempt that safely, so this does not try. Instead,
-/// once a stall is confirmed it records the reason in `down_reason` (the
-/// same cell [`EngineHandle::submit`] already consults) and stops watching:
-/// from that point on `submit` reports [`EngineError::EngineDown`] instead
-/// of letting the bounded queue fill up and return [`EngineError::Busy`]
-/// forever, which would leave callers unable to tell "briefly saturated"
-/// apart from "this handle will never make progress again".
+/// — there is no way to preempt that safely, so this does not try. But a
+/// single silence window is not proof of a permanent hang: a legitimately
+/// long native operation (e.g. `whisper_rs`'s full-segment decode) may
+/// simply not tick for a while and then finish normally.
+///
+/// Graduated escalation distinguishes the two:
+///
+/// 1. **Suspected stall** — `tick` has not been called for at least
+///    `stall_timeout` while a job is active. Logged as a `tracing::warn!`,
+///    but the engine keeps running. If the worker becomes idle (the job
+///    finished), the suspicion is cleared — it was a false positive.
+/// 2. **Confirmed stall** — the silence persists for at least
+///    `stall_timeout × escalation_factor`. Only now is the reason recorded
+///    in `down_reason` (the same cell [`EngineHandle::submit`] already
+///    consults) and the watchdog stops: from that point on `submit` reports
+///    [`EngineError::EngineDown`] instead of letting the bounded queue fill
+///    up and return [`EngineError::Busy`] forever, which would leave
+///    callers unable to tell "briefly saturated" apart from "this handle
+///    will never make progress again".
 fn spawn_stall_watchdog(
     job_active: Arc<AtomicBool>,
     heartbeat: Arc<AtomicU64>,
     epoch: Instant,
     stall_timeout: Duration,
+    escalation_factor: u32,
     engine_name: Arc<OnceLock<String>>,
     down_reason: Arc<OnceLock<String>>,
 ) {
@@ -657,9 +679,15 @@ fn spawn_stall_watchdog(
         .checked_div(4)
         .filter(|d| !d.is_zero())
         .unwrap_or(stall_timeout);
+    let confirm_threshold = stall_timeout.saturating_mul(escalation_factor);
     let build = std::thread::Builder::new()
         .name("ene-infer-stall-watch".to_string())
         .spawn(move || {
+            // Whether we have already logged the suspected-stall warning
+            // for the current job. Reset to `false` whenever the worker
+            // becomes idle (the job finished), so the next job gets its
+            // own warning if it too goes silent.
+            let mut suspected = false;
             loop {
                 std::thread::sleep(poll_interval);
                 if Arc::strong_count(&job_active) == 1 {
@@ -668,6 +696,9 @@ fn spawn_stall_watchdog(
                     return;
                 }
                 if !job_active.load(Ordering::Relaxed) {
+                    // The worker is idle: any prior suspicion was a false
+                    // positive (the job finished despite the silence).
+                    suspected = false;
                     continue;
                 }
                 let now_nanos = epoch.elapsed().as_nanos();
@@ -678,20 +709,36 @@ fn spawn_stall_watchdog(
                 let now_nanos_u64 = now_nanos as u64;
                 let last_tick = heartbeat.load(Ordering::Relaxed);
                 let stalled_for = Duration::from_nanos(now_nanos_u64.saturating_sub(last_tick));
-                if stalled_for >= stall_timeout {
-                    tracing::warn!(
+                if stalled_for >= confirm_threshold {
+                    tracing::error!(
                         engine = engine_name.get().map_or("unknown", String::as_str),
                         stalled_for = ?stalled_for,
-                        "ene-infer: job appears stalled; marking engine down (a stuck worker \
-                         thread cannot be preempted, so this handle will refuse further jobs \
-                         from now on)"
+                        confirm_threshold = ?confirm_threshold,
+                        "ene-infer: suspected stall confirmed — no JobContext::tick progress \
+                         for {stalled_for:?} (confirm_threshold={confirm_threshold:?}); marking \
+                         engine down (a stuck worker thread cannot be preempted, so this \
+                         handle will refuse further jobs from now on)"
                     );
                     drop(down_reason.set(format!(
                         "engine job stalled for at least {stalled_for:?} without JobContext::tick \
-                         progress (stall_timeout={stall_timeout:?}); the worker thread is presumed \
+                         progress (stall_timeout={stall_timeout:?}, \
+                         escalation_factor={escalation_factor}); the worker thread is presumed \
                          permanently stuck"
                     )));
                     return;
+                }
+                if stalled_for >= stall_timeout && !suspected {
+                    suspected = true;
+                    tracing::warn!(
+                        engine = engine_name.get().map_or("unknown", String::as_str),
+                        stalled_for = ?stalled_for,
+                        stall_timeout = ?stall_timeout,
+                        confirm_threshold = ?confirm_threshold,
+                        "ene-infer: job appears stalled (no JobContext::tick for {stalled_for:?}); \
+                         monitoring — the engine will be marked down if the silence persists \
+                         to {confirm_threshold:?}, or the suspicion will be cleared if the job \
+                         completes"
+                    );
                 }
             }
         });
