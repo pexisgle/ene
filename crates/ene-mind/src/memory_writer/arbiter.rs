@@ -526,10 +526,26 @@ impl MemoryArbiter {
             return None;
         }
 
-        for mem in existing {
-            if mem.kind != candidate.kind {
-                continue;
-            }
+        // Scan only the most recent same-kind memories (#351). `existing` is
+        // ordered by creation time, newest first; a bounded scan keeps the
+        // per-turn embedding cost of the title pass predictable (one batched
+        // `embed_batch` per kind) even for characters with thousands of
+        // memories. Older memories remain covered by the indexed
+        // semantic-similarity pass (`check_semantic_matches`) and the exact
+        // content dedup, which are both unbounded.
+        let same_kind = existing
+            .iter()
+            .filter(|m| m.kind == candidate.kind)
+            .take(MAX_CONTRADICTION_SCAN);
+
+        // Embed every distinct title once, in a single provider call, before
+        // scanning — the per-memory `is_match` lookups then hit the cache.
+        let distinct_titles = std::iter::once(candidate.title.as_str())
+            .chain(same_kind.clone().map(|m| m.title.as_str()))
+            .collect::<std::collections::HashSet<_>>();
+        matcher.prefetch(distinct_titles).await;
+
+        for mem in same_kind {
             if !matcher.is_match(&candidate.title, &mem.title).await {
                 continue;
             }
@@ -869,6 +885,16 @@ fn same_memory_content(candidate: &MemoryCandidate, mem: &MemoryItem) -> bool {
     normalize_text(&candidate.content) == normalize_text(&mem.content) && candidate.kind == mem.kind
 }
 
+/// Cap on how many most-recent same-kind memories the title-based
+/// contradiction scan examines per candidate (#351).
+///
+/// The scan embeds every distinct title once per kind per turn; bounding it
+/// keeps the embedding cost predictable on the post-turn write path even for
+/// characters with very large memory tables. Newest memories are prioritized
+/// (the store returns them first), and older rows remain covered by the
+/// indexed semantic-similarity pass and exact-content dedup.
+const MAX_CONTRADICTION_SCAN: usize = 512;
+
 /// Decides whether two memory titles refer to the same subject for the purpose
 /// of contradiction checking (#351).
 ///
@@ -916,6 +942,11 @@ impl<'a> TitleMatcher<'a> {
         if let Some(embedding) = self.cache.get(title) {
             return Some(embedding.clone());
         }
+        self.embed_one(title).await
+    }
+
+    /// Embed one title through the provider, caching and guarding the result.
+    async fn embed_one(&mut self, title: &str) -> Option<Vec<f32>> {
         let embedder = self.embedder?;
         match embedder
             .embed_batch(&[(title, EmbeddingKind::Summary)])
@@ -923,6 +954,14 @@ impl<'a> TitleMatcher<'a> {
         {
             Ok(mut vectors) if vectors.len() == 1 => {
                 let embedding = vectors.swap_remove(0);
+                if embedding.iter().all(|v| *v == 0.0) {
+                    warn!(
+                        component = "MemoryArbiter",
+                        "contradiction title embedding returned a zero vector; falling back to exact title matching"
+                    );
+                    self.disabled = true;
+                    return None;
+                }
                 self.cache.insert(title.to_string(), embedding.clone());
                 Some(embedding)
             }
@@ -943,6 +982,67 @@ impl<'a> TitleMatcher<'a> {
                 );
                 self.disabled = true;
                 None
+            }
+        }
+    }
+
+    /// Embed every distinct title in `titles` with a single provider call,
+    /// populating the cache so the subsequent per-memory scan hits cache only.
+    ///
+    /// Called once per contradiction scan with all same-kind titles that are
+    /// about to be compared, so the per-turn write path issues a small number
+    /// of `embed_batch` calls instead of one round trip per title (#351). A
+    /// provider failure disables the embedding path for the rest of the batch,
+    /// degrading to exact title matching as documented.
+    async fn prefetch(&mut self, titles: impl IntoIterator<Item = &str>) {
+        if !self.use_embedding() {
+            return;
+        }
+        let missing: Vec<&str> = titles
+            .into_iter()
+            .filter(|title| !self.cache.contains_key(*title))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let Some(embedder) = self.embedder else {
+            return;
+        };
+        let items: Vec<(&str, EmbeddingKind)> = missing
+            .iter()
+            .map(|t| (*t, EmbeddingKind::Summary))
+            .collect();
+        match embedder.embed_batch(&items).await {
+            Ok(vectors) if vectors.len() == missing.len() => {
+                for (title, vector) in missing.iter().zip(vectors) {
+                    if vector.iter().all(|v| *v == 0.0) {
+                        warn!(
+                            component = "MemoryArbiter",
+                            "contradiction title embedding returned a zero vector; falling back to exact title matching"
+                        );
+                        self.disabled = true;
+                        self.cache.clear();
+                        return;
+                    }
+                    self.cache.insert(title.to_string(), vector);
+                }
+            }
+            Ok(vectors) => {
+                warn!(
+                    component = "MemoryArbiter",
+                    returned = vectors.len(),
+                    requested = missing.len(),
+                    "contradiction title embedding batch size mismatch; falling back to exact title matching"
+                );
+                self.disabled = true;
+            }
+            Err(error) => {
+                warn!(
+                    component = "MemoryArbiter",
+                    error = %error,
+                    "contradiction title embedding failed; falling back to exact title matching"
+                );
+                self.disabled = true;
             }
         }
     }
@@ -1154,7 +1254,6 @@ mod tests {
     /// Embedder whose every call fails, to exercise the exact-match fallback
     /// that kicks in once embedding is disabled (#351).
     struct FailingEmbedder;
-
     #[async_trait::async_trait]
     impl EmbeddingProvider for FailingEmbedder {
         async fn embed_batch(
@@ -1183,6 +1282,31 @@ mod tests {
         ArbiterContext {
             embedder: Some(embedder),
             ..ctx(turn)
+        }
+    }
+
+    /// `TopicEmbedder` that also counts `embed_batch` invocations, to pin the
+    /// once-per-scan batching property of the contradiction title pass (#351).
+    struct CountingEmbedder {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for CountingEmbedder {
+        async fn embed_batch(
+            &self,
+            items: &[(&str, EmbeddingKind)],
+        ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(items.iter().map(|(text, _)| topic_vector(text)).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        fn model_name(&self) -> &'static str {
+            "counting-test"
         }
     }
 
@@ -2515,6 +2639,58 @@ mod tests {
             decisions[0].reason.code,
             ArbiterReasonCode::ContradictionSupersede
         );
+    }
+
+    /// The title pass must issue **one** `embed_batch` call per scan, not one
+    /// per existing memory: a character with many same-kind memories would
+    /// otherwise cost a provider round trip per title on the post-turn write
+    /// path (#351).
+    #[tokio::test]
+    async fn contradiction_scan_embeds_distinct_titles_in_one_batch() {
+        let turn = TurnInput {
+            user_message: "I prefer lattes",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // 60 same-kind memories with 10 distinct titles, all unrelated to the
+        // candidate (each distinct title is embedded exactly once in the batch).
+        let titles: Vec<String> = (0..10).map(|i| format!("preference {i}")).collect();
+        let existing: Vec<MemoryItem> = (0..60)
+            .map(|i| {
+                memory_item(
+                    i + 100,
+                    MemoryKind::Preference,
+                    &titles[i as usize % 10],
+                    &format!("content {i}"),
+                    0.7,
+                )
+            })
+            .collect();
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "コーヒー".to_string(),
+            content: "ラテが好き".to_string(),
+            source_quote: "I prefer lattes".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+
+        let embedder = CountingEmbedder {
+            calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let arbiter_ctx = ctx_with_embedder(turn, &embedder);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &existing, &arbiter_ctx).await;
+
+        // No false positive from the unrelated titles.
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Persist(_)
+        ));
+        // 10 distinct existing titles + the candidate title, all in one call.
+        assert_eq!(embedder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// `Relationship` memories were also skipped by `_ => false`; they now match
