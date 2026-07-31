@@ -817,9 +817,13 @@ impl DbIpcServer {
     /// yet) is a no-op. The check is intentionally `>=` rather than a
     /// prediction of the post-write size: once a plugin is at its cap, every
     /// further insert is refused until it deletes enough to drop back under,
-    /// which is the simplest rule that still guarantees the footprint cannot
-    /// grow without bound. Reads and deletes never call this, so a plugin can
-    /// always free space.
+    /// which is the simplest rule that still keeps the footprint bounded. The
+    /// measurement and the write are not one atomic unit on the standalone
+    /// paths, so under concurrent writers (the shared pool, parallel tool
+    /// calls) a single in-flight write may overshoot the cap; the next write
+    /// is gated again, so growth stays within one write of the cap rather than
+    /// unbounded. Reads and deletes never call this, so a plugin can always
+    /// free space.
     async fn enforce_quota(
         db: &impl ConnectionTrait,
         tool_name: &str,
