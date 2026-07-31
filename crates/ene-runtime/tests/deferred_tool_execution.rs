@@ -235,6 +235,7 @@ async fn deferred_tool_execution_emits_completion_event() {
         classifier_tx: mpsc::unbounded_channel().0,
         memory_writer_tx: mpsc::unbounded_channel().0,
         deferred_tool_tx,
+        aux_task_tx: mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: Some(store),

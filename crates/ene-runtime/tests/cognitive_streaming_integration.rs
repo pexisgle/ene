@@ -155,6 +155,7 @@ async fn run_stream_cognitive_path_completes_with_logs() {
         classifier_tx: tokio::sync::mpsc::unbounded_channel().0,
         memory_writer_tx: tokio::sync::mpsc::unbounded_channel().0,
         deferred_tool_tx: tokio::sync::mpsc::unbounded_channel().0,
+        aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
         concrete_store: Some(store.clone()),
