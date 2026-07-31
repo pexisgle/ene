@@ -172,7 +172,11 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
       "recall_similarity_threshold": 0.35,
       "commitment_boost": 0.25,
       "commitment_title_similarity_threshold": 0.82,
-      "contradiction_title_similarity_threshold": 0.82
+      "contradiction_title_similarity_threshold": 0.82,
+      "min_confidence_to_persist": 0.65,
+      "supersede_confidence_delta": 0.05,
+      "semantic_similarity_threshold": 0.85,
+      "dispute_confidence_gap": 0.15
     }
   }
 }
@@ -220,6 +224,22 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 （「職業」と「仕事」、「住んでいる場所」と「居住地」）は同じ主題として扱われ、
 無関係な重複として永続化される代わりに矛盾検査の対象となります。埋め込みプロバイダーが
 未設定の場合、調停器は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
+
+メモリー調停器の 4 つの判定閾値は、すべて `mind.memory.*` で設定できます (#352)。
+これらは合わせて、着信した候補をいつ永続化するか、いつ既存の矛盾する記憶を
+*上書き（supersede）* するか、いつ既存記憶を *係争中（disputed）* とマークするか、
+そしていつ判定をユーザー確認へ回すかを決めます：
+
+| 設定 | 既定 | 意味 |
+|---|---|---|
+| `min_confidence_to_persist` | `0.65` | 永続化に必要な候補の最低 confidence。 |
+| `supersede_confidence_delta` | `0.05` | 候補が既存記憶の confidence を上回り、上書きするために必要な差。 |
+| `semantic_similarity_threshold` | `0.85` | 2 つの記憶を意味的な重複とみなすコサイン類似度の閾値（以上で重複）。 |
+| `dispute_confidence_gap` | `0.15` | 矛盾する候補が既存記憶を上書きせず係争中とマークする、confidence の差の下限。 |
+
+4 つとも確率・比率であり、読み込み時に `0.0..=1.0` へ clamp されます。
+特に `semantic_similarity_threshold` は埋め込みモデルの類似度分布に強く依存するため、
+埋め込みプロバイダーを切り替えた際は再調整してください。
 
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 
