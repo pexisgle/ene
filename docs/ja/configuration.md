@@ -153,7 +153,7 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 ### `tools.*` — ツール実行ランタイムの挙動
 
 `plugins.*`（プラグインの プロセス／IPC 層を管理）とは別に、`tools.*` は
-`ene-runtime` と `ene-rag` が所有するツール呼び出しランタイムの設定を扱います。`tools.rag` は Tool RAG 選択パイプライン (`ene_rag::ToolRagConfig`) を設定し、以下のフィールド (`ene_runtime::ToolRuntimeConfig`) はアクターが同時に保持するバックグラウンドタスク数の上限と、遅延ツールのポーリング予算を制御します。上限に達すると、無制限にキューイングされるのではなく、admission（受け入れ）が拒否されます（フェイルファスト）。`CallTool`/`CancelDeferredTool` および `SearchTools` の呼び出し元には具体的な "busy" エラーが返りますが、ポストターンの分類器・メモリライター・遅延ツールのポーラーには返信チャンネルがないため、そこでの拒否は `TaskRejected` 診断イベントとしてのみ観測できます：
+`ene-runtime` と `ene-rag` が所有するツール呼び出しランタイムの設定を扱います。`tools.rag` は Tool RAG 選択パイプライン (`ene_rag::ToolRagConfig`) を設定し、以下のフィールド (`ene_runtime::ToolRuntimeConfig`) はアクターが同時に保持するバックグラウンドタスク数の上限と、遅延ツールのポーリング予算を制御します。上限に達すると、無制限にキューイングされるのではなく、admission（受け入れ）が拒否されます（フェイルファスト）。`CallTool`/`CancelDeferredTool` および `SearchTools` の呼び出し元には具体的な "busy" エラーが返りますが、ポストターンの分類器・メモリライター・遅延ツールのポーラーには返信チャンネルがないため、そこでの拒否は `TaskRejected` 診断イベントとして観測できます。メモリライターは部分的な例外で、書き込み自体はすでにデタッチ済みで実行されているため、admission が拒否されてもその結果は消費され、通常どおり `PendingCandidateAvailable` / `MemoryWrite` イベントが発火します。失われるのはその消費者のパニック監視のみです (#398)：
 
 ```json
 {

@@ -377,6 +377,74 @@ impl TurnActor {
         }
     }
 
+    /// Drains memory-writer `JoinHandle`s sent from the stream, admitting
+    /// each into `memory_writer_tasks` under the Stage 8 cap.
+    ///
+    /// The memory write itself is already running detached (spawned by the
+    /// stream task before its `JoinHandle` reached us), so admission control
+    /// here only bounds how many *outcome consumers* the actor supervises —
+    /// it never cancels the write. A rejected handle is therefore **not**
+    /// dropped on the floor (#398): its outcome is still consumed by a
+    /// detached `tokio::spawn` task so
+    /// [`LifecycleEvent::PendingCandidateAvailable`] and
+    /// [`DiagnosticEvent::MemoryWrite`] fire exactly as they would for an
+    /// admitted handle.
+    ///
+    /// Two consequences follow from the rejection path being a detached task
+    /// rather than a supervised `JoinSet` slot:
+    ///
+    /// 1. `memory_writer_cap` bounds only the *supervised* consumer count
+    ///    (the `JoinSet` length that [`admit_task`] checks), not the number
+    ///    of detached consumers — a burst of rejected writes spawns one
+    ///    detached task each with no cap applied.
+    /// 2. On shutdown, [`Self::run`] calls `memory_writer_tasks.abort_all()`,
+    ///    which aborts only *admitted* consumers. Detached consumers keep
+    ///    running and may emit events after teardown; this is benign because
+    ///    their `lifecycle_tx` / `diag_tx` sends fail with a closed-channel
+    ///    error that [`consume_memory_write_outcome`] drops.
+    ///
+    /// The only thing a rejection loses is panic supervision of the consumer
+    /// (the detached task is not reaped), which is a quality degradation, not
+    /// a correctness bug.
+    fn drain_memory_writers(&mut self) {
+        while let Ok(handle) = self.memory_writer_rx.try_recv() {
+            let diag_tx = self.diag_tx.clone();
+            let lifecycle_tx = self.lifecycle_tx.clone();
+            let store = self.concrete_store.clone();
+            if admit_task(
+                &self.memory_writer_tasks,
+                self.task_caps.memory_writer_cap,
+                "MemoryWriter",
+                None,
+                &self.diag_tx,
+            ) {
+                self.memory_writer_tasks.spawn(async move {
+                    consume_memory_write_outcome(handle, lifecycle_tx, diag_tx, store).await;
+                });
+            } else {
+                // Cap reached: keep the outcome consumer alive but detached so
+                // the lifecycle/diagnostic events are not lost (#398).
+                tokio::spawn(async move {
+                    consume_memory_write_outcome(handle, lifecycle_tx, diag_tx, store).await;
+                });
+            }
+        }
+    }
+
+    /// Test-only hook (#398): injects a memory-writer `JoinHandle` as if the
+    /// stream task had sent it, then runs [`Self::drain_memory_writers`] so
+    /// admission-cap behavior can be exercised without a live stream task.
+    #[cfg(test)]
+    pub(super) fn inject_and_drain_memory_writer(
+        &mut self,
+        handle: tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>,
+    ) {
+        self.memory_writer_tx
+            .send(handle)
+            .expect("memory-writer channel is open in tests");
+        self.drain_memory_writers();
+    }
+
     pub(super) async fn run(mut self) {
         loop {
             // Reap completed background tasks so the JoinSets shrink again
@@ -462,87 +530,7 @@ impl TurnActor {
             }
 
             // Drain deferred memory-writer JoinHandles sent from the stream.
-            while let Ok(handle) = self.memory_writer_rx.try_recv() {
-                if !admit_task(
-                    &self.memory_writer_tasks,
-                    self.task_caps.memory_writer_cap,
-                    "MemoryWriter",
-                    None,
-                    &self.diag_tx,
-                ) {
-                    // Same reasoning as the classifier drain above: the
-                    // memory write itself already runs detached, so a
-                    // rejected admission only loses panic supervision, not
-                    // the write.
-                    continue;
-                }
-                let diag_tx = self.diag_tx.clone();
-                let lifecycle_tx = self.lifecycle_tx.clone();
-                let store = self.concrete_store.clone();
-                self.memory_writer_tasks.spawn(async move {
-                    match handle.await {
-                        Ok(ene_mind::MemoryWriteOutcome::Ok {
-                            deferred_candidates,
-                        }) => {
-                            if deferred_candidates > 0 {
-                                drop(lifecycle_tx.send(
-                                    LifecycleEvent::PendingCandidateAvailable {
-                                        count: deferred_candidates,
-                                    },
-                                ));
-                            }
-                        }
-                        Ok(ene_mind::MemoryWriteOutcome::Failed {
-                            message,
-                            pending_id,
-                            permanent,
-                            character_id,
-                        }) => {
-                            let (pending_count, permanent_count) = if let Some(store) =
-                                store.as_ref()
-                            {
-                                store
-                                    .count_pending_memory_writes(&character_id)
-                                    .await
-                                    .ok()
-                                    .map_or((None, None), |(p, f)| (Some(p as u64), Some(f as u64)))
-                            } else {
-                                (None, None)
-                            };
-                            let status = if permanent {
-                                "permanent"
-                            } else if pending_id.is_some() {
-                                "enqueued"
-                            } else {
-                                "failed"
-                            };
-                            drop(diag_tx.send(DiagnosticEvent::MemoryWrite {
-                                character_id,
-                                status: status.to_string(),
-                                message,
-                                pending_id,
-                                pending_count,
-                                permanent_count,
-                            }));
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                component = "MemoryWriter",
-                                error = %e,
-                                "Deferred memory-writer task panicked"
-                            );
-                            drop(diag_tx.send(DiagnosticEvent::MemoryWrite {
-                                character_id: String::new(),
-                                status: "failed".to_string(),
-                                message: format!("memory writer task panicked: {e}"),
-                                pending_id: None,
-                                pending_count: None,
-                                permanent_count: None,
-                            }));
-                        }
-                    }
-                });
-            }
+            self.drain_memory_writers();
 
             // Drain deferred tool tasks accepted by the stream (#196).
             // Spawn a polling task for each that awaits completion.
@@ -2433,6 +2421,87 @@ fn reap_join_set(
                     message: e.to_string(),
                 }));
             }
+        }
+    }
+}
+
+/// Consumes a deferred memory-writer outcome and emits its side effects (#398).
+///
+/// Shared by the admitted path (supervised in `memory_writer_tasks`) and the
+/// rejected path (detached) of [`TurnActor::drain_memory_writers`] so both
+/// produce identical events:
+///
+/// - [`ene_mind::MemoryWriteOutcome::Ok`] with pending candidates emits
+///   [`LifecycleEvent::PendingCandidateAvailable`] on the lifecycle bus.
+/// - [`ene_mind::MemoryWriteOutcome::Failed`] emits
+///   [`DiagnosticEvent::MemoryWrite`],
+///   with the current pending/permanent retry counts looked up from `store`
+///   when one is available.
+/// - A panicked writer task is logged and surfaced as a `failed`
+///   [`DiagnosticEvent::MemoryWrite`].
+async fn consume_memory_write_outcome(
+    handle: tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>,
+    lifecycle_tx: broadcast::Sender<LifecycleEvent>,
+    diag_tx: broadcast::Sender<DiagnosticEvent>,
+    store: Option<Arc<ene_store::MemoryStore>>,
+) {
+    match handle.await {
+        Ok(ene_mind::MemoryWriteOutcome::Ok {
+            deferred_candidates,
+        }) => {
+            if deferred_candidates > 0 {
+                drop(
+                    lifecycle_tx.send(LifecycleEvent::PendingCandidateAvailable {
+                        count: deferred_candidates,
+                    }),
+                );
+            }
+        }
+        Ok(ene_mind::MemoryWriteOutcome::Failed {
+            message,
+            pending_id,
+            permanent,
+            character_id,
+        }) => {
+            let (pending_count, permanent_count) = if let Some(store) = store.as_ref() {
+                store
+                    .count_pending_memory_writes(&character_id)
+                    .await
+                    .ok()
+                    .map_or((None, None), |(p, f)| (Some(p as u64), Some(f as u64)))
+            } else {
+                (None, None)
+            };
+            let status = if permanent {
+                "permanent"
+            } else if pending_id.is_some() {
+                "enqueued"
+            } else {
+                "failed"
+            };
+            drop(diag_tx.send(DiagnosticEvent::MemoryWrite {
+                character_id,
+                status: status.to_string(),
+                message,
+                pending_id,
+                pending_count,
+                permanent_count,
+            }));
+        }
+        Err(e) => {
+            tracing::error!(
+                component = "MemoryWriter",
+                error = %e,
+                "Deferred memory-writer task panicked"
+            );
+            drop(diag_tx.send(DiagnosticEvent::MemoryWrite {
+                character_id: String::new(),
+                status: "failed".to_string(),
+                message: format!("memory writer task panicked: {e}"),
+                pending_id: None,
+                pending_count: None,
+                permanent_count: None,
+            }));
         }
     }
 }
