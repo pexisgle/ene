@@ -91,10 +91,23 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
     "proactive": {
       "enabled": true,
       "interval_seconds": 600
+    },
+    "memory": {
+      "recall_min_score": 0.10,
+      "recall_similarity_threshold": 0.35,
+      "commitment_boost": 0.25
     }
   }
 }
 ```
+
+Memory recall uses a hybrid score `(relevance × quality + commitment_boost) × penalty`
+(see `crates/ene-rag/src/scoring.rs`). A fresh, strongly relevant memory scores
+near `1.0`; recent/lexical-only candidates land around `0.1–0.5`; unrelated
+noise scores `0.0`. `recall_min_score` (default `0.10`) filters the final
+ranking, `recall_similarity_threshold` (default `0.35`) gates the vector-gather
+step, and `commitment_boost` (default `0.25`) lets active promises surface even
+with zero query relevance.
 
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 
@@ -148,11 +161,27 @@ event:
     "deferred_max_polls": 600,
     "rag": {
       "enabled": true,
-      "top_k": 12
+      "top_k": 12,
+      "min_similarity": 0.20,
+      "weights": {
+        "summary": 1.0,
+        "description": 0.6,
+        "capability": 0.8,
+        "example": 0.4,
+        "negative": -0.5,
+        "negative_threshold": 0.70
+      }
     }
   }
 }
 ```
+
+Tool RAG scores each tool as a weighted average of its per-field embedding
+similarities (`[-1, 1]`). `min_similarity` (default `0.20`) is the inclusion
+floor for that average; `weights.negative_threshold` (default `0.70`) is the
+gate at which a tool's negative-example embedding excludes it outright — a
+tool that matches its own negative example this strongly is filtered, not
+penalized.
 
 ### `desktop.*` — Desktop GUI & Graphics Parameters
 

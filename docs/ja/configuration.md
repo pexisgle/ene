@@ -91,10 +91,23 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
     "proactive": {
       "enabled": true,
       "interval_seconds": 600
+    },
+    "memory": {
+      "recall_min_score": 0.10,
+      "recall_similarity_threshold": 0.35,
+      "commitment_boost": 0.25
     }
   }
 }
 ```
+
+記憶想起はハイブリッドスコア `(relevance × quality + commitment_boost) × penalty`
+（`crates/ene-rag/src/scoring.rs` を参照）を使用します。新しくて関連性の強い記憶は
+`1.0` に近いスコアになり、最近の/語彙一致のみの候補は `0.1〜0.5` 程度、無関係な
+ノイズは `0.0` になります。`recall_min_score`（デフォルト `0.10`）は最終ランキングを
+フィルタリングし、`recall_similarity_threshold`（デフォルト `0.35`）はベクトル収集を
+制御し、`commitment_boost`（デフォルト `0.25`）はクエリとの関連性がゼロでもアクティブな
+約束を表面化させます。
 
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 
@@ -138,11 +151,27 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
     "deferred_max_polls": 600,
     "rag": {
       "enabled": true,
-      "top_k": 12
+      "top_k": 12,
+      "min_similarity": 0.20,
+      "weights": {
+        "summary": 1.0,
+        "description": 0.6,
+        "capability": 0.8,
+        "example": 0.4,
+        "negative": -0.5,
+        "negative_threshold": 0.70
+      }
     }
   }
 }
 ```
+
+Tool RAG は各ツールを、そのフィールドごとの埋め込み類似度の重み付き平均
+（`[-1, 1]`）でスコアリングします。`min_similarity`（デフォルト `0.20`）はその
+平均に対する包含下限です。`weights.negative_threshold`（デフォルト `0.70`）は
+ツールのネガティブ例埋め込みがこの値以上に一致した場合にそのツールを完全に
+除外するゲートです — 自身のネガティブ例と強く一致するツールはペナルティ
+ではなく除外されます。
 
 ### `desktop.*` — デスクトップ GUI およびグラフィックスパラメータ
 
