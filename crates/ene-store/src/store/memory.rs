@@ -909,7 +909,7 @@ impl MemoryStore {
         limit: usize,
         similarity_threshold: f32,
     ) -> Result<Vec<(crate::MemoryItem, f32)>, EneMemoryError> {
-        use super::{cosine_similarity_expr, cosine_similarity_filter};
+        use super::{EmbeddingCol, cosine_similarity_expr, cosine_similarity_filter};
         use sea_orm::{FromQueryResult, QueryOrder, QuerySelect};
 
         #[derive(Debug, FromQueryResult)]
@@ -943,7 +943,7 @@ impl MemoryStore {
         }
 
         let query_bytes = embedding_to_bytes(query_embedding);
-        let similarity_expr = cosine_similarity_expr("memory_embeddings.embedding", &query_bytes);
+        let similarity_expr = cosine_similarity_expr(EmbeddingCol::Qualified, &query_bytes);
 
         let threshold_val = f64::from(similarity_threshold);
         let limit_val = limit as u64;
@@ -982,7 +982,7 @@ impl MemoryStore {
             .filter(entities::memory_embeddings::Column::ModelName.eq(model_name))
             .filter(entities::memory_embeddings::Column::Field.eq("content"))
             .filter(cosine_similarity_filter(
-                "memory_embeddings.embedding",
+                EmbeddingCol::Qualified,
                 &query_bytes,
                 threshold_val,
             ))

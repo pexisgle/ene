@@ -286,33 +286,56 @@ pub(crate) fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 pub(crate) const COSINE_SIMILARITY_SQL: &str = "1.0 - vec_distance_cosine";
 
+/// An embedding column that cosine-similarity SQL may reference (#427).
+///
+/// This used to be a `&str` guarded by an allowlist and an `assert!`, which
+/// left a panic path in the code (`clippy::panic` does not catch `assert!`)
+/// and relied on a runtime check to uphold the "only these columns" invariant.
+/// Modelling the two permitted columns as an enum makes any other value
+/// unrepresentable: the SQL fragment is derived from the variant, so there is
+/// nothing to validate and no way to reach an unexpected column.
 #[cfg(test)]
-pub(crate) const ALLOWED_EMBEDDING_COLS: &[&str] = &["embedding", "memory_embeddings.embedding"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbeddingCol {
+    /// The unqualified `embedding` column of the table being queried.
+    Bare,
+    /// The `memory_embeddings.embedding` column, qualified for joins where the
+    /// bare name would be ambiguous.
+    Qualified,
+}
+
+#[cfg(test)]
+impl EmbeddingCol {
+    /// The SQL column reference interpolated into the cosine-similarity
+    /// expression.
+    const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Bare => "embedding",
+            Self::Qualified => "memory_embeddings.embedding",
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn cosine_similarity_expr(
-    embedding_col: &str,
+    embedding_col: EmbeddingCol,
     query_bytes: &[u8],
 ) -> sea_orm::sea_query::Expr {
     use sea_orm::sea_query::Expr;
-    assert!(
-        ALLOWED_EMBEDDING_COLS.contains(&embedding_col),
-        "unexpected embedding column: {embedding_col}"
-    );
-    let sql = format!("{COSINE_SIMILARITY_SQL}({embedding_col}, ?)");
+    let sql = format!("{COSINE_SIMILARITY_SQL}({}, ?)", embedding_col.as_sql());
     Expr::cust_with_values(sql, vec![query_bytes.to_vec()])
 }
 #[cfg(test)]
 pub(crate) fn cosine_similarity_filter(
-    embedding_col: &str,
+    embedding_col: EmbeddingCol,
     query_bytes: &[u8],
     threshold: f64,
 ) -> sea_orm::sea_query::Expr {
     use sea_orm::sea_query::Expr;
-    assert!(
-        ALLOWED_EMBEDDING_COLS.contains(&embedding_col),
-        "unexpected embedding column: {embedding_col}"
+    let sql = format!(
+        "{COSINE_SIMILARITY_SQL}({}, ?) >= ?",
+        embedding_col.as_sql()
     );
-    let sql = format!("{COSINE_SIMILARITY_SQL}({embedding_col}, ?) >= ?");
     Expr::cust_with_values(
         sql,
         vec![

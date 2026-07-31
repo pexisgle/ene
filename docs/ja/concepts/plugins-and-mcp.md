@@ -138,7 +138,11 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 を発行することはありません。`DeclareSchema` リクエストでテーブル・列・
 インデックスを宣言し、ホストが物理テーブルを作成・所有します。すべての
 テーブル名はプラグインのプレフィックス (`fs_`、`utility_`) で始まる必要が
-あり、後続のリクエストはすべて宣言に対して検証されます。
+あり、すべてのインデックス名にもそのプレフィックスを含める必要があります
+(SQLite のインデックス名はデータベース全体で一つのネームスペースを共有する
+ため、プレフィックスのないインデックスは、将来コアのマイグレーションが必要と
+する名前を先取りできてしまいます)。後続のリクエストはすべて宣言に対して
+検証されます。
 
 ### フィンガープリントベースの変更検知
 
@@ -151,6 +155,7 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | 列の追加 | `ALTER TABLE ... ADD COLUMN` でその場で適用され、既存行には列の `DEFAULT` (または `NULL`) が入ります。保存済み宣言は更新されます。 |
 | テーブルの追加 | `CREATE TABLE IF NOT EXISTS` で作成されます。保存済み宣言は更新されます。 |
 | インデックスの追加 | `CREATE INDEX IF NOT EXISTS` で適用されます。 |
+| ツールのプレフィックスを含まないインデックス名 | **拒否**されます (パーミッションエラー。インデックス名は SQLite のデータベース全体ネームスペースを共有します)。 |
 | 列の型変更 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
 | テーブル/列の削除 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
 | `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` 付き列の追加 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |

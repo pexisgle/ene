@@ -137,8 +137,10 @@ data into the host's `memory.db` through a per-tool DB IPC server
 (`ene-store`'s `db_server` module). A plugin never issues DDL directly: it
 declares its tables, columns, and indexes with a `DeclareSchema` request, and
 the host creates and owns the physical tables. Every table name must start
-with the plugin's prefix (`fs_`, `utility_`), and all subsequent requests are
-validated against the declaration.
+with the plugin's prefix (`fs_`, `utility_`), and every index name must carry
+that prefix too (SQLite index names share one database-wide namespace, so an
+unprefixed index could squat a name a core migration later needs). All
+subsequent requests are validated against the declaration.
 
 ### Fingerprint-based change detection
 
@@ -152,6 +154,7 @@ table:
 | Column added | Applied in place with `ALTER TABLE ... ADD COLUMN`; existing rows receive the column's `DEFAULT` (or `NULL`). The stored declaration is refreshed. |
 | Table added | Created via `CREATE TABLE IF NOT EXISTS`. The stored declaration is refreshed. |
 | Index added | Applied via `CREATE INDEX IF NOT EXISTS`. |
+| Index name without the tool's prefix | **Rejected** with a permission error (index names share SQLite's database-wide namespace). |
 | Column type changed | **Rejected** with a `SCHEMA_CONFLICT` error. |
 | Table/column removed | **Rejected** with a `SCHEMA_CONFLICT` error. |
 | Column added with `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` | **Rejected** with a `SCHEMA_CONFLICT` error. |

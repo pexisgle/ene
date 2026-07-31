@@ -19,6 +19,24 @@ fn embedding_bytes_roundtrip() {
     }
 }
 
+/// The cosine-similarity helpers take a typed [`EmbeddingCol`] rather than a
+/// `&str` + allowlist, so only the two permitted columns are representable and
+/// there is no `assert!`/panic path to guard them (#427 item 2).
+#[test]
+fn embedding_col_renders_expected_sql() {
+    assert_eq!(EmbeddingCol::Bare.as_sql(), "embedding");
+    assert_eq!(
+        EmbeddingCol::Qualified.as_sql(),
+        "memory_embeddings.embedding"
+    );
+
+    // Both variants build an expression without panicking.
+    let bytes = embedding_to_bytes(&[1.0_f32, 0.0, 0.0, 0.0]);
+    let _ = cosine_similarity_expr(EmbeddingCol::Bare, &bytes);
+    let _ = cosine_similarity_expr(EmbeddingCol::Qualified, &bytes);
+    let _ = cosine_similarity_filter(EmbeddingCol::Qualified, &bytes, 0.5);
+}
+
 fn new_session_meta(session_id: &str, card_name: &str) -> crate::session::NewSessionMeta {
     crate::session::NewSessionMeta {
         session_id: session_id.to_string(),
