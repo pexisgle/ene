@@ -102,6 +102,10 @@ fn format_context_block(context: &ProactiveContext) -> String {
 ///
 /// Returns `None` when the line does not carry all three axes, so the field
 /// is omitted rather than passed through as an opaque string.
+///
+/// The producer→parser wire format is locked by the round-trip test
+/// [`tests::affect_survives_round_trip_from_build_proactive_context`], which
+/// pipes the real producer output through this module's serializer.
 fn affect_value(summary: &str) -> Option<Value> {
     let mut valence: Option<f64> = None;
     let mut arousal: Option<f64> = None;
@@ -133,8 +137,13 @@ fn affect_value(summary: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ProactiveConfig, ProactiveSourcesConfig};
     use crate::lifecycle::HistoryEntry;
-    use crate::proactive::{ActivitySnapshot, ProactiveSuppressionState};
+    use crate::proactive::{
+        ActivitySnapshot, ProactiveObservation, ProactiveSuppressionState, ScreenSummaryStatus,
+        build_proactive_context,
+    };
+    use ene_core::{ActiveCommitmentPrompt, AffectState};
 
     fn base_ctx() -> ProactiveContext {
         ProactiveContext {
@@ -279,5 +288,86 @@ mod tests {
         ctx.affect_summary = Some("mood=calm".into());
         let obj = parse_block(&ctx);
         assert!(!obj.contains_key("affect"));
+    }
+
+    #[test]
+    fn affect_survives_round_trip_from_build_proactive_context() {
+        // Locks the producer→parser contract (#380): the parser in
+        // `affect_value` must keep understanding the exact line that
+        // `build_proactive_context` emits, or the affect field would be
+        // silently dropped instead of surviving into the JSON context.
+        let config = ProactiveConfig {
+            sources: ProactiveSourcesConfig {
+                conversation: true,
+                activity: true,
+                screen_summary: true,
+            },
+            ..ProactiveConfig::default()
+        };
+        let history = vec![HistoryEntry {
+            role: Role::User,
+            content: "I have a presentation today".into(),
+        }];
+        let observation = ProactiveObservation {
+            captured_at_unix_ms: 1,
+            activity: Some(ActivitySnapshot {
+                idle_seconds: Some(90),
+                active_window_label: "Code".into(),
+                recent_change: "focus".into(),
+            }),
+            screen_summary: Some("editor open".into()),
+            screen_summary_status: ScreenSummaryStatus::Available,
+        };
+        let affect = AffectState {
+            character_id: "character-1".into(),
+            user_id: String::new(),
+            valence: 0.30,
+            arousal: 0.10,
+            dominance: 0.0,
+            trust: 0.0,
+            affinity: 0.0,
+            irritation: 0.0,
+            curiosity: 0.0,
+            fatigue: 0.0,
+            mood_label: String::new(),
+            last_expression: String::new(),
+            discrete_emotions: Vec::new(),
+            updated_at: None,
+        };
+        let commitments = [ActiveCommitmentPrompt {
+            id: 1,
+            title: "ask about the presentation".into(),
+            description: String::new(),
+            due_label: None,
+            due_at: None,
+        }];
+        let ctx = build_proactive_context(
+            &config,
+            &history,
+            &observation,
+            Some(&affect),
+            &commitments,
+            ProactiveSuppressionState {
+                seconds_since_user_input: 90,
+                seconds_since_proactive: 1_000,
+                proactive_turns_this_session: 0,
+                user_turn_busy: false,
+            },
+        );
+
+        // The producer emits the exact line the parser is coupled to…
+        assert_eq!(
+            ctx.affect_summary.as_deref(),
+            Some("valence=0.30 arousal=0.10 dominance=0.00")
+        );
+
+        // …and it survives round-trip through the JSON context document.
+        let obj = parse_block(&ctx);
+        let affect = obj
+            .get("affect")
+            .expect("affect must survive round-trip through format_context_block");
+        assert_eq!(affect["valence"], json!(0.30));
+        assert_eq!(affect["arousal"], json!(0.10));
+        assert_eq!(affect["dominance"], json!(0.0));
     }
 }
