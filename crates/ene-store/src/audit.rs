@@ -49,8 +49,10 @@ impl AuditDecision {
 /// Input for recording a single audited tool call.
 #[derive(Debug, Clone)]
 pub struct NewAuditEntry {
-    /// Turn that triggered the call (empty for out-of-band diagnostics calls).
+    /// Turn that triggered the call (`None` for out-of-band diagnostics calls).
     pub turn_id: String,
+    /// Session that triggered the call (`None` for out-of-band diagnostics calls).
+    pub session_id: Option<String>,
     /// Namespaced tool name (e.g. `fs.write_file`).
     pub tool_name: String,
     /// Action label reported by the permission prompt (may be empty).
@@ -72,6 +74,9 @@ pub struct AuditEntry {
     pub id: i64,
     /// Turn that triggered the call.
     pub turn_id: String,
+    /// Session that triggered the call (`None` for rows written before
+    /// the `session_id` column existed, #426).
+    pub session_id: Option<String>,
     /// Namespaced tool name.
     pub tool_name: String,
     /// Action label.

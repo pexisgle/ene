@@ -1,11 +1,15 @@
 #![expect(missing_docs, reason = "sea-orm migration modules are schema-internal")]
 
+mod conversation_logs_search_index;
 mod embeddings_cleanup;
 mod pending_candidates;
+mod vec0_memory;
 
+use conversation_logs_search_index::ConversationLogsSearchIndexMigration;
 use embeddings_cleanup::EmbeddingsCleanupIndexMigration;
 use pending_candidates::PendingCandidatesMigration;
 use sea_orm_migration::prelude::*;
+use vec0_memory::Vec0EmbeddingIndexMigration;
 
 pub struct Migrator;
 
@@ -18,6 +22,9 @@ impl MigratorTrait for Migrator {
             Box::new(SourceRefIndexMigration),
             Box::new(EmbeddingsCleanupIndexMigration),
             Box::new(PendingCandidatesMigration),
+            Box::new(AuditLogSessionIdMigration),
+            Box::new(ConversationLogsSearchIndexMigration),
+            Box::new(Vec0EmbeddingIndexMigration),
         ]
     }
 }
@@ -1057,6 +1064,7 @@ enum AuditLog {
     Success,
     RedactedArgs,
     CreatedAt,
+    SessionId,
 }
 
 #[derive(Iden)]
@@ -1221,6 +1229,69 @@ impl MigrationTrait for SourceRefIndexMigration {
                 Index::drop()
                     .name("idx_typed_mem_character_source_ref")
                     .table(TypedMemories::Table)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+/// Adds a nullable `session_id` column and index to `audit_log` (#426).
+///
+/// Existing rows keep `NULL`, so audit entries written before this
+/// migration are never misattributed to a session. New rows record the
+/// originating session so `build_export` can filter tool history per
+/// session instead of omitting it entirely.
+///
+/// The `down` migration uses `DROP COLUMN`, which requires `SQLite` ≥ 3.35
+/// (2021-03-12); the bundled `SQLite` is newer, and the column is only ever
+/// dropped in a deliberate rollback, never in normal operation.
+pub struct AuditLogSessionIdMigration;
+
+impl MigrationName for AuditLogSessionIdMigration {
+    fn name(&self) -> &'static str {
+        "m20260731_000004_audit_log_session_id"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for AuditLogSessionIdMigration {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AuditLog::Table)
+                    .add_column(ColumnDef::new(AuditLog::SessionId).string().null())
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .if_not_exists()
+                    .name("idx_audit_log_session")
+                    .table(AuditLog::Table)
+                    .col(AuditLog::SessionId)
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_index(
+                Index::drop()
+                    .name("idx_audit_log_session")
+                    .table(AuditLog::Table)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(AuditLog::Table)
+                    .drop_column(AuditLog::SessionId)
                     .to_owned(),
             )
             .await?;

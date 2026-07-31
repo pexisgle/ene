@@ -608,6 +608,7 @@ pub(crate) async fn perform_tool_executions(
                 store,
                 ene_store::NewAuditEntry {
                     turn_id: ctx.turn.to_string(),
+                    session_id: Some(ctx.session_id.to_string()),
                     tool_name: name.clone(),
                     action: std::mem::take(&mut audit_action),
                     target: std::mem::take(&mut audit_target),
