@@ -366,12 +366,11 @@ impl ToolSpecAttrs {
     /// tool is never parallelized — so an undeclared tool keeps the safe
     /// sequential behavior instead of being optimistically treated as read-only.
     pub fn side_effects_spec(&self) -> TokenStream2 {
-        match &self.side_effects {
-            Some(s) => {
-                let path = path_token(s, "ene_plugin_proto::SideEffects", "ReadOnly");
-                quote! { Some(#path) }
-            }
-            None => quote! { None },
+        if let Some(s) = &self.side_effects {
+            let path = path_token(s, "ene_plugin_proto::SideEffects", "ReadOnly");
+            quote! { Some(#path) }
+        } else {
+            quote! { None }
         }
     }
 
