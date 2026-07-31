@@ -2257,7 +2257,7 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
     let store = MemoryStore::open(&path, 8).await.expect("reopen dim=8");
     let results = store
         .search_typed_memories_vector(
-            &vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &[1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "ene",
             "model-b",
             None,
@@ -2288,7 +2288,7 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
         .unwrap();
     let results = store
         .search_typed_memories_vector(
-            &vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "ene",
             "model-b",
             None,
