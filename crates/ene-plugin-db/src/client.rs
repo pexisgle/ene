@@ -1,7 +1,7 @@
 //! IPC client used by tool binaries to perform typed CRUD operations against
 //! the core DB server over a length-prefixed JSON Unix socket connection.
 
-use crate::messages::{DbErrorCode, DbRequest, DbResponse};
+use crate::messages::{DbBatchOpResult, DbErrorCode, DbRequest, DbResponse, DbWriteOp};
 use crate::types::{DbFilter, DbOrderBy, DbSchema, DbValue, Row};
 use ene_plugin_proto::transport::IpcStream;
 use std::collections::BTreeMap;
@@ -363,6 +363,31 @@ impl DbClient {
         }
     }
 
+    /// Applies a group of write operations atomically and returns one
+    /// [`DbBatchOpResult`] per operation, in the same order as `ops`.
+    ///
+    /// The server executes the whole batch inside a single `SQLite`
+    /// transaction: either every operation commits, or the entire batch is
+    /// rolled back and nothing is persisted. On rollback the server returns
+    /// an [`Err`](DbError) naming the failing operation, so a partial batch
+    /// can never be observed. Use this whenever several writes must stand or
+    /// fall together (for example, recording a multi-row undo entry) instead
+    /// of issuing the writes one request at a time.
+    ///
+    /// The server holds its write lock for the duration of the batch and
+    /// rejects batches larger than its operation limit (10,000) up front, so
+    /// keep batches bounded: split large workloads into multiple `batch`
+    /// calls rather than sending one giant list.
+    pub async fn batch(&mut self, ops: Vec<DbWriteOp>) -> Result<Vec<DbBatchOpResult>, DbError> {
+        let resp = Self::check_error(self.send_request(&DbRequest::Batch { ops }).await?)?;
+        match resp {
+            DbResponse::Batch { results } => Ok(results),
+            other => Err(DbError::UnexpectedResponse(format!(
+                "expected Batch, got {other:?}"
+            ))),
+        }
+    }
+
     /// Counts rows matching the filter.
     pub async fn count(&mut self, table: &str, filter: DbFilter) -> Result<i64, DbError> {
         let resp = Self::check_error(
@@ -562,6 +587,125 @@ mod tests {
             // Drop the first socket from the client side by reconnecting.
             client.reconnect().await.expect("reconnect re-handshakes");
             client.ping().await.expect("ping after reconnect");
+
+            server.await.expect("server task");
+            cleanup_path(&socket_path);
+        }
+    }
+
+    #[cfg(unix)]
+    #[expect(
+        clippy::expect_used,
+        clippy::panic,
+        reason = "batch wire harness panics on protocol or IO failure"
+    )]
+    mod batch_wire {
+        use super::*;
+        use ene_plugin_proto::transport::{IpcListener, cleanup_path};
+        use std::path::PathBuf;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn read_framed(stream: &mut ene_plugin_proto::transport::IpcStream) -> DbRequest {
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await.expect("read len");
+            let len = u32::from_le_bytes(len_buf) as usize;
+            let mut buf = vec![0u8; len];
+            stream.read_exact(&mut buf).await.expect("read body");
+            serde_json::from_slice(&buf).expect("decode request")
+        }
+
+        async fn write_framed(
+            stream: &mut ene_plugin_proto::transport::IpcStream,
+            resp: &DbResponse,
+        ) {
+            let json = serde_json::to_vec(resp).expect("encode response");
+            let len = json.len() as u32;
+            stream
+                .write_all(&len.to_le_bytes())
+                .await
+                .expect("write len");
+            stream.write_all(&json).await.expect("write body");
+            stream.flush().await.expect("flush");
+        }
+
+        /// The `Batch` request serializes over the wire and the client maps a
+        /// `Batch` response back to per-operation results in order.
+        #[tokio::test]
+        async fn batch_round_trips_over_ipc() {
+            let socket_path: PathBuf = std::env::temp_dir()
+                .join(format!("ene-plugin-db-batch-{}.sock", std::process::id()));
+            cleanup_path(&socket_path);
+
+            let token = "batch-token";
+            let path_for_server = socket_path.clone();
+            let token_for_server = token.to_string();
+
+            let server = tokio::spawn(async move {
+                let mut listener = IpcListener::bind(&path_for_server).expect("bind");
+                let mut stream = listener.accept().await.expect("accept");
+
+                match read_framed(&mut stream).await {
+                    DbRequest::Handshake { token } => {
+                        assert_eq!(token, token_for_server, "handshake token mismatch");
+                        write_framed(&mut stream, &DbResponse::HandshakeAck).await;
+                    }
+                    other => panic!("expected Handshake, got {other:?}"),
+                }
+
+                match read_framed(&mut stream).await {
+                    DbRequest::Batch { ops } => {
+                        assert_eq!(ops.len(), 2, "expected two ops on the wire");
+                        assert!(matches!(ops[0], DbWriteOp::Insert { .. }));
+                        assert!(matches!(ops[1], DbWriteOp::Delete { .. }));
+                        write_framed(
+                            &mut stream,
+                            &DbResponse::Batch {
+                                results: vec![
+                                    DbBatchOpResult::Insert { rowid: 7 },
+                                    DbBatchOpResult::Delete { affected: 3 },
+                                ],
+                            },
+                        )
+                        .await;
+                    }
+                    other => panic!("expected Batch, got {other:?}"),
+                }
+            });
+
+            for _ in 0..50 {
+                if socket_path.exists() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+
+            let mut client = DbClient::connect_with_token(&socket_path, token)
+                .await
+                .expect("connect_with_token");
+            let results = client
+                .batch(vec![
+                    DbWriteOp::Insert {
+                        table: "fs_test".to_string(),
+                        row: std::collections::BTreeMap::from([(
+                            "name".to_string(),
+                            DbValue::Text("x".to_string()),
+                        )]),
+                    },
+                    DbWriteOp::Delete {
+                        table: "fs_test".to_string(),
+                        filter: DbFilter::Always,
+                    },
+                ])
+                .await
+                .expect("batch");
+
+            assert_eq!(
+                results,
+                vec![
+                    DbBatchOpResult::Insert { rowid: 7 },
+                    DbBatchOpResult::Delete { affected: 3 },
+                ]
+            );
 
             server.await.expect("server task");
             cleanup_path(&socket_path);

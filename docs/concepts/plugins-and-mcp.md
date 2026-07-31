@@ -175,6 +175,27 @@ automatically.
   migrate the data yourself, or reconcile the difference in your plugin's own
   logic. The host will not rewrite or drop data on your behalf.
 
+### Atomic batches (`Batch`)
+
+A plugin that must apply several writes atomically sends a single `Batch`
+request carrying a list of `DbWriteOp` (`Insert` / `Upsert` / `Update` /
+`Delete`). The server validates every operation against the declared schema up
+front, then runs the whole list inside **one SQLite transaction**: either every
+operation commits, or — if any operation fails — the entire batch is rolled
+back and nothing is persisted. The response carries one `DbBatchOpResult` per
+operation, in request order; on failure the server returns `Error` naming the
+index of the failing operation.
+
+Because the transaction is scoped to a single request — never held across IPC
+round-trips — a plugin cannot pin SQLite's write lock open (which would stall
+the core's own memory writes), and a dropped connection can never leave a
+half-applied batch behind. This is the deliberate alternative to exposing
+explicit `Begin`/`Commit`/`Rollback` over IPC: the batch covers the
+"write several rows atomically" case (e.g. recording a multi-row undo entry)
+without the long-held-lock hazard. `Batch` was added as a new request/response
+variant with no protocol-version bump, following the same additive-only
+discipline as the stdio protocol above.
+
 ---
 
 ## 6. Plugin Security Model
