@@ -47,6 +47,7 @@ fn build_recalled(item: MemoryItem, reason: RecallReason) -> RecalledMemory {
             contradiction_penalty: 0.0,
             stale_penalty: 0.0,
             commitment_boost: 0.0,
+            reflection_multiplier: 1.0,
             total: confidence,
         },
         sources: vec![],

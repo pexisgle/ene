@@ -101,6 +101,7 @@ const fn is_supersedeable_status(status: crate::MemoryStatus) -> bool {
 fn merge_hybrid_candidate(
     gathered: &mut std::collections::HashMap<i64, ene_core::GatheredCandidate>,
     user_id: Option<&str>,
+    exclude_kinds: &[ene_core::MemoryKind],
     item: crate::MemoryItem,
     vector_similarity: f32,
     source: crate::MemoryCandidateSource,
@@ -109,6 +110,9 @@ fn merge_hybrid_candidate(
     use ene_rag::is_recallable_status;
 
     if !is_recallable_status(item.status) {
+        return;
+    }
+    if exclude_kinds.contains(&item.kind) {
         return;
     }
     if let Some(uid) = user_id
@@ -625,6 +629,7 @@ impl MemoryStore {
                 merge_hybrid_candidate(
                     &mut gathered,
                     query.user_id,
+                    &query.exclude_kinds,
                     item,
                     similarity,
                     MemoryCandidateSource::Vector,
@@ -647,6 +652,7 @@ impl MemoryStore {
                 merge_hybrid_candidate(
                     &mut gathered,
                     query.user_id,
+                    &query.exclude_kinds,
                     item,
                     0.0,
                     MemoryCandidateSource::Lexical,
@@ -671,6 +677,7 @@ impl MemoryStore {
             merge_hybrid_candidate(
                 &mut gathered,
                 query.user_id,
+                &query.exclude_kinds,
                 item,
                 0.0,
                 MemoryCandidateSource::Commitment,
@@ -714,6 +721,7 @@ impl MemoryStore {
             merge_hybrid_candidate(
                 &mut gathered,
                 query.user_id,
+                &query.exclude_kinds,
                 item,
                 0.0,
                 MemoryCandidateSource::Commitment,
@@ -743,6 +751,7 @@ impl MemoryStore {
                 merge_hybrid_candidate(
                     &mut gathered,
                     query.user_id,
+                    &query.exclude_kinds,
                     item,
                     0.0,
                     MemoryCandidateSource::Recent,

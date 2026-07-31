@@ -386,6 +386,161 @@ pub fn needs_onboarding(config: &ene_config::EneConfig) -> bool {
         .any(|i| matches!(i, SettingsIssue::MissingApiKey { .. }))
 }
 
+/// A task whose configured context window cannot hold its prompt budget plus
+/// output reserve (#366).
+///
+/// Produced by [`validate_context_budgets`] and surfaced as a startup warning:
+/// when a model's window is smaller than what the prompt composition needs,
+/// sections are silently dropped every turn. The struct carries the full
+/// breakdown so the caller can build a precise diagnostic message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextBudgetIssue {
+    /// Task name (e.g. `"chat"`, `"proactive"`).
+    pub task: String,
+    /// Local model registry key, or the cloud provider name.
+    pub model: String,
+    /// Effective context window in tokens (`min(advertised, configured)`).
+    pub effective_window: u32,
+    /// Prompt budget the task composes against, in tokens.
+    pub prompt_budget: u32,
+    /// Tokens reserved for the model's reply (`tasks.<task>.max_tokens`).
+    pub response_reserve: u32,
+    /// `prompt_budget + response_reserve` — what the window must hold.
+    pub required: u32,
+}
+
+impl ContextBudgetIssue {
+    /// Stable English message for CLI / UI / logs.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!(
+            "model '{}' for task '{}' has an effective context window of {} tokens but the current config requires {} ({} prompt + {} response); prompt sections will be dropped every turn",
+            self.model,
+            self.task,
+            self.effective_window,
+            self.required,
+            self.prompt_budget,
+            self.response_reserve
+        )
+    }
+}
+
+/// Validate that each generative task's context window can hold its prompt
+/// budget plus output reserve (#366).
+///
+/// `prompt_budget` is the token budget prompt composition targets (the mind's
+/// `max_prompt_tokens`); it is passed in because `ene-ai` does not depend on
+/// `ene-mind`. For every task that generates a completion — `chat`, plus
+/// `proactive` when it is configured — the effective window
+/// ([`AiConfig::effective_window_for_task`]) is compared against
+/// `prompt_budget + tasks.<task>.max_tokens`. A window that falls short means
+/// prompt sections are silently dropped every turn, so the caller should warn.
+///
+/// Only tasks whose window is known at startup are checked: a local model's
+/// [`LocalModelDef::context_size`], or an explicit operator
+/// [`AiProviderDef::context_window`] override. A cloud task with no override
+/// learns its real window from the provider at runtime, so it is skipped here
+/// rather than warned about on the conservative
+/// [`crate::context_window::DEFAULT_CONTEXT_WINDOW`] floor.
+#[must_use]
+pub fn validate_context_budgets(ai: &AiConfig, prompt_budget: u32) -> Vec<ContextBudgetIssue> {
+    let mut issues = Vec::new();
+    check_task_budget(ai, "chat", &ai.tasks.chat, prompt_budget, &mut issues);
+    if let Some(proactive) = ai.tasks.proactive.as_ref() {
+        check_task_budget(ai, "proactive", proactive, prompt_budget, &mut issues);
+    }
+    issues
+}
+
+/// Compare one task's effective window against its required budget and record
+/// a [`ContextBudgetIssue`] when the window is too small (#366).
+///
+/// Only tasks whose window is known at startup are checked: a local model's
+/// [`LocalModelDef::context_size`], or an explicit operator
+/// [`AiProviderDef::context_window`] override. A cloud task with no override
+/// learns its real window from the provider at runtime, so there is nothing to
+/// validate yet and it is skipped (avoids false warnings for the default
+/// cloud setup).
+fn check_task_budget(
+    ai: &AiConfig,
+    task_name: &str,
+    task: &TaskRef,
+    prompt_budget: u32,
+    issues: &mut Vec<ContextBudgetIssue>,
+) {
+    let advertised = local_advertised_window(ai, task);
+    let user_configured = ai
+        .providers
+        .get(&task.provider)
+        .and_then(|def| def.context_window);
+    if advertised.is_none() && user_configured.is_none() {
+        return;
+    }
+    let window = ai.effective_window_for_task(task, advertised);
+    let response_reserve = task.max_tokens.unwrap_or(0);
+    let required = prompt_budget.saturating_add(response_reserve);
+    if window.effective < required {
+        issues.push(ContextBudgetIssue {
+            task: task_name.to_string(),
+            model: task_model_label(task),
+            effective_window: window.effective,
+            prompt_budget,
+            response_reserve,
+            required,
+        });
+    }
+}
+
+/// The context window a local model advertises for a task, or `None` for a
+/// cloud task (whose window is learned from the provider at runtime).
+fn local_advertised_window(ai: &AiConfig, task: &TaskRef) -> Option<u32> {
+    if !AiConfig::is_local_provider(&task.provider) {
+        return None;
+    }
+    task.model
+        .as_deref()
+        .and_then(|name| ai.local_models.get(name))
+        .map(|def| def.context_size)
+}
+
+/// Human-readable model label for a task: the local model key when the task
+/// routes to the local provider, otherwise the cloud model name (falling back
+/// to the provider name when the task names no model).
+fn task_model_label(task: &TaskRef) -> String {
+    if AiConfig::is_local_provider(&task.provider) {
+        return task
+            .model
+            .clone()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| LOCAL_PROVIDER.to_string());
+    }
+    task.model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| task.provider.clone())
+}
+
+/// Emit a `tracing::warn!` for each under-sized context window (#366).
+///
+/// Convenience wrapper over [`validate_context_budgets`] for startup paths
+/// that only need the side effect. `prompt_budget` is the mind's
+/// `max_prompt_tokens`.
+pub fn warn_on_context_budget_issues(ai: &AiConfig, prompt_budget: u32) {
+    for issue in validate_context_budgets(ai, prompt_budget) {
+        tracing::warn!(
+            component = "AiConfig",
+            task = %issue.task,
+            model = %issue.model,
+            effective_window = issue.effective_window,
+            required = issue.required,
+            prompt_budget = issue.prompt_budget,
+            response_reserve = issue.response_reserve,
+            "context window too small for the configured prompt budget; {}",
+            issue.message()
+        );
+    }
+}
+
 /// Lightweight API-key validation for an OpenAI-compatible provider (#237).
 ///
 /// Performs a `GET {base_url}/models` request with a short timeout so an
@@ -964,5 +1119,128 @@ mod tests {
         };
         let w = cfg.effective_window_for_task(&task, None);
         assert_eq!(w.effective, crate::context_window::DEFAULT_CONTEXT_WINDOW);
+    }
+
+    /// Build an [`AiConfig`] whose chat and proactive tasks both route to a
+    /// local model with the given context size and chat output reserve (#366
+    /// test helper). The proactive reserve is fixed at 2,048 (a typical local
+    /// companion utterance).
+    fn local_chat_config(context_size: u32, chat_max_tokens: u32) -> AiConfig {
+        let mut cfg = AiConfig::default();
+        cfg.local_models.insert(
+            "gemma".to_string(),
+            LocalModelDef {
+                context_size,
+                ..LocalModelDef::default()
+            },
+        );
+        cfg.tasks.chat = TaskRef {
+            provider: crate::config::LOCAL_PROVIDER.to_string(),
+            model: Some("gemma".to_string()),
+            max_tokens: Some(chat_max_tokens),
+            ..TaskRef::default()
+        };
+        cfg.tasks.proactive = Some(TaskRef {
+            provider: crate::config::LOCAL_PROVIDER.to_string(),
+            model: Some("gemma".to_string()),
+            max_tokens: Some(2_048),
+            ..TaskRef::default()
+        });
+        cfg
+    }
+
+    #[test]
+    fn validate_context_budgets_flags_undersized_local_window() {
+        // The old 2,048-token window cannot hold a 12,000 prompt even with a
+        // modest local reserve.
+        let cfg = local_chat_config(2_048, 2_048);
+        let issues = validate_context_budgets(&cfg, 12_000);
+        // Both the chat and proactive tasks share the undersized model.
+        assert_eq!(issues.len(), 2);
+        let chat = issues
+            .iter()
+            .find(|i| i.task == "chat")
+            .expect("chat issue");
+        assert_eq!(chat.model, "gemma");
+        assert_eq!(chat.effective_window, 2_048);
+        assert_eq!(chat.prompt_budget, 12_000);
+        assert_eq!(chat.response_reserve, 2_048);
+        assert_eq!(chat.required, 14_048);
+        // The message carries the current value, required value, and breakdown.
+        let msg = chat.message();
+        assert!(msg.contains("2048"), "message: {msg}");
+        assert!(msg.contains("14048"), "message: {msg}");
+        assert!(msg.contains("12000"), "message: {msg}");
+    }
+
+    #[test]
+    fn validate_context_budgets_passes_with_default_local_window() {
+        // The raised 16,384 default holds a 12,000 prompt plus a local-sized
+        // reserve (the issue's guidance: lower max_tokens for local chat).
+        let cfg = local_chat_config(16_384, 2_048);
+        assert!(validate_context_budgets(&cfg, 12_000).is_empty());
+    }
+
+    #[test]
+    fn validate_context_budgets_warns_when_cloud_reserve_kept_on_local() {
+        // 16,384 is enough for the prompt but NOT for a cloud-sized 8,192
+        // output reserve (12,000 + 8,192 = 20,192). Keeping the cloud default
+        // on a local chat model is exactly the misconfiguration the startup
+        // warning targets, so chat is flagged while the modest-reserve
+        // proactive task is not.
+        let cfg = local_chat_config(16_384, 8_192);
+        let issues = validate_context_budgets(&cfg, 12_000);
+        assert_eq!(issues.len(), 1);
+        let issue = issues.first().expect("one issue");
+        assert_eq!(issue.task, "chat");
+        assert_eq!(issue.effective_window, 16_384);
+        assert_eq!(issue.required, 20_192);
+    }
+
+    #[test]
+    fn validate_context_budgets_skips_cloud_without_override() {
+        // A cloud chat task with no explicit window is learned at runtime, so
+        // it is not flagged on the conservative default floor.
+        let cfg = AiConfig::default();
+        assert!(validate_context_budgets(&cfg, 12_000).is_empty());
+    }
+
+    #[test]
+    fn validate_context_budgets_flags_small_cloud_override() {
+        // An operator override that shrinks the window below the budget is a
+        // startup-knowable misconfiguration and is flagged.
+        let mut cfg = AiConfig::default();
+        if let Some(def) = cfg.providers.get_mut("default") {
+            def.context_window = Some(4_096);
+        }
+        cfg.tasks.chat.max_tokens = Some(8_192);
+        let issues = validate_context_budgets(&cfg, 12_000);
+        assert_eq!(issues.len(), 1);
+        let issue = issues.first().expect("one issue");
+        assert_eq!(issue.task, "chat");
+        assert_eq!(issue.effective_window, 4_096);
+        assert_eq!(issue.required, 20_192);
+    }
+
+    #[test]
+    fn validate_context_budgets_ignores_classifier_and_embedding() {
+        // Only generative tasks (chat, proactive) are checked; a tiny
+        // embedding/classifier window must not produce an issue.
+        let mut cfg = local_chat_config(16_384, 2_048);
+        cfg.tasks.embedding = TaskRef {
+            provider: crate::config::LOCAL_PROVIDER.to_string(),
+            model: Some("gemma".to_string()),
+            max_tokens: None,
+            ..TaskRef::default()
+        };
+        cfg.local_models
+            .get_mut("gemma")
+            .expect("gemma present")
+            .context_size = 512;
+        // The embedding task is not generative, but chat/proactive now share
+        // the tiny window, so only those two are flagged.
+        let issues = validate_context_budgets(&cfg, 12_000);
+        assert!(issues.iter().all(|i| i.task != "embedding"));
+        assert_eq!(issues.len(), 2);
     }
 }

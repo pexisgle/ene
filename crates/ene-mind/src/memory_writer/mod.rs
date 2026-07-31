@@ -289,6 +289,7 @@ impl MemoryWriter {
                 options: options.clone(),
                 semantic_matches,
                 affect_valence: input.affect.valence,
+                embedder: providers.embedder,
             };
 
             let mut regular = Vec::new();
@@ -458,6 +459,7 @@ async fn build_semantic_matches(
             commitment_boost: 0.0,
             recent_fallback_limit: 0,
             time_range: None,
+            exclude_kinds: Vec::new(),
         };
 
         let gathered = store

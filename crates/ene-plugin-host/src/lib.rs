@@ -58,7 +58,7 @@ pub mod tool_registry;
 /// Per-plugin circuit breaker.
 pub use circuit_breaker::{BreakerState, CircuitBreaker};
 /// Plugin system configuration.
-pub use config::PluginConfig;
+pub use config::{PluginConfig, PluginEntry};
 /// Plugin host error type.
 pub use error::PluginHostError;
 /// Backward-compatible alias for [`PluginHostError`].

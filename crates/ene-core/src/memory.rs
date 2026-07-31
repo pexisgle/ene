@@ -533,6 +533,15 @@ pub struct Query<'a> {
     pub time_range: Option<TimeRange>,
     /// Limit on pure-recent fallback candidates.
     pub recent_fallback_limit: usize,
+    /// Memory kinds excluded from every gather path (#347).
+    ///
+    /// Candidates of an excluded kind are dropped before scoring, so they
+    /// never compete with normal memories in recall. The cognitive recall
+    /// path uses this to keep [`MemoryKind::Reflection`] memories out of
+    /// regular recall: reflections are a scoring signal (applied separately
+    /// via the self-reflection pipeline), not context to inject into the LLM.
+    /// An empty list excludes nothing.
+    pub exclude_kinds: Vec<MemoryKind>,
 }
 
 /// Deprecated name for [`Query`]; prefer `Query`.
@@ -591,6 +600,14 @@ pub struct MemoryScoreBreakdown {
     pub stale_penalty: f32,
     /// Boost for active commitment candidates.
     pub commitment_boost: f32,
+    /// Self-reflection adjustment multiplier applied after scoring (#347).
+    ///
+    /// `1.0` means no reflection adjustment. A value `> 1.0` boosts memories
+    /// matching successful strategies; `< 1.0` penalizes memories matching
+    /// strategies to avoid. Recorded so the explainable breakdown stays
+    /// consistent: `total` is the pre-reflection score scaled by this factor,
+    /// rather than a silent overwrite of `total`.
+    pub reflection_multiplier: f32,
     /// Final hybrid total score.
     pub total: f32,
 }
@@ -611,6 +628,7 @@ impl Default for MemoryScoreBreakdown {
             contradiction_penalty: 0.0,
             stale_penalty: 0.0,
             commitment_boost: 0.0,
+            reflection_multiplier: 1.0,
             total: 0.0,
         }
     }
