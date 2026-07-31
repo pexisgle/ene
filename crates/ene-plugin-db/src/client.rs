@@ -74,6 +74,14 @@ pub enum DbError {
         /// Human-readable error message.
         message: String,
     },
+    /// An error code this build does not know about (emitted by a newer
+    /// host). The error is surfaced as a diagnostic rather than being
+    /// dropped wholesale.
+    #[error("unknown database error: {message}")]
+    Unknown {
+        /// Human-readable error message.
+        message: String,
+    },
 }
 
 /// Client for communicating with the per-tool DB IPC server.
@@ -219,6 +227,7 @@ impl DbClient {
                 DbErrorCode::TypeMismatch => DbError::TypeMismatch { message },
                 DbErrorCode::InvalidFilter => DbError::InvalidFilter { message },
                 DbErrorCode::SchemaConflict => DbError::SchemaConflict { message },
+                DbErrorCode::Unknown => DbError::Unknown { message },
                 DbErrorCode::Internal => DbError::Internal { message },
             };
             return Err(err);

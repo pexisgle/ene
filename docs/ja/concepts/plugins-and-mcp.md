@@ -154,9 +154,11 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 | 列の型変更 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
 | テーブル/列の削除 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
 | `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` 付き列の追加 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
+| `DEFAULT` なしの `NOT NULL` 列の追加 | `SCHEMA_CONFLICT` エラーで**拒否**されます。 |
 
-`SQLite` は列の型変更、列・テーブルの削除、制約付き列の追加をその場で行えない
-ため、検証層と物理テーブルが暗黙に食い違う——検証は通るのに後で `INSERT` が
+`SQLite` は列の型変更、列・テーブルの削除、制約付き列の追加をその場で行えず、
+`NOT NULL` 列の追加には既存行を埋める `DEFAULT` が必要です。検証層と物理
+テーブルが暗黙に食い違う——検証は通るのに後で `INSERT` が
 `no such column` で失敗するという #423 の症状——のを防ぐため、ホストは互換性の
 ない変更を拒否し、プラグイン作者に明示的な調整を求めます。追加のみの変更
 (通常の新しい列とテーブル) は安全であり、自動的に適用されます。

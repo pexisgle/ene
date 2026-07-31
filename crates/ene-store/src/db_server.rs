@@ -43,6 +43,7 @@ use ene_plugin_db::{
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait, ExprTrait, Statement,
+    TransactionTrait,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
@@ -686,42 +687,68 @@ impl DbIpcServer {
             }
             // First declaration, or the schema changed: reconcile the
             // physical tables with the new declaration, then refresh the
-            // stored row.
+            // stored row. Both steps run in a single transaction so a
+            // failure part-way through cannot leave the physical tables
+            // ahead of the stored fingerprint (which would make the next
+            // DeclareSchema re-apply — and fail on — the same ALTERs).
             _ => {
-                let previous = stored
-                    .as_ref()
-                    .map(|row| {
-                        serde_json::from_str::<DbSchema>(&row.schema_json).map_err(|e| {
-                            DbServerError::Internal(format!(
-                                "stored schema for prefix '{prefix}' is corrupt: {e}"
-                            ))
-                        })
-                    })
-                    .transpose()?;
-
-                Self::apply_schema_change(db, tool_name, prefix, previous.as_ref(), &schema)
-                    .await?;
-
-                let active_model = tool_schemas::ActiveModel {
-                    prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
-                    schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
-                    fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
-                    created_at: sea_orm::ActiveValue::Set(chrono::Utc::now()),
-                };
-
-                tool_schemas::Entity::insert(active_model)
-                    .on_conflict(
-                        sea_orm::sea_query::OnConflict::column(tool_schemas::Column::Prefix)
-                            .update_columns([
-                                tool_schemas::Column::SchemaJson,
-                                tool_schemas::Column::Fingerprint,
-                                tool_schemas::Column::CreatedAt,
-                            ])
-                            .to_owned(),
-                    )
-                    .exec(db)
+                let txn = db
+                    .begin()
                     .await
                     .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+                let result = async {
+                    let previous = stored
+                        .as_ref()
+                        .map(|row| {
+                            serde_json::from_str::<DbSchema>(&row.schema_json).map_err(|e| {
+                                DbServerError::Internal(format!(
+                                    "stored schema for prefix '{prefix}' is corrupt: {e}"
+                                ))
+                            })
+                        })
+                        .transpose()?;
+
+                    Self::apply_schema_change(&txn, tool_name, prefix, previous.as_ref(), &schema)
+                        .await?;
+
+                    let active_model = tool_schemas::ActiveModel {
+                        prefix: sea_orm::ActiveValue::Set(prefix.to_string()),
+                        schema_json: sea_orm::ActiveValue::Set(schema_json.clone()),
+                        fingerprint: sea_orm::ActiveValue::Set(fingerprint.clone()),
+                        created_at: sea_orm::ActiveValue::Set(chrono::Utc::now()),
+                    };
+
+                    tool_schemas::Entity::insert(active_model)
+                        .on_conflict(
+                            sea_orm::sea_query::OnConflict::column(tool_schemas::Column::Prefix)
+                                .update_columns([
+                                    tool_schemas::Column::SchemaJson,
+                                    tool_schemas::Column::Fingerprint,
+                                    tool_schemas::Column::CreatedAt,
+                                ])
+                                .to_owned(),
+                        )
+                        .exec(&txn)
+                        .await
+                        .map_err(|e| DbServerError::Internal(e.to_string()))?;
+
+                    Ok::<_, DbServerError>(())
+                }
+                .await;
+
+                match result {
+                    Ok(()) => txn
+                        .commit()
+                        .await
+                        .map_err(|e| DbServerError::Internal(e.to_string()))?,
+                    Err(e) => {
+                        txn.rollback().await.map_err(|rb| {
+                            DbServerError::Internal(format!("{e}; rollback: {rb}"))
+                        })?;
+                        return Err(e);
+                    }
+                }
             }
         }
 
@@ -775,8 +802,15 @@ impl DbIpcServer {
     /// previously declared table removed from the declaration) are rejected
     /// with [`DbServerError::SchemaConflict`] so the validation layer and the
     /// actual tables never silently diverge.
+    ///
+    /// `db` is generic over [`ConnectionTrait`] so the caller can run this
+    /// inside a transaction: the ALTERs and the stored-declaration upsert
+    /// must commit atomically, otherwise a failure between them would leave
+    /// the physical table ahead of the stored fingerprint and every
+    /// subsequent `DeclareSchema` would re-apply (and fail on) the same
+    /// ALTER.
     async fn apply_schema_change(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tool_name: &str,
         prefix: &str,
         previous: Option<&DbSchema>,
@@ -866,6 +900,19 @@ impl DbIpcServer {
                         if column.primary_key || column.auto_increment || column.unique {
                             return Err(DbServerError::SchemaConflict(format!(
                                 "column '{}.{}' was added with a PRIMARY KEY/UNIQUE/AUTOINCREMENT constraint; SQLite cannot add such a column via ALTER TABLE, so the plugin must reconcile this change explicitly",
+                                table.name, column.name
+                            )));
+                        }
+                        // A NOT NULL column needs a DEFAULT: SQLite requires a
+                        // default to populate pre-existing rows when a
+                        // non-nullable column is added via `ALTER TABLE`.
+                        // Silently dropping the constraint (as the previous
+                        // emission logic did) would let validation and storage
+                        // diverge — refuse instead so the author reconciles
+                        // this explicitly.
+                        if !column.nullable && column.default.is_none() {
+                            return Err(DbServerError::SchemaConflict(format!(
+                                "column '{}.{}' was added NOT NULL without a DEFAULT; SQLite cannot add such a column via ALTER TABLE (existing rows would violate the constraint), so the plugin must either add a DEFAULT or make the column nullable",
                                 table.name, column.name
                             )));
                         }
@@ -1839,6 +1886,41 @@ mod tests {
         let after = stored_row(&db, "fs_").await.expect("row still stored");
         assert_eq!(before.fingerprint, after.fingerprint);
         assert_eq!(before.schema_json, after.schema_json);
+    }
+
+    /// Adding a NOT NULL column without a DEFAULT is rejected: SQLite cannot
+    /// add such a column via ALTER TABLE (existing rows would violate the
+    /// constraint), and silently dropping the constraint would let validation
+    /// and storage diverge.
+    #[tokio::test]
+    async fn not_null_column_without_default_is_rejected_as_conflict() {
+        let db = test_db_with_tool_schemas().await;
+
+        let resp = declare(&db, test_schema_v1()).await;
+        assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
+        let before = stored_row(&db, "fs_").await.expect("row stored");
+
+        // v2 adds a NOT NULL column without a DEFAULT.
+        let mut schema_v2 = test_schema_v1();
+        let mut col = test_column("checksum", ene_plugin_db::DbType::Text);
+        col.nullable = false;
+        schema_v2.tables[0].columns.push(col);
+
+        let resp = declare(&db, schema_v2).await;
+        assert!(
+            matches!(
+                resp,
+                DbResponse::Error {
+                    code: DbErrorCode::SchemaConflict,
+                    ..
+                }
+            ),
+            "expected SchemaConflict, got {resp:?}"
+        );
+
+        // The stored declaration is untouched after the rejected change.
+        let after = stored_row(&db, "fs_").await.expect("row still stored");
+        assert_eq!(before.fingerprint, after.fingerprint);
     }
 
     /// Removing a previously declared table is rejected rather than silently

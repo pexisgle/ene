@@ -155,12 +155,15 @@ table:
 | Column type changed | **Rejected** with a `SCHEMA_CONFLICT` error. |
 | Table/column removed | **Rejected** with a `SCHEMA_CONFLICT` error. |
 | Column added with `PRIMARY KEY`/`UNIQUE`/`AUTOINCREMENT` | **Rejected** with a `SCHEMA_CONFLICT` error. |
+| Column added as `NOT NULL` without a `DEFAULT` | **Rejected** with a `SCHEMA_CONFLICT` error. |
 
 `SQLite` cannot change a column's type, drop columns/tables, or add a
-constrained column in place, so rather than letting the validation layer and
-the physical tables silently diverge — the #423 symptom, where validation
-passes but an `INSERT` later fails with `no such column` — the host rejects
-incompatible changes and asks the plugin author to reconcile them explicitly.
+constrained column in place, and adding a `NOT NULL` column requires a
+`DEFAULT` to populate pre-existing rows — so rather than letting the
+validation layer and the physical tables silently diverge — the #423
+symptom, where validation passes but an `INSERT` later fails with
+`no such column` — the host rejects incompatible changes and asks the
+plugin author to reconcile them explicitly.
 Additive changes (plain new columns and tables) are safe and applied
 automatically.
 
