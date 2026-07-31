@@ -182,7 +182,7 @@ impl TopicBoundaryTracker {
             centroid_distance,
             silence_factor,
             topic_length_factor,
-            reason: boundary.then(|| SplitReason::Composite { score }),
+            reason: boundary.then_some(SplitReason::Composite { score }),
         }
     }
 
@@ -200,7 +200,7 @@ impl TopicBoundaryTracker {
             return 0.0;
         };
         let elapsed_secs = now.signed_duration_since(prev).num_seconds().max(0);
-        let saturation = config.silence_saturation_secs.max(1) as f64;
+        let saturation = f64::from(config.silence_saturation_secs.max(1));
         ((elapsed_secs as f64 / saturation) as f32).clamp(0.0, 1.0)
     }
 
@@ -327,7 +327,7 @@ mod tests {
         let steps = 40;
         let mut detected = false;
         for i in 0..=steps {
-            let t = f32::from(i) / f32::from(steps);
+            let t = i as f32 / steps as f32;
             let emb = blend(dim, 0, 1, t);
             let signal = tracker.observe_turn(&cfg, &emb, 40, t0());
             if signal.boundary {
