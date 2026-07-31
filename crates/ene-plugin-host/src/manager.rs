@@ -80,8 +80,8 @@ struct SupervisedPlugin {
     env_passthrough: Vec<String>,
     restart_count: usize,
     /// Set once the plugin is permanently disabled (restart budget exhausted
-    /// or a restart-time checksum mismatch). The health probe loop skips
-    /// disabled plugins so it does not keep restarting or re-emitting
+    /// or a restart-time checksum mismatch). The per-plugin supervisor task
+    /// skips disabled plugins so it does not keep restarting or re-emitting
     /// `PluginHealthEvent::Disabled` for them.
     disabled: bool,
 }
@@ -89,10 +89,6 @@ struct SupervisedPlugin {
 impl SupervisedPlugin {
     fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
-    }
-
-    fn delay_for_restart(&self) -> Duration {
-        delay_for_restart(self.restart_count)
     }
 
     fn restart(&mut self) -> Result<(), PluginHostError> {
@@ -182,6 +178,14 @@ impl Drop for SupervisedPlugin {
 fn delay_for_restart(restart_count: usize) -> Duration {
     let delay_ms = BASE_DELAY_MS.saturating_mul(2u64.saturating_pow(restart_count as u32));
     Duration::from_millis(delay_ms.min(MAX_DELAY_MS))
+}
+
+/// Sleeps for the restart backoff appropriate for `restart_count`.
+///
+/// Extracted so tests can substitute a controllable stand-in for the real
+/// sleep; production simply awaits `tokio::time::sleep`.
+async fn backoff_before_restart(restart_count: usize) {
+    tokio::time::sleep(delay_for_restart(restart_count)).await;
 }
 
 /// Environment variable names that must never be forwarded via
@@ -521,7 +525,11 @@ pub struct PluginHostManager {
     tool_registries: Vec<Arc<dyn ToolRegistry>>,
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     llm_factory_plugins: HashMap<String, String>,
-    health_task: Option<tokio::task::JoinHandle<()>>,
+    /// One supervisor task per supervised plugin. Each task independently
+    /// pings and restarts only its own plugin, so one plugin's restart
+    /// backoff or reconnect can never stall monitoring of the others (#432).
+    /// Empty when health probes are disabled or no plugins are supervised.
+    health_tasks: Vec<tokio::task::JoinHandle<()>>,
     health_rx: Option<mpsc::UnboundedReceiver<PluginHealthEvent>>,
     /// When true (default), Drop will attempt a best-effort graceful shutdown
     /// by killing child processes with a brief wait for reaping.
@@ -530,7 +538,7 @@ pub struct PluginHostManager {
 
 impl Drop for PluginHostManager {
     fn drop(&mut self) {
-        if let Some(task) = self.health_task.take() {
+        for task in self.health_tasks.drain(..) {
             task.abort();
         }
         // Best-effort graceful shutdown: kill child processes and wait.
@@ -580,7 +588,7 @@ impl PluginHostManager {
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
-                health_task: None,
+                health_tasks: Vec::new(),
                 health_rx: None,
                 shutdown_on_drop: true,
             });
@@ -847,24 +855,34 @@ impl PluginHostManager {
             }
         }
 
-        // Spawn the periodic health probe loop (disabled when the interval is 0).
+        // Spawn one independent supervisor task per plugin (disabled when the
+        // interval is 0). Each task pings and restarts only its own plugin, so
+        // one plugin's restart backoff (up to 30 s) or a slow reconnect can
+        // never stall the monitoring of any other plugin (#432). The task
+        // count is proportional to the plugin count — a handful in practice.
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
-        let health_task = if supervised.is_empty() || health_interval.is_zero() {
+        let health_tasks = if supervised.is_empty() || health_interval.is_zero() {
             if health_interval.is_zero() && !supervised.is_empty() {
                 tracing::info!(
                     component = "PluginHostManager",
                     "Health probes disabled by configuration (health_interval_ms = 0)"
                 );
             }
-            None
+            Vec::new()
         } else {
-            let probes: Vec<Arc<Mutex<SupervisedPlugin>>> =
-                supervised.iter().map(Arc::clone).collect();
-            let conns: Vec<Arc<IpcPluginConnection>> = connections.iter().map(Arc::clone).collect();
-            let tx = health_tx.clone();
-            Some(tokio::spawn(async move {
-                health_probe_loop(health_interval, probes, conns, tx).await;
-            }))
+            supervised
+                .iter()
+                .zip(connections.iter())
+                .map(|(plugin, conn)| {
+                    tokio::spawn(supervise_plugin(
+                        health_interval,
+                        Arc::clone(plugin),
+                        Arc::clone(conn),
+                        health_tx.clone(),
+                        backoff_before_restart,
+                    ))
+                })
+                .collect()
         };
 
         Ok(Self {
@@ -873,7 +891,7 @@ impl PluginHostManager {
             tool_registries,
             llm_factories,
             llm_factory_plugins,
-            health_task,
+            health_tasks,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
         })
@@ -925,9 +943,9 @@ impl PluginHostManager {
 
     /// Sends a graceful `Shutdown` to all plugins and kills the processes.
     pub async fn shutdown(&mut self) {
-        // Abort the health probe loop first so it cannot race with shutdown
-        // (e.g. restart a plugin we are about to kill).
-        if let Some(task) = self.health_task.take() {
+        // Abort every per-plugin supervisor first so none can race with
+        // shutdown (e.g. restart a plugin we are about to kill).
+        for task in self.health_tasks.drain(..) {
             task.abort();
         }
         for conn in &self.connections {
@@ -1178,144 +1196,161 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.is_file())
 }
 
-/// Background loop that periodically pings every supervised plugin and
-/// restarts any that are dead or unresponsive, emitting health events.
+/// Per-plugin health supervisor: periodically pings a single plugin and
+/// restarts it when dead or unresponsive, emitting health events.
+///
+/// One of these tasks runs per supervised plugin (#432). Because each task
+/// owns exactly one plugin, its restart backoff (`delay_for_restart`, up to
+/// 30 s) and any slow reconnect delay only *its own* next probe — they can
+/// never stall the monitoring of any other plugin, which the old single
+/// sequential loop did. The task runs until aborted by
+/// [`PluginHostManager::shutdown`] or drop.
+///
+/// `backoff_sleep` performs the restart backoff for a given restart count.
+/// Production passes [`backoff_before_restart`]; tests inject a controllable
+/// stand-in so the backoff can be observed without real delays. It is generic
+/// over the returned future so no boxing (and no extra dependency) is needed.
 #[expect(
     clippy::infinite_loop,
     reason = "background liveness probe runs for the lifetime of the plugin host"
 )]
-async fn health_probe_loop(
+async fn supervise_plugin<F>(
     interval: Duration,
-    plugins: Vec<Arc<Mutex<SupervisedPlugin>>>,
-    connections: Vec<Arc<IpcPluginConnection>>,
+    plugin: Arc<Mutex<SupervisedPlugin>>,
+    conn: Arc<IpcPluginConnection>,
     health_tx: mpsc::UnboundedSender<PluginHealthEvent>,
-) {
+    backoff_sleep: impl Fn(usize) -> F,
+) where
+    F: std::future::Future<Output = ()>,
+{
     let mut ticker = tokio::time::interval(interval);
     // Skip the immediate first tick.
     ticker.tick().await;
     loop {
         ticker.tick().await;
-        for (plugin, conn) in plugins.iter().zip(connections.iter()) {
-            // Permanently disabled plugins (restart budget exhausted or a
-            // restart-time checksum mismatch) are left stopped; skip them so
-            // the probe does not keep restarting or re-emitting `Disabled`.
-            if plugin.lock().await.disabled {
-                continue;
-            }
 
-            // Ping without any connection lock: `ping` takes `&self` and the
-            // writer lock is held only for the frame write, so a probe is never
-            // queued behind an in-flight tool call (#431).
-            let ping_ok = conn.ping().await.is_ok();
-            let alive = {
-                let mut p = plugin.lock().await;
-                p.is_alive()
-            };
+        // Permanently disabled plugins (restart budget exhausted or a
+        // restart-time checksum mismatch) are left stopped; skip them so the
+        // supervisor does not keep restarting or re-emitting `Disabled`.
+        if plugin.lock().await.disabled {
+            continue;
+        }
 
-            if alive && ping_ok {
-                continue;
-            }
+        // Ping without any connection lock: `ping` takes `&self` and the
+        // writer lock is held only for the frame write, so a probe is never
+        // queued behind an in-flight tool call (#431).
+        let ping_ok = conn.ping().await.is_ok();
+        let alive = {
+            let mut p = plugin.lock().await;
+            p.is_alive()
+        };
 
-            let reason = if alive { "unresponsive" } else { "dead" };
-            let name = {
-                let p = plugin.lock().await;
-                p.name.clone()
-            };
+        if alive && ping_ok {
+            continue;
+        }
 
-            drop(health_tx.send(PluginHealthEvent::Unhealthy {
-                plugin: name.clone(),
-                reason: reason.to_string(),
-            }));
+        let reason = if alive { "unresponsive" } else { "dead" };
+        let name = {
+            let p = plugin.lock().await;
+            p.name.clone()
+        };
 
-            tracing::warn!(
+        drop(health_tx.send(PluginHealthEvent::Unhealthy {
+            plugin: name.clone(),
+            reason: reason.to_string(),
+        }));
+
+        tracing::warn!(
+            component = "PluginHostManager",
+            plugin = %name,
+            reason = reason,
+            "Health probe: plugin unhealthy; restarting"
+        );
+
+        // Restart the plugin process and reconnect.
+        let mut p = plugin.lock().await;
+        if p.restart_count >= MAX_RESTARTS {
+            tracing::error!(
                 component = "PluginHostManager",
                 plugin = %name,
-                reason = reason,
-                "Health probe: plugin unhealthy; restarting"
+                "Plugin exceeded max restarts; disabled"
             );
+            p.disabled = true;
+            drop(health_tx.send(PluginHealthEvent::Disabled {
+                plugin: name,
+                reason: crate::health::DisabledReason::RestartBudgetExhausted,
+            }));
+            continue;
+        }
 
-            // Restart the plugin process and reconnect.
-            let mut p = plugin.lock().await;
-            if p.restart_count >= MAX_RESTARTS {
+        let attempt = p.restart_count.saturating_add(1);
+        drop(health_tx.send(PluginHealthEvent::Restarting {
+            plugin: name.clone(),
+            attempt,
+        }));
+
+        // The backoff sleep delays only this plugin's supervisor; every other
+        // plugin keeps being probed on schedule by its own task (#432).
+        let restart_count = p.restart_count;
+        drop(p);
+        backoff_sleep(restart_count).await;
+
+        let mut p = plugin.lock().await;
+        if let Err(e) = p.restart() {
+            // A checksum mismatch means the on-disk binary changed since
+            // it was last verified. Do NOT silently retry: disable the
+            // plugin and tell the user via a diagnostic (#429).
+            if matches!(e, PluginHostError::ChecksumMismatch { .. }) {
                 tracing::error!(
                     component = "PluginHostManager",
                     plugin = %name,
-                    "Plugin exceeded max restarts; disabled"
+                    error = %e,
+                    "Plugin binary checksum mismatch on restart; \
+                     binary changed since last verification; disabling plugin"
                 );
                 p.disabled = true;
                 drop(health_tx.send(PluginHealthEvent::Disabled {
                     plugin: name,
-                    reason: crate::health::DisabledReason::RestartBudgetExhausted,
+                    reason: crate::health::DisabledReason::ChecksumMismatch,
                 }));
-                continue;
+            } else {
+                tracing::error!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    error = %e,
+                    "Failed to restart plugin"
+                );
             }
+            continue;
+        }
+        drop(p);
 
-            let attempt = p.restart_count.saturating_add(1);
-            drop(health_tx.send(PluginHealthEvent::Restarting {
-                plugin: name.clone(),
-                attempt,
-            }));
-
-            let delay = p.delay_for_restart();
-            drop(p);
-            tokio::time::sleep(delay).await;
-
-            let mut p = plugin.lock().await;
-            if let Err(e) = p.restart() {
-                // A checksum mismatch means the on-disk binary changed since
-                // it was last verified. Do NOT silently retry: disable the
-                // plugin and tell the user via a diagnostic (#429).
-                if matches!(e, PluginHostError::ChecksumMismatch { .. }) {
-                    tracing::error!(
-                        component = "PluginHostManager",
-                        plugin = %name,
-                        error = %e,
-                        "Plugin binary checksum mismatch on restart; \
-                         binary changed since last verification; disabling plugin"
-                    );
-                    p.disabled = true;
-                    drop(health_tx.send(PluginHealthEvent::Disabled {
-                        plugin: name,
-                        reason: crate::health::DisabledReason::ChecksumMismatch,
-                    }));
-                } else {
-                    tracing::error!(
-                        component = "PluginHostManager",
-                        plugin = %name,
-                        error = %e,
-                        "Failed to restart plugin"
-                    );
-                }
-                continue;
+        // Reconnect the shared connection in place: `reconnect` takes
+        // `&self`, re-performs the handshake on the stored socket path, and
+        // swaps the writer/reader under their own locks, so every caller
+        // sharing this `Arc` sees the fresh transport (#431). A slow or
+        // failing reconnect delays only this plugin's supervisor (#432).
+        match conn.reconnect().await {
+            Ok(()) => {
+                drop(health_tx.send(PluginHealthEvent::Restarted {
+                    plugin: name.clone(),
+                }));
+                drop(health_tx.send(PluginHealthEvent::Recovered {
+                    plugin: name.clone(),
+                }));
+                tracing::info!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    "Plugin restarted and reconnected"
+                );
             }
-            drop(p);
-
-            // Reconnect the shared connection in place: `reconnect` takes
-            // `&self`, re-performs the handshake on the stored socket path, and
-            // swaps the writer/reader under their own locks, so every caller
-            // sharing this `Arc` sees the fresh transport (#431).
-            match conn.reconnect().await {
-                Ok(()) => {
-                    drop(health_tx.send(PluginHealthEvent::Restarted {
-                        plugin: name.clone(),
-                    }));
-                    drop(health_tx.send(PluginHealthEvent::Recovered {
-                        plugin: name.clone(),
-                    }));
-                    tracing::info!(
-                        component = "PluginHostManager",
-                        plugin = %name,
-                        "Plugin restarted and reconnected"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        component = "PluginHostManager",
-                        plugin = %name,
-                        error = %e,
-                        "Failed to reconnect after restart"
-                    );
-                }
+            Err(e) => {
+                tracing::error!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    error = %e,
+                    "Failed to reconnect after restart"
+                );
             }
         }
     }
@@ -1416,7 +1451,8 @@ fn verify_and_record_checksum(
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    reason = "tests use unwrap for concise failure messages"
+    clippy::expect_used,
+    reason = "tests use unwrap/expect for concise failure messages"
 )]
 #[expect(
     clippy::undocumented_unsafe_blocks,
@@ -1701,5 +1737,325 @@ mod tests {
             envs.get(OsStr::new("ENE_PLUGIN_SOCKET")),
             Some(&Some(std::ffi::OsStr::new("/tmp/test.sock")))
         );
+    }
+
+    // ── Per-plugin supervisor isolation (#432) ────────────────────────────
+
+    /// A mock plugin that answers the handshake and replies to every `Ping`,
+    /// incrementing `pings` on each probe. Accepts connections in a loop so a
+    /// reconnect (if any) is also served. Used as the "healthy" plugin.
+    #[cfg(unix)]
+    async fn run_healthy_mock_server(
+        socket_path: PathBuf,
+        pings: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::Ordering;
+
+        use ene_plugin_proto::{
+            IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest,
+            PluginIpcResponse, read_plugin_request, write_plugin_response,
+        };
+
+        ene_plugin_proto::cleanup_path(&socket_path);
+        let Ok(mut listener) = IpcListener::bind(&socket_path) else {
+            return;
+        };
+        loop {
+            let Ok(stream) = listener.accept().await else {
+                break;
+            };
+            let pings = Arc::clone(&pings);
+            tokio::spawn(async move {
+                let (mut read_half, write_half) = tokio::io::split(stream);
+                let writer = Arc::new(Mutex::new(write_half));
+                loop {
+                    let Ok(Some(req)) = read_plugin_request(&mut read_half).await else {
+                        break;
+                    };
+                    let writer = Arc::clone(&writer);
+                    let pings = Arc::clone(&pings);
+                    tokio::spawn(async move {
+                        let resp = match req {
+                            PluginIpcRequest::Handshake { .. } => PluginIpcResponse::HandshakeAck {
+                                version: PLUGIN_IPC_PROTOCOL_VERSION,
+                                capabilities: PluginCapabilities {
+                                    tools: 0,
+                                    llm_providers: Vec::new(),
+                                    tts_providers: Vec::new(),
+                                    stt_providers: Vec::new(),
+                                },
+                            },
+                            PluginIpcRequest::Ping { request_id } => {
+                                pings.fetch_add(1, Ordering::SeqCst);
+                                PluginIpcResponse::Pong { request_id }
+                            }
+                            _ => PluginIpcResponse::Error {
+                                request_id: String::new(),
+                                message: "unsupported".to_string(),
+                            },
+                        };
+                        let mut w = writer.lock().await;
+                        drop(write_plugin_response(&mut *w, &resp).await);
+                    });
+                }
+            });
+        }
+    }
+
+    /// A mock plugin that completes the handshake and then immediately closes
+    /// the connection, so every subsequent `Ping` fails fast (EOF / broken
+    /// pipe). Accepts connections in a loop so the host's reconnect attempts
+    /// also handshake-then-close. Used as the "dead" plugin that drives its
+    /// supervisor into the restart path.
+    #[cfg(unix)]
+    async fn run_dead_mock_server(socket_path: PathBuf) {
+        use ene_plugin_proto::{
+            IpcListener, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest,
+            PluginIpcResponse, read_plugin_request, write_plugin_response,
+        };
+
+        ene_plugin_proto::cleanup_path(&socket_path);
+        let Ok(mut listener) = IpcListener::bind(&socket_path) else {
+            return;
+        };
+        loop {
+            let Ok(stream) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let (mut read_half, write_half) = tokio::io::split(stream);
+                let mut writer = Mutex::new(write_half);
+                // Answer only the handshake, then drop the stream so the host
+                // observes a closed connection on its next request.
+                if let Ok(Some(PluginIpcRequest::Handshake { .. })) =
+                    read_plugin_request(&mut read_half).await
+                {
+                    let mut w = writer.lock().await;
+                    drop(
+                        write_plugin_response(
+                            &mut *w,
+                            &PluginIpcResponse::HandshakeAck {
+                                version: PLUGIN_IPC_PROTOCOL_VERSION,
+                                capabilities: PluginCapabilities {
+                                    tools: 0,
+                                    llm_providers: Vec::new(),
+                                    tts_providers: Vec::new(),
+                                    stt_providers: Vec::new(),
+                                },
+                            },
+                        )
+                        .await,
+                    );
+                }
+                // Dropping the halves here closes the connection.
+            });
+        }
+    }
+
+    /// Builds a [`SupervisedPlugin`] whose `binary_path` is a genuine
+    /// executable script (so a restart can re-spawn it) but whose
+    /// `socket_path` points at `socket` — the path the supervisor pings and
+    /// reconnects to. When `stay_alive` is true the child sleeps (so
+    /// `is_alive()` reports the plugin as running); otherwise it exits
+    /// immediately (so the supervisor sees a dead process and is driven into
+    /// its restart path). Used by the supervisor-isolation test, where the
+    /// "plugin" is a mock IPC server rather than a real long-lived process.
+    #[cfg(unix)]
+    fn supervised_plugin_on_socket(
+        name: &str,
+        socket: PathBuf,
+        stay_alive: bool,
+    ) -> SupervisedPlugin {
+        let dir =
+            std::env::temp_dir().join(format!("ene-supervisor-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary_path = dir.join(format!("ene-plugin-{name}"));
+        write_dummy_script(&binary_path);
+        let real = compute_binary_checksum(name, &binary_path).unwrap();
+
+        let child = if stay_alive {
+            std::process::Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .unwrap()
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap()
+        };
+
+        SupervisedPlugin {
+            name: name.to_string(),
+            child,
+            socket_path: socket,
+            binary_path,
+            pinned_checksum: PinnedChecksum::Tofu(real),
+            env_passthrough: Vec::new(),
+            restart_count: 0,
+            disabled: false,
+        }
+    }
+
+    /// One plugin's restart backoff must not stop another plugin from being
+    /// monitored (#432).
+    ///
+    /// Two plugins are supervised by independent tasks: `healthy` answers
+    /// pings (its probe count is observed server-side), `dead` closes every
+    /// connection so each probe fails and drives its supervisor into the
+    /// restart path. The restart backoff is injected as a gate the test
+    /// controls. While `dead` is parked in that backoff, `healthy` must keep
+    /// being pinged — under the old single sequential loop the shared probe
+    /// would have been stuck behind `dead`'s backoff and `healthy`'s ping
+    /// count would not advance.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn one_plugins_backoff_does_not_block_another_supervisor() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pid = std::process::id();
+        let healthy_sock = PathBuf::from(format!("/tmp/ene-sup-healthy-{pid}.sock"));
+        let dead_sock = PathBuf::from(format!("/tmp/ene-sup-dead-{pid}.sock"));
+
+        let healthy_pings = Arc::new(AtomicUsize::new(0));
+        let healthy_server = tokio::spawn(run_healthy_mock_server(
+            healthy_sock.clone(),
+            Arc::clone(&healthy_pings),
+        ));
+        let dead_server = tokio::spawn(run_dead_mock_server(dead_sock.clone()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let healthy = Arc::new(Mutex::new(supervised_plugin_on_socket(
+            "healthy",
+            healthy_sock.clone(),
+            true,
+        )));
+        let dead = Arc::new(Mutex::new(supervised_plugin_on_socket(
+            "dead",
+            dead_sock.clone(),
+            false,
+        )));
+
+        let healthy_conn = Arc::new(
+            IpcPluginConnection::connect(
+                &healthy_sock,
+                ene_plugin_proto::SandboxConfigData::default(),
+                None,
+                Duration::from_secs(5),
+                8,
+            )
+            .await
+            .expect("healthy handshake"),
+        );
+        let dead_conn = Arc::new(
+            IpcPluginConnection::connect(
+                &dead_sock,
+                ene_plugin_proto::SandboxConfigData::default(),
+                None,
+                Duration::from_secs(5),
+                8,
+            )
+            .await
+            .expect("dead handshake"),
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
+        let interval = Duration::from_millis(30);
+
+        // Healthy supervisor: never expected to hit its (no-op) backoff.
+        let healthy_task = tokio::spawn(supervise_plugin(
+            interval,
+            Arc::clone(&healthy),
+            Arc::clone(&healthy_conn),
+            tx.clone(),
+            |_count| async {},
+        ));
+
+        // Dead supervisor: its backoff parks on the gate until the test
+        // releases it, standing in for the (up to 30 s) real backoff.
+        let dead_backoffs = Arc::new(AtomicUsize::new(0));
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let gate_rx = Arc::new(Mutex::new(Some(gate_rx)));
+        let db = Arc::clone(&dead_backoffs);
+        let gate = Arc::clone(&gate_rx);
+        let dead_task = tokio::spawn(supervise_plugin(
+            interval,
+            Arc::clone(&dead),
+            Arc::clone(&dead_conn),
+            tx,
+            move |_count| {
+                let db = Arc::clone(&db);
+                let gate = Arc::clone(&gate);
+                async move {
+                    db.fetch_add(1, Ordering::SeqCst);
+                    if let Some(rx) = gate.lock().await.take() {
+                        drop(rx.await);
+                    }
+                }
+            },
+        ));
+
+        // Wait until the dead supervisor has reached its (parked) backoff and
+        // the healthy supervisor has pinged at least twice.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if dead_backoffs.load(Ordering::SeqCst) >= 1
+                && healthy_pings.load(Ordering::SeqCst) >= 2
+            {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "supervisors did not reach the expected state in time"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // While the dead plugin is parked in its backoff, the healthy plugin
+        // must keep being pinged. Under the old sequential loop the shared
+        // probe would be stuck behind the dead plugin's backoff and this count
+        // would not advance.
+        let before = healthy_pings.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after = healthy_pings.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "healthy plugin monitoring stalled while another plugin was in \
+             restart backoff (before={before}, after={after})"
+        );
+
+        // The dead plugin was flagged unhealthy on its way into the backoff.
+        let mut saw_unhealthy = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, PluginHealthEvent::Unhealthy { .. }) {
+                saw_unhealthy = true;
+            }
+        }
+        assert!(
+            saw_unhealthy,
+            "dead plugin should have been flagged unhealthy"
+        );
+
+        // Releasing the backoff lets the dead supervisor proceed to a restart,
+        // confirming the park — not a hang — was what held it.
+        drop(gate_tx);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if dead.lock().await.restart_count >= 1 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "dead plugin did not restart after its backoff was released"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        healthy_task.abort();
+        dead_task.abort();
+        healthy_server.abort();
+        dead_server.abort();
+        ene_plugin_proto::cleanup_path(&healthy_sock);
+        ene_plugin_proto::cleanup_path(&dead_sock);
     }
 }
