@@ -97,7 +97,8 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
     "memory": {
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
-      "commitment_boost": 0.25
+      "commitment_boost": 0.25,
+      "commitment_title_similarity_threshold": 0.82
     }
   }
 }
@@ -110,6 +111,13 @@ noise scores `0.0`. `recall_min_score` (default `0.10`) filters the final
 ranking, `recall_similarity_threshold` (default `0.35`) gates the vector-gather
 step, and `commitment_boost` (default `0.25`) lets active promises surface even
 with zero query relevance.
+
+The commitment ledger matches incoming commitments against active ones by title
+embedding similarity (#387): `commitment_title_similarity_threshold` (default
+`0.82`) is the cosine-similarity cutoff above which a rephrased promise
+supersedes the existing commitment instead of being registered as a duplicate.
+With no embedding provider configured, the ledger falls back to exact
+normalized-title matching and this threshold is unused.
 
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 
