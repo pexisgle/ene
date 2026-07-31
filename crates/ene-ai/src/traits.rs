@@ -234,7 +234,35 @@ impl LlmProviderRegistry {
     /// [`create_provider`](Self::create_provider) can no longer select a
     /// stale entry that points at a dead process.
     pub fn deregister(name: &str) -> bool {
-        if let Ok(mut guard) = Self::global().factories.lock() {
+        let Ok(mut guard) = Self::global().factories.lock() else {
+            tracing::warn!(
+                component = "LlmProviderRegistry",
+                provider = %name,
+                "Cannot deregister provider factory because the registry lock is poisoned"
+            );
+            return false;
+        };
+        guard.remove(name).is_some()
+    }
+
+    /// Removes a factory only when `name` still points to `expected`.
+    ///
+    /// The identity check prevents one runtime handle from deregistering a
+    /// replacement factory installed by another handle during concurrent host
+    /// reconfiguration.
+    pub fn deregister_if_matches(name: &str, expected: &Arc<dyn LlmProviderFactory>) -> bool {
+        let Ok(mut guard) = Self::global().factories.lock() else {
+            tracing::warn!(
+                component = "LlmProviderRegistry",
+                provider = %name,
+                "Cannot conditionally deregister provider factory because the registry lock is poisoned"
+            );
+            return false;
+        };
+        if guard
+            .get(name)
+            .is_some_and(|registered| Arc::ptr_eq(registered, expected))
+        {
             guard.remove(name).is_some()
         } else {
             false
@@ -246,6 +274,7 @@ impl LlmProviderRegistry {
     /// Intended for diagnostics and tests; the registry is process-global, so
     /// the set can change immediately after this returns.
     #[must_use]
+    #[cfg(test)]
     pub fn registered_names() -> Vec<String> {
         if let Ok(guard) = Self::global().factories.lock() {
             guard.keys().cloned().collect()
@@ -284,6 +313,7 @@ impl LlmProviderRegistry {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
+    use crate::openai::OpenAiProviderFactory;
 
     /// A factory whose `create_provider` always fails with a recognizable
     /// error, so a lookup that resolves it can be told apart from the
@@ -365,6 +395,30 @@ mod registry_tests {
         assert!(!LlmProviderRegistry::deregister(
             "registry-test-never-registered"
         ));
+    }
+
+    #[test]
+    fn conditional_deregister_preserves_a_replacement_factory() {
+        const NAME: &str = "registry-test-replacement";
+        let original: Arc<dyn LlmProviderFactory> = Arc::new(MarkerFactory { name: NAME });
+        let replacement: Arc<dyn LlmProviderFactory> = Arc::new(MarkerFactory { name: NAME });
+
+        LlmProviderRegistry::register(Arc::clone(&original));
+        LlmProviderRegistry::register(Arc::clone(&replacement));
+
+        assert!(!LlmProviderRegistry::deregister_if_matches(NAME, &original));
+        let err = unwrap_err(LlmProviderRegistry::create_provider(
+            NAME,
+            &config(),
+            &task(),
+        ));
+        assert!(matches!(err, LlmProviderError::LocalLlm(_)));
+        assert!(LlmProviderRegistry::deregister(NAME));
+    }
+
+    #[test]
+    fn built_in_openai_factory_name_remains_stable() {
+        assert_eq!(OpenAiProviderFactory.provider_name(), "openai-compatible");
     }
 
     #[test]

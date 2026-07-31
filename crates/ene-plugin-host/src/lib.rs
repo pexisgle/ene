@@ -74,7 +74,7 @@ pub use ipc_plugin::IpcPluginConnection;
 /// IPC-backed LLM provider.
 pub use ipc_provider::IpcLlmProvider;
 /// Plugin host manager.
-pub use manager::PluginHostManager;
+pub use manager::{LlmFactoriesByPlugin, LlmFactoryHandle, PluginHostManager};
 /// MCP server configuration types.
 pub use mcp_config::{McpServerConfig, McpTransport};
 /// MCP connector for the connector framework.

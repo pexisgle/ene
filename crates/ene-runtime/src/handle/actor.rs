@@ -677,13 +677,12 @@ impl TurnActor {
     /// running the heavy I/O in `bg_command_tasks` so the actor loop is never
     /// blocked (#397).
     ///
-    /// Shuts down the live host (stopping disabled plugins), deregisters the
-    /// old host's plugin-provided LLM factories from the global
-    /// [`LlmProviderRegistry`], spawns fresh DB IPC servers for the
-    /// newly-detected plugin set, starts a new host with the updated
-    /// configuration, re-registers the new host's plugin-provided LLM
-    /// factories, re-bridges health events into diagnostics, and rebuilds the
-    /// tool registry from the new host.
+    /// Shuts down the live host (stopping disabled plugins), spawns fresh DB
+    /// IPC servers for the newly-detected plugin set, starts a new host with
+    /// the updated configuration, removes only old factories that the new
+    /// host does not replace, re-registers new plugin-provided LLM factories,
+    /// re-bridges health events into diagnostics, and rebuilds the tool
+    /// registry from the new host.
     ///
     /// The shared `plugin_host` and `health_bridge_handle` mutexes are updated
     /// directly by the background task. The actor-only fields (`self.registry`,
@@ -691,6 +690,10 @@ impl TurnActor {
     /// sends [`EneCommand::PluginHostReconfigured`] back through the mailbox.
     ///
     /// Remaining limitations:
+    /// - The provider registry remains process-global, so concurrent handles
+    ///   still use last-writer-wins registration for the same provider kind;
+    ///   conditional deregistration avoids removing a replacement owned by a
+    ///   different host.
     /// - DB IPC servers spawned for the previous host are not torn down; the
     ///   new set replaces them on the same per-plugin socket paths (the stale
     ///   socket file is removed before re-binding), so at most one live server
@@ -2105,6 +2108,17 @@ fn finish_vision_prep(
     })
 }
 
+fn stale_llm_factory_names(
+    old_kinds: &[String],
+    new_factories: Option<&HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>>,
+) -> Vec<String> {
+    old_kinds
+        .iter()
+        .filter(|kind| new_factories.is_none_or(|factories| !factories.contains_key(*kind)))
+        .cloned()
+        .collect()
+}
+
 /// Background plugin host reconfiguration (#397).
 ///
 /// Performs the heavy I/O (host shutdown, DB IPC spawn, host start, health
@@ -2120,20 +2134,16 @@ async fn reconfigure_plugin_host_bg(
     diag_tx: broadcast::Sender<DiagnosticEvent>,
     cmd_tx: mpsc::UnboundedSender<EneCommand>,
 ) {
-    // Stop the previous host (and its health bridge) first.
-    //
-    // Capture the old host's plugin-provided LLM factory names before
-    // shutdown so they can be deregistered from the global
-    // [`LlmProviderRegistry`] once the host is gone. Factories for plugins
-    // that are no longer enabled in the new configuration are then never
-    // re-registered below, so a stale factory pointing at a dead process can
-    // no longer be selected (#399). Surviving plugins are deregistered here
-    // and re-registered from the fresh host further down, which simply
-    // replaces their entry.
-    let stale_llm_factory_names: Vec<String> = {
+    // Stop the previous host (and its health bridge) first. Keep the factory
+    // handles so stale removal below cannot evict a replacement installed by
+    // another runtime handle.
+    let old_llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> = {
         let mut guard = plugin_host.lock().await;
-        let names = guard.as_ref().map_or_else(Vec::new, |host| {
-            host.llm_factories().keys().cloned().collect()
+        let factories = guard.as_ref().map_or_else(HashMap::new, |host| {
+            host.llm_factories()
+                .iter()
+                .map(|(kind, factory)| (kind.clone(), Arc::clone(factory)))
+                .collect()
         });
         if let Some(mut host) = guard.take() {
             host.shutdown().await;
@@ -2144,17 +2154,8 @@ async fn reconfigure_plugin_host_bg(
         if let Some(handle) = bridge.take() {
             handle.abort();
         }
-        names
+        factories
     };
-    for name in &stale_llm_factory_names {
-        if LlmProviderRegistry::deregister(name) {
-            tracing::info!(
-                component = "TurnActor",
-                kind = %name,
-                "Deregistered stale plugin-provided LLM provider factory during reconfiguration"
-            );
-        }
-    }
 
     // Spawn DB IPC servers for the (possibly changed) plugin set.
     let db_tokens = match spawn_db_ipc_servers(&config, memory_store.as_ref()) {
@@ -2170,7 +2171,9 @@ async fn reconfigure_plugin_host_bg(
         }
     };
 
-    // Start the new host with the updated configuration.
+    // Start the new host before removing old entries. A surviving provider
+    // kind remains available until its replacement is registered, and stale
+    // entries are removed only when the new host does not serve that kind.
     let mut new_host = match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
         Ok(host) => Some(host),
         Err(e) => {
@@ -2184,9 +2187,37 @@ async fn reconfigure_plugin_host_bg(
         }
     };
 
-    // Re-register plugin-provided LLM factories from the fresh host. The old
-    // host's factories were deregistered above, so any kind not served by the
-    // new host stays deregistered (#399).
+    let old_llm_factory_names: Vec<String> = old_llm_factories.keys().cloned().collect();
+    let stale_llm_factory_names = stale_llm_factory_names(
+        &old_llm_factory_names,
+        new_host
+            .as_ref()
+            .map(ene_plugin_host::PluginHostManager::llm_factories),
+    );
+    let mut restore_builtin_openai = false;
+    for kind in stale_llm_factory_names {
+        if let Some(factory) = old_llm_factories.get(&kind)
+            && LlmProviderRegistry::deregister_if_matches(&kind, factory)
+        {
+            tracing::info!(
+                component = "TurnActor",
+                kind = %kind,
+                "Deregistered stale plugin-provided LLM provider factory during reconfiguration"
+            );
+            restore_builtin_openai |= kind == "openai-compatible";
+        }
+    }
+
+    // Plugin kinds are allowed to shadow the built-in factory at registration
+    // time. If that plugin disappears, restore the built-in before registering
+    // any replacement from the new host.
+    if restore_builtin_openai {
+        LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
+    }
+
+    // Register plugin-provided LLM factories from the fresh host. Existing
+    // kinds are replaced in place; old kinds absent from this host stay
+    // deregistered (#399).
     if let Some(host) = new_host.as_ref() {
         for (kind, factory) in host.llm_factories() {
             tracing::info!(
@@ -2204,8 +2235,12 @@ async fn reconfigure_plugin_host_bg(
         && let Some(mut health_rx) = host.take_health_receiver()
     {
         let diag_tx = diag_tx.clone();
+        let llm_factories_by_plugin = host.llm_factories_by_plugin();
         bridge_handle = Some(tokio::spawn(async move {
             while let Some(event) = health_rx.recv().await {
+                if let PluginHealthEvent::Disabled { plugin, .. } = &event {
+                    super::deregister_disabled_plugin_factories(plugin, &llm_factories_by_plugin);
+                }
                 emit_diag(&diag_tx, plugin_health_event_to_diag(event));
             }
         }));
@@ -2840,5 +2875,21 @@ mod tests {
         assert_eq!(tool, "web");
         assert_eq!(status, "disabled");
         assert_eq!(detail.as_deref(), Some("restart budget exhausted"));
+    }
+
+    #[test]
+    fn stale_factory_diff_keeps_kinds_served_by_new_host() {
+        let old_kinds = vec!["openai-compatible".to_string(), "stale-plugin".to_string()];
+        let mut new_factories = HashMap::new();
+        new_factories.insert(
+            "openai-compatible".to_string(),
+            Arc::new(ene_ai::OpenAiProviderFactory) as Arc<dyn ene_ai::LlmProviderFactory>,
+        );
+
+        assert_eq!(
+            stale_llm_factory_names(&old_kinds, Some(&new_factories)),
+            vec!["stale-plugin"]
+        );
+        assert_eq!(stale_llm_factory_names(&old_kinds, None), old_kinds);
     }
 }

@@ -509,6 +509,13 @@ impl ToolRegistry for PluginToolRegistry {
     }
 }
 
+/// The factory aliases below are shared with the runtime health bridge so it
+/// can retain factory identity while grouping entries by plugin.
+pub type LlmFactoryHandle = Arc<dyn ene_ai::LlmProviderFactory>;
+
+/// LLM provider factories grouped by the plugin that provides them.
+pub type LlmFactoriesByPlugin = HashMap<String, Vec<(String, LlmFactoryHandle)>>;
+
 /// Orchestrates the lifecycle of all plugin processes and MCP connections.
 ///
 /// Starts only plugins explicitly listed in `plugins.list` with
@@ -527,6 +534,7 @@ pub struct PluginHostManager {
     connections: Vec<Arc<Mutex<IpcPluginConnection>>>,
     tool_registries: Vec<Arc<dyn ToolRegistry>>,
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
+    llm_factory_plugins: HashMap<String, String>,
     health_task: Option<tokio::task::JoinHandle<()>>,
     health_rx: Option<mpsc::UnboundedReceiver<PluginHealthEvent>>,
     /// When true (default), Drop will attempt a best-effort graceful shutdown
@@ -587,6 +595,7 @@ impl PluginHostManager {
                 connections: Vec::new(),
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
+                llm_factory_plugins: HashMap::new(),
                 health_task: None,
                 health_rx: None,
                 shutdown_on_drop: true,
@@ -601,6 +610,7 @@ impl PluginHostManager {
         let mut tool_registries: Vec<Arc<dyn ToolRegistry>> = Vec::new();
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
+        let mut llm_factory_plugins: HashMap<String, String> = HashMap::new();
 
         std::fs::create_dir_all(ene_config::plugin_socket_dir()).map_err(|e| {
             PluginHostError::ExecutionFailed {
@@ -731,6 +741,7 @@ impl PluginHostManager {
                             spec.kind.clone(),
                             Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
                         );
+                        llm_factory_plugins.insert(spec.kind.clone(), name.clone());
                     }
 
                     supervised.push(plugin);
@@ -874,6 +885,7 @@ impl PluginHostManager {
             connections,
             tool_registries,
             llm_factories,
+            llm_factory_plugins,
             health_task,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
@@ -890,6 +902,24 @@ impl PluginHostManager {
     /// provider kind.
     pub fn llm_factories(&self) -> &HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> {
         &self.llm_factories
+    }
+
+    /// Returns the LLM factories grouped by the plugin that provides them.
+    ///
+    /// The factory handles are included so consumers can deregister only the
+    /// exact entries owned by this host, rather than removing a replacement
+    /// installed by another runtime handle.
+    pub fn llm_factories_by_plugin(&self) -> LlmFactoriesByPlugin {
+        let mut grouped = LlmFactoriesByPlugin::new();
+        for (kind, factory) in &self.llm_factories {
+            if let Some(plugin) = self.llm_factory_plugins.get(kind) {
+                grouped
+                    .entry(plugin.clone())
+                    .or_default()
+                    .push((kind.clone(), Arc::clone(factory)));
+            }
+        }
+        grouped
     }
 
     /// Returns the connector registry managing MCP server connectors (WS7).

@@ -46,7 +46,7 @@ use ene_ai::LlmProviderRegistry;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
 use ene_mind::ConversationSession;
-use ene_plugin_host::{DisabledReason, PluginHealthEvent};
+use ene_plugin_host::{DisabledReason, LlmFactoriesByPlugin, PluginHealthEvent};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -425,8 +425,12 @@ impl EneHandle {
             && let Some(mut health_rx) = host.take_health_receiver()
         {
             let diag_tx = diag_tx.clone();
+            let llm_factories_by_plugin = host.llm_factories_by_plugin();
             health_bridge_handle = Some(tokio::spawn(async move {
                 while let Some(event) = health_rx.recv().await {
+                    if let PluginHealthEvent::Disabled { plugin, .. } = &event {
+                        deregister_disabled_plugin_factories(plugin, &llm_factories_by_plugin);
+                    }
                     emit_diag(&diag_tx, plugin_health_event_to_diag(event));
                 }
             }));
@@ -944,6 +948,21 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
         tool,
         status: status.to_string(),
         detail,
+    }
+}
+
+fn deregister_disabled_plugin_factories(plugin: &str, factories_by_plugin: &LlmFactoriesByPlugin) {
+    if let Some(factories) = factories_by_plugin.get(plugin) {
+        for (kind, factory) in factories {
+            if LlmProviderRegistry::deregister_if_matches(kind, factory) {
+                tracing::info!(
+                    component = "PluginHealthBridge",
+                    plugin = %plugin,
+                    kind = %kind,
+                    "Deregistered LLM provider factory for permanently disabled plugin"
+                );
+            }
+        }
     }
 }
 
