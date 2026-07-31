@@ -78,8 +78,6 @@ struct SupervisedPlugin {
     /// always active — the binary pinned at startup must still be on disk to
     /// restart. There is no "no checksum" state, so no fail-open path (#429).
     pinned_checksum: PinnedChecksum,
-    sandbox: ene_plugin_proto::SandboxConfigData,
-    plugin_config: Option<serde_json::Value>,
     /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
     restart_count: usize,
@@ -851,7 +849,6 @@ impl PluginHostManager {
 
         // Spawn the periodic health probe loop (disabled when the interval is 0).
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
-        let handshake_timeout = Duration::from_millis(plugin_config.handshake_timeout_ms);
         let health_task = if supervised.is_empty() || health_interval.is_zero() {
             if health_interval.is_zero() && !supervised.is_empty() {
                 tracing::info!(
@@ -866,7 +863,7 @@ impl PluginHostManager {
             let conns: Vec<Arc<IpcPluginConnection>> = connections.iter().map(Arc::clone).collect();
             let tx = health_tx.clone();
             Some(tokio::spawn(async move {
-                health_probe_loop(health_interval, handshake_timeout, probes, conns, tx).await;
+                health_probe_loop(health_interval, probes, conns, tx).await;
             }))
         };
 
@@ -1053,8 +1050,7 @@ impl PluginHostManager {
             socket_path: socket_path.clone(),
             binary_path: binary_path.clone(),
             pinned_checksum,
-            sandbox,
-            plugin_config,
+            env_passthrough,
             restart_count: 0,
             disabled: false,
         };
@@ -1196,7 +1192,6 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
 )]
 async fn health_probe_loop(
     interval: Duration,
-    handshake_timeout: Duration,
     plugins: Vec<Arc<Mutex<SupervisedPlugin>>>,
     connections: Vec<Arc<IpcPluginConnection>>,
     health_tx: mpsc::UnboundedSender<PluginHealthEvent>,
@@ -1558,8 +1553,6 @@ mod tests {
             socket_path,
             binary_path,
             pinned_checksum,
-            sandbox: ene_plugin_proto::SandboxConfigData::default(),
-            plugin_config: None,
             env_passthrough: Vec::new(),
             restart_count: 0,
             disabled: false,

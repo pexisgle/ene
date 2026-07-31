@@ -546,6 +546,7 @@ async fn spawn_concurrent_and_connect(
         &socket_path,
         SandboxConfigData::default(),
         None,
+        TEST_HANDSHAKE_TIMEOUT,
         max_concurrent,
     )
     .await
@@ -680,6 +681,7 @@ async fn handshake_times_out_when_plugin_never_responds() {
         SandboxConfigData::default(),
         None,
         short_timeout,
+        TEST_MAX_CONCURRENT,
     )
     .await;
     let elapsed = started.elapsed();
@@ -1310,6 +1312,7 @@ async fn concurrent_transport_failures_coalesce_into_one_reconnect() {
             &socket_path,
             SandboxConfigData::default(),
             None,
+            TEST_HANDSHAKE_TIMEOUT,
             TEST_MAX_CONCURRENT,
         )
         .await
