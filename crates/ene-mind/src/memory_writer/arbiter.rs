@@ -7,12 +7,13 @@
 
 use std::collections::HashMap;
 
+use ene_ai::{EmbeddingKind, EmbeddingProvider, cosine_similarity};
 use ene_core::{
     AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemoryPort, MemorySalience,
     MemoryScope, MemorySource, MemoryStatus, NewMemoryItem, PendingCandidate,
     PendingCandidateStatus,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 use unicode_normalization::UnicodeNormalization;
 
 use super::candidate::{MemoryCandidate, TurnInput};
@@ -50,6 +51,11 @@ pub struct ArbiterOptions {
     pub semantic_similarity_threshold: f32,
     /// When confidence gap is below this, mark as disputed instead of superseding.
     pub dispute_confidence_gap: f32,
+    /// Minimum title-embedding cosine similarity for two memories to be treated
+    /// as sharing a contradiction key (#351). Only consulted on the embedding
+    /// path; without an embedder the arbiter falls back to exact normalized-title
+    /// equality.
+    pub contradiction_title_similarity_threshold: f32,
 }
 
 impl Default for ArbiterOptions {
@@ -59,6 +65,7 @@ impl Default for ArbiterOptions {
             supersede_confidence_delta: 0.05,
             semantic_similarity_threshold: 0.85,
             dispute_confidence_gap: 0.15,
+            contradiction_title_similarity_threshold: 0.82,
         }
     }
 }
@@ -68,13 +75,15 @@ impl ArbiterOptions {
     pub fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             min_confidence: config.min_confidence_to_persist as f32,
+            contradiction_title_similarity_threshold: config
+                .contradiction_title_similarity_threshold,
             ..Self::default()
         }
     }
 }
 
 /// Context for a single arbitration batch.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ArbiterContext<'a> {
     /// The conversation turn the candidates were extracted from.
     pub turn: TurnInput<'a>,
@@ -93,6 +102,26 @@ pub struct ArbiterContext<'a> {
     /// Affect valence of the turn the candidates were extracted from
     /// (-1.0 ..= 1.0). Used to derive `outcome_rating` for self-reflection (#210).
     pub affect_valence: f32,
+    /// Embedding provider for fuzzy contradiction-key matching (#351). `None`
+    /// falls back to exact normalized-title equality so contradiction checks
+    /// keep working without an embedding model.
+    pub embedder: Option<&'a dyn EmbeddingProvider>,
+}
+
+impl std::fmt::Debug for ArbiterContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArbiterContext")
+            .field("turn", &self.turn)
+            .field("character_id", &self.character_id)
+            .field("user_id", &self.user_id)
+            .field("source_ref", &self.source_ref)
+            .field("provenance", &self.provenance)
+            .field("options", &self.options)
+            .field("semantic_matches", &self.semantic_matches)
+            .field("affect_valence", &self.affect_valence)
+            .field("has_embedder", &self.embedder.is_some())
+            .finish()
+    }
 }
 
 /// Machine-readable reason for an arbiter decision (for tracing and tests).
@@ -214,17 +243,26 @@ pub struct MemoryArbiter;
 
 impl MemoryArbiter {
     /// Evaluate all candidates against existing memories without touching the store.
-    pub fn evaluate_all(
+    ///
+    /// Contradiction-key matching uses title-embedding similarity when
+    /// `ctx.embedder` is configured (#351), sharing one [`TitleMatcher`] across
+    /// the whole batch so repeated titles are embedded only once.
+    pub async fn evaluate_all(
         candidates: &[MemoryCandidate],
         existing: &[MemoryItem],
         ctx: &ArbiterContext<'_>,
     ) -> Vec<CandidateDecision> {
         let mut decisions = Vec::with_capacity(candidates.len());
         let mut batch_seen = std::collections::HashSet::new();
+        let mut matcher = TitleMatcher::new(
+            ctx.embedder,
+            ctx.options.contradiction_title_similarity_threshold,
+        );
 
         for (idx, candidate) in candidates.iter().enumerate() {
             let semantic = ctx.semantic_matches.get(&idx).cloned().unwrap_or_default();
-            let mut decision = Self::evaluate_one(candidate, existing, ctx, &semantic);
+            let mut decision =
+                Self::evaluate_one(candidate, existing, ctx, &semantic, &mut matcher).await;
 
             if candidate.should_persist && passes_validation(candidate, ctx) {
                 let key = dedup_key(candidate);
@@ -274,7 +312,7 @@ impl MemoryArbiter {
             .filter(|m| is_arbitration_visible(m.status))
             .collect();
 
-        let decisions = Self::evaluate_all(candidates, &active_existing, ctx);
+        let decisions = Self::evaluate_all(candidates, &active_existing, ctx).await;
         Self::apply_decisions(store, &decisions, ctx).await
     }
 
@@ -303,11 +341,12 @@ impl MemoryArbiter {
         Ok(applied)
     }
 
-    pub(crate) fn evaluate_one(
+    pub(crate) async fn evaluate_one(
         candidate: &MemoryCandidate,
         existing: &[MemoryItem],
         ctx: &ArbiterContext<'_>,
         semantic_matches: &[SemanticMatch],
+        matcher: &mut TitleMatcher<'_>,
     ) -> CandidateDecision {
         if !candidate.should_persist {
             return Self::evaluate_deletion(candidate, existing, ctx);
@@ -332,13 +371,11 @@ impl MemoryArbiter {
             };
         }
 
-        if let Some(decision) =
-            Self::check_semantic_matches(candidate, semantic_matches, ctx, existing)
-        {
+        if let Some(decision) = Self::check_semantic_matches(candidate, semantic_matches, ctx) {
             return decision;
         }
 
-        if let Some(decision) = Self::check_contradiction(candidate, existing, ctx) {
+        if let Some(decision) = Self::check_contradiction(candidate, existing, ctx, matcher).await {
             return decision;
         }
 
@@ -434,7 +471,6 @@ impl MemoryArbiter {
         candidate: &MemoryCandidate,
         semantic_matches: &[SemanticMatch],
         ctx: &ArbiterContext<'_>,
-        existing: &[MemoryItem],
     ) -> Option<CandidateDecision> {
         let best_match = semantic_matches
             .iter()
@@ -474,15 +510,17 @@ impl MemoryArbiter {
             );
         }
 
-        // Also check kind-specific contradictions not caught by semantic search.
-        let _ = existing;
+        // Kind-specific contradictions not caught by semantic search are handled
+        // by `check_contradiction` (#351), which matches titles by embedding
+        // similarity rather than exact string equality.
         None
     }
 
-    fn check_contradiction(
+    async fn check_contradiction(
         candidate: &MemoryCandidate,
         existing: &[MemoryItem],
         ctx: &ArbiterContext<'_>,
+        matcher: &mut TitleMatcher<'_>,
     ) -> Option<CandidateDecision> {
         if !is_contradiction_kind(candidate.kind) {
             return None;
@@ -492,7 +530,7 @@ impl MemoryArbiter {
             if mem.kind != candidate.kind {
                 continue;
             }
-            if !same_contradiction_key(candidate, mem) {
+            if !matcher.is_match(&candidate.title, &mem.title).await {
                 continue;
             }
             if same_memory_content(candidate, mem) {
@@ -831,22 +869,107 @@ fn same_memory_content(candidate: &MemoryCandidate, mem: &MemoryItem) -> bool {
     normalize_text(&candidate.content) == normalize_text(&mem.content) && candidate.kind == mem.kind
 }
 
-fn same_contradiction_key(candidate: &MemoryCandidate, mem: &MemoryItem) -> bool {
-    let c_title = normalize_text(&candidate.title);
-    let m_title = normalize_text(&mem.title);
-    if c_title == m_title {
-        return true;
+/// Decides whether two memory titles refer to the same subject for the purpose
+/// of contradiction checking (#351).
+///
+/// When an [`EmbeddingProvider`] is configured, titles are compared by the
+/// cosine similarity of their embeddings and a pair matches once the similarity
+/// reaches the configured threshold — this is what lets synonymous titles
+/// ("職業" vs "仕事", "住んでいる場所" vs "居住地") collapse into one subject
+/// instead of being treated as unrelated, and it removes the old hardcoded
+/// `"nickname"` / `"呼び方"` keyword list so matching works in any language.
+/// Without an embedder (or if embedding ever fails) the matcher degrades to the
+/// deterministic exact fallback (NFKC + lowercase + whitespace-collapsed
+/// equality), so contradiction checks never silently stop running.
+///
+/// Embeddings are cached by title for the lifetime of the matcher, so scanning
+/// every existing memory per candidate does not re-embed repeated titles.
+struct TitleMatcher<'a> {
+    /// Embedding provider; `None` selects the exact-match fallback.
+    embedder: Option<&'a dyn EmbeddingProvider>,
+    /// Cosine-similarity cutoff for a match (embedding path only).
+    threshold: f32,
+    /// Embeddings computed so far, keyed by exact title string.
+    cache: HashMap<String, Vec<f32>>,
+    /// Set once embedding fails, after which matching falls back to exact.
+    disabled: bool,
+}
+
+impl<'a> TitleMatcher<'a> {
+    /// Create a matcher. Embeddings are computed lazily and cached.
+    fn new(embedder: Option<&'a dyn EmbeddingProvider>, threshold: f32) -> Self {
+        Self {
+            embedder,
+            threshold,
+            cache: HashMap::new(),
+            disabled: false,
+        }
     }
 
-    match candidate.kind {
-        MemoryKind::Preference => c_title.starts_with(&m_title) || m_title.starts_with(&c_title),
-        MemoryKind::UserProfile => {
-            c_title.contains("nickname")
-                || c_title.contains("呼び方")
-                || m_title.contains("nickname")
-                || m_title.contains("呼び方")
+    /// Embed a single title, caching the result. Returns `None` when no embedder
+    /// is available, embedding has been disabled by a prior failure, or the
+    /// provider rejects this title.
+    async fn embed(&mut self, title: &str) -> Option<Vec<f32>> {
+        if !self.use_embedding() {
+            return None;
         }
-        _ => false,
+        if let Some(embedding) = self.cache.get(title) {
+            return Some(embedding.clone());
+        }
+        let embedder = self.embedder?;
+        match embedder
+            .embed_batch(&[(title, EmbeddingKind::Summary)])
+            .await
+        {
+            Ok(mut vectors) if vectors.len() == 1 => {
+                let embedding = vectors.swap_remove(0);
+                self.cache.insert(title.to_string(), embedding.clone());
+                Some(embedding)
+            }
+            Ok(vectors) => {
+                warn!(
+                    component = "MemoryArbiter",
+                    returned = vectors.len(),
+                    "contradiction title embedding batch size mismatch; falling back to exact title matching"
+                );
+                self.disabled = true;
+                None
+            }
+            Err(error) => {
+                warn!(
+                    component = "MemoryArbiter",
+                    error = %error,
+                    "contradiction title embedding failed; falling back to exact title matching"
+                );
+                self.disabled = true;
+                None
+            }
+        }
+    }
+
+    /// Cosine similarity between two titles' embeddings, embedding on demand.
+    async fn similarity(&mut self, left: &str, right: &str) -> Option<f32> {
+        let left_embedding = self.embed(left).await?;
+        let right_embedding = self.embed(right).await?;
+        Some(cosine_similarity(&left_embedding, &right_embedding))
+    }
+
+    /// Whether the embedding path is currently usable.
+    fn use_embedding(&self) -> bool {
+        self.embedder.is_some() && !self.disabled
+    }
+
+    /// Whether `candidate_title` refers to the same subject as `existing_title`.
+    ///
+    /// Uses embedding similarity when available; if embedding is unavailable or
+    /// fails mid-call, falls back to exact normalized-title equality.
+    async fn is_match(&mut self, candidate_title: &str, existing_title: &str) -> bool {
+        if self.use_embedding()
+            && let Some(similarity) = self.similarity(candidate_title, existing_title).await
+        {
+            return similarity >= self.threshold;
+        }
+        normalize_text(candidate_title) == normalize_text(existing_title)
     }
 }
 
@@ -923,6 +1046,7 @@ mod tests {
             options: ArbiterOptions::default(),
             semantic_matches: HashMap::new(),
             affect_valence: 0.0,
+            embedder: None,
         }
     }
 
@@ -944,26 +1068,146 @@ mod tests {
         &decisions.first().expect("one decision").action
     }
 
-    #[test]
-    fn low_confidence_is_rejected() {
+    /// Build a fully-populated [`MemoryItem`] for contradiction tests (#351).
+    fn memory_item(
+        id: i64,
+        kind: MemoryKind,
+        title: &str,
+        content: &str,
+        confidence: f32,
+    ) -> MemoryItem {
+        MemoryItem {
+            id: Some(id),
+            scope: MemoryScope::User,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind,
+            title: title.into(),
+            content: content.into(),
+            source: MemorySource::Inferred,
+            source_ref: None,
+            confidence: MemoryConfidence::new(confidence),
+            salience: MemorySalience::default(),
+            affect: AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            access_count: 0,
+            last_accessed_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            valid_from: None,
+            valid_until: None,
+            status: MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            faded_at: None,
+            commitment_id: None,
+        }
+    }
+
+    /// Embedder that maps a title to a unit vector keyed by the topic it
+    /// mentions, so synonymous titles ("職業"/"仕事" → occupation, "居住地"/
+    /// "住所" → residence) share a vector while unrelated topics are
+    /// orthogonal. Deterministic and dependency-free (#351).
+    struct TopicEmbedder;
+
+    fn topic_vector(text: &str) -> Vec<f32> {
+        let lowered = text.to_lowercase();
+        if lowered.contains("職業")
+            || lowered.contains("仕事")
+            || lowered.contains("occupation")
+            || lowered.contains("job")
+        {
+            vec![1.0, 0.0, 0.0, 0.0]
+        } else if lowered.contains("居住地")
+            || lowered.contains("住所")
+            || lowered.contains("residence")
+            || lowered.contains("address")
+        {
+            vec![0.0, 1.0, 0.0, 0.0]
+        } else if lowered.contains("coffee") || lowered.contains("コーヒー") {
+            vec![0.0, 0.0, 1.0, 0.0]
+        } else {
+            // Distinct neutral direction so unknown titles do not collide with
+            // any topic axis above.
+            vec![0.0, 0.0, 0.0, 1.0]
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for TopicEmbedder {
+        async fn embed_batch(
+            &self,
+            items: &[(&str, EmbeddingKind)],
+        ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+            Ok(items.iter().map(|(text, _)| topic_vector(text)).collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        fn model_name(&self) -> &str {
+            "topic-test"
+        }
+    }
+
+    /// Embedder whose every call fails, to exercise the exact-match fallback
+    /// that kicks in once embedding is disabled (#351).
+    struct FailingEmbedder;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for FailingEmbedder {
+        async fn embed_batch(
+            &self,
+            _items: &[(&str, EmbeddingKind)],
+        ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+            Err(ene_ai::EmbeddingError::Provider(
+                "forced embedding failure".to_string(),
+            ))
+        }
+
+        fn dimensions(&self) -> usize {
+            4
+        }
+
+        fn model_name(&self) -> &str {
+            "failing-test"
+        }
+    }
+
+    /// An [`ArbiterContext`] wired to a specific embedder (#351).
+    fn ctx_with_embedder<'a>(
+        turn: TurnInput<'a>,
+        embedder: &'a dyn EmbeddingProvider,
+    ) -> ArbiterContext<'a> {
+        ArbiterContext {
+            embedder: Some(embedder),
+            ..ctx(turn)
+        }
+    }
+
+    #[tokio::test]
+    async fn low_confidence_is_rejected() {
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
             tool_results: &[],
         };
-        let decisions = MemoryArbiter::evaluate_all(&[sample_candidate(0.4)], &[], &ctx(turn));
+        let decisions =
+            MemoryArbiter::evaluate_all(&[sample_candidate(0.4)], &[], &ctx(turn)).await;
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
         assert_eq!(decisions[0].reason.code, ArbiterReasonCode::LowConfidence);
     }
 
-    #[test]
-    fn source_quote_mismatch_is_rejected() {
+    #[tokio::test]
+    async fn source_quote_mismatch_is_rejected() {
         let turn = TurnInput {
             user_message: "hello there",
             assistant_message: None,
             tool_results: &[],
         };
-        let decisions = MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn));
+        let decisions =
+            MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn)).await;
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
         assert_eq!(
             decisions[0].reason.code,
@@ -971,14 +1215,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn valid_candidate_persists() {
+    #[tokio::test]
+    async fn valid_candidate_persists() {
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
             tool_results: &[],
         };
-        let decisions = MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn));
+        let decisions =
+            MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::Persist(_)
@@ -1019,7 +1264,7 @@ mod tests {
             tool_results: &[],
         };
         let decisions =
-            MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[existing], &ctx(turn));
+            MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[existing], &ctx(turn)).await;
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
         assert_eq!(decisions[0].reason.code, ArbiterReasonCode::ExactDuplicate);
     }
@@ -1067,7 +1312,7 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::Supersede { .. }
@@ -1121,7 +1366,7 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::MarkUserDeleted { memory_id } if memory_id == &id
@@ -1129,8 +1374,8 @@ mod tests {
         assert_eq!(decisions[0].reason.code, ArbiterReasonCode::DeletionRequest);
     }
 
-    #[test]
-    fn procedure_with_empty_source_quote_allowed_when_tools_present() {
+    #[tokio::test]
+    async fn procedure_with_empty_source_quote_allowed_when_tools_present() {
         let tools = [ToolResultSummary {
             tool_name: "fs".to_string(),
             success: true,
@@ -1152,15 +1397,15 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::Persist(_)
         ));
     }
 
-    #[test]
-    fn reflection_with_empty_source_quote_allowed_when_tools_present() {
+    #[tokio::test]
+    async fn reflection_with_empty_source_quote_allowed_when_tools_present() {
         let tools = [ToolResultSummary {
             tool_name: "web".to_string(),
             success: false,
@@ -1182,7 +1427,7 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::Persist(_)
@@ -1233,7 +1478,7 @@ mod tests {
             tags: Vec::new(),
         };
         let arbiter_ctx = ctx(turn);
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
         let applied = MemoryArbiter::apply_decisions(&store, &decisions, &arbiter_ctx)
             .await
             .unwrap();
@@ -1341,8 +1586,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn batch_duplicate_second_candidate_ignored() {
+    #[tokio::test]
+    async fn batch_duplicate_second_candidate_ignored() {
         let turn = TurnInput {
             user_message: "remember project X details",
             assistant_message: None,
@@ -1363,15 +1608,15 @@ mod tests {
             content: "Different detail about project X".to_string(),
             ..first.clone()
         };
-        let decisions = MemoryArbiter::evaluate_all(&[first, second], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[first, second], &[], &ctx(turn)).await;
         assert_eq!(decisions.len(), 2);
         assert!(matches!(&decisions[0].action, ArbiterAction::Persist(_)));
         assert!(matches!(decisions[1].action, ArbiterAction::Ignore));
         assert_eq!(decisions[1].reason.code, ArbiterReasonCode::BatchDuplicate);
     }
 
-    #[test]
-    fn semantic_duplicate_is_ignored() {
+    #[tokio::test]
+    async fn semantic_duplicate_is_ignored() {
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
@@ -1416,7 +1661,8 @@ mod tests {
             semantic_matches,
             ..ctx(turn)
         };
-        let decisions = MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &arbiter_ctx);
+        let decisions =
+            MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &arbiter_ctx).await;
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
         assert_eq!(
             decisions[0].reason.code,
@@ -1424,8 +1670,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn semantic_supersede_picks_strongest_match() {
+    #[tokio::test]
+    async fn semantic_supersede_picks_strongest_match() {
         let turn = TurnInput {
             user_message: "I love tea now",
             assistant_message: None,
@@ -1493,7 +1739,7 @@ mod tests {
             semantic_matches,
             ..ctx(turn)
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::Supersede {
@@ -1503,8 +1749,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn semantic_disputed_when_confidence_close() {
+    #[tokio::test]
+    async fn semantic_disputed_when_confidence_close() {
         let turn = TurnInput {
             user_message: "I love tea now",
             assistant_message: None,
@@ -1560,7 +1806,7 @@ mod tests {
             semantic_matches,
             ..ctx(turn)
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::MarkDisputed { memory_id: 7 }
@@ -1571,8 +1817,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn semantic_ask_confirmation_when_existing_much_stronger() {
+    #[tokio::test]
+    async fn semantic_ask_confirmation_when_existing_much_stronger() {
         let turn = TurnInput {
             user_message: "I love tea now",
             assistant_message: None,
@@ -1628,7 +1874,7 @@ mod tests {
             semantic_matches,
             ..ctx(turn)
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::AskConfirmationLater { .. }
@@ -1702,7 +1948,7 @@ mod tests {
             semantic_matches,
             ..ctx(turn)
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx).await;
 
         // The decision carries the conflicting memory's id + title.
         match decision_action(&decisions) {
@@ -1730,8 +1976,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn deletion_low_confidence_is_rejected() {
+    #[tokio::test]
+    async fn deletion_low_confidence_is_rejected() {
         let turn = TurnInput {
             user_message: "forget project X",
             assistant_message: None,
@@ -1748,13 +1994,13 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
         assert_eq!(decisions[0].reason.code, ArbiterReasonCode::LowConfidence);
     }
 
-    #[test]
-    fn deletion_quote_mismatch_is_rejected() {
+    #[tokio::test]
+    async fn deletion_quote_mismatch_is_rejected() {
         let turn = TurnInput {
             user_message: "hello there",
             assistant_message: None,
@@ -1771,7 +2017,7 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         assert!(matches!(decision_action(&decisions), ArbiterAction::Ignore));
         assert_eq!(
             decisions[0].reason.code,
@@ -1958,7 +2204,7 @@ mod tests {
             tags: Vec::new(),
         };
         let arbiter_ctx = ctx(turn);
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::AskConfirmationLater { .. }
@@ -2080,7 +2326,7 @@ mod tests {
             tags: Vec::new(),
         };
         let arbiter_ctx = ctx(turn);
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::MarkDisputed { memory_id } if memory_id == &id
@@ -2095,8 +2341,8 @@ mod tests {
         assert_eq!(mem.status, MemoryStatus::Disputed);
     }
 
-    #[test]
-    fn commitment_due_not_mapped_to_valid_until() {
+    #[tokio::test]
+    async fn commitment_due_not_mapped_to_valid_until() {
         let turn = TurnInput {
             user_message: "remind me tomorrow at 3pm",
             assistant_message: None,
@@ -2113,7 +2359,7 @@ mod tests {
             commitment_due: Some("tomorrow 15:00".to_string()),
             tags: Vec::new(),
         };
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         let ArbiterAction::Persist(item) = decision_action(&decisions) else {
             panic!("expected Persist");
         };
@@ -2121,8 +2367,8 @@ mod tests {
         assert!(item.valid_from.is_none());
     }
 
-    #[test]
-    fn interrupted_candidate_confidence_is_deprioritized() {
+    #[tokio::test]
+    async fn interrupted_candidate_confidence_is_deprioritized() {
         // An interrupted (barge-in) episode is partial and therefore less
         // reliable: the persisted confidence is reduced by the penalty (#M7).
         let turn = TurnInput {
@@ -2132,7 +2378,7 @@ mod tests {
         };
         let mut candidate = sample_candidate(0.9);
         candidate.tags.push(INTERRUPTED_TAG.to_string());
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         let ArbiterAction::Persist(item) = decision_action(&decisions) else {
             panic!("expected Persist");
         };
@@ -2144,8 +2390,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn interrupted_candidate_tags_are_serialized_into_content() {
+    #[tokio::test]
+    async fn interrupted_candidate_tags_are_serialized_into_content() {
         // The store has no tags column, so tags are serialized into the
         // content as a metadata footer (#M7).
         let turn = TurnInput {
@@ -2155,7 +2401,7 @@ mod tests {
         };
         let mut candidate = sample_candidate(0.9);
         candidate.tags.push(INTERRUPTED_TAG.to_string());
-        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn));
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &ctx(turn)).await;
         let ArbiterAction::Persist(item) = decision_action(&decisions) else {
             panic!("expected Persist");
         };
@@ -2167,14 +2413,15 @@ mod tests {
         assert!(item.content.contains(INTERRUPTED_TAG));
     }
 
-    #[test]
-    fn non_interrupted_candidate_has_no_tags_footer() {
+    #[tokio::test]
+    async fn non_interrupted_candidate_has_no_tags_footer() {
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
             tool_results: &[],
         };
-        let decisions = MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn));
+        let decisions =
+            MemoryArbiter::evaluate_all(&[sample_candidate(0.9)], &[], &ctx(turn)).await;
         let ArbiterAction::Persist(item) = decision_action(&decisions) else {
             panic!("expected Persist");
         };
@@ -2188,5 +2435,254 @@ mod tests {
     fn append_tags_metadata_empty_tags_is_identity() {
         let content = "plain content";
         assert_eq!(append_tags_metadata(content, &[]), content);
+    }
+
+    // ── #351: contradiction-key matching by title embedding similarity ──
+
+    /// Synonymous titles ("職業" vs "仕事") are matched by embedding similarity
+    /// and detected as a contradiction, where exact-title matching missed them.
+    #[tokio::test]
+    async fn synonym_titles_are_detected_as_contradiction() {
+        let turn = TurnInput {
+            user_message: "実は仕事は教師です",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let existing = memory_item(11, MemoryKind::UserProfile, "職業", "エンジニア", 0.7);
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::UserProfile,
+            title: "仕事".to_string(),
+            content: "教師".to_string(),
+            source_quote: "実は仕事は教師です".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let embedder = TopicEmbedder;
+        let arbiter_ctx = ctx_with_embedder(turn, &embedder);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
+        assert_eq!(
+            decisions[0].reason.code,
+            ArbiterReasonCode::ContradictionSupersede
+        );
+    }
+
+    /// `Semantic` memories were previously skipped by the `_ => false` arm of
+    /// `same_contradiction_key` (which only special-cased `Preference` and
+    /// `UserProfile`), so even synonymous titles never contradicted. With
+    /// embedding matching they now do.
+    #[tokio::test]
+    async fn semantic_kind_contradiction_now_matches() {
+        let turn = TurnInput {
+            user_message: "my job is teaching",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // Synonymous titles ("occupation" / "job") share the occupation vector;
+        // the old `_ => false` arm never even compared Semantic titles.
+        let existing = memory_item(
+            21,
+            MemoryKind::Semantic,
+            "occupation",
+            "works as an engineer",
+            0.7,
+        );
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Semantic,
+            title: "job".to_string(),
+            content: "works as a teacher".to_string(),
+            source_quote: "my job is teaching".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let embedder = TopicEmbedder;
+        let arbiter_ctx = ctx_with_embedder(turn, &embedder);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
+        assert_eq!(
+            decisions[0].reason.code,
+            ArbiterReasonCode::ContradictionSupersede
+        );
+    }
+
+    /// `Relationship` memories were also skipped by `_ => false`; they now match
+    /// on synonymous titles via embeddings.
+    #[tokio::test]
+    async fn relationship_kind_contradiction_now_matches() {
+        let turn = TurnInput {
+            user_message: "my address is Osaka now",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // Synonymous titles ("residence" / "address") share the residence vector.
+        let existing = memory_item(
+            31,
+            MemoryKind::Relationship,
+            "residence",
+            "lives in Tokyo",
+            0.7,
+        );
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Relationship,
+            title: "address".to_string(),
+            content: "lives in Osaka".to_string(),
+            source_quote: "my address is Osaka now".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let embedder = TopicEmbedder;
+        let arbiter_ctx = ctx_with_embedder(turn, &embedder);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
+        assert_eq!(
+            decisions[0].reason.code,
+            ArbiterReasonCode::ContradictionSupersede
+        );
+    }
+
+    /// Unrelated titles stay below the similarity threshold, so no false
+    /// contradiction is raised and the candidate persists as new.
+    #[tokio::test]
+    async fn unrelated_titles_do_not_contradict() {
+        let turn = TurnInput {
+            user_message: "my address is Kyoto",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // Occupation topic vs residence topic → orthogonal embeddings.
+        let existing = memory_item(41, MemoryKind::UserProfile, "職業", "エンジニア", 0.7);
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::UserProfile,
+            title: "住所".to_string(),
+            content: "京都".to_string(),
+            source_quote: "my address is Kyoto".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let embedder = TopicEmbedder;
+        let arbiter_ctx = ctx_with_embedder(turn, &embedder);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Persist(_)
+        ));
+        assert_eq!(decisions[0].reason.code, ArbiterReasonCode::ValidNewMemory);
+    }
+
+    /// The old hardcoded `"nickname"` / `"呼び方"` keyword list is gone: a
+    /// rephrased profile title that shares no keyword but is semantically the
+    /// same subject still matches via embeddings.
+    #[tokio::test]
+    async fn user_profile_matches_without_hardcoded_keyword() {
+        let turn = TurnInput {
+            user_message: "call me Taro from now on",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // Neither title contains "nickname" or "呼び方"; both map to the same
+        // neutral topic vector, so similarity is 1.0.
+        let existing = memory_item(51, MemoryKind::UserProfile, "how to call me", "Ken", 0.7);
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::UserProfile,
+            title: "preferred name".to_string(),
+            content: "Taro".to_string(),
+            source_quote: "call me Taro from now on".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let embedder = TopicEmbedder;
+        let arbiter_ctx = ctx_with_embedder(turn, &embedder);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
+    }
+
+    /// When the embedder fails, matching degrades to exact normalized-title
+    /// equality so contradiction checks never silently stop (#351).
+    #[tokio::test]
+    async fn embedding_failure_falls_back_to_exact_title() {
+        let turn = TurnInput {
+            user_message: "I love tea now",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        // Identical titles → exact fallback still matches despite embed failure.
+        let existing = memory_item(61, MemoryKind::Preference, "drink", "likes coffee", 0.7);
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes tea".to_string(),
+            source_quote: "I love tea now".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let embedder = FailingEmbedder;
+        let arbiter_ctx = ctx_with_embedder(turn, &embedder);
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
+        assert_eq!(
+            decisions[0].reason.code,
+            ArbiterReasonCode::ContradictionSupersede
+        );
+    }
+
+    /// Without any embedder configured, exact normalized-title equality is the
+    /// deterministic fallback (the default test context has `embedder: None`).
+    #[tokio::test]
+    async fn no_embedder_uses_exact_title_fallback() {
+        let turn = TurnInput {
+            user_message: "I love tea now",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let existing = memory_item(71, MemoryKind::Preference, "drink", "likes coffee", 0.7);
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "drink".to_string(),
+            content: "likes tea".to_string(),
+            source_quote: "I love tea now".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        };
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn)).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
     }
 }

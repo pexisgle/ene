@@ -154,7 +154,8 @@ Configures token context budget, hybrid memory recall, emotion decay, character 
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
       "commitment_boost": 0.25,
-      "commitment_title_similarity_threshold": 0.82
+      "commitment_title_similarity_threshold": 0.82,
+      "contradiction_title_similarity_threshold": 0.82
     }
   }
 }
@@ -199,6 +200,15 @@ embedding similarity (#387): `commitment_title_similarity_threshold` (default
 supersedes the existing commitment instead of being registered as a duplicate.
 With no embedding provider configured, the ledger falls back to exact
 normalized-title matching and this threshold is unused.
+
+The memory arbiter decides whether an incoming candidate contradicts an existing
+memory of the same kind by comparing the *similarity of their title embeddings*
+(#351): `contradiction_title_similarity_threshold` (default `0.82`) is the
+cosine-similarity cutoff above which synonymous titles ("職業" vs "仕事",
+"住んでいる場所" vs "居住地") are treated as the same subject and checked for
+contradiction, instead of being persisted as unrelated duplicates. With no
+embedding provider configured, the arbiter falls back to exact normalized-title
+matching and this threshold is unused.
 
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 

@@ -155,7 +155,8 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
       "commitment_boost": 0.25,
-      "commitment_title_similarity_threshold": 0.82
+      "commitment_title_similarity_threshold": 0.82,
+      "contradiction_title_similarity_threshold": 0.82
     }
   }
 }
@@ -196,6 +197,13 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 `0.82`）はコサイン類似度の閾値で、これを上回ると言い回しの異なる約束は二重登録ではなく
 既存コミットメントの更新（supersede）として扱われます。埋め込みプロバイダーが未設定の
 場合、台帳は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
+
+メモリー調停器（arbiter）は、着信した候補が同じ種別の既存記憶と矛盾するかどうかを、
+*タイトル埋め込みの類似度* で判定します (#351)。`contradiction_title_similarity_threshold`
+（デフォルト `0.82`）はコサイン類似度の閾値で、これを上回ると同義のタイトル
+（「職業」と「仕事」、「住んでいる場所」と「居住地」）は同じ主題として扱われ、
+無関係な重複として永続化される代わりに矛盾検査の対象となります。埋め込みプロバイダーが
+未設定の場合、調停器は正規化タイトルの完全一致にフォールバックし、この閾値は使用されません。
 
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 
