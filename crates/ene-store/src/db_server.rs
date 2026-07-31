@@ -3443,22 +3443,113 @@ mod tests {
         .await
     }
 
-    fn insert_name_request(name: &str) -> ene_plugin_db::DbRequest {
+    /// Sets up an in-memory DB with an `fs_blob` table whose rows carry a large
+    /// `data` BLOB, so a quota test can move the measured footprint by a known,
+    /// dominant amount (the BLOB dwarfs per-row overhead, keeping the
+    /// assertions independent of `SQLite`'s exact byte accounting).
+    async fn setup_quota_fixture() -> (
+        sea_orm::DatabaseConnection,
+        HashMap<String, ene_plugin_db::DbTable>,
+        HashMap<String, HashSet<String>>,
+        Arc<std::sync::Mutex<Option<i64>>>,
+    ) {
+        use sea_orm::ConnectionTrait;
+        let mut opt = sea_orm::ConnectOptions::new("sqlite::memory:");
+        opt.max_connections(1);
+        let db = sea_orm::Database::connect(opt).await.unwrap();
+        db.execute_unprepared(
+            "CREATE TABLE fs_blob (id INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB)",
+        )
+        .await
+        .unwrap();
+
+        let mut declared_tables: HashMap<String, ene_plugin_db::DbTable> = HashMap::new();
+        declared_tables.insert(
+            "fs_blob".to_string(),
+            ene_plugin_db::DbTable {
+                name: "fs_blob".to_string(),
+                columns: vec![
+                    ene_plugin_db::DbColumn {
+                        name: "id".to_string(),
+                        ty: ene_plugin_db::DbType::Integer,
+                        nullable: false,
+                        primary_key: true,
+                        auto_increment: true,
+                        unique: false,
+                        default: None,
+                    },
+                    ene_plugin_db::DbColumn {
+                        name: "data".to_string(),
+                        ty: ene_plugin_db::DbType::Blob,
+                        nullable: true,
+                        primary_key: false,
+                        auto_increment: false,
+                        unique: false,
+                        default: None,
+                    },
+                ],
+            },
+        );
+        let mut declared_columns: HashMap<String, HashSet<String>> = HashMap::new();
+        declared_columns.insert(
+            "fs_blob".to_string(),
+            ["id".to_string(), "data".to_string()].into_iter().collect(),
+        );
+        let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
+        (db, declared_tables, declared_columns, last_rowid)
+    }
+
+    /// An `Insert` of a `size`-byte BLOB into `fs_blob`.
+    fn blob_insert(size: usize) -> ene_plugin_db::DbRequest {
         ene_plugin_db::DbRequest::Insert {
-            table: "fs_test".to_string(),
+            table: "fs_blob".to_string(),
             row: std::collections::BTreeMap::from([(
-                "name".to_string(),
-                ene_plugin_db::DbValue::Text(name.to_string()),
+                "data".to_string(),
+                ene_plugin_db::DbValue::Blob(vec![0u8; size]),
             )]),
         }
     }
+
+    /// Counts rows in `fs_blob` via the request dispatcher.
+    async fn count_blob_rows(
+        db: &sea_orm::DatabaseConnection,
+        declared_tables: &mut HashMap<String, ene_plugin_db::DbTable>,
+        declared_columns: &mut HashMap<String, HashSet<String>>,
+        last_rowid: &Arc<std::sync::Mutex<Option<i64>>>,
+    ) -> i64 {
+        match request_with_quota(
+            db,
+            declared_tables,
+            declared_columns,
+            last_rowid,
+            None,
+            ene_plugin_db::DbRequest::Count {
+                table: "fs_blob".to_string(),
+                filter: ene_plugin_db::DbFilter::Always,
+            },
+        )
+        .await
+        {
+            ene_plugin_db::DbResponse::Count { count } => count,
+            other => panic!("expected Count, got {other:?}"),
+        }
+    }
+
+    /// Per-row payload used by the quota tests. Large enough to dominate any
+    /// per-row overhead, so the footprint after one insert is ~`QUOTA_PAYLOAD`.
+    const QUOTA_PAYLOAD: usize = 200_000;
+    /// A quota below one payload but above zero: the first insert fits (empty
+    /// table), but a second would push the footprint past the cap.
+    const QUOTA_TIGHT: u64 = 150_000;
+    /// A quota far above one payload: a single insert always fits.
+    const QUOTA_LOOSE: u64 = 1_000_000;
 
     /// With no quota configured (`None`), writes are never gated — the
     /// pre-#424 behavior is preserved for plugins that opt out of a cap.
     #[tokio::test]
     async fn insert_succeeds_when_quota_is_unbounded() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
-            setup_batch_fixture().await;
+            setup_quota_fixture().await;
 
         let resp = request_with_quota(
             &db,
@@ -3466,7 +3557,7 @@ mod tests {
             &mut declared_columns,
             &last_rowid,
             None,
-            insert_name_request("alpha"),
+            blob_insert(QUOTA_PAYLOAD),
         )
         .await;
 
@@ -3480,16 +3571,16 @@ mod tests {
     #[tokio::test]
     async fn insert_under_quota_succeeds() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
-            setup_batch_fixture().await;
+            setup_quota_fixture().await;
 
-        // 1 KiB is far above the few bytes a single row occupies.
+        // `QUOTA_LOOSE` is far above a single `QUOTA_PAYLOAD` row.
         let resp = request_with_quota(
             &db,
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(1024),
-            insert_name_request("alpha"),
+            Some(QUOTA_LOOSE),
+            blob_insert(QUOTA_PAYLOAD),
         )
         .await;
 
@@ -3498,7 +3589,7 @@ mod tests {
             "expected Insert, got {resp:?}"
         );
         assert_eq!(
-            count_test_rows(
+            count_blob_rows(
                 &db,
                 &mut declared_tables,
                 &mut declared_columns,
@@ -3515,18 +3606,17 @@ mod tests {
     #[tokio::test]
     async fn insert_over_quota_is_rejected() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
-            setup_batch_fixture().await;
+            setup_quota_fixture().await;
 
-        // "alpha" stores 5 bytes of `name` payload (plus an 8-byte rowid and
-        // a NULL qty), so a 10-byte quota admits it but leaves the footprint
-        // at-or-above the cap for the next write.
+        // The first insert fits: the table is empty, so the measured footprint
+        // (0) is below `QUOTA_TIGHT`. It stores ~`QUOTA_PAYLOAD` bytes.
         let first = request_with_quota(
             &db,
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(10),
-            insert_name_request("alpha"),
+            Some(QUOTA_TIGHT),
+            blob_insert(QUOTA_PAYLOAD),
         )
         .await;
         assert!(
@@ -3534,13 +3624,15 @@ mod tests {
             "first insert should fit under the quota, got {first:?}"
         );
 
+        // The second is refused: the footprint (~`QUOTA_PAYLOAD`) is now at or
+        // above `QUOTA_TIGHT`.
         let second = request_with_quota(
             &db,
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(10),
-            insert_name_request("beta"),
+            Some(QUOTA_TIGHT),
+            blob_insert(QUOTA_PAYLOAD),
         )
         .await;
         match second {
@@ -3556,7 +3648,7 @@ mod tests {
 
         // The rejected write persisted nothing.
         assert_eq!(
-            count_test_rows(
+            count_blob_rows(
                 &db,
                 &mut declared_tables,
                 &mut declared_columns,
@@ -3572,29 +3664,29 @@ mod tests {
     #[tokio::test]
     async fn delete_and_select_still_allowed_over_quota() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
-            setup_batch_fixture().await;
+            setup_quota_fixture().await;
 
         let first = request_with_quota(
             &db,
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(10),
-            insert_name_request("alpha"),
+            Some(QUOTA_TIGHT),
+            blob_insert(QUOTA_PAYLOAD),
         )
         .await;
         assert!(matches!(first, DbResponse::Insert { .. }));
 
-        // Reads are never gated.
+        // Reads are never gated, even though the footprint is now at the cap.
         let select = request_with_quota(
             &db,
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(10),
+            Some(QUOTA_TIGHT),
             ene_plugin_db::DbRequest::Select {
-                table: "fs_test".to_string(),
-                columns: Vec::new(),
+                table: "fs_blob".to_string(),
+                columns: vec!["id".to_string()],
                 filter: ene_plugin_db::DbFilter::Always,
                 order_by: Vec::new(),
                 limit: None,
@@ -3612,13 +3704,10 @@ mod tests {
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(10),
+            Some(QUOTA_TIGHT),
             ene_plugin_db::DbRequest::Delete {
-                table: "fs_test".to_string(),
-                filter: ene_plugin_db::DbFilter::Eq {
-                    column: "name".to_string(),
-                    value: ene_plugin_db::DbValue::Text("alpha".to_string()),
-                },
+                table: "fs_blob".to_string(),
+                filter: ene_plugin_db::DbFilter::Always,
             },
         )
         .await;
@@ -3633,8 +3722,8 @@ mod tests {
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(10),
-            insert_name_request("beta"),
+            Some(QUOTA_TIGHT),
+            blob_insert(QUOTA_PAYLOAD),
         )
         .await;
         assert!(
@@ -3648,32 +3737,27 @@ mod tests {
     #[tokio::test]
     async fn batch_insert_over_quota_rolls_back() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
-            setup_batch_fixture().await;
+            setup_quota_fixture().await;
 
-        let ops = vec![
-            ene_plugin_db::DbWriteOp::Insert {
-                table: "fs_test".to_string(),
-                row: std::collections::BTreeMap::from([(
-                    "name".to_string(),
-                    ene_plugin_db::DbValue::Text("alpha".to_string()),
-                )]),
-            },
-            ene_plugin_db::DbWriteOp::Insert {
-                table: "fs_test".to_string(),
-                row: std::collections::BTreeMap::from([(
-                    "name".to_string(),
-                    ene_plugin_db::DbValue::Text("beta".to_string()),
-                )]),
-            },
-        ];
+        let blob_op = || ene_plugin_db::DbWriteOp::Insert {
+            table: "fs_blob".to_string(),
+            row: std::collections::BTreeMap::from([(
+                "data".to_string(),
+                ene_plugin_db::DbValue::Blob(vec![0u8; QUOTA_PAYLOAD]),
+            )]),
+        };
 
+        // op 0 fits (empty table); op 1 would push the footprint past
+        // `QUOTA_TIGHT`, so the whole batch is refused and rolled back.
         let resp = request_with_quota(
             &db,
             &mut declared_tables,
             &mut declared_columns,
             &last_rowid,
-            Some(10),
-            ene_plugin_db::DbRequest::Batch { ops },
+            Some(QUOTA_TIGHT),
+            ene_plugin_db::DbRequest::Batch {
+                ops: vec![blob_op(), blob_op()],
+            },
         )
         .await;
 
@@ -3690,7 +3774,7 @@ mod tests {
 
         // The whole batch rolled back — the first (in-quota) insert too.
         assert_eq!(
-            count_test_rows(
+            count_blob_rows(
                 &db,
                 &mut declared_tables,
                 &mut declared_columns,
