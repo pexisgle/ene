@@ -1720,10 +1720,9 @@ mod tests {
     /// bus instead of being silently dropped.
     ///
     /// `memory_writer_cap` is set to 0 so *every* drained handle is
-    /// rejected, and a blocking placeholder occupies the (empty) `JoinSet`
-    /// is never needed — rejection is forced purely by the cap. Before the
-    /// fix, the rejected `JoinHandle` was dropped unread and the event
-    /// never fired.
+    /// rejected purely by the cap (no placeholder task needed to fill the
+    /// `JoinSet`). Before the fix, the rejected `JoinHandle` was dropped
+    /// unread and the event never fired.
     #[tokio::test]
     async fn rejected_memory_writer_still_emits_pending_candidate() {
         let task_caps = crate::task_config::ToolRuntimeConfig {
@@ -1738,12 +1737,7 @@ mod tests {
                 deferred_candidates: 3,
             }
         });
-        actor
-            .memory_writer_tx
-            .send(handle)
-            .expect("memory-writer channel open");
-
-        actor.drain_memory_writers();
+        actor.inject_and_drain_memory_writer(handle);
 
         let ev = tokio::time::timeout(std::time::Duration::from_secs(2), lifecycle_rx.recv())
             .await
@@ -1789,12 +1783,7 @@ mod tests {
                 character_id: "char".to_string(),
             }
         });
-        actor
-            .memory_writer_tx
-            .send(handle)
-            .expect("memory-writer channel open");
-
-        actor.drain_memory_writers();
+        actor.inject_and_drain_memory_writer(handle);
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut saw_memory_write = false;

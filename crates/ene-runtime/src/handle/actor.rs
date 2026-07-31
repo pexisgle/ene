@@ -365,6 +365,20 @@ impl TurnActor {
         }
     }
 
+    /// Test-only hook (#398): injects a memory-writer `JoinHandle` as if the
+    /// stream task had sent it, then runs [`Self::drain_memory_writers`] so
+    /// admission-cap behavior can be exercised without a live stream task.
+    #[cfg(test)]
+    pub(super) fn inject_and_drain_memory_writer(
+        &mut self,
+        handle: tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>,
+    ) {
+        self.memory_writer_tx
+            .send(handle)
+            .expect("memory-writer channel is open in tests");
+        self.drain_memory_writers();
+    }
+
     pub(super) async fn run(mut self) {
         loop {
             // Reap completed background tasks so the JoinSets shrink again
