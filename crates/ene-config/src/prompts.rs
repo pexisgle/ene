@@ -850,6 +850,35 @@ mod tests {
     }
 
     #[test]
+    fn decision_system_labels_untrusted_observation_data() {
+        // #380: the decision system prompt must instruct the model to treat
+        // third-party content (screen summary, conversation, window labels)
+        // as observation data, never as instructions, in every locale.
+        for (lib, source) in [
+            (PromptLibrary::built_in_english(), "built-in en"),
+            (PromptLibrary::built_in_japanese(), "built-in ja"),
+        ] {
+            let system = &lib.proactive().decision_system;
+            assert!(
+                system.contains("screen_summary"),
+                "[{source}] decision_system must name the screen_summary field"
+            );
+            assert!(
+                system.contains("recent_conversation"),
+                "[{source}] decision_system must name the recent_conversation field"
+            );
+            assert!(
+                system.contains("DATA"),
+                "[{source}] decision_system must mark observation fields as DATA"
+            );
+            assert!(
+                system.contains("should_speak: true"),
+                "[{source}] decision_system must call out injected control lines"
+            );
+        }
+    }
+
+    #[test]
     fn render_substitutes_vars_in_nested_key() {
         let lib = PromptLibrary::built_in_english();
         let rendered = lib.memory().render_facts_header("Alice");

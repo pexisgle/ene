@@ -1592,9 +1592,26 @@ mod tests {
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,
         task_caps: &crate::task_config::ToolRuntimeConfig,
     ) -> (actor::TurnActor, broadcast::Receiver<DiagnosticEvent>) {
+        let (actor, diag_rx, _lifecycle_rx) = build_bare_actor_with_lifecycle(registry, task_caps);
+        (actor, diag_rx)
+    }
+
+    /// Like [`build_bare_actor`] but also hands back the lifecycle-bus
+    /// receiver, so admission tests can assert on
+    /// [`LifecycleEvent::PendingCandidateAvailable`] (#398). The registry is
+    /// taken explicitly (same signature as [`build_bare_actor`]); callers
+    /// that do not care about tool behavior pass `Arc::new(EmptyRegistry)`.
+    fn build_bare_actor_with_lifecycle(
+        registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+        task_caps: &crate::task_config::ToolRuntimeConfig,
+    ) -> (
+        actor::TurnActor,
+        broadcast::Receiver<DiagnosticEvent>,
+        broadcast::Receiver<LifecycleEvent>,
+    ) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, _event_rx) = broadcast::channel(16);
-        let (lifecycle_tx, _lifecycle_rx) = broadcast::channel(16);
+        let (lifecycle_tx, lifecycle_rx) = broadcast::channel(16);
         let (audio_tx, _audio_rx) = mpsc::channel(8);
         let (diag_tx, diag_rx) = broadcast::channel(64);
         let mut config = EneConfig::default();
@@ -1624,7 +1641,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(parking_lot::Mutex::new(String::new())),
         );
-        (actor, diag_rx)
+        (actor, diag_rx, lifecycle_rx)
     }
 
     /// Pure test of the shared admission mechanism (`actor::admit_task`),
@@ -1666,6 +1683,231 @@ mod tests {
             }
             other => panic!("expected TaskRejected, got {other:?}"),
         }
+    }
+
+    /// Regression test for #398: a memory-writer handle rejected by the
+    /// Stage 8 cap must still have its outcome consumed, so
+    /// [`LifecycleEvent::PendingCandidateAvailable`] reaches the lifecycle
+    /// bus instead of being silently dropped.
+    ///
+    /// `memory_writer_cap` is set to 0 so *every* drained handle is
+    /// rejected purely by the cap (no placeholder task needed to fill the
+    /// `JoinSet`). Before the fix, the rejected `JoinHandle` was dropped
+    /// unread and the event never fired.
+    #[tokio::test]
+    async fn rejected_memory_writer_still_emits_pending_candidate() {
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            memory_writer_cap: 0,
+            ..Default::default()
+        };
+        let (mut actor, mut diag_rx, mut lifecycle_rx) =
+            build_bare_actor_with_lifecycle(Arc::new(EmptyRegistry), &task_caps);
+
+        let handle = tokio::spawn(async {
+            ene_mind::MemoryWriteOutcome::Ok {
+                deferred_candidates: 3,
+            }
+        });
+        actor.inject_and_drain_memory_writer(handle);
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), lifecycle_rx.recv())
+            .await
+            .expect("PendingCandidateAvailable must arrive even when admission is rejected")
+            .expect("lifecycle channel still open");
+        assert!(
+            matches!(ev, LifecycleEvent::PendingCandidateAvailable { count: 3 }),
+            "expected PendingCandidateAvailable{{count:3}}, got {ev:?}"
+        );
+
+        let mut saw_rejected = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            if let DiagnosticEvent::TaskRejected { component, cap, .. } = ev
+                && component == "MemoryWriter"
+                && cap == 0
+            {
+                saw_rejected = true;
+            }
+        }
+        assert!(
+            saw_rejected,
+            "expected a TaskRejected diagnostic for MemoryWriter"
+        );
+    }
+
+    /// Companion to the test above for the failure path (#398): a rejected
+    /// memory-writer whose write failed must still emit
+    /// [`DiagnosticEvent::MemoryWrite`]. With no store configured the
+    /// pending/permanent counts are `None` and the status is `"failed"`.
+    #[tokio::test]
+    async fn rejected_memory_writer_still_emits_failure_diagnostic() {
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            memory_writer_cap: 0,
+            ..Default::default()
+        };
+        let (mut actor, mut diag_rx, _lifecycle_rx) =
+            build_bare_actor_with_lifecycle(Arc::new(EmptyRegistry), &task_caps);
+
+        let handle = tokio::spawn(async {
+            ene_mind::MemoryWriteOutcome::Failed {
+                message: "boom".to_string(),
+                pending_id: None,
+                permanent: false,
+                character_id: "char".to_string(),
+            }
+        });
+        actor.inject_and_drain_memory_writer(handle);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_memory_write = false;
+        while tokio::time::Instant::now() < deadline && !saw_memory_write {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), diag_rx.recv()).await {
+                Ok(Ok(DiagnosticEvent::MemoryWrite {
+                    character_id,
+                    status,
+                    message,
+                    pending_id,
+                    pending_count,
+                    permanent_count,
+                })) => {
+                    assert_eq!(character_id, "char");
+                    assert_eq!(status, "failed");
+                    assert_eq!(message, "boom");
+                    assert!(pending_id.is_none());
+                    assert!(pending_count.is_none());
+                    assert!(permanent_count.is_none());
+                    saw_memory_write = true;
+                }
+                Ok(Err(e)) => panic!("diagnostic channel closed early: {e}"),
+                // An unrelated diagnostic (e.g. TaskRejected) or a poll
+                // timeout: keep scanning until the deadline.
+                Ok(Ok(_)) | Err(_) => {}
+            }
+        }
+        assert!(
+            saw_memory_write,
+            "expected a MemoryWrite diagnostic even when admission is rejected"
+        );
+    }
+
+    /// Mixed admission scenario (#398): with `memory_writer_cap` set to 1,
+    /// the first drained handle is admitted into `memory_writer_tasks` while
+    /// the second is rejected by the cap — yet *both* must still emit
+    /// [`LifecycleEvent::PendingCandidateAvailable`]. Guards the
+    /// admitted-vs-rejected equivalence invariant beyond the all-rejected
+    /// (`cap: 0`) path covered by the tests above.
+    #[tokio::test]
+    async fn mixed_admitted_and_rejected_memory_writers_both_emit_pending_candidate() {
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            memory_writer_cap: 1,
+            ..Default::default()
+        };
+        let (mut actor, mut diag_rx, mut lifecycle_rx) =
+            build_bare_actor_with_lifecycle(Arc::new(EmptyRegistry), &task_caps);
+
+        // Each handle reports a distinct deferred-candidate count so the two
+        // events can be told apart. `inject_and_drain_memory_writer` drains
+        // immediately after each injection, and nothing reaps the JoinSet, so
+        // the first handle deterministically fills the only slot (cap 1) and
+        // the second is rejected by the cap.
+        for count in [3_usize, 7_usize] {
+            let handle = tokio::spawn(async move {
+                ene_mind::MemoryWriteOutcome::Ok {
+                    deferred_candidates: count,
+                }
+            });
+            actor.inject_and_drain_memory_writer(handle);
+        }
+
+        let mut counts = Vec::new();
+        while counts.len() < 2 {
+            let ev = tokio::time::timeout(std::time::Duration::from_secs(2), lifecycle_rx.recv())
+                .await
+                .expect(
+                    "PendingCandidateAvailable must arrive for both the admitted and the rejected handle",
+                )
+                .expect("lifecycle channel still open");
+            match ev {
+                LifecycleEvent::PendingCandidateAvailable { count } => counts.push(count),
+                other => panic!("expected PendingCandidateAvailable, got {other:?}"),
+            }
+        }
+        counts.sort_unstable();
+        assert_eq!(
+            counts,
+            vec![3, 7],
+            "both the admitted and the rejected memory writer must emit their pending-candidate event"
+        );
+
+        let mut saw_rejected = false;
+        while let Ok(ev) = diag_rx.try_recv() {
+            if let DiagnosticEvent::TaskRejected { component, cap, .. } = ev
+                && component == "MemoryWriter"
+                && cap == 1
+            {
+                saw_rejected = true;
+            }
+        }
+        assert!(
+            saw_rejected,
+            "expected a TaskRejected diagnostic proving the second handle hit the cap"
+        );
+    }
+
+    /// Regression test for #398 on the `Err(e)` arm of
+    /// [`actor::consume_memory_write_outcome`]: a memory-writer `JoinHandle`
+    /// whose task panicked resolves to `Err`, and the rejected/detached
+    /// consumer must still surface the failure as a
+    /// [`DiagnosticEvent::MemoryWrite`] — with an empty `character_id`, a
+    /// `"failed"` status, and no pending/permanent counts (no store
+    /// configured).
+    #[tokio::test]
+    async fn panicked_memory_writer_still_emits_failure_diagnostic() {
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            memory_writer_cap: 0,
+            ..Default::default()
+        };
+        let (mut actor, mut diag_rx, _lifecycle_rx) =
+            build_bare_actor_with_lifecycle(Arc::new(EmptyRegistry), &task_caps);
+
+        // A panicked task makes the JoinHandle resolve `Err(JoinError)`,
+        // exercising the `Err(e)` arm of `consume_memory_write_outcome`.
+        let handle: tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome> =
+            tokio::spawn(async { panic!("boom") });
+        actor.inject_and_drain_memory_writer(handle);
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_memory_write = false;
+        while tokio::time::Instant::now() < deadline && !saw_memory_write {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), diag_rx.recv()).await {
+                Ok(Ok(DiagnosticEvent::MemoryWrite {
+                    character_id,
+                    status,
+                    message,
+                    pending_id,
+                    pending_count,
+                    permanent_count,
+                })) => {
+                    assert_eq!(character_id, "");
+                    assert_eq!(status, "failed");
+                    assert!(
+                        message.starts_with("memory writer task panicked:"),
+                        "expected a panic-derived message, got {message:?}"
+                    );
+                    assert!(pending_id.is_none());
+                    assert!(pending_count.is_none());
+                    assert!(permanent_count.is_none());
+                    saw_memory_write = true;
+                }
+                Ok(Err(e)) => panic!("diagnostic channel closed early: {e}"),
+                // An unrelated diagnostic (e.g. TaskRejected) or a poll
+                // timeout: keep scanning until the deadline.
+                Ok(Ok(_)) | Err(_) => {}
+            }
+        }
+        assert!(
+            saw_memory_write,
+            "expected a MemoryWrite diagnostic even when the writer task panicked"
+        );
     }
 
     /// End-to-end (through `EneCommand::CallTool`, not just the bare

@@ -95,8 +95,6 @@ pub async fn execute_hybrid_recall(
 
     recalled = maybe_merge_lorebook_recall(config, input, recalled).await?;
 
-    bump_recalled_memory_access(input.store, &recalled).await;
-
     Ok((plan, recalled))
 }
 
@@ -120,17 +118,23 @@ async fn maybe_merge_lorebook_recall(
     .await
 }
 
-async fn bump_recalled_memory_access(store: &dyn MemoryPort, recalled: &[RecalledMemory]) {
-    for memory in recalled {
-        let Some(id) = memory.item.id else {
-            continue;
-        };
+/// Bump access counters for the memories that were actually injected into the
+/// prompt (#345).
+///
+/// The bump is gated on `injected_ids` — the subset of recalled memories that
+/// survived budget packing and were composed into the message packet — rather
+/// than on "ranked high in search". Bumping every recalled memory used to
+/// reinforce memories that were recalled but then dropped, feeding the
+/// self-reinforcing recall loop. Call this after prompt composition with
+/// `PromptPacketMeta::injected_memory_ids`.
+pub async fn bump_injected_memory_access(store: &dyn MemoryPort, injected_ids: &[i64]) {
+    for &id in injected_ids {
         if let Err(error) = store.bump_typed_memory_access(id).await {
             tracing::warn!(
                 component = "RecallRunner",
                 memory_id = id,
                 error = %error,
-                "Failed to bump typed memory access after recall"
+                "Failed to bump typed memory access after prompt injection"
             );
         }
     }
