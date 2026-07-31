@@ -58,6 +58,19 @@ fn is_embedded_language(code: &str) -> bool {
     SUPPORTED_LANGUAGES.contains(&code)
 }
 
+/// Parses the bundled prompt metadata JSON embedded via `include_str!`.
+///
+/// Kept as a regular function (rather than inlined in the `embedded_pack!`
+/// macro) so the `#[expect]` below is attached to a normal item — `#[expect]`
+/// does not fulfil correctly when expanded from `macro_rules!`.
+#[expect(
+    clippy::expect_used,
+    reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
+)]
+fn parse_embedded_metadata(json: &str) -> RawPromptLibraryData {
+    serde_json::from_str(json).expect("bundled prompt metadata is a release-blocker if invalid")
+}
+
 /// Strongly typed prompt library layout mapping to `assets/lang/{lang}/prompts.json`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PromptLibraryData {
@@ -511,20 +524,12 @@ pub struct PromptLibrary {
 /// shipped asset stay byte-for-byte identical.
 macro_rules! embedded_pack {
     ($lang:literal) => {{
-        // The bundled JSON is checked into the repository and is part of the
-        // build artifact. A parse failure here is a release-blocker bug, not
-        // a runtime condition we can recover from.
-        #[expect(
-            clippy::expect_used,
-            reason = "bundled JSON is validated at build time; parse failure is a release-blocker"
-        )]
-        let raw: RawPromptLibraryData = serde_json::from_str(include_str!(concat!(
+        let raw: RawPromptLibraryData = parse_embedded_metadata(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/prompts/",
             $lang,
             ".json"
-        )))
-        .expect("bundled prompt metadata is a release-blocker if invalid");
+        )));
 
         let system = SystemPrompts {
             mascot_context: include_str!(concat!(
