@@ -234,6 +234,9 @@ impl EneConfig {
 
     /// Serialise and insert a sub-section into the `extra` map using the type's associated path.
     ///
+    /// Serialisation goes through [`section_to_value`] to avoid the f32→f64
+    /// widening artefact that `serde_json::to_value` introduces (#329).
+    ///
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
     /// go through [`CharacterConfig::set_section`]. The
@@ -249,9 +252,7 @@ impl EneConfig {
                 T::KEY
             )));
         }
-        let val = serde_json::to_value(section).map_err(|e| {
-            EneConfigError::GenericConfigError(format!("Failed to serialize section: {e}"))
-        })?;
+        let val = section_to_value(section)?;
         // Skip the write if the serialised value is already identical
         // to what sits at this path. This avoids redundant BTreeMap
         // mutations and prevents unnecessary dirty-flag flips.
@@ -314,6 +315,32 @@ impl EneConfig {
         }
         current.cloned()
     }
+}
+
+/// Serialises a typed config section into a [`serde_json::Value`] without the
+/// f32→f64 widening artefact that `serde_json::to_value` introduces.
+///
+/// # Why not `to_value` directly?
+///
+/// `serde_json::to_value` routes f32 through `Number::from_f32`, which stores
+/// `f as f64` internally. When the resulting `Value` tree is later written to
+/// disk, ryu formats the *widened* f64, producing 17-digit noise such as
+/// `0.6000000238418579` instead of `0.6` (#329).
+///
+/// The string round-trip avoids this: `serde_json::to_string` calls ryu's
+/// native f32 formatter (shortest representation that round-trips to the same
+/// f32), and parsing the string back yields an f64 whose shortest decimal
+/// representation is identical (e.g. `0.6f32` → `"0.6"` → `0.6f64` → `"0.6"`).
+/// The f32 value is preserved because `0.6f64 as f32 == 0.6f32`.
+pub(crate) fn section_to_value<T: serde::Serialize>(
+    section: &T,
+) -> Result<serde_json::Value, EneConfigError> {
+    let json_str = serde_json::to_string(section).map_err(|e| {
+        EneConfigError::GenericConfigError(format!("Failed to serialize section: {e}"))
+    })?;
+    serde_json::from_str(&json_str).map_err(|e| {
+        EneConfigError::GenericConfigError(format!("Failed to parse serialized section: {e}"))
+    })
 }
 
 pub(crate) fn set_nested(
@@ -1143,5 +1170,86 @@ mod tests {
             mode, 0o600,
             "tightened permissions must survive the rewrite"
         );
+    }
+
+    // ── Float precision regression tests (#329) ──────────────────────
+
+    /// A struct with f32 fields, mirroring the shape of real config sections
+    /// (e.g. `MindMemoryConfig`, `CharacterConfig`) that flow through
+    /// `set_section` → `extra` map → `to_string_pretty`.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct FloatSection {
+        weight: f32,
+        threshold: f32,
+        scale: f32,
+    }
+
+    /// `section_to_value` must not introduce the 17-digit f32→f64 widening
+    /// artefact. `0.3f32` should appear as `0.3` in the JSON output, not
+    /// `0.30000001192092896`.
+    #[test]
+    fn section_to_value_f32_shortest_representation() {
+        let section = FloatSection {
+            weight: 0.3,
+            threshold: 0.6,
+            scale: 1.0,
+        };
+        let value = section_to_value(&section).expect("serialize");
+        let json = serde_json::to_string(&value).expect("to_string");
+
+        assert!(json.contains("0.3"), "expected 0.3 in output, got: {json}");
+        assert!(
+            !json.contains("0.30000001192092896"),
+            "17-digit widening artefact found in: {json}"
+        );
+        assert!(json.contains("0.6"), "expected 0.6 in output, got: {json}");
+        assert!(
+            !json.contains("0.6000000238418579"),
+            "17-digit widening artefact found in: {json}"
+        );
+    }
+
+    /// The value must round-trip exactly: f32 → `section_to_value` → JSON
+    /// string → parse back → f32 must equal the original.
+    #[test]
+    fn section_to_value_f32_round_trips_exactly() {
+        let section = FloatSection {
+            weight: 0.3,
+            threshold: 0.6,
+            scale: 2.5,
+        };
+        let value = section_to_value(&section).expect("serialize");
+        let json = serde_json::to_string_pretty(&value).expect("to_string_pretty");
+        let recovered: FloatSection = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(recovered, section, "f32 values must survive the round-trip");
+    }
+
+    /// `EneConfig::set_section` must write clean floats into the `extra` map,
+    /// and the full `to_string_pretty` output must not contain 17-digit noise.
+    #[test]
+    fn set_section_writes_clean_floats_into_extra() {
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+        struct TestSection {
+            strength: f32,
+        }
+        impl HasConfigKey for TestSection {
+            const KEY: &'static str = "test_float";
+            const TARGET: ConfigTarget = ConfigTarget::Settings;
+            fn path() -> &'static [&'static str] {
+                &["test_float"]
+            }
+        }
+
+        let mut config = EneConfig::default();
+        let section = TestSection { strength: 0.3 };
+        config.set_section(&section).expect("set_section");
+
+        let json = serde_json::to_string_pretty(&config).expect("serialize config");
+        assert!(
+            !json.contains("0.30000001192092896"),
+            "17-digit artefact in full config output: {json}"
+        );
+        assert!(json.contains("0.3"), "expected clean 0.3 in: {json}");
     }
 }
