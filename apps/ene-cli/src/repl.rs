@@ -121,11 +121,10 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
             // host is single-flight).
             event = rx.recv() => {
                 match event {
-                    Ok(ene_runtime::EneEvent::TurnStarted { turn, origin })
-                        if origin == ene_runtime::TurnOrigin::Proactive =>
-                    {
-                        ReplStep::Proactive(turn)
-                    }
+                    Ok(ene_runtime::EneEvent::TurnStarted {
+                        turn,
+                        origin: ene_runtime::TurnOrigin::Proactive,
+                    }) => ReplStep::Proactive(turn),
                     // Turn-scoped events for the proactive turn arrive
                     // while `process_stream` owns `rx`; anything seen
                     // here is a stray event for a turn rendered
