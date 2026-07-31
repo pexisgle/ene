@@ -7,36 +7,32 @@ use crate::terminal_ui::TerminalUi;
 
 /// Processes AI events from the actor in real-time, printing them to stdout.
 ///
-/// When `active_turn` is set, turn-scoped events for other turns are ignored
-/// (single-flight hosts should only see one turn, but this keeps the stream
-/// safe if a lagged subscriber still holds an older id).
-/// Returns when the matching stream finishes or an error occurs.
+/// Renders exactly the turn identified by `active_turn`; turn-scoped events
+/// for any other turn are ignored (single-flight hosts should only see one
+/// turn, but this keeps the stream safe if a lagged subscriber still holds an
+/// older id). Returns when the matching stream finishes or an error occurs.
+///
+/// The caller owns the subscription and decides which turn to render: the
+/// REPL renders a user turn it just started, or a proactive turn it observed
+/// via `TurnStarted` (#402). Turn discovery no longer happens here.
 ///
 /// On a chat-bus lag (`RecvError::Lagged`) the stream follows the runtime's
 /// documented recovery (#403): it cancels the still-in-flight turn reported
 /// by [`ene_runtime::EneHandle::active_turn`] so the single-flight gate is
 /// released, then returns. A closed channel (`RecvError::Closed`) means the
 /// actor is gone and also returns, without a cancel.
-pub async fn process_stream(
-    rx: &mut EneEventReceiver,
-    handle: &EneHandle,
-    active_turn: Option<&TurnId>,
-) {
+pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle, active_turn: &TurnId) {
     let ui = TerminalUi::global();
-    let mut subscribed_turn = active_turn.cloned();
     loop {
         match rx.recv().await {
-            Ok(EneEvent::TurnStarted { turn, origin }) => {
-                if subscribed_turn.is_none() && origin == ene_runtime::TurnOrigin::Proactive {
-                    subscribed_turn = Some(turn);
-                }
-            }
+            // The turn is already known to the caller; nothing to do here.
+            Ok(EneEvent::TurnStarted { .. }) => {}
             Ok(EneEvent::TextDelta {
                 turn,
                 origin: _,
                 delta,
             }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 ui.write_stream(&delta);
@@ -47,7 +43,7 @@ pub async fn process_stream(
                 cues,
                 source,
             }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 for cue in cues {
@@ -76,7 +72,7 @@ pub async fn process_stream(
                 name,
                 arguments,
             }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 tracing::info!(%turn, tool = %name, arguments = %arguments, "Tool calling started");
@@ -87,13 +83,13 @@ pub async fn process_stream(
                 name,
                 result,
             }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 tracing::info!(%turn, tool = %name, result = %result, "Tool result");
             }
             Ok(EneEvent::ContextCompressed { turn, level, .. }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 tracing::info!(%turn, level = %level, "Context compressed");
@@ -103,7 +99,7 @@ pub async fn process_stream(
                 origin: _,
                 reason,
             }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 ui.end_stream();
@@ -131,7 +127,7 @@ pub async fn process_stream(
                 target,
                 description,
             }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 tracing::info!(
@@ -175,7 +171,7 @@ pub async fn process_stream(
                 request_id,
                 prompt,
             }) => {
-                if !turn_matches(subscribed_turn.as_ref(), &turn) {
+                if !turn_matches(active_turn, &turn) {
                     continue;
                 }
                 let total = prompt.items.len();
@@ -294,8 +290,24 @@ pub async fn process_stream(
     }
 }
 
-fn turn_matches(active: Option<&TurnId>, event_turn: &TurnId) -> bool {
-    // When no turn is subscribed yet, accept all events so the loop can
-    // observe a Terminal event and exit instead of hanging forever.
-    active.is_none_or(|t| t == event_turn)
+fn turn_matches(active: &TurnId, event_turn: &TurnId) -> bool {
+    active == event_turn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_matches_accepts_same_turn() {
+        let turn = TurnId::new();
+        assert!(turn_matches(&turn, &turn));
+    }
+
+    #[test]
+    fn turn_matches_rejects_other_turn() {
+        let active = TurnId::new();
+        let other = TurnId::new();
+        assert!(!turn_matches(&active, &other));
+    }
 }
