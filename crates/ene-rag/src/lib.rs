@@ -65,10 +65,6 @@
 //! weighted average with a negative-example gate (#436). Both policies live
 //! here so the memory and tool sides cannot diverge again.
 #![warn(missing_docs)]
-#![cfg_attr(
-    test,
-    expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions",)
-)]
 
 /// Decay scoring and lifecycle thresholds.
 pub mod decay;
