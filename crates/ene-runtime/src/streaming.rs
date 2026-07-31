@@ -478,7 +478,8 @@ pub(crate) async fn perform_tool_executions(
                 .ok()
                 .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
                 .unwrap_or_default();
-            execute_system_search_tool(ctx.registry, ctx.tool_rag, &query).await
+            execute_system_search_tool(ctx.registry, ctx.tool_rag, &query, ctx.session.card_name())
+                .await
         } else if background_capable.contains(&name) {
             // Try deferred execution for background-capable tools (#196).
             let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
@@ -948,6 +949,7 @@ pub(crate) async fn execute_system_search_tool(
     registry: &dyn ene_plugin_host::ToolRegistry,
     tool_rag: Option<&ToolRag>,
     query: &str,
+    character_id: &str,
 ) -> Result<String, PluginHostError> {
     if query.is_empty() {
         return Ok("Please provide a search query.".to_string());
@@ -966,7 +968,8 @@ pub(crate) async fn execute_system_search_tool(
                 tracing::warn!(component = "ToolRag", "ensure_index timed out");
             }
         }
-        if let Ok(tools) = tokio::time::timeout(rag_timeout, rag.select(query)).await {
+        if let Ok(tools) = tokio::time::timeout(rag_timeout, rag.select(query, character_id)).await
+        {
             tools
         } else {
             tracing::warn!(

@@ -437,7 +437,7 @@ impl MemoryStore {
         &self,
         character_id: &str,
     ) -> Result<Vec<String>, EneMemoryError> {
-        use sea_orm::{EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+        use sea_orm::{EntityTrait, QueryFilter, QueryOrder};
 
         let models = entities::typed_memories::Entity::find()
             .filter(entities::typed_memories::Column::CharacterId.eq(character_id))

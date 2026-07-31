@@ -1584,6 +1584,7 @@ impl TurnActor {
                 let registry = self.registry.clone();
                 let tool_rag = self.tool_rag.clone();
                 let session_id = self.session.memory.session_id.to_string();
+                let card_name = self.session.card_name().to_string();
                 self.call_tool_tasks.spawn(async move {
                     let context = turn.as_ref().map(|turn| ene_plugin_proto::CallContext {
                         conversation_id: session_id,
@@ -1598,6 +1599,7 @@ impl TurnActor {
                             registry.as_ref(),
                             tool_rag.as_deref(),
                             &query,
+                            &card_name,
                         )
                         .await
                         .map_err(EneRuntimeError::from)
