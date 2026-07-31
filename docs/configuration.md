@@ -163,8 +163,11 @@ a cap is reached, admission is rejected (fails fast) rather than queued
 without bound — `CallTool`/`CancelDeferredTool` and `SearchTools` calls get
 back an actionable "busy" error; the post-turn classifier, memory-writer,
 and deferred-tool-poller admission points have no reply channel of their
-own, so a rejection there only shows up as a `TaskRejected` diagnostic
-event:
+own, so a rejection there shows up as a `TaskRejected` diagnostic event.
+The memory-writer is a partial exception: its write already runs detached,
+so even a rejected admission still consumes the outcome and fires the usual
+`PendingCandidateAvailable` / `MemoryWrite` events — only panic supervision
+of that consumer is lost (#398):
 
 ```json
 {
