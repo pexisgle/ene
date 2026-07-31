@@ -29,6 +29,14 @@ use sea_orm::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
+/// Maximum number of operations accepted in a single [`DbRequest::Batch`].
+///
+/// The server holds the `SQLite` write lock for the whole batch, and each
+/// operation carries a full [`Row`](crate::Row) of values, so an unbounded
+/// batch would let a plugin pin the write lock and memory for an arbitrarily
+/// long time. Requests above this limit are rejected up front.
+const MAX_BATCH_OPS: usize = 10_000;
+
 /// Errors from the DB IPC server.
 #[derive(Debug, thiserror::Error)]
 pub enum DbServerError {
@@ -55,6 +63,19 @@ pub enum DbServerError {
         /// Column name.
         column: String,
     },
+    /// An operation inside a [`DbRequest::Batch`] failed at `index`.
+    ///
+    /// Wraps the underlying error so the failing operation index can be
+    /// reported in the *message* while the wire error code of the underlying
+    /// error is preserved — clients that match on the typed error they would
+    /// get from a standalone request still catch it.
+    #[error("batch op {index}: {source}")]
+    BatchOp {
+        /// Index of the failing operation within the batch.
+        index: usize,
+        /// The underlying error.
+        source: Box<DbServerError>,
+    },
     /// An internal server error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -62,7 +83,16 @@ pub enum DbServerError {
 
 impl DbServerError {
     fn to_error_response(&self) -> DbResponse {
-        let (code, message) = match self {
+        let (code, message) = self.error_parts();
+        DbResponse::Error { code, message }
+    }
+
+    /// Splits this error into its wire [`DbErrorCode`] and human-readable
+    /// message, recursing through [`Self::BatchOp`] so the batch operation
+    /// index is prefixed to the message without corrupting any structured
+    /// fields (e.g. `UnknownColumn`'s `table`).
+    fn error_parts(&self) -> (DbErrorCode, String) {
+        match self {
             Self::PermissionDenied(msg) => (DbErrorCode::PermissionDenied, msg.clone()),
             Self::UnknownTable(msg) => (DbErrorCode::UnknownTable, msg.clone()),
             Self::UnknownColumn { table, column } => (
@@ -73,28 +103,10 @@ impl DbServerError {
             Self::Json(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Db(e) => (DbErrorCode::Internal, e.to_string()),
             Self::Internal(msg) => (DbErrorCode::Internal, msg.clone()),
-        };
-        DbResponse::Error { code, message }
-    }
-
-    /// Returns this error with the failing batch operation index prefixed to
-    /// its message, preserving the wire error code of every variant, so a
-    /// rejected [`DbRequest::Batch`] reports which operation aborted it while
-    /// the client still matches on the same typed error it would get from a
-    /// standalone request.
-    fn at_batch_op(self, idx: usize) -> Self {
-        let prefix = format!("batch op {idx}");
-        match self {
-            Self::PermissionDenied(msg) => Self::PermissionDenied(format!("{prefix}: {msg}")),
-            Self::UnknownTable(msg) => Self::UnknownTable(format!("{prefix}: {msg}")),
-            Self::UnknownColumn { table, column } => Self::UnknownColumn {
-                table: format!("{prefix}: {table}"),
-                column,
-            },
-            Self::Io(e) => Self::Internal(format!("{prefix}: IO error: {e}")),
-            Self::Json(e) => Self::Internal(format!("{prefix}: JSON error: {e}")),
-            Self::Db(e) => Self::Internal(format!("{prefix}: database error: {e}")),
-            Self::Internal(msg) => Self::Internal(format!("{prefix}: {msg}")),
+            Self::BatchOp { index, source } => {
+                let (code, message) = source.error_parts();
+                (code, format!("batch op {index}: {message}"))
+            }
         }
     }
 }
@@ -555,9 +567,20 @@ impl DbIpcServer {
         last_rowid: &Arc<std::sync::Mutex<Option<i64>>>,
         ops: Vec<DbWriteOp>,
     ) -> Result<Vec<DbBatchOpResult>, DbServerError> {
+        if ops.len() > MAX_BATCH_OPS {
+            return Err(DbServerError::Internal(format!(
+                "batch too large: {} operations exceeds the limit of {MAX_BATCH_OPS}",
+                ops.len()
+            )));
+        }
+
         for (idx, op) in ops.iter().enumerate() {
-            Self::validate_write_op(declared_tables, declared_columns, op)
-                .map_err(|e| e.at_batch_op(idx))?;
+            Self::validate_write_op(declared_tables, declared_columns, op).map_err(|e| {
+                DbServerError::BatchOp {
+                    index: idx,
+                    source: Box::new(e),
+                }
+            })?;
         }
 
         let txn = db.begin().await.map_err(DbServerError::Db)?;
@@ -589,8 +612,18 @@ impl DbIpcServer {
                 Err(e) => {
                     // Explicit rollback for a prompt, deterministic release of
                     // the write lock; dropping `txn` would roll back too.
-                    txn.rollback().await.map_err(DbServerError::Db)?;
-                    return Err(e.at_batch_op(idx));
+                    if let Err(rollback_err) = txn.rollback().await {
+                        // Surface the rollback failure but keep the original
+                        // statement error as the primary one.
+                        error!(
+                            error = %rollback_err,
+                            "failed to roll back batch transaction after statement error"
+                        );
+                    }
+                    return Err(DbServerError::BatchOp {
+                        index: idx,
+                        source: Box::new(e),
+                    });
                 }
             }
         }
@@ -603,7 +636,12 @@ impl DbIpcServer {
         // conflict-update path performs no insert, so its `last_insert_id()`
         // would be stale). Record the batch's final insert rowid so the tool's
         // view stays consistent.
-        if let Ok(mut guard) = last_rowid.lock() {
+        {
+            // A poisoned mutex means a panic happened while holding the lock;
+            // recover the value rather than silently skipping the update.
+            let mut guard = last_rowid
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for res in results.iter().rev() {
                 if let DbBatchOpResult::Insert { rowid } = res {
                     *guard = Some(*rowid);
@@ -1895,6 +1933,58 @@ mod tests {
             ene_plugin_db::DbResponse::Batch { results } => assert!(results.is_empty()),
             other => panic!("expected Batch, got {other:?}"),
         }
+    }
+
+    /// A batch larger than [`MAX_BATCH_OPS`] is rejected up front so a plugin
+    /// cannot pin the write lock and memory for an arbitrarily long time.
+    #[tokio::test]
+    async fn oversized_batch_is_rejected() {
+        let (db, mut declared_tables, mut declared_columns, last_rowid) =
+            setup_batch_fixture().await;
+
+        let ops = vec![
+            ene_plugin_db::DbWriteOp::Insert {
+                table: "fs_test".to_string(),
+                row: std::collections::BTreeMap::from([(
+                    "name".to_string(),
+                    ene_plugin_db::DbValue::Text("x".to_string()),
+                )]),
+            };
+            MAX_BATCH_OPS + 1
+        ];
+
+        let resp = DbIpcServer::handle_request(
+            &db,
+            "fs",
+            "fs_",
+            &mut declared_tables,
+            &mut declared_columns,
+            &last_rowid,
+            ene_plugin_db::DbRequest::Batch { ops },
+        )
+        .await;
+        match resp {
+            ene_plugin_db::DbResponse::Error { code, message } => {
+                assert_eq!(code, ene_plugin_db::DbErrorCode::Internal);
+                assert!(
+                    message.contains("batch too large"),
+                    "expected size-limit error, got: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+
+        // Nothing was persisted.
+        assert_eq!(
+            count_test_rows(
+                &db,
+                &mut declared_tables,
+                &mut declared_columns,
+                &last_rowid
+            )
+            .await,
+            0
+        );
     }
 
     /// A batch op referencing an undeclared column preserves the structured

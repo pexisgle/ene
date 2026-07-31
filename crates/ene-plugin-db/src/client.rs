@@ -356,6 +356,11 @@ impl DbClient {
     /// can never be observed. Use this whenever several writes must stand or
     /// fall together (for example, recording a multi-row undo entry) instead
     /// of issuing the writes one request at a time.
+    ///
+    /// The server holds its write lock for the duration of the batch and
+    /// rejects batches larger than its operation limit (10,000) up front, so
+    /// keep batches bounded: split large workloads into multiple `batch`
+    /// calls rather than sending one giant list.
     pub async fn batch(&mut self, ops: Vec<DbWriteOp>) -> Result<Vec<DbBatchOpResult>, DbError> {
         let resp = Self::check_error(self.send_request(&DbRequest::Batch { ops }).await?)?;
         match resp {

@@ -12,6 +12,26 @@
 //! single `SQLite` transaction, committing all of them or rolling all of them
 //! back, so a plugin never persists a half-applied update.
 //!
+//! ## Wire compatibility
+//!
+//! The DB IPC channel carries no version field — it is tied to the plugin
+//! protocol version and the host/plugin pair shipped by the same release.
+//! [`DbRequest::Batch`] is an *additive* extension to the wire protocol:
+//!
+//! - **Old host, new plugin**: an old host does not know the `Batch` variant
+//!   and rejects the request at the JSON decode step, closing the connection.
+//!   The plugin sees a transport error. Because plugin binaries and the core
+//!   are released together, this only occurs when a plugin from a newer
+//!   release is run against an older core, which is not a supported
+//!   configuration.
+//! - **New host, old plugin**: an old plugin never sends `Batch`, and every
+//!   pre-existing request/response shape is unchanged, so old plugins keep
+//!   working against a newer host.
+//!
+//! Do not extend the request or response enums with *breaking* changes
+//! (removing or renaming variants); prefer additive variants plus, where a
+//! field must become optional, `#[serde(default)]`.
+//!
 //! ## Quick Start
 //!
 //! ```rust,no_run
