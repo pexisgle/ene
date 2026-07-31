@@ -805,6 +805,7 @@ mod tests {
                     supports_streaming: true,
                     supports_vision: true,
                     concurrency: crate::capabilities::ConcurrencyHint::default(),
+                    context_window: None,
                 }],
                 tts_providers: vec![],
                 stt_providers: vec![],

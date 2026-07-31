@@ -500,6 +500,35 @@ impl AiConfig {
         })
     }
 
+    /// Compute the effective context-window budget for a task (#364).
+    ///
+    /// `provider_advertised` is the window the backend reports for itself —
+    /// [`ene_plugin_proto::LlmProviderSpec::context_window`] for a plugin
+    /// provider, or `Some(LocalModelDef.context_size)` for a local model. It
+    /// is combined with any `ai.providers.<name>.context_window` override on
+    /// the task's provider (as `min`, so config can only shrink the model's
+    /// stated limit) and the task's `max_tokens` response reserve, via
+    /// [`crate::context_window::effective_window`]. The safety margin uses
+    /// the heuristic default; callers with measured usage (#365) can recompute
+    /// with a zero margin.
+    #[must_use]
+    pub fn effective_window_for_task(
+        &self,
+        task: &TaskRef,
+        provider_advertised: Option<u32>,
+    ) -> crate::context_window::EffectiveWindow {
+        let user_configured = self
+            .providers
+            .get(&task.provider)
+            .and_then(|def| def.context_window);
+        crate::context_window::effective_window(
+            provider_advertised,
+            user_configured,
+            task.max_tokens,
+            crate::context_window::DEFAULT_SAFETY_MARGIN_FRACTION,
+        )
+    }
+
     /// Resolve chat settings for an optional task (`None` → [`AiConfig::tasks`] chat).
     pub fn resolve_chat_task(
         &self,
@@ -879,5 +908,61 @@ mod tests {
             i,
             SettingsIssue::SuspiciousKind { kind, .. } if kind == "anthroic"
         )));
+    }
+
+    #[test]
+    fn effective_window_for_task_honors_advertised_and_reserve() {
+        let mut cfg = AiConfig::default();
+        cfg.providers.insert(
+            "default".to_string(),
+            AiProviderDef {
+                kind: "anthropic".to_string(),
+                ..AiProviderDef::default()
+            },
+        );
+        let task = TaskRef {
+            provider: "default".to_string(),
+            max_tokens: Some(4_096),
+            ..TaskRef::default()
+        };
+        let w = cfg.effective_window_for_task(&task, Some(200_000));
+        assert_eq!(w.effective, 200_000);
+        assert_eq!(w.response_reserve, 4_096);
+        assert_eq!(
+            w.safety_margin,
+            200_000 / crate::context_window::DEFAULT_SAFETY_MARGIN_FRACTION
+        );
+    }
+
+    #[test]
+    fn effective_window_for_task_applies_config_override() {
+        let mut cfg = AiConfig::default();
+        cfg.providers.insert(
+            "default".to_string(),
+            AiProviderDef {
+                kind: "anthropic".to_string(),
+                context_window: Some(32_000),
+                ..AiProviderDef::default()
+            },
+        );
+        let task = TaskRef {
+            provider: "default".to_string(),
+            ..TaskRef::default()
+        };
+        // Operator override (32k) caps the advertised 200k window.
+        let w = cfg.effective_window_for_task(&task, Some(200_000));
+        assert_eq!(w.effective, 32_000);
+    }
+
+    #[test]
+    fn effective_window_for_task_defaults_when_unadvertised() {
+        let cfg = AiConfig::default();
+        let task = TaskRef {
+            provider: "default".to_string(),
+            max_tokens: None,
+            ..TaskRef::default()
+        };
+        let w = cfg.effective_window_for_task(&task, None);
+        assert_eq!(w.effective, crate::context_window::DEFAULT_CONTEXT_WINDOW);
     }
 }

@@ -73,6 +73,15 @@ pub struct AiProviderDef {
     /// API key configuration.
     #[serde(default)]
     pub api_key: ApiKeyConfig,
+    /// Explicit context-window override in tokens (#364).
+    ///
+    /// Caps the window a provider advertises (`LlmProviderSpec.context_window`,
+    /// or `LocalModelDef.context_size` for local models): the effective window
+    /// is `min(advertised, this)`, so an operator can run a large-window model
+    /// on a smaller budget but never exceed the model's stated limit. `None`
+    /// (the default) defers entirely to whatever the provider advertises.
+    #[serde(default)]
+    pub context_window: Option<u32>,
     /// Provider-specific options not covered by the typed fields.
     #[serde(flatten)]
     #[schemars(skip)]
@@ -93,6 +102,7 @@ impl Default for AiProviderDef {
             kind: "openai_compatible".to_string(),
             base_url: default_string(),
             api_key: ApiKeyConfig::default(),
+            context_window: None,
             extra: serde_json::Map::new(),
         }
     }

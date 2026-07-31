@@ -191,6 +191,7 @@ mod tests {
                 inline: "sk-test-123".to_string(),
                 env: String::new(),
             },
+            context_window: None,
             extra: serde_json::Map::new(),
         }
     }

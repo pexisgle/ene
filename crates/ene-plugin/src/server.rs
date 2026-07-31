@@ -1103,6 +1103,7 @@ mod tests {
                 supports_streaming: true,
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
+                context_window: None,
             }]
         }
 
@@ -1154,6 +1155,7 @@ mod tests {
                 supports_streaming: true,
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
+                context_window: None,
             }]
         }
 
