@@ -151,6 +151,23 @@ bound queue (bounded by their own timeout) rather than fanning out to the
 plugin. Chat *streams* (`CreateChatStream`) are the exception: they bypass this
 bound and are not counted against it.
 
+When a tool requests permission or interactive user input, the runtime waits
+for the consumer (desktop UI, CLI, or an automation) to answer — but never
+indefinitely. `permission_prompt_timeout_ms` (default `300000`, 5 minutes) and
+`user_input_prompt_timeout_ms` (default `600000`, 10 minutes) bound those
+waits, and each wait is also selected against the turn's cancel token. If a
+consumer never responds (a dropped event, a headless consumer, a closed
+window), the prompt fails safe — treated as *denied* (permission) or
+*cancelled* (user input) — so the turn still reaches `Terminal` and the turn
+gate is released instead of leaving every later `run()` stuck on
+`RunError::Busy`. The input timeout defaults higher because typing an answer
+takes longer than clicking approve/deny.
+
+Setting either timeout to `0` does **not** disable the wait: the prompt times
+out immediately (fail-safe denied/cancelled unless the consumer has already
+answered). Use a large value if the consumer legitimately needs a long time
+to answer.
+
 ### `tools.*` — Tool-Execution Runtime Behavior
 
 Distinct from `plugins.*` (which manages the plugin *process*/IPC layer):

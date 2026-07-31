@@ -101,6 +101,16 @@ pub(crate) struct ToolExecutionContext<'a> {
     pub pending_user_inputs: &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
     /// Per-tool call timeout in milliseconds.
     pub timeout_ms: u64,
+    /// How long to wait for a consumer to answer a permission prompt before
+    /// failing safe (treated as denied) — see [`await_permission_decision`].
+    pub permission_prompt_timeout_ms: u64,
+    /// How long to wait for a consumer to answer a user-input prompt before
+    /// failing safe (treated as cancelled) — see [`await_user_input_response`].
+    pub user_input_prompt_timeout_ms: u64,
+    /// The turn's cancellation token. The prompt waits select against it
+    /// directly so a `Cancel` resolves them immediately instead of relying on
+    /// the actor's `drain_pending()` dropping the oneshot sender (#401).
+    pub cancel_token: CancellationToken,
     /// Maximum characters for tool result summaries.
     pub max_summary_chars: usize,
     /// Optional memory store for audit logging.
@@ -120,6 +130,115 @@ pub(crate) struct ToolExecutionOutput {
     pub messages: Vec<LlmMessage>,
     /// Bounded summaries for cognitive memory grounding.
     pub summaries: Vec<ToolResultSummary>,
+}
+
+/// Waits for a consumer's permission decision, bounded and fail-safe (#401).
+///
+/// The wait resolves on the first of:
+/// - the turn's cancel token firing (a `Cancel` was issued),
+/// - the `permission_prompt_timeout_ms` deadline elapsing, or
+/// - the oneshot sender being dropped (the actor's `drain_pending()` cleared
+///   the pending map, e.g. on shutdown).
+///
+/// Any of these — or a genuine `Deny` — yields `None`, which the caller treats
+/// as "not approved" (fail-closed: the tool call is denied and the turn still
+/// reaches `Terminal`, releasing the turn gate). A timeout is logged so an
+/// unresponsive consumer is observable rather than a silent denial. Only an
+/// explicit `AllowOnce` / `AllowSession` yields `Some(decision)`.
+pub(crate) async fn await_permission_decision(
+    rx: oneshot::Receiver<PermissionDecision>,
+    cancel_token: &CancellationToken,
+    timeout_ms: u64,
+    request_id: &RequestId,
+) -> Option<PermissionDecision> {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    // `biased` with `cancel → rx → sleep` ordering: a cancel always beats a
+    // simultaneously-ready answer, and a genuine answer beats a deadline that
+    // becomes ready in the same poll — the real decision is never silently
+    // dropped on a tie with the timeout.
+    tokio::select! {
+        biased;
+        () = cancel_token.cancelled() => {
+            tracing::debug!(
+                component = "streaming",
+                request_id = %request_id,
+                "permission prompt cancelled by turn cancel"
+            );
+            None
+        }
+        res = rx => if let Ok(decision) = res {
+            Some(decision)
+        } else {
+            tracing::debug!(
+                component = "streaming",
+                request_id = %request_id,
+                "permission decision sender dropped; treating as denied"
+            );
+            None
+        },
+        () = tokio::time::sleep(timeout) => {
+            tracing::warn!(
+                component = "streaming",
+                request_id = %request_id,
+                timeout_ms,
+                "permission prompt timed out with no consumer response; treating as denied (#401)"
+            );
+            None
+        }
+    }
+}
+
+/// Waits for a consumer's interactive input response, bounded and fail-safe (#401).
+///
+/// Mirrors [`await_permission_decision`]: the wait is selected against the
+/// turn's cancel token and a `user_input_prompt_timeout_ms` deadline. A cancel,
+/// timeout, dropped sender, or explicit [`UserInputResponse::Cancel`] yields
+/// `None` (the caller reports the prompt as cancelled); only a genuine
+/// [`UserInputResponse::Multi`] answer yields `Some(answers)`. A timeout is
+/// logged so an unresponsive consumer is observable.
+pub(crate) async fn await_user_input_response(
+    rx: oneshot::Receiver<UserInputResponse>,
+    cancel_token: &CancellationToken,
+    timeout_ms: u64,
+    request_id: &RequestId,
+) -> Option<Vec<MultiAnswer>> {
+    let timeout = std::time::Duration::from_millis(timeout_ms);
+    // `biased` with `cancel → rx → sleep` ordering: a cancel always beats a
+    // simultaneously-ready answer, and a genuine answer beats a deadline that
+    // becomes ready in the same poll — the real answer is never silently
+    // dropped on a tie with the timeout.
+    tokio::select! {
+        biased;
+        () = cancel_token.cancelled() => {
+            tracing::debug!(
+                component = "streaming",
+                request_id = %request_id,
+                "user-input prompt cancelled by turn cancel"
+            );
+            None
+        }
+        res = rx => match res {
+            Ok(UserInputResponse::Multi(answers)) => Some(answers),
+            Ok(UserInputResponse::Cancel) => None,
+            Err(_) => {
+                tracing::debug!(
+                    component = "streaming",
+                    request_id = %request_id,
+                    "user-input response sender dropped; treating as cancelled"
+                );
+                None
+            }
+        },
+        () = tokio::time::sleep(timeout) => {
+            tracing::warn!(
+                component = "streaming",
+                request_id = %request_id,
+                timeout_ms,
+                "user-input prompt timed out with no consumer response; treating as cancelled (#401)"
+            );
+            None
+        }
+    }
 }
 
 /// Result of a cognitive streaming run (session snapshot + terminal reason).
@@ -217,6 +336,9 @@ pub struct StreamContext {
         mpsc::UnboundedSender<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
     /// Sender for deferred tool tasks accepted during tool execution (#196).
     pub deferred_tool_tx: mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
+    /// Sender for auxiliary stream-task `JoinHandle`s (e.g. the TTS synthesis
+    /// worker) that the actor must be able to abort on shutdown (#401).
+    pub aux_task_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Optional TTS provider for streaming audio synthesis.
     pub tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
     /// Shared buffer of streamed assistant text deltas, updated live by the
@@ -455,8 +577,19 @@ pub(crate) async fn perform_tool_executions(
                     }));
 
                     let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                    match decide_rx.await {
-                        Ok(PermissionDecision::AllowOnce) => {
+                    // Bounded, fail-safe wait: a consumer that never answers
+                    // (lost event, headless consumer) can no longer hold the
+                    // turn open forever — the wait times out and is selected
+                    // against the cancel token (#401).
+                    match await_permission_decision(
+                        decide_rx,
+                        &ctx.cancel_token,
+                        ctx.permission_prompt_timeout_ms,
+                        &req_id,
+                    )
+                    .await
+                    {
+                        Some(PermissionDecision::AllowOnce) => {
                             audit_decision = ene_store::AuditDecision::AllowOnce;
                             // Route the approval to the plugin that owns the
                             // tool which raised the request, so an unrelated
@@ -482,7 +615,7 @@ pub(crate) async fn perform_tool_executions(
                                 |r| r.map(|r| r.text_for_llm()),
                             );
                         }
-                        Ok(PermissionDecision::AllowSession) => {
+                        Some(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
                             ctx.registry.allow_pattern(action, target).await;
                             // Route the approval to the owning plugin (#434);
@@ -535,7 +668,9 @@ pub(crate) async fn perform_tool_executions(
                                 |r| r.map(|r| r.text_for_llm()),
                             );
                         }
-                        _ => {
+                        // Denied, timed out, cancelled, or the sender was
+                        // dropped: fail closed.
+                        Some(PermissionDecision::Deny) | None => {
                             audit_decision = ene_store::AuditDecision::Denied;
                             result = Err(PluginHostError::Protocol(ToolError::permission_denied(
                                 "Permission denied by user".to_string(),
@@ -569,36 +704,42 @@ pub(crate) async fn perform_tool_executions(
                         prompt: prompt.clone(),
                     }));
 
-                    match resp_rx.await {
-                        Ok(UserInputResponse::Multi(answers)) => {
-                            let new_args = inject_user_answers(&args, &answers);
-                            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                            result = tokio::time::timeout(
-                                tool_timeout,
-                                ctx.registry.call_tool(&name, &new_args, Some(&call_ctx)),
-                            )
-                            .await
-                            .map_or_else(
-                                |_| {
-                                    Err(PluginHostError::ExecutionFailed {
-                                        message: format!(
-                                            "Tool '{}' timed out after {:.2} seconds",
-                                            name,
-                                            tool_timeout.as_secs_f64()
-                                        ),
-                                    })
-                                },
-                                |r| r.map(|r| r.text_for_llm()),
-                            );
-                        }
-                        Ok(UserInputResponse::Cancel) | Err(_) => {
-                            result = Err(PluginHostError::ExecutionFailed {
-                                message: "User cancelled the question".to_string(),
-                            });
-                            // Decision resolved; no further
-                            // pending rounds needed.
-                            break;
-                        }
+                    // Bounded, fail-safe wait, mirroring the permission branch
+                    // above (#401).
+                    if let Some(answers) = await_user_input_response(
+                        resp_rx,
+                        &ctx.cancel_token,
+                        ctx.user_input_prompt_timeout_ms,
+                        &req_id,
+                    )
+                    .await
+                    {
+                        let new_args = inject_user_answers(&args, &answers);
+                        let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+                        result = tokio::time::timeout(
+                            tool_timeout,
+                            ctx.registry.call_tool(&name, &new_args, Some(&call_ctx)),
+                        )
+                        .await
+                        .map_or_else(
+                            |_| {
+                                Err(PluginHostError::ExecutionFailed {
+                                    message: format!(
+                                        "Tool '{}' timed out after {:.2} seconds",
+                                        name,
+                                        tool_timeout.as_secs_f64()
+                                    ),
+                                })
+                            },
+                            |r| r.map(|r| r.text_for_llm()),
+                        );
+                    } else {
+                        result = Err(PluginHostError::ExecutionFailed {
+                            message: "User cancelled the question".to_string(),
+                        });
+                        // Decision resolved; no further
+                        // pending rounds needed.
+                        break;
                     }
                 }
                 _ => break, // Ok or other Err; stop resolving.
@@ -972,6 +1113,9 @@ mod tests {
                 pending_permissions: &pending_permissions,
                 pending_user_inputs: &pending_user_inputs,
                 timeout_ms: 1000,
+                permission_prompt_timeout_ms: 60_000,
+                user_input_prompt_timeout_ms: 60_000,
+                cancel_token: CancellationToken::new(),
                 max_summary_chars: 100,
                 audit_store: None,
                 permission_scopes: &Arc::new(Mutex::new(Vec::new())),
@@ -1100,6 +1244,9 @@ mod tests {
                 pending_permissions: &pending_permissions,
                 pending_user_inputs: &pending_user_inputs,
                 timeout_ms: 5_000,
+                permission_prompt_timeout_ms: 60_000,
+                user_input_prompt_timeout_ms: 60_000,
+                cancel_token: CancellationToken::new(),
                 max_summary_chars: 10,
                 audit_store: None,
                 permission_scopes: &scopes,
@@ -1227,6 +1374,9 @@ mod tests {
             pending_permissions: &pending_permissions,
             pending_user_inputs: &pending_user_inputs,
             timeout_ms: 5_000,
+            permission_prompt_timeout_ms: 60_000,
+            user_input_prompt_timeout_ms: 60_000,
+            cancel_token: CancellationToken::new(),
             max_summary_chars: 500,
             audit_store: None,
             permission_scopes: &scopes,
@@ -1382,6 +1532,9 @@ mod tests {
             pending_permissions: &pending_permissions,
             pending_user_inputs: &pending_user_inputs,
             timeout_ms: 5_000,
+            permission_prompt_timeout_ms: 60_000,
+            user_input_prompt_timeout_ms: 60_000,
+            cancel_token: CancellationToken::new(),
             max_summary_chars: 500,
             audit_store: None,
             permission_scopes: &scopes,
@@ -1445,5 +1598,484 @@ mod tests {
             }
         }
         assert_eq!(got, 1, "expected exactly one Terminal event");
+    }
+
+    /// Builds a tool-execution context for the #401 regression tests.
+    /// `permission_prompt_timeout_ms` / `user_input_prompt_timeout_ms` are
+    /// kept tiny so the bounded waits fire quickly; `cancel_token` lets a
+    /// test cancel mid-wait.
+    fn prompt_wait_ctx<'a>(
+        registry: &'a dyn ene_plugin_host::ToolRegistry,
+        event_tx: &'a tokio::sync::broadcast::Sender<EneEvent>,
+        turn: &'a crate::types::TurnId,
+        pending_permissions: &'a Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        >,
+        pending_user_inputs: &'a Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        >,
+        permission_scopes: &'a Arc<tokio::sync::Mutex<Vec<PermissionScope>>>,
+        undo_stack: &'a Arc<tokio::sync::Mutex<crate::undo::UndoStack>>,
+        deferred_tool_tx: &'a tokio::sync::mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
+        cancel_token: CancellationToken,
+    ) -> ToolExecutionContext<'a> {
+        ToolExecutionContext {
+            registry,
+            tool_rag: None,
+            session_id: "session-1",
+            event_tx,
+            turn,
+            origin: TurnOrigin::User,
+            pending_permissions,
+            pending_user_inputs,
+            timeout_ms: 5_000,
+            permission_prompt_timeout_ms: 100,
+            user_input_prompt_timeout_ms: 100,
+            cancel_token,
+            max_summary_chars: 500,
+            audit_store: None,
+            permission_scopes,
+            undo_stack,
+            deferred_tool_tx,
+        }
+    }
+
+    /// Regression test for #401: a permission prompt whose consumer never
+    /// responds must not hang the executor. Before the fix, `decide_rx.await`
+    /// had no timeout and was not selected against the cancel token, so the
+    /// turn never reached `Terminal` and the turn gate stayed held forever
+    /// (later `run()` calls returning `RunError::Busy`). The bounded wait must
+    /// fail safe: treat the unanswered prompt as denied, complete the round,
+    /// and never re-invoke the tool.
+    #[tokio::test]
+    async fn unresponsive_permission_consumer_terminates_via_timeout() {
+        use ene_ai::LlmToolCall;
+        use ene_plugin_host::ToolRegistry;
+        use ene_plugin_proto::ToolError;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysRequiresPermission {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ToolRegistry for AlwaysRequiresPermission {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+                Vec::new()
+            }
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
+            ) -> Result<ToolResult, PluginHostError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(PluginHostError::Protocol(ToolError::PermissionRequired {
+                    request_id: "req-timeout".to_string(),
+                    action: "fs.delete".to_string(),
+                    target: "/tmp/x".to_string(),
+                    description: "delete file".to_string(),
+                }))
+            }
+            async fn approve_permission(&self, _request_id: &str) {}
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = AlwaysRequiresPermission {
+            calls: calls.clone(),
+        };
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_permissions: Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let pending_user_inputs: Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let scopes = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let undo_stack = Arc::new(tokio::sync::Mutex::new(crate::undo::UndoStack::new(8)));
+        let turn = crate::types::TurnId::new();
+
+        let tool_calls = vec![LlmToolCall {
+            id: "call-1".to_string(),
+            name: "fs.delete".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        // Deliberately NO consumer: nobody answers the permission prompt.
+        let exec_ctx = prompt_wait_ctx(
+            &registry,
+            &event_tx,
+            &turn,
+            &pending_permissions,
+            &pending_user_inputs,
+            &scopes,
+            &undo_stack,
+            &deferred_tool_tx,
+            CancellationToken::new(),
+        );
+        let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
+
+        // Before the fix this would hang forever; the outer timeout turns a
+        // regression into a test failure rather than a stuck suite.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
+            .await
+            .expect("executor hung: unanswered permission prompt was not bounded (#401)");
+        let output = result.expect("executor returned error");
+
+        // The tool was invoked exactly once; the unanswered prompt was denied
+        // (fail-safe) rather than approved-and-retried.
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(output.summaries.len(), 1);
+        assert!(!output.summaries[0].success);
+        assert!(
+            output.summaries[0].summary.contains("Permission denied"),
+            "expected a denial surfaced to the LLM, got: {:?}",
+            output.summaries[0].summary
+        );
+    }
+
+    /// Regression test for #401: cancelling the turn while a permission prompt
+    /// is pending must resolve the wait immediately (via the cancel token),
+    /// treating the prompt as denied, rather than blocking until the timeout.
+    #[tokio::test]
+    async fn cancel_during_permission_wait_denies_prompt() {
+        use ene_ai::LlmToolCall;
+        use ene_plugin_host::ToolRegistry;
+        use ene_plugin_proto::ToolError;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysRequiresPermission {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ToolRegistry for AlwaysRequiresPermission {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+                Vec::new()
+            }
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
+            ) -> Result<ToolResult, PluginHostError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(PluginHostError::Protocol(ToolError::PermissionRequired {
+                    request_id: "req-cancel".to_string(),
+                    action: "fs.delete".to_string(),
+                    target: "/tmp/x".to_string(),
+                    description: "delete file".to_string(),
+                }))
+            }
+            async fn approve_permission(&self, _request_id: &str) {}
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = AlwaysRequiresPermission {
+            calls: calls.clone(),
+        };
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_permissions: Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let pending_user_inputs: Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let scopes = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let undo_stack = Arc::new(tokio::sync::Mutex::new(crate::undo::UndoStack::new(8)));
+        let turn = crate::types::TurnId::new();
+
+        let tool_calls = vec![LlmToolCall {
+            id: "call-1".to_string(),
+            name: "fs.delete".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        let cancel_token = CancellationToken::new();
+        let exec_ctx = prompt_wait_ctx(
+            &registry,
+            &event_tx,
+            &turn,
+            &pending_permissions,
+            &pending_user_inputs,
+            &scopes,
+            &undo_stack,
+            &deferred_tool_tx,
+            cancel_token.clone(),
+        );
+        let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
+
+        // Cancel shortly after the prompt is raised; the wait must observe the
+        // token well before the (long) timeout would fire.
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_token.cancel();
+        });
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
+            .await
+            .expect("executor hung: cancel was not observed by the permission wait (#401)");
+        drop(canceller.await);
+        let output = result.expect("executor returned error");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!output.summaries[0].success);
+        assert!(output.summaries[0].summary.contains("Permission denied"));
+    }
+
+    /// Regression test for #401: an unanswered interactive user-input prompt
+    /// must time out (fail safe as "cancelled") instead of hanging the turn.
+    #[tokio::test]
+    async fn unresponsive_user_input_consumer_terminates_via_timeout() {
+        use ene_ai::LlmToolCall;
+        use ene_plugin_host::ToolRegistry;
+        use ene_plugin_proto::ToolError;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysRequiresInput {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ToolRegistry for AlwaysRequiresInput {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+                Vec::new()
+            }
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
+            ) -> Result<ToolResult, PluginHostError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(PluginHostError::Protocol(ToolError::UserInputRequired {
+                    request_id: "input-timeout".to_string(),
+                    prompt: ene_plugin_proto::UserInputPrompt::new(vec![
+                        ene_plugin_proto::QuestionItem {
+                            question: "Pick a value".to_string(),
+                            options: Vec::new(),
+                            allow_free_text: true,
+                        },
+                    ])
+                    .expect("non-empty prompt"),
+                }))
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = AlwaysRequiresInput {
+            calls: calls.clone(),
+        };
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<EneEvent>(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_permissions: Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let pending_user_inputs: Arc<
+            tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        > = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let scopes = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let undo_stack = Arc::new(tokio::sync::Mutex::new(crate::undo::UndoStack::new(8)));
+        let turn = crate::types::TurnId::new();
+
+        let tool_calls = vec![LlmToolCall {
+            id: "call-1".to_string(),
+            name: "ask.question".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        // Deliberately NO consumer.
+        let exec_ctx = prompt_wait_ctx(
+            &registry,
+            &event_tx,
+            &turn,
+            &pending_permissions,
+            &pending_user_inputs,
+            &scopes,
+            &undo_stack,
+            &deferred_tool_tx,
+            CancellationToken::new(),
+        );
+        let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
+            .await
+            .expect("executor hung: unanswered user-input prompt was not bounded (#401)");
+        let output = result.expect("executor returned error");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!output.summaries[0].success);
+        assert!(
+            output.summaries[0].summary.contains("cancelled"),
+            "expected a cancellation surfaced to the LLM, got: {:?}",
+            output.summaries[0].summary
+        );
+    }
+
+    /// Unit coverage for [`await_permission_decision`]: a timeout with no
+    /// response yields `None` (fail-safe deny) rather than blocking.
+    #[tokio::test]
+    async fn await_permission_decision_times_out_to_none() {
+        let (_tx, rx) = oneshot::channel::<PermissionDecision>();
+        let started = std::time::Instant::now();
+        let decision =
+            await_permission_decision(rx, &CancellationToken::new(), 50, &RequestId::from("req-1"))
+                .await;
+        assert!(decision.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// Unit coverage for [`await_permission_decision`]: a fired cancel token
+    /// resolves the wait to `None` immediately, ahead of the timeout.
+    #[tokio::test]
+    async fn await_permission_decision_cancel_resolves_immediately() {
+        let (_tx, rx) = oneshot::channel::<PermissionDecision>();
+        let token = CancellationToken::new();
+        token.cancel();
+        let started = std::time::Instant::now();
+        let decision =
+            await_permission_decision(rx, &token, 60_000, &RequestId::from("req-1")).await;
+        assert!(decision.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
+
+    /// Unit coverage for [`await_permission_decision`]: a genuine decision is
+    /// passed through unchanged.
+    #[tokio::test]
+    async fn await_permission_decision_passes_through_approval() {
+        let (tx, rx) = oneshot::channel::<PermissionDecision>();
+        // A oneshot send error is `Copy` here (just the unsent decision), so
+        // `drop()` would itself trip `clippy::dropping_copy_types`.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = tx.send(PermissionDecision::AllowOnce);
+        let decision = await_permission_decision(
+            rx,
+            &CancellationToken::new(),
+            60_000,
+            &RequestId::from("req-1"),
+        )
+        .await;
+        assert_eq!(decision, Some(PermissionDecision::AllowOnce));
+    }
+
+    /// Unit coverage for [`await_user_input_response`]: a timeout with no
+    /// response yields `None` (fail-safe cancel) rather than blocking.
+    #[tokio::test]
+    async fn await_user_input_response_times_out_to_none() {
+        let (_tx, rx) = oneshot::channel::<UserInputResponse>();
+        let started = std::time::Instant::now();
+        let answers =
+            await_user_input_response(rx, &CancellationToken::new(), 50, &RequestId::from("req-1"))
+                .await;
+        assert!(answers.is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// Unit coverage for [`await_user_input_response`]: a genuine multi-answer
+    /// is passed through unchanged.
+    #[tokio::test]
+    async fn await_user_input_response_passes_through_answers() {
+        let (tx, rx) = oneshot::channel::<UserInputResponse>();
+        drop(tx.send(UserInputResponse::Multi(vec![MultiAnswer::Answer {
+            text: "hello".to_string(),
+        }])));
+        let answers = await_user_input_response(
+            rx,
+            &CancellationToken::new(),
+            60_000,
+            &RequestId::from("req-1"),
+        )
+        .await;
+        assert_eq!(
+            answers,
+            Some(vec![MultiAnswer::Answer {
+                text: "hello".to_string()
+            }])
+        );
+    }
+
+    /// Regression test for the `biased` branch order (#401): a genuine
+    /// permission decision that is ready at the same instant the deadline
+    /// elapses must win over the timeout.
+    ///
+    /// The helper future is driven manually (noop waker) under `start_paused`
+    /// so the clock and the oneshot are fully controlled: the future registers
+    /// its timeout timer, the clock jumps straight to the deadline (firing the
+    /// timer via `advance`'s internal yield), and *then* the decision is
+    /// delivered — so on the decisive poll both the deadline and the decision
+    /// are ready, and the biased select must prefer the decision. With the
+    /// previous `cancel → sleep → rx` order the timeout branch would win and
+    /// the real decision would be silently dropped.
+    #[tokio::test(start_paused = true)]
+    async fn await_permission_decision_takes_decision_at_deadline_instant() {
+        use std::task::{Context, Poll};
+
+        let (tx, rx) = oneshot::channel::<PermissionDecision>();
+        let token = CancellationToken::new();
+        let request_id = RequestId::from("req-1");
+        let wait = await_permission_decision(rx, &token, 100, &request_id);
+        tokio::pin!(wait);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: registers the 100 ms timeout timer; nothing is ready.
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+
+        // Jump the clock to the deadline so the timeout timer fires, then
+        // deliver a genuine decision. Both are now ready in the same poll.
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        // A oneshot send error is `Copy` here (just the unsent decision), so
+        // `drop()` would itself trip `clippy::dropping_copy_types`.
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+        )]
+        let _ = tx.send(PermissionDecision::AllowOnce);
+
+        assert!(matches!(
+            wait.as_mut().poll(&mut cx),
+            Poll::Ready(Some(PermissionDecision::AllowOnce))
+        ));
+    }
+
+    /// Regression test for the `biased` branch order (#401): a genuine
+    /// user-input answer that is ready at the same instant the deadline
+    /// elapses must win over the timeout.
+    ///
+    /// Same controlled-clock/manual-poll setup as
+    /// [`await_permission_decision_takes_decision_at_deadline_instant`].
+    #[tokio::test(start_paused = true)]
+    async fn await_user_input_response_takes_answer_at_deadline_instant() {
+        use std::task::{Context, Poll};
+
+        let (tx, rx) = oneshot::channel::<UserInputResponse>();
+        let token = CancellationToken::new();
+        let request_id = RequestId::from("req-1");
+        let wait = await_user_input_response(rx, &token, 100, &request_id);
+        tokio::pin!(wait);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: registers the 100 ms timeout timer; nothing is ready.
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+
+        // Jump the clock to the deadline so the timeout timer fires, then
+        // deliver a genuine answer. Both are now ready in the same poll.
+        tokio::time::advance(std::time::Duration::from_millis(100)).await;
+        drop(tx.send(UserInputResponse::Multi(vec![MultiAnswer::Answer {
+            text: "hello".to_string(),
+        }])));
+
+        assert!(matches!(
+            wait.as_mut().poll(&mut cx),
+            Poll::Ready(Some(ref answers)) if answers == &[MultiAnswer::Answer { text: "hello".to_string() }]
+        ));
     }
 }
