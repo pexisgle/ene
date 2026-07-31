@@ -139,9 +139,17 @@ impl RecallPlanner {
             time_range: None,
             // Reflection memories are a scoring signal applied separately by
             // the self-reflection pipeline (#347), never ordinary recall
-            // results — exclude them from every gather path so they cannot
-            // compete with normal memories or leak into the LLM context.
-            exclude_kinds: vec![MemoryKind::Reflection],
+            // results — when the pipeline is enabled they are excluded from
+            // every gather path so they cannot compete with normal memories or
+            // leak into the LLM context. With the pipeline disabled the
+            // exclusion is off too: reflections then behave exactly as they
+            // did before this feature (ordinary recall results), so enabling
+            // the pipeline is the only observable behavior change.
+            exclude_kinds: if memory.reflection.enabled {
+                vec![MemoryKind::Reflection]
+            } else {
+                vec![]
+            },
         }
     }
 
@@ -421,6 +429,10 @@ mod tests {
             recall_result_limit: 3,
             recall_similarity_threshold: 0.42,
             recall_min_score: 0.21,
+            reflection: crate::config::ReflectionConfig {
+                enabled: true,
+                ..crate::config::ReflectionConfig::default()
+            },
             ..MindMemoryConfig::default()
         };
         let options = RecallPlannerOptions::from_config(&ContextConfig::default(), &memory);
@@ -445,7 +457,29 @@ mod tests {
         assert_eq!(
             search.exclude_kinds,
             vec![ene_store::MemoryKind::Reflection],
-            "recall queries must exclude reflection memories (#347)"
+            "recall queries must exclude reflection memories while the pipeline is enabled (#347)"
+        );
+
+        // With the pipeline disabled the exclusion must be off too: reflections
+        // keep behaving as ordinary recall results, so enabling the pipeline is
+        // the only observable behavior change (#347).
+        let disabled_memory = MindMemoryConfig {
+            reflection: crate::config::ReflectionConfig {
+                enabled: false,
+                ..crate::config::ReflectionConfig::default()
+            },
+            ..memory
+        };
+        let search = RecallPlanner::to_memory_search_options(
+            &plan,
+            &embedding,
+            "model-a",
+            now,
+            &disabled_memory,
+        );
+        assert!(
+            search.exclude_kinds.is_empty(),
+            "reflection exclusion must be gated on the reflection pipeline"
         );
     }
 

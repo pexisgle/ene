@@ -191,7 +191,13 @@ impl SelfReflectionPipeline {
     }
 }
 
-/// Load existing reflection memories for a character (up to 50).
+/// Load active reflection memories for a character (up to 50).
+///
+/// Only [`ene_core::MemoryStatus::Active`] reflections participate in the
+/// recall adjustment: superseded rows are duplicates, and faded/archived
+/// reflections are no longer the current strategy signal. Filtering here keeps
+/// the boost/penalty applied by `apply_reflection_adjustment` consistent with
+/// what the pipeline most recently persisted.
 pub async fn load_reflection_memories(
     store: &dyn MemoryPort,
     character_id: &str,
@@ -200,7 +206,10 @@ pub async fn load_reflection_memories(
         .get_typed_memories_by_character(character_id, Some(MemoryKind::Reflection), 50, 0)
         .await
     {
-        Ok(items) => items,
+        Ok(items) => items
+            .into_iter()
+            .filter(|item| item.status == ene_core::MemoryStatus::Active)
+            .collect(),
         Err(e) => {
             tracing::warn!(
                 component = "SelfReflection",
