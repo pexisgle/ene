@@ -37,6 +37,9 @@ ene_config::define_config!(
 
         /// Proactive companion speech policy (#103).
         pub proactive: ProactiveConfig,
+
+        /// Topic-boundary detection policy (#367).
+        pub topic_boundary: TopicBoundaryConfig,
     }
 );
 
@@ -471,6 +474,67 @@ impl Default for CharacterMemoryConfig {
     }
 }
 
+/// Topic-boundary detection policy (#367).
+///
+/// Detection maintains a topic **centroid** (an exponentially weighted moving
+/// average of the embeddings belonging to the current topic) and scores each
+/// completed turn with a composite of the cosine distance from the centroid,
+/// the silence since the previous utterance, and the topic's turn count. A
+/// boundary is signalled once the composite score reaches
+/// [`Self::boundary_threshold`]. The detector only produces a signal/score;
+/// acting on it (compression #368, session split #369) is a later stage.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct TopicBoundaryConfig {
+    /// Master switch for topic-boundary detection.
+    pub enabled: bool,
+    /// Composite score (`0.0..=1.0`) at or above which a turn is flagged as a
+    /// topic boundary. Session splitting (#369) is expected to use a higher
+    /// threshold than compression (#368).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub boundary_threshold: f32,
+    /// Weight of the centroid-distance term in the composite score.
+    pub weight_centroid: f32,
+    /// Weight of the silence term in the composite score.
+    pub weight_silence: f32,
+    /// Weight of the topic-length (turn-count) term in the composite score.
+    pub weight_topic_length: f32,
+    /// Moving-average blend factor for the centroid: the fraction of a new
+    /// qualifying embedding folded in each turn. A small value keeps the
+    /// centroid slow-moving so it represents the topic as a whole rather than
+    /// chasing the latest utterance.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub centroid_alpha: f32,
+    /// Utterances shorter than this many characters are treated as
+    /// backchannels: they neither score a boundary nor update the centroid, so
+    /// a "うん" cannot corrupt the topic model.
+    pub min_utterance_chars: usize,
+    /// Elapsed silence (seconds) that saturates the silence term to `1.0`.
+    pub silence_saturation_secs: u32,
+    /// Soft cap on turns per topic; the topic-length term reaches `1.0` here.
+    /// An over-long topic is likely to contain multiple topics, so this term is
+    /// what makes *gradual* drift detectable even when the centroid keeps
+    /// tracking it closely.
+    pub max_topic_turns: usize,
+}
+
+impl Default for TopicBoundaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            boundary_threshold: 0.55,
+            weight_centroid: 0.6,
+            weight_silence: 0.15,
+            weight_topic_length: 0.25,
+            centroid_alpha: 0.15,
+            min_utterance_chars: 6,
+            silence_saturation_secs: 300,
+            max_topic_turns: 12,
+        }
+    }
+}
+
 /// How much of the focused window's title the activity observer captures (#378).
 ///
 /// Window titles routinely contain private data — document and file names
@@ -873,5 +937,50 @@ mod tests {
         assert!(!cfg.enabled);
         assert!((cfg.decay_half_life_minutes - 30.0).abs() < f64::EPSILON);
         assert_eq!(cfg.classifier_language, "en");
+    }
+
+    #[test]
+    fn topic_boundary_defaults_are_sane() {
+        let cfg = TopicBoundaryConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.boundary_threshold > 0.0 && cfg.boundary_threshold <= 1.0);
+        assert!(cfg.centroid_alpha > 0.0 && cfg.centroid_alpha <= 1.0);
+        assert!(cfg.min_utterance_chars > 0);
+        assert!(cfg.max_topic_turns > 0);
+        // The composite weights are a convex combination.
+        let total = cfg.weight_centroid + cfg.weight_silence + cfg.weight_topic_length;
+        assert!((total - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn topic_boundary_out_of_range_fields_are_clamped() {
+        let cfg: TopicBoundaryConfig = serde_json::from_str(
+            r#"{
+                "boundary_threshold": 1.7,
+                "centroid_alpha": -0.4
+            }"#,
+        )
+        .expect("deserialize");
+        assert!((cfg.boundary_threshold - 1.0).abs() < f32::EPSILON);
+        assert!(cfg.centroid_alpha < f32::EPSILON);
+    }
+
+    #[test]
+    fn topic_boundary_round_trips_through_public_schema() {
+        let cfg: TopicBoundaryConfig = serde_json::from_str(
+            r#"{
+                "enabled": false,
+                "boundary_threshold": 0.7,
+                "max_topic_turns": 20
+            }"#,
+        )
+        .expect("deserialize");
+        assert!(!cfg.enabled);
+        assert!((cfg.boundary_threshold - 0.7).abs() < f32::EPSILON);
+        assert_eq!(cfg.max_topic_turns, 20);
+
+        let json = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(json["enabled"], false);
+        assert_eq!(json["max_topic_turns"], 20);
     }
 }

@@ -1218,6 +1218,38 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             session.finalize_response();
             session.record_assistant_response();
 
+            // Topic-boundary detection (#367): score the completed turn against
+            // the running topic centroid in the same deferred slot as memory
+            // writing and affect classification, so it never delays the
+            // response. Detection only — retrospective compression (#368) and
+            // session splitting (#369) consume the signal in later stages.
+            if !is_proactive {
+                let utterance_chars = user_input.chars().count();
+                if let Some(signal) =
+                    session.detect_topic_boundary(&mind.topic_boundary, utterance_chars)
+                {
+                    if signal.boundary {
+                        tracing::info!(
+                            component = "TopicBoundary",
+                            session_id = %session_id,
+                            score = signal.score,
+                            centroid_distance = signal.centroid_distance,
+                            silence_factor = signal.silence_factor,
+                            topic_length_factor = signal.topic_length_factor,
+                            "Topic boundary detected"
+                        );
+                    } else {
+                        tracing::debug!(
+                            component = "TopicBoundary",
+                            session_id = %session_id,
+                            score = signal.score,
+                            centroid_distance = signal.centroid_distance,
+                            "Topic boundary score computed"
+                        );
+                    }
+                }
+            }
+
             if let Some(store) = mem_store.clone() {
                 let deferred_input = OwnedPostTurnInput {
                     turn: OwnedTurnInput {

@@ -83,6 +83,48 @@ A **session** is a contiguous dialogue history stored in SQLite (`ene-store`).
 - **Automatic Compression & Splitting**: When token count exceeds configured limits (`mind.context.max_tokens`), `SessionManager` performs context compression and creates a new session branch.
 - **Summary Fact Generation**: Before splitting a session, key facts and dialogue summaries are extracted and stored into `MemoryStore` as permanent episodic memory.
 
+### Topic-Boundary Detection (#367)
+
+Independent of token pressure, `ene-mind` detects *topic* boundaries so later
+stages can decide when to compress (#368) or split (#369) on semantic grounds.
+A naive "cosine similarity between two consecutive utterances" is not used —
+it fails on backchannels ("うん" is dissimilar to its neighbours yet on-topic),
+on short utterances with unstable embeddings, and on topics that drift
+gradually so no single low-similarity pair ever appears.
+
+Instead the detector maintains a **topic centroid**: an exponentially weighted
+moving average of the embeddings that belong to the current topic. Each
+completed turn is scored with a composite of three signals:
+
+| Signal | Contribution |
+|---|---|
+| Cosine distance from the centroid | Primary indicator of a topic shift |
+| Silence since the previous utterance | A long pause raises boundary likelihood |
+| Turn count of the current topic | An over-long topic likely holds several topics |
+
+The turn-count term is the accumulator that makes **gradual** drift detectable:
+a centroid that tracks its topic closely keeps the distance term small, but an
+over-long topic is still flagged through its turn count. Utterances shorter
+than `mind.topic_boundary.min_utterance_chars` are treated as backchannels —
+they neither score a boundary nor update the centroid, so a "うん" cannot
+corrupt the topic model. No hard-coded keyword list ("ところで", "話は変わるけど",
+…) is used; the embeddings carry the signal, which keeps the detector working
+across languages.
+
+Detection runs in the same deferred post-turn slot as memory writing and affect
+classification, so it never delays the response, and it considers the user
+input embedding of the completed turn. The centroid lifecycle is:
+
+| Trigger | Centroid |
+|---|---|
+| Compression (#368) | **Not reset** — compression is physical, not a topic boundary |
+| Session split (#369) | Reset |
+| Confirmed boundary | Restart as the new topic's centroid |
+
+The detector only produces a signal and a composite score (surfaced as a
+`SplitReason::Composite`); acting on it belongs to #368 and #369. All
+thresholds and weights are configurable under `mind.topic_boundary`.
+
 ---
 
 ## 3. Prompt Packet Composition
