@@ -175,7 +175,8 @@ pub async fn summarize_conversation(
     .map_err(|_| {
         CognitionError::Other("summarization: chat completion timed out after 120s".to_string())
     })?
-    .map_err(|e| CognitionError::Other(format!("summarization: {e}")))?;
+    .map_err(|e| CognitionError::Other(format!("summarization: {e}")))?
+    .text;
 
     parse_summary_json(&content)
 }

@@ -7,7 +7,7 @@
 )]
 
 use async_trait::async_trait;
-use ene_ai::{LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
+use ene_ai::{LlmCompletion, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk, Role};
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_mind::MindConfig;
 use ene_plugin_proto::ToolResult;
@@ -43,6 +43,7 @@ impl LlmProvider for EchoProvider {
         let stream = tokio_stream::once(Ok(LlmResponseChunk {
             text_delta: Some(self.response.clone()),
             tool_calls_delta: None,
+            usage: None,
         }));
         Ok(Box::pin(stream))
     }
@@ -51,8 +52,8 @@ impl LlmProvider for EchoProvider {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok(self.response.clone())
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only(self.response.clone()))
     }
 }
 

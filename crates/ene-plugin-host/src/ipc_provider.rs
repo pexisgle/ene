@@ -53,7 +53,7 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use ene_ai::RetryPolicy;
 use ene_ai::error::LlmProviderError;
-use ene_ai::message::{LlmMessage, LlmResponseChunk, LlmToolCallChunk};
+use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk, LlmToolCallChunk};
 use ene_plugin_proto::{ConcurrencyHint, PluginIpcResponse};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -367,6 +367,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                         request_id: chunk_rid,
                         text_delta,
                         tool_calls_delta,
+                        usage,
                     } if chunk_rid == rid => {
                         let tool_calls = if tool_calls_delta.is_empty() {
                             None
@@ -386,6 +387,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                                 Some(text_delta)
                             },
                             tool_calls_delta: tool_calls,
+                            usage,
                         };
                         match tx.try_send(Ok(chunk)) {
                             Ok(()) => {}
@@ -440,7 +442,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         &self,
         messages: &[LlmMessage],
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         let messages_json: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
@@ -487,6 +489,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
                 },
             )
             .await
+            .map(|(text, usage)| LlmCompletion { text, usage })
     }
 }
 

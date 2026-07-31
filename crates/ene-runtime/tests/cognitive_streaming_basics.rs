@@ -10,8 +10,8 @@
 
 use async_trait::async_trait;
 use ene_ai::{
-    EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
-    embed_query,
+    EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
+    LlmResponseChunk, embed_query,
 };
 use ene_config::{CharacterCardV3, PromptLibrary, expand_cbs_macros};
 use ene_mind::{CognitionEngine, HistoryEntry, MindConfig, TurnContext};
@@ -67,8 +67,8 @@ impl LlmProvider for MockLlm {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok("ok".into())
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only("ok".into()))
     }
 }
 

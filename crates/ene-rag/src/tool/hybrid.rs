@@ -125,6 +125,7 @@ pub async fn hyde_document(
 
     llm.chat_completion(&messages, None)
         .await
+        .map(|completion| completion.text)
         .map_err(|e| EmbeddingError::Provider(e.to_string()))
 }
 
@@ -210,6 +211,7 @@ pub async fn rerank_tool_specs(
     let raw = llm
         .chat_completion(&messages, Some(schema))
         .await
+        .map(|completion| completion.text)
         .map_err(|e| EmbeddingError::Provider(e.to_string()))?;
 
     let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {

@@ -9,7 +9,8 @@
 
 use async_trait::async_trait;
 use ene_ai::{
-    EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
+    EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
+    LlmResponseChunk,
 };
 use ene_config::{CharacterCardV3, EneConfig};
 use ene_plugin_host::{PluginHostError, ToolRegistry};
@@ -72,6 +73,7 @@ impl LlmProvider for MockLlm {
         let chunks = vec![Ok(LlmResponseChunk {
             text_delta: Some(response),
             tool_calls_delta: None,
+            usage: None,
         })];
         Ok(Box::pin(tokio_stream::iter(chunks)))
     }
@@ -80,8 +82,8 @@ impl LlmProvider for MockLlm {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok(self.response.clone())
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only(self.response.clone()))
     }
 }
 

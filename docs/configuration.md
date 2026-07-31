@@ -91,6 +91,28 @@ available = min(model_window, context_window)
 }
 ```
 
+#### Token usage accounting (#365)
+
+Every completion carries an optional token-usage record — `prompt_tokens`,
+`completion_tokens`, and `total_tokens` — through all three provider layers
+(`ene-ai`'s in-process types, the plugin IPC, and the streaming chunk). How it
+is filled depends on the backend:
+
+- **Providers that report usage** (OpenAI-compatible, Anthropic) populate it
+  directly from the API response. For streaming, usage arrives on the
+  **final** chunk only; intermediate chunks leave it empty.
+- **Local models** (llama.cpp) count tokens themselves — the exact prompt
+  length fed into the context and the number of tokens sampled — so they
+  report real usage for both one-shot and streaming completions.
+- **Providers that report nothing** fall back to a coarse character-based
+  estimate (roughly one token per three characters), which over-counts English
+  and under-counts Japanese less than a naive four-chars-per-token rule.
+
+Because a measured count has no estimation error, the `safety_margin` above can
+be driven toward zero once usage is available; the estimate keeps a conservative
+margin only while a backend reports nothing. There is no configuration for this
+behavior — it is automatic per provider.
+
 ### `store.*` — Database & Memory Persistence
 
 Controls SQLite database persistence, integrity checks, and backup retention (#239):
@@ -182,23 +204,6 @@ bound queue (bounded by their own timeout) rather than fanning out to the
 plugin. Chat *streams* (`CreateChatStream`) are the exception: they bypass this
 bound and are not counted against it.
 
-When a tool requests permission or interactive user input, the runtime waits
-for the consumer (desktop UI, CLI, or an automation) to answer — but never
-indefinitely. `permission_prompt_timeout_ms` (default `300000`, 5 minutes) and
-`user_input_prompt_timeout_ms` (default `600000`, 10 minutes) bound those
-waits, and each wait is also selected against the turn's cancel token. If a
-consumer never responds (a dropped event, a headless consumer, a closed
-window), the prompt fails safe — treated as *denied* (permission) or
-*cancelled* (user input) — so the turn still reaches `Terminal` and the turn
-gate is released instead of leaving every later `run()` stuck on
-`RunError::Busy`. The input timeout defaults higher because typing an answer
-takes longer than clicking approve/deny.
-
-Setting either timeout to `0` does **not** disable the wait: the prompt times
-out immediately (fail-safe denied/cancelled unless the consumer has already
-answered). Use a large value if the consumer legitimately needs a long time
-to answer.
-
 ### `tools.*` — Tool-Execution Runtime Behavior
 
 Distinct from `plugins.*` (which manages the plugin *process*/IPC layer):
@@ -211,11 +216,8 @@ a cap is reached, admission is rejected (fails fast) rather than queued
 without bound — `CallTool`/`CancelDeferredTool` and `SearchTools` calls get
 back an actionable "busy" error; the post-turn classifier, memory-writer,
 and deferred-tool-poller admission points have no reply channel of their
-own, so a rejection there shows up as a `TaskRejected` diagnostic event.
-The memory-writer is a partial exception: its write already runs detached,
-so even a rejected admission still consumes the outcome and fires the usual
-`PendingCandidateAvailable` / `MemoryWrite` events — only panic supervision
-of that consumer is lost (#398):
+own, so a rejection there only shows up as a `TaskRejected` diagnostic
+event:
 
 ```json
 {

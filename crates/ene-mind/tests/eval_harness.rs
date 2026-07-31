@@ -10,8 +10,8 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use ene_ai::{
-    EmbeddingKind, EmbeddingProvider, LlmMessage, LlmProvider, LlmProviderError, LlmResponseChunk,
-    embed_query,
+    EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
+    LlmResponseChunk, embed_query,
 };
 use ene_config::CharacterCardV3;
 use ene_mind::{CognitionEngine, HistoryEntry, MindConfig, TurnContext};
@@ -79,8 +79,8 @@ impl LlmProvider for EvalLlm {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
-        Ok("ok".into())
+    ) -> Result<LlmCompletion, LlmProviderError> {
+        Ok(LlmCompletion::text_only("ok".into()))
     }
 }
 
@@ -107,7 +107,7 @@ impl LlmProvider for PanicLlm {
         &self,
         _messages: &[LlmMessage],
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, LlmProviderError> {
+    ) -> Result<LlmCompletion, LlmProviderError> {
         panic!("before_turn must not call classifier chat_completion");
     }
 }

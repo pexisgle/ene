@@ -5,6 +5,7 @@
 .opencode
 .fastembed_cache
 .claude/
+.agents/
 
 assets/models/
 

@@ -708,6 +708,10 @@ impl IpcPluginConnection {
     }
 
     /// Sends a `ChatCompletion` request and awaits the result.
+    ///
+    /// Returns the assistant text plus any token usage the plugin reported
+    /// (#365); `usage` is `None` when the plugin does not report it (including
+    /// older plugins that omit the field on the wire).
     pub async fn chat_completion(
         &self,
         request_id: String,
@@ -717,7 +721,7 @@ impl IpcPluginConnection {
         max_tokens: Option<u32>,
         messages: Vec<serde_json::Value>,
         json_schema: Option<serde_json::Value>,
-    ) -> Result<String, PluginHostError> {
+    ) -> Result<(String, Option<ene_plugin_proto::TokenUsage>), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::ChatCompletion {
                 request_id,
@@ -730,7 +734,7 @@ impl IpcPluginConnection {
             })
             .await?;
         match resp {
-            PluginIpcResponse::ChatCompletionResult { content, .. } => Ok(content),
+            PluginIpcResponse::ChatCompletionResult { content, usage, .. } => Ok((content, usage)),
             PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to ChatCompletion: {other:?}"

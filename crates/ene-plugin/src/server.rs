@@ -528,9 +528,10 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 )
                 .await
             {
-                Ok(content) => PluginIpcResponse::ChatCompletionResult {
+                Ok(completion) => PluginIpcResponse::ChatCompletionResult {
                     request_id: request_id.clone(),
-                    content,
+                    content: completion.text,
+                    usage: completion.usage,
                 },
                 Err(e) => PluginIpcResponse::Error {
                     request_id: request_id.clone(),
@@ -928,6 +929,7 @@ async fn run_chat_stream(
                             request_id: request_id.clone(),
                             text_delta: chunk.text_delta.unwrap_or_default(),
                             tool_calls_delta: chunk.tool_calls_delta.unwrap_or_default(),
+                            usage: chunk.usage,
                         };
                         if tx.send(resp).await.is_err() {
                             return;
@@ -971,7 +973,7 @@ async fn run_chat_stream(
 )]
 mod tests {
     use super::*;
-    use crate::plugin::{PluginStreamChunk, ToolPluginCapabilities};
+    use crate::plugin::{PluginCompletion, PluginStreamChunk, ToolPluginCapabilities};
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
@@ -1120,10 +1122,12 @@ mod tests {
                 Ok(PluginStreamChunk {
                     text_delta: Some("Hello".into()),
                     tool_calls_delta: None,
+                    usage: None,
                 }),
                 Ok(PluginStreamChunk {
                     text_delta: Some(" world".into()),
                     tool_calls_delta: None,
+                    usage: None,
                 }),
             ];
             Ok(Box::pin(tokio_stream::iter(chunks)))
@@ -1137,8 +1141,10 @@ mod tests {
             _max_tokens: Option<u32>,
             _messages: Vec<serde_json::Value>,
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, PluginError> {
-            Ok("Mock completion response".into())
+        ) -> Result<PluginCompletion, PluginError> {
+            Ok(PluginCompletion::text_only(
+                "Mock completion response".into(),
+            ))
         }
     }
 
@@ -1173,6 +1179,7 @@ mod tests {
             let first = tokio_stream::iter(vec![Ok(PluginStreamChunk {
                 text_delta: Some("partial".into()),
                 tool_calls_delta: None,
+                usage: None,
             })]);
             let pending = tokio_stream::pending::<Result<PluginStreamChunk, PluginError>>();
             Ok(Box::pin(first.chain(pending)))
@@ -1521,9 +1528,11 @@ mod tests {
             PluginIpcResponse::ChatCompletionResult {
                 request_id,
                 content,
+                usage,
             } => {
                 assert_eq!(request_id, "req-1");
                 assert_eq!(content, "Mock completion response");
+                assert_eq!(usage, None);
             }
             other => panic!("expected ChatCompletionResult, got {other:?}"),
         }

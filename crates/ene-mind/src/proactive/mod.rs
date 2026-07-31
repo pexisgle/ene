@@ -298,7 +298,7 @@ pub async fn decide_proactive_speech(
     let raw = match tokio::time::timeout(timeout, provider.chat_completion(&messages, Some(schema)))
         .await
     {
-        Ok(Ok(text)) => text,
+        Ok(Ok(completion)) => completion.text,
         Ok(Err(e)) => {
             return ProactiveDecisionOutcome {
                 decision: ProactiveDecision::silent(format!("decision provider error: {e}")),
@@ -400,7 +400,7 @@ mod tests {
     use super::*;
     use crate::config::ProactiveSourcesConfig;
     use async_trait::async_trait;
-    use ene_ai::{LlmMessage, LlmProviderError, LlmResponseChunk, Role};
+    use ene_ai::{LlmCompletion, LlmMessage, LlmProviderError, LlmResponseChunk, Role};
     use std::pin::Pin;
     use tokio_stream::Stream;
 
@@ -434,8 +434,8 @@ mod tests {
             &self,
             _messages: &[LlmMessage],
             _json_schema: Option<serde_json::Value>,
-        ) -> Result<String, LlmProviderError> {
-            Ok(self.body.clone())
+        ) -> Result<LlmCompletion, LlmProviderError> {
+            Ok(LlmCompletion::text_only(self.body.clone()))
         }
     }
 
@@ -460,11 +460,11 @@ mod tests {
             &self,
             _messages: &[LlmMessage],
             json_schema: Option<serde_json::Value>,
-        ) -> Result<String, LlmProviderError> {
+        ) -> Result<LlmCompletion, LlmProviderError> {
             if let Ok(mut guard) = self.captured.lock() {
                 *guard = json_schema;
             }
-            Ok(self.body.clone())
+            Ok(LlmCompletion::text_only(self.body.clone()))
         }
     }
 

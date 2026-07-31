@@ -10,7 +10,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use ene_plugin_proto::{
     CallContext, DeferredOutcome, DeferredStatus, LlmProviderSpec, PluginError, SandboxConfigData,
-    SttProviderSpec, ToolError, ToolResult, ToolSpec, TtsProviderSpec,
+    SttProviderSpec, TokenUsage, ToolError, ToolResult, ToolSpec, TtsProviderSpec,
 };
 use tokio_stream::Stream;
 
@@ -25,6 +25,37 @@ pub struct PluginStreamChunk {
     pub text_delta: Option<String>,
     /// Incremental tool-call JSON deltas (partial function-call arguments).
     pub tool_calls_delta: Option<Vec<serde_json::Value>>,
+    /// Token usage for the whole completion, set on the **final** chunk when
+    /// the provider reports it (#365). Intermediate chunks leave this `None`.
+    pub usage: Option<TokenUsage>,
+}
+
+/// A completed (non-streaming) plugin chat response: text plus any token
+/// usage the provider reported (#365).
+///
+/// Returned by [`LlmPlugin::chat_completion`]; the plugin server maps it onto
+/// [`PluginIpcResponse::ChatCompletionResult`](ene_plugin_proto::PluginIpcResponse).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PluginCompletion {
+    /// The generated assistant text.
+    pub text: String,
+    /// Token usage reported by the provider, if any.
+    pub usage: Option<TokenUsage>,
+}
+
+impl PluginCompletion {
+    /// A completion with no usage information.
+    #[must_use]
+    pub fn text_only(text: String) -> Self {
+        Self { text, usage: None }
+    }
+}
+
+impl From<String> for PluginCompletion {
+    /// Wrap a bare text response as a completion with no usage.
+    fn from(text: String) -> Self {
+        Self::text_only(text)
+    }
 }
 
 /// A boxed, sendable stream of [`PluginStreamChunk`] results.
@@ -156,8 +187,10 @@ pub trait LlmPlugin: Send + Sync {
 
     /// Performs a non-streaming chat completion.
     ///
-    /// The default returns [`PluginError::NotSupported`] for plugins that
-    /// do not provide LLM completions.
+    /// Returns a [`PluginCompletion`] carrying the assistant text plus any
+    /// token usage the provider reported (#365). The default returns
+    /// [`PluginError::NotSupported`] for plugins that do not provide LLM
+    /// completions.
     async fn chat_completion(
         &self,
         _kind: &str,
@@ -166,7 +199,7 @@ pub trait LlmPlugin: Send + Sync {
         _max_tokens: Option<u32>,
         _messages: Vec<serde_json::Value>,
         _json_schema: Option<serde_json::Value>,
-    ) -> Result<String, PluginError> {
+    ) -> Result<PluginCompletion, PluginError> {
         Err(PluginError::not_supported("chat_completion"))
     }
 }
