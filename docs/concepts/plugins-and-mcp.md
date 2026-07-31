@@ -265,6 +265,43 @@ intentional — the running instance was verified against the original binary,
 so the host refuses to silently exec a different one; restart the host to pick
 up the new binary and re-pin its checksum.
 
+### Process supervision & restart budget
+
+Every started plugin is supervised by a periodic health probe
+(`plugins.health_interval_ms`, default 30 s; `0` disables probing). On each
+tick the host pings the plugin and checks the child process is alive:
+
+- **Healthy** (alive and answered the ping) → the plugin's **restart budget is
+  recovered** (reset to zero).
+- **Unhealthy** (dead or unresponsive) → the host emits an `Unhealthy` event,
+  waits an exponentially-growing backoff delay, restarts the process, and
+  reconnects. Each restart consumes one unit of budget.
+
+The restart budget is a **recoverable sliding measure of recent instability,
+not a lifetime cap**. After `MAX_RESTARTS` (5) restarts without an intervening
+healthy round-trip, the plugin is **permanently disabled**
+(`PluginHealthEvent::Disabled`, reason `restart_budget_exhausted`) until the
+host itself restarts. But any healthy round-trip clears the budget back to
+zero, so a plugin that crashes once a day and otherwise runs well never
+accumulates budget, while a genuine crash loop (repeated failures with no
+healthy interval) exhausts it and is stopped.
+
+Budget recovery happens on **any** healthy round-trip, independent of the
+plugin's capabilities:
+
+- a successful **tool call** (plugins that expose tools), and
+- a healthy **health-probe ping** (every supervised plugin).
+
+The health-probe path is what makes recovery work for **provider-only
+plugins** (e.g. the built-in `anthropic` provider): they expose no tools, so
+they never build a tool registry and never have a successful tool call to
+reset their budget. Without probe-based recovery their budget would be a
+lifetime limit of five crashes for the whole host session — fatal for a
+long-running desktop companion. A plugin that answers pings but fails real
+work is still contained: the per-registry circuit breaker trips on consecutive
+call failures, so ping-based recovery cannot keep a broken plugin serving
+traffic indefinitely.
+
 ---
 
 ## 7. MCP (Model Context Protocol) Integration

@@ -78,6 +78,15 @@ struct SupervisedPlugin {
     pinned_checksum: PinnedChecksum,
     /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
+    /// Consecutive restart attempts since the plugin last demonstrated it was
+    /// healthy. This is a *recoverable* budget, not a lifetime cap: every
+    /// healthy round-trip — a successful tool call
+    /// ([`PluginToolRegistry::call_tool`]) or a healthy health-probe ping
+    /// ([`supervise_plugin`]) — resets it to `0` via [`Self::note_healthy`].
+    /// A plugin that crashes once a day therefore never accumulates budget,
+    /// while a genuine crash loop exhausts it and is disabled. Recovery via
+    /// the health probe is what makes the budget apply to provider-only
+    /// plugins (which never build a [`PluginToolRegistry`]) too (#433).
     restart_count: usize,
     /// Set once the plugin is permanently disabled (restart budget exhausted
     /// or a restart-time checksum mismatch). The per-plugin supervisor task
@@ -89,6 +98,17 @@ struct SupervisedPlugin {
 impl SupervisedPlugin {
     fn is_alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Records a healthy round-trip by clearing the restart budget.
+    ///
+    /// Called whenever the plugin demonstrates it is genuinely healthy — a
+    /// successful tool call or a healthy health-probe ping — so a plugin that
+    /// has been running well is not penalized for old crashes. This is the
+    /// only path (besides a fresh [`Self::restart`]) that mutates
+    /// `restart_count`, keeping the budget's semantics in one place.
+    fn note_healthy(&mut self) {
+        self.restart_count = 0;
     }
 
     fn restart(&mut self) -> Result<(), PluginHostError> {
@@ -375,7 +395,7 @@ impl ToolRegistry for PluginToolRegistry {
             }
             // A healthy round-trip clears the restart budget so a plugin
             // that has been running well is not penalized for old crashes.
-            self.supervised.lock().await.restart_count = 0;
+            self.supervised.lock().await.note_healthy();
         } else {
             let mut breaker = self.breaker.lock();
             if breaker.record_failure() {
@@ -1247,6 +1267,12 @@ where
 /// Production passes [`backoff_before_restart`]; tests inject a controllable
 /// stand-in so the backoff can be observed without real delays. It is generic
 /// over the returned future so no boxing (and no extra dependency) is needed.
+///
+/// A healthy round-trip (process alive and ping answered) recovers the
+/// plugin's restart budget via [`SupervisedPlugin::note_healthy`], so the
+/// budget is a sliding measure of recent instability rather than a lifetime
+/// cap — this is what lets provider-only plugins, which have no tool-call
+/// reset path, recover from old crashes too (#433).
 async fn supervise_plugin<F>(
     interval: Duration,
     plugin: Arc<Mutex<SupervisedPlugin>>,
@@ -1280,6 +1306,19 @@ async fn supervise_plugin<F>(
         };
 
         if alive && ping_ok {
+            // A healthy probe round-trip clears the restart budget, so a
+            // plugin that has been running well is not penalized for old
+            // crashes. This is the recovery path that makes the budget
+            // apply to provider-only plugins too: they never build a
+            // `PluginToolRegistry` (no tools), so a successful tool call
+            // — the only reset path before #433 — never happens for them.
+            // Probing is independent of capability routing, so every
+            // supervised plugin recovers here. A plugin that responds to
+            // pings but fails real work is still contained: the
+            // per-registry circuit breaker trips on consecutive call
+            // failures, so ping-based recovery cannot keep a broken
+            // plugin serving traffic indefinitely.
+            plugin.lock().await.note_healthy();
             continue;
         }
 
@@ -2208,5 +2247,149 @@ mod tests {
         dead_server.abort();
         // The socket files and dummy binaries live under `temp` and are
         // removed when the `TempDir` drops at the end of the test.
+    }
+
+    /// A healthy probe round-trip (process alive + ping answered) recovers the
+    /// restart budget (#433). Provider-only plugins have no tool-call reset
+    /// path, so the health probe is their only recovery path: a plugin that
+    /// has accumulated a full budget of restarts must return to zero once it
+    /// is observed healthy again, rather than staying one crash away from
+    /// permanent disablement for the rest of the host session.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn healthy_probe_recovers_restart_budget() {
+        use std::sync::atomic::AtomicUsize;
+
+        let temp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let sock = temp.path().join("recover.sock");
+        let pings = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(run_healthy_mock_server(sock.clone(), Arc::clone(&pings)));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let plugin = Arc::new(Mutex::new(supervised_plugin_on_socket(
+            temp.path(),
+            "recover",
+            sock.clone(),
+            true, // stays alive so the probe sees a healthy round-trip
+        )));
+        // Simulate a budget accumulated from past crashes.
+        plugin.lock().await.restart_count = MAX_RESTARTS;
+
+        let conn = Arc::new(
+            IpcPluginConnection::connect(
+                &sock,
+                ene_plugin_proto::SandboxConfigData::default(),
+                None,
+                Duration::from_secs(5),
+                8,
+            )
+            .await
+            .expect("recover handshake"),
+        );
+
+        let (tx, _rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
+        let task = tokio::spawn(supervise_plugin(
+            Duration::from_millis(30),
+            Arc::clone(&plugin),
+            Arc::clone(&conn),
+            tx,
+            |_count| async {},
+        ));
+
+        // The first healthy probe must clear the budget back to zero.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if plugin.lock().await.restart_count == 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a healthy probe round-trip must recover the restart budget"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !plugin.lock().await.disabled,
+            "a healthy plugin must not be disabled"
+        );
+
+        task.abort();
+        server.abort();
+    }
+
+    /// A dead plugin whose budget is already exhausted is disabled (not
+    /// restarted) — crash-loop detection is preserved even though healthy
+    /// plugins now recover their budget (#433).
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn exhausted_budget_disables_dead_plugin() {
+        let temp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let sock = temp.path().join("exhaust.sock");
+        let server = tokio::spawn(run_dead_mock_server(sock.clone()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let plugin = Arc::new(Mutex::new(supervised_plugin_on_socket(
+            temp.path(),
+            "exhaust",
+            sock.clone(),
+            false, // exits immediately so the probe sees a dead process
+        )));
+        // Budget already consumed by prior crash-loop restarts.
+        plugin.lock().await.restart_count = MAX_RESTARTS;
+
+        let conn = Arc::new(
+            IpcPluginConnection::connect(
+                &sock,
+                ene_plugin_proto::SandboxConfigData::default(),
+                None,
+                Duration::from_secs(5),
+                8,
+            )
+            .await
+            .expect("exhaust handshake"),
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
+        let task = tokio::spawn(supervise_plugin(
+            Duration::from_millis(30),
+            Arc::clone(&plugin),
+            Arc::clone(&conn),
+            tx,
+            |_count| async {},
+        ));
+
+        // The supervisor must observe the dead plugin, see the exhausted
+        // budget, and disable it rather than restarting.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if plugin.lock().await.disabled {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "an exhausted budget on a dead plugin must disable it"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let mut saw_disabled = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(
+                event,
+                PluginHealthEvent::Disabled {
+                    reason: crate::health::DisabledReason::RestartBudgetExhausted,
+                    ..
+                }
+            ) {
+                saw_disabled = true;
+            }
+        }
+        assert!(
+            saw_disabled,
+            "expected a RestartBudgetExhausted Disabled event"
+        );
+
+        task.abort();
+        server.abort();
     }
 }
