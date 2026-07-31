@@ -107,10 +107,10 @@ pub struct PromptPacketMeta {
     /// IDs of recalled memories that actually made it into the packed prompt.
     ///
     /// Subset of the recalled set that survived budget trimming. The recall
-    /// access bump is gated on this list (#345): only memories the model will
-    /// actually see get their `access_count` / `last_accessed_at` updated, so
-    /// ranking high in search but being dropped by the budget no longer
-    /// reinforces a memory.
+    /// access bump is gated on this list (#345): only memories actually
+    /// composed into the packed prompt get their `access_count` /
+    /// `last_accessed_at` updated, so ranking high in search but being dropped
+    /// by the budget no longer reinforces a memory.
     pub injected_memory_ids: Vec<i64>,
 }
 

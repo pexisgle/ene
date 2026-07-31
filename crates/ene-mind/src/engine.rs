@@ -487,10 +487,13 @@ impl CognitionEngine {
         meta.injected_memory_ids
             .clone_from(&packed.meta.injected_memory_ids);
 
-        // Bump access counters only for memories that actually made it into the
-        // prompt (#345). This moved out of `execute_hybrid_recall` (which bumped
-        // every recalled memory) so that being recalled-but-dropped no longer
-        // reinforces a memory's score and shields it from forgetting.
+        // Bump access counters only for memories actually composed into the
+        // message packet (#345). The bump fires here, during prompt composition,
+        // before the request is sent — "injected" means the memory survived
+        // budget packing into the packet, not that the LLM has seen it. This
+        // moved out of `execute_hybrid_recall` (which bumped every recalled
+        // memory) so that being recalled-but-dropped no longer reinforces a
+        // memory's score and shields it from forgetting.
         if let Some(store) = ctx.store {
             crate::recall::bump_injected_memory_access(store, &meta.injected_memory_ids).await;
         }

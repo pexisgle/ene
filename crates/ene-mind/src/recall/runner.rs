@@ -122,9 +122,9 @@ async fn maybe_merge_lorebook_recall(
 /// prompt (#345).
 ///
 /// The bump is gated on `injected_ids` — the subset of recalled memories that
-/// survived budget packing and will really appear in the model's context —
-/// rather than on "ranked high in search". Bumping every recalled memory used
-/// to reinforce memories that were recalled but then dropped, feeding the
+/// survived budget packing and were composed into the message packet — rather
+/// than on "ranked high in search". Bumping every recalled memory used to
+/// reinforce memories that were recalled but then dropped, feeding the
 /// self-reinforcing recall loop. Call this after prompt composition with
 /// `PromptPacketMeta::injected_memory_ids`.
 pub async fn bump_injected_memory_access(store: &dyn MemoryPort, injected_ids: &[i64]) {

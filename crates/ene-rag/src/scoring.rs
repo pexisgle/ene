@@ -232,23 +232,24 @@ pub fn relationship_score(impact: f32) -> f32 {
 /// half-life decay on the *age* of the most recent access. Old accesses stop
 /// mattering: a memory recalled ten times a year ago no longer carries a near
 /// full boost, so access history cannot lock a memory into the top of the
-/// ranking forever. A memory that has never been accessed (`last_accessed_at`
-/// `None`) scores `0.0` regardless of its stored count.
+/// ranking forever. When no access time is recorded (`last_accessed_at` is
+/// `None`), the decay anchor falls back to `updated_at`, mirroring
+/// [`recency_score`] — a legacy count without a timestamp still contributes
+/// rather than silently zeroing a previously rewarded row.
 pub fn access_boost_score(
     access_count: i64,
     last_accessed_at: Option<DateTime<Utc>>,
+    updated_at: DateTime<Utc>,
     now: DateTime<Utc>,
     access_half_life_days: f64,
 ) -> f32 {
     if access_count <= 0 {
         return 0.0;
     }
-    let Some(last_accessed) = last_accessed_at else {
-        return 0.0;
-    };
+    let anchor = last_accessed_at.unwrap_or(updated_at);
     let count_factor = (1.0 - (-(access_count as f32) * 0.25).exp()).clamp(0.0, 1.0);
     let recency = crate::decay::half_life_decay(
-        crate::decay::age_in_days(now, last_accessed),
+        crate::decay::age_in_days(now, anchor),
         access_half_life_days,
     );
     (count_factor * recency).clamp(0.0, 1.0)
@@ -375,6 +376,7 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
     let access = access_boost_score(
         item.access_count,
         item.last_accessed_at,
+        item.updated_at,
         options.now,
         ACCESS_BOOST_HALF_LIFE_DAYS,
     );
@@ -1038,10 +1040,30 @@ mod tests {
     #[test]
     fn access_boost_is_zero_without_accesses() {
         let now = Utc::now();
-        assert!(access_boost_score(0, Some(now), now, 14.0) < f32::EPSILON);
-        // A stored count with no recorded access time scores nothing: the
-        // reward is gated on a real, datable access.
-        assert!(access_boost_score(10, None, now, 14.0) < f32::EPSILON);
+        assert!(access_boost_score(0, Some(now), now, now, 14.0) < f32::EPSILON);
+        // A stored count with no recorded access time falls back to the
+        // `updated_at` anchor (mirroring `recency_score`), so a legacy count
+        // still contributes instead of silently zeroing.
+        assert!(access_boost_score(10, None, now, now, 14.0) > 0.5);
+    }
+
+    #[test]
+    fn access_boost_without_access_time_decays_from_updated_at() {
+        // #345 regression: legacy rows with `access_count > 0` but no
+        // `last_accessed_at` used to score zero. They now anchor on
+        // `updated_at`, so a recently-updated memory still earns its boost
+        // while an old one has decayed away.
+        let now = Utc::now();
+        let recent = now - chrono::Duration::days(1);
+        let stale = now - chrono::Duration::days(365);
+        let fresh = access_boost_score(10, None, recent, now, 14.0);
+        let aged = access_boost_score(10, None, stale, now, 14.0);
+        assert!(fresh > 0.5, "recent update should still boost, got {fresh}");
+        assert!(
+            aged < 0.01,
+            "year-old update must have decayed away, got {aged}"
+        );
+        assert!(aged < fresh);
     }
 
     #[test]
@@ -1051,8 +1073,8 @@ mod tests {
         let now = Utc::now();
         let recent = now - chrono::Duration::days(1);
         let stale = now - chrono::Duration::days(365);
-        let fresh_boost = access_boost_score(10, Some(recent), now, 14.0);
-        let stale_boost = access_boost_score(10, Some(stale), now, 14.0);
+        let fresh_boost = access_boost_score(10, Some(recent), now, now, 14.0);
+        let stale_boost = access_boost_score(10, Some(stale), now, now, 14.0);
         assert!(fresh_boost > 0.5, "recent accesses should still boost");
         assert!(
             stale_boost < 0.01,
@@ -1066,8 +1088,8 @@ mod tests {
         let now = Utc::now();
         let one_half_life_ago = now - chrono::Duration::days(14);
         // Saturating count factor ≈ 0.918 at count=10; half-life decay halves it.
-        let full = access_boost_score(10, Some(now), now, 14.0);
-        let half = access_boost_score(10, Some(one_half_life_ago), now, 14.0);
+        let full = access_boost_score(10, Some(now), now, now, 14.0);
+        let half = access_boost_score(10, Some(one_half_life_ago), now, now, 14.0);
         assert!((half - full * 0.5).abs() < 1e-3);
     }
 }

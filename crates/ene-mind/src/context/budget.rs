@@ -16,7 +16,7 @@ use crate::prompt_packet::{
 };
 use crate::recall::{RecallBudgetHints, RecalledMemory, format_recalled_content};
 
-use super::tokens::{estimate_tokens, truncate_to_tokens};
+use super::tokens::{estimate_tokens, tokens_to_chars, truncate_to_tokens};
 
 /// Fixed and dynamic token budgets for prompt packing.
 #[derive(Debug, Clone)]
@@ -76,9 +76,9 @@ pub struct BudgetMeta {
     ///
     /// A memory recalled by search may still be dropped by the budget manager
     /// (its whole section dropped, or trimmed within the section). Only the
-    /// survivors — the ones the model will actually see — should have their
-    /// access counters bumped (#345), so recall does not reinforce memories it
-    /// never surfaced.
+    /// survivors — the ones actually composed into the packed prompt — should
+    /// have their access counters bumped (#345), so recall does not reinforce
+    /// memories it never surfaced.
     pub injected_memory_ids: Vec<i64>,
 }
 
@@ -174,6 +174,67 @@ fn memory_section_body(memories: &[RecalledMemory]) -> String {
         .join("\n")
 }
 
+/// Render a memory section body, joining an optional non-memory `prefix`
+/// (e.g. the user-persona block in the profile section) with the memory bullets.
+fn render_memory_body(prefix: &str, memories: &[RecalledMemory]) -> String {
+    let memory_body = memory_section_body(memories);
+    if prefix.is_empty() {
+        memory_body
+    } else if memory_body.is_empty() {
+        prefix.to_string()
+    } else {
+        format!("{prefix}\n{memory_body}")
+    }
+}
+
+/// Fit a memory section into `max_chars`, dropping the lowest-confidence
+/// memories until the rendered body fits.
+///
+/// `memories` must be pre-sorted in drop order (ascending confidence) so
+/// `remove(0)` drops the weakest first — the same direction the within-section
+/// trim loop in [`pack_prompt`] uses. Unlike the old char-level truncation
+/// (which sliced the highest-confidence tail mid-line), whole bullets are
+/// dropped, so the surviving vector and the rendered body always agree (#345).
+fn fit_memory_bullets(
+    prefix: &str,
+    memories: &mut Vec<RecalledMemory>,
+    max_chars: usize,
+) -> String {
+    loop {
+        let body = render_memory_body(prefix, memories);
+        if body.chars().count() <= max_chars || memories.is_empty() {
+            return body;
+        }
+        memories.remove(0);
+    }
+}
+
+/// Recalled-memory survivors per section, kept in lockstep with the rendered
+/// section bodies at every packing stage (#345).
+///
+/// `build_sections` prunes these to each section's token budget, the drop loop
+/// clears them when a section is dropped, and the within-section trim loop
+/// removes low-confidence memories from them while rebuilding the body — so at
+/// any point their IDs are exactly the memories the packed prompt will show.
+#[derive(Debug, Clone, Default)]
+struct MemorySurvivors {
+    semantic: Vec<RecalledMemory>,
+    profile: Vec<RecalledMemory>,
+    episodic: Vec<RecalledMemory>,
+}
+
+impl MemorySurvivors {
+    /// Clear the survivors for `kind`, mirroring that section being dropped.
+    fn clear_kind(&mut self, kind: PromptSectionKind) {
+        match kind {
+            PromptSectionKind::SemanticContext => self.semantic.clear(),
+            PromptSectionKind::UserProfile => self.profile.clear(),
+            PromptSectionKind::EpisodicMemories => self.episodic.clear(),
+            _ => {}
+        }
+    }
+}
+
 fn set_section_body(sections: &mut [PromptSection], kind: PromptSectionKind, body: String) {
     if let Some(section) = sections.iter_mut().find(|s| s.kind == kind) {
         section.content = body;
@@ -232,8 +293,12 @@ fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) ->
     drop_count
 }
 
-fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSection> {
+fn build_sections(
+    input: &PackInput,
+    budget: &ContextBudget,
+) -> (Vec<PromptSection>, MemorySurvivors) {
     let (semantic, profile, episodic) = classify_recalled_memories(&input.recalled);
+    let mut survivors = MemorySurvivors::default();
 
     let mut sections = Vec::new();
 
@@ -279,9 +344,15 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         let mut semantic_owned: Vec<RecalledMemory> =
             semantic.iter().map(|m| (*m).clone()).collect();
         sort_memories_for_drop(&mut semantic_owned);
+        let body = fit_memory_bullets(
+            "",
+            &mut semantic_owned,
+            tokens_to_chars(budget.budget_for(PromptSectionKind::SemanticContext)),
+        );
+        survivors.semantic = semantic_owned;
         sections.push(PromptSection::new(
             PromptSectionKind::SemanticContext,
-            memory_section_body(&semantic_owned),
+            body,
             budget.budget_for(PromptSectionKind::SemanticContext),
         ));
     }
@@ -290,20 +361,18 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         let mut profile_owned: Vec<RecalledMemory> = profile.iter().map(|m| (*m).clone()).collect();
         sort_memories_for_drop(&mut profile_owned);
 
-        // Build the section body: prepend user_persona info then append recalled profile memories
-        let mut body_parts = Vec::new();
-
-        // Add structured user persona as a block at the top of the UserProfile section
-        if let Some(ref persona) = input.user_persona {
-            body_parts.push(persona.render_lines("- "));
-        }
-
-        // Append recalled profile/preference/relationship memories
-        if !profile_owned.is_empty() {
-            body_parts.push(memory_section_body(&profile_owned));
-        }
-
-        let body = body_parts.join("\n");
+        // The structured persona block shares the section budget with the
+        // recalled profile memories; reserve it before fitting the bullets.
+        let persona_block = input
+            .user_persona
+            .as_ref()
+            .map(|persona| persona.render_lines("- "));
+        let body = fit_memory_bullets(
+            persona_block.as_deref().unwrap_or(""),
+            &mut profile_owned,
+            tokens_to_chars(budget.budget_for(PromptSectionKind::UserProfile)),
+        );
+        survivors.profile = profile_owned;
         sections.push(PromptSection::new(
             PromptSectionKind::UserProfile,
             body,
@@ -323,9 +392,15 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         let mut episodic_owned: Vec<RecalledMemory> =
             episodic.iter().map(|m| (*m).clone()).collect();
         sort_memories_for_drop(&mut episodic_owned);
+        let body = fit_memory_bullets(
+            "",
+            &mut episodic_owned,
+            tokens_to_chars(budget.budget_for(PromptSectionKind::EpisodicMemories)),
+        );
+        survivors.episodic = episodic_owned;
         sections.push(PromptSection::new(
             PromptSectionKind::EpisodicMemories,
-            memory_section_body(&episodic_owned),
+            body,
             budget.budget_for(PromptSectionKind::EpisodicMemories),
         ));
     }
@@ -366,7 +441,7 @@ fn build_sections(input: &PackInput, budget: &ContextBudget) -> Vec<PromptSectio
         0,
     ));
 
-    sections
+    (sections, survivors)
 }
 
 fn apply_section_budget(section: &mut PromptSection) {
@@ -383,10 +458,8 @@ fn apply_section_budget(section: &mut PromptSection) {
 /// Pack a prompt packet under the configured token budget.
 #[must_use]
 pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
-    let mut sections = build_sections(&input, budget);
+    let (mut sections, mut survivors) = build_sections(&input, budget);
     let mut dropped = Vec::new();
-    let (mut semantic, mut profile, mut episodic) =
-        classify_recalled_memories_owned(&input.recalled);
 
     for section in &mut sections {
         apply_section_budget(section);
@@ -414,6 +487,13 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
                 section_tokens_cache[idx] = 0;
                 section_tokens_sum = section_tokens_sum.saturating_sub(removed_tokens);
                 drop_set.insert(kind);
+                // Keep the survivor vectors in lockstep with the rendered
+                // sections: a cleared section renders nothing, so its survivors
+                // must not be reported as injected. Clearing them also stops the
+                // within-section trim loop below from re-populating a dropped
+                // section — the previous divergence where displayed memories
+                // were excluded by the `dropped` guard (#345).
+                survivors.clear_kind(kind);
                 total = total.saturating_sub(removed_tokens);
             }
         }
@@ -423,9 +503,9 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     // Low-confidence memories drop first within each recalled section.
     if total > budget.total_tokens {
         for (kind, memories) in [
-            (PromptSectionKind::EpisodicMemories, &mut episodic),
-            (PromptSectionKind::SemanticContext, &mut semantic),
-            (PromptSectionKind::UserProfile, &mut profile),
+            (PromptSectionKind::EpisodicMemories, &mut survivors.episodic),
+            (PromptSectionKind::SemanticContext, &mut survivors.semantic),
+            (PromptSectionKind::UserProfile, &mut survivors.profile),
         ] {
             sort_memories_for_drop(memories);
             while total > budget.total_tokens && memories.len() > 1 {
@@ -464,7 +544,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
 
     let packed_tokens = total;
 
-    let injected_memory_ids = collect_injected_memory_ids(&dropped, &semantic, &profile, &episodic);
+    let injected_memory_ids = collect_injected_memory_ids(&survivors);
 
     let packet = PromptPacket { sections, history };
 
@@ -479,49 +559,24 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     }
 }
 
-/// IDs of recalled memories that survived budget packing into the prompt (#345).
+/// IDs of recalled memories that actually survived into the packed prompt (#345).
 ///
-/// A memory's section may be dropped wholesale (its kind lands in `dropped`) or
-/// trimmed within the section (low-confidence rows removed from the owned
-/// vectors). Only the survivors — what the model will actually read — are
-/// returned, so the access bump can be gated on real prompt inclusion rather
-/// than on "ranked high in search".
-fn collect_injected_memory_ids(
-    dropped: &[PromptSectionKind],
-    semantic: &[RecalledMemory],
-    profile: &[RecalledMemory],
-    episodic: &[RecalledMemory],
-) -> Vec<i64> {
+/// The survivor vectors are the single source of truth for what was rendered:
+/// `build_sections` prunes them to each section's token budget, the drop loop
+/// clears them when a section is dropped, and the within-section trim loop
+/// removes low-confidence memories from them while rebuilding the body. Their
+/// IDs therefore match exactly what the model will see — the gate the access
+/// bump is keyed on, so recall never reinforces a memory it did not surface.
+fn collect_injected_memory_ids(survivors: &MemorySurvivors) -> Vec<i64> {
     let mut ids = Vec::new();
-    let mut extend_from = |kind: PromptSectionKind, memories: &[RecalledMemory]| {
-        if dropped.contains(&kind) {
-            return;
-        }
+    for memories in [&survivors.semantic, &survivors.profile, &survivors.episodic] {
         for memory in memories {
             if let Some(id) = memory.item.id {
                 ids.push(id);
             }
         }
-    };
-    extend_from(PromptSectionKind::SemanticContext, semantic);
-    extend_from(PromptSectionKind::UserProfile, profile);
-    extend_from(PromptSectionKind::EpisodicMemories, episodic);
+    }
     ids
-}
-
-fn classify_recalled_memories_owned(
-    recalled: &[RecalledMemory],
-) -> (
-    Vec<RecalledMemory>,
-    Vec<RecalledMemory>,
-    Vec<RecalledMemory>,
-) {
-    let (semantic, profile, episodic) = classify_recalled_memories(recalled);
-    (
-        semantic.iter().map(|m| (*m).clone()).collect(),
-        profile.iter().map(|m| (*m).clone()).collect(),
-        episodic.iter().map(|m| (*m).clone()).collect(),
-    )
 }
 
 #[cfg(test)]
@@ -662,23 +717,138 @@ mod tests {
     }
 
     #[test]
-    fn collect_injected_memory_ids_respects_dropped_sections() {
+    fn collect_injected_memory_ids_reflects_survivor_vectors() {
         // Direct, deterministic check of the survivor computation (#345): IDs
-        // are collected per section, and any section listed in `dropped`
-        // contributes nothing.
-        let semantic = vec![sample_memory_with_id(1, MemoryKind::Semantic, 0.9)];
-        let profile = vec![sample_memory_with_id(2, MemoryKind::Preference, 0.9)];
-        let episodic = vec![sample_memory_with_id(3, MemoryKind::Episodic, 0.9)];
+        // are collected per kind. A section that is dropped has its survivor
+        // vector cleared by the drop loop (`MemorySurvivors::clear_kind`), so
+        // an empty vector yields no IDs — mirroring how `pack_prompt` keeps
+        // vector state in sync with rendered content.
+        let survivors = MemorySurvivors {
+            semantic: vec![sample_memory_with_id(1, MemoryKind::Semantic, 0.9)],
+            profile: vec![sample_memory_with_id(2, MemoryKind::Preference, 0.9)],
+            episodic: vec![sample_memory_with_id(3, MemoryKind::Episodic, 0.9)],
+        };
 
-        let mut all = collect_injected_memory_ids(&[], &semantic, &profile, &episodic);
+        let mut all = collect_injected_memory_ids(&survivors);
         all.sort_unstable();
         assert_eq!(all, vec![1, 2, 3]);
 
-        let dropped = [PromptSectionKind::EpisodicMemories];
-        let ids = collect_injected_memory_ids(&dropped, &semantic, &profile, &episodic);
-        assert!(!ids.contains(&3), "dropped episodic id must be excluded");
+        let mut without_episodic = survivors;
+        without_episodic.clear_kind(PromptSectionKind::EpisodicMemories);
+        let ids = collect_injected_memory_ids(&without_episodic);
+        assert!(
+            !ids.contains(&3),
+            "a dropped section's memories must be excluded"
+        );
         assert!(ids.contains(&1));
         assert!(ids.contains(&2));
+    }
+
+    #[test]
+    fn injected_memory_ids_keep_only_memories_that_fit_section_budget() {
+        // #345 regression (over-count): the per-section token budget used to
+        // char-truncate the rendered body, silently cutting the highest-
+        // confidence tail (after the ascending-confidence sort) out of the
+        // visible content while the survivor vectors still reported those
+        // memories injected and bumped them. The vectors and the rendered body
+        // must agree: memories whose bullets do not fit the section budget are
+        // dropped wholesale and never reported injected.
+        let config = ContextConfig {
+            memory_budget_tokens: 15,
+            ..ContextConfig::default()
+        };
+        let budget = ContextBudget::from_config(&config);
+        // All confidences >= 0.5 so no "[uncertain]" qualifier skews the
+        // char accounting; sorted ascending they render as id 1, 2, 3.
+        let mut low = sample_memory_with_id(1, MemoryKind::Episodic, 0.6);
+        low.item.content = "m1 ".repeat(9);
+        let mut mid = sample_memory_with_id(2, MemoryKind::Episodic, 0.7);
+        mid.item.content = "m2 ".repeat(9);
+        let mut high = sample_memory_with_id(3, MemoryKind::Episodic, 0.9);
+        high.item.content = "m3 ".repeat(9);
+        let input = kernel_only_input(vec![low, mid, high]);
+        let packed = pack_prompt(input, &budget);
+
+        // 15 tokens = 60 chars fits two 28-char bullets; the low-confidence
+        // head is dropped first, keeping the high-confidence tail.
+        let ids = packed.meta.injected_memory_ids.clone();
+        assert!(
+            ids.contains(&2) && ids.contains(&3),
+            "the high-confidence tail must be kept, got {ids:?}"
+        );
+        assert!(
+            !ids.contains(&1),
+            "the low-confidence head must be trimmed, got {ids:?}"
+        );
+
+        let episodic = packed
+            .packet
+            .section(PromptSectionKind::EpisodicMemories)
+            .expect("episodic section present");
+        assert!(
+            ids.iter()
+                .all(|id| episodic.content.contains(&format!("m{id} "))),
+            "every injected id must be rendered, body={:?}",
+            episodic.content
+        );
+        assert!(
+            !episodic.content.contains("m1 "),
+            "a trimmed memory must not be rendered, body={:?}",
+            episodic.content
+        );
+    }
+
+    #[test]
+    fn dropped_section_stays_empty_when_total_still_over_budget() {
+        // #345 regression (under-count): when a memory section is dropped but
+        // the total is still over budget, the within-section trim loop used to
+        // re-populate the cleared section from the survivor vectors — memories
+        // the model then saw, yet excluded from `injected_memory_ids` by the
+        // `dropped` guard. Clearing the survivors at drop time keeps the
+        // section dropped and its (now empty) vector consistent with the
+        // rendered content: nothing is reported injected.
+        let config = ContextConfig {
+            max_prompt_tokens: 10,
+            ..ContextConfig::default()
+        };
+        let budget = ContextBudget::from_config(&config);
+        let input = PackInput {
+            behavior_contract: Some("rules ".repeat(200)),
+            recalled: vec![
+                sample_memory_with_id(1, MemoryKind::Episodic, 0.9),
+                sample_memory_with_id(2, MemoryKind::Episodic, 0.7),
+                sample_memory_with_id(3, MemoryKind::Episodic, 0.5),
+            ],
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+        assert!(
+            packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::EpisodicMemories),
+            "episodic section should be dropped, dropped={:?}",
+            packed.meta.dropped
+        );
+        // The undroppable behavior contract keeps `total` over budget even
+        // after the drop pass, forcing the trim loop to run.
+        assert!(
+            packed.meta.packed_tokens > budget.total_tokens,
+            "test requires total to remain over budget, got {}",
+            packed.meta.packed_tokens
+        );
+        assert!(
+            packed.meta.injected_memory_ids.is_empty(),
+            "a dropped section's memories must not be injected"
+        );
+        let episodic = packed
+            .packet
+            .section(PromptSectionKind::EpisodicMemories)
+            .expect("episodic section present");
+        assert!(
+            episodic.content.is_empty(),
+            "a dropped section must not be re-populated by the trim loop"
+        );
     }
 
     #[test]
