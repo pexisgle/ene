@@ -357,6 +357,24 @@ impl ToolSpecAttrs {
         }
     }
 
+    /// Side effects for the LLM-facing [`ToolSpec`](::ene_plugin_proto::ToolSpec)
+    /// (#400).
+    ///
+    /// Unlike [`Self::side_effects_path`] (which defaults to `ReadOnly` for the
+    /// RAG profile), this returns `None` when the author did not declare side
+    /// effects. The parallel tool-call policy treats `None` fail-closed — the
+    /// tool is never parallelized — so an undeclared tool keeps the safe
+    /// sequential behavior instead of being optimistically treated as read-only.
+    pub fn side_effects_spec(&self) -> TokenStream2 {
+        match &self.side_effects {
+            Some(s) => {
+                let path = path_token(s, "ene_plugin_proto::SideEffects", "ReadOnly");
+                quote! { Some(#path) }
+            }
+            None => quote! { None },
+        }
+    }
+
     pub fn keywords_list(&self, kind: &str) -> Vec<String> {
         match kind {
             "primary" => self.keywords_primary.0.clone(),

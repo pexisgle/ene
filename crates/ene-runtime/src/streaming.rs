@@ -8,6 +8,7 @@ use ene_mind::memory_writer::{ToolResultSummary, tool_grounding};
 use ene_plugin_host::PluginHostError;
 use ene_plugin_proto::ToolError;
 use ene_rag::ToolRag;
+use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,6 +112,21 @@ pub(crate) struct ToolExecutionContext<'a> {
     /// directly so a `Cancel` resolves them immediately instead of relying on
     /// the actor's `drain_pending()` dropping the oneshot sender (#401).
     pub cancel_token: CancellationToken,
+    /// Maximum number of side-effect-free tool calls executed concurrently
+    /// in one round (#400). `0` disables parallelism.
+    pub parallel_tool_calls_max: usize,
+    /// Tool names that support deferred (background) execution (#196).
+    ///
+    /// Computed once per turn from `registry.list_tools()` and threaded
+    /// through every round, instead of re-listing all tools (and cloning
+    /// every `ToolSpec`) at the top of each round (#400).
+    pub background_capable: &'a std::collections::HashSet<String>,
+    /// Tool names eligible for bounded parallel execution (#400).
+    ///
+    /// A tool lands here only when it explicitly declares
+    /// `SideEffects::ReadOnly` and is not background-capable. Computed once
+    /// per turn alongside [`Self::background_capable`].
+    pub parallelizable: &'a std::collections::HashSet<String>,
     /// Maximum characters for tool result summaries.
     pub max_summary_chars: usize,
     /// Optional memory store for audit logging.
@@ -418,6 +434,29 @@ pub(crate) async fn select_relevant_tools(
 }
 
 /// Executes a batch of tool calls and sends result events through the broadcast channel.
+///
+/// # Parallel execution policy (#400)
+///
+/// Tool calls the LLM returns in a single round are split by their declared
+/// side effects:
+///
+/// - **Side-effect-free** calls (`SideEffects::ReadOnly`, non-background) run
+///   first, concurrently, in a bounded batch of at most
+///   [`ToolExecutionContext::parallel_tool_calls_max`] at once. Only the raw
+///   dispatch runs in parallel — no events are emitted and no permission /
+///   user-input prompts are resolved in this phase.
+/// - **All** calls are then finalized in the *original* order: each emits
+///   `ToolCallStart`, consumes its precomputed parallel result (or runs
+///   sequentially when it was not parallelized), resolves any chained
+///   permission / user-input prompts, records the audit entry and undo
+///   checkpoint, and emits `ToolCallResult`.
+///
+/// Finalizing in order preserves every ordering-sensitive invariant:
+/// `EneEvent::ToolCallStart` / `ToolCallResult` ordering for the UI, the undo
+/// stack order, [`ToolResultSummary`] order, and the `round_messages` order.
+/// A read-only tool that unexpectedly returns `PermissionRequired` /
+/// `UserInputRequired` is resolved on the sequential finalize path, so
+/// interactive prompts are never surfaced concurrently.
 pub(crate) async fn perform_tool_executions(
     ctx: &ToolExecutionContext<'_>,
     tool_calls: Vec<LlmToolCall>,
@@ -425,16 +464,6 @@ pub(crate) async fn perform_tool_executions(
 ) -> Result<ToolExecutionOutput, crate::error::EneRuntimeError> {
     let mut round_messages = Vec::new();
     let mut summaries = Vec::new();
-
-    // Build a lookup of background-capable tool names so deferred calls
-    // are only attempted for tools that advertise support (#196).
-    let background_capable: std::collections::HashSet<String> = ctx
-        .registry
-        .list_tools()
-        .into_iter()
-        .filter(|spec| spec.background_capable)
-        .map(|spec| spec.name.as_str().to_string())
-        .collect();
 
     round_messages.push(LlmMessage::Assistant {
         content: if assistant_content.is_empty() {
@@ -450,7 +479,58 @@ pub(crate) async fn perform_tool_executions(
         turn_id: ctx.turn.to_string(),
     };
 
-    for call in tool_calls {
+    // Phase 1 — run side-effect-free calls concurrently (bounded). Results are
+    // collected in the original order so Phase 2 can finalize deterministically.
+    let mut parallel_results = if ctx.parallel_tool_calls_max > 0 {
+        let parallel_indices: Vec<usize> = tool_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| ctx.parallelizable.contains(&call.name))
+            .map(|(idx, _)| idx)
+            .collect();
+
+        let mut results: Vec<Option<Result<String, PluginHostError>>> =
+            vec![None; tool_calls.len()];
+        if !parallel_indices.is_empty() {
+            let stream = futures::stream::iter(parallel_indices.into_iter().map(|idx| {
+                let call = tool_calls[idx].clone();
+                let call_ctx = call_ctx.clone();
+                let registry = ctx.registry;
+                let background_capable = ctx.background_capable;
+                let deferred_tool_tx = ctx.deferred_tool_tx;
+                let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+                async move {
+                    let outcome = dispatch_tool_call(
+                        registry,
+                        background_capable,
+                        deferred_tool_tx,
+                        &call.name,
+                        &call.arguments,
+                        &call_ctx,
+                        tool_timeout,
+                    )
+                    .await;
+                    (idx, outcome)
+                }
+            }));
+            // `buffer_unordered` caps in-flight calls at the configured bound;
+            // `collect` drains them all before Phase 2 starts.
+            let completed: Vec<(usize, Result<String, PluginHostError>)> = stream
+                .buffer_unordered(ctx.parallel_tool_calls_max)
+                .collect()
+                .await;
+            for (idx, outcome) in completed {
+                results[idx] = Some(outcome);
+            }
+        }
+        results
+    } else {
+        vec![None; tool_calls.len()]
+    };
+
+    // Phase 2 — finalize in the original order, preserving event / undo /
+    // summary / message ordering and resolving interactive prompts serially.
+    for (idx, call) in tool_calls.into_iter().enumerate() {
         let name = call.name.clone();
         let args = call.arguments.clone();
 
@@ -472,61 +552,32 @@ pub(crate) async fn perform_tool_executions(
             );
         }
 
-        let mut result = if name == "system.search_tools" {
-            let query = serde_json::from_str::<serde_json::Value>(&args)
-                .ok()
-                .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
-                .unwrap_or_default();
-            execute_system_search_tool(ctx.registry, ctx.tool_rag, &query).await
-        } else if background_capable.contains(&name) {
-            // Try deferred execution for background-capable tools (#196).
-            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-            match tokio::time::timeout(
-                tool_timeout,
-                ctx.registry
-                    .call_tool_deferred(&name, &args, Some(&call_ctx)),
-            )
-            .await
-            {
-                Ok(Ok(ene_plugin_host::DeferredCallResult::Deferred { task_id })) => {
-                    // Task accepted for background execution.
-                    drop(ctx.deferred_tool_tx.send(crate::handle::DeferredToolTask {
-                        tool_name: name.clone(),
-                        task_id: task_id.clone(),
-                        arguments: args.clone(),
-                        started_at: chrono::Utc::now(),
-                    }));
-                    Ok(format!(
-                        "Task queued for background execution with task_id: {task_id}"
-                    ))
+        // Consume the precomputed parallel result when present; otherwise run
+        // the call now on the sequential path. `.take()` moves the result out
+        // (each index is visited exactly once, and `PluginHostError` is not
+        // `Clone`).
+        let mut result = match parallel_results[idx].take() {
+            Some(outcome) => outcome,
+            None => {
+                let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+                if name == "system.search_tools" {
+                    let query = serde_json::from_str::<serde_json::Value>(&args)
+                        .ok()
+                        .and_then(|v| v.get("query").and_then(|q| q.as_str()).map(String::from))
+                        .unwrap_or_default();
+                    execute_system_search_tool(ctx.registry, ctx.tool_rag, &query).await
+                } else {
+                    dispatch_tool_call(
+                        ctx.registry,
+                        ctx.background_capable,
+                        ctx.deferred_tool_tx,
+                        &name,
+                        &args,
+                        &call_ctx,
+                        tool_timeout,
+                    )
+                    .await
                 }
-                Ok(Ok(ene_plugin_host::DeferredCallResult::Sync(res))) => Ok(res.text_for_llm()),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(PluginHostError::ExecutionFailed {
-                    message: format!(
-                        "Tool '{}' timed out after {:.2} seconds",
-                        name,
-                        tool_timeout.as_secs_f64()
-                    ),
-                }),
-            }
-        } else {
-            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-            match tokio::time::timeout(
-                tool_timeout,
-                ctx.registry.call_tool(&name, &args, Some(&call_ctx)),
-            )
-            .await
-            {
-                Ok(Ok(res)) => Ok(res.text_for_llm()),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(PluginHostError::ExecutionFailed {
-                    message: format!(
-                        "Tool '{}' timed out after {:.2} seconds",
-                        name,
-                        tool_timeout.as_secs_f64()
-                    ),
-                }),
             }
         };
 
@@ -603,15 +654,7 @@ pub(crate) async fn perform_tool_executions(
                             )
                             .await
                             .map_or_else(
-                                |_| {
-                                    Err(PluginHostError::ExecutionFailed {
-                                        message: format!(
-                                            "Tool '{}' timed out after {:.2} seconds",
-                                            name,
-                                            tool_timeout.as_secs_f64()
-                                        ),
-                                    })
-                                },
+                                |_| Err(timeout_error(&name, tool_timeout)),
                                 |r| r.map(|r| r.text_for_llm()),
                             );
                         }
@@ -656,15 +699,7 @@ pub(crate) async fn perform_tool_executions(
                             )
                             .await
                             .map_or_else(
-                                |_| {
-                                    Err(PluginHostError::ExecutionFailed {
-                                        message: format!(
-                                            "Tool '{}' timed out after {:.2} seconds",
-                                            name,
-                                            tool_timeout.as_secs_f64()
-                                        ),
-                                    })
-                                },
+                                |_| Err(timeout_error(&name, tool_timeout)),
                                 |r| r.map(|r| r.text_for_llm()),
                             );
                         }
@@ -722,15 +757,7 @@ pub(crate) async fn perform_tool_executions(
                         )
                         .await
                         .map_or_else(
-                            |_| {
-                                Err(PluginHostError::ExecutionFailed {
-                                    message: format!(
-                                        "Tool '{}' timed out after {:.2} seconds",
-                                        name,
-                                        tool_timeout.as_secs_f64()
-                                    ),
-                                })
-                            },
+                            |_| Err(timeout_error(&name, tool_timeout)),
                             |r| r.map(|r| r.text_for_llm()),
                         );
                     } else {
@@ -819,6 +846,74 @@ pub(crate) async fn perform_tool_executions(
         messages: round_messages,
         summaries,
     })
+}
+
+/// Dispatches a single tool call to the appropriate execution path.
+///
+/// Routes background-capable tools to deferred execution (#196) and everything
+/// else to a plain synchronous call, each bounded by `tool_timeout`. Used by
+/// both the parallel (side-effect-free) and sequential finalize phases of
+/// [`perform_tool_executions`] (#400).
+///
+/// `system.search_tools` is never dispatched here — it is not parallelizable
+/// and is intercepted on the sequential path, where the turn's `ToolRag`
+/// handle is available.
+///
+/// `background_capable` is the per-turn classification set (computed once from
+/// `registry.list_tools()`), so dispatch never re-lists tools (#400).
+async fn dispatch_tool_call(
+    registry: &dyn ene_plugin_host::ToolRegistry,
+    background_capable: &std::collections::HashSet<String>,
+    deferred_tool_tx: &mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
+    name: &str,
+    args: &str,
+    call_ctx: &ene_plugin_proto::CallContext,
+    tool_timeout: std::time::Duration,
+) -> Result<String, PluginHostError> {
+    if background_capable.contains(name) {
+        // Try deferred execution for background-capable tools (#196).
+        match tokio::time::timeout(
+            tool_timeout,
+            registry.call_tool_deferred(name, args, Some(call_ctx)),
+        )
+        .await
+        {
+            Ok(Ok(ene_plugin_host::DeferredCallResult::Deferred { task_id })) => {
+                // Task accepted for background execution.
+                drop(deferred_tool_tx.send(crate::handle::DeferredToolTask {
+                    tool_name: name.to_string(),
+                    task_id: task_id.clone(),
+                    arguments: args.to_string(),
+                    started_at: chrono::Utc::now(),
+                }));
+                Ok(format!(
+                    "Task queued for background execution with task_id: {task_id}"
+                ))
+            }
+            Ok(Ok(ene_plugin_host::DeferredCallResult::Sync(res))) => Ok(res.text_for_llm()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(timeout_error(name, tool_timeout)),
+        }
+    } else {
+        match tokio::time::timeout(tool_timeout, registry.call_tool(name, args, Some(call_ctx)))
+            .await
+        {
+            Ok(Ok(res)) => Ok(res.text_for_llm()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(timeout_error(name, tool_timeout)),
+        }
+    }
+}
+
+/// Builds the standard timeout error for a tool that exceeded its budget.
+fn timeout_error(name: &str, tool_timeout: std::time::Duration) -> PluginHostError {
+    PluginHostError::ExecutionFailed {
+        message: format!(
+            "Tool '{}' timed out after {:.2} seconds",
+            name,
+            tool_timeout.as_secs_f64()
+        ),
+    }
 }
 
 /// Maximum number of tool calls per round to guard against unbounded memory growth.
@@ -940,6 +1035,11 @@ pub(crate) fn search_tools_spec() -> ene_plugin_proto::ToolSpec {
             "required": ["query"]
         }),
         background_capable: false,
+        // Read-only in practice, but kept off the parallel path: it is
+        // dispatched through `execute_system_search_tool`, which needs the
+        // turn's `ToolRag` handle that the bounded parallel batch does not
+        // carry (#400).
+        side_effects: None,
     }
 }
 
@@ -1077,6 +1177,7 @@ mod tests {
                     description: "Read files".to_string(),
                     parameters: serde_json::json!({}),
                     background_capable: false,
+                    side_effects: Some(ene_plugin_proto::SideEffects::ReadOnly),
                 }]
             }
             async fn call_tool(
@@ -1102,6 +1203,8 @@ mod tests {
             arguments: serde_json::json!({ "query": "filesystem" }).to_string(),
         }];
 
+        let background_capable = std::collections::HashSet::new();
+        let parallelizable = std::collections::HashSet::new();
         let output = perform_tool_executions(
             &ToolExecutionContext {
                 registry: &registry,
@@ -1116,6 +1219,9 @@ mod tests {
                 permission_prompt_timeout_ms: 60_000,
                 user_input_prompt_timeout_ms: 60_000,
                 cancel_token: CancellationToken::new(),
+                parallel_tool_calls_max: 4,
+                background_capable: &background_capable,
+                parallelizable: &parallelizable,
                 max_summary_chars: 100,
                 audit_store: None,
                 permission_scopes: &Arc::new(Mutex::new(Vec::new())),
@@ -1233,6 +1339,8 @@ mod tests {
         let turn = crate::types::TurnId::new();
         let scopes = Arc::new(Mutex::new(Vec::new()));
         let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
+        let background_capable = std::collections::HashSet::new();
+        let parallelizable = std::collections::HashSet::new();
         let output = perform_tool_executions(
             &ToolExecutionContext {
                 registry: &registry,
@@ -1247,6 +1355,9 @@ mod tests {
                 permission_prompt_timeout_ms: 60_000,
                 user_input_prompt_timeout_ms: 60_000,
                 cancel_token: CancellationToken::new(),
+                parallel_tool_calls_max: 4,
+                background_capable: &background_capable,
+                parallelizable: &parallelizable,
                 max_summary_chars: 10,
                 audit_store: None,
                 permission_scopes: &scopes,
@@ -1364,6 +1475,8 @@ mod tests {
         let turn = crate::types::TurnId::new();
         let scopes = Arc::new(Mutex::new(Vec::new()));
         let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
+        let background_capable = std::collections::HashSet::new();
+        let parallelizable = std::collections::HashSet::new();
         let exec_ctx = ToolExecutionContext {
             registry: &registry,
             tool_rag: None,
@@ -1377,6 +1490,9 @@ mod tests {
             permission_prompt_timeout_ms: 60_000,
             user_input_prompt_timeout_ms: 60_000,
             cancel_token: CancellationToken::new(),
+            parallel_tool_calls_max: 4,
+            background_capable: &background_capable,
+            parallelizable: &parallelizable,
             max_summary_chars: 500,
             audit_store: None,
             permission_scopes: &scopes,
@@ -1522,6 +1638,8 @@ mod tests {
         let turn = crate::types::TurnId::new();
         let scopes = Arc::new(Mutex::new(Vec::new()));
         let undo_stack = Arc::new(Mutex::new(crate::undo::UndoStack::new(8)));
+        let background_capable = std::collections::HashSet::new();
+        let parallelizable = std::collections::HashSet::new();
         let exec_ctx = ToolExecutionContext {
             registry: &registry,
             tool_rag: None,
@@ -1535,6 +1653,9 @@ mod tests {
             permission_prompt_timeout_ms: 60_000,
             user_input_prompt_timeout_ms: 60_000,
             cancel_token: CancellationToken::new(),
+            parallel_tool_calls_max: 4,
+            background_capable: &background_capable,
+            parallelizable: &parallelizable,
             max_summary_chars: 500,
             audit_store: None,
             permission_scopes: &scopes,
@@ -1618,6 +1739,8 @@ mod tests {
         undo_stack: &'a Arc<tokio::sync::Mutex<crate::undo::UndoStack>>,
         deferred_tool_tx: &'a tokio::sync::mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
         cancel_token: CancellationToken,
+        background_capable: &'a std::collections::HashSet<String>,
+        parallelizable: &'a std::collections::HashSet<String>,
     ) -> ToolExecutionContext<'a> {
         ToolExecutionContext {
             registry,
@@ -1632,6 +1755,9 @@ mod tests {
             permission_prompt_timeout_ms: 100,
             user_input_prompt_timeout_ms: 100,
             cancel_token,
+            parallel_tool_calls_max: 4,
+            background_capable,
+            parallelizable,
             max_summary_chars: 500,
             audit_store: None,
             permission_scopes,
@@ -1703,6 +1829,8 @@ mod tests {
         }];
 
         // Deliberately NO consumer: nobody answers the permission prompt.
+        let background_capable = std::collections::HashSet::new();
+        let parallelizable = std::collections::HashSet::new();
         let exec_ctx = prompt_wait_ctx(
             &registry,
             &event_tx,
@@ -1713,6 +1841,8 @@ mod tests {
             &undo_stack,
             &deferred_tool_tx,
             CancellationToken::new(),
+            &background_capable,
+            &parallelizable,
         );
         let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
 
@@ -1794,6 +1924,8 @@ mod tests {
         }];
 
         let cancel_token = CancellationToken::new();
+        let background_capable = std::collections::HashSet::new();
+        let parallelizable = std::collections::HashSet::new();
         let exec_ctx = prompt_wait_ctx(
             &registry,
             &event_tx,
@@ -1804,6 +1936,8 @@ mod tests {
             &undo_stack,
             &deferred_tool_tx,
             cancel_token.clone(),
+            &background_capable,
+            &parallelizable,
         );
         let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
 
@@ -1887,6 +2021,8 @@ mod tests {
         }];
 
         // Deliberately NO consumer.
+        let background_capable = std::collections::HashSet::new();
+        let parallelizable = std::collections::HashSet::new();
         let exec_ctx = prompt_wait_ctx(
             &registry,
             &event_tx,
@@ -1897,6 +2033,8 @@ mod tests {
             &undo_stack,
             &deferred_tool_tx,
             CancellationToken::new(),
+            &background_capable,
+            &parallelizable,
         );
         let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
 
@@ -2077,5 +2215,387 @@ mod tests {
             wait.as_mut().poll(&mut cx),
             Poll::Ready(Some(ref answers)) if answers == &[MultiAnswer::Answer { text: "hello".to_string() }]
         ));
+    }
+
+    /// A registry whose read-only tools sleep briefly while running, so a
+    /// parallel batch overlaps and `max_in_flight` rises above 1. Used to
+    /// verify the bounded-parallel path of #400.
+    struct SlowReadOnlyRegistry {
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        max_in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ene_plugin_host::ToolRegistry for SlowReadOnlyRegistry {
+        fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+            Vec::new()
+        }
+        async fn call_tool(
+            &self,
+            name: &str,
+            _arguments: &str,
+            _context: Option<&ene_plugin_proto::CallContext>,
+        ) -> Result<ToolResult, PluginHostError> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            // Track the high-water mark of concurrent executions.
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(ToolResult::text(format!("result:{name}")))
+        }
+    }
+
+    fn parallel_test_sets(
+        parallelizable: &[&str],
+    ) -> (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) {
+        (
+            std::collections::HashSet::new(),
+            parallelizable.iter().map(|s| (*s).to_string()).collect(),
+        )
+    }
+
+    /// Two read-only tools must run concurrently (#400): the high-water mark
+    /// of in-flight calls reaches 2, and results are still returned in the
+    /// original `tool_calls` order.
+    #[tokio::test]
+    async fn read_only_tools_run_in_parallel_and_preserve_order() {
+        use std::sync::atomic::AtomicUsize;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let registry = SlowReadOnlyRegistry {
+            in_flight: in_flight.clone(),
+            max_in_flight: max_in_flight.clone(),
+        };
+
+        let (event_tx, _event_rx) = broadcast::channel(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let pending_user_inputs = Arc::new(Mutex::new(HashMap::new()));
+        let turn = crate::types::TurnId::new();
+        let (background_capable, parallelizable) =
+            parallel_test_sets(&["weather.get", "calendar.read"]);
+
+        let tool_calls = vec![
+            LlmToolCall {
+                id: "call-a".to_string(),
+                name: "weather.get".to_string(),
+                arguments: "{}".to_string(),
+            },
+            LlmToolCall {
+                id: "call-b".to_string(),
+                name: "calendar.read".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+
+        let output = perform_tool_executions(
+            &ToolExecutionContext {
+                registry: &registry,
+                tool_rag: None,
+                session_id: "session-1",
+                event_tx: &event_tx,
+                turn: &turn,
+                origin: TurnOrigin::User,
+                pending_permissions: &pending_permissions,
+                pending_user_inputs: &pending_user_inputs,
+                timeout_ms: 5_000,
+                permission_prompt_timeout_ms: 60_000,
+                user_input_prompt_timeout_ms: 60_000,
+                cancel_token: CancellationToken::new(),
+                parallel_tool_calls_max: 4,
+                background_capable: &background_capable,
+                parallelizable: &parallelizable,
+                max_summary_chars: 200,
+                audit_store: None,
+                permission_scopes: &Arc::new(Mutex::new(Vec::new())),
+                undo_stack: &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
+                deferred_tool_tx: &deferred_tool_tx,
+            },
+            tool_calls,
+            "",
+        )
+        .await
+        .expect("tool executions");
+
+        // Both calls overlapped at some point.
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) >= 2,
+            "read-only tools should run concurrently, max_in_flight = {}",
+            max_in_flight.load(Ordering::SeqCst)
+        );
+        // Results are re-ordered to the original tool_calls order.
+        assert_eq!(output.summaries.len(), 2);
+        assert_eq!(output.summaries[0].tool_name.as_str(), "weather.get");
+        assert_eq!(output.summaries[1].tool_name.as_str(), "calendar.read");
+        // Assistant message + two tool messages.
+        assert_eq!(output.messages.len(), 3);
+    }
+
+    /// Setting `parallel_tool_calls_max = 0` disables parallelism entirely:
+    /// even read-only tools run one at a time (#400).
+    #[tokio::test]
+    async fn parallel_disabled_runs_sequentially() {
+        use std::sync::atomic::AtomicUsize;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let registry = SlowReadOnlyRegistry {
+            in_flight: in_flight.clone(),
+            max_in_flight: max_in_flight.clone(),
+        };
+
+        let (event_tx, _event_rx) = broadcast::channel(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let pending_user_inputs = Arc::new(Mutex::new(HashMap::new()));
+        let turn = crate::types::TurnId::new();
+        let (background_capable, parallelizable) =
+            parallel_test_sets(&["weather.get", "calendar.read"]);
+
+        let tool_calls = vec![
+            LlmToolCall {
+                id: "call-a".to_string(),
+                name: "weather.get".to_string(),
+                arguments: "{}".to_string(),
+            },
+            LlmToolCall {
+                id: "call-b".to_string(),
+                name: "calendar.read".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+
+        let output = perform_tool_executions(
+            &ToolExecutionContext {
+                registry: &registry,
+                tool_rag: None,
+                session_id: "session-1",
+                event_tx: &event_tx,
+                turn: &turn,
+                origin: TurnOrigin::User,
+                pending_permissions: &pending_permissions,
+                pending_user_inputs: &pending_user_inputs,
+                timeout_ms: 5_000,
+                permission_prompt_timeout_ms: 60_000,
+                user_input_prompt_timeout_ms: 60_000,
+                cancel_token: CancellationToken::new(),
+                parallel_tool_calls_max: 0,
+                background_capable: &background_capable,
+                parallelizable: &parallelizable,
+                max_summary_chars: 200,
+                audit_store: None,
+                permission_scopes: &Arc::new(Mutex::new(Vec::new())),
+                undo_stack: &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
+                deferred_tool_tx: &deferred_tool_tx,
+            },
+            tool_calls,
+            "",
+        )
+        .await
+        .expect("tool executions");
+
+        assert_eq!(
+            max_in_flight.load(Ordering::SeqCst),
+            1,
+            "parallelism disabled must keep calls sequential"
+        );
+        assert_eq!(output.summaries.len(), 2);
+    }
+
+    /// A tool that is *not* in the parallelizable set (e.g. it declares side
+    /// effects) stays on the sequential path even when other calls in the same
+    /// round are parallelized (#400).
+    #[tokio::test]
+    async fn side_effectful_tool_stays_sequential() {
+        use std::sync::atomic::AtomicUsize;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let registry = SlowReadOnlyRegistry {
+            in_flight: in_flight.clone(),
+            max_in_flight: max_in_flight.clone(),
+        };
+
+        let (event_tx, _event_rx) = broadcast::channel(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_permissions = Arc::new(Mutex::new(HashMap::new()));
+        let pending_user_inputs = Arc::new(Mutex::new(HashMap::new()));
+        let turn = crate::types::TurnId::new();
+        // Only the read-only tool is parallelizable; `filesystem.write`
+        // (side-effectful) is deliberately excluded.
+        let (background_capable, parallelizable) = parallel_test_sets(&["weather.get"]);
+
+        let tool_calls = vec![
+            LlmToolCall {
+                id: "call-a".to_string(),
+                name: "weather.get".to_string(),
+                arguments: "{}".to_string(),
+            },
+            LlmToolCall {
+                id: "call-b".to_string(),
+                name: "filesystem.write".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ];
+
+        let output = perform_tool_executions(
+            &ToolExecutionContext {
+                registry: &registry,
+                tool_rag: None,
+                session_id: "session-1",
+                event_tx: &event_tx,
+                turn: &turn,
+                origin: TurnOrigin::User,
+                pending_permissions: &pending_permissions,
+                pending_user_inputs: &pending_user_inputs,
+                timeout_ms: 5_000,
+                permission_prompt_timeout_ms: 60_000,
+                user_input_prompt_timeout_ms: 60_000,
+                cancel_token: CancellationToken::new(),
+                parallel_tool_calls_max: 4,
+                background_capable: &background_capable,
+                parallelizable: &parallelizable,
+                max_summary_chars: 200,
+                audit_store: None,
+                permission_scopes: &Arc::new(Mutex::new(Vec::new())),
+                undo_stack: &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
+                deferred_tool_tx: &deferred_tool_tx,
+            },
+            tool_calls,
+            "",
+        )
+        .await
+        .expect("tool executions");
+
+        // Only one parallelizable call, so nothing overlaps.
+        assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
+        // Order is preserved regardless of the split.
+        assert_eq!(output.summaries.len(), 2);
+        assert_eq!(output.summaries[0].tool_name.as_str(), "weather.get");
+        assert_eq!(output.summaries[1].tool_name.as_str(), "filesystem.write");
+    }
+
+    /// A read-only-classified tool that still returns `PermissionRequired`
+    /// must surface the prompt on the sequential finalize path and resolve it
+    /// (never concurrently) — the fail-safe for a mis-declared tool (#400).
+    #[tokio::test]
+    async fn parallel_tool_permission_prompt_resolves_sequentially() {
+        use ene_plugin_proto::ToolError;
+        use std::sync::atomic::AtomicUsize;
+
+        struct ReadOnlyThenPermission {
+            request_id: String,
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ene_plugin_host::ToolRegistry for ReadOnlyThenPermission {
+            fn list_tools(&self) -> Vec<ene_plugin_proto::ToolSpec> {
+                Vec::new()
+            }
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
+            ) -> Result<ToolResult, PluginHostError> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(PluginHostError::Protocol(ToolError::PermissionRequired {
+                        request_id: self.request_id.clone(),
+                        action: "fs.read".to_string(),
+                        target: "/tmp/secret".to_string(),
+                        description: "read outside sandbox".to_string(),
+                    }))
+                } else {
+                    Ok(ToolResult::text("ok"))
+                }
+            }
+            async fn approve_permission(&self, _request_id: &str) {}
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = ReadOnlyThenPermission {
+            request_id: "req-ro".to_string(),
+            calls: calls.clone(),
+        };
+
+        let (event_tx, _event_rx) = broadcast::channel(16);
+        let (deferred_tool_tx, _deferred_tool_rx) = tokio::sync::mpsc::unbounded_channel();
+        let pending_permissions: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+        let pending_user_inputs: Arc<
+            Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
+        > = Arc::new(Mutex::new(HashMap::new()));
+
+        // Fast consumer approves the permission as soon as it is requested.
+        let consumer_event_rx = event_tx.subscribe();
+        let consumer_perms = pending_permissions.clone();
+        let consumer = tokio::spawn(async move {
+            let mut rx = consumer_event_rx;
+            while let Ok(ev) = rx.recv().await {
+                if let EneEvent::PermissionRequired { request_id, .. } = ev {
+                    let mut guard = consumer_perms.lock().await;
+                    if let Some(tx) = guard.remove(&request_id) {
+                        #[expect(
+                            clippy::let_underscore_must_use,
+                            reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                        )]
+                        let _ = tx.send(PermissionDecision::AllowOnce);
+                    }
+                    return;
+                }
+            }
+        });
+
+        let turn = crate::types::TurnId::new();
+        let (background_capable, parallelizable) = parallel_test_sets(&["fs.read"]);
+        let tool_calls = vec![LlmToolCall {
+            id: "call-1".to_string(),
+            name: "fs.read".to_string(),
+            arguments: "{}".to_string(),
+        }];
+
+        let exec_ctx = ToolExecutionContext {
+            registry: &registry,
+            tool_rag: None,
+            session_id: "session-1",
+            event_tx: &event_tx,
+            turn: &turn,
+            origin: TurnOrigin::User,
+            pending_permissions: &pending_permissions,
+            pending_user_inputs: &pending_user_inputs,
+            timeout_ms: 5_000,
+            permission_prompt_timeout_ms: 60_000,
+            user_input_prompt_timeout_ms: 60_000,
+            cancel_token: CancellationToken::new(),
+            parallel_tool_calls_max: 4,
+            background_capable: &background_capable,
+            parallelizable: &parallelizable,
+            max_summary_chars: 500,
+            audit_store: None,
+            permission_scopes: &Arc::new(Mutex::new(Vec::new())),
+            undo_stack: &Arc::new(Mutex::new(crate::undo::UndoStack::new(8))),
+            deferred_tool_tx: &deferred_tool_tx,
+        };
+        let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), exec).await;
+        drop(consumer.await);
+
+        let output = result
+            .expect("executor hung: permission prompt not resolved")
+            .expect("executor returned error");
+        assert_eq!(output.messages.len(), 2);
+        assert_eq!(output.summaries.len(), 1);
+        // First call hit PermissionRequired (parallel phase), the retry after
+        // approval succeeded (sequential finalize phase).
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(output.summaries[0].summary.contains("ok"));
     }
 }

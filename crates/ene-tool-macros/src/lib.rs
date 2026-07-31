@@ -292,6 +292,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
     let description = struct_attrs.description_value();
     let category = struct_attrs.category_path();
     let side_effects = struct_attrs.side_effects_path();
+    let side_effects_spec = struct_attrs.side_effects_spec();
     let background_capable = struct_attrs.background_capable;
     let keywords_primary = struct_attrs.keywords_list("primary");
     let keywords_secondary = struct_attrs.keywords_list("secondary");
@@ -324,9 +325,11 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
 
             /// Construct a `ToolSpec` for this args type.
             ///
-            /// Emits the LLM-facing fields only (`name`, `description`,
-            /// `parameters`). Rich `#[tool(...)]` metadata is emitted by
-            /// [`Self::rag_profile`] for Tool RAG (#137).
+            /// Emits the LLM-facing fields (`name`, `description`,
+            /// `parameters`) plus the host-execution metadata
+            /// `background_capable` and `side_effects` (the latter drives the
+            /// parallel tool-call policy, #400). Rich `#[tool(...)]` metadata
+            /// is emitted by [`Self::rag_profile`] for Tool RAG (#137).
             pub fn spec() -> ::ene_plugin_proto::ToolSpec {
                 use ::ene_plugin_proto::{ToolSpec, ToolName};
                 use ::schemars::JsonSchema as _;
@@ -358,6 +361,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                     description,
                     parameters: schema,
                     background_capable: #background_capable,
+                    side_effects: #side_effects_spec,
                 }
             }
 

@@ -797,6 +797,25 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mut round = 0usize;
     let mut turn_tool_results: Vec<ToolResultSummary> = Vec::new();
 
+    // Classify the tools available this turn once, rather than re-listing (and
+    // cloning every `ToolSpec`) at the top of each tool-execution round (#400).
+    // `tools` is exactly the set offered to the LLM, so it bounds every call
+    // the model can make. `parallelizable` is fail-closed: only tools that
+    // explicitly declare `SideEffects::ReadOnly` (and are not background-capable)
+    // are eligible for the bounded parallel batch.
+    let mut background_capable: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut parallelizable: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for spec in &tools {
+        let name = spec.name.as_str().to_string();
+        if spec.background_capable {
+            background_capable.insert(name.clone());
+        }
+        if spec.is_parallelizable() {
+            parallelizable.insert(name);
+        }
+    }
+
     // TTS pipeline: spawn a background worker that synthesizes sentences into
     // PCM audio chunks and emits them through the dedicated audio channel
     // (#272; not the chat broadcast bus — see `send_audio_chunk`).
@@ -1380,6 +1399,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             permission_prompt_timeout_ms: plugin_config.permission_prompt_timeout_ms,
             user_input_prompt_timeout_ms: plugin_config.user_input_prompt_timeout_ms,
             cancel_token: cancel_token.clone(),
+            parallel_tool_calls_max: plugin_config.parallel_tool_calls_max,
+            background_capable: &background_capable,
+            parallelizable: &parallelizable,
             max_summary_chars: mind.memory.tool_grounding.max_summary_chars,
             audit_store: mem_store.as_ref(),
             permission_scopes: &permission_scopes,

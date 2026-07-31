@@ -224,7 +224,8 @@ async fn read_directory(
     summary = "Read the contents of a file or list a directory.",
     description = "Read the contents of a file or list a directory. When editing text from Read output, preserve exact indentation (tabs/spaces) as it appears AFTER the line number prefix.",
     category = "Filesystem",
-    keywords_primary = "read, file, open, cat, directory, list"
+    keywords_primary = "read, file, open, cat, directory, list",
+    side_effects = "ReadOnly"
 )]
 pub struct FsReadAction {
     /// Absolute path to the file or directory.

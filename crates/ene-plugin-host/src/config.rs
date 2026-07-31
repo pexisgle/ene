@@ -26,6 +26,10 @@ const fn default_user_input_prompt_timeout_ms() -> u64 {
     600_000
 }
 
+const fn default_parallel_tool_calls_max() -> usize {
+    4
+}
+
 /// Default plugin list containing the builtin tool and provider plugins.
 fn default_plugin_list() -> HashMap<String, PluginEntry> {
     let mut list: HashMap<String, PluginEntry> = ["app", "browser", "fs", "utility", "web"]
@@ -152,6 +156,17 @@ ene_config::define_config!(
         /// legitimately needs a long time to answer.
         #[serde(default = "default_user_input_prompt_timeout_ms")]
         pub user_input_prompt_timeout_ms: u64 = default_user_input_prompt_timeout_ms(),
+        /// Maximum number of side-effect-free tool calls executed concurrently
+        /// in a single round (#400).
+        ///
+        /// When the LLM returns multiple tool calls, those that declare
+        /// themselves read-only (`SideEffects::ReadOnly`) are run in a bounded
+        /// batch of at most this many at once; side-effectful tools always run
+        /// sequentially. `0` disables parallelism entirely (every call runs
+        /// sequentially). The bound caps simultaneous IPC load on plugin
+        /// processes.
+        #[serde(default = "default_parallel_tool_calls_max")]
+        pub parallel_tool_calls_max: usize = default_parallel_tool_calls_max(),
         /// Interval between health probe pings in milliseconds.
         ///
         /// Set to `0` to disable periodic health checks.

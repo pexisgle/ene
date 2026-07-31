@@ -72,7 +72,8 @@ pub fn glob_search(
     summary = "Find files and directories matching a glob pattern.",
     description = "Find files and directories matching a glob pattern.",
     category = "Filesystem",
-    keywords_primary = "glob, find, search, files, pattern, match"
+    keywords_primary = "glob, find, search, files, pattern, match",
+    side_effects = "ReadOnly"
 )]
 pub struct FsGlobAction {
     /// Glob pattern (e.g. '**/*.rs', 'src/**/*.ts').

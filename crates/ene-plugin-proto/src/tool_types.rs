@@ -512,8 +512,11 @@ pub struct UndoMetadata {
 
 /// The structured, LLM-facing tool specification.
 ///
-/// Per API v1 / #135 this is limited to the fields the model sees:
-/// `name`, `description`, and `parameters` (JSON Schema).
+/// Per API v1 / #135 the model-facing surface is limited to `name`,
+/// `description`, and `parameters` (JSON Schema). The remaining fields
+/// (`background_capable`, `side_effects`) are host-execution metadata that
+/// providers strip before serializing tools to a model API; they follow the
+/// same precedent as `background_capable` (#196).
 ///
 /// RAG metadata lives on [`ToolRagProfile`] (#137), not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -532,10 +535,24 @@ pub struct ToolSpec {
     /// Defaults to `false` for ordinary synchronous tools.
     #[serde(default)]
     pub background_capable: bool,
+    /// Declared side effects, used to decide whether a call may run in a
+    /// bounded parallel batch (#400).
+    ///
+    /// `None` means "unknown" and is treated fail-closed: such tools are
+    /// never parallelized. Only an explicit [`SideEffects::ReadOnly`] marks a
+    /// tool eligible for concurrent execution. Older plugin binaries that omit
+    /// the field on the wire deserialize to `None` via `#[serde(default)]`,
+    /// so they keep the safe sequential behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side_effects: Option<SideEffects>,
 }
 
 impl ToolSpec {
     /// Construct an LLM-facing tool spec.
+    ///
+    /// `side_effects` defaults to `None` (unknown), which keeps the tool
+    /// sequential under the parallel tool-call policy (#400). Use
+    /// [`Self::side_effects`] to declare a concrete classification.
     #[must_use]
     pub fn new(
         name: impl Into<ToolName>,
@@ -547,6 +564,7 @@ impl ToolSpec {
             description: description.into(),
             parameters,
             background_capable: false,
+            side_effects: None,
         }
     }
 
@@ -555,6 +573,32 @@ impl ToolSpec {
     pub const fn background_capable(mut self, capable: bool) -> Self {
         self.background_capable = capable;
         self
+    }
+
+    /// Declare the tool's side effects (#400).
+    ///
+    /// Only [`SideEffects::ReadOnly`] makes a tool eligible for bounded
+    /// parallel execution; any other value (or leaving it unset) keeps the
+    /// tool on the sequential path.
+    #[must_use]
+    pub const fn side_effects(mut self, side_effects: SideEffects) -> Self {
+        self.side_effects = Some(side_effects);
+        self
+    }
+
+    /// Whether this tool may run in a bounded parallel batch (#400).
+    ///
+    /// A tool is parallelizable only when it explicitly declares
+    /// [`SideEffects::ReadOnly`] and is not background-capable (deferred tools
+    /// already return immediately, so parallelizing them buys nothing and
+    /// would reorder their acceptance events). Tools with unknown side effects
+    /// (`None`) are treated fail-closed and stay sequential.
+    #[must_use]
+    pub const fn is_parallelizable(&self) -> bool {
+        if self.background_capable {
+            return false;
+        }
+        matches!(self.side_effects, Some(SideEffects::ReadOnly))
     }
 }
 
@@ -736,6 +780,62 @@ mod tests {
     #[test]
     fn side_effects_default_is_read_only() {
         assert_eq!(SideEffects::default(), SideEffects::ReadOnly);
+    }
+
+    #[test]
+    fn tool_spec_defaults_to_unknown_side_effects() {
+        // `ToolSpec::new` leaves side effects unknown (`None`), which is
+        // fail-closed: the tool is not eligible for parallel execution (#400).
+        let spec = ToolSpec::new(
+            ToolName::new("mystery.tool"),
+            "Unknown side effects",
+            serde_json::json!({}),
+        );
+        assert_eq!(spec.side_effects, None);
+        assert!(!spec.is_parallelizable());
+    }
+
+    #[test]
+    fn tool_spec_is_parallelizable_only_for_explicit_read_only() {
+        let read_only = ToolSpec::new(
+            ToolName::new("weather.get"),
+            "Read the weather",
+            serde_json::json!({}),
+        )
+        .side_effects(SideEffects::ReadOnly);
+        assert!(read_only.is_parallelizable());
+
+        let mutating = ToolSpec::new(
+            ToolName::new("filesystem.write"),
+            "Write a file",
+            serde_json::json!({}),
+        )
+        .side_effects(SideEffects::FileSystem { mutates: true });
+        assert!(!mutating.is_parallelizable());
+
+        // Background-capable tools are never parallelized even if read-only.
+        let background = ToolSpec::new(
+            ToolName::new("background.sleep"),
+            "Sleep",
+            serde_json::json!({}),
+        )
+        .side_effects(SideEffects::ReadOnly)
+        .background_capable(true);
+        assert!(!background.is_parallelizable());
+    }
+
+    #[test]
+    fn tool_spec_side_effects_serde_is_optional() {
+        // An older plugin binary that omits `side_effects` on the wire must
+        // deserialize to `None` (fail-closed), not an error (#400).
+        let json = r#"{"name":"legacy.tool","description":"d","parameters":{}}"#;
+        let spec: ToolSpec = serde_json::from_str(json).unwrap();
+        assert_eq!(spec.side_effects, None);
+        assert!(!spec.is_parallelizable());
+
+        // When `None`, the field is omitted from serialization.
+        let out = serde_json::to_string(&spec).unwrap();
+        assert!(!out.contains("side_effects"));
     }
 
     #[test]
