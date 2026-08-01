@@ -1803,6 +1803,7 @@ impl TurnActor {
         self.apply_pending_compression().await;
 
         if record_user_message {
+            self.maybe_split_session_on_timeout().await;
             self.session.record_user_input();
             self.session.add_user_message(&user_input);
             self.check_and_perform_split(&user_input).await;
@@ -2023,6 +2024,33 @@ impl TurnActor {
     }
 
     // ── Split management ──
+
+    /// Start a new session when the user returns after a long idle period (#369).
+    async fn maybe_split_session_on_timeout(&mut self) {
+        let mind = self
+            .config
+            .get_section::<ene_mind::MindConfig>()
+            .unwrap_or_default();
+        let timeout = mind.session.session_timeout_minutes;
+        if timeout == 0 {
+            return;
+        }
+        let Some(last) = self.session.last_message_time() else {
+            return;
+        };
+        let elapsed = chrono::Utc::now().signed_duration_since(last);
+        let elapsed_minutes = elapsed.num_minutes();
+        if elapsed_minutes < timeout as i64 {
+            return;
+        }
+        let new_id = self.session.reset_session();
+        tracing::info!(
+            component = "SessionSplit",
+            elapsed_minutes,
+            new_session_id = %new_id,
+            "Session split due to inactivity timeout (#369)"
+        );
+    }
 
     async fn handle_manual_split(&mut self) -> Result<SplitResult, EneRuntimeError> {
         if self.session.history().is_empty() {

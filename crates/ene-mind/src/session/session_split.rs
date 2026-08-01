@@ -1,28 +1,17 @@
 use super::types::SessionId;
 use ene_core::KeyFact;
 
-/// Reasons for a session split or compression boundary.
-#[derive(Debug, Clone)]
+/// Reasons for starting a **new session** (#369).
+///
+/// Topic changes and context pressure are handled by compression (#368), not
+/// session splits. [`SplitReason::Composite`] from the old design was removed;
+/// topic-boundary detection exposes only a score via [`TopicBoundarySignal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SplitReason {
     /// Split due to inactivity timeout.
     Timeout {
         /// Minutes elapsed since the last message.
         elapsed_minutes: u64,
-    },
-    /// Split due to topic change detection.
-    TopicChange {
-        /// Cosine similarity between consecutive user message embeddings.
-        similarity: f32,
-    },
-    /// Split due to context length pressure.
-    ContextPressure {
-        /// Proportion of history used (0.0–1.0).
-        context_ratio: f32,
-    },
-    /// Split due to a high composite score across multiple factors.
-    Composite {
-        /// The computed split score (0.0–1.0+).
-        score: f32,
     },
     /// Split requested manually by the user.
     Manual,
@@ -37,37 +26,26 @@ impl std::fmt::Display for SplitReason {
                     "Session split due to {elapsed_minutes} minutes of inactivity"
                 )
             }
-            Self::TopicChange { similarity } => {
-                write!(
-                    f,
-                    "Session split due to topic change (similarity: {similarity:.2})"
-                )
-            }
-            Self::ContextPressure { context_ratio } => {
-                write!(
-                    f,
-                    "Session split due to context pressure ({:.0}% full)",
-                    context_ratio * 100.0
-                )
-            }
-            Self::Composite { score } => {
-                write!(f, "Session split with composite score {score:.2}")
-            }
             Self::Manual => write!(f, "Session split manually"),
         }
     }
 }
 
-/// The result of a session split or compression operation.
+/// Outcome of a **session split** that issues a new [`SessionId`] (#369).
+///
+/// Compression-only operations return [`crate::context::CompressionResult`]
+/// instead; they do not change the session id. [`handle_manual_compression`] in
+/// the runtime still returns this type for API compatibility, but
+/// [`Self::new_session_id`] is unchanged for compression-only passes.
 #[derive(Debug, Clone)]
 pub struct SplitResult {
-    /// The reason the split was triggered.
+    /// Why the split was triggered.
     pub reason: SplitReason,
-    /// The generated conversation summary.
+    /// The generated conversation summary (compression artifact).
     pub summary: String,
     /// Extracted key facts from the conversation.
     pub key_facts: Vec<KeyFact>,
-    /// The ID of the new session (unchanged for compression).
+    /// The session id after the operation. Unchanged for compression-only passes.
     pub new_session_id: SessionId,
     /// Number of conversation-history entries in the snapshot at split time.
     pub snapshot_len: usize,

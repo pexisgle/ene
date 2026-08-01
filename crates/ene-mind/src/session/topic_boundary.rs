@@ -18,12 +18,10 @@
 //! (below [`TopicBoundaryConfig::min_utterance_chars`]) are excluded from both
 //! scoring and centroid updates so a backchannel cannot corrupt the centroid.
 //!
-//! This module only *detects* a boundary and produces a [`TopicBoundarySignal`]
-//! (plus a [`SplitReason`] when one is warranted). Acting on the signal —
-//! retrospective compression (#368) and session splitting (#369) — is the
-//! responsibility of later stages.
+//! This module only *detects* a boundary and produces a [`TopicBoundarySignal`].
+//! Acting on the signal — retrospective compression (#368) and session splitting
+//! (#369) — is the responsibility of later stages.
 
-use super::session_split::SplitReason;
 use crate::config::TopicBoundaryConfig;
 use chrono::{DateTime, Utc};
 use ene_ai::cosine_similarity;
@@ -49,9 +47,8 @@ pub struct TopicBoundaryTracker {
 /// The outcome of scoring one completed turn against the topic centroid (#367).
 ///
 /// `score` is the composite boundary score in `0.0..=1.0`; `boundary` is true
-/// once it reaches the configured threshold. `reason` carries a
-/// [`SplitReason::Composite`] when a boundary is detected so downstream stages
-/// (compression #368, session split #369) can consume a ready-made reason.
+/// once it reaches the configured threshold. Compression (#368) consumes the
+/// score directly; session split (#369) does not use topic boundaries.
 #[derive(Clone, Debug)]
 pub struct TopicBoundarySignal {
     /// Composite boundary score, clamped to `0.0..=1.0`.
@@ -64,8 +61,6 @@ pub struct TopicBoundarySignal {
     pub silence_factor: f32,
     /// Normalized topic-length contribution (`0.0..=1.0`).
     pub topic_length_factor: f32,
-    /// A ready-made split reason when a boundary was detected.
-    pub reason: Option<SplitReason>,
 }
 
 impl TopicBoundarySignal {
@@ -80,7 +75,6 @@ impl TopicBoundarySignal {
             centroid_distance: 0.0,
             silence_factor: 0.0,
             topic_length_factor: 0.0,
-            reason: None,
         }
     }
 }
@@ -182,7 +176,6 @@ impl TopicBoundaryTracker {
             centroid_distance,
             silence_factor,
             topic_length_factor,
-            reason: boundary.then_some(SplitReason::Composite { score }),
         }
     }
 
@@ -317,7 +310,7 @@ mod tests {
         // A sudden jump to an orthogonal topic crosses the threshold.
         let signal = tracker.observe_turn(&cfg, &axis(4, 1), 40, t0());
         assert!(signal.boundary);
-        assert!(matches!(signal.reason, Some(SplitReason::Composite { .. })));
+        assert!(signal.score >= config.boundary_threshold);
         // The new topic restarts from the crossing utterance.
         assert_eq!(tracker.turns_in_topic(), 1);
     }

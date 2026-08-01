@@ -40,6 +40,9 @@ ene_config::define_config!(
 
         /// Topic-boundary detection policy (#367).
         pub topic_boundary: TopicBoundaryConfig,
+
+        /// Session lifecycle settings (#369).
+        pub session: SessionConfig,
     }
 );
 
@@ -535,6 +538,29 @@ impl Default for CharacterMemoryConfig {
     fn default() -> Self {
         Self {
             identity_kernel_max_tokens: 400,
+        }
+    }
+}
+
+/// Session lifecycle policy (#369).
+///
+/// Automatic splits are limited to inactivity timeouts and manual requests.
+/// Topic changes are handled by compression (#368), not session splits.
+#[derive(
+    Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+#[schemars(crate = "::ene_config::schemars")]
+pub struct SessionConfig {
+    /// Minutes of silence after the previous utterance before the next user
+    /// message starts a new session. `0` disables automatic timeout splits.
+    pub session_timeout_minutes: u64,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            session_timeout_minutes: 120,
         }
     }
 }

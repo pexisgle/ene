@@ -368,8 +368,8 @@ impl ConversationSession {
     /// and updates the detector state. `utterance_chars` is the length of the
     /// user utterance in characters (short backchannels are ignored). Returns
     /// `None` when detection is disabled or no embedding is available for the
-    /// turn. The returned signal carries a [`SplitReason`] when a boundary is
-    /// detected, for downstream compression (#368) and splitting (#369).
+    /// turn. Returns `None` when detection is disabled or no embedding is available for the
+    /// turn. Compression (#368) consumes the returned score; session split does not (#369).
     pub fn detect_topic_boundary(
         &mut self,
         config: &crate::config::TopicBoundaryConfig,
