@@ -62,7 +62,7 @@ impl RecallPlanner {
             .ok_or_else(|| {
                 CognitionError::RecallFailed("cannot plan recall without turn text".to_string())
             })?;
-        let intents = infer_intents(&topic, input.affect);
+        let intents = infer_intents(&topic, input.affect, input.language);
         let has_commitments = !input.commitments.is_empty();
         let required_kinds = kinds_for_intents(&intents, has_commitments);
 
@@ -191,7 +191,7 @@ fn semantic_queries(
     }
     if crate::contains_any(
         &lower,
-        &["what do you know", "tell me about", "とは", "について"],
+        ["what do you know", "tell me about", "とは", "について"],
     ) {
         push_query(&mut queries, &format!("{topic} facts"));
     }
@@ -271,6 +271,7 @@ mod tests {
             scene_summary,
             affect,
             commitments,
+            language: "en",
             character_id: "ene",
             user_id: Some("user1"),
         }
