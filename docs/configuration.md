@@ -395,9 +395,9 @@ plugin-owned:
 
 A plugin's `config_schema()` may mark a field with `x-ene-secret: true`. The
 host uses this (plus a well-known-name fallback: `api_key`, `token`,
-`password`, `authorization`, …) to mask the field in the settings UI and to
-redact it from host log output — an inline API key can never appear in the
-log stream. Storing secrets outside `settings.json` (a keyring/secret
+`password`, `authorization`, …) to mask the field in the settings UI (planned)
+and to redact it from host log output — an inline API key can never appear in
+the log stream. Storing secrets outside `settings.json` (a keyring/secret
 service) is tracked separately; until then plugin secrets stay in
 `plugins.list.<name>.config`, marked by the schema and redacted at the host
 boundary.

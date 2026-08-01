@@ -314,8 +314,8 @@ plugins, so e.g. the Anthropic provider can receive its API key at handshake
 time rather than per request.
 
 A plugin advertises the JSON Schema its config accepts via
-`config_schema()`. Fields marked `x-ene-secret: true` in that schema are
-masked in the UI and redacted from host logs (see
+`config_schema()`. Fields marked `x-ene-secret: true` in that schema will be
+masked in the UI (planned) and redacted from host logs (see
 [`configuration.md`](../configuration.md) for the exact shape).
 
 ### Binary checksum verification (TOFU)
