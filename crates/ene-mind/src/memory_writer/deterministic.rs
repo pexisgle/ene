@@ -16,9 +16,8 @@
 
 #![expect(
     clippy::string_slice,
-    reason = "special-token and summarizer parsers slice at known ASCII delimiters"
+    reason = "deterministic extractor slices query text at known ASCII keyword boundaries"
 )]
-use regex::Regex;
 
 use super::candidate::{Locale, MemoryCandidate, TurnInput};
 use super::tool_grounding;
@@ -98,25 +97,17 @@ fn forget_candidate(user_msg: &str, target: &str) -> MemoryCandidate {
 /// the historical semantics of the hand-written matchers, where the
 /// object-before-keyword pattern (`Xを忘れて`) took precedence over the
 /// keyword-first pattern (`忘れて X`). A pattern is skipped when the message
-/// reads as a question and the pattern opts into the question guard. Invalid
-/// regexes are logged and skipped so a bad pack entry cannot break extraction.
+/// reads as a question and the pattern opts into the question guard. Regexes
+/// are compiled once per pack load (see
+/// [`PatternLibrary::compiled_forget_patterns`]), so a bad pack entry is
+/// skipped at load time and cannot break extraction.
 fn match_forget_patterns(user_msg: &str, patterns: &PatternLibrary) -> Option<MemoryCandidate> {
-    for pattern in patterns.forget_patterns() {
+    for compiled in patterns.compiled_forget_patterns() {
+        let pattern = &compiled.pattern;
         if pattern.skip_questions && is_en_question(user_msg) {
             continue;
         }
-        let re = match Regex::new(&pattern.regex) {
-            Ok(re) => re,
-            Err(error) => {
-                tracing::warn!(
-                    name = %pattern.name,
-                    error = %error,
-                    "invalid forget pattern regex; skipping pattern"
-                );
-                continue;
-            }
-        };
-        let Some(caps) = re.captures(user_msg) else {
+        let Some(caps) = compiled.regex.captures(user_msg) else {
             continue;
         };
         let Some(group) = caps.get(pattern.target_group) else {
@@ -149,8 +140,8 @@ fn match_forget_patterns(user_msg: &str, patterns: &PatternLibrary) -> Option<Me
 /// schedules, nicknames, …) are not pattern-matched either. Tool-result
 /// grounding is applied when enabled via [`ToolGroundingConfig`].
 ///
-/// Candidates are deduplicated by (title, kind) across pattern and
-/// tool-grounding hits.
+/// Candidates are deduplicated by (title, kind, `should_persist`) across
+/// pattern and tool-grounding hits.
 pub fn extract(
     turn: &TurnInput<'_>,
     locale: &Locale,

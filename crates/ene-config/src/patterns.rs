@@ -14,6 +14,10 @@
 //! [`crate::prompts::SUPPORTED_LANGUAGES`] carry an embedded fallback; an unsupported language
 //! code falls back to English.
 //!
+//! [`PatternLibrary::load`] is on the per-turn memory-extraction hot path, so
+//! loaded packs are cached (keyed by pack mtime): a pack is read and parsed,
+//! and its regexes compiled, at most once per edit, not once per turn.
+//!
 //! # Usage
 //!
 //! ```rust,no_run
@@ -25,6 +29,12 @@
 //! }
 //! ```
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+use std::time::SystemTime;
+
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::prompts::{is_embedded_language, resolve_language_alias};
@@ -62,7 +72,55 @@ pub struct PatternPackData {
 pub struct PatternLibrary {
     data: PatternPackData,
     lang: String,
+    /// Forget regexes compiled once at load time (see [`Self::load`]).
+    compiled: Vec<CompiledForgetPattern>,
 }
+
+/// A forget pattern with its [`Regex`] compiled once at load time, so the
+/// per-turn matcher never recompiles it.
+#[derive(Debug, Clone)]
+pub struct CompiledForgetPattern {
+    /// The parsed pattern metadata.
+    pub pattern: ForgetPattern,
+    /// Compiled [`ForgetPattern::regex`].
+    pub regex: Regex,
+}
+
+/// Compiles every forget-pattern regex; a pattern whose regex fails to
+/// compile is skipped with a warning so a bad pack entry cannot break
+/// extraction (same semantics as the old per-match compile failure skip).
+fn compile_forget_patterns(data: &PatternPackData) -> Vec<CompiledForgetPattern> {
+    data.forget_patterns
+        .iter()
+        .filter_map(|pattern| match Regex::new(&pattern.regex) {
+            Ok(regex) => Some(CompiledForgetPattern {
+                pattern: pattern.clone(),
+                regex,
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    name = %pattern.name,
+                    error = %error,
+                    "invalid forget pattern regex; skipping pattern"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// Cache key for [`PatternLibrary::load`]: the pack path and its mtime, so a
+/// pack edited on disk is picked up on the next load while unchanged packs
+/// are served without re-reading/re-parsing the file.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LoadCacheKey {
+    base: PathBuf,
+    code: String,
+    mtime: Option<SystemTime>,
+}
+
+static LOAD_CACHE: OnceLock<parking_lot::Mutex<HashMap<LoadCacheKey, Arc<PatternLibrary>>>> =
+    OnceLock::new();
 
 /// Builds a [`PatternLibrary`] from the compile-time embedded pack for `$lang`.
 ///
@@ -78,6 +136,7 @@ macro_rules! embedded_pattern_pack {
             "/patterns.json"
         )));
         PatternLibrary {
+            compiled: compile_forget_patterns(&data),
             data,
             lang: $lang.to_string(),
         }
@@ -108,8 +167,29 @@ impl PatternLibrary {
     /// case-insensitively by primary subtag (the legacy alias `"jp"` maps to
     /// `"ja"`); a language with neither a runtime pack nor an embedded
     /// fallback falls back to English.
+    ///
+    /// Results are cached keyed by pack mtime, so repeated calls in the
+    /// per-turn extraction path only pay a `stat`; a pack edited on disk is
+    /// reloaded on the next call.
     pub fn load(lang: &str) -> Self {
-        Self::load_from(crate::paths::assets_dir(), lang)
+        let base = crate::paths::assets_dir();
+        let code = resolve_language_alias(lang);
+        let mtime = crate::paths::pattern_pack_path_in(base, &code)
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok();
+        let key = LoadCacheKey {
+            base: base.to_path_buf(),
+            code: code.clone(),
+            mtime,
+        };
+        let cache = LOAD_CACHE.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+        if let Some(lib) = cache.lock().get(&key) {
+            return Arc::as_ref(lib).clone();
+        }
+        let lib = Self::load_from(&key.base, &key.code);
+        cache.lock().insert(key, Arc::new(lib.clone()));
+        lib
     }
 
     /// Loads the pattern library for `lang`, resolving the runtime pack
@@ -154,6 +234,7 @@ impl PatternLibrary {
         })?;
         let data: PatternPackData = serde_json::from_str(&contents)?;
         Ok(Self {
+            compiled: compile_forget_patterns(&data),
             data,
             lang: code.to_string(),
         })
@@ -198,6 +279,12 @@ impl PatternLibrary {
     /// Forget-detection patterns for this language, in match order.
     pub fn forget_patterns(&self) -> &[ForgetPattern] {
         &self.data.forget_patterns
+    }
+
+    /// Forget-detection patterns with their regexes pre-compiled, in match
+    /// order. Prefer this on hot paths; see [`Self::load`].
+    pub fn compiled_forget_patterns(&self) -> &[CompiledForgetPattern] {
+        &self.compiled
     }
 }
 
