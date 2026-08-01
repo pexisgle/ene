@@ -48,6 +48,9 @@ pub mod message;
 pub mod model_fetch;
 /// OpenAI-compatible provider implementation.
 pub mod openai;
+/// Provider-specific settings relocated into the `plugins.list.<name>`
+/// sections (llama.cpp mmproj/acceleration, ONNX dylib path, Kokoro profiles).
+pub mod plugin_config;
 /// Provider resolution from configuration.
 pub mod resolve;
 /// Retry policy for transient provider errors.

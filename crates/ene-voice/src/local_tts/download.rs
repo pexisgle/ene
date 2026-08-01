@@ -72,14 +72,19 @@ pub(crate) fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
 
 /// Resolve the Kokoro `voices.bin` path from configuration.
 ///
-/// Precedence: `TtsConfig::voices_path` when non-empty, then a default cache
-/// location. Environment overrides are handled by the config system
-/// (`ENE_AI__TTS__VOICES_PATH`).
-pub(crate) fn resolve_voices_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
-    if let Some(path) = ai
-        .tts
-        .voices_path
-        .as_deref()
+/// Precedence: the Kokoro plugin profile
+/// `plugins.list.kokoro.profiles.kokoro.voices_path` when set (the previous
+/// `TtsConfig::voices_path` moved here in #313), then a default cache
+/// location.
+pub(crate) fn resolve_voices_path() -> std::path::PathBuf {
+    let profile = ene_ai::plugin_config::global_plugin_profile_blob(
+        ene_ai::plugin_config::KOKORO_PLUGIN,
+        ene_ai::plugin_config::KOKORO_DEFAULT_PROFILE,
+    );
+    if let Some(path) = profile
+        .as_ref()
+        .and_then(|p| p.get("voices_path"))
+        .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|p| !p.is_empty())
     {
@@ -179,7 +184,7 @@ pub async fn prefetch_if_configured(ai: &ene_ai::AiConfig) -> Result<(), AudioPr
         return Ok(());
     }
     let model_path = resolve_model_path(ai);
-    let voices_path = resolve_voices_path(ai);
+    let voices_path = resolve_voices_path();
     ensure_kokoro_files_exist(&model_path, &voices_path).await
 }
 

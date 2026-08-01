@@ -326,7 +326,6 @@ mod tests {
             "missing".to_string(),
             LocalModelDef {
                 model_path: "/nonexistent/ene-missing-decision.gguf".to_string(),
-                acceleration: ProactiveAcceleration::Cpu,
                 ..LocalModelDef::default()
             },
         );
@@ -351,7 +350,6 @@ mod tests {
         cfg.local_models.insert(
             "empty".to_string(),
             LocalModelDef {
-                acceleration: ProactiveAcceleration::Cpu,
                 ..LocalModelDef::default()
             },
         );

@@ -197,15 +197,6 @@ pub struct LocalModelDef {
     /// Explicit filesystem path override (skips download when non-empty).
     #[serde(default = "default_string")]
     pub model_path: String,
-    /// Optional HTTPS URL for the multimodal projector (`mmproj`) GGUF.
-    #[serde(default = "default_string")]
-    pub mmproj_url: String,
-    /// Optional filesystem path for `mmproj` (skips download when non-empty).
-    #[serde(default = "default_string")]
-    pub mmproj_path: String,
-    /// Preferred acceleration backend.
-    #[serde(default)]
-    pub acceleration: ProactiveAcceleration,
     /// GPU layer offload: `"auto"` or an integer string (e.g. `"33"`).
     // TODO: Replace `String` with an `AutoOrU32` enum to catch misconfiguration
     // at the config boundary instead of silently falling back at load time.
@@ -228,9 +219,6 @@ impl Default for LocalModelDef {
             url: default_string(),
             quantization: default_local_quantization(),
             model_path: default_string(),
-            mmproj_url: default_string(),
-            mmproj_path: default_string(),
-            acceleration: ProactiveAcceleration::default(),
             gpu_layers: default_gpu_layers(),
             context_size: default_context_size(),
         }
@@ -365,8 +353,6 @@ pub struct TtsConfig {
     pub language: String,
     /// Explicit filesystem path to the TTS model (used when non-empty).
     pub model_path: Option<String>,
-    /// Explicit filesystem path to the Kokoro `voices.bin` (used when non-empty).
-    pub voices_path: Option<String>,
 }
 
 impl Default for TtsConfig {
@@ -378,7 +364,6 @@ impl Default for TtsConfig {
             speed: 1.0,
             language: String::new(),
             model_path: None,
-            voices_path: None,
         }
     }
 }
@@ -527,10 +512,6 @@ ene_config::define_config!(
         pub stt: SttConfig,
         /// VAD (voice activity detection) engine settings.
         pub vad: VadConfig,
-        /// Explicit path to the ONNX Runtime dynamic library used by the local
-        /// TTS / VAD providers (used when non-empty; `None` = `ort` default
-        /// resolution).
-        pub ort_dylib_path: Option<String> = None,
     }
 );
 

@@ -326,7 +326,7 @@ pub fn render(
                     }
                 });
 
-                // Optional Voices Path
+                // Optional Voices Path (#313: lives in the Kokoro plugin profile)
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(
                         crate::i18n::loader(),
@@ -336,11 +336,7 @@ pub fn render(
                         egui::TextEdit::singleline(&mut input.tts_voices_path).desired_width(220.0),
                     );
                     if response.changed() {
-                        ai_cfg.tts.voices_path = if input.tts_voices_path.trim().is_empty() {
-                            None
-                        } else {
-                            Some(input.tts_voices_path.trim().to_string())
-                        };
+                        settings.set_kokoro_voices_path(&input.tts_voices_path);
                         changed = true;
                     }
                 });
