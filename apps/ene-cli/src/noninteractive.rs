@@ -440,10 +440,10 @@ async fn tool_command(
     action: &ToolAction,
     json: bool,
 ) -> Result<i32, OutputError> {
-    let diag = ctx.handle.diagnostics();
+    let tools = ctx.handle.tools();
     match action {
         ToolAction::List => {
-            let tools = diag
+            let tools = tools
                 .list_tools()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list tools: {e}")))?;
@@ -455,7 +455,7 @@ async fn tool_command(
             Ok(EXIT_OK)
         }
         ToolAction::Search { query } => {
-            let tools = diag
+            let tools = tools
                 .search_tools(query.clone())
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("search tools: {e}")))?;
@@ -467,7 +467,7 @@ async fn tool_command(
             Ok(EXIT_OK)
         }
         ToolAction::Help { name } => {
-            let tools = diag
+            let tools = tools
                 .list_tools()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list tools: {e}")))?;
@@ -490,7 +490,7 @@ async fn tool_command(
             Ok(EXIT_OK)
         }
         ToolAction::Call { name, arguments } => {
-            let result = diag
+            let result = tools
                 .call_tool(name.clone(), arguments.clone())
                 .await
                 .map_err(|e| {

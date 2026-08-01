@@ -19,8 +19,8 @@
 //! ## What stayed (deliberately, see PR description)
 //!
 //! Turn execution (`Run` / `Cancel`), permission decisions, user-input
-//! responses, snapshot, manual split/undo, tool calls, character-card swap,
-//! feature/proactive settings updates, tool-index invalidation, `CCv3`
+//! responses, snapshot, manual compression/undo, tool calls, character-card
+//! swap, feature/proactive settings updates, tool-index invalidation, `CCv3`
 //! memory hash, and plugin host restart all still go through this single
 //! actor. The issue's ideal design further splits config/control operations
 //! (`SetCharacter`, `UpdateFeatureSettings`, plugin host restart) into a
@@ -36,7 +36,7 @@ use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 use super::event::{
     AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, TerminalReason,
 };
-use crate::diagnostics::{DiagnosticEvent, MemoryQueryHandle, emit_diag};
+use crate::diagnostics::{DiagnosticEvent, MemoryHandle, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{RequestId, TurnId};
@@ -46,10 +46,10 @@ use ene_config::EneConfig;
 use ene_mind::CardName;
 use ene_mind::commitments::CommitmentLedger;
 use ene_mind::{
-    CompressionLevel, CompressionTaskInput, HistoryEntry as MindHistoryEntry,
+    CompressionLevel, CompressionResult, CompressionTaskInput, HistoryEntry as MindHistoryEntry,
     compression_has_usable_summary,
 };
-use ene_mind::{ConversationSession, EneSessionError, SplitResult};
+use ene_mind::{ConversationSession, EneSessionError};
 use ene_plugin_host::{
     CompositeToolRegistry, DisabledReason, PluginHealthEvent, PluginHostError, ToolRegistry,
 };
@@ -1517,8 +1517,8 @@ impl TurnActor {
                 drop(guard);
                 true
             }
-            EneCommand::ManualSplit { reply } => {
-                let result = self.handle_manual_split().await;
+            EneCommand::CompressContext { reply } => {
+                let result = self.handle_manual_compression().await;
                 drop(reply.send(result));
                 true
             }
@@ -1530,7 +1530,7 @@ impl TurnActor {
                     config: self.config.clone(),
                     session_id: self.session.memory.session_id.clone(),
                     card_name: CardName::from(self.session.card_name()),
-                    memory: MemoryQueryHandle::new(
+                    memory: MemoryHandle::new(
                         self.concrete_store.clone(),
                         self.session.memory.embedding_provider.clone(),
                         self.config
@@ -2059,14 +2059,10 @@ impl TurnActor {
         );
     }
 
-    async fn handle_manual_split(&mut self) -> Result<SplitResult, EneRuntimeError> {
+    async fn handle_manual_compression(&mut self) -> Result<CompressionResult, EneRuntimeError> {
         if self.session.history().is_empty() {
             return Err(EneRuntimeError::from(EneSessionError::SplitNotNeeded));
         }
-        self.handle_manual_compression().await
-    }
-
-    async fn handle_manual_compression(&mut self) -> Result<SplitResult, EneRuntimeError> {
         let Some(store) = self.session.memory.memory_store.clone() else {
             return Err(EneRuntimeError::from(EneSessionError::SplitNotNeeded));
         };
@@ -2093,13 +2089,7 @@ impl TurnActor {
         if compression_has_usable_summary(&result) {
             self.trim_history_after_compression();
         }
-        Ok(SplitResult {
-            reason: ene_mind::SplitReason::Manual,
-            summary: result.summary,
-            key_facts: vec![],
-            new_session_id: self.session.memory.session_id.clone(),
-            snapshot_len: self.session.history().len(),
-        })
+        Ok(result)
     }
 
     async fn check_and_perform_split(&mut self, _user_input: &str) {

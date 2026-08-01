@@ -34,9 +34,7 @@ impl std::fmt::Display for SplitReason {
 /// Outcome of a **session split** that issues a new [`SessionId`] (#369).
 ///
 /// Compression-only operations return [`crate::context::CompressionResult`]
-/// instead; they do not change the session id. [`handle_manual_compression`] in
-/// the runtime still returns this type for API compatibility, but
-/// [`Self::new_session_id`] is unchanged for compression-only passes.
+/// instead; they do not change the session id.
 #[derive(Debug, Clone)]
 pub struct SplitResult {
     /// Why the split was triggered.

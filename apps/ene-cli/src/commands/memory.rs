@@ -73,7 +73,7 @@ impl CliCommand for MemoryCommand {
 
 async fn handle_search(
     query: &str,
-    memory: &ene_runtime::MemoryQueryHandle,
+    memory: &ene_runtime::MemoryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
 ) -> Result<CommandOutcome, CliError> {
     if query.is_empty() {

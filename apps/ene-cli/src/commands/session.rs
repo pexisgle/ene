@@ -244,7 +244,7 @@ async fn handle_split(
         "{}",
         style::header("[Session] Manually triggering context compression...")
     );
-    match ctx.handle.diagnostics().manual_split().await {
+    match ctx.handle.compress_context().await {
         Ok(result) => {
             println!(
                 "{}",
@@ -257,7 +257,7 @@ async fn handle_split(
                 "{}",
                 style::warning(format!(
                     "[Session] Session ID unchanged: {}",
-                    result.new_session_id
+                    result.session_id
                 ))
             );
             println!(

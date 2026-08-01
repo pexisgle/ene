@@ -32,7 +32,10 @@ pub mod bootstrap;
 #[cfg(any(unix, windows))]
 #[doc(no_inline)]
 pub use ene_store::db_server;
-/// Opt-in diagnostics facade (pipeline detail, memory, tools).
+/// Opt-in diagnostics facade (pipeline detail, provider health, memory).
+///
+/// Strictly observability — control operations (character swap,
+/// compression, tools) live on [`EneHandle`] itself (#406).
 pub mod diagnostics;
 mod empty_response_log;
 /// Core error types.
@@ -60,6 +63,8 @@ mod streaming_cognitive;
 /// Bounded-task admission config for the turn actor's background
 /// `JoinSet`s (Stage 8).
 pub mod task_config;
+/// Tool registry operations handle (list / search / call / invalidate) (#406).
+pub mod tools;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
 /// Actor-native undo stack and metadata (#178).
@@ -96,10 +101,12 @@ pub use query::sessions::SessionQueryHandle;
 pub use vision::VisionHandle;
 
 // ── Diagnostics ──
-/// Diagnostics facade and memory query handle.
-pub use diagnostics::{
-    DiagnosticEvent, DiagnosticEventReceiver, EneDiagnostics, MemoryQueryHandle,
-};
+/// Diagnostics facade and memory query-and-mutation handle.
+pub use diagnostics::{DiagnosticEvent, DiagnosticEventReceiver, EneDiagnostics, MemoryHandle};
+
+// ── Tools ──
+/// Tool registry operations handle (list / search / call / invalidate).
+pub use tools::ToolHandle;
 
 // ── Public API v1 ──
 /// Public API version constant, JSON chat/lifecycle-event mirrors, session

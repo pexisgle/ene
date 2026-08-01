@@ -6,9 +6,11 @@
 //! and delegates read-only session/candidate queries and screen-image vision
 //! summarization to dedicated handles that bypass the actor mailbox entirely
 //! (#271) — see [`EneHandle::sessions`], [`EneHandle::candidates`], and
-//! [`EneHandle::vision`].
+//! [`EneHandle::vision`]. Tool operations get their own handle via
+//! [`EneHandle::tools`] (#406); unlike the read-only handles it still routes
+//! through the mailbox — see [`crate::tools`] for why.
 //!
-//! ## Module layout (#271)
+//! ## Module layout (#271, #406)
 //!
 //! - [`command`] — [`EneCommand`] (now solely turn-execution / control-plane
 //!   commands; the session/candidate/vision-payload variants are gone).
@@ -22,6 +24,8 @@
 //! - [`crate::query::sessions`] / [`crate::query::candidates`] — read-only
 //!   session and pending-candidate handles.
 //! - [`crate::vision`] — screen-image vision summarization handle.
+//! - [`crate::tools`] — tool registry handle (list / search / call /
+//!   invalidate).
 
 mod actor;
 mod command;
@@ -119,8 +123,9 @@ impl TurnGate {
 ///
 /// This replaces the previous approach of checking
 /// `Arc::strong_count(&cmd_tx) == 1`, which was unreachable because
-/// `EneHandle` internally holds three independent `Arc` clones of `cmd_tx`
-/// (self, diagnostics, vision).
+/// `EneHandle` internally holds four independent `Arc` clones of `cmd_tx`
+/// (self, diagnostics, vision, tools); the shutdown guard holds a bare
+/// sender clone.
 ///
 /// ## Drop shutdown is best-effort
 ///
@@ -256,6 +261,9 @@ pub struct EneHandle {
     candidates: crate::query::candidates::MemoryCandidateHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox (#271).
     vision: crate::vision::VisionHandle,
+    /// Tool registry operations handle (list / search / call / invalidate).
+    /// Routes through the actor mailbox (#406) — see [`crate::tools`].
+    tools: crate::tools::ToolHandle,
     /// RAII guard that triggers graceful shutdown when the last handle clone
     /// drops. Shared via `Arc` across all handle clones so the guard's `Drop`
     /// fires exactly once — when the last clone is released. Declared as the
@@ -297,6 +305,7 @@ impl Clone for EneHandle {
             sessions: self.sessions.clone(),
             candidates: self.candidates.clone(),
             vision: self.vision.clone(),
+            tools: self.tools.clone(),
             shutdown_guard: Arc::clone(&self.shutdown_guard),
         }
     }
@@ -510,7 +519,7 @@ impl EneHandle {
         }
 
         let mind_memory = mind.memory.clone();
-        let memory = crate::diagnostics::MemoryQueryHandle::new(
+        let memory = crate::diagnostics::MemoryHandle::new(
             memory_store.clone(),
             session.memory.embedding_provider.clone(),
             mind_memory,
@@ -602,6 +611,7 @@ impl EneHandle {
             Arc::clone(&card_name),
         );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
+        let tools = crate::tools::ToolHandle::new(Arc::clone(&cmd_tx));
 
         let actor = actor::TurnActor::new(
             cmd_rx,
@@ -649,6 +659,7 @@ impl EneHandle {
             sessions,
             candidates,
             vision,
+            tools,
             shutdown_guard,
         })
     }
@@ -687,7 +698,11 @@ impl EneHandle {
             .map(|inner| AudioStreamReceiver { inner })
     }
 
-    /// Concrete diagnostics facade (pipeline detail, memory, tools).
+    /// Opt-in diagnostics facade: pipeline detail, provider health, memory.
+    ///
+    /// Observability only — the control surface (character swap,
+    /// compression, tools) lives on this handle via [`EneHandle::set_character`],
+    /// [`EneHandle::compress_context`], and [`EneHandle::tools`] (#406).
     pub const fn diagnostics(&self) -> &crate::diagnostics::EneDiagnostics {
         &self.diagnostics
     }
@@ -714,6 +729,58 @@ impl EneHandle {
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn vision(&self) -> crate::vision::VisionHandle {
         self.vision.clone()
+    }
+
+    /// Tool registry operations handle (list / search / call / invalidate)
+    /// (#406).
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    /// Unlike [`EneHandle::sessions`] / [`EneHandle::candidates`] /
+    /// [`EneHandle::vision`] it routes through the actor mailbox — tool
+    /// calls and searches are admission-capped there (Stage 8) and the
+    /// registry is actor-owned state; see [`crate::tools`].
+    pub fn tools(&self) -> crate::tools::ToolHandle {
+        self.tools.clone()
+    }
+
+    /// Hot-swap the character card (CLI `/card`) (#406).
+    ///
+    /// Replaces the loaded card on the actor's session, resets the proactive
+    /// scheduler, and keeps the shared card-name slot used by
+    /// [`EneHandle::candidates`] in sync.
+    pub async fn set_character(
+        &self,
+        card: ene_config::CharacterCardV3,
+    ) -> Result<(), EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SetCharacter {
+                card: Box::new(card),
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// Manually trigger a compression-only pass over the current
+    /// conversation (#369 / #406).
+    ///
+    /// Compression trims history into a stored scene summary but does **not**
+    /// start a new session: the session id is unchanged, and the returned
+    /// [`ene_mind::CompressionResult`] reflects those compression-only
+    /// semantics (no `SplitReason`, no `new_session_id`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EneRuntimeError::Mind`] wrapping
+    /// [`ene_mind::EneSessionError::SplitNotNeeded`] when there is no
+    /// history to compress or memory is disabled.
+    pub async fn compress_context(&self) -> Result<ene_mind::CompressionResult, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::CompressContext { reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
     /// Start a turn. Returns [`RunError::Busy`] if a turn is already in flight
@@ -1330,8 +1397,8 @@ mod tests {
 
     /// Regression test for #396: the old `Drop` for `EneHandle` gated
     /// shutdown on `Arc::strong_count(&cmd_tx) == 1`, which was never true
-    /// because a single handle holds three independent `Arc` clones of
-    /// `cmd_tx` (self, diagnostics, vision). The [`HandleShutdownGuard`]
+    /// because a single handle holds four independent `Arc` clones of
+    /// `cmd_tx` (self, diagnostics, vision, tools). The [`HandleShutdownGuard`]
     /// is shared via one `Arc` across all handle clones, so its `Drop` must
     /// fire exactly once — when the *last* clone is released. Dropping an
     /// intermediate clone must leave the actor alive; dropping the last

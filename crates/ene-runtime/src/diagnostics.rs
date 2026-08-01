@@ -1,38 +1,44 @@
-//! Diagnostics facade for opt-in pipeline and memory APIs (#111).
+//! Diagnostics facade for opt-in pipeline and memory APIs (#111, #406).
 //!
-//! Chat-critical events stay on [`crate::EneEvent`]. Pipeline phases/metrics
-//! and memory/journal/tool inspection live here.
+//! Chat-critical events stay on [`crate::EneEvent`]. This facade is strictly
+//! *observability*: pipeline phases/metrics, provider health/fallback
+//! history, actor snapshots, and memory/journal inspection. Control surface —
+//! character-card swap ([`crate::EneHandle::set_character`]), manual context
+//! compression ([`crate::EneHandle::compress_context`]), and tool
+//! operations ([`crate::EneHandle::tools`]) — moved back onto
+//! [`crate::EneHandle`] itself (#406).
 
 use crate::error::EneRuntimeError;
 use crate::handle::{EneCommand, EneStateSnapshot};
 use crate::public_api::PublicApiError;
 use crate::types::TurnId;
-use ene_mind::SplitResult;
-use ene_plugin_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-/// A read-only handle for querying the memory subsystem.
+/// A handle for querying **and mutating** the memory subsystem.
 ///
-/// Wraps the memory store and embedding provider, exposing only
-/// the operations needed by downstream consumers (CLI commands, etc.).
+/// Wraps the memory store and embedding provider, exposing the operations
+/// needed by downstream consumers (CLI commands, etc.). Despite living on
+/// the diagnostics facade it is not read-only: pin/status/restore/forget
+/// mutations are part of its surface, which is why the type is named
+/// [`MemoryHandle`] rather than a "query" handle (#406).
 #[derive(Clone)]
-pub struct MemoryQueryHandle {
+pub struct MemoryHandle {
     pub(crate) store: Option<Arc<ene_store::MemoryStore>>,
     pub(crate) embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
     pub(crate) mind_memory: ene_mind::MindMemoryConfig,
 }
 
-impl std::fmt::Debug for MemoryQueryHandle {
+impl std::fmt::Debug for MemoryHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemoryQueryHandle")
+        f.debug_struct("MemoryHandle")
             .field("enabled", &self.is_enabled())
             .finish()
     }
 }
 
-impl MemoryQueryHandle {
+impl MemoryHandle {
     pub(crate) fn new(
         store: Option<Arc<ene_store::MemoryStore>>,
         embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
@@ -439,10 +445,14 @@ impl DiagnosticEventReceiver {
 }
 
 /// Concrete diagnostics facade returned by [`crate::EneHandle::diagnostics`].
+///
+/// Observability-only surface: memory/journal inspection, provider health,
+/// diagnostic-event subscription, and actor snapshots. Control operations
+/// (character swap, compression, tools) live on [`crate::EneHandle`] (#406).
 pub struct EneDiagnostics {
     pub(crate) cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     pub(crate) diag_tx: broadcast::Sender<DiagnosticEvent>,
-    pub(crate) memory: MemoryQueryHandle,
+    pub(crate) memory: MemoryHandle,
     /// Provider health monitor for failover diagnostics (#175).
     pub(crate) health_monitor: ene_ai::ProviderHealthMonitor,
 }
@@ -456,8 +466,8 @@ impl std::fmt::Debug for EneDiagnostics {
 }
 
 impl EneDiagnostics {
-    /// Memory / journal query surface.
-    pub const fn memory(&self) -> &MemoryQueryHandle {
+    /// Memory / journal query-and-mutation surface.
+    pub const fn memory(&self) -> &MemoryHandle {
         &self.memory
     }
 
@@ -491,78 +501,6 @@ impl EneDiagnostics {
             .send(EneCommand::GetSnapshot { reply: tx })
             .map_err(|_| PublicApiError::ActorDead)?;
         rx.await.map_err(|_| PublicApiError::ActorDead)
-    }
-
-    /// List available tools from the registry.
-    pub async fn list_tools(&self) -> Result<Vec<ToolSpec>, PublicApiError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ListTools { reply: tx })
-            .map_err(|_| PublicApiError::ActorDead)?;
-        rx.await.map_err(|_| PublicApiError::ActorDead)
-    }
-
-    /// Search tools in the registry using RAG if available.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EneRuntimeError::Busy`] when the actor's tool-search task
-    /// set is at capacity (Stage 8).
-    pub async fn search_tools(&self, query: String) -> Result<Vec<ToolSpec>, EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::SearchTools { query, reply: tx })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
-    }
-
-    /// Call a tool directly by name with arguments.
-    pub async fn call_tool(
-        &self,
-        name: String,
-        arguments: String,
-    ) -> Result<String, EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::CallTool {
-                name,
-                arguments,
-                turn: None,
-                reply: tx,
-            })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
-    }
-
-    /// Manually trigger a session split / compression pass.
-    pub async fn manual_split(&self) -> Result<SplitResult, EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ManualSplit { reply: tx })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
-    }
-
-    /// Invalidate the Tool RAG index.
-    pub fn invalidate_tool_index(&self) -> Result<(), PublicApiError> {
-        self.cmd_tx
-            .send(EneCommand::InvalidateToolIndex)
-            .map_err(|_| PublicApiError::ActorDead)
-    }
-
-    /// Hot-swap the character card (CLI `/card`).
-    pub async fn set_character(
-        &self,
-        card: ene_config::CharacterCardV3,
-    ) -> Result<(), EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::SetCharacter {
-                card: Box::new(card),
-                reply: tx,
-            })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 }
 

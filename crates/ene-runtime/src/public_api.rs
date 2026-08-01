@@ -53,8 +53,9 @@
 //! `ene_store::ExportedMessage`, and `ene_store::EneMemoryError` directly,
 //! double-nested inside `Result<Result<T, E>, ActorDead>`. This module
 //! now mirrors the event-side pattern for those methods. As of #408 the
-//! actor-control and diagnostics methods likewise report a dead actor as
-//! [`PublicApiError::ActorDead`] rather than a dedicated error type.
+//! actor-control, diagnostics, and tool-handle methods likewise report a
+//! dead actor as [`PublicApiError::ActorDead`] rather than a dedicated
+//! error type.
 
 use crate::handle::{EneEvent, EneStatus, LifecycleEvent, TerminalReason};
 use crate::types::TurnOrigin;
@@ -171,11 +172,11 @@ impl From<ene_store::ExportedMessage> for PublicExportedMessage {
 /// these categories via the `From` impls below, so a new internal error
 /// variant does not change this type — see the `API_VERSION` bump-policy doc
 /// above. The actor-control methods on [`crate::EneHandle`] (permissions,
-/// undo, user input, feature updates) and the diagnostics / vision handles
-/// report a dead actor directly as [`PublicApiError::ActorDead`] (#408) —
-/// there is no separate actor-dead error type. `#[non_exhaustive]` so a
-/// future category addition is itself non-breaking for match arms in client
-/// code.
+/// undo, user input, feature updates) and the diagnostics / vision / tools
+/// handles report a dead actor directly as [`PublicApiError::ActorDead`]
+/// (#408) — there is no separate actor-dead error type. `#[non_exhaustive]`
+/// so a future category addition is itself non-breaking for match arms in
+/// client code.
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
