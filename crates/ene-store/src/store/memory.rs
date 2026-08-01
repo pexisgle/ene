@@ -31,10 +31,6 @@ fn user_visibility_condition(user_id: &str) -> sea_orm::Condition {
         .add(entities::typed_memories::Column::UserId.eq(""))
 }
 
-fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
 async fn query_sqlite_changes(db: &impl ConnectionTrait) -> Result<usize, sea_orm::DbErr> {
     use sea_orm::{DatabaseBackend, Statement};
     let row = db
@@ -47,6 +43,33 @@ async fn query_sqlite_changes(db: &impl ConnectionTrait) -> Result<usize, sea_or
         .and_then(|r| r.try_get::<i64>("", "n").ok())
         .unwrap_or(0);
     Ok(usize::try_from(count).unwrap_or(0))
+}
+
+/// SQL fragment for lifecycle decay score, matching [`ene_rag::decay_score`].
+///
+/// `anchor_sql` is a column/`coalesce(...)` expression for the decay anchor.
+/// Callers bind `(half_life_days, now_text)` for the two `?` placeholders in
+/// order (half-life first, then the `julianday(?)` reference instant).
+pub(crate) fn natural_decay_score_sql(anchor_sql: &str) -> String {
+    let scale = ene_rag::EMOTIONAL_MAGNITUDE_SCALE;
+    let emotional = format!(
+        "CASE WHEN sqrt(affective_valence * affective_valence + affective_arousal * affective_arousal) / {scale} > 1.0 \
+         THEN 1.0 \
+         ELSE sqrt(affective_valence * affective_valence + affective_arousal * affective_arousal) / {scale} END"
+    );
+    format!(
+        "exp(-{ln2} / ? * (julianday(?) - julianday({anchor_sql}))) \
+         * ({sw} * salience + {sb}) \
+         * ({cw} * confidence + {cb}) \
+         * ({ew} * ({emotional}) + {eb})",
+        ln2 = ene_rag::DECAY_LN2,
+        sw = ene_rag::DECAY_SALIENCE_WEIGHT,
+        sb = ene_rag::DECAY_SALIENCE_BIAS,
+        cw = ene_rag::DECAY_CONFIDENCE_WEIGHT,
+        cb = ene_rag::DECAY_CONFIDENCE_BIAS,
+        ew = ene_rag::DECAY_EMOTIONAL_WEIGHT,
+        eb = ene_rag::DECAY_EMOTIONAL_BIAS,
+    )
 }
 
 /// Strip the trailing `ene:tags` metadata footer from memory content.
@@ -1464,6 +1487,10 @@ impl MemoryStore {
     /// could land on a different connection and return a wrong (or zero) count;
     /// pinning the UPDATE and the count to one transaction keeps them on the
     /// same connection and makes the pass atomic.
+    ///
+    /// Non-finite `half_life_days` / thresholds (NaN or ±infinity) are rejected
+    /// up front: `SQLite` has no literal for those values, and interpolating them
+    /// would turn into identifier-looking tokens (`inf`, `NaN`).
     pub async fn apply_natural_decay_batch(
         &self,
         character_id: &str,
@@ -1473,43 +1500,57 @@ impl MemoryStore {
         fade_threshold: f32,
         archive_threshold: f32,
     ) -> Result<NaturalDecayReport, EneMemoryError> {
-        use sea_orm::{ConnectionTrait, TransactionTrait};
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 
-        if half_life_days <= 0.0 || half_life_days.is_nan() {
+        if !half_life_days.is_finite()
+            || half_life_days <= 0.0
+            || !fade_threshold.is_finite()
+            || !archive_threshold.is_finite()
+        {
             return Ok(NaturalDecayReport::default());
         }
 
         let now_text = now.format("%Y-%m-%d %H:%M:%S").to_string();
-        let cid = escape_sql_literal(character_id);
-        let user_clause = match user_id {
-            Some(uid) => format!(
-                " AND (user_id = '{}' OR user_id = '')",
-                escape_sql_literal(uid)
-            ),
-            None => String::new(),
+        let decay_active = natural_decay_score_sql("updated_at");
+        let decay_faded = natural_decay_score_sql("coalesce(faded_at, created_at)");
+        let user_clause = if user_id.is_some() {
+            " AND (user_id = ? OR user_id = '')"
+        } else {
+            ""
         };
 
-        let emotional = "CASE WHEN sqrt(affective_valence * affective_valence + affective_arousal * affective_arousal) / 2.83 > 1.0 THEN 1.0 ELSE sqrt(affective_valence * affective_valence + affective_arousal * affective_arousal) / 2.83 END";
-
-        let decay_active = format!(
-            "exp(-0.6931471805599453 / {half_life_days} * (julianday('{now_text}') - julianday(updated_at))) * (0.5 * salience + 0.5) * (0.5 * confidence + 0.5) * (0.3 * {emotional} + 0.7)"
-        );
-        let decay_faded = format!(
-            "exp(-0.6931471805599453 / {half_life_days} * (julianday('{now_text}') - julianday(coalesce(faded_at, created_at)))) * (0.5 * salience + 0.5) * (0.5 * confidence + 0.5) * (0.3 * {emotional} + 0.7)"
-        );
-
+        // Placeholder order: updated_at, character_id, [user_id], half_life,
+        // julianday reference, threshold.
         let fade_to_faded = format!(
-            "UPDATE typed_memories SET status = 'faded', faded_at = updated_at, updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'active' AND pinned = 0{user_clause} AND ({decay_active}) < {fade_threshold}"
+            "UPDATE typed_memories SET status = 'faded', faded_at = updated_at, updated_at = ? \
+             WHERE character_id = ? AND status = 'active' AND pinned = 0{user_clause} \
+             AND ({decay_active}) < ?"
         );
         let faded_to_archived = format!(
-            "UPDATE typed_memories SET status = 'archived', updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'faded' AND pinned = 0{user_clause} AND ({decay_faded}) < {archive_threshold}"
+            "UPDATE typed_memories SET status = 'archived', updated_at = ? \
+             WHERE character_id = ? AND status = 'faded' AND pinned = 0{user_clause} \
+             AND ({decay_faded}) < ?"
         );
 
+        let bind_decay_update = |sql: String, threshold: f32| -> Statement {
+            let mut values: Vec<sea_orm::Value> =
+                vec![now_text.clone().into(), character_id.to_string().into()];
+            if let Some(uid) = user_id {
+                values.push(uid.to_string().into());
+            }
+            values.push(half_life_days.into());
+            values.push(now_text.clone().into());
+            values.push(f64::from(threshold).into());
+            Statement::from_sql_and_values(DatabaseBackend::Sqlite, sql, values)
+        };
+
         let txn = self.db.begin().await?;
-        txn.execute_unprepared(&fade_to_faded).await?;
+        txn.execute_raw(bind_decay_update(fade_to_faded, fade_threshold))
+            .await?;
         let faded_count = query_sqlite_changes(&txn).await?;
 
-        txn.execute_unprepared(&faded_to_archived).await?;
+        txn.execute_raw(bind_decay_update(faded_to_archived, archive_threshold))
+            .await?;
         let archived_count = query_sqlite_changes(&txn).await?;
         txn.commit().await?;
 

@@ -1618,6 +1618,119 @@ async fn apply_natural_decay_batch_fades_and_archives() {
 }
 
 #[tokio::test]
+async fn apply_natural_decay_batch_ignores_non_finite_params() {
+    let store = setup_store().await;
+    let id = store
+        .insert_typed_memory(&crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind: crate::MemoryKind::Semantic,
+            title: "stale".into(),
+            content: "should stay active when params are non-finite".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.1),
+            salience: crate::MemorySalience::new(0.1),
+            affect: crate::AffectAnnotation::default(),
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        })
+        .await
+        .unwrap();
+    store.test_backdate_typed_memory(id, 200).await.unwrap();
+
+    let now = Utc::now();
+    for (half_life, fade, archive) in [
+        (
+            f64::INFINITY,
+            ene_rag::FADE_THRESHOLD,
+            ene_rag::ARCHIVE_THRESHOLD,
+        ),
+        (30.0, f32::NAN, ene_rag::ARCHIVE_THRESHOLD),
+        (30.0, ene_rag::FADE_THRESHOLD, f32::NEG_INFINITY),
+    ] {
+        let report = store
+            .apply_natural_decay_batch("ene", Some("user1"), now, half_life, fade, archive)
+            .await
+            .unwrap();
+        assert_eq!(report.faded_count, 0);
+        assert_eq!(report.archived_count, 0);
+    }
+
+    let loaded = store.get_typed_memory(id).await.unwrap().unwrap();
+    assert_eq!(loaded.status, crate::MemoryStatus::Active);
+}
+
+/// Rust [`ene_rag::decay_score`] and the SQL expression used by natural decay
+/// must agree on the same row (shared coefficients from `ene-rag`).
+#[tokio::test]
+async fn natural_decay_sql_matches_rust_decay_score() {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+
+    let store = setup_store().await;
+    let now = Utc::now();
+    let half_life_days = 30.0_f64;
+    let id = store
+        .insert_typed_memory(&crate::NewMemoryItem {
+            scope: crate::MemoryScope::Character,
+            character_id: "ene".into(),
+            user_id: "user1".into(),
+            kind: crate::MemoryKind::Semantic,
+            title: "score-match".into(),
+            content: "compare rust vs sql decay".into(),
+            source: crate::MemorySource::Conversation,
+            source_ref: None,
+            confidence: crate::MemoryConfidence::new(0.6),
+            salience: crate::MemorySalience::new(0.7),
+            affect: crate::AffectAnnotation {
+                valence: 0.4,
+                arousal: -0.2,
+            },
+            relationship_impact: 0.0,
+            valid_from: None,
+            valid_until: None,
+            status: crate::MemoryStatus::Active,
+            supersedes_id: None,
+            pinned: false,
+            created_at: None,
+            commitment_id: None,
+        })
+        .await
+        .unwrap();
+    store.test_backdate_typed_memory(id, 45).await.unwrap();
+
+    let item = store.get_typed_memory(id).await.unwrap().unwrap();
+    let rust_score = ene_rag::decay_score(&item, now, half_life_days);
+
+    let now_text = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let score_sql = memory::natural_decay_score_sql("updated_at");
+    let sql = format!("SELECT ({score_sql}) AS score FROM typed_memories WHERE id = ?");
+    let row = store
+        .connection()
+        .query_one_raw(Statement::from_sql_and_values(
+            DatabaseBackend::Sqlite,
+            sql,
+            [half_life_days.into(), now_text.into(), id.into()],
+        ))
+        .await
+        .unwrap()
+        .expect("row");
+    let sql_score: f64 = row.try_get("", "score").unwrap();
+
+    assert!(
+        (f64::from(rust_score) - sql_score).abs() < 1e-5,
+        "rust={rust_score} sql={sql_score}"
+    );
+}
+
+#[tokio::test]
 async fn pin_typed_memory_excludes_from_natural_decay() {
     let store = setup_store().await;
     let id = store
