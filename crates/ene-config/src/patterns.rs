@@ -76,14 +76,14 @@ pub struct PatternPackData {
     pub intent_keywords: IntentKeywords,
 }
 
-/// Keyword-substring lists driving heuristic recall-intent inference (#355).
+/// Keyword-substring lists driving heuristic recall-intent inference.
 ///
 /// The corpus lives in the language pack so tuning it — or adding a language —
 /// needs no Rust change: the recall planner loads the pack for the configured
 /// language and matches the lowercased turn topic against each list. Lists may
 /// be empty for intents a language has no natural phrasing for; the recall
 /// side simply never infers that intent.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntentKeywords {
     /// Episodic-recall hints (e.g. `"remember"`, `"前回"`).
     pub episodic: Vec<String>,

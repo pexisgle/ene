@@ -17,7 +17,7 @@ pub enum RecallIntent {
 /// Keyword matching is driven by the language pack for `lang` (see
 /// [`ene_config::PatternLibrary`]) — its `intent_keywords` section in
 /// particular — so tuning the corpus or adding a language needs no Rust
-/// change (#355). `lang` follows the standard pack resolution: aliases are
+/// change. `lang` follows the standard pack resolution: aliases are
 /// normalized, `ene_config::SUPPORTED_LANGUAGES` carry a compile-time
 /// embedded fallback, and unknown languages fall back to English. A topic
 /// matching no keywords yields `Semantic` only, as before.
@@ -142,7 +142,7 @@ mod tests {
     #[test]
     fn unknown_language_falls_back_to_english_keywords() {
         // "fr" has no pack and no embedded fallback: the English pack applies,
-        // so English keywords still trigger their intents (#355).
+        // so English keywords still trigger their intents.
         assert_contains(
             &infer_intents("I like coffee", None, "fr"),
             RecallIntent::Preference,
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn keywords_are_per_language_not_a_union() {
-        // #355 narrowing: keyword matching follows the pack for the configured
+        // Keyword matching is narrowed: it follows the pack for the configured
         // language only. A Japanese topic must not trigger intents via the
         // English pack, and vice versa — the previous en+ja union is gone.
         assert_eq!(
@@ -186,8 +186,8 @@ mod tests {
 
     #[test]
     fn language_aliases_resolve_to_the_same_pack() {
-        // "jp" (legacy) and "ja-JP" must load the Japanese pack (#354 alias
-        // semantics shared with the deterministic extractor).
+        // "jp" (legacy) and "ja-JP" must load the Japanese pack, per the
+        // alias semantics shared with the deterministic extractor.
         assert_contains(
             &infer_intents("前回の話", None, "jp"),
             RecallIntent::Episodic,

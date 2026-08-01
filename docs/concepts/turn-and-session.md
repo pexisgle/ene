@@ -224,7 +224,7 @@ Deterministic memory heuristics use the same pack layout: `ene-config`'s
 `PatternLibrary` loads per-language data from `assets/lang/{lang}/patterns.json`,
 selected by the same `mind.emotion.classifier_language` setting. The pack holds
 the forget-detection regexes *and* the recall-intent keyword lists (episodic /
-preference / relationship / affective / procedure hints, #355). Adding a
+preference / relationship / affective / procedure hints). Adding a
 language is therefore a data-only change (drop in a `patterns.json`), and a
 language without a pack falls back to English patterns. Explicit *remember*
 requests are owned by the LLM extractor and are no longer pattern-matched;
