@@ -317,6 +317,8 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 
 ホストはこのブロブを**そのまま**保存・配信します。ブロブ内のキーを解釈・書き換え・破棄することは決してありません（未知のキーもロード→セーブの往復で保持されます）。ブロブはハンドシェイク時に一度だけプラグインへ送信されます（`ConfigurablePlugin::set_config`）。プロバイダートレイト（LLM/embed/TTS/STT）を実装するプラグインも、ツールプラグインと同じ方法で受け取ります。単一キーの環境変数オーバーライドは `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`（例：`ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`）です。従来 `ai.*` にあったプロバイダー固有設定はここへ移動しました。たとえば `plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`（旧 `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`）、`plugins.list.onnx.config.ort_dylib_path`（旧 `ai.ort_dylib_path`）、`plugins.list.kokoro.profiles.kokoro.voices_path`（旧 `ai.tts.voices_path`）。
 
+バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
+
 #### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
 
 1 つのプラグインがモデル/音声/プロファイルごとに異なる設定を必要とすることがあります。`profiles` マップは、ホストからは不透明なプロファイル別ブロブを保持し、ハンドシェイク時にプラグインへ配信されます（`ConfigurablePlugin::set_profiles`）。プロファイルの*選択*はプラグイン側の責務です：

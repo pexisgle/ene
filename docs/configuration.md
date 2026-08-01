@@ -369,6 +369,16 @@ settings that previously lived in `ai.*` moved here — for example
 `plugins.list.kokoro.profiles.kokoro.voices_path`
 (was `ai.tts.voices_path`).
 
+Version-1 `settings.json` files are migrated automatically on load: the
+relocated keys above are moved into their `plugins.list.*` destinations (and
+removed from their old `ai.*` locations) before the file is read, then the
+migrated document is persisted. Files without those keys are left logically
+unchanged. Legacy flat entry-level keys (`plugins.list.<name>.<key>`, from
+before the nested `config`/`profiles` hierarchy) are also folded into the
+delivered config blob at startup, with explicit `config` keys taking
+precedence — the file on disk is not rewritten for this, so the fold is
+stable across reloads.
+
 #### `plugins.list.<name>.profiles.<profile>` — per-profile settings (#313)
 
 A single plugin can need different settings per model/voice/profile. The
