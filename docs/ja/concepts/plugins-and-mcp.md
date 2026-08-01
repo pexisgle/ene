@@ -301,6 +301,12 @@ trust gate が依拠しているもの) を暗黙に置き換えることを防�
 MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passthrough`
 フィールドをサポートしています。
 
+### プラグイン設定フロー (`set_config` / `set_profiles`)
+
+ツールプラグイン・**プロバイダープラグインの両方**が、IPC ハンドシェイク中に一度だけホストから設定を受け取ります。`plugins.list.<name>.config` ブロブは `ConfigurablePlugin::set_config` 経由でそのまま配信され、`plugins.list.<name>.profiles.<profile>` マップ（モデル/音声ごとの設定用）は `ConfigurablePlugin::set_profiles` 経由で配信されます。どちらもホストからは不透明です。ホストはそれらをそのまま保存し、キーを解釈せず、再接続時にも再送信します。プロバイダープラグイン（LLM/embed/TTS/STT）はツールプラグインと同じ配信を受けるため、たとえば Anthropic プロバイダーは API キーをリクエストごとではなくハンドシェイク時に受け取れます。
+
+プラグインは `config_schema()` で受け付ける設定の JSON Schema を広告します。そのスキーマで `x-ene-secret: true` とマークされたフィールドは、UI でマスクされ、ホストのログから redact されます（正確な形は [`configuration.md`](../ja/configuration.md) を参照）。
+
 ### バイナリチェックサム検証 (TOFU)
 
 初回起動時にホストはプラグインバイナリの SHA-256 チェックサムを計算し、
