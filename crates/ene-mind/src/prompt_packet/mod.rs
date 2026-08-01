@@ -8,6 +8,7 @@ mod section;
 
 pub use section::{PromptSection, PromptSectionKind};
 
+use chrono::{DateTime, Utc};
 use ene_ai::{LlmMessage, UserMessagePart};
 use ene_core::{ActiveCommitmentPrompt, MemoryKind, MemorySource};
 
@@ -162,19 +163,85 @@ pub fn classify_recalled_memories(
 }
 
 /// Render active commitments as a bullet list body (without heading).
-pub fn render_commitments_block(commitments: &[ActiveCommitmentPrompt]) -> String {
+///
+/// Deadlines are appended in parentheses: `- {title}: {description}（期限: 明日）`,
+/// with overdue commitments explicitly marked (`（期限切れ）`). `lang` selects
+/// the wording ("ja" vs anything else, which falls back to English); the strings
+/// belong in a language pack once mind-side i18n extraction lands. `now` anchors
+/// the relative-deadline computation so every bullet in the block shares one
+/// reference instant.
+pub fn render_commitments_block(
+    commitments: &[ActiveCommitmentPrompt],
+    lang: &str,
+    now: DateTime<Utc>,
+) -> String {
+    let japanese = lang.eq_ignore_ascii_case("ja");
+    let (open, close) = if japanese {
+        ("（", "）")
+    } else {
+        (" (", ")")
+    };
+
     commitments
         .iter()
         .map(|c| {
-            if c.description.is_empty() {
+            let base = if c.description.is_empty() {
                 c.title.clone()
             } else {
                 format!("{}: {}", c.title, c.description)
+            };
+            match render_due_expression(c, now, japanese) {
+                Some(due) => format!("{base}{open}{due}{close}"),
+                None => base,
             }
         })
         .map(|line| format!("- {line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Human-readable deadline expression for a single commitment, or `None` when
+/// the commitment carries no deadline at all.
+///
+/// A parsed `due_at` wins over the raw `due_label`: the label is only a
+/// fallback for hints extraction could not parse (e.g. "next time"), and is
+/// rendered as-is. Overdue detection uses the ledger's `due_at < now` rule,
+/// mirroring `mark_stale_commitments`. Offsets are against the UTC calendar
+/// day, matching the ledger's UTC deadline comparisons.
+fn render_due_expression(
+    commitment: &ActiveCommitmentPrompt,
+    now: DateTime<Utc>,
+    japanese: bool,
+) -> Option<String> {
+    let prefix = if japanese { "期限: " } else { "Deadline: " };
+    let overdue = if japanese { "期限切れ" } else { "overdue" };
+
+    if let Some(due_at) = commitment.due_at {
+        if due_at < now {
+            return Some(overdue.to_string());
+        }
+        // Calendar-day offset (not a raw 24h span), so a deadline late
+        // tomorrow renders as "明日"/"tomorrow" rather than "あと1日".
+        let days = due_at
+            .date_naive()
+            .signed_duration_since(now.date_naive())
+            .num_days();
+        let relative = match (days, japanese) {
+            (0, true) => "本日中".to_string(),
+            (0, false) => "today".to_string(),
+            (1, true) => "明日".to_string(),
+            (1, false) => "tomorrow".to_string(),
+            (n, true) => format!("あと{n}日"),
+            (n, false) => format!("in {n} days"),
+        };
+        return Some(format!("{prefix}{relative}"));
+    }
+
+    commitment
+        .due_label
+        .as_deref()
+        .filter(|label| !label.trim().is_empty())
+        .map(|label| format!("{prefix}{label}"))
 }
 
 #[cfg(test)]
@@ -239,7 +306,7 @@ mod tests {
         if !commitments.is_empty() {
             sections.push(PromptSection::new(
                 PromptSectionKind::ActiveCommitments,
-                render_commitments_block(commitments),
+                render_commitments_block(commitments, "en", chrono::Utc::now()),
             ));
         }
 
@@ -441,5 +508,153 @@ mod tests {
         };
         assert!(content.contains("matcha"));
         assert!(content.contains("User Profile"));
+    }
+
+    fn sample_commitment(
+        title: &str,
+        description: &str,
+        due_label: Option<&str>,
+        due_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> ActiveCommitmentPrompt {
+        ActiveCommitmentPrompt {
+            id: 1,
+            title: title.into(),
+            description: description.into(),
+            due_label: due_label.map(str::to_string),
+            due_at,
+        }
+    }
+
+    #[test]
+    fn commitments_block_renders_future_due_at_as_relative() {
+        // A parsed `due_at` in the future becomes a relative expression
+        // anchored at the renderer's `now` (calendar-day offset).
+        let now = chrono::Utc::now();
+        let commitment = sample_commitment(
+            "資料を確認する",
+            "企画書のレビュー",
+            None,
+            Some(now + chrono::Duration::days(2)),
+        );
+        let ja = render_commitments_block(std::slice::from_ref(&commitment), "ja", now);
+        assert!(
+            ja.contains("（期限: あと2日）"),
+            "unexpected ja render: {ja}"
+        );
+        let en = render_commitments_block(&[commitment], "en", now);
+        assert!(
+            en.contains(" (Deadline: in 2 days)"),
+            "unexpected en render: {en}"
+        );
+    }
+
+    #[test]
+    fn commitments_block_renders_today_and_tomorrow_terms() {
+        // Natural relative terms for the same-day and next-day cases.
+        // Anchor `now` to a fixed instant and derive both due dates from its
+        // calendar date at midday, so a late-evening UTC run cannot roll the
+        // same-day deadline across midnight (which would flip days to 1).
+        let now = chrono::DateTime::<chrono::Utc>::from_timestamp(1_752_537_600, 0)
+            .expect("fixed anchor timestamp is in range");
+        let today = sample_commitment(
+            "t1",
+            "",
+            None,
+            Some(
+                now.date_naive()
+                    .and_hms_opt(12, 0, 0)
+                    .expect("12:00 is valid")
+                    .and_utc(),
+            ),
+        );
+        let tomorrow = sample_commitment(
+            "t2",
+            "",
+            None,
+            Some(
+                now.date_naive()
+                    .and_hms_opt(12, 0, 0)
+                    .expect("12:00 is valid")
+                    .and_utc()
+                    + chrono::Duration::days(1),
+            ),
+        );
+        let ja = render_commitments_block(&[today.clone(), tomorrow.clone()], "ja", now);
+        assert!(
+            ja.contains("（期限: 本日中）"),
+            "unexpected ja render: {ja}"
+        );
+        assert!(ja.contains("（期限: 明日）"), "unexpected ja render: {ja}");
+        let en = render_commitments_block(&[today, tomorrow], "en", now);
+        assert!(
+            en.contains(" (Deadline: today)"),
+            "unexpected en render: {en}"
+        );
+        assert!(
+            en.contains(" (Deadline: tomorrow)"),
+            "unexpected en render: {en}"
+        );
+    }
+
+    #[test]
+    fn commitments_block_marks_past_due_at_as_overdue() {
+        // A `due_at` before `now` is explicitly marked overdue, mirroring
+        // the ledger's `mark_stale_commitments` (`due_at < now`).
+        let now = chrono::Utc::now();
+        let commitment = sample_commitment(
+            "report",
+            "send to manager",
+            None,
+            Some(now - chrono::Duration::days(1)),
+        );
+        let ja = render_commitments_block(std::slice::from_ref(&commitment), "ja", now);
+        assert!(ja.contains("（期限切れ）"), "unexpected ja render: {ja}");
+        let en = render_commitments_block(&[commitment], "en", now);
+        assert!(en.contains(" (overdue)"), "unexpected en render: {en}");
+    }
+
+    #[test]
+    fn commitments_block_renders_due_label_as_is() {
+        // Without a parseable `due_at`, the raw `due_label` is rendered
+        // verbatim ("期限: 明日"), because the label is the only deadline hint.
+        let now = chrono::Utc::now();
+        let commitment =
+            sample_commitment("資料を確認する", "企画書のレビュー", Some("明日"), None);
+        let ja = render_commitments_block(std::slice::from_ref(&commitment), "ja", now);
+        assert!(ja.contains("（期限: 明日）"), "unexpected ja render: {ja}");
+        let en = render_commitments_block(&[commitment], "en", now);
+        assert!(
+            en.contains(" (Deadline: 明日)"),
+            "unexpected en render: {en}"
+        );
+    }
+
+    #[test]
+    fn commitments_block_without_deadline_is_unchanged() {
+        // Commitments with neither `due_at` nor `due_label` keep the
+        // historical title/description-only rendering.
+        let now = chrono::Utc::now();
+        let commitment = sample_commitment("buy milk", "from the corner store", None, None);
+        let rendered = render_commitments_block(&[commitment], "ja", now);
+        assert_eq!(rendered, "- buy milk: from the corner store");
+    }
+
+    #[test]
+    fn commitments_block_prefers_due_at_over_due_label() {
+        // A parseable `due_at` wins over the raw label; the relative
+        // expression is not clobbered by a stale/conflicting label.
+        let now = chrono::Utc::now();
+        let commitment = sample_commitment(
+            "資料を確認する",
+            "企画書のレビュー",
+            Some("来週"),
+            Some(now + chrono::Duration::days(2)),
+        );
+        let ja = render_commitments_block(&[commitment], "ja", now);
+        assert!(
+            ja.contains("（期限: あと2日）"),
+            "unexpected ja render: {ja}"
+        );
+        assert!(!ja.contains("来週"), "label must not override due_at: {ja}");
     }
 }

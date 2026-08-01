@@ -482,6 +482,8 @@ impl CognitionEngine {
             user_persona,
             compression_pending: ctx.compression_pending,
             user_input: ctx.user_input.to_string(),
+            lang: ctx.config.emotion.classifier_language.clone(),
+            now: None,
         };
 
         // Budget the prompt against the model's effective context window
