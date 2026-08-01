@@ -139,6 +139,11 @@ pub struct PackInput {
     pub compression_pending: bool,
     /// Current user input.
     pub user_input: String,
+    /// Section-renderer language (`classifier_language` from the mind config):
+    /// "ja" selects Japanese wording, anything else falls back to English —
+    /// used for e.g. commitment deadline expressions (#385). Belongs in a
+    /// language pack with #338.
+    pub lang: String,
 }
 
 fn sort_memories_for_drop(memories: &mut [RecalledMemory]) {
@@ -343,7 +348,7 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
     if !input.commitments.is_empty() {
         sections.push(PromptSection::new(
             PromptSectionKind::ActiveCommitments,
-            render_commitments_block(&input.commitments),
+            render_commitments_block(&input.commitments, &input.lang, chrono::Utc::now()),
         ));
     }
 
@@ -615,6 +620,7 @@ mod tests {
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
+            lang: "en".into(),
         }
     }
 
@@ -810,6 +816,7 @@ mod tests {
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
+            lang: "en".into(),
         };
         let packed = pack_prompt(input, &budget);
         let kernel_section = packed
@@ -879,6 +886,7 @@ mod tests {
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
+            lang: "en".into(),
         };
         let packed = pack_prompt(input, &budget);
         assert!(packed.meta.history_messages_dropped > 0);
@@ -913,6 +921,7 @@ mod tests {
             user_persona: None,
             compression_pending: false,
             user_input: "hello".into(),
+            lang: "en".into(),
         };
         let packed = pack_prompt(input, &budget);
         assert!(
@@ -1206,5 +1215,47 @@ mod tests {
         {
             assert_eq!(got.content, want.content);
         }
+    }
+
+    #[test]
+    fn commitments_section_renders_deadline_through_packing() {
+        // #385: the deadline reaches the packed prompt — `due_at` becomes a
+        // relative expression in the configured language, overdue is marked.
+        let now = chrono::Utc::now();
+        let input = PackInput {
+            commitments: vec![
+                ActiveCommitmentPrompt {
+                    id: 1,
+                    title: "report".into(),
+                    description: "send to manager".into(),
+                    due_label: None,
+                    due_at: Some(now + chrono::Duration::days(2)),
+                },
+                ActiveCommitmentPrompt {
+                    id: 2,
+                    title: "call back".into(),
+                    description: String::new(),
+                    due_label: None,
+                    due_at: Some(now - chrono::Duration::days(1)),
+                },
+            ],
+            lang: "ja".into(),
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &default_test_budget());
+        let commitments = packed
+            .packet
+            .section(PromptSectionKind::ActiveCommitments)
+            .expect("commitments section present");
+        assert!(
+            commitments.content.contains("（期限: あと2日）"),
+            "future deadline missing from packed prompt: {:?}",
+            commitments.content
+        );
+        assert!(
+            commitments.content.contains("（期限切れ）"),
+            "overdue marker missing from packed prompt: {:?}",
+            commitments.content
+        );
     }
 }
