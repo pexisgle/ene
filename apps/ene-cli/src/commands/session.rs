@@ -234,7 +234,9 @@ async fn handle_split(
             "Cannot compress: No conversation history.".to_string(),
         ));
     }
-    if !snapshot.memory.is_enabled() {
+    // The snapshot no longer carries the memory handle; it lives on
+    // the diagnostics facade, which is the documented access path.
+    if !ctx.handle.diagnostics().memory().is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));

@@ -22,7 +22,6 @@
 //!   `broadcast`, small capacity. Turn-independent notifications. Multiple
 //!   subscribers via [`crate::EneHandle::subscribe_lifecycle`].
 
-use crate::diagnostics::MemoryHandle;
 use crate::types::{RequestId, TurnId};
 use chrono::{DateTime, Utc};
 use ene_config::EneConfig;
@@ -211,6 +210,18 @@ pub enum TerminalReason {
 }
 
 /// A snapshot of the current actor state for read-only queries.
+///
+/// Fetched via [`crate::EneDiagnostics::get_snapshot`] (mailbox-based). For
+/// small per-frame state prefer the mailbox-free accessors on
+/// [`crate::EneHandle`] — [`crate::EneHandle::card_name`],
+/// [`crate::EneHandle::session_id`], [`crate::EneHandle::session_started_at`],
+/// [`crate::EneHandle::turn_count`], [`crate::EneHandle::config`], and
+/// [`crate::EneHandle::character_card`] — which never queue behind an
+/// in-flight `Run` turn. History is the one deliberately mailbox-based
+/// read: [`crate::EneHandle::history`] ships the large payload over the
+/// command mailbox, so unlike the accessors above it *does* queue behind an
+/// in-flight `Run` turn. Memory access lives on [`crate::EneDiagnostics::memory`]
+/// (a [`crate::diagnostics::MemoryHandle`]), not on this snapshot.
 #[derive(Clone)]
 pub struct EneStateSnapshot {
     /// The loaded character card, if any.
@@ -223,9 +234,6 @@ pub struct EneStateSnapshot {
     pub session_id: SessionId,
     /// Character card name.
     pub card_name: CardName,
-    /// Memory handle (enabled only if memory is configured).
-    /// Prefer [`crate::EneDiagnostics::memory`] for new code.
-    pub memory: MemoryHandle,
     /// Current conversation turn count.
     pub current_turn_count: u32,
     /// When the session started (UTC).

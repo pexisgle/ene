@@ -31,20 +31,21 @@
 //! (config/control commands are already infrequent, low-latency, and never
 //! block behind a `Run` turn any worse than `Run` itself already does).
 
+use super::SharedActorState;
 use super::TurnGate;
 use super::command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 use super::event::{
     AudioChunk, EneEvent, EneStateSnapshot, EneStatus, LifecycleEvent, TerminalReason,
 };
-use crate::diagnostics::{DiagnosticEvent, MemoryHandle, emit_diag};
+use crate::diagnostics::{DiagnosticEvent, emit_diag};
 use crate::error::EneRuntimeError;
 use crate::streaming::{self, PermissionDecision, UserInputResponse};
 use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
 use ene_ai::{AiTaskKind, LlmProviderRegistry, create_task_chat_provider};
 use ene_config::EneConfig;
-use ene_mind::CardName;
 use ene_mind::commitments::CommitmentLedger;
+use ene_mind::{CardName, SessionId};
 use ene_mind::{
     CompressionLevel, CompressionResult, CompressionTaskInput, HistoryEntry as MindHistoryEntry,
     compression_has_usable_summary,
@@ -229,11 +230,13 @@ pub(super) struct TurnActor {
     /// sync when the plugin host is restarted so shutdown aborts the live
     /// bridge rather than a stale one (#238).
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Current character-card name, shared with
-    /// [`crate::query::candidates::MemoryCandidateHandle`] so pending-candidate
-    /// queries can read it without a mailbox round-trip (#271). Kept in sync
-    /// on every `SetCharacter`.
-    card_name: Arc<parking_lot::Mutex<String>>,
+    /// Mailbox-free shared actor state: card name (shared with
+    /// [`crate::query::candidates::MemoryCandidateHandle`]),
+    /// session id / started-at / turn count, config, and the loaded card.
+    /// [`crate::EneHandle`] reads these slots synchronously; this actor keeps
+    /// them in sync at the mutation points (session split, `SetCharacter`,
+    /// per-turn bookkeeping, feature-settings updates).
+    shared: Arc<SharedActorState>,
 }
 
 impl TurnActor {
@@ -265,7 +268,7 @@ impl TurnActor {
         plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
         plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
         health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-        card_name: Arc<parking_lot::Mutex<String>>,
+        shared_state: Arc<SharedActorState>,
     ) -> Self {
         let (classifier_tx, classifier_rx) = mpsc::unbounded_channel();
         let (memory_writer_tx, memory_writer_rx) = mpsc::unbounded_channel();
@@ -329,7 +332,7 @@ impl TurnActor {
             plugin_tool_registries,
             plugin_host,
             health_bridge_handle,
-            card_name,
+            shared: shared_state,
         }
     }
 
@@ -585,6 +588,10 @@ impl TurnActor {
                         // sender was dropped).
                         if let Ok(outcome) = res {
                             self.session = outcome.session;
+                            // The stream task recorded the assistant
+                            // response on its session clone; publish the
+                            // (possibly incremented) turn count.
+                            self.sync_shared_session_state();
                             if self.active_origin == crate::types::TurnOrigin::Proactive
                                 && outcome.terminal == TerminalReason::Done
                             {
@@ -1272,6 +1279,7 @@ impl TurnActor {
                                 && let Ok(outcome) = rx.try_recv()
                             {
                                 self.session = outcome.session;
+                                self.sync_shared_session_state();
                             }
                         }
                         () = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
@@ -1285,6 +1293,7 @@ impl TurnActor {
                                 && let Ok(outcome) = rx.try_recv()
                             {
                                 self.session = outcome.session;
+                                self.sync_shared_session_state();
                             }
                         }
                     }
@@ -1301,6 +1310,10 @@ impl TurnActor {
                     let spoken_chars = partial.chars().count();
                     self.session
                         .mark_interrupted(&turn.to_string(), &partial, spoken_chars);
+                    // `mark_interrupted` records an assistant response (turn
+                    // count +1); republish so the shared `turn_count` slot
+                    // does not lag the actor's session.
+                    self.sync_shared_session_state();
                 }
 
                 self.drain_pending().await;
@@ -1358,7 +1371,8 @@ impl TurnActor {
             }
             EneCommand::SetCharacter { card, reply } => {
                 self.session.set_card(&card);
-                *self.card_name.lock() = self.session.card_name().to_string();
+                *self.shared.card_name.lock() = self.session.card_name().to_string();
+                *self.shared.character_card.lock() = Some(Arc::new(*card));
                 self.proactive.reset_session();
                 self.abort_proactive_decision();
                 drop(reply.send(Ok(())));
@@ -1381,6 +1395,7 @@ impl TurnActor {
                 if let Ok(mut mind_cfg) = self.config.get_section::<ene_mind::MindConfig>() {
                     mind_cfg.proactive = mind;
                     drop(self.config.set_section(&mind_cfg));
+                    self.sync_shared_config();
                 }
                 self.abort_proactive_decision();
                 true
@@ -1402,6 +1417,7 @@ impl TurnActor {
                 drop(self.config.set_section(&store));
                 drop(self.config.set_section(&plugins));
                 drop(self.config.set_section(&rag));
+                self.sync_shared_config();
                 self.abort_proactive_decision();
 
                 if plugins_changed {
@@ -1530,18 +1546,15 @@ impl TurnActor {
                     config: self.config.clone(),
                     session_id: self.session.memory.session_id.clone(),
                     card_name: CardName::from(self.session.card_name()),
-                    memory: MemoryHandle::new(
-                        self.concrete_store.clone(),
-                        self.session.memory.embedding_provider.clone(),
-                        self.config
-                            .get_section::<ene_mind::MindConfig>()
-                            .unwrap_or_default()
-                            .memory,
-                    ),
                     current_turn_count: self.session.current_turn_count() as u32,
                     session_started_at: self.session.session_started_at(),
                 };
                 drop(reply.send(snapshot));
+                true
+            }
+            EneCommand::GetHistory { reply } => {
+                let history = self.session.history().to_vec();
+                drop(reply.send(history));
                 true
             }
             EneCommand::ListTools { reply } => {
@@ -1806,6 +1819,7 @@ impl TurnActor {
             self.maybe_split_session_on_timeout();
             self.session.record_user_input();
             self.session.add_user_message(&user_input);
+            self.sync_shared_session_state();
             self.check_and_perform_split(&user_input).await;
         }
 
@@ -2032,6 +2046,46 @@ impl TurnActor {
 
     // ── Split management ──
 
+    /// Starts a new session: resets the session and publishes the new id /
+    /// started-at / turn count to the mailbox-free shared state.
+    ///
+    /// This is the single place a session split (currently only the
+    /// inactivity-timeout path) may occur, so it is also the
+    /// single place the shared [`SharedActorState`] session slots are
+    /// refreshed — [`crate::EneHandle::session_id`] / `session_started_at` /
+    /// `turn_count` must reflect the fresh session immediately.
+    fn split_session(&mut self) -> SessionId {
+        let new_id = self.session.reset_session();
+        self.sync_shared_session_state();
+        new_id
+    }
+
+    /// Publishes the current session id / started-at / turn count to the
+    /// mailbox-free shared state. Idempotent; called after a session
+    /// split, after a user input is recorded, and after a stream outcome is
+    /// applied (the stream task records the assistant response on its own
+    /// session clone). The slots are individually consistent, not cross-slot
+    /// atomic: mid-split a reader can observe the new session id with a stale
+    /// turn count. No current consumer reads them as a pair.
+    fn sync_shared_session_state(&self) {
+        *self.shared.session_id.lock() = self.session.memory.session_id.clone();
+        *self.shared.session_started_at.lock() = self.session.session_started_at();
+        self.shared
+            .turn_count
+            .store(self.session.current_turn_count() as u32, Ordering::Relaxed);
+    }
+
+    /// Publishes the current config to the mailbox-free shared state.
+    ///
+    /// Called after every in-place config mutation (`UpdateFeatureSettings`,
+    /// `UpdateProactiveSettings`) so [`crate::EneHandle::config`] stays
+    /// consistent with the actor's authoritative copy. Read-only sharing:
+    /// only the actor writes, and only under a write lock.
+    fn sync_shared_config(&self) {
+        let cfg = Arc::new(self.config.clone());
+        *self.shared.config.write() = cfg;
+    }
+
     /// Start a new session when the user returns after a long idle period (#369).
     fn maybe_split_session_on_timeout(&mut self) {
         let mind = self
@@ -2050,7 +2104,7 @@ impl TurnActor {
         if elapsed_minutes < timeout as i64 {
             return;
         }
-        let new_id = self.session.reset_session();
+        let new_id = self.split_session();
         tracing::info!(
             component = "SessionSplit",
             elapsed_minutes,
@@ -3305,6 +3359,53 @@ mod tests {
             gate.active.lock().is_none(),
             "Shutdown must release the single-flight gate so a racing run() \
              reports ActorDead, not a stale Busy (#404)"
+        );
+    }
+
+    /// The mailbox-free shared session state must be published the
+    /// moment a session split resets the session: the shared session
+    /// id and started-at change, and the shared turn count resets to zero.
+    /// Drives the same `split_session` helper the inactivity-timeout path
+    /// (`maybe_split_session_on_timeout`) calls once its elapsed check fires,
+    /// so a regression in the split → publish wiring is caught here.
+    #[tokio::test]
+    async fn timeout_split_publishes_shared_session_state() {
+        use crate::handle::tests::{EmptyRegistry, build_bare_actor_with_session_and_gate};
+
+        let mut session = ConversationSession::new();
+        // Start the turn count at 1 so the post-split reset assertion below
+        // compares 1 -> 0 instead of the vacuous 0 == 0.
+        session.record_user_input();
+        let config = EneConfig::default();
+        let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
+        let task_caps = crate::task_config::ToolRuntimeConfig::default();
+        let (mut actor, _diag_rx, _lifecycle_rx, _gate, shared) =
+            build_bare_actor_with_session_and_gate(registry, &task_caps, session, config);
+
+        let old_id = shared.session_id.lock().clone();
+        let old_started_at = *shared.session_started_at.lock();
+        assert_eq!(
+            shared.turn_count.load(Ordering::Relaxed),
+            1,
+            "the injected session's turn count is mirrored into the shared state"
+        );
+
+        actor.split_session();
+
+        assert_ne!(
+            shared.session_id.lock().clone(),
+            old_id,
+            "a session split must publish the new session id to the shared state"
+        );
+        assert_ne!(
+            *shared.session_started_at.lock(),
+            old_started_at,
+            "a session split must publish the new session start time"
+        );
+        assert_eq!(
+            shared.turn_count.load(Ordering::Relaxed),
+            0,
+            "a session split resets the shared turn count from 1 to zero"
         );
     }
 }

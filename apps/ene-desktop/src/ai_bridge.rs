@@ -387,13 +387,14 @@ impl AiBridge {
         include_archived: bool,
         include_superseded: bool,
     ) -> Result<MemoryJournalPayload, AiBridgeError> {
-        let snapshot = self.get_snapshot_blocking()?;
-        let character_id = snapshot.card_name.as_str();
-        let user_id = snapshot.config.user_name.clone();
+        // Mailbox-free state reads: the journal is refreshed from UI
+        // actions, so it must never queue behind an in-flight turn.
+        let character_id = self.handle.card_name();
+        let user_id = self.handle.config().user_name.clone();
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
             let options = ene_store::MemoryJournalListOptions {
-                character_id,
+                character_id: &character_id,
                 user_id: Some(user_id.as_str()),
                 include_archived,
                 include_superseded,
@@ -403,12 +404,12 @@ impl AiBridge {
                 offset: 0,
             };
             let memories = memory.list_journal_memories(&options).await?;
-            let affect = memory.show_affect_state(character_id).await?;
+            let affect = memory.show_affect_state(&character_id).await?;
             let commitments = memory
-                .list_active_commitments(character_id, Some(&user_id), limit)
+                .list_active_commitments(&character_id, Some(&user_id), limit)
                 .await?;
             let (pending_writes, permanent_writes) =
-                memory.count_pending_memory_writes(character_id).await?;
+                memory.count_pending_memory_writes(&character_id).await?;
             Ok(MemoryJournalPayload {
                 memories,
                 affect,
@@ -425,13 +426,13 @@ impl AiBridge {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryJournalRecallRow>, AiBridgeError> {
-        let snapshot = self.get_snapshot_blocking()?;
-        let character_id = snapshot.card_name.as_str();
-        let user_id = snapshot.config.user_name.as_str();
+        // Mailbox-free state reads; see `refresh_memory_journal`.
+        let character_id = self.handle.card_name();
+        let user_id = self.handle.config().user_name.clone();
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
             let recalled = memory
-                .search_typed_memories_explained(character_id, Some(user_id), query, limit)
+                .search_typed_memories_explained(&character_id, Some(&user_id), query, limit)
                 .await?;
             Ok(recalled
                 .iter()
