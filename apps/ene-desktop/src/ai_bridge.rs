@@ -83,10 +83,10 @@ pub enum AiBridgeError {
     #[error("operation timed out after {0}s")]
     Timeout(u64),
     /// Host-internal wiring that still reports [`EneRuntimeError`] failed:
-    /// runtime bootstrap ([`AiBridge::try_new`]) and the diagnostics methods
-    /// that also surface actor-side failures beyond a dead channel
-    /// (`search_tools` / `call_tool` / `manual_split` / `set_character`,
-    /// which can additionally report `EneRuntimeError::Busy`).
+    /// runtime bootstrap ([`AiBridge::try_new`]) and the methods that also
+    /// surface actor-side failures beyond a dead channel (`search_tools` /
+    /// `call_tool` / `compress_context` / `set_character`, which can
+    /// additionally report `EneRuntimeError::Busy`).
     #[error(transparent)]
     Runtime(#[from] EneRuntimeError),
     /// One of the API v1 contract methods on [`EneHandle`] — or an
@@ -95,7 +95,7 @@ pub enum AiBridgeError {
     #[error(transparent)]
     Api(#[from] ene_runtime::PublicApiError),
     /// A memory-store operation invoked directly from the desktop bridge
-    /// (bypassing the actor command channel via `MemoryQueryHandle::store`)
+    /// (bypassing the actor command channel via `MemoryHandle::store`)
     /// failed.
     #[error(transparent)]
     Storage(#[from] ene_store::EneMemoryError),
