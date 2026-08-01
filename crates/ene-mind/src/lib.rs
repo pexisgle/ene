@@ -70,6 +70,8 @@ pub mod recall;
 pub mod session;
 /// LLM-driven conversation summarization for session boundaries.
 pub mod summarizer;
+/// Shared title matching for subject identity (contradictions, commitments).
+mod title_match;
 
 /// Mind runtime configuration section.
 pub mod config;
