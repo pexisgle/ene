@@ -38,7 +38,7 @@ $$S = w_v \cdot S_{\text{vector}} + w_l \cdot S_{\text{lexical}} + w_r \cdot S_{
 bump がランキングに与える効果も制限されています。アクセスブーストは最終アクセスからの経過時間で減衰する (半減期減衰) ため、ずっと前のアクセスはカウントされなくなり、記憶が永続的なランキング上の優位を固定することはできません。
 
 ### 矛盾解決（メモリー調停器）
-候補記憶を永続化する前に、メモリー調停器（arbiter）はそれが同じ種別（`Preference`, `UserProfile`, `Semantic`, `Relationship`）の既存記憶と矛盾しないかを検査します。2 つの記憶は、その **タイトル埋め込み** のコサイン類似度が `mind.memory.contradiction_title_similarity_threshold`（デフォルト `0.82`）に達したときに同じ主題として扱われます (#351)。これにより、同義のタイトル（「職業」と「仕事」）は矛盾する重複として蓄積されるのではなく、1 つの主題にまとめられます。埋め込みプロバイダーが未設定の場合、調停器は正規化タイトルの完全一致にフォールバックします。
+候補記憶を永続化する前に、メモリー調停器（arbiter）はそれが同じ種別（`Preference`, `UserProfile`, `Semantic`, `Relationship`, `Commitment`）の既存記憶と矛盾しないかを検査します。どの種別を検査するか（そして主題をどのようにキー付けするか）は、`MemoryKind` の種別別ポリシーテーブルという一箇所で定義されています。2 つの記憶は、その **タイトル埋め込み** のコサイン類似度が `mind.memory.contradiction_title_similarity_threshold`（デフォルト `0.82`）に達したときに同じ主題として扱われます。これにより、同義のタイトル（「職業」と「仕事」）は矛盾する重複として蓄積されるのではなく、1 つの主題にまとめられます。埋め込みプロバイダーが未設定の場合、調停器は正規化タイトルの完全一致にフォールバックします。
 
 矛盾が見つかった場合、調停器は候補の confidence を既存記憶のものと比較します。候補が既存を `mind.memory.supersede_confidence_delta`（デフォルト `0.05`）以上上回れば、新しい記憶が古い記憶を *上書き（supersede）* します。差が `mind.memory.dispute_confidence_gap`（デフォルト `0.15`）の範囲内であれば、既存記憶は *係争中（disputed）* とマークされます。それ以外の場合、判定はユーザー確認へ回されます。重複排除時の意味的重複検出には `mind.memory.semantic_similarity_threshold`（デフォルト `0.85`）を使用します。`min_confidence_to_persist` を含むこれら 4 つの閾値はすべて `mind.memory.*` で設定でき、読み込み時に `0.0..=1.0` へ clamp されます (#352)。
 
