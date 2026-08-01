@@ -1803,7 +1803,7 @@ impl TurnActor {
         self.apply_pending_compression().await;
 
         if record_user_message {
-            self.maybe_split_session_on_timeout().await;
+            self.maybe_split_session_on_timeout();
             self.session.record_user_input();
             self.session.add_user_message(&user_input);
             self.check_and_perform_split(&user_input).await;
@@ -2026,7 +2026,7 @@ impl TurnActor {
     // ── Split management ──
 
     /// Start a new session when the user returns after a long idle period (#369).
-    async fn maybe_split_session_on_timeout(&mut self) {
+    fn maybe_split_session_on_timeout(&mut self) {
         let mind = self
             .config
             .get_section::<ene_mind::MindConfig>()
