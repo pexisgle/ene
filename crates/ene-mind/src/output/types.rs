@@ -8,12 +8,10 @@ use ene_core::AffectState;
 /// Source of the resolved expression decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpressionSource {
-    /// Mapped from current affect state (PAD dimensions).
-    AffectMapping,
-    /// LLM token used as advisory hint.
-    LlmAdvisory,
-    /// LLM token treated as a direct command.
-    LlmCommand,
+    /// LLM proposal is canonical when present.
+    Llm,
+    /// Affect mapping used when no LLM proposal was available.
+    AffectFallback,
     /// Previous expression held due to hysteresis.
     HysteresisHold,
     /// Fallback to neutral or nearest supported expression.
@@ -24,9 +22,8 @@ impl ExpressionSource {
     /// Debug string for event emission.
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Self::AffectMapping => "affect",
-            Self::LlmAdvisory => "llm_advisory",
-            Self::LlmCommand => "llm_command",
+            Self::Llm => "llm",
+            Self::AffectFallback => "affect",
             Self::HysteresisHold => "hysteresis",
             Self::FallbackNeutral => "fallback",
         }

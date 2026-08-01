@@ -49,8 +49,7 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle, activ
                 for cue in cues {
                     let label = match source {
                         CueSource::Affect => "affect",
-                        CueSource::LlmAdvisory => "llm_advisory",
-                        CueSource::LlmCommand => "llm_command",
+                        CueSource::Llm => "llm",
                         CueSource::Hysteresis => "hysteresis",
                         CueSource::Fallback => "fallback",
                     };

@@ -1022,8 +1022,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         let mut assistant_content = String::new();
         let mut accumulated_emotion_tokens: Vec<String> = Vec::new();
         let mut perf_arbiter = PerformanceArbiter::default();
-        let suppress_stream_tokens =
-            mind.emotion.enabled && mind.emotion.llm_expression_is_advisory;
 
         let mut is_first_chunk = true;
         while let Some(chunk_res) = stream.next().await {
@@ -1094,20 +1092,16 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         for token in special_tokens {
                             accumulated_emotion_tokens.push(token.clone());
 
-                            if !suppress_stream_tokens
-                                && let Some(cue) = ene_mind::parse_performance_marker(&token)
-                            {
-                                let source = match cue.kind {
-                                    PerfKind::Expression | PerfKind::Motion | PerfKind::LookAt => {
-                                        if mind.emotion.llm_expression_is_advisory {
-                                            CueSource::LlmAdvisory
-                                        } else {
-                                            CueSource::LlmCommand
-                                        }
+                            // Expression markers are accumulated for end-of-turn
+                            // resolve_expression only. Motions / look_at / cancel
+                            // still use the mid-turn PerformanceArbiter.
+                            if let Some(cue) = ene_mind::parse_performance_marker(&token) {
+                                match cue.kind {
+                                    PerfKind::Expression => {}
+                                    PerfKind::Motion | PerfKind::LookAt | PerfKind::Cancel => {
+                                        perf_arbiter.accept(cue, CueSource::Llm);
                                     }
-                                    PerfKind::Cancel => CueSource::LlmCommand,
-                                };
-                                perf_arbiter.accept(cue.clone(), source);
+                                }
                             }
                         }
                     }
@@ -1150,9 +1144,12 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 );
             }
 
+            let mut resolved_decision_expr: Option<String> = None;
             if mind.emotion.enabled {
+                // Latest streamed expression marker wins as the resolve proposal.
                 let llm_proposal = accumulated_emotion_tokens
                     .iter()
+                    .rev()
                     .find_map(|token| {
                         ene_mind::parse_performance_marker(token)
                             .and_then(|cue| (cue.kind == PerfKind::Expression).then_some(cue.name))
@@ -1169,8 +1166,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     previous_expression.as_ref(),
                     elapsed_since_change,
                 );
-                turn_affect = updated_affect;
-                session.record_expression_change(&decision.expression);
                 tracing::debug!(
                     component = "CognitionEngine",
                     event = "expression selected",
@@ -1182,16 +1177,29 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     source = %decision.source.as_str(),
                     "Expression arbiter selected expression"
                 );
-                // Feed the final expression decision into arbiter
-                // and consolidate with mid-turn cue accumulations.
-                let expr_cue = PerformanceCue::expression(decision.expression.clone());
+                // Final expression slot comes only from resolve_expression.
                 let expr_source = CueSource::from(decision.source);
-                perf_arbiter.accept(expr_cue, expr_source);
-                // Fill any gaps with the affect-derived default.
-                perf_arbiter.set_affect_default(&turn_affect);
+                perf_arbiter.accept(
+                    PerformanceCue::expression(decision.expression.clone()),
+                    expr_source,
+                );
+                perf_arbiter.set_affect_default(&updated_affect);
+                resolved_decision_expr = Some(decision.expression);
+                turn_affect = updated_affect;
             }
 
             let resolved = perf_arbiter.resolve();
+            if let Some(fallback_expr) = resolved_decision_expr {
+                let displayed_expression = resolved
+                    .iter()
+                    .find(|(cue, _)| cue.kind == PerfKind::Expression)
+                    .map(|(cue, _)| cue.name.clone())
+                    .unwrap_or(fallback_expr);
+                turn_affect
+                    .last_expression
+                    .clone_from(&displayed_expression);
+                session.record_expression_change(&displayed_expression);
+            }
             if !resolved.is_empty() {
                 let (cues, sources): (Vec<_>, Vec<_>) = resolved.into_iter().unzip();
                 let primary_source = sources.into_iter().max_by_key(|s| cue_source_priority(*s));
@@ -1256,7 +1264,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 raw_assistant_content: &assistant_content,
                 display_buffer: &session.display.display_buffer,
                 emotion_tokens: &accumulated_emotion_tokens,
-                suppress_stream_tokens,
+                suppress_stream_tokens: mind.emotion.enabled,
                 prompt_meta: Some(&composed.meta),
             });
 

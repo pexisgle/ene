@@ -108,8 +108,8 @@ impl LayerComposer {
     /// Accept a motion cue, placing it on the appropriate layer with
     /// priority-based replacement.
     ///
-    /// `priority` should follow the convention: 5 = command, 4 = advisory,
-    /// 3 = affect, 2 = hysteresis, 1 = fallback.
+    /// `priority` should follow the convention: 4 = llm, 3 = affect,
+    /// 2 = hysteresis, 1 = fallback.
     pub fn accept_motion(
         &mut self,
         name: String,

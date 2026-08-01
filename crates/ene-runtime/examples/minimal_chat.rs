@@ -97,8 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         cue.name,
                         match source {
                             CueSource::Affect => "affect",
-                            CueSource::LlmAdvisory => "llm_advisory",
-                            CueSource::LlmCommand => "llm_command",
+                            CueSource::Llm => "llm",
                             CueSource::Hysteresis => "hysteresis",
                             CueSource::Fallback => "fallback",
                         }

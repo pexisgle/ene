@@ -245,4 +245,7 @@ Ene models character emotional state using a PAD-derived (**Pleasure-Arousal-Dom
 ### Emotional Dynamics
 - **Natural Decay**: Affect values drift toward baseline over time.
 - **Classification**: Text responses and user input trigger subtle affect shifts via `ene-mind`'s `EmotionEngine`.
-- **Performance Cues**: `ene-mind`'s output arbitration maps affect state to `PerformanceCue`s (expression/motion) sent as `EneEvent::Performance` for `ene-desktop`/VRM avatar playback.
+- **Performance Cues**: End-of-turn expression comes from a single
+  `resolve_expression` decision (LLM proposal canonical, affect as fallback).
+  Motion / look-at markers still accumulate mid-turn via `PerformanceArbiter`.
+  The result is sent as `EneEvent::Performance` for `ene-desktop`/VRM playback.
