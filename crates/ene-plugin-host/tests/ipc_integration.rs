@@ -679,7 +679,7 @@ async fn handshake_delivers_config_and_profiles() {
     let profiles = serde_json::json!({
         "kokoro": {"voices_path": "/data/voices.bin"}
     });
-    let conn = IpcPluginConnection::connect(
+    let _conn = IpcPluginConnection::connect(
         &socket_path,
         SandboxConfigData::default(),
         Some(config.clone()),
