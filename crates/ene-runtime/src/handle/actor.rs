@@ -2076,7 +2076,8 @@ impl TurnActor {
     /// consistent with the actor's authoritative copy. Read-only sharing:
     /// only the actor writes, and only under a write lock.
     fn sync_shared_config(&self) {
-        *self.shared.config.write() = Arc::new(self.config.clone());
+        let cfg = Arc::new(self.config.clone());
+        *self.shared.config.write() = cfg;
     }
 
     /// Start a new session when the user returns after a long idle period (#369).
@@ -3365,7 +3366,10 @@ mod tests {
     async fn timeout_split_publishes_shared_session_state() {
         use crate::handle::tests::{EmptyRegistry, build_bare_actor_with_session_and_gate};
 
-        let session = ConversationSession::new();
+        let mut session = ConversationSession::new();
+        // Start the turn count at 1 so the post-split reset assertion below
+        // compares 1 -> 0 instead of the vacuous 0 == 0.
+        session.record_user_input();
         let config = EneConfig::default();
         let registry: Arc<dyn ene_plugin_host::ToolRegistry> = Arc::new(EmptyRegistry);
         let task_caps = crate::task_config::ToolRuntimeConfig::default();
@@ -3374,7 +3378,11 @@ mod tests {
 
         let old_id = shared.session_id.lock().clone();
         let old_started_at = *shared.session_started_at.lock();
-        assert_eq!(shared.turn_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            shared.turn_count.load(Ordering::Relaxed),
+            1,
+            "the injected session's turn count is mirrored into the shared state"
+        );
 
         actor.split_session();
 
@@ -3391,7 +3399,7 @@ mod tests {
         assert_eq!(
             shared.turn_count.load(Ordering::Relaxed),
             0,
-            "a session split resets the turn count to zero in the shared state"
+            "a session split resets the shared turn count from 1 to zero"
         );
     }
 }

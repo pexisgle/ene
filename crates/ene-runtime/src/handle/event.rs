@@ -214,10 +214,13 @@ pub enum TerminalReason {
 /// Fetched via [`crate::EneDiagnostics::get_snapshot`] (mailbox-based). For
 /// small per-frame state prefer the mailbox-free accessors on
 /// [`crate::EneHandle`] — [`crate::EneHandle::card_name`],
-/// [`crate::EneHandle::session_id`], [`crate::EneHandle::turn_count`],
-/// [`crate::EneHandle::config`], [`crate::EneHandle::character_card`], and
-/// [`crate::EneHandle::history`] — which never queue behind an in-flight
-/// `Run` turn (#407). Memory access lives on [`crate::EneDiagnostics::memory`]
+/// [`crate::EneHandle::session_id`], [`crate::EneHandle::session_started_at`],
+/// [`crate::EneHandle::turn_count`], [`crate::EneHandle::config`], and
+/// [`crate::EneHandle::character_card`] — which never queue behind an
+/// in-flight `Run` turn (#407). History is the one deliberately mailbox-based
+/// read: [`crate::EneHandle::history`] ships the large payload over the
+/// command mailbox, so unlike the accessors above it *does* queue behind an
+/// in-flight `Run` turn. Memory access lives on [`crate::EneDiagnostics::memory`]
 /// (a [`crate::diagnostics::MemoryHandle`]), not on this snapshot.
 #[derive(Clone)]
 pub struct EneStateSnapshot {
