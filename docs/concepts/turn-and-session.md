@@ -220,6 +220,15 @@ embedded packs are generated from the same `crates/ene-config/prompts/` sources
 as the shipped assets, and a unit test asserts the two stay byte-for-byte
 identical.
 
+Deterministic forget detection uses the same pack layout: `ene-config`'s
+`PatternLibrary` loads the forget regexes from `assets/lang/{lang}/patterns.json`,
+selected by the same `mind.emotion.classifier_language` setting. Adding a
+language is therefore a data-only change (drop in a `patterns.json`), and a
+language without a pack falls back to English patterns. Explicit *remember*
+requests are owned by the LLM extractor and are no longer pattern-matched;
+*forget* requests keep their deterministic safety net and are always applied
+even when the LLM owns the turn.
+
 ---
 
 ## 4. Affect & Emotion Model (PAD)

@@ -60,11 +60,12 @@ impl MemoryWriter {
     /// Extract and persist memories from the turn when enabled.
     ///
     /// When LLM extraction is enabled and returns candidates, those candidates
-    /// are the sole conversation/tool judgment (remember patterns and tool
-    /// grounding are hints / fallback only). Explicit forget patterns are always
-    /// applied as a safety net, even when the LLM owns the turn. On LLM failure,
-    /// empty result, or when disabled, remember patterns and configured
-    /// tool-grounding fallbacks reach the arbiter.
+    /// are the sole conversation judgment (tool grounding remains a hint /
+    /// fallback only). Explicit forget patterns are always applied as a safety
+    /// net, even when the LLM owns the turn. Explicit remember requests
+    /// are owned by the LLM extractor and have no deterministic fallback. On
+    /// LLM failure, empty result, or when disabled, configured tool-grounding
+    /// fallbacks reach the arbiter.
     ///
     /// Returns the number of memory candidates deferred to the user-approval
     /// queue (#174) during this turn, so callers can notify the UI.
@@ -83,7 +84,7 @@ impl MemoryWriter {
 
         let deterministic = deterministic::extract_with_tool_grounding(
             &turn,
-            locale,
+            &locale,
             config.memory.min_confidence_to_persist as f32,
             &config.memory.tool_grounding,
         )?;
@@ -125,7 +126,7 @@ impl MemoryWriter {
             match llm::extract_with_timeout(
                 provider,
                 &turn,
-                locale,
+                &locale,
                 config.memory.extraction_timeout_secs,
                 &llm_hints,
             )
@@ -141,12 +142,12 @@ impl MemoryWriter {
                         "LLM memory extraction completed"
                     );
                     if llm_candidates.is_empty() {
-                        // Leave `used_llm` false so remember/forget
-                        // safety-net patterns still reach the arbiter.
+                        // Leave `used_llm` false so forget safety-net patterns
+                        // and tool-grounding fallbacks still reach the arbiter.
                         tracing::debug!(
                             component = "MemoryWriter",
                             character_id = %input.character_id,
-                            "LLM returned no candidates; will use remember/forget patterns if any"
+                            "LLM returned no candidates; will use forget patterns / tool fallbacks if any"
                         );
                     } else {
                         used_llm = true;
@@ -171,41 +172,18 @@ impl MemoryWriter {
             );
         }
 
-        // Remember/forget patterns fall back when LLM did not own the turn.
         // Forget requests are always applied even when LLM owned the turn so
         // explicit「忘れて」cannot be dropped if the model omits a deletion.
-        let (forget_candidates, other_patterns): (
-            Vec<candidate::MemoryCandidate>,
-            Vec<candidate::MemoryCandidate>,
-        ) = pattern_candidates
-            .into_iter()
-            .partition(|c| !c.should_persist);
-
-        if !forget_candidates.is_empty() {
+        // Remember patterns no longer exist — explicit remember is
+        // LLM-owned.
+        if !pattern_candidates.is_empty() {
             tracing::debug!(
                 component = "MemoryWriter",
                 character_id = %input.character_id,
-                candidate_count = forget_candidates.len(),
+                candidate_count = pattern_candidates.len(),
                 "Applying deterministic forget candidates (safety net)"
             );
-            batches.push((forget_candidates, CandidateProvenance::Deterministic));
-        }
-
-        if !used_llm && !other_patterns.is_empty() {
-            tracing::debug!(
-                component = "MemoryWriter",
-                character_id = %input.character_id,
-                candidate_count = other_patterns.len(),
-                "Using deterministic remember candidates (LLM disabled, failed, or empty)"
-            );
-            batches.push((other_patterns, CandidateProvenance::Deterministic));
-        } else if used_llm && !other_patterns.is_empty() {
-            tracing::debug!(
-                component = "MemoryWriter",
-                character_id = %input.character_id,
-                hint_count = other_patterns.len(),
-                "Deterministic remember patterns used as LLM hints only (not auto-persisted)"
-            );
+            batches.push((pattern_candidates, CandidateProvenance::Deterministic));
         }
 
         if !used_llm && !tool_candidates.is_empty() {
@@ -502,12 +480,12 @@ fn sanitize_ref(raw: &str) -> String {
     }
 }
 
-const fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
-    if lang.eq_ignore_ascii_case("ja") {
-        candidate::Locale::Ja
-    } else {
-        candidate::Locale::En
-    }
+/// Resolves the configured classifier language to a [`candidate::Locale`]
+/// carrying the primary language code (case-insensitive, primary subtag,
+/// `"jp"` → `"ja"`). The deterministic extractor loads forget patterns for the
+/// code and falls back to English patterns when no pack exists for it.
+fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
+    candidate::Locale::resolve(lang)
 }
 
 #[derive(Default)]
@@ -673,10 +651,15 @@ mod tests {
     }
 
     #[test]
-    fn locale_from_classifier_language_maps_ja() {
-        assert_eq!(locale_from_classifier_language("ja"), candidate::Locale::Ja);
-        assert_eq!(locale_from_classifier_language("JA"), candidate::Locale::Ja);
-        assert_eq!(locale_from_classifier_language("en"), candidate::Locale::En);
+    fn locale_from_classifier_language_resolves_primary_code() {
+        assert_eq!(locale_from_classifier_language("ja").code(), "ja");
+        assert_eq!(locale_from_classifier_language("JA").code(), "ja");
+        assert_eq!(locale_from_classifier_language("ja-JP").code(), "ja");
+        assert_eq!(locale_from_classifier_language("jp").code(), "ja");
+        assert_eq!(locale_from_classifier_language("en").code(), "en");
+        // Unknown languages resolve to their own code and fall back to English
+        // patterns in the deterministic extractor.
+        assert_eq!(locale_from_classifier_language("zh").code(), "zh");
     }
 
     #[tokio::test]
@@ -731,9 +714,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_success_with_candidates_skips_deterministic_remember() {
-        // Explicit remember would also match, but LLM returns its own candidate
-        // → only the LLM item should be persisted (remember is hint-only).
+    async fn llm_success_with_candidates_persists_only_llm_items() {
+        // The LLM returns its own candidate for an explicit remember request;
+        // remember has no deterministic fallback, so only the LLM item
+        // should be persisted.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.emotion.classifier_language = "en".into();
@@ -787,7 +771,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_empty_falls_back_to_remember_pattern() {
+    async fn llm_empty_persists_nothing_without_forget() {
+        // An empty LLM result used to fall back to the deterministic remember
+        // pattern; remember is now LLM-owned, so nothing persists when
+        // the LLM returns no candidates and no forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.emotion.classifier_language = "en".into();
@@ -820,9 +807,9 @@ mod tests {
         .expect("write_memories");
 
         let count = store.count_typed_memories("ene", None).await.unwrap();
-        assert!(
-            count >= 1,
-            "empty LLM result should fall back to explicit remember pattern"
+        assert_eq!(
+            count, 0,
+            "empty LLM result must not persist an explicit remember"
         );
     }
 
@@ -921,7 +908,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_failure_falls_back_to_remember_pattern() {
+    async fn llm_failure_persists_nothing_without_forget() {
+        // LLM failure used to fall back to the deterministic remember pattern;
+        // remember is now LLM-owned, so nothing persists on failure
+        // unless a forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.emotion.classifier_language = "en".into();
@@ -954,14 +944,14 @@ mod tests {
         .expect("write_memories");
 
         let count = store.count_typed_memories("ene", None).await.unwrap();
-        assert!(
-            count >= 1,
-            "deterministic remember should persist on LLM failure"
+        assert_eq!(
+            count, 0,
+            "LLM failure must not persist an explicit remember"
         );
     }
 
     #[tokio::test]
-    async fn no_llm_provider_uses_remember_pattern() {
+    async fn no_llm_provider_persists_nothing_without_forget() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.emotion.classifier_language = "en".into();
@@ -985,7 +975,144 @@ mod tests {
             .expect("write_memories");
 
         let count = store.count_typed_memories("ene", None).await.unwrap();
-        assert!(count >= 1);
+        assert_eq!(
+            count, 0,
+            "explicit remember must not persist without an LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_llm_provider_applies_forget_pattern() {
+        // Forget reliability is preserved without an LLM: the deterministic
+        // forget safety net must mark the target deleted (existing guarantee).
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.emotion.classifier_language = "en".into();
+
+        let existing_id = store
+            .insert_typed_memory(&NewMemoryItem {
+                scope: MemoryScope::Character,
+                character_id: "ene".to_string(),
+                user_id: "user".to_string(),
+                kind: MemoryKind::Semantic,
+                title: "project X".to_string(),
+                content: "User is working on project X".to_string(),
+                source: MemorySource::Inferred,
+                source_ref: None,
+                confidence: MemoryConfidence::new(0.8),
+                salience: MemorySalience::default(),
+                affect: AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                created_at: None,
+                commitment_id: None,
+            })
+            .await
+            .unwrap();
+
+        let affect = AffectState::neutral("ene");
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "Forget about project X",
+                assistant_message: Some("Okay."),
+                tool_results: &[],
+            },
+            affect: &affect,
+            character_id: "ene",
+            user_id: "user",
+            interrupted: false,
+            spoken_text: None,
+        };
+
+        MemoryWriter::write_memories(&store, &config, &post, MemoryWriteProviders::default())
+            .await
+            .expect("write_memories");
+
+        let existing = store
+            .get_typed_memory(existing_id)
+            .await
+            .unwrap()
+            .expect("memory row");
+        assert_eq!(
+            existing.status,
+            MemoryStatus::UserDeleted,
+            "forget pattern must apply even without an LLM provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn zh_classifier_language_falls_back_to_english_forget_patterns() {
+        // "zh" has no pattern pack; the deterministic extractor falls back to
+        // English patterns, so forget still works for zh users.
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let mut config = MindConfig::default();
+        config.emotion.classifier_language = "zh".into();
+
+        let existing_id = store
+            .insert_typed_memory(&NewMemoryItem {
+                scope: MemoryScope::Character,
+                character_id: "ene".to_string(),
+                user_id: "user".to_string(),
+                kind: MemoryKind::Semantic,
+                title: "project X".to_string(),
+                content: "User is working on project X".to_string(),
+                source: MemorySource::Inferred,
+                source_ref: None,
+                confidence: MemoryConfidence::new(0.8),
+                salience: MemorySalience::default(),
+                affect: AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                created_at: None,
+                commitment_id: None,
+            })
+            .await
+            .unwrap();
+
+        let affect = AffectState::neutral("ene");
+        let post = PostTurnInput {
+            turn: TurnInput {
+                user_message: "Forget about project X",
+                assistant_message: Some("Okay."),
+                tool_results: &[],
+            },
+            affect: &affect,
+            character_id: "ene",
+            user_id: "user",
+            interrupted: false,
+            spoken_text: None,
+        };
+
+        MemoryWriter::write_memories(
+            &store,
+            &config,
+            &post,
+            MemoryWriteProviders {
+                llm: Some(&MockProvider::new(r#"{"candidates": []}"#)),
+                embedder: None,
+            },
+        )
+        .await
+        .expect("write_memories");
+
+        let existing = store
+            .get_typed_memory(existing_id)
+            .await
+            .unwrap()
+            .expect("memory row");
+        assert_eq!(
+            existing.status,
+            MemoryStatus::UserDeleted,
+            "forget must work for a language without a pack via English fallback"
+        );
     }
 
     #[tokio::test]

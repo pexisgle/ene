@@ -64,6 +64,20 @@ pub fn prompt_pack_path(language_code: &str) -> PathBuf {
     prompt_pack_path_in(assets_dir(), language_code)
 }
 
+/// Runtime pattern pack for a language within an explicit base assets directory
+/// (`base/lang/{code}/patterns.json`).
+///
+/// These packs are the runtime source of truth for [`crate::PatternLibrary`];
+/// the compile-time embedded packs are only a fallback when this file is absent.
+pub(crate) fn pattern_pack_path_in(base: &std::path::Path, language_code: &str) -> PathBuf {
+    base.join("lang").join(language_code).join("patterns.json")
+}
+
+/// Runtime pattern pack for a language (`assets_dir/lang/{code}/patterns.json`).
+pub fn pattern_pack_path(language_code: &str) -> PathBuf {
+    pattern_pack_path_in(assets_dir(), language_code)
+}
+
 /// JSON Schema for `settings.json`.
 pub fn schema_file_path() -> PathBuf {
     assets_dir().join("schema").join("settings.schema.json")
