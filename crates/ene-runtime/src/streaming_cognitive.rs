@@ -719,6 +719,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         query_embedding.as_deref(),
         embedder.as_ref(),
         &provider,
+        available_window,
         post_history_phi.as_deref(),
     );
     let prefetch = ComposePrefetch {

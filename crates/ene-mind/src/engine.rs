@@ -1023,6 +1023,7 @@ mod turn_id_tests {
             query_embedding: None,
             embedder: None,
             llm_provider: None,
+            available_window: None,
             post_history_block: None,
             packing_budget_override: None,
         };

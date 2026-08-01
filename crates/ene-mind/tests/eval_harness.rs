@@ -143,6 +143,7 @@ async fn run_before_turn(
         query_embedding: Some(&query),
         embedder: Some(&embedder),
         llm_provider: Some(llm),
+        available_window: None,
         post_history_block: None,
         packing_budget_override: None,
     };
@@ -264,6 +265,7 @@ async fn scenario_identity_kernel_survives_long_history() {
                 query_embedding: Some(&query),
                 embedder: Some(&embedder),
                 llm_provider: Some(llm),
+                available_window: None,
                 post_history_block: None,
                 packing_budget_override: None,
             },
