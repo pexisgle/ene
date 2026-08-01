@@ -152,7 +152,7 @@ pub trait ToolRegistry: Send + Sync {
 /// Name collision across sub-registries is a hard error — per API v1 / #135,
 /// every tool must have a unique public name.
 pub struct CompositeToolRegistry {
-    state: std::sync::RwLock<CompositeState>,
+    state: parking_lot::RwLock<CompositeState>,
 }
 
 struct CompositeState {
@@ -183,7 +183,7 @@ impl CompositeToolRegistry {
             }
         }
         Ok(Self {
-            state: std::sync::RwLock::new(CompositeState {
+            state: parking_lot::RwLock::new(CompositeState {
                 registries,
                 tool_index,
                 external_sources: HashMap::new(),
@@ -224,10 +224,7 @@ impl CompositeToolRegistry {
     /// `to_vec`) so the guard is dropped before awaiting — holding a synchronous
     /// lock guard across `.await` would deadlock and is not `Send`.
     fn with_registries<R>(&self, f: impl FnOnce(&[Arc<dyn ToolRegistry>]) -> R) -> R {
-        let guard = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.state.read();
         if guard.dead_indices.is_empty() {
             f(&guard.registries)
         } else {
@@ -244,19 +241,13 @@ impl CompositeToolRegistry {
 
     /// Write-locks state and calls `f` with a mutable reference to `CompositeState`.
     fn with_state_mut<R>(&self, f: impl FnOnce(&mut CompositeState) -> R) -> R {
-        let mut guard = self
-            .state
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.state.write();
         f(&mut guard)
     }
 
     /// Resolves the owning sub-registry for a tool name.
     fn registry_for(&self, name: &str) -> Result<Arc<dyn ToolRegistry>, PluginHostError> {
-        let guard = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.state.read();
         let Some(&idx) = guard.tool_index.get(name) else {
             return Err(PluginHostError::Protocol(
                 ene_plugin_proto::ToolError::NotFound {
@@ -393,10 +384,7 @@ impl CompositeToolRegistry {
 #[async_trait]
 impl ToolRegistry for CompositeToolRegistry {
     fn list_tools(&self) -> Vec<ToolSpec> {
-        let guard = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.state.read();
         let mut tools = Vec::new();
         for (i, registry) in guard.registries.iter().enumerate() {
             if guard.dead_indices.contains(&i) {
@@ -409,10 +397,7 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     fn list_rag_profiles(&self) -> Vec<ToolRagProfile> {
-        let guard = self
-            .state
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.state.read();
         let mut profiles = Vec::new();
         for (i, registry) in guard.registries.iter().enumerate() {
             if guard.dead_indices.contains(&i) {

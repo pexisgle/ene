@@ -7,12 +7,12 @@
 //! ## API key trust gate
 //!
 //! Resolved API credentials are only forwarded to plugins that are either
-//! **built-in** (their binary lives in
-//! [`builtin_plugins_dir`](ene_config::builtin_plugins_dir)) or **explicitly
-//! listed** under `plugins.list.<name>` in configuration. Any other plugin
-//! receives the provider definition *without* an `api_key`, so an arbitrary
-//! user-supplied plugin binary can never silently harvest credentials it was
-//! never meant to see.
+//! **built-in** (one of the compiled-in shipped plugin names, see
+//! [`BUILTIN_PLUGIN_NAMES`](crate::manager::BUILTIN_PLUGIN_NAMES)) or
+//! **explicitly listed** under `plugins.list.<name>` in configuration. Any
+//! other plugin receives the provider definition *without* an `api_key`, so
+//! an arbitrary user-supplied plugin binary can never silently harvest
+//! credentials it was never meant to see.
 
 use std::sync::Arc;
 
@@ -33,9 +33,11 @@ pub struct IpcLlmProviderFactory {
     /// Name of the plugin binary serving this provider kind. Used for the
     /// `plugins.list.<name>` trust lookup and diagnostics.
     plugin_name: String,
-    /// Whether the plugin binary lives in
-    /// [`builtin_plugins_dir`](ene_config::builtin_plugins_dir). Built-in
-    /// plugins are always trusted to receive credentials.
+    /// Whether the plugin is one of the trusted built-ins that ship with Ene
+    /// (matched against the compiled-in
+    /// [`BUILTIN_PLUGIN_NAMES`](crate::manager::BUILTIN_PLUGIN_NAMES) list,
+    /// not a filesystem location). Built-in plugins are always trusted to
+    /// receive credentials.
     builtin: bool,
     /// Shared across every [`IpcLlmProvider`] this factory creates, since a
     /// fresh provider instance is built per call

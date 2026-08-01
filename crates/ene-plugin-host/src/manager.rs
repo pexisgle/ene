@@ -1167,18 +1167,51 @@ fn is_valid_plugin_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Returns `true` when the plugin binary resolves from the builtin plugins
-/// directory. Used by the API key trust gate: only builtin or explicitly
+/// The plugin binaries that ship with Ene as trusted built-ins.
+///
+/// Compiled into the host rather than discovered from the filesystem: in
+/// debug builds [`builtin_plugins_dir`](ene_config::builtin_plugins_dir)
+/// resolves to the directory of the running executable (`target/debug/...`),
+/// so a path-existence check would let any `ene-plugin-*` binary dropped
+/// there masquerade as a trusted built-in and pass the credential trust gate
+/// in [`IpcLlmProviderFactory`](crate::factory::IpcLlmProviderFactory).
+/// Matching against a fixed list keeps that gate independent of whatever
+/// happens to be on disk.
+///
+/// Keep in sync with the `plugins/` directory, the default `plugins.list` in
+/// [`config`](crate::config), and the built-in catalog in
+/// `docs/concepts/plugins-and-mcp.md`.
+pub(crate) const BUILTIN_PLUGIN_NAMES: &[&str] =
+    &["anthropic", "app", "browser", "fs", "utility", "web"];
+
+/// Returns `true` when the plugin is one of the trusted built-ins that ship
+/// with Ene. Used by the API key trust gate: only builtin or explicitly
 /// configured plugins receive resolved credentials.
+///
+/// This matches against the compiled-in [`BUILTIN_PLUGIN_NAMES`] list rather
+/// than probing the filesystem (see that constant's docs for why).
 fn is_builtin_plugin(name: &str) -> bool {
-    let exe_suffix = if cfg!(windows) { ".exe" } else { "" };
-    let dir = ene_config::builtin_plugins_dir();
-    dir.join(format!("ene-plugin-{name}{exe_suffix}")).is_file()
-        || dir.join(format!("{name}{exe_suffix}")).is_file()
+    BUILTIN_PLUGIN_NAMES.contains(&name)
 }
 
 /// Finds the binary path for a plugin by name, searching builtin and user
 /// directories with both `ene-plugin-{name}` and `{name}` naming conventions.
+///
+/// The search order is fixed and **the builtin directory takes priority**:
+///
+/// 1. `<builtin>/ene-plugin-{name}`
+/// 2. `<builtin>/{name}`
+/// 3. `<user>/ene-plugin-{name}`
+/// 4. `<user>/{name}`
+///
+/// The first candidate that exists as a file wins. Because builtin entries
+/// come first, a user plugin placed under
+/// [`user_plugins_dir`](ene_config::user_plugins_dir) can **never** shadow a
+/// built-in of the same name — the shipped binary always runs. This is the
+/// deliberate, security-conservative choice (a user drop-in cannot silently
+/// replace a trusted built-in), but it also means a user who places a binary
+/// with the same name as a built-in will see the built-in run instead of
+/// theirs; pick a distinct name to override behavior.
 ///
 /// Returns `None` if the name fails [`is_valid_plugin_name`] validation or
 /// no matching binary exists.
@@ -1568,6 +1601,26 @@ mod tests {
         assert!(find_plugin_binary("foo/bar").is_none());
         assert!(find_plugin_binary("..").is_none());
         assert!(find_plugin_binary("").is_none());
+    }
+
+    #[test]
+    fn is_builtin_plugin_matches_compiled_in_list() {
+        // Every shipped built-in is trusted...
+        for &name in BUILTIN_PLUGIN_NAMES {
+            assert!(is_builtin_plugin(name), "{name} must be a built-in");
+        }
+        // ...and the list is exactly the shipped set (no accidental drift).
+        assert_eq!(
+            BUILTIN_PLUGIN_NAMES,
+            &["anthropic", "app", "browser", "fs", "utility", "web"]
+        );
+
+        // An arbitrary binary dropped into the plugins directory must NOT be
+        // treated as a built-in: trust comes from the compiled-in list, not
+        // from a file existing on disk (#435 item 6).
+        assert!(!is_builtin_plugin("evil"));
+        assert!(!is_builtin_plugin("ene-plugin-evil"));
+        assert!(!is_builtin_plugin(""));
     }
 
     #[test]
