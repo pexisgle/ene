@@ -310,7 +310,7 @@ mod tests {
         // A sudden jump to an orthogonal topic crosses the threshold.
         let signal = tracker.observe_turn(&cfg, &axis(4, 1), 40, t0());
         assert!(signal.boundary);
-        assert!(signal.score >= config.boundary_threshold);
+        assert!(signal.score >= cfg.boundary_threshold);
         // The new topic restarts from the crossing utterance.
         assert_eq!(tracker.turns_in_topic(), 1);
     }
