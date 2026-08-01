@@ -360,11 +360,15 @@ impl EneHandle {
 
         // Startup validation (#366): warn when a configured context window is
         // too small for the prompt budget plus output reserve, since prompt
-        // sections would otherwise be silently dropped every turn.
+        // sections would otherwise be silently dropped every turn. Since #370,
+        // `max_prompt_tokens` is an *optional* operator cap: with no cap the
+        // prompt auto-follows the model's effective window, so there is no
+        // fixed budget to validate against and nothing to warn about.
+        if let Some(cap) = mind.context.max_prompt_tokens
+            && let Ok(cap) = u32::try_from(cap)
         {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
-            let prompt_budget = u32::try_from(mind.context.max_prompt_tokens).unwrap_or(u32::MAX);
-            ene_ai::warn_on_context_budget_issues(&ai_config, prompt_budget);
+            ene_ai::warn_on_context_budget_issues(&ai_config, cap);
         }
 
         let mem_config = config.get_section::<ene_store::StoreConfig>()?;

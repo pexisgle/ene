@@ -247,12 +247,14 @@ fn default_gpu_layers() -> String {
 
 /// Default context window for a local model, in tokens (#366).
 ///
-/// Calibrated to hold the system's own default prompt budget
-/// (`mind.context.max_prompt_tokens` = 12,000) with room left for the model's
-/// reply. The previous default (2,048) was sized for small decision tasks
-/// (classification, proactive triggers) and silently dropped most prompt
-/// sections once a local model was assigned to `tasks.chat`, whose full
-/// conversation prompt needs ~12,000 tokens.
+/// Calibrated to hold the system's own default prompt budget with room left
+/// for the model's reply. The previous default (2,048) was sized for small
+/// decision tasks (classification, proactive triggers) and silently dropped
+/// most prompt sections once a local model was assigned to `tasks.chat`,
+/// whose full conversation prompt needs on the order of 12,000 tokens. (#370
+/// later removed the fixed `mind.context.max_prompt_tokens` budget — the
+/// prompt now auto-follows the model's window — but 16,384 remains a
+/// comfortable floor for a full conversation prompt plus reply.)
 ///
 /// 16,384 is deliberately chosen over 32,768: llama.cpp's KV cache grows
 /// linearly with context length, so for a `Gemma-3-4B`-class model (34 layers,
