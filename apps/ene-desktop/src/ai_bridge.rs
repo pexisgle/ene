@@ -85,8 +85,8 @@ pub enum AiBridgeError {
     /// Host-internal wiring that still reports [`EneRuntimeError`] failed:
     /// runtime bootstrap ([`AiBridge::try_new`]) and the methods that also
     /// surface actor-side failures beyond a dead channel (`search_tools` /
-    /// `call_tool` / `compress_context` / `set_character`, which can
-    /// additionally report `EneRuntimeError::Busy`).
+    /// `call_tool`, which can additionally report `EneRuntimeError::Busy`,
+    /// and `compress_context` / `set_character`).
     #[error(transparent)]
     Runtime(#[from] EneRuntimeError),
     /// One of the API v1 contract methods on [`EneHandle`] — or an
