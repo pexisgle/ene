@@ -52,7 +52,7 @@ impl LocalTtsProviderFactory {
             )
         })?;
         let model_path = download::resolve_model_path(&ai);
-        let voices_path = download::resolve_voices_path();
+        let voices_path = download::resolve_voices_path(config);
         let voice_name = resolved.voice.clone().unwrap_or_default();
         let ort_dylib_path =
             ene_ai::plugin_config::plugin_config_blob(config, ene_ai::plugin_config::ONNX_PLUGIN)

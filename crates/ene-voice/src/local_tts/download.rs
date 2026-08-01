@@ -76,8 +76,13 @@ pub(crate) fn resolve_model_path(ai: &ene_ai::AiConfig) -> std::path::PathBuf {
 /// `plugins.list.kokoro.profiles.kokoro.voices_path` when set (the previous
 /// `TtsConfig::voices_path` moved here in #313), then a default cache
 /// location.
-pub(crate) fn resolve_voices_path() -> std::path::PathBuf {
-    let profile = ene_ai::plugin_config::global_plugin_profile_blob(
+///
+/// Reads from the passed-in config document (not the global singleton) so the
+/// result agrees with the other `plugins.list` reads made from that same
+/// document (e.g. `ort_dylib_path` in `LocalTtsProviderFactory::build`).
+pub(crate) fn resolve_voices_path(config: &ene_config::EneConfig) -> std::path::PathBuf {
+    let profile = ene_ai::plugin_config::plugin_profile_blob(
+        config,
         ene_ai::plugin_config::KOKORO_PLUGIN,
         ene_ai::plugin_config::KOKORO_DEFAULT_PROFILE,
     );
@@ -161,8 +166,12 @@ pub async fn ensure_kokoro_files_exist(
     Ok(())
 }
 
-/// Prefetch the Kokoro ONNX model and `voices.bin` files if `ai.tts` selects
-/// the local Kokoro provider ([`super::PROVIDER_NAME`]).
+/// Prefetch the Kokoro ONNX model and `voices.bin` files if the AI config's
+/// TTS section selects the local Kokoro provider ([`super::PROVIDER_NAME`]).
+///
+/// Reads its settings from the passed-in config document — the same one the
+/// provider factory will later use — so the prefetched paths agree with the
+/// ones `LocalTtsProviderFactory::build` resolves.
 ///
 /// Intended to be called once from the runtime's async bootstrap path
 /// (mirrors `ene_ai_local::prefetch_configured_gguf`), before any TTS
@@ -172,19 +181,24 @@ pub async fn ensure_kokoro_files_exist(
 ///
 /// # Errors
 ///
-/// Returns [`AudioProviderError`] when the download fails. Callers should
-/// treat this as non-fatal: log it and continue, since `provider::open`
-/// performs its own file-existence check and reports a clear error either
-/// way.
-pub async fn prefetch_if_configured(ai: &ene_ai::AiConfig) -> Result<(), AudioProviderError> {
+/// Returns [`AudioProviderError`] when the download fails (or the AI config
+/// section cannot be parsed). Callers should treat this as non-fatal: log it
+/// and continue, since `provider::open` performs its own file-existence check
+/// and reports a clear error either way.
+pub async fn prefetch_if_configured(
+    config: &ene_config::EneConfig,
+) -> Result<(), AudioProviderError> {
+    let ai = config
+        .get_section::<ene_ai::AiConfig>()
+        .map_err(|e| AudioProviderError::Init(format!("failed to parse AI config: {e}")))?;
     let Some(resolved) = ai.resolve_tts() else {
         return Ok(());
     };
     if resolved.provider != super::PROVIDER_NAME {
         return Ok(());
     }
-    let model_path = resolve_model_path(ai);
-    let voices_path = resolve_voices_path();
+    let model_path = resolve_model_path(&ai);
+    let voices_path = resolve_voices_path(config);
     ensure_kokoro_files_exist(&model_path, &voices_path).await
 }
 

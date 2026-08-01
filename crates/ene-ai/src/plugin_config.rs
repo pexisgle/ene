@@ -10,13 +10,22 @@
 //!
 //! # Where the document comes from
 //!
-//! The readers receive only their own config section (`AiConfig`), not the
-//! full `EneConfig`, so these helpers read the loaded document through the
-//! global config singleton ([`ene_config::get_global_config`]), which is
-//! refreshed on every `load_full_config_from` / `ConfigStore` load. A
-//! settings edit made after startup is therefore picked up only after the
-//! next full config load — acceptable for these niche loader settings; a
-//! later epic should thread the active `EneConfig` explicitly.
+//! Readers fall into two groups. Factory-built providers receive the full
+//! `EneConfig` at construction and read their plugin settings from that
+//! document via [`plugin_config_blob`] / [`plugin_profile_blob`] — e.g.
+//! `ene-voice`'s `LocalTtsProviderFactory` and `SileroVadFactory` source
+//! `ort_dylib_path` and the Kokoro `voices_path` from the active document.
+//! Paths that only hold the `AiConfig` section (or none at all) fall back to
+//! the global config singleton ([`ene_config::get_global_config`]) via
+//! [`global_plugin_config_blob`] / [`global_plugin_profile_blob`] /
+//! [`LlamaCppPluginConfig::global`] — e.g. `ene-ai-local`'s llama.cpp loader
+//! and the resolve-time reads in [`crate::resolve::ResolvedLocalModel`].
+//!
+//! The global singleton is refreshed on every `load_full_config_from` /
+//! `ConfigStore` load, so a settings edit made after startup is picked up by
+//! the global-singleton readers only after the next full config load. That
+//! staleness is acceptable for these niche loader settings; a later epic
+//! should thread the active `EneConfig` into the remaining singleton readers.
 
 use ene_config::EneConfig;
 
