@@ -165,7 +165,13 @@ pub use session::{
 #[doc(no_inline)]
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 
-/// Returns `true` if `haystack` contains any of the `needles` as a substring.
-pub(crate) fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| haystack.contains(n))
+/// Returns `true` if `haystack` contains any of `needles` as a substring.
+pub(crate) fn contains_any<I, S>(haystack: &str, needles: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    needles
+        .into_iter()
+        .any(|needle| haystack.contains(needle.as_ref()))
 }

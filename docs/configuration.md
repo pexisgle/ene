@@ -216,9 +216,10 @@ with zero query relevance.
 
 `mind.emotion.classifier_language` (default `"en"`) selects the prompt-library
 language used for the affect classifier and the cognitive output contract, and
-drives the deterministic forget-pattern pack. The user-facing LLM instruction
+drives the deterministic pattern pack (forget regexes and recall-intent keyword
+lists). The user-facing LLM instruction
 strings are loaded at runtime from `assets/lang/{lang}/prompts.json` and the
-deterministic forget regexes from `assets/lang/{lang}/patterns.json`; when a
+deterministic patterns from `assets/lang/{lang}/patterns.json`; when a
 pack is absent the build falls back to a compile-time embedded pack for the
 languages in `ene_config::SUPPORTED_LANGUAGES` (`en`, `ja`), and otherwise to
 English. See

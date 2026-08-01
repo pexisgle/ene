@@ -214,9 +214,10 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 約束を表面化させます。
 
 `mind.emotion.classifier_language`（デフォルト `"en"`）は、感情分類器と認知出力契約で
-使用されるプロンプトライブラリの言語を選択し、決定論的な忘却パターンパックも駆動します。
+使用されるプロンプトライブラリの言語を選択し、決定論的なパターンパック（忘却正規表現と
+想起意図キーワードリスト）も駆動します。
 ユーザー向け LLM 指示文字列は `assets/lang/{lang}/prompts.json` から、決定論的な
-忘却正規表現は `assets/lang/{lang}/patterns.json` から実行時にロードされます。その
+パターンは `assets/lang/{lang}/patterns.json` から実行時にロードされます。その
 パックが存在しない場合、`ene_config::SUPPORTED_LANGUAGES`（`en`, `ja`）の言語に
 ついてはコンパイル時埋め込みパックへ、それ以外は英語へフォールバックします。詳細は
 [ターン・セッション](concepts/turn-and-session.md) §3 を参照してください。

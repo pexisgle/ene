@@ -1,10 +1,11 @@
 //! Deterministic pattern packs with multi-language support.
 //!
-//! Forget-detection regexes are loaded at runtime from
-//! `assets/lang/{lang}/patterns.json` (see [`crate::paths::pattern_pack_path`]),
-//! keeping the pattern corpus out of compiled code. Adding a language is a
-//! matter of dropping a new `assets/lang/{lang}/patterns.json` pack — no Rust
-//! change to the loading path is required. Listing the code in
+//! Forget-detection regexes and recall-intent keyword lists are loaded at
+//! runtime from `assets/lang/{lang}/patterns.json` (see
+//! [`crate::paths::pattern_pack_path`]), keeping the pattern corpus out of
+//! compiled code. Adding a language is a matter of dropping a new
+//! `assets/lang/{lang}/patterns.json` pack — no Rust change to the loading
+//! path is required. Listing the code in
 //! [`crate::prompts::SUPPORTED_LANGUAGES`] additionally embeds a compile-time fallback so the
 //! language still works when the asset is missing.
 //!
@@ -26,6 +27,9 @@
 //! let lib = PatternLibrary::load("en");
 //! for pattern in lib.forget_patterns() {
 //!     println!("{}: {}", pattern.name, pattern.regex);
+//! }
+//! for keyword in &lib.intent_keywords().episodic {
+//!     println!("{keyword}");
 //! }
 //! ```
 
@@ -65,6 +69,32 @@ pub struct PatternPackData {
     /// Forget-detection patterns, tried in pack order; every matching pattern
     /// yields a candidate (duplicates are collapsed by the caller).
     pub forget_patterns: Vec<ForgetPattern>,
+    /// Recall-intent keyword substrings, one list per recall intent
+    /// (`episodic`, `preference`, `relationship`, `affective`, `procedure`).
+    /// Each entry is matched case-insensitively as a substring of the
+    /// lowercased turn topic.
+    pub intent_keywords: IntentKeywords,
+}
+
+/// Keyword-substring lists driving heuristic recall-intent inference.
+///
+/// The corpus lives in the language pack so tuning it — or adding a language —
+/// needs no Rust change: the recall planner loads the pack for the configured
+/// language and matches the lowercased turn topic against each list. Lists may
+/// be empty for intents a language has no natural phrasing for; the recall
+/// side simply never infers that intent.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IntentKeywords {
+    /// Episodic-recall hints (e.g. `"remember"`, `"前回"`).
+    pub episodic: Vec<String>,
+    /// Preference-recall hints (e.g. `"i like"`, `"好き"`).
+    pub preference: Vec<String>,
+    /// Relationship-recall hints (e.g. `"between us"`, `"友達"`).
+    pub relationship: Vec<String>,
+    /// Affective-recall hints (e.g. `"feel"`, `"気持ち"`).
+    pub affective: Vec<String>,
+    /// Procedure-recall hints (e.g. `"how to"`, `"やり方"`).
+    pub procedure: Vec<String>,
 }
 
 /// Loads and accesses deterministic patterns from a JSON locale file.
@@ -286,6 +316,15 @@ impl PatternLibrary {
     pub fn compiled_forget_patterns(&self) -> &[CompiledForgetPattern] {
         &self.compiled
     }
+
+    /// Recall-intent keyword substrings for this language.
+    ///
+    /// One list per intent (`episodic`, `preference`, `relationship`,
+    /// `affective`, `procedure`), matched case-insensitively as substrings of
+    /// the lowercased turn topic by the recall planner.
+    pub fn intent_keywords(&self) -> &IntentKeywords {
+        &self.data.intent_keywords
+    }
 }
 
 #[cfg(test)]
@@ -306,7 +345,8 @@ mod tests {
     #[test]
     fn embedded_packs_parse_and_are_complete() {
         // Language-pack validation: the embedded packs for every
-        // supported language must parse and contain forget patterns.
+        // supported language must parse and contain forget patterns and
+        // complete intent-keyword lists.
         for lang in SUPPORTED_LANGUAGES {
             let lib = PatternLibrary::built_in(lang);
             assert_eq!(lib.lang(), *lang);
@@ -318,6 +358,19 @@ mod tests {
                 assert!(!pattern.name.is_empty());
                 assert!(!pattern.regex.is_empty());
                 assert!(pattern.target_group > 0, "target_group is 1-based");
+            }
+            let keywords = lib.intent_keywords();
+            for (intent, list) in [
+                ("episodic", &keywords.episodic),
+                ("preference", &keywords.preference),
+                ("relationship", &keywords.relationship),
+                ("affective", &keywords.affective),
+                ("procedure", &keywords.procedure),
+            ] {
+                assert!(
+                    !list.is_empty(),
+                    "{lang} pack must contain {intent} intent keywords"
+                );
             }
         }
     }
@@ -338,6 +391,14 @@ mod tests {
             assert!(
                 !asset.forget_patterns.is_empty(),
                 "{lang} asset pack must contain forget patterns"
+            );
+            assert!(
+                !asset.intent_keywords.episodic.is_empty()
+                    && !asset.intent_keywords.preference.is_empty()
+                    && !asset.intent_keywords.relationship.is_empty()
+                    && !asset.intent_keywords.affective.is_empty()
+                    && !asset.intent_keywords.procedure.is_empty(),
+                "{lang} asset pack must contain complete intent-keyword lists"
             );
             assert_eq!(
                 serde_json::to_value(&asset).expect("serialize asset pack"),

@@ -233,7 +233,7 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     let lower = text.to_lowercase();
     if crate::contains_any(
         &lower,
-        &[
+        [
             "hello",
             "hi ",
             "hey",
@@ -249,7 +249,7 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     }
     if crate::contains_any(
         &lower,
-        &[
+        [
             "sorry",
             "sad",
             "upset",
@@ -266,13 +266,13 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     }
     if crate::contains_any(
         &lower,
-        &["joke", "funny", "lol", "haha", "冗談", "笑", "面白"],
+        ["joke", "funny", "lol", "haha", "冗談", "笑", "面白"],
     ) {
         return Some(StyleIntent::Joking);
     }
     if crate::contains_any(
         &lower,
-        &[
+        [
             "explain",
             "why ",
             "how does",
@@ -287,7 +287,7 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     }
     if crate::contains_any(
         &lower,
-        &[
+        [
             "can't",
             "cannot",
             "won't",
@@ -302,7 +302,7 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
     }
     if crate::contains_any(
         &lower,
-        &[
+        [
             "tool",
             "search",
             "file",

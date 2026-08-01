@@ -22,6 +22,10 @@ pub struct RecallPlannerInput<'a> {
     pub affect: Option<&'a AffectState>,
     /// Active commitments that should be considered independent of similarity.
     pub commitments: &'a [ActiveCommitmentPrompt],
+    /// Language tag selecting the intent-keyword language pack (e.g. `"en"`,
+    /// `"ja"`, `"ja-JP"`). Resolved with alias/fallback semantics by
+    /// [`ene_config::PatternLibrary`]; unknown languages fall back to English.
+    pub language: &'a str,
     /// Character identifier for recall scope.
     pub character_id: &'a str,
     /// Optional user identifier for recall scope.

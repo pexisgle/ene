@@ -68,6 +68,7 @@ pub async fn execute_hybrid_recall(
         scene_summary: None,
         affect: input.affect,
         commitments: &commitment_prompts,
+        language: &config.emotion.classifier_language,
         character_id: input.character_id,
         user_id: Some(input.user_id),
     };
