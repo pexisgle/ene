@@ -5,8 +5,9 @@
 //! collider sphere edge and one `DebugLine` per hit-point
 //! cross segment, then calls [`DebugRenderer::render`] after
 //! the main VRM pass with the same camera and the same
-//! `Depth32Float` depth attachment (loaded, not cleared) so
-//! the model silhouette correctly occludes the wires.
+//! `Depth32Float` depth attachment (loaded, not cleared).
+//! The pipeline's depth test is `CompareFunction::Always`, so
+//! the wires draw over the model regardless of depth.
 //!
 //! Performance budget: a 50-bone character with 16 longitudes
 //! and 8 latitudes per sphere is 50 * (16 + 8) = 1,200 lines
@@ -446,9 +447,9 @@ impl DebugRenderer {
 
     /// Draw the accumulated lines into `view` and submit
     /// the resulting command buffer. The depth attachment
-    /// is `LoadOp::Load` (preserves the model's depth) and
-    /// `Less` depth test is enabled so the model can
-    /// occlude the wires.
+    /// is `LoadOp::Load` (preserves the model's depth); the
+    /// pipeline's `CompareFunction::Always` depth test draws
+    /// the wires on top of the model.
     ///
     /// `camera_uniform` is uploaded to the camera binding
     /// every frame so the debug lines transform with the
@@ -485,7 +486,6 @@ impl DebugRenderer {
             self.capacity_lines = new_capacity;
         }
 
-        // Pack the lines into a contiguous `Vec<DebugVertex>`.
         let mut vertices: Vec<DebugVertex> = Vec::with_capacity(self.lines.len() * 2);
         for line in &self.lines {
             vertices.extend_from_slice(&line.vertices());

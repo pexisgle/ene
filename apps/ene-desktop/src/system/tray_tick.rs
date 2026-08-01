@@ -4,14 +4,11 @@
 //! even when no winit events fire; without a periodic
 //! `tick_gtk()` call the system tray stops redrawing.
 //!
-//! Phase 7.5 introduced the `Messages<TickGtk>` queue and the
-//! `pump_legacy_events` system (Linux build of `tray_plugin`)
-//! writes one `TickGtk` per `about_to_wait` cycle. The
-//! consumer side of the queue is a free function called by
-//! `Runtime::about_to_wait` (the winit tick is on the main
-//! thread, so the `Rc<RefCell<TrayHandle>>` stays put). The
-//! bevy-side `tick_gtk_system` simply drains the queue so the
-//! bevy test / introspection world can observe it.
+//! `pump_legacy_events` writes one `TickGtk` per frame on Linux.
+//! The actual `tick_gtk()` call lives in `Runtime::about_to_wait`
+//! (the winit tick is on the main thread, so the
+//! `Rc<RefCell<TrayHandle>>` stays put); the bevy-side
+//! `tick_gtk_system` drains the queue so a bevy test can observe it.
 #[cfg(target_os = "linux")]
 use bevy_ecs::prelude::*;
 
@@ -37,7 +34,5 @@ pub fn tick_gtk_system(ready: Option<Res<GtkReady>>, mut messages: MessageReader
     if !ready.is_some_and(|r| r.0) {
         return;
     }
-    for _ in messages.read() {
-        // Drain only; the real call site is in `runtime.rs`.
-    }
+    for _ in messages.read() {}
 }

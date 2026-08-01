@@ -1,4 +1,4 @@
-//! Sessions settings page (#176).
+//! Sessions settings page.
 //!
 //! Surfaces the stored-session lifecycle over the actor's session API:
 //!
@@ -37,7 +37,6 @@ const SEARCH_LIMIT: usize = 20;
 /// Maximum characters shown for a search-hit message body.
 const CONTENT_PREVIEW_LEN: usize = 120;
 
-/// Render the Sessions page body.
 pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
     ui.heading(fl!(crate::i18n::loader(), "sessions-title"));
     ui.label(fl!(crate::i18n::loader(), "sessions-hint"));

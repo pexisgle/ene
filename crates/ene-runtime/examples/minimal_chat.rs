@@ -45,14 +45,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rx = handle.subscribe();
 
     // Lifecycle notifications (status changes, pending memory candidates,
-    // background tool completions) ride a separate bus from chat events
-    // (#272) — drain them on their own task.
+    // background tool completions) ride a separate bus from chat events —
+    // drain them on their own task.
     let mut lifecycle_rx = handle.subscribe_lifecycle();
     tokio::spawn(async move {
         while let Ok(event) = lifecycle_rx.recv().await {
-            // Status only ever reports `Idle` / `Running` (#404 removed the
-            // never-emitted `Error` variant): failures surface on the chat
-            // bus as `EneEvent::Terminal { reason: Failed }`, handled below.
+            // Status only ever reports `Idle` / `Running`: failures surface
+            // on the chat bus as `EneEvent::Terminal { reason: Failed }`,
+            // handled below.
             if let LifecycleEvent::StatusChanged { status } = event {
                 eprintln!("\n[Status: {status:?}]");
             }

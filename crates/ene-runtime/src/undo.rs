@@ -1,4 +1,4 @@
-//! Actor-native undo stack and metadata (#178).
+//! Actor-native undo stack and metadata.
 //!
 //! The runtime records one [`UndoEntry`] per mutating tool call so the
 //! `/undo` command can surface what a rollback affects and, for reversible
@@ -61,7 +61,7 @@ pub struct UndoEntry {
     pub metadata: UndoMetadata,
 }
 
-/// Outcome of an `/undo` request, reported back to the caller (#178).
+/// Outcome of an `/undo` request, reported back to the caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UndoReport {
     /// No reversible operation is available to undo.

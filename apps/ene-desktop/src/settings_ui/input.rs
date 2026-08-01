@@ -1,8 +1,6 @@
 //! Per-render scratch buffer for editable text fields.
 //!
-//! `SettingsInputState` mirrors the legacy
-//! `apps/ene-desktop/src/settings_ui/mod.rs::SettingsInputState`. It
-//! is owned by the [`SettingsUi`](super::SettingsUi) and
+//! `SettingsInputState` is owned by the [`SettingsUi`](super::SettingsUi) and
 //! `sync_from_settings` is called whenever the settings window
 //! transitions from hidden → visible.
 use crate::settings::CharacterSettings;
@@ -23,7 +21,6 @@ pub struct SettingsInputState {
     pub ai_embedding_provider: String,
     pub ai_embedding_model: String,
     pub ai_embedding_dimensions: String,
-    /// Last AI settings validation / connection-test message (#241).
     pub ai_validation_message: Option<String>,
     pub tts_provider: String,
     pub tts_model: String,

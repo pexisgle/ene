@@ -1,4 +1,4 @@
-//! Rolling context compression (#79).
+//! Rolling context compression.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -58,8 +58,8 @@ pub enum CompressionReason {
         turn_count: usize,
     },
     /// Window pressure: the retained history's estimated token count reached
-    /// the configured ceiling (#368). This is the token-based replacement for
-    /// the former message-count ratio heuristic.
+    /// the configured ceiling. This is the token-based trigger for topics that
+    /// run long without a detected boundary.
     ContextPressure {
         /// Estimated tokens of the retained history when the trigger fired.
         history_tokens: usize,
@@ -98,7 +98,7 @@ pub struct CompressionTaskInput {
     pub level: CompressionLevel,
     /// Context configuration snapshot.
     pub config: ContextConfig,
-    /// Number of *leading* history messages the compressed span occupies (#368).
+    /// Number of *leading* history messages the compressed span occupies.
     /// `None` trims to the configured recent window on apply; `Some(n)` drops
     /// the `n` leading messages (used by retroactive topic-boundary
     /// compression to keep the boundary turn onward).
@@ -116,7 +116,7 @@ pub struct CompressionResult {
     pub summary: String,
     /// Compression level written.
     pub level: CompressionLevel,
-    /// Number of *leading* history messages the compressed span occupied (#368).
+    /// Number of *leading* history messages the compressed span occupied.
     /// `None` for window-pressure/manual compression, which trims to the
     /// configured recent window; `Some(n)` for retroactive topic-boundary
     /// compression, which drops the `n` leading messages (the pre-boundary
@@ -180,16 +180,15 @@ pub fn poll_compression_result(
 }
 
 /// Evaluate whether window-pressure compression should run for the current
-/// turn (#368).
+/// turn.
 ///
 /// This is the *secondary* trigger — a token-based safety net for topics that
 /// run long without a detected boundary. The *primary* trigger is the
 /// retroactive topic-boundary compression planned by
 /// [`plan_retroactive_compression`]. The window-pressure term compares the
 /// retained history's estimated token count against
-/// [`ContextConfig::context_pressure_tokens`] (replacing the former
-/// message-count ratio heuristic, which ignored token cost entirely); the
-/// turn-count term is retained as a coarse backstop.
+/// [`ContextConfig::context_pressure_tokens`], accounting for token cost
+/// directly; the turn-count term is retained as a coarse backstop.
 pub fn evaluate_compression_trigger(
     config: &ContextConfig,
     turn_count: usize,
@@ -205,7 +204,7 @@ pub fn evaluate_compression_trigger(
 }
 
 /// A planned retroactive compression: the span of history *before* a detected
-/// topic boundary, to be summarized into a single scene span (#368).
+/// topic boundary, to be summarized into a single scene span.
 ///
 /// The boundary turn itself is the first turn of the *new* topic, so it is
 /// retained; everything strictly before it is compressed. The resulting
@@ -227,7 +226,7 @@ pub struct RetroactiveCompressionPlan {
     pub drop_leading: usize,
 }
 
-/// Plan a retroactive compression for a detected topic boundary (#368).
+/// Plan a retroactive compression for a detected topic boundary.
 ///
 /// `history` is the committed history *including* the boundary turn (the last
 /// user/assistant exchange), and `turn_count` is the session's completed turn

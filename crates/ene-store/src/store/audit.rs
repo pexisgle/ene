@@ -1,4 +1,4 @@
-//! Audit-log queries (#177).
+//! Audit-log queries.
 
 use super::{EneMemoryError, MemoryStore};
 use crate::entities;
@@ -22,8 +22,6 @@ fn audit_row_to_entry(row: entities::audit_log::Model) -> crate::audit::AuditEnt
 }
 
 impl MemoryStore {
-    // ── Audit Log (#177) ──────────────────────────────────────────────────────
-
     /// Records a single audited tool call, redacting sensitive arguments.
     pub async fn insert_audit_entry(
         &self,
@@ -34,7 +32,7 @@ impl MemoryStore {
 
         let now = Utc::now();
         // `None` marks out-of-band diagnostics calls; persist those as NULL
-        // so they are never attributed to a session (#426).
+        // so they are never attributed to a session.
         let session_id = entry.session_id.clone();
         let model = entities::audit_log::ActiveModel {
             turn_id: Set(entry.turn_id.clone()),
@@ -101,7 +99,7 @@ impl MemoryStore {
         Ok(rows.into_iter().map(audit_row_to_entry).collect())
     }
 
-    /// Returns audit entries for a single session, oldest first (#426).
+    /// Returns audit entries for a single session, oldest first.
     ///
     /// Rows whose `session_id` is `NULL` (written before the column
     /// existed, or out-of-band diagnostics calls) are never returned, so

@@ -9,8 +9,6 @@ mod sway;
 
 use ene_plugin_proto::ToolError;
 
-// ==================== Compositor trait ====================
-
 #[cfg_attr(
     not(target_os = "linux"),
     expect(
@@ -22,8 +20,6 @@ pub trait WlCompositor {
     fn list_windows(&self) -> Result<String, ToolError>;
     fn focus_window(&self, title: &str) -> Result<String, ToolError>;
 }
-
-// ==================== Detection ====================
 
 #[cfg_attr(
     not(target_os = "linux"),
@@ -57,8 +53,6 @@ pub fn dispatch() -> Option<Box<dyn WlCompositor>> {
     None
 }
 
-// ==================== Shared helpers (gdbus) ====================
-
 #[cfg(target_os = "linux")]
 fn gvariant_string(s: &str) -> String {
     let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
@@ -72,8 +66,6 @@ fn gvariant_string(s: &str) -> String {
 /// control characters, `</script>` sequences, etc.).
 #[cfg(target_os = "linux")]
 fn js_string_literal(s: &str) -> String {
-    // serde_json::to_string produces a JSON string with proper escaping.
-    // JSON string literals are valid JavaScript string literals.
     // Fallback: manual escaping if serialization fails (should never happen
     // for &str, but we avoid unwrap in production).
     serde_json::to_string(s).unwrap_or_else(|_| {

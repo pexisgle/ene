@@ -4,13 +4,9 @@ use ene_plugin_proto::ToolError;
 
 use super::{WlCompositor, gvariant_string, js_string_literal, parse_gdbus_tuple_string};
 
-// ==================== Version detection ====================
-
 fn is_kde6() -> bool {
     std::env::var("KDE_SESSION_VERSION").is_ok_and(|v| v == "6")
 }
-
-// ==================== D-Bus transport abstraction ====================
 
 /// D-Bus CLI transport used to talk to `KWin`'s scripting interface.
 ///
@@ -31,8 +27,6 @@ impl DbusTransport {
         }
     }
 
-    /// Builds a `Command` that invokes `method` on `object_path` with the given
-    /// string `args`, using the correct syntax for this transport.
     fn call(self, object_path: &str, method: &str, args: &[&str]) -> Command {
         match self {
             Self::Qdbus => {
@@ -78,8 +72,6 @@ impl DbusTransport {
         }
     }
 }
-
-// ==================== Plasma 6: loadScript + print/journal ====================
 
 const KWIN_MARKER: &str = "ENE_KWIN_OUT:";
 
@@ -193,8 +185,6 @@ fn kwin_load_and_run(transport: DbusTransport, js: &str) -> Result<String, ToolE
     capture_kwin_print_output(since_ts)
 }
 
-// ==================== Plasma 5: evaluateScript (legacy) ====================
-
 fn kwin_eval(transport: DbusTransport, js: &str) -> Result<String, ToolError> {
     let label = transport.label();
     let output = transport
@@ -217,8 +207,6 @@ fn kwin_eval(transport: DbusTransport, js: &str) -> Result<String, ToolError> {
     }
 }
 
-// ==================== Transport fallback helpers ====================
-
 /// Runs `f` with `qdbus`, falling back to `gdbus` when qdbus fails or yields
 /// an empty result. The qdbus error is logged so the fallback is observable.
 fn with_dbus_fallback<F>(mut f: F) -> Result<String, ToolError>
@@ -234,8 +222,6 @@ where
     }
     f(DbusTransport::Gdbus)
 }
-
-// ==================== WlCompositor impl ====================
 
 pub(super) struct Kde;
 

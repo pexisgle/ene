@@ -179,7 +179,7 @@ fn render_mind(ui: &mut egui::Ui, settings: &mut CharacterSettings, ai: &Arc<AiB
     });
 }
 
-/// Window-title capture level combo for the activity source (#378).
+/// Window-title capture level combo for the activity source.
 ///
 /// Raising the level lets the proactive observer read the focused window's
 /// title; the hint warns that title text is sent to the decision LLM (and to
@@ -359,7 +359,6 @@ fn render_audio(
         }
     });
 
-    // VAD threshold slider.
     ui.horizontal(|ui| {
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
@@ -375,7 +374,6 @@ fn render_audio(
         }
     });
 
-    // Read-only provider info.
     ui.horizontal(|ui| {
         ui.label(i18n_embed_fl::fl!(
             crate::i18n::loader(),
@@ -401,7 +399,7 @@ fn render_audio(
     }
 
     // Propagate audio settings into the shared `AudioState` so the next
-    // mic (re)start picks them up (H3). The capture path snapshots
+    // mic (re)start picks them up. The capture path snapshots
     // `AudioState.config` / `mic_device` at start, so without this the
     // Features page edits would never reach `start_mic_capture`.
     #[cfg(feature = "voice")]
@@ -417,7 +415,7 @@ fn render_audio(
     }
 
     // Push the VAD threshold to the runtime actor like the other feature
-    // settings do (H3).
+    // settings do.
     if changed {
         sync_features(settings, ai);
     }

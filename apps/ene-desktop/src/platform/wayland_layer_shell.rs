@@ -79,7 +79,6 @@ pub struct LayerShellContext {
 }
 
 impl LayerShellContext {
-    /// Create a fresh context with no detection result cached.
     pub const fn new() -> Self {
         Self { cached: None }
     }
@@ -178,7 +177,6 @@ impl Dispatch<WlRegistry, wayland_client::globals::GlobalListContents> for Layer
 /// Shared, thread-safe wrapper around [`LayerShellContext`].
 pub type LayerShellState = Arc<Mutex<LayerShellContext>>;
 
-/// Build a fresh [`LayerShellState`].
 pub fn new_layer_shell_state() -> LayerShellState {
     Arc::new(Mutex::new(LayerShellContext::new()))
 }

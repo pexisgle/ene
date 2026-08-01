@@ -4,20 +4,8 @@
 //! [`AppState`]. Implements winit 0.30's `ApplicationHandler` so
 //! `EventLoop::run_app` is a single call from `main`.
 //!
-//! Each frame:
-//!
-//! 1. `about_to_wait` drains the cross-subsystem [`AppEvent`] bus,
-//!    forwarding tray actions to UI state, applying AI inbox
-//!    updates to the latest-response buffer, auto-popping the
-//!    settings window on permission / user-input requests, ticking
-//!    the GTK pump on Linux, and calling `flush_if_dirty` on the
-//!    settings.
-//! 2. `window_event` dispatches input. Keyboard `F1` toggles the
-//!    settings window, `Escape` closes (and saves) the focused
-//!    window, the window close button exits.
-//! 3. Redraw happens via `request_redraw` from `about_to_wait` and
-//!    is performed in `about_to_wait` to avoid winit 0.30's
-//!    `RedrawRequested` double-fire on Windows.
+//! Redraws from `about_to_wait` instead of `RedrawRequested` to avoid
+//! winit 0.30's double-fire on Windows.
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,31 +47,21 @@ pub struct Runtime {
     chat_egui_window: Option<ChatEguiWindow>,
     last_cursor_physical: Option<PhysicalPosition<f64>>,
     last_frame_instant: Option<Instant>,
-    /// Lazily-initialized clock for the emotion pipeline. The
-    /// `now_secs` passed to `tick_emotions` is
-    /// `emotion_clock.unwrap().elapsed().as_secs_f64()`. The AI
-    /// bridge's commands are pushed with `target_time = 0.0`, so
-    /// once the clock is set, every tick has monotonically
-    /// increasing `now_secs` and commands pop immediately.
-    /// Settings-UI commands use their own
-    /// `started_at.elapsed()` clock and are pushed at
-    /// `target_time = now_secs` *at scheduling time*, so a
-    /// command scheduled when the UI's clock was at 4.0 will
-    /// pop on the next tick (whose `now_secs >= 0` after
-    /// initialization). The two clocks do not need to agree
-    /// because the settings UI drains through the bevy
-    /// `UiEmotionQueue` resource and the AI bridge drains
-    /// through `PerformanceCue` / `EmoteToken` messages; both ultimately push
-    /// into `EmotionPipelineState::pending`.
+    /// Lazily-initialized clock for the emotion pipeline. The AI bridge
+    /// pushes commands with `target_time = 0.0`, so once the clock is set
+    /// every tick has monotonically increasing `now_secs` and commands pop
+    /// immediately; settings-UI commands are scheduled against their own
+    /// `started_at.elapsed()` clock. The two clocks need not agree because
+    /// both paths ultimately push into `EmotionPipelineState::pending`.
     emotion_clock: Option<Instant>,
     device_state: device_query::DeviceState,
     char_surface_fatal: bool,
     /// Whether an Alt modifier key is currently held. Tracked from
     /// `WindowEvent::ModifiersChanged` so the Alt+Space spotlight
-    /// hotkey can be detected on `Space` key presses (#218).
+    /// hotkey can be detected on `Space` key presses.
     alt_held: bool,
     /// Previous frame's `tts_playing` value, used to detect the
-    /// true→false transition and reset the viseme mouth shape (L11).
+    /// true→false transition and reset the viseme mouth shape.
     #[cfg(feature = "voice")]
     prev_tts_playing: bool,
 }
@@ -101,7 +79,6 @@ impl Runtime {
         // runs strictly *after* the first `resumed`.
         state.app.update();
 
-        // First-run onboarding when the chat API key is missing (#241).
         if ene_ai::needs_onboarding(&state.settings.config()) {
             let mut ui = state.ui_bevy_state_mut();
             ui.0.show_onboarding = true;
@@ -109,7 +86,6 @@ impl Runtime {
             ui.0.settings_window_visible = true;
         }
 
-        // Startup runtime failure: surface a fatal dialog in settings (#242).
         if let Some(error) = state.runtime_startup_error.clone() {
             let mut ui = state.ui_bevy_state_mut();
             ui.0.settings_window_visible = true;
@@ -183,7 +159,7 @@ impl Runtime {
         if visible {
             self.state.save();
             self.state.ui_bevy_state_mut().0.settings_window_visible = false;
-            // Re-create model: Drop the window entirely to work around Wayland/winit 0.30 unmap bugs.
+            // Drop the window entirely to work around Wayland/winit 0.30 unmap bugs.
             self.ui_window = None;
         }
     }
@@ -247,10 +223,8 @@ impl Runtime {
 }
 
 impl ApplicationHandler for Runtime {
-    /// Phase 4 (GraphicsReady): create winit windows, init GPU surfaces,
-    /// load the VRM, and set up platform-specific click-through / tray.
-    /// Runs after Phase 2 (sync app launch) and in parallel with Phase 3
-    /// (async runtime warmup in [`crate::ai_bridge::AiBridge`]).
+    /// Create the winit windows, init GPU surfaces, load the VRM, and set
+    /// up platform-specific click-through / tray.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
 
@@ -437,7 +411,7 @@ impl ApplicationHandler for Runtime {
             .is_some_and(|w| w.window.id() == window_id);
 
         // Track the Alt modifier across all windows so the Alt+Space
-        // spotlight hotkey works no matter which window is focused (#218).
+        // spotlight hotkey works no matter which window is focused.
         if let WindowEvent::ModifiersChanged(modifiers) = &event {
             self.alt_held = modifiers.state().alt_key();
         }
@@ -466,12 +440,9 @@ impl ApplicationHandler for Runtime {
 }
 
 impl Runtime {
-    /// Push the per-frame runtime state into bevy resources
-    /// before `app.update()` runs. Phase 8 lifts the cross-
-    /// platform debug gate inputs (`DragActive`, `DebugFps`,
-    /// `TransparentWindow`) into bevy `Resource`s so the
-    /// `should_render_debug_system` and the Linux-only
-    /// `apply_linux_click_through_system` can read them.
+    /// Push the per-frame runtime state into bevy resources before
+    /// `app.update()` runs so the `should_render_debug_system` and the
+    /// Linux-only `apply_linux_click_through_system` can read them.
     fn sync_runtime_to_bevy(&mut self) {
         let drag_active = self.state.character.drag.is_dragging();
         let debug_fps = self.state.settings.graphics().resolved().debug_fps;
@@ -529,9 +500,6 @@ impl Runtime {
         self.state.sync_runtime_health_to_ui();
     }
 
-    /// Check the `ExitRequested` bevy resource. Returns `true`
-    /// and exits the event loop when the resource is set;
-    /// otherwise `false`.
     fn handle_exit(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let exit = self
             .state
@@ -547,10 +515,9 @@ impl Runtime {
         true
     }
 
-    /// Run the per-frame debug pipeline (raycast, hover lookup)
-    /// when the bevy `ShouldRenderDebug` resource permits.
-    /// Skipped on non-Linux / non-Windows builds the body of
-    /// `update_char_window_cursor_and_hittest` itself no-ops.
+    /// Run the per-frame debug pipeline (raycast, hover lookup) when the
+    /// bevy `ShouldRenderDebug` resource permits. On non-Windows builds
+    /// the cursor hit-test body itself no-ops.
     fn run_debug_pipeline(&mut self) {
         let Some(cw) = self.char_window.as_ref() else {
             return;
@@ -595,21 +562,11 @@ impl Runtime {
         self.state.ui_bevy_state_mut().0.hovered_bone_name = hovered_name;
     }
 
-    /// Render the character window and the settings UI window
-    /// in sequence. The character window renders first; the
-    /// egui UI window only renders when `settings_window_visible`
-    /// is true.
+    /// Render the character, chat, and settings windows in sequence.
+    /// The character surface is fatal-error checked separately because a
+    /// dead surface would otherwise loop silently; the chat / settings
+    /// frame paths exit directly on their own fatal acquire errors.
     fn render_per_frame(&mut self, event_loop: &ActiveEventLoop) {
-        // The previous form was
-        // `if let Err(AcquireError::Fatal) = ... {}` —
-        // an empty body that never fired because
-        // `render_char_frame` is the only place that
-        // would have returned Fatal, and the actual
-        // Fatal arm of the inner match (render_per_frame's
-        // UI path below) is the one that needs to act.
-        // Drive the char window and, on Fatal, exit the
-        // event loop so the app does not silently loop
-        // on a dead surface.
         self.render_char_frame();
 
         self.render_chat_frame(event_loop);
@@ -879,7 +836,6 @@ impl Runtime {
             WindowEvent::KeyboardInput { .. } => {
                 if let Some(named) = key_pressed(&event) {
                     if matches!(named, NamedKey::Space) && self.alt_held {
-                        // Alt+Space toggles the spotlight quick launcher (#218).
                         let next = {
                             let mut ui_state = self.state.ui_bevy_state_mut();
                             ui_state.0.spotlight_visible = !ui_state.0.spotlight_visible;
@@ -980,9 +936,9 @@ impl Runtime {
 
     /// Render the character window directly from `about_to_wait`.
     ///
-    /// Returns `Err(AcquireError::Fatal)` only on a fatal
-    /// surface error; `Reconfigure` and `Timeout` are handled
-    /// inline and return `Ok(())`.
+    /// A fatal surface acquire error sets `char_surface_fatal` so the
+    /// caller can exit the event loop; `Reconfigure` and `Timeout` are
+    /// handled inline.
     fn render_char_frame(&mut self) {
         let Some(cw) = self.char_window.as_mut() else {
             return;
@@ -1027,7 +983,6 @@ impl Runtime {
         let debug_renderer = &mut debug.debug_renderer;
         let (device, queue) = (&gpu.device, &gpu.queue);
 
-        // If settings requested a character or motion reload, process it dynamically (#133).
         if settings.character_state.needs_respawn {
             settings.character_state.needs_respawn = false;
 
@@ -1107,7 +1062,6 @@ impl Runtime {
             .clamp(0.0, 0.1);
         self.last_frame_instant = Some(now);
 
-        // Tick and compose the motion layer state (#133).
         {
             let world = app.world_mut();
             let motion_layer =
@@ -1116,7 +1070,6 @@ impl Runtime {
                 motion_layer.tick(dt_secs);
                 let frame = motion_layer.compose();
 
-                // If the active motion name changed, load the new clip.
                 if let Some(motion_name) = frame.active_motions.first() {
                     let should_switch =
                         character.active_motion_name() != Some(motion_name.as_str());
@@ -1224,7 +1177,7 @@ impl Runtime {
                 .get_resource::<crate::audio::AudioState>()
                 .is_some_and(crate::audio::AudioState::is_tts_playing);
             // Consume queued PCM up to the current playback position so the
-            // analyzer only sees samples that are actually playing (M4).
+            // analyzer only sees samples that are actually playing.
             if tts_playing
                 && let Some(viseme) = app.world().get_resource::<crate::audio::VisemeState>()
             {
@@ -1243,7 +1196,7 @@ impl Runtime {
                 && self.prev_tts_playing
                 && let Some(model) = character.model_mut()
             {
-                // L11: on the frame where `tts_playing` transitions from
+                // On the frame where `tts_playing` transitions from
                 // true to false, apply zeroed viseme weights so the mouth
                 // shape resets instead of holding the last phoneme.
                 let expressions_meta = model.expressions_meta.clone();
@@ -1433,13 +1386,8 @@ impl Runtime {
     }
 
     fn handle_ui_window_event(&mut self, _event_loop: &ActiveEventLoop, event: WindowEvent) {
-        // Safe-by-construction today (the caller
-        // dispatches via `is_ui` which is true only
-        // when ui_window is Some), but using
-        // `if let Some` makes a future regression
-        // (a window id mistakenly routed here before
-        // ui_window is set) a silent no-op rather than
-        // a panic that kills the event loop.
+        // `if let Some` keeps a misrouted window id a silent no-op instead
+        // of a panic that kills the event loop.
         let Some(uw) = self.ui_window.as_mut() else {
             return;
         };
@@ -1528,12 +1476,10 @@ impl Runtime {
         else {
             return;
         };
-        // Phase 7.1: write the per-action message so the
-        // dispatcher system in `system::ui_dispatcher` can
-        // observe / drain it on the next frame. The actual
-        // mutation still happens through `apply_action`
-        // because `CharacterSettings` is not a bevy
-        // `Resource` yet.
+        // Write the per-action message so the dispatcher system in
+        // `system::ui_dispatcher` can observe / drain it on the next frame.
+        // The actual mutation still happens through `apply_action`
+        // because `CharacterSettings` is not a bevy `Resource` yet.
         app.world_mut()
             .write_message(crate::event::ui_action::SettingsActionEvent {
                 action: action.clone(),
@@ -1963,8 +1909,6 @@ impl UiWindow {
                 .render(ui, settings, ai, world, ui_entity, now_secs);
         });
 
-        // Spotlight quick launcher + floating caption overlays (#218).
-        // Rendered as top-level egui windows inside the settings context.
         crate::spotlight::render_spotlight_overlay(&self.egui_ctx, ai, world, ui_entity);
         crate::spotlight::render_caption_overlay(&self.egui_ctx, world, ui_entity);
 

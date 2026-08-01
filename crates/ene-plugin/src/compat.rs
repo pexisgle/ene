@@ -45,7 +45,6 @@ use crate::plugin::{ConfigurablePlugin, ToolPlugin, ToolPluginCapabilities};
 /// }
 /// ```
 pub struct ToolProviderPlugin<T: ToolProvider> {
-    /// The wrapped legacy tool provider.
     pub(crate) provider: T,
     /// Serializes `set_call_context` + tool call pairs so that concurrent
     /// connections through the shared-`&self` legacy path cannot interleave

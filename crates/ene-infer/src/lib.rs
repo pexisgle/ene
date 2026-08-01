@@ -4,12 +4,11 @@
 //! models (LLM, embedding, STT, TTS, ...) behind a uniform async API,
 //! without letting each provider hand-roll its own concurrency.
 //!
-//! ## The problem this replaces
+//! ## Why concurrency is centralized here
 //!
-//! Every local-inference provider in this workspace used to implement its
-//! own `async fn` and got concurrency wrong in a different way: wrapping
-//! `spawn_blocking` in `tokio::time::timeout` (the blocking work is not
-//! cancellable, so a "timed out" job keeps running while holding a lock on
+//! Hand-rolled provider concurrency keeps going wrong in the same ways:
+//! wrapping `spawn_blocking` in `tokio::time::timeout` (the blocking work is
+//! not cancellable, so a "timed out" job keeps running while holding a lock on
 //! the model), using `block_in_place` (panics off a multi-thread runtime
 //! worker), or taking cached state out of a mutex around a `spawn_blocking`
 //! call (a cancelled or panicking task loses that state permanently).
@@ -49,8 +48,7 @@
 //! — there is no way to intercept that from safe Rust. This is an accepted
 //! limit of the design, not an oversight: providers whose native
 //! dependencies abort on invariant violations are expected to validate
-//! inputs before they reach that code, the same as before this crate
-//! existed.
+//! inputs before they reach that code.
 #![warn(missing_docs)]
 #![cfg_attr(
     all(test, feature = "test-util"),

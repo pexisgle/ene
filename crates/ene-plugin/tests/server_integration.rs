@@ -510,8 +510,6 @@ async fn round_trip(stream: &mut IpcStream, req: &PluginIpcRequest) -> PluginIpc
         .expect("non-EOF")
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn server_handshake_advertises_capabilities() {
     let (mut stream, state, socket_path) = spawn_and_connect("hs").await;
@@ -519,7 +517,6 @@ async fn server_handshake_advertises_capabilities() {
     let caps = do_handshake(&mut stream).await;
     assert_eq!(caps.tools, 1);
 
-    // Verify sandbox and config were received during handshake.
     assert!(state.sandbox_received.load(Ordering::SeqCst));
     assert!(state.config_received.load(Ordering::SeqCst));
 

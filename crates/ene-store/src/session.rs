@@ -1,4 +1,4 @@
-//! Session metadata domain model (#176).
+//! Session metadata domain model.
 //!
 //! Plain serde structs decoupled from the `SeaORM` entity. The `sessions`
 //! table tracks per-session bookkeeping (card, title, archive flag, turn

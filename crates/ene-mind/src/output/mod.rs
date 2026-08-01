@@ -1,4 +1,4 @@
-//! Output Arbiter: expression validation, hysteresis, output mapping (#89).
+//! Output Arbiter: expression validation, hysteresis, output mapping.
 
 mod arbiter;
 pub mod performance;

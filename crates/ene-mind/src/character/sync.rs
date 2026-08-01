@@ -1,4 +1,4 @@
-//! `CCv3` character memory index synchronization (#83 / #84).
+//! `CCv3` character memory index synchronization.
 
 #![expect(
     clippy::arithmetic_side_effects,

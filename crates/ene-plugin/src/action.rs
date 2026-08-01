@@ -18,7 +18,7 @@ pub trait ToolSpecArgs: DeserializeOwned + Send + Sync + 'static {
     /// LLM-facing tool specification.
     fn spec() -> ToolSpec;
 
-    /// Returns the host/RAG metadata profile for this args type (#137).
+    /// Returns the host/RAG metadata profile for this args type.
     fn rag_profile() -> ToolRagProfile;
 }
 
@@ -41,7 +41,6 @@ pub trait ToolAction: Send + Sync {
     /// Implement as `MyArgs::spec()`.
     fn definition(&self) -> ToolSpec;
 
-    /// Returns host/RAG metadata for this tool (#137).
     /// Implement as `MyArgs::rag_profile()`.
     fn rag_profile(&self) -> ToolRagProfile;
 

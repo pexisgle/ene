@@ -33,7 +33,7 @@ pub enum PermissionDecision {
     Deny,
 }
 
-/// How long a granted permission scope remains in effect (#177).
+/// How long a granted permission scope remains in effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantType {
@@ -45,7 +45,7 @@ pub enum GrantType {
     Permanent,
 }
 
-/// A standing permission grant tracked by the host (#177).
+/// A standing permission grant tracked by the host.
 ///
 /// Session grants are recorded when the user approves an action with
 /// [`PermissionDecision::AllowSession`] so the permission center can
@@ -83,27 +83,18 @@ pub enum UserInputResponse {
 /// Shared context for a tool execution round, reducing parameter count
 /// in [`perform_tool_executions`].
 pub(crate) struct ToolExecutionContext<'a> {
-    /// Tool registry for dispatching calls.
     pub registry: &'a dyn ene_plugin_host::ToolRegistry,
-    /// Optional RAG pipeline for semantic tool search.
     pub tool_rag: Option<&'a ToolRag>,
-    /// Conversation session identifier.
     pub session_id: &'a str,
     /// Active character identifier, used to scope tool-selection failure
-    /// feedback (#349).
+    /// feedback.
     pub character_id: &'a str,
-    /// Broadcast channel for emitting tool events.
     pub event_tx: &'a broadcast::Sender<EneEvent>,
-    /// Active turn id.
     pub turn: &'a TurnId,
-    /// Who initiated the turn.
     pub origin: TurnOrigin,
-    /// Pending permission decision senders.
     pub pending_permissions:
         &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
-    /// Pending user input senders.
     pub pending_user_inputs: &'a Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
-    /// Per-tool call timeout in milliseconds.
     pub timeout_ms: u64,
     /// How long to wait for a consumer to answer a permission prompt before
     /// failing safe (treated as denied) — see [`await_permission_decision`].
@@ -113,32 +104,27 @@ pub(crate) struct ToolExecutionContext<'a> {
     pub user_input_prompt_timeout_ms: u64,
     /// The turn's cancellation token. The prompt waits select against it
     /// directly so a `Cancel` resolves them immediately instead of relying on
-    /// the actor's `drain_pending()` dropping the oneshot sender (#401).
+    /// the actor's `drain_pending()` dropping the oneshot sender.
     pub cancel_token: CancellationToken,
     /// Maximum number of side-effect-free tool calls executed concurrently
-    /// in one round (#400). `0` disables parallelism.
+    /// in one round. `0` disables parallelism.
     pub parallel_tool_calls_max: usize,
-    /// Tool names that support deferred (background) execution (#196).
+    /// Tool names that support deferred (background) execution.
     ///
     /// Computed once per turn from `registry.list_tools()` and threaded
     /// through every round, instead of re-listing all tools (and cloning
-    /// every `ToolSpec`) at the top of each round (#400).
+    /// every `ToolSpec`) at the top of each round.
     pub background_capable: &'a std::collections::HashSet<String>,
-    /// Tool names eligible for bounded parallel execution (#400).
+    /// Tool names eligible for bounded parallel execution.
     ///
     /// A tool lands here only when it explicitly declares
     /// `SideEffects::ReadOnly` and is not background-capable. Computed once
     /// per turn alongside [`Self::background_capable`].
     pub parallelizable: &'a std::collections::HashSet<String>,
-    /// Maximum characters for tool result summaries.
     pub max_summary_chars: usize,
-    /// Optional memory store for audit logging.
     pub audit_store: Option<&'a Arc<ene_store::MemoryStore>>,
-    /// Session-wide permission grants (#177).
     pub permission_scopes: &'a Arc<Mutex<Vec<PermissionScope>>>,
-    /// Undo stack for reversible operations (#178).
     pub undo_stack: &'a Arc<Mutex<crate::undo::UndoStack>>,
-    /// Channel for spawning deferred tool tasks (#196).
     pub deferred_tool_tx: &'a mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
 }
 
@@ -151,7 +137,7 @@ pub(crate) struct ToolExecutionOutput {
     pub summaries: Vec<ToolResultSummary>,
 }
 
-/// Waits for a consumer's permission decision, bounded and fail-safe (#401).
+/// Waits for a consumer's permission decision, bounded and fail-safe.
 ///
 /// The wait resolves on the first of:
 /// - the turn's cancel token firing (a `Cancel` was issued),
@@ -207,7 +193,7 @@ pub(crate) async fn await_permission_decision(
     }
 }
 
-/// Waits for a consumer's interactive input response, bounded and fail-safe (#401).
+/// Waits for a consumer's interactive input response, bounded and fail-safe.
 ///
 /// Mirrors [`await_permission_decision`]: the wait is selected against the
 /// turn's cancel token and a `user_input_prompt_timeout_ms` deadline. A cancel,
@@ -269,12 +255,11 @@ pub struct StreamOutcome {
     /// Why the stream ended (for proactive cooldown accounting).
     pub terminal: TerminalReason,
     /// Composite score of a topic boundary detected retroactively on the
-    /// completed turn (#367/#368), if any. The actor consumes this to compress
+    /// completed turn, if any. The actor consumes this to compress
     /// the span before the boundary without delaying the response.
     pub topic_boundary_score: Option<f32>,
 }
 
-/// Emit terminal and return [`StreamOutcome`] for the actor oneshot.
 pub(crate) fn stream_finish(
     session: ene_mind::ConversationSession,
     event_tx: &broadcast::Sender<EneEvent>,
@@ -327,7 +312,7 @@ pub struct StreamContext {
     pub tool_rag: Option<Arc<ToolRag>>,
     pub provider: Arc<dyn ene_ai::LlmProvider>,
     pub event_tx: broadcast::Sender<EneEvent>,
-    /// Audio channel sender for TTS PCM chunks (#272). Bounded `mpsc`,
+    /// Audio channel sender for TTS PCM chunks. Bounded `mpsc`,
     /// separate from `event_tx` so heavyweight audio payloads never share a
     /// buffer with lightweight chat events.
     pub audio_tx: mpsc::Sender<crate::handle::AudioChunk>,
@@ -335,15 +320,11 @@ pub struct StreamContext {
     pub cancel_token: CancellationToken,
     pub pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pub pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
-    /// Session-wide permission grants tracked for the permission center (#177).
     pub permission_scopes: Arc<Mutex<Vec<PermissionScope>>>,
-    /// Actor-native undo stack of mutating tool calls (#178).
     pub undo_stack: Arc<Mutex<crate::undo::UndoStack>>,
     /// Shared with the actor; first side to flip emits Terminal.
     pub terminal_emitted: Arc<std::sync::atomic::AtomicBool>,
-    /// Active turn id for all turn-scoped events.
     pub turn: TurnId,
-    /// Whether this turn was user- or proactive-initiated.
     pub origin: TurnOrigin,
     /// When false, tool selection is skipped (proactive default).
     pub allow_tools: bool,
@@ -356,19 +337,16 @@ pub struct StreamContext {
     /// Sender for classifier `JoinHandles` spawned after Terminal emission.
     /// The actor drains this into its classifier `JoinSet` for lifecycle management.
     pub classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
-    /// Sender for deferred memory-writer `JoinHandles` spawned after Terminal emission.
     pub memory_writer_tx:
         mpsc::UnboundedSender<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
-    /// Sender for deferred tool tasks accepted during tool execution (#196).
     pub deferred_tool_tx: mpsc::UnboundedSender<crate::handle::DeferredToolTask>,
     /// Sender for auxiliary stream-task `JoinHandle`s (e.g. the TTS synthesis
-    /// worker) that the actor must be able to abort on shutdown (#401).
+    /// worker) that the actor must be able to abort on shutdown.
     pub aux_task_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
-    /// Optional TTS provider for streaming audio synthesis.
     pub tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
     /// Shared buffer of streamed assistant text deltas, updated live by the
     /// stream task so the actor can recover the partial response if the task
-    /// is hard-aborted before it records the interruption itself (#H5).
+    /// is hard-aborted before it records the interruption itself.
     pub partial_text: Arc<parking_lot::Mutex<String>>,
     /// Whether a rolling-compression task is in flight for this session (the
     /// summary has not been applied yet).
@@ -378,7 +356,7 @@ pub struct StreamContext {
     /// actor from `ContextManager::has_pending()` at turn start.
     pub compression_pending: bool,
     /// Concrete store for `MemoryStore`-specific operations (conversation
-    /// log insertion) not available through `ene_core::MemoryPort` (#309).
+    /// log insertion) not available through `ene_core::MemoryPort`.
     pub concrete_store: Option<Arc<ene_store::MemoryStore>>,
 }
 
@@ -406,13 +384,10 @@ pub(crate) async fn select_relevant_tools(
         return vec![];
     }
 
-    // Use the new ToolRag pipeline if available.
     let mut res = if let Some(rag) = tool_rag {
-        // Get all tools and RAG profiles from the registry.
         let all_tools = registry.list_tools();
         let profiles = registry.list_rag_profiles();
 
-        // Ensure the index is up-to-date (no-op for already-indexed fields).
         let rag_timeout = std::time::Duration::from_secs(10);
         match tokio::time::timeout(rag_timeout, rag.ensure_index(&all_tools, &profiles)).await {
             Ok(Ok(())) => {}
@@ -424,7 +399,6 @@ pub(crate) async fn select_relevant_tools(
             }
         }
 
-        // Select relevant tools via the RAG pipeline.
         let select_fut: std::pin::Pin<
             Box<dyn std::future::Future<Output = Vec<ene_plugin_proto::ToolSpec>> + Send>,
         > = if let Some(emb) = query_embedding {
@@ -442,7 +416,6 @@ pub(crate) async fn select_relevant_tools(
             registry.list_tools()
         }
     } else {
-        // Fallback: no ToolRag, return all tools from the registry.
         registry.list_tools()
     };
 
@@ -452,7 +425,7 @@ pub(crate) async fn select_relevant_tools(
 
 /// Executes a batch of tool calls and sends result events through the broadcast channel.
 ///
-/// # Parallel execution policy (#400)
+/// # Parallel execution policy
 ///
 /// Tool calls the LLM returns in a single round are split by their declared
 /// side effects:
@@ -508,7 +481,7 @@ pub(crate) async fn perform_tool_executions(
     //
     // Parallelism applies only when the whole round is side-effect-free: a
     // mixed round runs strictly sequentially in original order so a read can
-    // never overtake an earlier write from the same response (#400).
+    // never overtake an earlier write from the same response.
     let all_parallelizable = !tool_calls.is_empty()
         && tool_calls
             .iter()
@@ -577,7 +550,7 @@ pub(crate) async fn perform_tool_executions(
             arguments: args.clone(),
         }));
 
-        // Warn before executing an irreversible operation (#178). Such
+        // Warn before executing an irreversible operation. Such
         // actions are never placed on the undo stack, so the user is told
         // up front that they cannot be rolled back.
         if crate::undo::is_irreversible(&name) {
@@ -667,7 +640,7 @@ pub(crate) async fn perform_tool_executions(
                     // Bounded, fail-safe wait: a consumer that never answers
                     // (lost event, headless consumer) can no longer hold the
                     // turn open forever — the wait times out and is selected
-                    // against the cancel token (#401).
+                    // against the cancel token.
                     match await_permission_decision(
                         decide_rx,
                         &ctx.cancel_token,
@@ -680,7 +653,7 @@ pub(crate) async fn perform_tool_executions(
                             audit_decision = ene_store::AuditDecision::AllowOnce;
                             // Route the approval to the plugin that owns the
                             // tool which raised the request, so an unrelated
-                            // plugin mid-long-tool-call cannot delay it (#434).
+                            // plugin mid-long-tool-call cannot delay it.
                             ctx.registry
                                 .approve_permission_for(&name, req_id.as_str())
                                 .await;
@@ -697,7 +670,7 @@ pub(crate) async fn perform_tool_executions(
                         Some(PermissionDecision::AllowSession) => {
                             audit_decision = ene_store::AuditDecision::AllowSession;
                             ctx.registry.allow_pattern(action, target).await;
-                            // Route the approval to the owning plugin (#434);
+                            // Route the approval to the owning plugin;
                             // the session-wide pattern above is still broadcast
                             // to every plugin.
                             ctx.registry
@@ -739,15 +712,11 @@ pub(crate) async fn perform_tool_executions(
                                 |r| r.map(|r| r.text_for_llm()),
                             );
                         }
-                        // Denied, timed out, cancelled, or the sender was
-                        // dropped: fail closed.
                         Some(PermissionDecision::Deny) | None => {
                             audit_decision = ene_store::AuditDecision::Denied;
                             result = Err(PluginHostError::Protocol(ToolError::permission_denied(
                                 "Permission denied by user".to_string(),
                             )));
-                            // Decision resolved; no further
-                            // pending rounds needed.
                             break;
                         }
                     }
@@ -776,7 +745,7 @@ pub(crate) async fn perform_tool_executions(
                     }));
 
                     // Bounded, fail-safe wait, mirroring the permission branch
-                    // above (#401).
+                    // above.
                     if let Some(answers) = await_user_input_response(
                         resp_rx,
                         &ctx.cancel_token,
@@ -800,12 +769,10 @@ pub(crate) async fn perform_tool_executions(
                         result = Err(PluginHostError::ExecutionFailed {
                             message: "User cancelled the question".to_string(),
                         });
-                        // Decision resolved; no further
-                        // pending rounds needed.
                         break;
                     }
                 }
-                _ => break, // Ok or other Err; stop resolving.
+                _ => break,
             }
         }
 
@@ -814,7 +781,7 @@ pub(crate) async fn perform_tool_executions(
             Err(e) => (format!("Error executing tool: {e}"), false),
         };
 
-        // Record the tool call in the permission audit log (#177).
+        // Record the tool call in the permission audit log.
         // Arguments are redacted by the store before persistence so
         // secrets and raw prompt text never land in the audit trail.
         if let Some(store) = ctx.audit_store {
@@ -833,7 +800,7 @@ pub(crate) async fn perform_tool_executions(
             );
         }
 
-        // Record a successful mutating tool call on the undo stack (#178).
+        // Record a successful mutating tool call on the undo stack.
         // Only reversible/irreversible mutations are relevant; read-only and
         // meta tools are ignored by `UndoStack::record`.
         if success {
@@ -886,17 +853,17 @@ pub(crate) async fn perform_tool_executions(
 
 /// Dispatches a single tool call to the appropriate execution path.
 ///
-/// Routes background-capable tools to deferred execution (#196) and everything
+/// Routes background-capable tools to deferred execution and everything
 /// else to a plain synchronous call, each bounded by `tool_timeout`. Used by
 /// both the parallel (side-effect-free) and sequential finalize phases of
-/// [`perform_tool_executions`] (#400).
+/// [`perform_tool_executions`].
 ///
 /// `system.search_tools` is never dispatched here — it is not parallelizable
 /// and is intercepted on the sequential path, where the turn's `ToolRag`
 /// handle is available.
 ///
 /// `background_capable` is the per-turn classification set (computed once from
-/// `registry.list_tools()`), so dispatch never re-lists tools (#400).
+/// `registry.list_tools()`), so dispatch never re-lists tools.
 async fn dispatch_tool_call(
     registry: &dyn ene_plugin_host::ToolRegistry,
     background_capable: &std::collections::HashSet<String>,
@@ -907,7 +874,6 @@ async fn dispatch_tool_call(
     tool_timeout: std::time::Duration,
 ) -> Result<String, PluginHostError> {
     if background_capable.contains(name) {
-        // Try deferred execution for background-capable tools (#196).
         match tokio::time::timeout(
             tool_timeout,
             registry.call_tool_deferred(name, args, Some(call_ctx)),
@@ -915,7 +881,6 @@ async fn dispatch_tool_call(
         .await
         {
             Ok(Ok(ene_plugin_host::DeferredCallResult::Deferred { task_id })) => {
-                // Task accepted for background execution.
                 drop(deferred_tool_tx.send(crate::handle::DeferredToolTask {
                     tool_name: name.to_string(),
                     task_id: task_id.clone(),
@@ -941,7 +906,6 @@ async fn dispatch_tool_call(
     }
 }
 
-/// Builds the standard timeout error for a tool that exceeded its budget.
 fn timeout_error(name: &str, tool_timeout: std::time::Duration) -> PluginHostError {
     PluginHostError::ExecutionFailed {
         message: format!(
@@ -1074,7 +1038,7 @@ pub(crate) fn search_tools_spec() -> ene_plugin_proto::ToolSpec {
         // Read-only in practice, but kept off the parallel path: it is
         // dispatched through `execute_system_search_tool`, which needs the
         // turn's `ToolRag` handle that the bounded parallel batch does not
-        // carry (#400).
+        // carry.
         side_effects: None,
     }
 }
@@ -1234,7 +1198,6 @@ mod tests {
         let pending_user_inputs = Arc::new(Mutex::new(HashMap::new()));
         let turn = crate::types::TurnId::new();
 
-        // Query for filesystem tool
         let tool_calls = vec![LlmToolCall {
             id: "call_123".to_string(),
             name: "system.search_tools".to_string(),
@@ -1276,7 +1239,6 @@ mod tests {
         assert_eq!(output.summaries.len(), 1);
         let summary = &output.summaries[0];
         assert_eq!(summary.tool_name.as_str(), "system.search_tools");
-        // Check that it returned description of filesystem.read
         assert!(summary.summary.contains("filesystem.read"));
         assert!(summary.summary.contains("Read files"));
     }
@@ -1418,13 +1380,12 @@ mod tests {
         );
     }
 
-    /// Regression test for #35: a fast consumer that receives
+    /// Regression test: a fast consumer that receives
     /// `EneEvent::PermissionRequired` and immediately sends a
     /// `PermissionDecision` must never race ahead of the executor's
-    /// insert into `pending_permissions`. Before the fix the
-    /// executor emitted the event before registering the oneshot,
-    /// so a synchronous consumer's decision was dropped at the
-    /// actor and the executor then awaited forever.
+    /// insert into `pending_permissions`. A consumer that replies before the
+    /// oneshot is registered would have its decision dropped at the
+    /// actor and the executor would then await forever.
     #[tokio::test]
     async fn fast_consumer_does_not_lose_permission_decision() {
         use ene_ai::LlmToolCall;
@@ -1487,8 +1448,8 @@ mod tests {
 
         // Start a fast consumer that subscribes to the event stream
         // and replies with a decision as soon as the event is seen.
-        // The decision path here mirrors the actor in
-        // `ene-runtime::handle::EneActor::run`: remove the entry from
+        // The decision path here mirrors the actor's
+        // `EneCommand::PermissionDecision` handler: remove the entry from
         // the shared map and send on the oneshot.
         let consumer_event_rx = event_tx.subscribe();
         let consumer_perms = pending_permissions.clone();
@@ -1555,12 +1516,12 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    /// Regression test for #39: a tool that returns
+    /// Regression test: a tool that returns
     /// `PermissionRequired` on the first call and then
     /// `UserInputRequired` on the second call must have
-    /// both pending requests resolved in sequence. Before
-    /// the fix the second error was silently treated as a
-    /// terminal tool result, so a chained prompt would be
+    /// both pending requests resolved in sequence. Otherwise the second error
+    /// would be silently treated as a
+    /// terminal tool result, and a chained prompt would be
     /// reported as a `Error executing tool:` line in the
     /// final history instead of being resolved.
     #[tokio::test]
@@ -1635,7 +1596,6 @@ mod tests {
             arguments: "{}".to_string(),
         }];
 
-        // Fast consumer: reply to permission, then user input.
         let consumer_event_rx = event_tx.subscribe();
         let consumer_perms = pending_permissions.clone();
         let consumer_inputs = pending_user_inputs.clone();
@@ -1717,7 +1677,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
-    /// Regression test for #32: the terminal guard must guarantee
+    /// Regression test: the terminal guard must guarantee
     /// exactly one [`EneEvent::Terminal`] per run, even when the
     /// cancel command and the stream task both reach a terminal
     /// emit site (which is the common race when the user cancels
@@ -1763,7 +1723,7 @@ mod tests {
         assert_eq!(got, 1, "expected exactly one Terminal event");
     }
 
-    /// Builds a tool-execution context for the #401 regression tests.
+    /// Builds a tool-execution context for the prompt-wait regression tests.
     /// `permission_prompt_timeout_ms` / `user_input_prompt_timeout_ms` are
     /// kept tiny so the bounded waits fire quickly; `cancel_token` lets a
     /// test cancel mid-wait.
@@ -1809,11 +1769,11 @@ mod tests {
         }
     }
 
-    /// Regression test for #401: a permission prompt whose consumer never
-    /// responds must not hang the executor. Before the fix, `decide_rx.await`
-    /// had no timeout and was not selected against the cancel token, so the
-    /// turn never reached `Terminal` and the turn gate stayed held forever
-    /// (later `run()` calls returning `RunError::Busy`). The bounded wait must
+    /// Regression test: a permission prompt whose consumer never
+    /// responds must not hang the executor. An unbounded, unselected
+    /// `decide_rx.await` would leave the turn without `Terminal` and hold
+    /// the turn gate forever (later `run()` calls returning
+    /// `RunError::Busy`). The bounded wait must
     /// fail safe: treat the unanswered prompt as denied, complete the round,
     /// and never re-invoke the tool.
     #[tokio::test]
@@ -1889,15 +1849,14 @@ mod tests {
         );
         let exec = perform_tool_executions(&exec_ctx, tool_calls, "");
 
-        // Before the fix this would hang forever; the outer timeout turns a
-        // regression into a test failure rather than a stuck suite.
+        // Without the bounded wait this would hang forever; the outer
+        // timeout turns a regression into a test failure rather than a stuck
+        // suite.
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
             .await
             .expect("executor hung: unanswered permission prompt was not bounded (#401)");
         let output = result.expect("executor returned error");
 
-        // The tool was invoked exactly once; the unanswered prompt was denied
-        // (fail-safe) rather than approved-and-retried.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(output.summaries.len(), 1);
         assert!(!output.summaries[0].success);
@@ -1908,7 +1867,7 @@ mod tests {
         );
     }
 
-    /// Regression test for #401: cancelling the turn while a permission prompt
+    /// Regression test: cancelling the turn while a permission prompt
     /// is pending must resolve the wait immediately (via the cancel token),
     /// treating the prompt as denied, rather than blocking until the timeout.
     #[tokio::test]
@@ -2002,7 +1961,7 @@ mod tests {
         assert!(output.summaries[0].summary.contains("Permission denied"));
     }
 
-    /// Regression test for #401: an unanswered interactive user-input prompt
+    /// Regression test: an unanswered interactive user-input prompt
     /// must time out (fail safe as "cancelled") instead of hanging the turn.
     #[tokio::test]
     async fn unresponsive_user_input_consumer_terminates_via_timeout() {
@@ -2180,7 +2139,7 @@ mod tests {
         );
     }
 
-    /// Regression test for the `biased` branch order (#401): a genuine
+    /// Regression test for the `biased` branch order: a genuine
     /// permission decision that is ready at the same instant the deadline
     /// elapses must win over the timeout.
     ///
@@ -2189,8 +2148,8 @@ mod tests {
     /// its timeout timer, the clock jumps straight to the deadline (firing the
     /// timer via `advance`'s internal yield), and *then* the decision is
     /// delivered — so on the decisive poll both the deadline and the decision
-    /// are ready, and the biased select must prefer the decision. With the
-    /// previous `cancel → sleep → rx` order the timeout branch would win and
+    /// are ready, and the biased select must prefer the decision. With a
+    /// `cancel → sleep → rx` order the timeout branch would win and
     /// the real decision would be silently dropped.
     #[tokio::test(start_paused = true)]
     async fn await_permission_decision_takes_decision_at_deadline_instant() {
@@ -2205,7 +2164,6 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // First poll: registers the 100 ms timeout timer; nothing is ready.
         assert!(wait.as_mut().poll(&mut cx).is_pending());
 
         // Jump the clock to the deadline so the timeout timer fires, then
@@ -2225,7 +2183,7 @@ mod tests {
         ));
     }
 
-    /// Regression test for the `biased` branch order (#401): a genuine
+    /// Regression test for the `biased` branch order: a genuine
     /// user-input answer that is ready at the same instant the deadline
     /// elapses must win over the timeout.
     ///
@@ -2244,7 +2202,6 @@ mod tests {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // First poll: registers the 100 ms timeout timer; nothing is ready.
         assert!(wait.as_mut().poll(&mut cx).is_pending());
 
         // Jump the clock to the deadline so the timeout timer fires, then
@@ -2262,7 +2219,7 @@ mod tests {
 
     /// A registry whose read-only tools sleep briefly while running, so a
     /// parallel batch overlaps and `max_in_flight` rises above 1. Used to
-    /// verify the bounded-parallel path of #400.
+    /// verify the bounded-parallel path.
     struct SlowReadOnlyRegistry {
         in_flight: Arc<std::sync::atomic::AtomicUsize>,
         max_in_flight: Arc<std::sync::atomic::AtomicUsize>,
@@ -2280,7 +2237,6 @@ mod tests {
             _context: Option<&ene_plugin_proto::CallContext>,
         ) -> Result<ToolResult, PluginHostError> {
             let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-            // Track the high-water mark of concurrent executions.
             self.max_in_flight.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(std::time::Duration::from_millis(120)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
@@ -2300,7 +2256,7 @@ mod tests {
         )
     }
 
-    /// Two read-only tools must run concurrently (#400): the high-water mark
+    /// Two read-only tools must run concurrently: the high-water mark
     /// of in-flight calls reaches 2, and results are still returned in the
     /// original `tool_calls` order.
     #[tokio::test]
@@ -2365,22 +2321,19 @@ mod tests {
         .await
         .expect("tool executions");
 
-        // Both calls overlapped at some point.
         assert!(
             max_in_flight.load(Ordering::SeqCst) >= 2,
             "read-only tools should run concurrently, max_in_flight = {}",
             max_in_flight.load(Ordering::SeqCst)
         );
-        // Results are re-ordered to the original tool_calls order.
         assert_eq!(output.summaries.len(), 2);
         assert_eq!(output.summaries[0].tool_name.as_str(), "weather.get");
         assert_eq!(output.summaries[1].tool_name.as_str(), "calendar.read");
-        // Assistant message + two tool messages.
         assert_eq!(output.messages.len(), 3);
     }
 
     /// Setting `parallel_tool_calls_max = 0` disables parallelism entirely:
-    /// even read-only tools run one at a time (#400).
+    /// even read-only tools run one at a time.
     #[tokio::test]
     async fn parallel_disabled_runs_sequentially() {
         use std::sync::atomic::AtomicUsize;
@@ -2453,7 +2406,7 @@ mod tests {
 
     /// A tool that is *not* in the parallelizable set (e.g. it declares side
     /// effects) stays on the sequential path even when other calls in the same
-    /// round are parallelized (#400).
+    /// round are parallelized.
     #[tokio::test]
     async fn side_effectful_tool_stays_sequential() {
         use std::sync::atomic::AtomicUsize;
@@ -2517,9 +2470,7 @@ mod tests {
         .await
         .expect("tool executions");
 
-        // Only one parallelizable call, so nothing overlaps.
         assert_eq!(max_in_flight.load(Ordering::SeqCst), 1);
-        // Order is preserved regardless of the split.
         assert_eq!(output.summaries.len(), 2);
         assert_eq!(output.summaries[0].tool_name.as_str(), "weather.get");
         assert_eq!(output.summaries[1].tool_name.as_str(), "filesystem.write");
@@ -2527,7 +2478,7 @@ mod tests {
 
     /// A read-only-classified tool that still returns `PermissionRequired`
     /// must surface the prompt on the sequential finalize path and resolve it
-    /// (never concurrently) — the fail-safe for a mis-declared tool (#400).
+    /// (never concurrently) — the fail-safe for a mis-declared tool.
     #[tokio::test]
     async fn parallel_tool_permission_prompt_resolves_sequentially() {
         use ene_plugin_proto::ToolError;
@@ -2579,7 +2530,6 @@ mod tests {
             Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>,
         > = Arc::new(Mutex::new(HashMap::new()));
 
-        // Fast consumer approves the permission as soon as it is requested.
         let consumer_event_rx = event_tx.subscribe();
         let consumer_perms = pending_permissions.clone();
         let consumer = tokio::spawn(async move {

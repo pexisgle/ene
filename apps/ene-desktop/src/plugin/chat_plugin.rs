@@ -1,4 +1,4 @@
-//! Chat window plugin (#109).
+//! Chat window plugin.
 
 use bevy_app::{App, Plugin, Startup};
 use bevy_ecs::prelude::*;

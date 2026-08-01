@@ -99,7 +99,7 @@ fn compression_without_summary_is_not_usable() {
 
 #[test]
 fn pack_prompt_counts_history_toward_total_budget() {
-    // #370: packing budgets against a single window (here injected directly)
+    // Packing budgets against a single window (here injected directly)
     // and trims the oldest history to fit it.
     let budget = ContextBudget::with_capacity(35);
     let packed = pack_prompt(

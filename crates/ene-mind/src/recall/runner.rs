@@ -1,4 +1,4 @@
-//! End-to-end hybrid recall execution for the cognitive runtime (#100).
+//! End-to-end hybrid recall execution for the cognitive runtime.
 
 use chrono::Utc;
 use ene_config::CharacterCardV3;
@@ -17,7 +17,7 @@ use crate::recall::{
 
 /// Input for executing hybrid typed-memory recall.
 pub struct ExecuteRecallInput<'a> {
-    /// Memory store handle (behind the `MemoryPort` abstraction, #270).
+    /// Memory store handle (behind the `MemoryPort` abstraction).
     pub store: &'a dyn MemoryPort,
     /// Character card name.
     pub character_id: &'a str,
@@ -33,7 +33,7 @@ pub struct ExecuteRecallInput<'a> {
     pub embedding_model: &'a str,
     /// Loaded affect state (optional).
     pub affect: Option<&'a ene_core::AffectState>,
-    /// Character card for lorebook key-trigger recall (#83).
+    /// Character card for lorebook key-trigger recall.
     pub card: Option<&'a CharacterCardV3>,
 }
 
@@ -103,7 +103,7 @@ pub async fn execute_hybrid_recall(
 
     let mut scored = ene_rag::score_and_rank(&search_options, gathered);
 
-    // Close the self-reflection feedback loop (#347): reflections are excluded
+    // Close the self-reflection feedback loop: reflections are excluded
     // from the search query above (they are a scoring signal, not recall
     // results), so load them separately and apply their boost/penalty to the
     // scored memories. Gated by the reflection `enabled` config.
@@ -120,7 +120,7 @@ pub async fn execute_hybrid_recall(
 }
 
 /// Load reflection memories and apply their boost/penalty to scored recall
-/// candidates, closing the self-reflection feedback loop (#347).
+/// candidates, closing the self-reflection feedback loop.
 ///
 /// Reflections are a scoring signal, not recall results — the search query
 /// already excludes [`ene_core::MemoryKind::Reflection`], so this loads them
@@ -196,11 +196,11 @@ async fn maybe_merge_lorebook_recall(
 }
 
 /// Bump access counters for the memories that were actually injected into the
-/// prompt (#345).
+/// prompt.
 ///
 /// The bump is gated on `injected_ids` — the subset of recalled memories that
 /// survived budget packing and were composed into the message packet — rather
-/// than on "ranked high in search". Bumping every recalled memory used to
+/// than on "ranked high in search". Bumping every recalled memory would
 /// reinforce memories that were recalled but then dropped, feeding the
 /// self-reinforcing recall loop. Call this after prompt composition with
 /// `PromptPacketMeta::injected_memory_ids`.

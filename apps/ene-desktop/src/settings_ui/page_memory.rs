@@ -224,7 +224,7 @@ fn render_recall_search_ui(
     render_recall_rows(ui, snapshot);
 }
 
-// ── Pending approval UI (#223) ───────────────────────────────────────────────
+// ── Pending approval UI ───────────────────────────────────────────────
 
 fn render_pending_approval(
     ui: &mut egui::Ui,
@@ -256,38 +256,32 @@ fn render_pending_approval(
         .show(ui, |ui| {
             for candidate in &candidates {
                 ui.group(|ui| {
-                    // Title
                     ui.strong(&candidate.title);
 
-                    // Kind badge
                     ui.label(format!(
                         "{}: {}",
                         fl!(crate::i18n::loader(), "memory-journal-kind"),
                         candidate.kind
                     ));
 
-                    // Content preview
                     ui.label(format!(
                         "{}: {}",
                         fl!(crate::i18n::loader(), "memory-journal-content"),
                         candidate.content
                     ));
 
-                    // Confidence bar
                     ui.horizontal(|ui| {
                         ui.label(fl!(crate::i18n::loader(), "memory-journal-confidence"));
                         render_salience_bar(ui, candidate.confidence);
                         ui.label(format!("{:.1}%", candidate.confidence * 100.0));
                     });
 
-                    // Reason detail
                     ui.label(format!(
                         "{}: {}",
                         fl!(crate::i18n::loader(), "memory-journal-reason"),
                         candidate.reason_detail
                     ));
 
-                    // Source quote
                     if !candidate.source_quote.is_empty() {
                         ui.label(format!(
                             "{}: \"{}\"",
@@ -296,7 +290,6 @@ fn render_pending_approval(
                         ));
                     }
 
-                    // Existing conflict info
                     if let Some(ref existing_title) = candidate.existing_memory_title {
                         ui.label(format!(
                             "{}: {}",
@@ -305,7 +298,6 @@ fn render_pending_approval(
                         ));
                     }
 
-                    // Approve / Reject buttons
                     ui.horizontal(|ui| {
                         let candidate_id = candidate.id;
                         if ui
@@ -341,13 +333,12 @@ fn render_pending_approval(
         });
 }
 
-// ── Commitment management UI (#223) ──────────────────────────────────────────
+// ── Commitment management UI ──────────────────────────────────────────
 
 fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
     ui.separator();
     ui.heading(fl!(crate::i18n::loader(), "memory-commitments-title"));
 
-    // Filter bar
     ui.horizontal(|ui| {
         if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
             ui.selectable_value(
@@ -412,7 +403,6 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
                     ui.horizontal(|ui| {
                         ui.strong(&commitment.title);
 
-                        // Status badge
                         let status_label = match commitment.status {
                             ene_store::CommitmentStatus::Active => {
                                 fl!(crate::i18n::loader(), "memory-commitment-status-active")
@@ -431,12 +421,10 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
                         ui.label(format!("[{status_label}]"));
                     });
 
-                    // Description
                     if !commitment.description.is_empty() {
                         ui.label(&commitment.description);
                     }
 
-                    // Created / Due dates
                     ui.label(format!(
                         "{}: {}",
                         fl!(crate::i18n::loader(), "memory-journal-created"),
@@ -457,7 +445,6 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
                         ));
                     }
 
-                    // Action buttons (only for active commitments)
                     if commitment.status == ene_store::CommitmentStatus::Active
                         && let Some(c_id) = commitment.id
                     {
@@ -496,7 +483,7 @@ fn render_commitments(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, 
         });
 }
 
-// ── Salience bar visualization (#223) ────────────────────────────────────────
+// ── Salience bar visualization ────────────────────────────────────────
 
 fn render_salience_bar(ui: &mut egui::Ui, salience: f32) {
     let color = if salience > 0.7 {
@@ -557,7 +544,6 @@ fn render_browse_rows(
                         fl!(crate::i18n::loader(), "memory-journal-scope"),
                         row.scope
                     ));
-                    // Enhanced row with salience bar
                     ui.horizontal(|ui| {
                         ui.label(format!(
                             "{}: {:.2}  |",

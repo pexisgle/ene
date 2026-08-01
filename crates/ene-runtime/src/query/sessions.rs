@@ -1,4 +1,4 @@
-//! Read-only session query handle (#176, #271).
+//! Read-only session query handle.
 //!
 //! See the [`crate::query`] module docs for why this bypasses the actor
 //! mailbox entirely: session CRUD only ever touches `MemoryStore`, never the
@@ -29,9 +29,9 @@ impl SessionQueryHandle {
         })
     }
 
-    /// List stored sessions, newest first (#176).
+    /// List stored sessions, newest first.
     ///
-    /// Part of the API v1 contract (#269): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not `ene_store::EneMemoryError`.
     pub async fn list(
         &self,
@@ -42,27 +42,27 @@ impl SessionQueryHandle {
         Ok(metas.into_iter().map(Into::into).collect())
     }
 
-    /// Export a session to a versioned, redacted JSON bundle (#176).
+    /// Export a session to a versioned, redacted JSON bundle.
     ///
-    /// Part of the API v1 contract (#269): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not `ene_store::EneMemoryError`.
     pub async fn export(&self, session_id: &str) -> Result<String, PublicApiError> {
         let export = self.store()?.build_export(session_id).await?;
         Ok(export.to_json()?)
     }
 
-    /// Import a session from a JSON export bundle (#176).
+    /// Import a session from a JSON export bundle.
     ///
-    /// Part of the API v1 contract (#269): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not `ene_store::EneMemoryError`.
     pub async fn import(&self, json: &str) -> Result<i64, PublicApiError> {
         let export = ene_store::SessionExport::from_json(json)?;
         Ok(self.store()?.import_export(&export).await?)
     }
 
-    /// Full-text search over stored conversation messages (#176).
+    /// Full-text search over stored conversation messages.
     ///
-    /// Part of the API v1 contract (#269): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, and matches carry
     /// [`PublicExportedMessage`] rather than `ene_store::ExportedMessage`.
     pub async fn search(
@@ -78,9 +78,9 @@ impl SessionQueryHandle {
             .collect())
     }
 
-    /// Archive or unarchive a session (#176).
+    /// Archive or unarchive a session.
     ///
-    /// Part of the API v1 contract (#269): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not `ene_store::EneMemoryError`.
     pub async fn set_archived(
         &self,

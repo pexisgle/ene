@@ -1,9 +1,9 @@
 //! Companion Commitment Ledger — promises, tasks, and follow-ups.
 //!
 //! The `commitments` table is the sole source of truth for commitment lifecycle
-//! and prompt injection (#124). Typed `MemoryKind::Commitment` rows are optional
-//! references (`typed_memories.commitment_id`) and are no longer dual-written
-//! from arbiter persist → sync.
+//! and prompt injection. Typed `MemoryKind::Commitment` rows are optional
+//! references (`typed_memories.commitment_id`) and are not dual-written from
+//! arbiter persist.
 //!
 //! **Contradiction semantics:** this ledger is where a rephrased or
 //! rescheduled commitment is *merged* into the existing row (title-keyed
@@ -55,7 +55,7 @@ pub struct CommitmentLedger;
 /// Context required when writing ledger rows from commitment candidates.
 ///
 /// Carries the optional embedding provider used to match commitments by title
-/// *similarity* rather than exact string equality (#387). When `embedder` is
+/// *similarity* rather than exact string equality. When `embedder` is
 /// `None`, matching degrades to the deterministic exact-title fallback so the
 /// ledger keeps working without an embedding model.
 #[derive(Clone, Default)]
@@ -64,11 +64,11 @@ pub struct CommitmentSyncContext<'a> {
     pub character_id: &'a str,
     /// User identifier (may be empty).
     pub user_id: &'a str,
-    /// Embedding provider for fuzzy title matching (#387). `None` falls back to
+    /// Embedding provider for fuzzy title matching. `None` falls back to
     /// exact normalized-title equality.
     pub embedder: Option<&'a dyn EmbeddingProvider>,
     /// Minimum title-embedding cosine similarity for two commitments to be
-    /// treated as the same one (#387). Only consulted on the embedding path.
+    /// treated as the same one. Only consulted on the embedding path.
     pub title_similarity_threshold: f32,
 }
 
@@ -92,7 +92,7 @@ impl CommitmentLedger {
     /// Does **not** insert typed `MemoryKind::Commitment` bodies. Deletion-style
     /// candidates (`should_persist = false`) cancel matching active ledger rows
     /// by title. Matching is by title-embedding similarity when an embedder is
-    /// configured (#387), falling back to exact normalized-title equality
+    /// configured, falling back to exact normalized-title equality
     /// otherwise.
     pub async fn apply_commitment_candidates(
         store: &dyn MemoryPort,
@@ -182,9 +182,6 @@ impl CommitmentLedger {
     }
 
     /// Arbitrate non-commitment candidates; write commitments ledger-first.
-    ///
-    /// Replaces the former dual-write path (`arbitrate` → typed persist →
-    /// `sync_from_applied_decisions`).
     pub async fn arbitrate_apply_and_sync(
         store: &dyn MemoryPort,
         candidates: &[MemoryCandidate],
@@ -212,7 +209,7 @@ impl CommitmentLedger {
     ///
     /// Takes `&dyn MemoryPort` (rather than the concrete `MemoryStore`, like
     /// this ledger's other associated functions) because its only caller
-    /// outside this module, `ene-mind`'s recall runner (#270), holds its
+    /// outside this module, `ene-mind`'s recall runner, holds its
     /// store handle behind that abstraction.
     pub async fn list_active(
         store: &dyn MemoryPort,
@@ -270,7 +267,7 @@ impl CommitmentLedger {
             .map_err(CognitionError::MemoryPort)
     }
 
-    /// Cancel every active commitment whose title matches `title` (#387).
+    /// Cancel every active commitment whose title matches `title`.
     ///
     /// Matching uses the shared [`TitleMatcher`], so a rephrased cancellation
     /// ("資料作成をやめる") reaches the commitment registered under a synonymous
@@ -320,7 +317,7 @@ impl CommitmentLedger {
     }
 }
 
-/// Decides whether two commitment titles refer to the same commitment (#387).
+/// Decides whether two commitment titles refer to the same commitment.
 ///
 /// When an [`EmbeddingProvider`] is configured, titles are compared by the
 /// cosine similarity of their embeddings and a pair matches once the similarity
@@ -332,13 +329,9 @@ impl CommitmentLedger {
 /// Embeddings are cached by title for the lifetime of the matcher, so re-listing
 /// active commitments per candidate does not re-embed repeated titles.
 struct TitleMatcher<'a> {
-    /// Embedding provider; `None` selects the exact-match fallback.
     embedder: Option<&'a dyn EmbeddingProvider>,
-    /// Cosine-similarity cutoff for a match (embedding path only).
     threshold: f32,
-    /// Embeddings computed so far, keyed by exact title string.
     cache: HashMap<String, Vec<f32>>,
-    /// Set once embedding fails, after which matching falls back to exact.
     disabled: bool,
 }
 
@@ -401,7 +394,6 @@ impl<'a> TitleMatcher<'a> {
         Some(cosine_similarity(&left_embedding, &right_embedding))
     }
 
-    /// Whether the embedding path is currently usable.
     fn use_embedding(&self) -> bool {
         self.embedder.is_some() && !self.disabled
     }
@@ -621,7 +613,6 @@ mod tests {
     async fn apply_supersedes_existing_with_changed_content() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
 
-        // Insert the initial commitment
         let candidates = [commitment_candidate(0.9)];
         let ids1 = CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &candidates)
             .await
@@ -805,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_supersedes_rephrased_title_via_embedding() {
-        // #387: a rephrased commitment ("write design doc" vs "design review")
+        // A rephrased commitment ("write design doc" vs "design review")
         // must supersede the existing row rather than register a duplicate,
         // because the titles are embedding-similar.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
@@ -847,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_keeps_unrelated_titles_separate_via_embedding() {
-        // #387: embedding matching must not over-merge — unrelated titles stay
+        // Embedding matching must not over-merge — unrelated titles stay
         // separate commitments.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let embedder = KeywordEmbedder;
@@ -884,7 +875,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_deletion_cancels_rephrased_title_via_embedding() {
-        // #387: a rephrased cancellation reaches the synonymously-titled row.
+        // A rephrased cancellation reaches the synonymously-titled row.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let embedder = KeywordEmbedder;
         let ctx = fuzzy_sync_ctx(&embedder);
@@ -917,7 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn embedding_failure_falls_back_to_exact_matching() {
-        // #387: if the embedder errors, the ledger degrades to exact matching
+        // If the embedder errors, the ledger degrades to exact matching
         // rather than failing the write or double-registering exact duplicates.
         struct FailingEmbedder;
 

@@ -150,7 +150,6 @@ where
                     pcm: slice.to_vec(),
                     sample_rate,
                 };
-                // Stop if the consumer dropped the receiver.
                 if tx.send(Ok(chunk)).await.is_err() {
                     break;
                 }

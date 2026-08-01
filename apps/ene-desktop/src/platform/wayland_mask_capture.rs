@@ -87,8 +87,6 @@ impl MaskCaptureCamera {
         Self::try_new_sized(device, w, h, downsample)
     }
 
-    /// Build a new mask capture target with explicit
-    /// (downsampled) dimensions.
     fn try_new_sized(
         device: &wgpu::Device,
         width: u32,
@@ -270,7 +268,6 @@ impl MaskCaptureCamera {
         len
     }
 
-    /// Unmap the readback staging buffer.
     pub fn unmap_readback(&mut self) {
         if self.is_mapped {
             self.readback.unmap();

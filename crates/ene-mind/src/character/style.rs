@@ -1,4 +1,4 @@
-//! Style example chunking and retrieval (#84).
+//! Style example chunking and retrieval.
 
 use std::sync::Arc;
 

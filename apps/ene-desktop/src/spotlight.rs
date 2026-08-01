@@ -1,5 +1,5 @@
 //! Spotlight quick-launcher overlay (Alt+Space) and floating
-//! caption overlay (#218).
+//! caption overlay.
 //!
 //! Both are rendered as egui `Window` popups inside the settings
 //! window's egui context.
@@ -124,7 +124,6 @@ pub fn render_spotlight_overlay(
         .title_bar(true)
         .show(ctx, |ui| {
             ui.vertical(|ui| {
-                // Search input
                 let text_response = ui.add_sized(
                     [ui.available_width(), 32.0],
                     egui::TextEdit::singleline(&mut input_buf)
@@ -132,14 +131,12 @@ pub fn render_spotlight_overlay(
                         .desired_width(f32::INFINITY),
                 );
 
-                // Request focus when first shown; handle Escape
                 if text_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     close = true;
                 }
 
                 ui.separator();
 
-                // Results list
                 let filtered_now = filter_actions(&input_buf, &actions);
                 let count = filtered_now.len();
                 let sel = selected_idx.min(count.saturating_sub(1));
@@ -207,13 +204,13 @@ fn execute_spotlight_action(action: &SpotlightAction, world: &mut World, ui_enti
         }
         SpotlightAction::ToggleFeature { feature, .. } => {
             if feature == "mic" {
-                // Toggle mic via the AppEvent bus (signals the AI bridge).
-                // TODO(#218): wire mic toggle from spotlight via EventChannels.
+                // TODO: wire the mic toggle from spotlight via EventChannels
+                // once the mic toggle is connected to the audio subsystem.
             }
         }
         SpotlightAction::RunCommand { .. } => {
             // The built-in command toggles the floating caption overlay,
-            // giving the caption window (#218) a launch path.
+            // giving the caption window a launch path.
             if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
                 state.0.caption_visible = !state.0.caption_visible;
             }
@@ -266,7 +263,6 @@ pub fn render_caption_overlay(ctx: &egui::Context, world: &mut World, ui_entity:
         });
     });
 
-    // Write back state
     if let Some(mut state) = world.get_mut::<UiStateComponent>(ui_entity) {
         if close {
             state.0.caption_visible = false;

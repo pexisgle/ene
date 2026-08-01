@@ -1,18 +1,9 @@
 //! LLM-based memory extractor.
 //!
 //! Uses a language model to identify memory candidates from a single
-//! conversation turn. Returns `Vec<MemoryCandidate>` with structured
-//! metadata. Falls back to an empty vec when the LLM returns no valid
-//! candidates.
-//!
-//! Deterministic pattern hits may be passed as optional `pattern_hints`; the
-//! LLM remains the authority on what to keep and which [`MemoryKind`] to use.
-//! It handles:
-//! - Structured output via JSON schema (`additionalProperties: false`)
-//! - A configurable call timeout (see [`extract_with_timeout`]; the default is
-//!   [`DEFAULT_EXTRACTION_TIMEOUT_SECS`])
-//! - Markdown wrapper stripping (```json ... ```)
-//! - Confidence capping at 0.9
+//! conversation turn. Deterministic pattern hits may be passed as optional
+//! `pattern_hints`; the LLM remains the authority on what to keep and which
+//! [`MemoryKind`] to use.
 
 // `fmt::Error` is `Copy`, so `drop()` would itself trip
 // `clippy::dropping_copy_types`; every `write!`/`writeln!` in this module
@@ -52,7 +43,7 @@ const MAX_CONFIDENCE: f32 = 0.9;
 /// Advisory multiplier applied to confidence when the `source_quote` script
 /// does not match the requested locale. Kept mild (not a hard drop) because
 /// script heuristics cannot distinguish e.g. romaji Japanese from English,
-/// so a mismatch is only a weak signal (Bugbot medium finding).
+/// so a mismatch is only a weak signal.
 const LOCALE_MISMATCH_PENALTY: f32 = 0.8;
 
 /// Minimum `source_quote` length (in characters) before the locale-mismatch
@@ -82,7 +73,7 @@ pub async fn extract(
 /// forget (and tool) pattern hints.
 ///
 /// This is the entry point the runtime should use so the timeout can be driven
-/// by `MindMemoryConfig::extraction_timeout_secs` (issue #66). Pattern hints
+/// by `MindMemoryConfig::extraction_timeout_secs`. Pattern hints
 /// assist the model; they are not auto-persisted by this function.
 pub async fn extract_with_timeout(
     provider: &dyn LlmProvider,
@@ -249,7 +240,6 @@ fn parse_candidates_json(
         .trim_end_matches("```")
         .trim();
 
-    // Try direct parse first
     if let Ok(wrapper) = serde_json::from_str::<RawWrapper>(cleaned) {
         return Ok(wrapper
             .candidates
@@ -258,7 +248,6 @@ fn parse_candidates_json(
             .collect());
     }
 
-    // Try extracting embedded JSON object
     if let Some(start) = cleaned.find('{')
         && let Some(end) = cleaned.rfind('}')
     {
@@ -272,7 +261,6 @@ fn parse_candidates_json(
         }
     }
 
-    // Non-JSON response — treat as extraction failure
     Err(CognitionError::ExtractionFailed(format!(
         "LLM response was not valid JSON for the extractor schema. First 200 chars: {}",
         raw.chars().take(200).collect::<String>()
@@ -827,7 +815,6 @@ mod tests {
 
     #[tokio::test]
     async fn schema_has_additional_properties_false() {
-        // Verify the schema includes additionalProperties: false
         let schema = super::extraction_schema();
         let candidates_schema = &schema["properties"]["candidates"]["items"];
         assert_eq!(candidates_schema["additionalProperties"], false);
@@ -857,7 +844,6 @@ mod tests {
         .await
         .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
-        // Confidence should be reduced due to locale mismatch
         assert!(
             result[0].confidence < 0.8,
             "Expected reduced confidence, got {}",
@@ -868,7 +854,7 @@ mod tests {
     #[tokio::test]
     async fn short_quote_is_not_penalized_by_locale_mismatch() {
         // A short CJK quote (e.g. a name) in an English session is too
-        // ambiguous to penalize, so confidence is preserved (Bugbot finding).
+        // ambiguous to penalize, so confidence is preserved.
         let json = r#"{
             "candidates": [{
                 "kind": "UserProfile",

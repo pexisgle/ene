@@ -1,9 +1,9 @@
-//! State holders that the v2 settings UI writes into and the
+//! State holders that the settings UI writes into and the
 //! character renderer consumes. Provides [`AnimationControl`],
 //! [`EmotionCommand`] / [`EmotionQueue`], and [`ActiveEmotion`]
 //! — the data types only; the rendering and queueing
-//! transitions now live in `system::ui_consumers` and
-//! `resource::emotion_pipeline` (Phase 7.5).
+//! transitions live in `system::ui_consumers` and
+//! `resource::emotion_pipeline`.
 use std::collections::VecDeque;
 
 #[derive(Clone, Debug)]

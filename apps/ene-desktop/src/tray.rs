@@ -260,6 +260,10 @@ fn pump_win32_messages() {
         DispatchMessageW, GetMessageW, TranslateMessage,
     };
     unsafe {
+        // SAFETY: `msg` is a valid, zero-initialized `MSG` on the stack
+        // that outlives every call, and `GetMessageW` / `TranslateMessage` /
+        // `DispatchMessageW` are invoked with `hWnd = null_mut()`, which
+        // retrieves / dispatches messages for the current thread only.
         let mut msg: windows_sys::Win32::UI::WindowsAndMessaging::MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);

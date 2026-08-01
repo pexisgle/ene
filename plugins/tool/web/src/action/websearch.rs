@@ -99,10 +99,10 @@ impl WebSearchAction {
         let limit = self.limit.unwrap_or(5).min(10);
         // Snapshot the current config under a read lock so
         // a hot-reload from a reconfigure (which takes the
-        // write lock) does not block the search. The
-        // previous `OnceLock::get()` pattern only ever
-        // returned the value set on the first call, so
-        // updating an API key required a process restart.
+        // write lock) does not block the search. A
+        // `OnceLock::get()` would only return the value set
+        // on the first call, so updating an API key would
+        // require a process restart.
         let config = match self.config.read() {
             Ok(guard) => Some(guard.clone()),
             Err(e) => {

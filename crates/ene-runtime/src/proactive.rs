@@ -1,5 +1,3 @@
-//! Proactive companion speech scheduling helpers (#166).
-
 use ene_ai::LlmProvider;
 use ene_mind::{
     ActiveCommitmentPrompt, ProactiveConfig, ProactiveObservation, ProactiveSuppressionState,
@@ -12,21 +10,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Mutable scheduler counters owned by the actor.
 #[derive(Debug)]
 pub(crate) struct ProactiveScheduler {
-    /// Latest host observation.
     pub observation: ProactiveObservation,
     /// Ephemeral screen frame from the last successful vision summarize (data URI).
     /// Never persisted; used only for the next proactive generation when the
     /// generation model declares `supports_vision`.
     pub last_screen_image_data_uri: Option<String>,
-    /// When the last user `Run` started.
     pub last_user_input_at: Instant,
-    /// When the last proactive utterance completed.
     pub last_proactive_at: Option<Instant>,
-    /// Proactive turns completed in this session.
     pub proactive_turns: usize,
     /// Bumped whenever a user turn starts so in-flight decisions are discarded.
     pub epoch: u64,
-    /// Tick counter for periodic world state memory writes (#209).
+    /// Tick counter for periodic world state memory writes.
     #[expect(dead_code, reason = "planned for #209 world-state persistence")]
     pub world_state_tick: usize,
 }
@@ -52,7 +46,6 @@ impl ProactiveScheduler {
         self.epoch = self.epoch.wrapping_add(1);
     }
 
-    /// Record a completed proactive utterance.
     pub fn on_proactive_completed(&mut self) {
         self.last_proactive_at = Some(Instant::now());
         self.proactive_turns = self.proactive_turns.saturating_add(1);
@@ -117,22 +110,17 @@ pub(crate) fn rgb_to_jpeg_data_uri(width: u32, height: u32, rgb: &[u8]) -> Resul
 /// Result of an async decision task.
 #[derive(Debug, Clone)]
 pub(crate) struct ProactiveDecisionResult {
-    /// Epoch captured when the decision started.
     pub epoch: u64,
-    /// Tick counter for periodic world state memory writes (#209).
+    /// Tick counter for periodic world state memory writes.
     #[expect(dead_code, reason = "planned for #209 world-state persistence")]
     pub world_state_tick: usize,
-    /// Whether generation should start.
     pub should_generate: bool,
     /// Model `should_speak` flag (before confidence gate).
     pub should_speak: bool,
     /// Model confidence in `[0.0, 1.0]`.
     pub confidence: f64,
-    /// Whether the lightweight decision LLM was invoked.
     pub llm_invoked: bool,
-    /// Topic hint for the generation prompt.
     pub topic_hint: String,
-    /// Diagnostic reason / skip text.
     pub detail: String,
 }
 

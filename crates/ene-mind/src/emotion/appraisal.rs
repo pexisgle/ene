@@ -1,4 +1,4 @@
-//! Deterministic keyword/heuristic appraisal rules (#86).
+//! Deterministic keyword/heuristic appraisal rules.
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -206,8 +206,7 @@ const JA_NEGATION_SUFFIXES: &[&str] = &["じゃない", "ではない", "くな�
 /// boundary matching: the pattern must not be embedded inside a longer run of
 /// its own script (so `バカ` does not fire inside `バカンス`), and a trailing
 /// negation suffix suppresses the match (so `嫌いじゃない` reads as a preference,
-/// not an insult). This keeps Japanese and ASCII matching comparably strict
-/// (#360).
+/// not an insult). This keeps Japanese and ASCII matching comparably strict.
 fn pattern_matches(normalized: &str, pattern: &str) -> bool {
     if !pattern.is_ascii() {
         return japanese_pattern_matches(normalized, pattern);

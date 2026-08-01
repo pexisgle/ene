@@ -1,21 +1,26 @@
 {
   "$schema": "./schema/settings.schema.json",
-  "version": 2,
+  "version": 1,
   "character": "Alicia",
   "user_name": "User",
   "ai": {
     "local_models": {
       "gemma-4-e2b": {
+        "acceleration": "auto",
         "context_size": 16384,
         "gpu_layers": "auto",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
         "url": "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf"
       },
       "gemma-4-e4b": {
+        "acceleration": "auto",
         "context_size": 16384,
         "gpu_layers": "auto",
+        "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/mmproj-F16.gguf",
         "url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_0.gguf"
       },
       "jina-v5-small": {
+        "acceleration": "auto",
         "context_size": 2048,
         "gpu_layers": "auto",
         "quantization": "F16",
@@ -75,17 +80,6 @@
         "activity": true,
         "conversation": true,
         "screen_summary": true
-      }
-    }
-  },
-  "plugins": {
-    "list": {
-      "llama-cpp": {
-        "enable": true,
-        "config": {
-          "mmproj_url": "https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/mmproj-F16.gguf",
-          "acceleration": "auto"
-        }
       }
     }
   },

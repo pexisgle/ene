@@ -34,13 +34,13 @@
 //!   classifier — its outcome drives user-visible events
 //!   (`LifecycleEvent::PendingCandidateAvailable` and
 //!   `DiagnosticEvent::MemoryWrite`). A rejected admission therefore
-//!   still consumes the outcome via a detached task (#398), so those
+//!   still consumes the outcome via a detached task, so those
 //!   events fire regardless of admission; the only loss is panic
 //!   supervision of that consumer, not the events themselves.
 //! - `search_cap` — `EneCommand::SearchTools` / tool-search jobs.
 //! - `bg_command_cap` — heavy command-handler work (GGUF model load,
 //!   plugin host restart) spawned off the actor's main loop to prevent
-//!   head-of-line blocking (#397). Low default because these operations
+//!   head-of-line blocking. Low default because these operations
 //!   are infrequent.
 
 const fn default_call_tool_cap() -> usize {
@@ -100,18 +100,16 @@ ene_config::define_config!(
         #[serde(default = "default_search_cap")]
         pub search_cap: usize = default_search_cap(),
         /// Max concurrently in-flight heavy command-handler background
-        /// tasks — GGUF model loads, plugin host restarts (#397)
+        /// tasks — GGUF model loads, plugin host restarts
         /// (`ENE_TOOLS__BG_COMMAND_CAP`).
         #[serde(default = "default_bg_command_cap")]
         pub bg_command_cap: usize = default_bg_command_cap(),
         /// Maximum poll iterations (at 100ms each) before a deferred
         /// (background) tool task is considered timed out (default 600 =
-        /// 60s). Previously read directly from the
-        /// `ENE_TOOLS__DEFERRED_MAX_POLLS` env var via `std::env::var`
-        /// rather than through the config system; folded in here so it
-        /// now also participates in defaults -> JSON -> env precedence
-        /// and shows up in `settings.json`'s schema. The env var name is
-        /// unchanged, so existing overrides keep working.
+        /// 60s). Read from the `ENE_TOOLS__DEFERRED_MAX_POLLS` env var
+        /// through the config system so it participates in defaults -> JSON
+        /// -> env precedence and shows up in `settings.json`'s schema. The
+        /// env var name is unchanged, so existing overrides keep working.
         #[serde(default = "default_deferred_max_polls")]
         pub deferred_max_polls: u32 = default_deferred_max_polls(),
     }

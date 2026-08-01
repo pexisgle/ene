@@ -1,10 +1,10 @@
-//! Input/output types for the Emotion Engine (#86).
+//! Input/output types for the Emotion Engine.
 
 use std::time::Duration;
 
 use ene_core::AffectState;
 
-/// Optional LLM affect classifier proposal (#88).
+/// Optional LLM affect classifier proposal.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AffectProposal {
     /// Detected user emotion label.

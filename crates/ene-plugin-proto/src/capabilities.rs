@@ -63,7 +63,7 @@ pub struct LlmProviderSpec {
     ///
     /// This is the model's hard limit on `prompt + completion` tokens. The
     /// host combines it with any user-configured override to derive the
-    /// effective window it budgets prompts against (see #364). `None` means
+    /// effective window it budgets prompts against. `None` means
     /// the provider does not advertise a limit — either because it genuinely
     /// has none, or because an older plugin binary predates this field and
     /// omitted it on the wire (`#[serde(default)]` keeps that a `None`
@@ -254,7 +254,7 @@ mod tests {
     }
 
     /// Load-bearing contract: an unset `concurrency` field (as an old plugin
-    /// binary built before this change would send) must deserialize to the
+    /// binary that omits it on the wire would send) must deserialize to the
     /// serial default, not an error and not a permissive default.
     #[test]
     fn llm_provider_spec_missing_concurrency_defaults_to_serial() {
@@ -266,7 +266,7 @@ mod tests {
     }
 
     /// Load-bearing contract: an unset `context_window` field (as an old
-    /// plugin binary built before #364 would send) must deserialize to
+    /// plugin binary that predates the field would send) must deserialize to
     /// `None` — "provider does not advertise a limit" — not an error. This is
     /// what lets the field ship without a protocol version bump.
     #[test]

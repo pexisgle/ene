@@ -30,9 +30,8 @@ pub async fn write(path: &Path, content: &str, sandbox: &Sandbox) -> Result<Stri
         content_bytes.to_vec()
     };
 
-    // Check the size after BOM prepending — a 3-byte BOM added on top of
-    // a content that's already at the limit used to push the write 3
-    // bytes over the configured max_write_bytes.
+    // Check the size after BOM prepending: the 3-byte BOM can push a
+    // content that is already at the limit over `max_write_bytes`.
     if output.len() > sandbox.config().max_write_bytes {
         return Err(ToolError::execution_failed(format!(
             "File too large: {} bytes exceeds maximum of {} bytes",

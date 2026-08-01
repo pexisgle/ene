@@ -23,7 +23,7 @@ pub struct ChatState {
     pub pending_permission: Option<PendingPermission>,
     pub pending_user_input: Option<PendingUserInput>,
     pub user_input_drafts: Vec<QuestionDraft>,
-    /// Transient status message from the most recent undo action (#178).
+    /// Transient status message from the most recent undo action.
     pub undo_status: Option<String>,
 }
 

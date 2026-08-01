@@ -86,7 +86,7 @@ pub struct PromptLibraryData {
     pub split: SplitPrompts,
     /// Memory extractor prompts configuration.
     pub extractor: ExtractorPrompts,
-    /// Affect classifier prompts configuration (#88).
+    /// Affect classifier prompts configuration.
     pub affect_classifier: AffectClassifierPrompts,
     /// Proactive speech / screen-summary prompts.
     pub proactive: ProactivePrompts,
@@ -177,7 +177,7 @@ pub struct EmotionPrompts {
     pub example_angry: String,
     /// Neutral example string.
     pub example_neutral: String,
-    /// Natural-dialogue output contract for engine-managed expression (#91).
+    /// Natural-dialogue output contract for engine-managed expression.
     pub natural_dialogue_contract: String,
 }
 
@@ -330,7 +330,7 @@ impl ExtractorPrompts {
     }
 }
 
-/// Prompt templates for the LLM affect classifier (#88).
+/// Prompt templates for the LLM affect classifier.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AffectClassifierPrompts {
     /// System prompt for the affect classifier.
@@ -873,7 +873,7 @@ mod tests {
 
     #[test]
     fn decision_system_labels_untrusted_observation_data() {
-        // #380: the decision system prompt must instruct the model to treat
+        // The decision system prompt must instruct the model to treat
         // third-party content (screen summary, conversation, window labels)
         // as observation data, never as instructions, in every locale.
         for (lib, source) in [
@@ -909,17 +909,14 @@ mod tests {
 
     #[test]
     fn prompt_libraries_contain_required_template_variables() {
-        // Test compile-time embedded english prompts
         let lib_en = PromptLibrary::built_in_english();
         verify_library_variables(&lib_en, "built-in en");
 
-        // Test compile-time embedded japanese prompts
         let lib_ja = PromptLibrary::built_in_japanese();
         verify_library_variables(&lib_ja, "built-in ja");
     }
 
     fn verify_library_variables(lib: &PromptLibrary, source: &str) {
-        // mascot_context must contain variables for character and user names
         let mascot = &lib.system().mascot_context;
         assert!(
             mascot.contains("{char_name}"),
@@ -930,7 +927,6 @@ mod tests {
             "[{source}] mascot_context template must contain {{user_name}}"
         );
 
-        // summarizer.system must contain variables for character and user names
         let sum_sys = &lib.summarizer().system;
         assert!(
             sum_sys.contains("{char_name}"),
@@ -941,7 +937,6 @@ mod tests {
             "[{source}] summarizer.system template must contain {{user_name}}"
         );
 
-        // summarizer.user_prompt must contain variables for user_name, existing_facts, and conversation
         let sum_user = &lib.summarizer().user_prompt;
         assert!(
             sum_user.contains("{user_name}"),

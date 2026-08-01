@@ -70,7 +70,7 @@ pub enum DbError {
     },
     /// A write was rejected because it would exceed the plugin's configured
     /// DB storage quota (`plugins.list.<name>.db_quota_mb`). Reads and
-    /// deletes remain available so the plugin can free space (#424).
+    /// deletes remain available so the plugin can free space.
     #[error("storage quota exceeded: {message}")]
     QuotaExceeded {
         /// Human-readable error message.
@@ -149,11 +149,11 @@ impl DbClient {
 
     /// Re-establishes the IPC connection after the server has restarted.
     ///
-    /// The previous behavior had no way to recover from a `ConnectionClosed`
-    /// error: callers had to drop the client and rebuild it from scratch,
-    /// which meant every cached `schema`/`rowid` state was lost. With
-    /// `socket_path` and `auth_token` captured at connect-time, the same
-    /// client can be brought back online here.
+    /// A `ConnectionClosed` error would otherwise force callers to drop the
+    /// client and rebuild it from scratch, losing every cached
+    /// `schema`/`rowid` state. Because `socket_path` and `auth_token` are
+    /// captured at connect-time, the same client can be brought back online
+    /// here.
     ///
     /// If the new connection succeeds but the handshake fails (e.g. auth
     /// rejected), the old stream is preserved so subsequent retries don't
@@ -438,10 +438,9 @@ impl DbClient {
 
     /// Requests a graceful shutdown of the DB server.
     ///
-    /// Returns the server's response. The previous implementation
-    /// ignored the response with `let _ = ...;`, which made it
-    /// impossible to detect a server that had already died (the call
-    /// would return `Ok(())` even when the connection was closed).
+    /// Returns the server's response so a server that already died is
+    /// detectable: ignoring the result would report success even when the
+    /// connection was closed.
     pub async fn shutdown(&mut self) -> Result<(), DbError> {
         let resp = Self::check_error(self.send_request(&DbRequest::Shutdown).await?)?;
         match resp {
@@ -637,8 +636,6 @@ mod tests {
             stream.flush().await.expect("flush");
         }
 
-        /// The `Batch` request serializes over the wire and the client maps a
-        /// `Batch` response back to per-operation results in order.
         #[tokio::test]
         async fn batch_round_trips_over_ipc() {
             let socket_path: PathBuf = std::env::temp_dir()

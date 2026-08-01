@@ -1,10 +1,6 @@
-//! Memory span domain types for rolling conversation compression (#79 / #98).
-//!
-//! Moved from `ene-store` (#309) — pure domain vocabulary for the
-//! conversation compression subsystem. No `SeaORM` or SQL concerns live
-//! here; `ene-store` owns the conversion to/from DB rows.
+//! Memory span domain types for rolling conversation compression.
 
-/// Input for inserting a compressed conversation span (#79 / #98).
+/// Input for inserting a compressed conversation span.
 #[derive(Debug, Clone)]
 pub struct NewMemorySpan {
     /// Session this span belongs to.
@@ -21,7 +17,7 @@ pub struct NewMemorySpan {
     pub compression_level: i32,
 }
 
-/// Active scene summary row for prompt injection (#79).
+/// Active scene summary row for prompt injection.
 #[derive(Debug, Clone)]
 pub struct ActiveSceneSummaryRow {
     /// Span database id.

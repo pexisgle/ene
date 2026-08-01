@@ -4,11 +4,10 @@ use thiserror::Error;
 
 /// Errors produced by connector identity and credential operations.
 ///
-/// Connection-lifecycle variants were removed alongside the `Connector` trait
-/// (#416); process supervision and its failure modes live in `ene-plugin-host`.
-/// The credential vault and OAuth flow (#415) are expected to extend this with
-/// e.g. missing-credential / authorization-required variants when there is a
-/// concrete consumer.
+/// Connection-lifecycle variants are not part of this enum; process
+/// supervision and its failure modes live in `ene-plugin-host`. The credential
+/// vault and OAuth flow are expected to extend this with e.g. missing-credential
+/// / authorization-required variants when there is a concrete consumer.
 #[derive(Debug, Error)]
 pub enum ConnectorError {
     /// Authentication was attempted and rejected (bad or revoked secret).

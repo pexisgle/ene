@@ -1,8 +1,4 @@
 //! Typed memory domain model.
-//!
-//! Moved from `ene-store` (#270) — pure domain vocabulary for the typed
-//! memory subsystem (kinds, statuses, scores, queries). No `SeaORM` or SQL
-//! concerns live here; `ene-store` owns the conversion to/from DB rows.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -517,10 +513,6 @@ impl Default for AffectAnnotation {
 }
 
 /// A typed memory item.
-///
-/// The central unit of the typed memory store. Each item has a
-/// [`MemoryKind`], [`MemoryStatus`], [`MemorySource`], and
-/// associated confidence and salience scores.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryItem {
     /// Primary key (`None` until persisted).
@@ -568,13 +560,13 @@ pub struct MemoryItem {
     /// Set on replacement rows; `None` when this memory is not a superseding
     /// successor. Superseded rows do not populate this field.
     pub supersedes_id: Option<i64>,
-    /// User-pinned memories are exempt from natural decay (#76).
+    /// User-pinned memories are exempt from natural decay.
     #[serde(default)]
     pub pinned: bool,
     /// When the memory entered `faded` status (archive-decay anchor).
     #[serde(default)]
     pub faded_at: Option<DateTime<Utc>>,
-    /// Optional FK to the commitment ledger row (`commitments.id`) (#124).
+    /// Optional FK to the commitment ledger row (`commitments.id`).
     #[serde(default)]
     pub commitment_id: Option<i64>,
 }
@@ -620,7 +612,7 @@ pub struct NewMemoryItem {
     /// Optional created timestamp (defaults to now on insert).
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
-    /// Optional FK to the commitment ledger row (#124).
+    /// Optional FK to the commitment ledger row.
     #[serde(default)]
     pub commitment_id: Option<i64>,
 }
@@ -647,7 +639,7 @@ pub enum MemoryCandidateSource {
     Pending,
 }
 
-/// Weights for hybrid memory search scoring components (#346).
+/// Weights for hybrid memory search scoring components.
 ///
 /// The hybrid score is *relevance-driven*: `vector` and `lexical` form the
 /// relevance base that decides whether a memory is a candidate at all, while
@@ -658,7 +650,7 @@ pub enum MemoryCandidateSource {
 ///
 /// Product defaults are supplied by `mind.memory.hybrid_weights`
 /// (`ene_mind::MindMemoryConfig`); the store only applies caller-provided
-/// weights when scoring (#123).
+/// weights when scoring.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", default)]
 #[schemars(crate = "schemars")]
@@ -697,10 +689,6 @@ impl Default for HybridSearchWeights {
 }
 
 /// A time range filter for memory queries.
-///
-/// Used to filter memories by their `created_at` timestamp, enabling
-/// queries like "what was I doing yesterday?" or "show me memories
-/// from last week".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeRange {
     /// Start of the time range (inclusive).
@@ -709,7 +697,7 @@ pub struct TimeRange {
     pub end: Option<DateTime<Utc>>,
 }
 
-/// Typed-memory search query (#123).
+/// Typed-memory search query.
 ///
 /// Callers (mind) pre-compute `embedding` when vector search is desired.
 /// `None` skips the vector gather path and scores lexical/recency/commitment
@@ -744,11 +732,11 @@ pub struct Query<'a> {
     pub min_score: f32,
     /// Boost applied when a candidate is surfaced via an active commitment.
     pub commitment_boost: f32,
-    /// Filter by time range (for world state queries like "what was I doing yesterday?"?).
+    /// Filter by time range (for world state queries like "what was I doing yesterday?").
     pub time_range: Option<TimeRange>,
     /// Limit on pure-recent fallback candidates.
     pub recent_fallback_limit: usize,
-    /// Memory kinds excluded from every gather path (#347).
+    /// Memory kinds excluded from every gather path.
     ///
     /// Candidates of an excluded kind are dropped before scoring, so they
     /// never compete with normal memories in recall. The cognitive recall
@@ -759,7 +747,7 @@ pub struct Query<'a> {
     pub exclude_kinds: Vec<MemoryKind>,
 }
 
-/// Deprecated name for [`Query`]; prefer `Query`.
+/// Deprecated; prefer [`Query`].
 pub type MemorySearchOptions<'a> = Query<'a>;
 
 /// Filter options for the desktop/CLI memory journal browse list.
@@ -804,10 +792,10 @@ pub struct MemoryScoreBreakdown {
     /// Access-frequency boost.
     pub access_boost: f32,
     /// Combined query-relevance signal in `[0, 1]` — the weighted blend of
-    /// vector similarity and lexical overlap that forms the score base (#346).
+    /// vector similarity and lexical overlap that forms the score base.
     pub relevance: f32,
     /// Multiplicative quality factor `>= 1.0` built from the salience,
-    /// confidence, recency, affect, relationship, and access signals (#346).
+    /// confidence, recency, affect, relationship, and access signals.
     pub quality_factor: f32,
     /// Penalty for disputed status.
     pub contradiction_penalty: f32,
@@ -815,7 +803,7 @@ pub struct MemoryScoreBreakdown {
     pub stale_penalty: f32,
     /// Boost for active commitment candidates.
     pub commitment_boost: f32,
-    /// Self-reflection adjustment multiplier applied after scoring (#347).
+    /// Self-reflection adjustment multiplier applied after scoring.
     ///
     /// `1.0` means no reflection adjustment. A value `> 1.0` boosts memories
     /// matching successful strategies; `< 1.0` penalizes memories matching
@@ -860,7 +848,7 @@ pub struct ScoredMemory {
     pub sources: Vec<MemoryCandidateSource>,
 }
 
-/// A candidate gathered from one or more recall sources, before scoring (#302).
+/// A candidate gathered from one or more recall sources, before scoring.
 ///
 /// Produced by [`MemoryPort::search`](crate::MemoryPort::search) and consumed
 /// by the `ene-rag` scoring layer. Lives in `ene-core` so both the store

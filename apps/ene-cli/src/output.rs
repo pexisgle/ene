@@ -1,4 +1,4 @@
-//! Machine-readable output support for non-interactive CLI use (#186).
+//! Machine-readable output support for non-interactive CLI use.
 //!
 //! Provides a stable JSON / JSONL contract for CI pipelines, shell scripts,
 //! and external orchestrators:
@@ -15,7 +15,6 @@
 
 use serde::Serialize;
 
-/// Output format for non-interactive subcommands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
     /// Human-readable colored text (the REPL default).
@@ -28,7 +27,6 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    /// Whether structured (machine-readable) output is requested.
     #[must_use]
     pub const fn is_structured(self) -> bool {
         matches!(self, Self::Json | Self::Jsonl)
@@ -59,7 +57,7 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 
 /// Stable error code strings used in the JSON error envelope.
 ///
-/// The full set is part of the stable machine-readable contract (#186); some
+/// The full set is part of the stable machine-readable contract; some
 /// classes (e.g. `Timeout`) surface as exit codes rather than through an
 /// [`OutputError`], so not every variant is constructed internally.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -80,7 +78,6 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
-    /// The exit code associated with this error class.
     #[must_use]
     pub const fn exit_code(self) -> i32 {
         match self {
@@ -97,16 +94,13 @@ impl ErrorCode {
 /// The JSON error envelope printed to stdout on failure in structured mode.
 #[derive(Debug, Serialize)]
 pub struct ErrorBody {
-    /// Stable machine-readable error class.
     pub code: ErrorCode,
-    /// Human-readable detail.
     pub message: String,
 }
 
 /// A structured error that carries both a stable code and an exit status.
 #[derive(Debug)]
 pub struct OutputError {
-    /// The serializable error body.
     pub body: ErrorBody,
 }
 
@@ -119,7 +113,6 @@ impl std::fmt::Display for OutputError {
 impl std::error::Error for OutputError {}
 
 impl OutputError {
-    /// Construct a new structured error.
     #[must_use]
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
@@ -130,13 +123,11 @@ impl OutputError {
         }
     }
 
-    /// The process exit code for this error.
     #[must_use]
     pub const fn exit_code(&self) -> i32 {
         self.body.code.exit_code()
     }
 
-    /// Serialize the error body to a pretty JSON string.
     #[must_use]
     pub fn to_json(&self) -> String {
         #[derive(Serialize)]
@@ -176,12 +167,8 @@ pub fn print_jsonl(value: &impl Serialize) -> Result<(), OutputError> {
     Ok(())
 }
 
-// ── Streaming event schema ──────────────────────────────────────────────────
-
-/// A single presentation cue in a [`StreamEvent::Performance`] event.
 #[derive(Debug, Serialize)]
 pub struct PerfCue {
-    /// Cue name (e.g. an expression or motion label).
     pub name: String,
     /// Cue kind: `expression`, `motion`, `lookat`, or `cancel`.
     pub kind: String,
@@ -189,7 +176,7 @@ pub struct PerfCue {
     pub source: String,
 }
 
-/// A JSONL-serializable mirror of the chat `EneEvent` bus (#186).
+/// A JSONL-serializable mirror of the chat `EneEvent` bus.
 ///
 /// Emitted one-per-line during a non-interactive `run`. The schema is stable
 /// and independent of the internal `EneEvent` representation.
@@ -197,54 +184,32 @@ pub struct PerfCue {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
     /// The turn has started streaming.
-    TurnStarted {
-        /// Turn id.
-        turn: String,
-    },
+    TurnStarted { turn: String },
     /// A chunk of generated text.
-    TextDelta {
-        /// Turn id.
-        turn: String,
-        /// The text chunk.
-        delta: String,
-    },
+    TextDelta { turn: String, delta: String },
     /// Presentation cues for the turn.
-    Performance {
-        /// Turn id.
-        turn: String,
-        /// Cue list.
-        cues: Vec<PerfCue>,
-    },
+    Performance { turn: String, cues: Vec<PerfCue> },
     /// A tool call was requested.
     ToolCallStart {
-        /// Turn id.
         turn: String,
-        /// Tool name.
         name: String,
         /// Parsed JSON arguments (raw object if parsing fails).
         arguments: serde_json::Value,
     },
     /// A tool call completed.
     ToolCallResult {
-        /// Turn id.
         turn: String,
-        /// Tool name.
         name: String,
-        /// Tool output.
         result: String,
     },
     /// A permission gate was auto-denied because no `--yes` was supplied.
     PermissionDenied {
-        /// Turn id.
         turn: String,
-        /// Operation category.
         action: String,
-        /// Target resource.
         target: String,
     },
     /// The turn reached a terminal state (exactly one per run).
     Terminal {
-        /// Turn id.
         turn: String,
         /// `done`, `failed`, or `cancelled`.
         reason: String,

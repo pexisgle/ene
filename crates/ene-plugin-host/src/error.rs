@@ -103,7 +103,7 @@ pub enum PluginHostError {
 
     /// A tool name collision in [`CompositeToolRegistry`](crate::CompositeToolRegistry).
     ///
-    /// Per API v1 / #135, name collision is a hard error at every
+    /// Per API v1, name collision is a hard error at every
     /// registry layer.
     #[error("Duplicate tool name: {tool_name}")]
     DuplicateToolName {
@@ -115,7 +115,6 @@ pub enum PluginHostError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    // ── MCP-specific errors ──────────────────────────────────────────
     /// MCP server process could not be spawned or connected to.
     #[error("MCP Connect error: {0}")]
     McpConnect(String),

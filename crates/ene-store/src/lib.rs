@@ -28,7 +28,7 @@
 //!   `ene-tool-proto` — the store sits low in the dependency graph so it can be
 //!   safely called from any of those crates without introducing a cycle.
 //! - Domain vocabulary (`AffectState`, typed-memory kinds/statuses, the
-//!   commitment ledger's types) is defined in `ene-core` (#270) and
+//!   commitment ledger's types) is defined in `ene-core` and
 //!   re-exported here unchanged — `ene-store` owns only the `SeaORM`
 //!   entities and SQL that convert those domain types to/from DB rows. It
 //!   additionally implements `ene_core::MemoryPort` for `MemoryStore`, the
@@ -65,9 +65,9 @@
 
 /// Affect state domain model.
 pub mod affect;
-/// Tool-permission audit log domain model (#177).
+/// Tool-permission audit log domain model.
 pub mod audit;
-/// File-level SQLite backup, restore, and integrity helpers (#239).
+/// File-level SQLite backup, restore, and integrity helpers.
 pub mod backup;
 /// Companion commitment ledger domain model.
 pub mod commitment;
@@ -80,17 +80,17 @@ pub mod db_server;
 pub mod entities;
 /// Memory-related error types.
 pub mod error;
-/// Versioned session export format (#176).
+/// Versioned session export format.
 pub mod export;
 /// Memory forgetting lifecycle (decay score and status transitions).
 pub(crate) mod forgetting;
 /// `SeaORM` schema migrations.
 pub mod migrator;
-/// `impl MemoryPort for MemoryStore` (#270).
+/// `impl MemoryPort for MemoryStore`.
 pub mod port;
 /// Hybrid memory search scoring.
 pub mod search;
-/// Session metadata domain model (#176).
+/// Session metadata domain model.
 pub mod session;
 /// Core memory store (`SQLite` + sqlite-vec).
 pub mod store;
@@ -99,9 +99,9 @@ pub mod typed_memory;
 
 /// Affect state types.
 pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
-/// Audit log types (#177).
+/// Audit log types.
 pub use audit::{AuditDecision, AuditEntry, NewAuditEntry, redact_arguments};
-/// Backup / integrity open options (#239).
+/// Backup / integrity open options.
 pub use backup::{OpenOptions, list_backups, restore_database};
 /// Commitment ledger types.
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
@@ -109,7 +109,7 @@ pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCo
 pub use config::StoreConfig;
 /// Memory error type.
 pub use error::EneMemoryError;
-/// Session export format types (#176).
+/// Session export format types.
 pub use export::{
     ExportedMessage, ExportedToolLog, SESSION_EXPORT_FORMAT_VERSION, SessionExport, redact_secrets,
 };
@@ -117,7 +117,7 @@ pub use export::{
 pub use forgetting::InvalidTransition;
 /// Document-to-document lexical similarity for recall diversification.
 pub use search::document_lexical_similarity;
-/// Session metadata types (#176).
+/// Session metadata types.
 pub use session::{NewSessionMeta, SessionMeta};
 /// Core memory types.
 pub use store::{

@@ -73,7 +73,6 @@ mod tests {
     use std::io::Write;
     use std::sync::Mutex;
 
-    /// Serializes tests that mutate process-global env vars.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Sets an env var. Test-only; callers must hold [`ENV_LOCK`].

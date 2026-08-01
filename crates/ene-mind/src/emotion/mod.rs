@@ -1,4 +1,4 @@
-//! Emotion Engine: deterministic affect computation + optional LLM classifier (#86, #88).
+//! Emotion Engine: deterministic affect computation + optional LLM classifier.
 
 mod appraisal;
 pub mod classifier;

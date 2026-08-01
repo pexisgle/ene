@@ -38,11 +38,11 @@ pub struct AiUserInputRequested {
 #[derive(Message, Debug, Clone)]
 pub struct PerformanceCue(pub String);
 
-/// Compatibility alias for older call sites (same type).
+/// Compatibility alias for `PerformanceCue` (same type).
 pub use PerformanceCue as EmoteToken;
 
 /// Motion cue routed from [`ene_runtime::EneEvent::Performance`] when
-/// the cue kind is [`PerfKind::Motion`] (#133).
+/// the cue kind is [`PerfKind::Motion`].
 ///
 /// `layer` carries the canonical [`ene_config::MotionLayer`]; the consumer
 /// system converts it to `ene_vrm::MotionLayer` before feeding the
@@ -56,7 +56,7 @@ pub struct MotionCommand {
 }
 
 /// Expression cue with weight and hold duration from [`ene_runtime::EneEvent::Performance`]
-/// when the cue kind is [`PerfKind::Expression`] (#132).
+/// when the cue kind is [`PerfKind::Expression`].
 #[derive(Message, Debug, Clone)]
 pub struct ExpressionCommand {
     pub name: String,
@@ -65,10 +65,10 @@ pub struct ExpressionCommand {
 }
 
 /// Cancel cue from [`ene_runtime::EneEvent::Performance`] when the cue kind
-/// is [`PerfKind::Cancel`] (#132).
+/// is [`PerfKind::Cancel`].
 #[derive(Message, Debug, Clone)]
 pub struct CancelCommand(pub String);
 
-/// Pending memory candidates count update (#223).
+/// Pending memory candidates count update.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct PendingCandidatesCount(pub usize);

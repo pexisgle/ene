@@ -6,10 +6,6 @@
 use glam::{Mat4, Vec2, Vec3};
 
 /// Per-window drag state. `None` = idle, `Some(_)` = dragging.
-///
-/// Mirrors the legacy `CharacterDragState { last_cursor_world_pos:
-/// Option<Vec2> }` exactly — the field name is preserved so the
-/// `is_dragging()` semantics are unambiguous.
 #[derive(Debug, Default, Clone)]
 pub struct CharacterDragState {
     /// Last cursor world position during an active drag. `None` when
@@ -52,8 +48,6 @@ pub enum DragAction {
     Ended,
 }
 
-/// Transform the 8 AABB corners by the model matrix. 1:1 with
-/// `legacy::aabb_world_corners`.
 pub fn aabb_world_corners(aabb_min: [f32; 3], aabb_max: [f32; 3], model_mat: Mat4) -> [Vec3; 8] {
     let [ax, ay, az] = aabb_min;
     let [bx, by, bz] = aabb_max;
@@ -70,8 +64,6 @@ pub fn aabb_world_corners(aabb_min: [f32; 3], aabb_max: [f32; 3], model_mat: Mat
     .map(|c| model_mat.transform_point3(c))
 }
 
-/// Expand a model-local AABB into a world-space AABB after applying
-/// the model matrix. 1:1 with `legacy::transformed_aabb_bounds`.
 pub fn transformed_aabb_bounds(
     aabb_min: [f32; 3],
     aabb_max: [f32; 3],
@@ -86,8 +78,7 @@ pub fn transformed_aabb_bounds(
     (min, max)
 }
 
-/// Fast slab test against an axis-aligned bounding box. 1:1 with
-/// `legacy::ray_intersects_aabb`.
+/// Fast slab test against an axis-aligned bounding box.
 #[cfg_attr(not(test), expect(dead_code, reason = "Test-only helper"))]
 pub fn ray_intersects_aabb(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> bool {
     let eps = 1e-6;
@@ -139,8 +130,7 @@ pub fn cursor_logical_to_world_2d(
     Some(Vec2::new(world_3d.x, world_3d.y))
 }
 
-/// Process a press / release event. Mirrors
-/// `legacy::update_drag_state`'s first half.
+/// Process a press / release event.
 ///
 /// - `Pressed` + `cursor_over_character` → start drag, return
 ///   `DragAction::Started`. The current cursor world position is
@@ -174,8 +164,7 @@ pub const fn on_press_or_release(
     }
 }
 
-/// Apply the per-frame drag delta. Mirrors `legacy::update_drag_state`'s
-/// second half: when the user is dragging, integrate
+/// Apply the per-frame drag delta: when the user is dragging, integrate
 /// `(cursor_world_pos - last_cursor_world_pos).extend(0.0)` into
 /// `character_position` and update the stored origin.
 ///
@@ -369,10 +358,9 @@ mod tests {
     fn cursor_logical_to_world_2d_at_viewport_center_returns_eye() {
         // For the ortho camera the cursor at the viewport center
         // projects onto the camera's local z=0 plane, which in
-        // world space passes through the eye. This matches the
-        // legacy `Camera::viewport_to_world_2d` semantics; the
-        // drag system only cares about the *delta* between two
-        // samples, not the absolute value.
+        // world space passes through the eye. The drag system only
+        // cares about the *delta* between two samples, not the
+        // absolute value.
         let world = cursor_logical_to_world_2d(
             Vec2::new(320.0, 240.0),
             (640, 480),

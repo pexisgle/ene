@@ -1,4 +1,4 @@
-//! MMR diversification for hybrid recall candidates (#78).
+//! MMR diversification for hybrid recall candidates.
 //!
 //! Downstream recall execution calls [`MemoryDiversifyPipeline::diversify`] after
 //! `MemoryStore::search`.

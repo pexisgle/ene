@@ -292,8 +292,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ene-browser-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        // A freshly created dir has mtime ≈ now, well within the 5-min
-        // threshold, so sweep must not delete it.
         BrowserSessionStore::sweep_stale_dirs();
         assert!(dir.exists(), "fresh dir must survive sweep");
 

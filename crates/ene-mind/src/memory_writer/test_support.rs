@@ -1,4 +1,4 @@
-//! Lightweight in-memory [`MemoryPort`] test double (#270).
+//! Lightweight in-memory [`MemoryPort`] test double.
 //!
 //! Exists so cognitive-logic tests (arbiter decisions, recall scoring,
 //! forgetting) can run against `&dyn MemoryPort` without touching `SQLite` —
@@ -294,7 +294,6 @@ impl MemoryPort for InMemoryMemoryPort {
                 })
                 .map(|(i, _)| i)
                 .collect();
-            // Oldest first; drop the overflow beyond the cap.
             indices.sort_by(|&a, &b| pending[a].created_at.cmp(&pending[b].created_at));
             if indices.len() > max_per_character {
                 let overflow = indices.len() - max_per_character;
@@ -336,7 +335,7 @@ impl MemoryPort for InMemoryMemoryPort {
         Ok(Vec::new())
     }
 
-    // ── Affect state (#309) ────────────────────────────────────────────────
+    // ── Affect state ────────────────────────────────────────────────────────
 
     async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError> {
         Ok(AffectState::neutral(character_id))
@@ -354,7 +353,7 @@ impl MemoryPort for InMemoryMemoryPort {
         Ok(None)
     }
 
-    // ── Commitment CRUD (#309) ─────────────────────────────────────────────
+    // ── Commitment CRUD ─────────────────────────────────────────────────────
 
     async fn insert_commitment(&self, _new: &NewCommitment) -> Result<i64, MemoryPortError> {
         Ok(self.alloc_id())
@@ -384,7 +383,7 @@ impl MemoryPort for InMemoryMemoryPort {
         Ok(0)
     }
 
-    // ── Pending memory writes (#309) ───────────────────────────────────────
+    // ── Pending memory writes ───────────────────────────────────────────────
 
     async fn enqueue_pending_memory_write(
         &self,
@@ -417,7 +416,7 @@ impl MemoryPort for InMemoryMemoryPort {
         )))
     }
 
-    // ── Memory spans / compression (#309) ──────────────────────────────────
+    // ── Memory spans / compression ──────────────────────────────────────────
 
     async fn insert_memory_span(&self, _span: &NewMemorySpan) -> Result<i64, MemoryPortError> {
         Ok(self.alloc_id())
@@ -549,7 +548,6 @@ mod tests {
         assert_eq!(removed, 2);
 
         let remaining = port.pending_candidates();
-        // 3 pending survivors + the untouched approved row.
         assert_eq!(remaining.len(), 4);
         let mut pending_titles: Vec<_> = remaining
             .iter()

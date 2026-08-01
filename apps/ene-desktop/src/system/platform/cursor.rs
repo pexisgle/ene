@@ -1,15 +1,14 @@
 //! Per-frame cursor state write.
 //!
-//! Phase 8 made the cursor source single-source-of-truth: the
-//! `device_query` global mouse position is read in
-//! `update_char_window_cursor_and_hittest` (in `runtime.rs`)
-//! and converted to window-local coordinates. The
-//! `update_cursor_state_system` is intentionally a no-op kept
-//! as a documented seam for any future migration that wants to
-//! route cursor state through bevy.
+//! The `device_query` global mouse position is the cursor source of
+//! truth: it is read in `update_char_window_cursor_and_hittest` (in
+//! `runtime.rs`) and converted to window-local coordinates.
+//! `update_cursor_state_system` is intentionally a no-op kept as a
+//! documented seam for any future migration that wants to route
+//! cursor state through bevy.
 //!
-//! `CursorState` is still a bevy `Resource` and is populated by
-//! the F3 collider overlay's per-frame `update_char_window_cursor_and_hittest`
+//! `CursorState` is still a bevy `Resource` and is populated by the
+//! F3 collider overlay's per-frame `update_char_window_cursor_and_hittest`
 //! indirectly (via `apply_linux_click_through_system` reading
 //! the resource on Linux).
 use bevy_ecs::prelude::*;
@@ -19,13 +18,13 @@ use crate::resource::cursor_state::CursorState;
 
 /// Intentionally a no-op.
 ///
-/// Phase 8 picks `device_query` (a global screen coordinate) as
-/// the cursor source of truth for the click-through test because
+/// `device_query` (a global screen coordinate) is the cursor
+/// source of truth for the click-through test because
 /// winit 0.30's `WindowEvent::CursorMoved` on Wayland is not
 /// reliable on all compositors. This system keeps its signature
-/// and slot in `AppSet::Input` so the migration is local: a
-/// future Phase can re-introduce the `PointerMoved` reader
-/// without changing the plugin wiring.
+/// and slot in `AppSet::Input` so a future migration can
+/// re-introduce the `PointerMoved` reader without changing the
+/// plugin wiring.
 pub const fn update_cursor_state_system(
     _events: MessageReader<PointerMoved>,
     _cursor: ResMut<CursorState>,
@@ -64,8 +63,8 @@ mod tests {
             logical_y: -7.0,
         });
         step_world(&mut world);
-        // Phase 8: device_query wins. PointerMoved must NOT
-        // overwrite the cursor state.
+        // device_query wins. PointerMoved must NOT overwrite the
+        // cursor state.
         assert!(world.resource::<CursorState>().physical.is_none());
     }
 }

@@ -85,7 +85,7 @@ impl From<&str> for TurnId {
     }
 }
 
-/// Who initiated a turn (#103 proactive speech).
+/// Who initiated a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnOrigin {

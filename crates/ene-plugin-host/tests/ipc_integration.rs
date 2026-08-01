@@ -706,7 +706,7 @@ async fn handshake_delivers_config_and_profiles() {
     cleanup_path(&socket_path);
 }
 
-// ── Test: Handshake timeout (issue #430) ─────────────────────────────────
+// ── Test: Handshake timeout ─────────────────────────────────────────────
 
 #[tokio::test]
 async fn handshake_times_out_when_plugin_never_responds() {

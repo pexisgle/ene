@@ -3,27 +3,17 @@
 //! Consumes [`SettingsActionEvent`] messages (written by the
 //! winit hotkey handlers via
 //! [`crate::runtime::Runtime::dispatch_settings_action`])
-//! and applies the matching arm.
+//! and drains them.
 //!
-//! Phase 7.1 scope: the system is a **drain** that records
-//! the per-frame action count for the runtime. The actual
-//! per-action work continues to happen in
+//! The actual per-action work happens in
 //! [`apply_action`](crate::settings_ui::widgets::apply_action)
-//! called from `runtime.rs::dispatch_settings_action` so the
-//! existing `&mut CharacterSettings` access path is
-//! preserved.
+//! called from `runtime.rs::dispatch_settings_action`; the
+//! `&mut CharacterSettings` access path lives there.
 //!
-//! Future work (Phase 8) rewrites the page-render code
-//! (`page_character.rs` etc.) to write
-//! `SettingsActionEvent` messages instead of calling
-//! `apply_action` directly, at which point the
-//! `dispatch_settings_action` legacy call site is removed
-//! and the dispatcher becomes the single source of truth.
-//!
-//! The runtime still writes one `SettingsActionEvent` per
-//! hotkey press; this system drains the queue so a stale
-//! event does not survive a `RedrawRequested` double-fire
-//! (winit 0.30's behaviour on Windows).
+//! The runtime writes one `SettingsActionEvent` per hotkey
+//! press; this system drains the queue so a stale event does
+//! not survive a `RedrawRequested` double-fire (winit 0.30's
+//! behaviour on Windows).
 use bevy_ecs::prelude::*;
 
 use crate::event::ui_action::SettingsActionEvent;
@@ -31,8 +21,8 @@ use crate::event::ui_action::SettingsActionEvent;
 /// Drain every `SettingsActionEvent` queued this frame.
 ///
 /// The runtime's `dispatch_settings_action` writes one
-/// `SettingsActionEvent` and then immediately calls the
-/// legacy `apply_action` so the per-frame mutation lands on
+/// `SettingsActionEvent` and then immediately calls
+/// `apply_action` so the per-frame mutation lands on
 /// `AppState::settings`. This system exists so the message
 /// bus does not accumulate unread events.
 pub fn apply_settings_action_system(mut events: MessageReader<SettingsActionEvent>) {

@@ -6,7 +6,7 @@ use llama_cpp_4::mtmd::MtmdContext;
 use once_cell::sync::OnceCell;
 
 /// Cache *success* only. A `std::sync::OnceLock<Result<LlamaBackend, String>>`
-/// (the previous design) permanently remembers an initialization failure —
+/// would permanently remember an initialization failure —
 /// one transient GPU-init hiccup would disable local inference for the rest
 /// of the process. `once_cell::sync::OnceCell::get_or_try_init` gives the
 /// same "run the initializer exactly once, block concurrent callers until it

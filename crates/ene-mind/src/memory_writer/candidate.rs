@@ -59,7 +59,7 @@ pub struct TurnInput<'a> {
 
 /// A candidate memory extracted from a conversation turn.
 ///
-/// This is an intermediate representation — the Memory Arbiter (#75) will
+/// This is an intermediate representation — the Memory Arbiter will
 /// decide whether to persist it, merge it with existing memories, or discard it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryCandidate {

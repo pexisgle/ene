@@ -6,7 +6,7 @@
 //!
 //! ## Spec
 //!
-//! [VRMC_springBone-1.0](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_springBone-1.0)
+//! [`VRMC_springBone-1.0`](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_springBone-1.0)
 //! defines:
 //!
 //! - **Colliders**: sphere or capsule shapes attached to nodes.
@@ -514,7 +514,6 @@ impl SpringBoneSimulator {
             .map(|(chain, chain_state)| {
                 let mut updated_rotations = HashMap::new();
 
-                // Collect colliders for this chain
                 let mut chain_colliders: Vec<(usize, &SpringBoneShape)> = Vec::new();
                 for &cg_idx in &chain.collider_group_indices {
                     if let Some(cg) = props.collider_groups.get(cg_idx) {
@@ -898,7 +897,6 @@ mod tests {
         assert_eq!(props.springs[0].joints[0].node, 10);
         assert_eq!(props.springs[0].joints[1].node, 11);
         assert_eq!(props.springs[0].joints[2].node, 12);
-        // Defaults
         assert!((props.springs[0].joints[0].hit_radius - DEFAULT_HIT_RADIUS).abs() < 1e-6);
         assert!((props.springs[0].joints[0].stiffness - DEFAULT_STIFFNESS).abs() < 1e-6);
         assert!((props.springs[0].joints[0].gravity_power - DEFAULT_GRAVITY_POWER).abs() < 1e-6);
@@ -1000,7 +998,6 @@ mod tests {
 
         assert_eq!(sim.chains.len(), 1);
         assert_eq!(sim.chains[0].joints.len(), 2);
-        // First joint's current_tail should be at child's rest position
         let tail = sim.chains[0].joints[0].current_tail;
         assert!((tail - Vec3::new(0.0, 0.5, 0.0)).length() < 1e-5);
     }
@@ -1068,7 +1065,6 @@ mod tests {
         // With no gravity and stiffness=1, the joint should stay near rest
         assert!(updated.contains_key(&0));
         let new_rot = updated[&0];
-        // Rotation should be near identity (no forces applied)
         assert!(new_rot.angle_between(Quat::IDENTITY) < 0.1);
     }
 

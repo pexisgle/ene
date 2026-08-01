@@ -1951,10 +1951,10 @@ mod tests {
         );
     }
 
-    /// #313: the host-opaque `plugins.list.<name>.config` / `.profiles` blobs
-    /// are stored and restored verbatim through a load → save → load
-    /// round-trip, so the host never drops plugin-owned settings (including
-    /// keys it does not understand) when persisting.
+    /// Host-opaque `plugins.list.<name>.config` / `.profiles` blobs are stored
+    /// and restored verbatim through a load → save → load round-trip, so the
+    /// host never drops plugin-owned settings (including keys it does not
+    /// understand) when persisting.
     #[test]
     fn plugins_list_config_and_profiles_round_trip_verbatim() {
         let _guard = migration_guard();
@@ -2017,7 +2017,7 @@ mod tests {
         );
     }
 
-    /// #313: the `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>` env override path
+    /// The `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>` env override path
     /// (single plugin-config key) must keep resolving into the nested
     /// `plugins.list.<name>.config` blob.
     #[test]

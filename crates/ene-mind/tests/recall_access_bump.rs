@@ -1,4 +1,4 @@
-//! Engine-level integration test for the recall access bump (#345).
+//! Engine-level integration test for the recall access bump.
 //!
 //! The bump is gated on `PromptPacketMeta::injected_memory_ids` — the recalled
 //! memories actually composed into the packed prompt. These tests run the full
@@ -90,9 +90,9 @@ async fn insert_memory(
 
 /// Build a config for the packing tests.
 ///
-/// Per-section budgets are gone (#370); the packing budget is injected
-/// directly via `TurnContext::packing_budget_override` in [`compose`], so the
-/// config only needs its defaults.
+/// The packing budget is injected directly via
+/// `TurnContext::packing_budget_override` in [`compose`], so the config only
+/// needs its defaults.
 fn test_config() -> MindConfig {
     MindConfig {
         context: ContextConfig::default(),
@@ -104,7 +104,7 @@ fn test_config() -> MindConfig {
 ///
 /// `packing_budget` is injected via `TurnContext::packing_budget_override` so
 /// the drop/trim behaviour is deterministic and independent of the global AI
-/// config or a live provider (#370).
+/// config or a live provider.
 async fn compose(
     engine: &CognitionEngine,
     config: &MindConfig,
@@ -171,7 +171,7 @@ async fn injected_memories_are_bumped_when_section_fits() {
     let engine = CognitionEngine::new();
 
     // Two episodic memories in the same section. With a generous budget the
-    // whole section fits, so both are injected and bumped (#345).
+    // whole section fits, so both are injected and bumped.
     let first_id = insert_memory(
         &store,
         MemoryKind::Episodic,

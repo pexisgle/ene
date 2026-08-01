@@ -1,6 +1,6 @@
 //! VRMC_vrm_animation-1.0 (VRMA) parser, playback engine, and retargeting.
 //!
-//! loads `.vrma` files (glTF binary with the
+//! Loads `.vrma` files (glTF binary with the
 //! `VRMC_vrm_animation` extension) and provides a per-frame
 //! evaluator that samples bone rotations, expression weights,
 //! and look-at gaze direction at an arbitrary time.

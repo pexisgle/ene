@@ -1,4 +1,4 @@
-//! Proactive companion speech decision pipeline (#103 / #164).
+//! Proactive companion speech decision pipeline.
 //!
 //! Builds a normalized [`ProactiveContext`], applies deterministic gates, asks a
 //! lightweight LLM for structured JSON only, and fail-closes on any error.
@@ -27,21 +27,21 @@ use crate::lifecycle::HistoryEntry;
 pub struct ActivitySnapshot {
     /// Seconds since the last OS activity signal when available.
     pub idle_seconds: Option<u64>,
-    /// Privacy-aware label for the focused window (#378).
+    /// Privacy-aware label for the focused window.
     ///
     /// Depending on the configured `mind.proactive.sources.window_title_level`
     /// this is the app name only, the app name plus a redacted window title,
     /// or the app name plus the raw title. It is re-redacted defensively in
     /// [`build_proactive_context`] before reaching the decision prompt.
     pub active_window_label: String,
-    /// Short description of the change since the previous observation (#378).
+    /// Short description of the change since the previous observation.
     ///
     /// Empty when nothing changed; otherwise a phrase such as
     /// `"focused firefox"` or `"switched from firefox to code"`.
     pub recent_change: String,
 }
 
-/// Screen summary availability from the host (#168).
+/// Screen summary availability from the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenSummaryStatus {
@@ -54,7 +54,7 @@ pub enum ScreenSummaryStatus {
     Available,
 }
 
-/// Host-supplied observation used to build decision context (#166 / #168).
+/// Host-supplied observation used to build decision context.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProactiveObservation {
     /// When this observation was captured (unix millis).

@@ -1,4 +1,4 @@
-//! Custom panic hook that surfaces a localized dialog and log location (#242).
+//! Custom panic hook that surfaces a localized dialog and log location.
 
 use std::panic::PanicHookInfo;
 use std::path::PathBuf;

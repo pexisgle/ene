@@ -18,7 +18,6 @@ pub struct VisemeDriver {
     /// Analyzer sized to the most recently observed sample rate.
     /// `None` until the first PCM chunk arrives.
     analyzer: Option<VisemeAnalyzer>,
-    /// Sample rate the current [`Self::analyzer`] was built for.
     sample_rate: u32,
 }
 
@@ -48,7 +47,6 @@ impl VisemeDriver {
         self.analyzer.as_mut().map(VisemeAnalyzer::analyze)
     }
 
-    /// Clear the buffered audio and reset the smoothed weights.
     pub fn reset(&mut self) {
         if let Some(analyzer) = self.analyzer.as_mut() {
             analyzer.reset();

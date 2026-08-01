@@ -39,7 +39,7 @@ impl PartialEq for ApiKeyConfig {
 }
 
 ene_config::define_label_enum!(
-    /// GPU / CPU acceleration preference for local llama.cpp (#165).
+    /// GPU / CPU acceleration preference for local llama.cpp.
     pub enum ProactiveAcceleration {
         /// Pick from OS / available backends / startup result.
         #[default]
@@ -73,7 +73,7 @@ pub struct AiProviderDef {
     /// API key configuration.
     #[serde(default)]
     pub api_key: ApiKeyConfig,
-    /// Explicit context-window override in tokens (#364).
+    /// Explicit context-window override in tokens.
     ///
     /// Caps the window a provider advertises (`LlmProviderSpec.context_window`,
     /// or `LocalModelDef.context_size` for local models): the effective window
@@ -115,7 +115,7 @@ pub fn is_builtin_kind(kind: &str) -> bool {
     BUILTIN_PROVIDER_KINDS.contains(&kind)
 }
 
-/// Suggests a built-in kind when `kind` looks like a typo of one (#C3).
+/// Suggests a built-in kind when `kind` looks like a typo of one.
 ///
 /// Returns the closest built-in kind when the edit distance is small enough to
 /// indicate a likely typo (e.g. `"openai_compatable"` → `"openai_compatible"`,
@@ -233,16 +233,15 @@ fn default_gpu_layers() -> String {
     "auto".to_string()
 }
 
-/// Default context window for a local model, in tokens (#366).
+/// Default context window for a local model, in tokens.
 ///
-/// Calibrated to hold the system's own default prompt budget with room left
-/// for the model's reply. The previous default (2,048) was sized for small
-/// decision tasks (classification, proactive triggers) and silently dropped
-/// most prompt sections once a local model was assigned to `tasks.chat`,
-/// whose full conversation prompt needs on the order of 12,000 tokens. (#370
-/// later removed the fixed `mind.context.max_prompt_tokens` budget — the
-/// prompt now auto-follows the model's window — but 16,384 remains a
-/// comfortable floor for a full conversation prompt plus reply.)
+/// Calibrated to hold the full main-conversation prompt, which needs on the
+/// order of 12,000 tokens when a local model backs `tasks.chat`, with room
+/// left for the model's reply. The prompt auto-follows the model's window —
+/// no separate prompt-token budget caps it — so a window sized only for small
+/// decision tasks (classification, proactive triggers) silently drops most
+/// prompt sections; 16,384 is a comfortable floor for a full conversation
+/// prompt plus reply.
 ///
 /// 16,384 is deliberately chosen over 32,768: llama.cpp's KV cache grows
 /// linearly with context length, so for a `Gemma-3-4B`-class model (34 layers,
@@ -420,7 +419,7 @@ impl Default for VadConfig {
     }
 }
 
-/// Retry / backoff policy for transient provider failures (#237).
+/// Retry / backoff policy for transient provider failures.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -459,7 +458,7 @@ impl RetryConfig {
     }
 }
 
-/// Provider health-check and failover policy (#175).
+/// Provider health-check and failover policy.
 ///
 /// When `enabled`, the runtime probes each configured cloud provider's
 /// `/models` endpoint (with a timeout, sending no user data) and selects the
@@ -504,7 +503,7 @@ ene_config::define_config!(
         pub tasks: AiTasksConfig,
         /// Retry / backoff policy for transient provider failures.
         pub retry: RetryConfig,
-        /// Provider health-check and failover policy (#175).
+/// Provider health-check and failover policy.
         pub fallback: FallbackConfig,
         /// TTS (text-to-speech) provider settings.
         pub tts: TtsConfig,
@@ -550,8 +549,8 @@ mod tests {
 
     #[test]
     fn local_model_default_context_size_is_16k() {
-        // #366: the default must hold the 12,000-token prompt budget plus a
-        // response reserve, not the old decision-only 2,048.
+        // The default must hold the 12,000-token prompt budget plus a
+        // response reserve.
         assert_eq!(default_context_size(), 16_384);
         assert_eq!(LocalModelDef::default().context_size, 16_384);
     }
@@ -704,7 +703,6 @@ mod tests {
 
     #[test]
     fn kind_typo_suggestion_catches_near_misses() {
-        // Hyphen vs underscore and single-character typos of built-ins.
         assert_eq!(
             kind_typo_suggestion("openai-compatible"),
             Some("openai_compatible")
@@ -718,10 +716,8 @@ mod tests {
 
     #[test]
     fn kind_typo_suggestion_ignores_builtin_and_plugin_kinds() {
-        // Already built-in: no suggestion.
         assert_eq!(kind_typo_suggestion("openai_compatible"), None);
         assert_eq!(kind_typo_suggestion("anthropic"), None);
-        // Genuinely different plugin kinds: no suggestion.
         assert_eq!(kind_typo_suggestion("my-custom-plugin"), None);
         assert_eq!(kind_typo_suggestion("gemini"), None);
     }

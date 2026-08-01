@@ -11,7 +11,6 @@ use std::sync::Arc;
 /// silently dropping patterns (which would cause index mismatch).
 type CompiledBlocklist = Result<Vec<(regex::Regex, String)>, String>;
 
-/// Sandbox settings — allowed directories and restrictions
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     pub enabled: bool,
@@ -71,7 +70,6 @@ impl Default for SandboxConfig {
 }
 
 impl SandboxConfig {
-    /// Normalizes the path and checks permissions
     pub fn resolve_and_check(
         &self,
         path: &Path,
@@ -195,7 +193,6 @@ impl SandboxConfig {
         Ok(())
     }
 
-    /// Checks permissions for destructive operations
     pub fn check_permission(
         &self,
         action: DestructiveAction,
@@ -352,28 +349,24 @@ impl Sandbox {
         *guard = None;
     }
 
-    /// Adds an approved request ID
     pub fn approve_request(&self, request_id: &str) {
         if let Ok(mut guard) = self.approved_requests.write() {
             guard.insert(request_id.to_string());
         }
     }
 
-    /// Adds an action + target pattern combination
     pub fn allow_pattern(&self, action: &str, target_pattern: &str) {
         if let Ok(mut guard) = self.allowed_patterns.write() {
             guard.insert((action.to_string(), target_pattern.to_string()));
         }
     }
 
-    /// Revokes a previously granted session-wide allow pattern (#177).
     pub fn revoke_pattern(&self, action: &str, target_pattern: &str) {
         if let Ok(mut guard) = self.allowed_patterns.write() {
             guard.remove(&(action.to_string(), target_pattern.to_string()));
         }
     }
 
-    /// Permission check for destructive operations
     pub fn check_permission(
         &self,
         action: DestructiveAction,
@@ -419,22 +412,18 @@ impl Sandbox {
         }
     }
 
-    /// Read path validation
     pub fn check_readable(&self, path: &Path) -> Result<PathBuf, ToolError> {
         self.config.resolve_and_check(path, false)
     }
 
-    /// Write path validation
     pub fn check_writable(&self, path: &Path) -> Result<PathBuf, ToolError> {
         self.config.resolve_and_check(path, true)
     }
 
-    /// Command validation
     pub fn check_command(&self, cmd: &str) -> Result<(), ToolError> {
         self.config.is_command_blocked(cmd)
     }
 
-    /// Records overwrite of an existing file
     pub async fn track_overwrite(&self, path: &Path, original_content: Option<Vec<u8>>) {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
@@ -447,7 +436,6 @@ impl Sandbox {
             .await;
     }
 
-    /// Records creation of a new file
     pub async fn track_creation(&self, path: &Path) {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
@@ -460,7 +448,6 @@ impl Sandbox {
             .await;
     }
 
-    /// Records file deletion
     pub async fn track_deletion(&self, path: &Path, original_content: Option<Vec<u8>>) {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
@@ -473,7 +460,6 @@ impl Sandbox {
             .await;
     }
 
-    /// Records a patch application (multiple file operations in one Undo entry)
     pub async fn track_patch(&self, operations: Vec<crate::undo::UndoOperation>) {
         let mgr = match self.ensure_undo_manager().await {
             Ok(m) => m,
@@ -488,7 +474,6 @@ impl Sandbox {
         }
     }
 
-    /// Undoes the most recent operation
     pub async fn undo_last(&self) -> Result<String, ToolError> {
         let mgr = self.ensure_undo_manager().await?;
         let entry = mgr

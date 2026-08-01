@@ -33,9 +33,9 @@ use crate::lifecycle::PostTurnInput;
 
 /// Optional providers for LLM extraction and semantic deduplication.
 pub struct MemoryWriteProviders<'a> {
-    /// LLM provider for optional memory candidate extraction (#66).
+    /// LLM provider for optional memory candidate extraction.
     pub llm: Option<&'a dyn LlmProvider>,
-    /// Embedding provider for pre-arbitration semantic duplicate detection (#75).
+    /// Embedding provider for pre-arbitration semantic duplicate detection.
     pub embedder: Option<&'a dyn EmbeddingProvider>,
 }
 
@@ -68,7 +68,7 @@ impl MemoryWriter {
     /// fallbacks reach the arbiter.
     ///
     /// Returns the number of memory candidates deferred to the user-approval
-    /// queue (#174) during this turn, so callers can notify the UI.
+    /// queue during this turn, so callers can notify the UI.
     pub async fn write_memories(
         store: &dyn MemoryPort,
         config: &MindConfig,
@@ -208,7 +208,7 @@ impl MemoryWriter {
         }
 
         // Tag every candidate from an interrupted (barge-in / cancelled) turn so
-        // downstream consumers can distinguish partial episodes (#206).
+        // downstream consumers can distinguish partial episodes.
         if input.interrupted {
             for (candidates, _) in &mut batches {
                 for candidate in candidates.iter_mut() {

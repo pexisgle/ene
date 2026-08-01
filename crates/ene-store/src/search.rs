@@ -1,9 +1,9 @@
-//! Hybrid memory search scoring — re-exported from `ene-rag` (#302).
+//! Hybrid memory search scoring — re-exported from `ene-rag`.
 //!
 //! The scoring policy (weighted hybrid scoring, recency decay, lexical overlap)
-//! moved to `ene-rag` as part of the RAG policy-layer separation. Only the items
-//! store code still reaches through a `crate::search::*` path are re-exported
-//! here, at the narrowest visibility that keeps those paths working:
+//! lives in `ene-rag` (the RAG policy layer). Only the items store code reaches
+//! through a `crate::search::*` path are re-exported here, at the narrowest
+//! visibility that keeps those paths working:
 //!
 //! - `document_lexical_similarity` stays `pub` — it is genuinely public
 //!   (re-exported at the crate root).

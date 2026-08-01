@@ -1,11 +1,10 @@
 //! Declared engine capability, concurrency, and resource metadata.
 //!
-//! Before this module, capability was discovered by trial and error:
-//! `LocalLlamaCppProvider::create_chat_stream` returned a runtime error if
-//! `tools` was non-empty, and `supports_vision()` was an inherent method not
-//! on any trait, so callers had to know the concrete provider type. An
-//! [`EngineDescriptor`] replaces that with an upfront declaration the blanket
-//! adapters in this module can act on generically.
+//! Capability is declared up front by each engine rather than discovered by
+//! trial and error at runtime (a runtime error when `tools` is non-empty, or
+//! inherent methods that force callers to know the concrete provider type).
+//! An [`EngineDescriptor`] lets the blanket adapters in this module act on
+//! capability generically.
 
 use std::collections::HashMap;
 
@@ -156,16 +155,14 @@ impl Default for ConcurrencyHint {
 /// declares `ResourceClass::Gpu { device: 0 }` — no change to callers or to
 /// engines already using that class.
 ///
-/// `Cpu` deliberately carries no field. An earlier revision used
-/// `Cpu { threads: u32 }` and relied on two engines picking different
-/// numbers to avoid sharing a semaphore — that made a capacity question
-/// (how many CPU-bound jobs may run at once) masquerade as an identity
-/// question (are these the same resource), which does not scale: every new
-/// CPU engine had to pick an unused magic number, and retuning an existing
-/// engine's thread count would silently change what it shares a budget
-/// with. All CPU-bound local engines now declare the same `Cpu` value and
-/// share one process-wide budget; how large that budget is (whether two
-/// independent CPU engines may run concurrently at all) is controlled by
+/// `Cpu` deliberately carries no field — a distinguishing number would make
+/// a capacity question (how many CPU-bound jobs may run at once) masquerade
+/// as an identity question (are these the same resource): every new CPU
+/// engine would have to pick an unused magic number, and retuning an
+/// engine's thread count would silently change what it shares a budget with.
+/// All CPU-bound local engines declare the same `Cpu` value and share one
+/// process-wide budget; how large that budget is (whether two independent
+/// CPU engines may run concurrently at all) is controlled by
 /// [`crate::engine_adapter::resource::default_permits`] /
 /// [`crate::engine_adapter::resource::ResourceRegistry::configure_all`], not
 /// by this type.

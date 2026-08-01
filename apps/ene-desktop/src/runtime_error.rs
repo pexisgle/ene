@@ -1,4 +1,4 @@
-//! User-facing runtime error messages mapped to localized Fluent strings (#242).
+//! User-facing runtime error messages mapped to localized Fluent strings.
 
 use ene_runtime::EneRuntimeError;
 
@@ -48,7 +48,7 @@ pub fn user_message(error: &EneRuntimeError) -> String {
         ),
         EneRuntimeError::Ai(err) => user_message_from_ai(err),
         // The actor rejected a background task (direct tool call / search)
-        // because its bounded queue was already full (Stage 8) — the
+        // because its bounded queue was already full — the
         // request was never attempted, so retrying shortly is the right
         // user action, same framing as the AI-provider `Busy` copy above.
         EneRuntimeError::Busy { .. } => {
@@ -89,7 +89,7 @@ fn user_message_from_ai(error: &ene_ai::AiError) -> String {
             ),
             // `Busy` covers both a saturated local `ene-infer` engine queue
             // and a plugin-supplied provider's `ConcurrencyHint` admission
-            // control rejecting a request (#stage6) — either way, the
+            // control rejecting a request — either way, the
             // request was never attempted and retrying shortly is the right
             // user action, so it gets its own copy rather than folding into
             // the generic provider-error bucket below.

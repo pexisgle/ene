@@ -1,4 +1,4 @@
-//! Diagnostics facade for opt-in pipeline and memory APIs (#111, #406).
+//! Diagnostics facade for opt-in pipeline and memory APIs.
 //!
 //! Chat-critical events stay on [`crate::EneEvent`]. This facade is strictly
 //! *observability*: pipeline phases/metrics, provider health/fallback
@@ -6,7 +6,7 @@
 //! character-card swap ([`crate::EneHandle::set_character`]), manual context
 //! compression ([`crate::EneHandle::compress_context`]), and tool
 //! operations ([`crate::EneHandle::tools`]) — moved back onto
-//! [`crate::EneHandle`] itself (#406).
+//! [`crate::EneHandle`] itself.
 //!
 //! The memory surface (`MemoryHandle`) is the one mutation-capable part of
 //! this facade (pin/status/restore/forget, commitment lifecycle, pending-write
@@ -31,7 +31,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// pin/status/restore/forget mutations, commitment lifecycle
 /// (complete/cancel), pending-write inspection and drain, and store
 /// backup/integrity diagnostics are part of its surface, which is why the
-/// type is named [`MemoryHandle`] rather than a "query" handle (#406).
+/// type is named [`MemoryHandle`] rather than a "query" handle.
 ///
 /// The raw `MemoryStore` is intentionally not exposed (`store()` was removed);
 /// every operation routes through the facade's own methods and
@@ -147,7 +147,7 @@ impl MemoryHandle {
         .map_err(EneRuntimeError::from)
     }
 
-    /// Search typed memories and attach explainable recall reasons (#74 / #123).
+    /// Search typed memories and attach explainable recall reasons.
     pub async fn search_typed_memories_explained(
         &self,
         character_id: &str,
@@ -637,7 +637,7 @@ pub enum DiagnosticEvent {
         /// Map of phase names to elapsed time in milliseconds.
         timings: HashMap<String, u64>,
     },
-    /// A panic was caught and contained by the actor supervisor (#236).
+    /// A panic was caught and contained by the actor supervisor.
     ///
     /// The actor loop survives per-command panics; this event surfaces them
     /// for diagnostics instead of crashing the process or losing the panic.
@@ -647,7 +647,7 @@ pub enum DiagnosticEvent {
         /// Best-effort panic message.
         message: String,
     },
-    /// A tool health/lifecycle event from the tool host supervisor (#238).
+    /// A tool health/lifecycle event from the tool host supervisor.
     ///
     /// Emitted when a tool is detected unhealthy (hung or dead), restarted,
     /// recovered, paused by the circuit breaker, or disabled. `status` is a
@@ -661,7 +661,7 @@ pub enum DiagnosticEvent {
         /// Optional human-readable detail (e.g. unhealthy reason).
         detail: Option<String>,
     },
-    /// A provider health-check result (#175).
+    /// A provider health-check result.
     ///
     /// Emitted after each provider probe so the UI can display the active
     /// provider's connectivity, latency, and last error without polling.
@@ -676,7 +676,7 @@ pub enum DiagnosticEvent {
         /// Optional human-readable error detail.
         detail: Option<String>,
     },
-    /// A provider failover event (#175).
+    /// A provider failover event.
     ///
     /// Emitted when the runtime switches from an unhealthy primary provider
     /// to a fallback so the user is notified that the conversation is
@@ -689,7 +689,7 @@ pub enum DiagnosticEvent {
         /// Reason for the fallback.
         reason: String,
     },
-    /// A deferred memory-write failure or permanent queue warning (#240).
+    /// A deferred memory-write failure or permanent queue warning.
     MemoryWrite {
         /// Character scope for the failed write.
         character_id: String,
@@ -704,7 +704,7 @@ pub enum DiagnosticEvent {
         /// Current permanent failure count for the character (if known).
         permanent_count: Option<u64>,
     },
-    /// A broadcast subscriber lagged and skipped events (#189).
+    /// A broadcast subscriber lagged and skipped events.
     ///
     /// Consumers must not treat the stream as gap-free after this. The lag is
     /// also surfaced synchronously as the
@@ -756,7 +756,7 @@ pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 /// Event receiver for [`DiagnosticEvent`].
 ///
 /// On lag, emits [`DiagnosticEvent::Lagged`] onto the same channel before
-/// returning the lag error (#189). Diagnostics are observability-only, so a
+/// returning the lag error. Diagnostics are observability-only, so a
 /// diagnostics-bus lag needs no state recovery beyond noting the gap.
 pub struct DiagnosticEventReceiver {
     inner: broadcast::Receiver<DiagnosticEvent>,
@@ -804,12 +804,12 @@ impl DiagnosticEventReceiver {
 ///
 /// Observability-only surface: memory/journal inspection, provider health,
 /// diagnostic-event subscription, and actor snapshots. Control operations
-/// (character swap, compression, tools) live on [`crate::EneHandle`] (#406).
+/// (character swap, compression, tools) live on [`crate::EneHandle`].
 pub struct EneDiagnostics {
     pub(crate) cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     pub(crate) diag_tx: broadcast::Sender<DiagnosticEvent>,
     pub(crate) memory: MemoryHandle,
-    /// Provider health monitor for failover diagnostics (#175).
+    /// Provider health monitor for failover diagnostics.
     pub(crate) health_monitor: ene_ai::ProviderHealthMonitor,
 }
 
@@ -827,17 +827,17 @@ impl EneDiagnostics {
         &self.memory
     }
 
-    /// Provider health monitor for failover diagnostics (#175).
+    /// Provider health monitor for failover diagnostics.
     pub const fn health_monitor(&self) -> &ene_ai::ProviderHealthMonitor {
         &self.health_monitor
     }
 
-    /// Snapshot of all cached provider health reports (#175).
+    /// Snapshot of all cached provider health reports.
     pub fn provider_health_reports(&self) -> Vec<ene_ai::ProviderHealthReport> {
         self.health_monitor.all_reports()
     }
 
-    /// Snapshot of recent provider fallback events (#175).
+    /// Snapshot of recent provider fallback events.
     pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
         self.health_monitor.fallback_history()
     }

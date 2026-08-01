@@ -1,4 +1,4 @@
-//! Character processing: CCv3 compilation, Identity Kernel, lorebook indexing (#82–#84).
+//! Character processing: CCv3 compilation, Identity Kernel, lorebook indexing.
 
 mod authors_note;
 mod compiler;
@@ -38,12 +38,12 @@ impl CharacterProcessor {
     ///
     /// `available_window` is the number of prompt tokens the model's context
     /// window leaves for this turn; the kernel budget is derived from it as a
-    /// fraction so larger models carry a fuller definition (#386).
+    /// fraction so larger models carry a fuller definition.
     /// `user_persona`, when provided, expands the `{{user_persona}}` CBS macro
-    /// in card-derived fields (#H-3).
+    /// in card-derived fields.
     ///
     /// `pick_seed`, when provided, keeps `{{pick}}` stable for the lifetime of
-    /// the chat instead of re-rolling on each per-turn recompilation (#343);
+    /// the chat instead of re-rolling on each per-turn recompilation;
     /// derive it with [`ene_config::session_pick_seed`].
     pub fn compile_kernel(
         card: &CharacterCardV3,
@@ -59,7 +59,7 @@ impl CharacterProcessor {
     ///
     /// Used when no model window is known (tests and callers outside a live
     /// turn); the budget is still derived from a window rather than a fixed
-    /// token count (#386).
+    /// token count.
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
         let window = usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX);
         Self::compile_kernel(card, user_name, None, None, window)

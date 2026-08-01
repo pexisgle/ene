@@ -1,15 +1,13 @@
-//! Persistent pending memory-candidate approval queue (#420).
+//! Persistent pending memory-candidate approval queue.
 //!
-//! Replaces the previous in-memory `Vec<PendingCandidate>` so candidates
-//! survive restarts and are shared across `MemoryStore` instances on the
-//! same database. Follows the `pending_memory_writes` "pending queue"
-//! conventions: `user_id` defaults to `''`, and `created_at` is a
-//! `timestamp_with_time_zone` so the retention sweep can compare it in SQL
-//! exactly like `pending_memory_writes.next_retry_at`. (The issue sketched
-//! `created_at TEXT`; the timestamptz column is chosen instead because it is
-//! the repo's proven pattern for datetime columns filtered in SQL.) Both the
-//! table and index are created `IF NOT EXISTS` so the migration is additive
-//! and idempotent.
+//! Candidates persist so they survive restarts and are shared across
+//! `MemoryStore` instances on the same database. Follows the
+//! `pending_memory_writes` "pending queue" conventions: `user_id` defaults to
+//! `''`, and `created_at` is a `timestamp_with_time_zone` rather than `TEXT`
+//! because timestamptz is the repo's proven pattern for datetime columns
+//! filtered in SQL (the retention sweep compares it like
+//! `pending_memory_writes.next_retry_at`). Both the table and index are
+//! created `IF NOT EXISTS` so the migration is additive and idempotent.
 //!
 //! The composite index is `(character_id, status, created_at)`: it covers the
 //! retention count query's `WHERE character_id = ? AND status = 'pending'
@@ -18,7 +16,7 @@
 
 use sea_orm_migration::prelude::*;
 
-/// Adds the persistent pending memory-candidate approval queue (#420).
+/// Adds the persistent pending memory-candidate approval queue.
 pub struct PendingCandidatesMigration;
 
 impl MigrationName for PendingCandidatesMigration {

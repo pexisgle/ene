@@ -37,7 +37,6 @@ pub struct WebToolProvider {
 }
 
 impl WebToolProvider {
-    /// Creates a new `WebToolProvider` and registers web actions.
     #[expect(
         clippy::expect_used,
         reason = "a default reqwest client silently loses the SSRF redirect policy, timeout, and user agent — failing fast is safer"
@@ -66,13 +65,10 @@ impl WebToolProvider {
             .build()
             .expect("reqwest client builder should not fail");
 
-        // RwLock so the API key can be hot-reloaded by a
-        // reconfigure without restarting the tool
-        // binary. The previous `OnceLock` only allowed
-        // the first `set_config` to take effect; a
-        // user updating their search API key in
-        // settings would have to bounce the entire
-        // process for the new key to be picked up.
+        // RwLock so the API key can be hot-reloaded by a reconfigure
+        // without restarting the tool binary; a `OnceLock` would only
+        // honor the first `set_config`, so updating the search API key
+        // in settings would require restarting the process.
         let config = Arc::new(RwLock::new(WebSearchConfig::default()));
 
         let actions: Vec<Box<dyn ToolAction>> = vec![

@@ -56,7 +56,6 @@ fn main() {
         Some(bin.as_slice())
     };
 
-    // AABB / center / normalize_scale.
     let mut all_positions: Vec<[f32; 3]> = Vec::new();
     for mesh in gltf.document.meshes() {
         for primitive in mesh.primitives() {
@@ -110,7 +109,6 @@ fn main() {
         ]
     );
 
-    // Merged skeleton joint count (PR4.19).
     let mut all_joint_nodes: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for skin in gltf.document.skins() {
         for joint in skin.joints() {
@@ -125,7 +123,6 @@ fn main() {
         total_skin_joints as i64 - all_joint_nodes.len() as i64
     );
 
-    // Auto-fit scale: 2.6 * 0.9 / 1.5 = 1.56.
     let viewport_h = 2.6_f32;
     let margin = 0.9_f32;
     let normalized_max_extent = max_extent * normalize_scale;
@@ -136,7 +133,6 @@ fn main() {
     println!("normalized_max_ext  = {normalized_max_extent}");
     println!("auto_fit_scale      = {auto_fit_scale}");
 
-    // Model matrix (the runtime sends this to the shader).
     let character_position = [0.0_f32, 0.0, 0.0];
     let model_matrix = glam::Mat4::from_translation(character_position.into())
         * glam::Mat4::from_scale(glam::Vec3::splat(auto_fit_scale))
@@ -163,7 +159,6 @@ fn main() {
         model_matrix.x_axis.w, model_matrix.y_axis.w, model_matrix.z_axis.w, model_matrix.w_axis.w
     );
 
-    // Diagonal scale extraction.
     let scale_x = model_matrix
         .z_axis
         .x
@@ -205,7 +200,6 @@ fn main() {
         auto_fit_scale * normalize_scale,
     );
 
-    // World Y range of (0, 0, 0) and (0, 1.65, 0) under the model matrix.
     let feet_raw = glam::Vec3::new(0.0, 0.0, 0.0);
     let head_raw = glam::Vec3::new(0.0, 1.65, 0.0);
     let feet_world = model_matrix.transform_point3(feet_raw);

@@ -1,4 +1,4 @@
-//! Token estimation helpers for context budget management (#81).
+//! Token estimation helpers for context budget management.
 
 /// Approximate characters per token for heuristic budgeting.
 pub const CHARS_PER_TOKEN: usize = 4;
@@ -11,7 +11,7 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(CHARS_PER_TOKEN).max(1)
 }
 
-// Language-aware estimation (#386). The flat [`CHARS_PER_TOKEN`] heuristic is
+// Language-aware estimation. The flat [`CHARS_PER_TOKEN`] heuristic is
 // tuned for English (~4 chars/token); Japanese packs roughly one token per
 // 1–1.5 characters, so counting it at the English ratio under-counts a card by
 // 3–4×. The weights below are expressed in twelfths of a token — the LCM of the
@@ -25,7 +25,7 @@ const CJK_TOKEN_UNITS: usize = 8;
 /// Whole-token divisor for the per-character weights above.
 const TOKEN_UNITS: usize = 12;
 
-/// Whether a character is counted at the denser CJK ratio (#386).
+/// Whether a character is counted at the denser CJK ratio.
 ///
 /// Covers Hiragana, Katakana, CJK ideographs (and their compatibility /
 /// extension blocks), CJK punctuation, and fullwidth forms — the ranges a
@@ -52,7 +52,7 @@ const fn token_units_for(c: char) -> usize {
     }
 }
 
-/// Estimate token count with a language-aware character ratio (#386).
+/// Estimate token count with a language-aware character ratio.
 ///
 /// Unlike [`estimate_tokens`], which assumes a flat [`CHARS_PER_TOKEN`] tuned
 /// for English, this counts CJK characters at ~1.5 chars/token and everything
@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn language_aware_estimate_counts_japanese_denser() {
         // 12 CJK chars at 2/3 token each = 8 tokens, versus the flat
-        // heuristic's 12/4 = 3 — the under-count #386 corrects.
+        // heuristic's 12/4 = 3 — the under-count this estimate corrects.
         let ja = "今日は良い天気ですね元気";
         assert_eq!(ja.chars().count(), 12);
         assert_eq!(estimate_tokens_language_aware(ja), 8);

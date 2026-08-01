@@ -8,7 +8,7 @@
 //!
 //! ## What lives here
 //!
-//! ### Tool types (formerly `ene-tool-proto`)
+//! ### Tool types
 //!
 //! - [`ToolSpec`] / [`ToolName`] / [`ToolRagProfile`] — LLM-facing tool
 //!   schemas and RAG metadata.
@@ -65,7 +65,7 @@ pub mod tool_provider;
 pub mod tool_types;
 /// UDS / Named Pipe transport layer.
 pub mod transport;
-/// Token usage accounting for LLM responses (#365).
+/// Token usage accounting for LLM responses.
 pub mod usage;
 
 /// Capability and provider spec types.

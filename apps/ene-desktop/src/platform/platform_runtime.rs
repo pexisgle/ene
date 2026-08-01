@@ -58,9 +58,8 @@ static FIRST_DISPATCH_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Inputs to [`apply_linux_click_through`].
 ///
-/// Phase 8 lifts every field out of the legacy `state::PlatformState`
-/// (which is now removed) and the `&mut AppState` borrow that
-/// used to be required to read them. Callers either pass
+/// Every field is passed in directly — no shared platform-state
+/// struct or `&mut AppState` borrow is required. Callers either pass
 /// `bevy_ecs::Res<…>` references or, in the non-bevy runtime
 /// path, raw `&Option<Arc<Mutex<…>>>` references.
 #[cfg(target_os = "linux")]

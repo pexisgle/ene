@@ -3,7 +3,7 @@
 //! Owns the [`AiBridgeResource`] / [`ProcessingFlag`]
 //! resources and the per-action AI consumer systems.
 //!
-//! Phase 6 does *not* construct the [`AiBridge`] itself;
+//! This plugin does not construct the [`AiBridge`] itself;
 //! `Runtime::resumed` does that (the bridge needs the
 //! tokio handle and the cross-thread event sender). The
 //! plugin only owns the bevy-side accessors.

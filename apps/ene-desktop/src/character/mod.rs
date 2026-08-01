@@ -48,7 +48,6 @@ pub struct CharacterRenderer {
     vrma: Option<VrmaAsset>,
     vrma_player: VrmaPlayer,
     vrma_path: Option<PathBuf>,
-    /// Resolved asset directory for motion clip lookups (#133).
     assets_dir: Option<PathBuf>,
     active_bone_nodes: Vec<usize>,
     /// Spring-bone simulator. `None` for models without `VRMC_springBone`.
@@ -59,9 +58,7 @@ pub struct CharacterRenderer {
     /// FXAA post-processor. Rebuilt by
     /// [`CharacterRenderer::set_antialiasing_mode`].
     post_processor: Option<PostProcessor>,
-    /// Cached FXAA shader module.
     fxaa_shader: Option<wgpu::ShaderModule>,
-    /// Surface format the post-processor was built against.
     fxaa_format: Option<wgpu::TextureFormat>,
 }
 
@@ -198,7 +195,6 @@ impl CharacterRenderer {
             .and_then(|s| s.to_str())
     }
 
-    /// Set whether the internal VRMA player advances time.
     pub fn set_motion_player_playing(&mut self, playing: bool) {
         self.vrma_player.playing = playing;
     }
@@ -232,12 +228,11 @@ impl CharacterRenderer {
         }
     }
 
-    /// Advance the `VrmaPlayer` by `dt_secs`, evaluate the active
-    /// clip, push expression weights into the morph layer, step
-    /// the spring-bone simulator, and recompute the skin palette.
-    /// Returns the new palette for the runtime to forward to
-    /// [`VrmRenderer::update_skin_palette`]. `None` when there is
-    /// no motion, no model, or the player is paused.
+    /// Advance the `VrmaPlayer` by `dt_secs`, evaluate the active clip,
+    /// and rebuild the skin palette (including spring-bone sway). Returns
+    /// the new palette for the runtime to forward to
+    /// [`VrmRenderer::update_skin_palette`]; `None` when there is no
+    /// motion, no model, or the player is paused.
     pub fn update_motion(&mut self, dt_secs: f32) -> Option<Vec<glam::Mat4>> {
         let mut frame = if self.vrma_player.playing {
             if let Some(asset) = &self.vrma
@@ -298,7 +293,7 @@ impl CharacterRenderer {
 
         let model = self.model.as_mut()?;
 
-        // Retarget hips translation (absolute VRMA sample → rest-relative
+        // Retarget the hips translation (absolute VRMA sample → rest-relative
         // delta). Height scale must fall back when the VRMA's world-rest
         // hips Y is near-zero (locomotion clips); otherwise deltas explode
         // (~180x) and the mesh flies / shakes vertically.
@@ -330,7 +325,6 @@ impl CharacterRenderer {
             }
         }
 
-        // Expression weights (morph targets).
         if !frame.expression_weights.is_empty() {
             let expressions_meta = model.expressions_meta.clone();
             let layer_mut = model.expressions_mut();
@@ -341,12 +335,10 @@ impl CharacterRenderer {
             layer_mut.apply_overrides(&expressions_meta);
         }
 
-        // Compose the LookAt bone output (set by
-        // `update_look_at` for `"bone"`-type models) on top of
-        // the VRMA pose so the head and eyes track the cursor.
-        // `None` for `"expression"`-type models, where the
-        // LookAt signal routes into morph weights via
-        // `apply_emotions` instead.
+        // Compose the LookAt bone output (set by `update_look_at` for
+        // `"bone"`-type models) on top of the VRMA pose so the head and
+        // eyes track the cursor. `None` for `"expression"`-type models,
+        // where the LookAt signal routes into morph weights instead.
         let mut palette = model
             .update_skin_palette(&frame, self.look_at_bone_output.as_ref())
             .to_vec();
@@ -443,12 +435,9 @@ impl CharacterRenderer {
         self.camera.set_aspect(size.0 as f32 / size.1 as f32);
     }
 
-    /// Draw the model into `view`. No-op if the model failed to
-    /// load. `model_uniform` is composed by the runtime every
-    /// frame from `CharacterState` (position + scale). When the
-    /// AA mode is `Fxaa` and the post-processor is built, the
-    /// model is drawn into its intermediate texture first, then
-    /// the post-processor samples it into `view`.
+    /// Draw the model into `view`. No-op if the model failed to load.
+    /// With `Fxaa` the model is drawn into the post-processor's
+    /// intermediate texture first, then sampled into `view`.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -538,9 +527,8 @@ impl CharacterRenderer {
         }
     }
 
-    /// Lazily build the FXAA post-processor. Loads the FXAA
-    /// shader (idempotent) and constructs a new `PostProcessor`
-    /// for the given swapchain size and format.
+    /// Lazily build the FXAA post-processor for the current swapchain
+    /// size and format.
     fn try_build_post_processor(
         &mut self,
         device: &wgpu::Device,
@@ -561,7 +549,6 @@ impl CharacterRenderer {
             });
             self.fxaa_shader = Some(shader);
         }
-        // Re-build when the swapchain format or size changes.
         let needs_rebuild = (self.fxaa_format != Some(format))
             || self
                 .post_processor
@@ -793,12 +780,10 @@ impl CharacterRenderer {
         self.camera.look_at(eye.into(), target.into());
     }
 
-    /// Returns the current camera eye position.
     pub const fn camera_eye(&self) -> [f32; 3] {
         self.camera.eye()
     }
 
-    /// Returns the current camera target position.
     pub const fn camera_target(&self) -> [f32; 3] {
         self.camera.target()
     }
@@ -818,7 +803,6 @@ impl CharacterRenderer {
         self.look_at_bone_output.as_ref()
     }
 
-    /// The most recent smoothed world target (or `None`).
     #[expect(dead_code, reason = "diagnostic accessor retained for debug overlays")]
     pub const fn look_at_target(&self) -> Option<Vec3> {
         self.look_at.smoothed_world_target
@@ -1120,7 +1104,6 @@ fn collect_world_rest_rotations(model: &VrmModel) -> std::collections::HashMap<u
     for i in 0..n {
         let mut q = Quat::IDENTITY;
         let mut cur = i as i32;
-        // Walk to the root, accumulating rotations.
         while cur >= 0 {
             q = model.nodes.rest_local_rotations[cur as usize] * q;
             cur = model.nodes.parents[cur as usize];
@@ -1249,8 +1232,6 @@ mod body_center_tests {
         assert_eq!(world, Vec3::new(0.0, 1.5, 0.0));
     }
 
-    /// `pick_body_center_bone` must prefer `head` over `chest`
-    /// and `chest` over `hips`.
     #[test]
     fn pick_body_center_prefers_head_over_chest_and_hips() {
         let mut reg = HumanoidBoneRegistry::new();
@@ -1261,7 +1242,6 @@ mod body_center_tests {
         assert_eq!(picked.rest.translation, Vec3::new(0.0, 1.5, 0.0));
     }
 
-    /// With `head` absent, the chain falls back to `chest`.
     #[test]
     fn pick_body_center_falls_back_to_chest() {
         let mut reg = HumanoidBoneRegistry::new();
@@ -1271,8 +1251,6 @@ mod body_center_tests {
         assert_eq!(picked.rest.translation, Vec3::new(0.0, 1.0, 0.0));
     }
 
-    /// With `head` and `chest` absent, the chain falls back to
-    /// `hips`.
     #[test]
     fn pick_body_center_falls_back_to_hips() {
         let mut reg = HumanoidBoneRegistry::new();
@@ -1281,17 +1259,12 @@ mod body_center_tests {
         assert_eq!(picked.rest.translation, Vec3::new(0.0, 0.5, 0.0));
     }
 
-    /// An empty registry must return `None` so the caller can
-    /// fall back to the AABB center.
     #[test]
     fn pick_body_center_returns_none_for_empty_registry() {
         let reg = HumanoidBoneRegistry::new();
         assert!(pick_body_center_bone(&reg).is_none());
     }
 
-    /// `body_center_world` with no model loaded must return
-    /// `character_position` unchanged (the camera does not stare
-    /// at the world origin).
     #[test]
     fn body_center_world_no_model_returns_character_position() {
         let renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
@@ -1383,9 +1356,8 @@ mod camera_target_tests {
     /// `chest_world_rest_y` must walk the parent chain and
     /// sum the per-link Y offsets. A 3-node chain (hips at
     /// 1.0, spine at +0.2, chest at +0.2) gives a world
-    /// chest Y of 1.4. The first-fix code (which read
-    /// `chest.rest.translation[1]` directly) would have
-    /// returned 0.2 here.
+    /// chest Y of 1.4. Reading `chest.rest.translation[1]`
+    /// directly would return 0.2 here.
     #[test]
     fn chest_world_rest_y_sums_parent_chain_offsets() {
         let model = model_with_chest_chain(&[1.0, 0.2, 0.2], 0.2, 1.0);
@@ -1397,7 +1369,6 @@ mod camera_target_tests {
         );
     }
 
-    /// `chest_world_rest_y` must sum only Y, not X or Z.
     #[test]
     fn chest_world_rest_y_sums_only_y_axis() {
         let mut humanoid = HumanoidBoneRegistry::new();
@@ -1450,9 +1421,6 @@ mod camera_target_tests {
         );
     }
 
-    /// Camera target Y must come from the chest's **world** rest Y
-    /// (sum of parent chain), and must stay stable when a VRMA
-    /// motion oscillates the chest bone's animated position.
     #[test]
     fn update_camera_target_is_stable_and_uses_world_rest_y() {
         let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");
@@ -1480,8 +1448,6 @@ mod camera_target_tests {
         );
     }
 
-    /// `update_camera_target` with no model must not panic; the
-    /// target stays at the orthographic default.
     #[test]
     fn update_camera_target_without_model_keeps_default_target() {
         let mut renderer = CharacterRenderer::uninit(std::path::Path::new("."), "missing.vrm");

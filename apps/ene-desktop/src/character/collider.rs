@@ -79,21 +79,20 @@ impl BoneShape {
 pub struct BoneShapeSpec {
     /// Node index of the bone in the glTF hierarchy.
     pub bone_node: usize,
-    /// Local translation in the body's frame (the kinematic
-    /// body sits at the world origin in the rest pose, so
-    /// the collider's local position equals its world
-    /// position offset by the body's translation).
+    /// Local translation in the body's frame. The kinematic body sits
+    /// at the world origin in the rest pose, so the collider's local
+    /// position equals its world position offset by the body's
+    /// translation.
     pub local_position: Vec3,
-    /// Local rotation of the collider in the body's frame.
-    /// Identity for spheres; the bone's rest world rotation
-    /// for trunk / foot `CapsuleY`s; the limb's
-    /// "toward-child" alignment for `Capsule`s.
+    /// Local rotation of the collider in the body's frame. Identity for
+    /// spheres; the bone's rest world rotation for trunk / foot
+    /// `CapsuleY`s; the limb's "toward-child" alignment for `Capsule`s.
     pub local_rotation: Quat,
-    /// Picked shape + dimensions, in world units (already
-    /// multiplied by `actual_scale`).
+    /// Picked shape + dimensions, in world units (already multiplied by
+    /// `actual_scale`).
     pub shape: BoneShape,
-    /// Static offset of the collider's center relative to the bone's position in rest pose,
-    /// in world units (already multiplied by `actual_scale`).
+    /// Static offset of the collider's center relative to the bone's rest
+    /// position, in world units (already multiplied by `actual_scale`).
     pub static_offset: Vec3,
     /// The bone's world rotation in rest pose.
     pub rest_rotation: Quat,
@@ -105,34 +104,17 @@ pub struct BoneShapeSpec {
 /// `PhysicsWorld::update_character_bone_positions`.
 #[derive(Clone, Copy, Debug)]
 pub struct BonePose {
-    /// Translation in the model's normalised frame (so
-    /// `PhysicsWorld` can multiply by `actual_scale` to land
-    /// in world units).
+    /// Translation in the model's normalised frame (so `PhysicsWorld`
+    /// can multiply by `actual_scale` to land in world units).
     pub translation: Vec3,
-    /// Current world rotation of the bone (from
-    /// `model.nodes.world_rotations[bone.node]`). For
-    /// trunk / foot bones the collider's static rotation is
-    /// the rest rotation, so the runtime bakes the delta
-    /// into the body's translation; for limbs the per-frame
-    /// rotation drives the capsule orientation directly.
+    /// Current world rotation of the bone. For limbs this drives the
+    /// capsule orientation directly; for trunk / foot bones the
+    /// rotation is mostly identity and the update is a no-op.
     pub rotation: Quat,
 }
 
-/// Build the list of [`BoneShapeSpec`]s for every humanoid
-/// bone on `model`. Bones whose computed radius falls below
-/// [`MIN_BONE_RADIUS`] — typically the 24 finger segments and
-/// the small toe bones — are dropped so the per-frame
-/// `update_character_bone_positions` call stays cheap.
-///
-/// `actual_scale = auto_fit_scale × model_scale`. The returned
-/// dimensions are already multiplied by this value so the
-/// collider matches the rendered mesh even when the user has
-/// not set `model_scale = 1.0`.
-///
-/// The order is deterministic (`BTreeMap` iteration on the
-/// humanoid registry); [`crate::character::CharacterRenderer::current_bone_poses`]
-/// returns poses in the same order so the runtime can
-/// zip the two lists without re-keying.
+/// Classify a spring-bone chain into a coarse category (`hair` or
+/// `cloth`) used for collider debug naming.
 pub fn classify_spring_chain(name: Option<&str>) -> &'static str {
     let Some(n) = name else {
         return "cloth";
@@ -149,6 +131,21 @@ pub fn classify_spring_chain(name: Option<&str>) -> &'static str {
     }
 }
 
+/// Build the list of [`BoneShapeSpec`]s for every humanoid
+/// bone on `model`. Bones whose computed radius falls below
+/// [`MIN_BONE_RADIUS`] — typically the 24 finger segments and
+/// the small toe bones — are dropped so the per-frame
+/// `update_character_bone_positions` call stays cheap.
+///
+/// `actual_scale = auto_fit_scale × model_scale`. The returned
+/// dimensions are already multiplied by this value so the
+/// collider matches the rendered mesh even when the user has
+/// not set `model_scale = 1.0`.
+///
+/// The order is deterministic (iteration over the humanoid
+/// registry); [`crate::character::CharacterRenderer::current_bone_poses`]
+/// returns poses in the same order so the runtime can
+/// zip the two lists without re-keying.
 pub fn compute_bone_specs(model: &VrmModel, actual_scale: f32) -> Vec<BoneShapeSpec> {
     let center = Vec3::from(model.center());
     let normalize_scale = model.normalize_scale();
@@ -185,7 +182,7 @@ pub fn compute_bone_specs(model: &VrmModel, actual_scale: f32) -> Vec<BoneShapeS
                 let rest_rotation = rest_world_rotations[joint.node];
                 let radius = joint.hit_radius.max(0.02) * scale;
 
-                // Try to find if there is a child joint in the chain to build a segment-aligned capsule
+                // Segment-aligned capsule when a child joint exists.
                 if i + 1 < chain.joints.len() {
                     let child_joint = &chain.joints[i + 1];
                     let child_world = rest_world[child_joint.node];
@@ -248,8 +245,6 @@ fn compute_bone_spec(
     let inverse_bind = *model.skeleton.inverse_bind.get(joint_idx)?;
     let joint_world_rest = rest_joint_world(model, joint_idx);
 
-    // Walk every primitive; collect each vertex's world
-    // position weighted to this joint.
     let world_positions =
         collect_weighted_world_positions(model, joint_idx, &inverse_bind, &joint_world_rest);
 
@@ -476,14 +471,12 @@ fn fit_bone_shape(
                 _ => 0.05,
             };
 
-            // Calculate max distance from bone_world to any vertex in the cloud
+            // The radius must cover all these vertices, so we take max_r,
+            // bounded from below by `default_radius` for empty/small clouds.
             let mut max_r = 0.0f32;
             for &p in weighted_world {
                 max_r = max_r.max((p - bone_world).length());
             }
-
-            // The radius must completely cover all these vertices, so we take max_r.
-            // But we also bound it from below by the default_radius to handle empty/small clouds.
             let radius = max_r.max(default_radius) * scale;
 
             (BoneShape::Sphere { radius }, Quat::IDENTITY, Vec3::ZERO)
@@ -514,7 +507,6 @@ fn fit_bone_shape(
                     let rotation = Quat::from_rotation_arc(Vec3::Y, axis_dir);
                     let offset = 0.5 * axis * scale;
 
-                    // Calculate max perpendicular distance from the segment to any vertex in the cloud
                     let mut max_perp = 0.0f32;
                     for &p in weighted_world {
                         let d = p - bone_world;
@@ -633,7 +625,6 @@ fn fit_segment_capsule(
     }
     let axis_dir = axis / axis_len;
 
-    // Radius is the max perpendicular distance to the segment.
     let mut max_r2 = 0.0f32;
     for &p in weighted_world {
         let d = p - bone_world;
@@ -794,9 +785,7 @@ mod tests {
         )
     }
 
-    /// Build a `MeshVertex` with all four skinning slots
-    /// pointing at the same joint / weight. The test
-    /// helpers above use single-slot assignments.
+    /// Build a `MeshVertex` with the first skinning slot assigned.
     fn vertex(pos: Vec3, joint: u32, weight: f32) -> MeshVertex {
         MeshVertex {
             position: pos.to_array(),
@@ -851,8 +840,6 @@ mod tests {
         assert_eq!(out[0], Vec3::new(1.0, 2.0, 3.0));
     }
 
-    /// `humanoid_parent_node` must walk past non-humanoid
-    /// nodes to find the closest humanoid ancestor.
     #[test]
     fn humanoid_parent_finds_nearest_humanoid_ancestor() {
         let model = model_with_two_nodes(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.5, 0.0));
@@ -860,9 +847,6 @@ mod tests {
         assert_eq!(parent, Some(0));
     }
 
-    /// The top of a humanoid chain (hips) has no humanoid
-    /// parent — `humanoid_parent_node` returns `None` and
-    /// the limb capsule fit falls back to a sphere.
     #[test]
     fn humanoid_parent_returns_none_for_chain_root() {
         let model = model_with_two_nodes(Vec3::ZERO, Vec3::new(0.0, 0.5, 0.0));

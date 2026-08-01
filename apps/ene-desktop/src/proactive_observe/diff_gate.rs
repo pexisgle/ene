@@ -1,5 +1,5 @@
 //! Screen-diff gate that skips redundant vision inference when the screen
-//! content has not changed significantly (#215).
+//! content has not changed significantly.
 //!
 //! Uses a simple average-hash (aHash) comparison on the downscaled screen
 //! capture. When the Hamming distance between successive hashes is below a
@@ -31,7 +31,6 @@ pub struct ScreenDiffGate {
 }
 
 impl ScreenDiffGate {
-    /// Create a fresh gate with no cached state.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -56,7 +55,6 @@ impl ScreenDiffGate {
         None
     }
 
-    /// Store a new hash + summary pair as the baseline for future comparisons.
     pub fn cache(&mut self, hash: u64, summary: String) {
         self.last_hash = Some(hash);
         self.last_summary = Some(summary);

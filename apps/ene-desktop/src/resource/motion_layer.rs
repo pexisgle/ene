@@ -1,6 +1,6 @@
 //! Motion layer state — wraps the [`ene_vrm::layer_composer::LayerComposer`]
 //! so ECS systems can route motion cues into it and the render path
-//! can tick/compose per frame (#133).
+//! can tick/compose per frame.
 
 use bevy_ecs::prelude::*;
 use ene_vrm::MotionLayer;

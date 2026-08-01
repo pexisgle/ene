@@ -34,7 +34,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Configuration delivered by the host at handshake time
-/// (`plugins.list.anthropic.config`), stored per process (#313).
+/// (`plugins.list.anthropic.config`), stored per process.
 ///
 /// `Mutex` (rather than `OnceLock`) so tests can reset it between cases; in
 /// production the handshake is a one-shot and reconnects resend the same
@@ -53,7 +53,7 @@ impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
     }
 
     /// Advertises the config schema; `api_key` is marked `x-ene-secret: true`
-    /// so the host masks/redacts it (#313).
+    /// so the host masks/redacts it.
     fn config_schema(&self) -> Option<Value> {
         Some(json!({
             "type": "object",
@@ -74,7 +74,7 @@ impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
                         }
                     ],
                     "x-ene-secret": true,
-                    "description": "Anthropic API key, or a {source: inline|env|auto} descriptor (#305)"
+                    "description": "Anthropic API key, or a {source: inline|env|auto} descriptor"
                 },
                 "base_url": {
                     "type": "string",
@@ -143,7 +143,7 @@ fn resolve_key_value(value: &Value) -> Option<String> {
 
 /// Resolves the effective API key for a request.
 ///
-/// Precedence (#313):
+/// Precedence:
 /// 1. The config delivered by the host at handshake time via
 ///    [`ConfigurablePlugin::set_config`] (`plugins.list.anthropic.config`),
 ///    resolved with the same `{"source": ...}` contract.

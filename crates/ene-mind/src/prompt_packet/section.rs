@@ -1,4 +1,4 @@
-//! Prompt section kinds and deterministic ordering (#87).
+//! Prompt section kinds and deterministic ordering.
 
 #![expect(
     clippy::option_if_let_else,
@@ -12,13 +12,13 @@
 pub enum PromptSectionKind {
     /// Platform / tool contract (desktop mascot framing).
     PlatformContract,
-    /// Immutable character identity kernel (#82).
+    /// Immutable character identity kernel.
     IdentityKernel,
     /// Behavior rules and card system instructions.
     BehaviorContract,
     /// Current affect / mood summary.
     CharacterState,
-    /// Active rolling scene summary (#79).
+    /// Active rolling scene summary.
     SceneState,
     /// Lorebook and semantic character memory.
     SemanticContext,
@@ -28,9 +28,9 @@ pub enum PromptSectionKind {
     ActiveCommitments,
     /// Episodic and other recalled memories.
     EpisodicMemories,
-    /// `CCv3` style example anchors (#84).
+    /// `CCv3` style example anchors.
     StyleExamples,
-    /// Note about a previously interrupted response (#206).
+    /// Note about a previously interrupted response.
     InterruptionNote,
     /// Expression PHI / output contract (required).
     OutputContract,
@@ -48,7 +48,7 @@ impl PromptSectionKind {
     }
 
     /// Packing priority: higher values are kept longer when the prompt must be
-    /// shrunk to fit the model's context window (#370).
+    /// shrunk to fit the model's context window.
     ///
     /// Required sections report [`u8::MAX`] — packing never drops them
     /// regardless of this value (it checks [`Self::is_required`] directly).

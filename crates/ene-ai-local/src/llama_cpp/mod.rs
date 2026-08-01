@@ -1,4 +1,4 @@
-//! Shared llama-cpp-4 adapter for local decision + embedding (#171).
+//! Shared llama-cpp-4 adapter for local decision + embedding.
 //!
 //! Keeps low-level llama.cpp types inside `ene-ai-local`; callers use typed helpers only.
 

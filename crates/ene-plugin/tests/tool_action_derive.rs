@@ -11,8 +11,6 @@ use ene_tool_macros::{ToolAction, ToolSpec, tool_action};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-// ── Basic ToolAction derive ─────────────────────────────────────────
-
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "test",
@@ -73,8 +71,6 @@ fn tool_action_derive_rag_profile() {
     assert_eq!(profile.summary, "Echoes input.");
 }
 
-// ── ToolAction derive with skip fields ──────────────────────────────
-
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "test",
@@ -128,8 +124,6 @@ fn tool_action_skip_field_hidden_from_schema() {
     assert!(props.contains_key("value"));
 }
 
-// ── #[tool_action] attribute macro ──────────────────────────────────
-
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolSpec)]
 #[tool(
     namespace = "test",
@@ -180,8 +174,6 @@ fn tool_action_attr_macro_rag_profile() {
     let profile = action.rag_profile();
     assert_eq!(profile.name.as_str(), "test.greet");
 }
-
-// ── Schema overrides: enum_values, default, min/max ─────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolSpec)]
 #[tool(
@@ -257,8 +249,6 @@ fn schema_min_max_applied() {
     assert_eq!(steps.get("minimum"), Some(&serde_json::json!(1)));
     assert_eq!(steps.get("maximum"), Some(&serde_json::json!(100)));
 }
-
-// ── Hidden field via #[arg(hidden)] ─────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema, ToolSpec)]
 #[tool(

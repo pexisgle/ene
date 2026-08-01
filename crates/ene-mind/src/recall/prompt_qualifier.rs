@@ -1,4 +1,4 @@
-//! Prompt qualifiers for recalled typed memories (#76).
+//! Prompt qualifiers for recalled typed memories.
 
 #![expect(
     clippy::option_if_let_else,

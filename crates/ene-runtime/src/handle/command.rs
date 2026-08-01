@@ -3,21 +3,17 @@
 //! Fire-and-forget variants are sent via internal channels. Oneshot variants
 //! carry a reply channel for result confirmation.
 //!
-//! ## History (#271)
+//! ## Scope
 //!
-//! Before this split, this enum also carried the read-only session/candidate
-//! queries (`ListSessions`, `ExportSession`, `ImportSession`,
-//! `SearchSessions`, `ArchiveSession`, `ListPendingCandidates`,
-//! `ApproveCandidate`, `RejectCandidate` — 8 variants) and a
-//! `SummarizeScreenImage` variant carrying a raw RGB8 buffer. The session /
-//! candidate variants are gone entirely: [`crate::query::sessions::SessionQueryHandle`]
-//! and [`crate::query::candidates::MemoryCandidateHandle`] talk to
-//! `MemoryStore` directly, bypassing the actor mailbox (and the head-of-line
-//! blocking behind in-flight `Run` turns that came with it). The vision
-//! variant is now [`EneCommand::PrepareVisionSummary`] /
-//! [`EneCommand::StashProactiveScreenImage`], both payload-free — see
-//! [`crate::vision`] for where the buffer and the actual model call now
-//! live.
+//! Read-only session/candidate queries (`ListSessions`, `ExportSession`,
+//! `ImportSession`, `SearchSessions`, `ArchiveSession`,
+//! `ListPendingCandidates`, `ApproveCandidate`, `RejectCandidate`) and the
+//! screen-image vision buffer are handled outside this actor mailbox: see
+//! [`crate::query::sessions::SessionQueryHandle`],
+//! [`crate::query::candidates::MemoryCandidateHandle`], and
+//! [`crate::vision`]. The vision path only crosses the mailbox as the
+//! payload-free [`EneCommand::PrepareVisionSummary`] /
+//! [`EneCommand::StashProactiveScreenImage`] pair.
 
 use crate::error::EneRuntimeError;
 use crate::streaming::{PermissionDecision, UserInputResponse};
@@ -30,13 +26,13 @@ use ene_plugin_proto::ToolSpec;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-/// A deferred (background) tool task tracked by the actor (#196).
+/// A deferred (background) tool task tracked by the actor.
 ///
 /// Created when a background-capable tool accepts a deferred call and
 /// returns a `task_id`. The actor polls the owning tool until the task
 /// reaches a terminal state, then emits
 /// [`super::event::LifecycleEvent::ToolBackgroundCompleted`] on the
-/// lifecycle bus (#272).
+/// lifecycle bus.
 #[derive(Debug, Clone)]
 pub struct DeferredToolTask {
     /// The tool name that owns the background task.
@@ -75,24 +71,24 @@ pub enum EneCommand {
         /// The user's decision.
         decision: PermissionDecision,
     },
-    /// List all session-wide permission grants (#177).
+    /// List all session-wide permission grants.
     ListPermissions {
         /// Reply channel for the granted scopes.
         reply: oneshot::Sender<Vec<crate::streaming::PermissionScope>>,
     },
-    /// Revoke a single session-wide permission grant by id (#177).
+    /// Revoke a single session-wide permission grant by id.
     RevokePermission {
         /// The `PermissionScope::id` to revoke.
         id: u64,
         /// Reply channel reporting whether a scope was removed.
         reply: oneshot::Sender<bool>,
     },
-    /// Revoke all session-wide permission grants (#177).
+    /// Revoke all session-wide permission grants.
     ResetAllPermissions {
         /// Reply channel carrying the number of revoked scopes.
         reply: oneshot::Sender<usize>,
     },
-    /// Undo the most recent reversible tool operation (#178).
+    /// Undo the most recent reversible tool operation.
     Undo {
         /// Reply channel carrying the undo report.
         reply: oneshot::Sender<crate::undo::UndoReport>,
@@ -153,7 +149,7 @@ pub enum EneCommand {
         /// Reply channel.
         reply: oneshot::Sender<Result<String, EneRuntimeError>>,
     },
-    /// Cancel a deferred (background) tool task by id (#196).
+    /// Cancel a deferred (background) tool task by id.
     ///
     /// Routes to the owning tool and asks it to abort the background task.
     /// The reply reports whether a running task was actually cancelled.
@@ -181,12 +177,12 @@ pub enum EneCommand {
         /// Confirmation channel.
         reply: oneshot::Sender<Result<(), EneRuntimeError>>,
     },
-    /// Update host-side proactive observation snapshot (#166).
+    /// Update host-side proactive observation snapshot.
     UpdateProactiveObservation {
         /// Normalized observation from desktop (no raw screenshots).
         observation: ene_mind::ProactiveObservation,
     },
-    /// Hot-update proactive policy (#103). Provider routing comes from [`AiConfig`].
+    /// Hot-update proactive policy. Provider routing comes from [`AiConfig`].
     UpdateProactiveSettings {
         /// Mind proactive policy.
         mind: ene_mind::ProactiveConfig,
@@ -197,13 +193,12 @@ pub enum EneCommand {
         /// Boxed payload to keep [`EneCommand`] small.
         settings: Box<FeatureSettingsUpdate>,
     },
-    /// Prepare a screen-image vision summary (#271).
+    /// Prepare a screen-image vision summary.
     ///
-    /// Payload-free (no RGB buffer): performs the same "runtime busy" check
-    /// and lazy local-model init the legacy `SummarizeScreenImage` command
-    /// did, then hands back a cloned model handle plus rendered prompts so
-    /// [`crate::vision::VisionHandle`] can run the actual inference outside
-    /// the actor. See [`crate::vision`] module docs.
+    /// Payload-free (no RGB buffer): performs the runtime "busy" check and
+    /// lazy local-model init, then hands back a cloned model handle plus
+    /// rendered prompts so [`crate::vision::VisionHandle`] can run the
+    /// actual inference outside the actor. See [`crate::vision`] module docs.
     PrepareVisionSummary {
         /// Privacy-safe OS app label (may be empty).
         app_label: String,
@@ -211,13 +206,13 @@ pub enum EneCommand {
         reply: oneshot::Sender<Result<VisionPrepared, crate::public_api::PublicApiError>>,
     },
     /// Stash the *encoded* (JPEG data URI) screen frame for the next
-    /// proactive generation turn (#271). `None` clears any previous stash
-    /// (mirrors the legacy inline encode-failure fallback). Fire-and-forget.
+    /// proactive generation turn. `None` clears any previous stash (used
+    /// when encoding the frame failed). Fire-and-forget.
     StashProactiveScreenImage {
         /// Encoded frame, or `None` on encode failure.
         data_uri: Option<String>,
     },
-    /// Internal: background plugin host reconfiguration completed (#397).
+    /// Internal: background plugin host reconfiguration completed.
     ///
     /// Sent from a `bg_command_tasks` task back to the actor after the
     /// expensive `PluginHostManager::start` I/O finishes. The shared
@@ -230,13 +225,13 @@ pub enum EneCommand {
         /// Per-plugin tool registries for future re-merges.
         plugin_tool_registries: Vec<Arc<dyn ene_plugin_host::ToolRegistry>>,
     },
-    /// Test-only (#268 regression coverage): mutates `pending_permissions`,
-    /// `permission_scopes`, and `undo_stack` — the three fields #268 called
-    /// out for post-panic consistency scrutiny — then panics, so the panic
-    /// hits mid-command with in-flight shared-state mutations already
-    /// applied. Exercises `run_command_isolated`'s `catch_unwind` under
-    /// realistic conditions rather than a synthetic bare future. Compiled
-    /// only under `cfg(test)`; not reachable from production code.
+    /// Test-only: mutates `pending_permissions`, `permission_scopes`, and
+    /// `undo_stack` — the three shared-state fields a panicking command can
+    /// mutate — then panics, so the panic hits mid-command with in-flight
+    /// shared-state mutations already applied. Exercises
+    /// `run_command_isolated`'s `catch_unwind` under realistic conditions
+    /// rather than a synthetic bare future. Compiled only under `cfg(test)`;
+    /// not reachable from production code.
     #[cfg(test)]
     TestInjectPanicAfterMutations {
         /// Request id inserted into `pending_permissions` before the panic.
@@ -246,7 +241,7 @@ pub enum EneCommand {
         /// to prove the map entry survived intact.
         permission_tx: oneshot::Sender<PermissionDecision>,
     },
-    /// Test-only (#397 regression coverage): occupies one `bg_command_tasks`
+    /// Test-only: occupies one `bg_command_tasks`
     /// slot with a long-sleeping task, then replies on `reply`. Used to
     /// simulate a heavy background command (GGUF load / plugin host restart)
     /// being in flight so a follow-up command can be asserted to still be
@@ -267,7 +262,7 @@ pub struct FeatureSettingsUpdate {
     pub mind: ene_mind::MindConfig,
     /// Long-term memory store section.
     pub store: ene_store::StoreConfig,
-    /// Plugin system section (formerly tool host section).
+    /// Plugin system section.
     pub plugins: ene_plugin_host::PluginConfig,
     /// Tool RAG section.
     pub rag: ene_rag::ToolRagConfig,

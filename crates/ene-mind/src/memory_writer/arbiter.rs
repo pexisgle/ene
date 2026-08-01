@@ -1,9 +1,5 @@
 //! Memory Arbiter — validates, deduplicates, and resolves contradictions
 //! for [`MemoryCandidate`] items before they are persisted.
-//!
-//! Issue #75: sits between deterministic/LLM extractors and the typed
-//! memory store. Extractors produce candidates; the arbiter decides whether
-//! to persist, ignore, supersede, dispute, or mark memories for deletion.
 
 use std::collections::HashMap;
 
@@ -23,9 +19,9 @@ use crate::error::CognitionError;
 /// Provenance of a memory candidate, used to set [`MemorySource`] on persist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateProvenance {
-    /// Produced by the deterministic extractor (#70).
+    /// Produced by the deterministic extractor.
     Deterministic,
-    /// Produced by the LLM extractor (#66).
+    /// Produced by the LLM extractor.
     LlmExtracted,
 }
 
@@ -51,13 +47,13 @@ pub struct ArbiterOptions {
     pub semantic_similarity_threshold: f32,
     /// When confidence gap is below this, mark as disputed instead of superseding.
     pub dispute_confidence_gap: f32,
-    /// Character bigram Jaccard floor for relaxed `source_quote` matching (#353).
+    /// Character bigram Jaccard floor for relaxed `source_quote` matching.
     pub source_quote_ngram_threshold: f32,
-    /// Confidence penalty when the quote passes only via n-gram similarity (#353).
+    /// Confidence penalty when the quote passes only via n-gram similarity.
     pub source_quote_ngram_confidence_penalty: f32,
     /// Minimum title-embedding cosine similarity for two memories to be treated
-    /// as sharing a contradiction key (#351). Only consulted on the embedding
-    /// path; without an embedder the arbiter falls back to exact normalized-title
+    /// as sharing a contradiction key. Only consulted on the embedding path;
+    /// without an embedder the arbiter falls back to exact normalized-title
     /// equality.
     pub contradiction_title_similarity_threshold: f32,
 }
@@ -79,13 +75,9 @@ impl Default for ArbiterOptions {
 impl ArbiterOptions {
     /// Build options from [`MindMemoryConfig`].
     ///
-    /// Every threshold is read from config (#352) rather than falling back to
-    /// [`Self::default`], so all four arbitration parameters — persist gate,
-    /// supersede margin, semantic-duplicate similarity, and dispute gap — are
-    /// tunable from `mind.memory.*`. The float thresholds are clamped into the
-    /// unit interval defensively, mirroring `MemoryDiversifyOptions::from_config`
-    /// (`recall/diversify.rs`); deserialization already clamps, but options may
-    /// be built from a programmatically constructed config.
+    /// The float thresholds are clamped into the unit interval defensively,
+    /// mirroring `MemoryDiversifyOptions::from_config`; deserialization already
+    /// clamps, but options may be built from a programmatically constructed config.
     pub fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             min_confidence: config.min_confidence_to_persist as f32,
@@ -120,11 +112,11 @@ pub struct ArbiterContext<'a> {
     /// Pre-computed semantic matches per candidate index (optional).
     pub semantic_matches: HashMap<usize, Vec<SemanticMatch>>,
     /// Affect valence of the turn the candidates were extracted from
-    /// (-1.0 ..= 1.0). Used to derive `outcome_rating` for self-reflection (#210).
+    /// (-1.0 ..= 1.0). Used to derive `outcome_rating` for self-reflection.
     pub affect_valence: f32,
-    /// Embedding provider for fuzzy contradiction-key matching (#351). `None`
-    /// falls back to exact normalized-title equality so contradiction checks
-    /// keep working without an embedding model.
+    /// Embedding provider for fuzzy contradiction-key matching. `None` falls
+    /// back to exact normalized-title equality so contradiction checks keep
+    /// working without an embedding model.
     pub embedder: Option<&'a dyn EmbeddingProvider>,
 }
 
@@ -153,7 +145,7 @@ pub enum ArbiterReasonCode {
     EmptyFields,
     /// `source_quote` is not found in the turn text.
     SourceQuoteNotInTurn,
-    /// A tool-derived candidate failed the lightweight validity check (#349).
+    /// A tool-derived candidate failed the lightweight validity check.
     ToolDerivedInvalid,
     /// Deletion candidate is missing `deletion_target_key`.
     MissingDeletionTarget,
@@ -163,7 +155,7 @@ pub enum ArbiterReasonCode {
     ExactDuplicate,
     /// Semantic duplicate with identical content.
     SemanticDuplicate,
-    /// A repeated tool failure supersedes the prior failure record (#349).
+    /// A repeated tool failure supersedes the prior failure record.
     ToolFailureSupersede,
     /// New evidence supersedes an existing memory.
     ContradictionSupersede,
@@ -226,8 +218,7 @@ pub enum ArbiterAction {
     /// Carries the conflicting memory's identity so the deferred candidate can
     /// record what it would supersede: `existing_memory_id` is persisted and
     /// later propagated to the typed memory's `supersedes_id` on approval, and
-    /// `existing_memory_title` is a display-only hint for the approval UI
-    /// (#420 review).
+    /// `existing_memory_title` is a display-only hint for the approval UI.
     AskConfirmationLater {
         /// Id of the existing memory this candidate conflicts with, if any.
         existing_memory_id: Option<i64>,
@@ -256,7 +247,7 @@ pub struct AppliedDecision {
     pub inserted_id: Option<i64>,
     /// Whether a status update was applied to an existing memory.
     pub updated_existing: bool,
-    /// Outcome rating derived from user response sentiment (#210).
+    /// Outcome rating derived from user response sentiment.
     /// Range: -1.0 (negative) to 1.0 (positive). `None` when not yet evaluated.
     pub outcome_rating: Option<f32>,
 }
@@ -269,8 +260,8 @@ impl MemoryArbiter {
     /// Evaluate all candidates against existing memories without touching the store.
     ///
     /// Contradiction-key matching uses title-embedding similarity when
-    /// `ctx.embedder` is configured (#351), sharing one [`TitleMatcher`] across
-    /// the whole batch so repeated titles are embedded only once.
+    /// `ctx.embedder` is configured, sharing one [`TitleMatcher`] across the
+    /// whole batch so repeated titles are embedded only once.
     pub async fn evaluate_all(
         candidates: &[MemoryCandidate],
         existing: &[MemoryItem],
@@ -348,8 +339,8 @@ impl MemoryArbiter {
     /// should wrap the store connection in a transaction before calling this.
     ///
     /// `ctx.affect_valence` (-1.0 ..= 1.0) is recorded as the `outcome_rating`
-    /// of each persisted decision so the self-reflection pipeline (#210) can
-    /// score interaction outcomes by user sentiment.
+    /// of each persisted decision so the self-reflection pipeline can score
+    /// interaction outcomes by user sentiment.
     pub async fn apply_decisions(
         store: &dyn MemoryPort,
         decisions: &[CandidateDecision],
@@ -567,12 +558,12 @@ impl MemoryArbiter {
         }
 
         // Kind-specific contradictions not caught by semantic search are handled
-        // by `check_contradiction` (#351), which matches titles by embedding
-        // similarity rather than exact string equality.
+        // by `check_contradiction`, which matches titles by embedding similarity
+        // rather than exact string equality.
         None
     }
 
-    /// Deduplicate tool-derived memories by their stable per-tool title (#349).
+    /// Deduplicate tool-derived memories by their stable per-tool title.
     ///
     /// Tool-grounding candidates (`tool failure:{tool}`, `tool:{tool}`,
     /// `tool outcome:{tool}`) carry an empty `source_quote` and a title that is
@@ -634,7 +625,7 @@ impl MemoryArbiter {
             return None;
         }
 
-        // Scan only the most recent same-kind memories (#351). `existing` is
+        // Scan only the most recent same-kind memories. `existing` is
         // ordered by creation time, newest first; a bounded scan keeps the
         // per-turn embedding cost of the title pass predictable (one batched
         // `embed_batch` per kind) even for characters with thousands of
@@ -798,10 +789,9 @@ impl MemoryArbiter {
                 existing_memory_id,
                 existing_memory_title,
             } => {
-                // Defer the candidate to the user-approval queue (#174) so it
-                // can be reviewed and persisted later instead of being dropped.
-                // The conflicting memory's identity (when present) is recorded
-                // so approval can propagate it to `supersedes_id` (#420 review).
+                // Deferred candidates persist to the user-approval queue for
+                // later review; the conflicting memory's identity is recorded
+                // so approval can propagate it to `supersedes_id`.
                 let pending = PendingCandidate {
                     id: 0,
                     character_id: ctx.character_id.to_string(),
@@ -865,19 +855,19 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
         _ => MemorySalience::default(),
     };
 
-    // `commitment_due` is intentionally not mapped to `valid_until` yet — natural
-    // language due-date parsing is deferred (see issue #75 follow-up).
+    // `commitment_due` is intentionally not mapped to `valid_until` yet: natural
+    // language due-date parsing is not implemented.
     let (valid_from, valid_until) = (None, None);
 
     // The store has no dedicated tags column, so candidate tags are serialized
     // into the content as a trailing JSON metadata footer. Downstream consumers
     // (recall, export) can detect partial/interrupted episodes from this marker
-    // without a schema migration (#M7).
+    // without a schema migration.
     let content = append_tags_metadata(&candidate.content, &candidate.tags);
 
     // Interrupted (barge-in / cancelled) episodes are partial and therefore
     // less reliable: deprioritize them in recall scoring by lowering the
-    // persisted confidence (#M7).
+    // persisted confidence.
     let confidence = if is_interrupted_candidate(candidate) {
         MemoryConfidence::new((candidate.confidence - INTERRUPTED_CONFIDENCE_PENALTY).max(0.0))
     } else {
@@ -907,21 +897,19 @@ fn candidate_to_new_item(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) 
     }
 }
 
-/// Confidence penalty applied to memories extracted from interrupted turns (#M7).
+/// Confidence penalty applied to memories extracted from interrupted turns.
 const INTERRUPTED_CONFIDENCE_PENALTY: f32 = 0.15;
 
-/// Tag marker used to flag episodes from interrupted (barge-in) turns (#M7).
+/// Tag marker used to flag episodes from interrupted (barge-in) turns.
 pub(crate) const INTERRUPTED_TAG: &str = "interrupted";
 
-/// Whether a candidate originated from an interrupted turn (#M7).
+/// Whether a candidate originated from an interrupted turn.
 fn is_interrupted_candidate(candidate: &MemoryCandidate) -> bool {
     candidate.tags.iter().any(|tag| tag == INTERRUPTED_TAG)
 }
 
 /// Serialize candidate tags into a trailing JSON metadata footer so they
-/// survive persistence despite the store lacking a tags column (#M7).
-///
-/// Returns the original content unchanged when there are no tags.
+/// survive persistence despite the store lacking a tags column.
 fn append_tags_metadata(content: &str, tags: &[String]) -> String {
     if tags.is_empty() {
         return content.to_string();
@@ -942,7 +930,7 @@ fn dedup_key(candidate: &MemoryCandidate) -> (MemoryKind, String) {
     (candidate.kind, normalize_text(&candidate.title))
 }
 
-/// NFKC + lowercase + punctuation strip + whitespace collapse (#353).
+/// NFKC + lowercase + punctuation strip + whitespace collapse.
 fn normalize_quote_text(s: &str) -> String {
     s.nfkc()
         .collect::<String>()
@@ -978,7 +966,7 @@ const fn is_quote_punctuation(c: char) -> bool {
         )
 }
 
-/// Outcome of verifying a `source_quote` against turn text (#353).
+/// Outcome of verifying a `source_quote` against turn text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceQuoteVerdict {
     /// Normalized substring match — no confidence change.
@@ -1101,10 +1089,10 @@ const fn is_arbitration_visible(status: MemoryStatus) -> bool {
 /// [`super::tool_grounding`]. These candidates carry an empty `source_quote`
 /// and a stable per-tool title, so their content varies with every failure
 /// while the title stays constant. They are therefore deduplicated by title
-/// (superseding the prior record) rather than by volatile content (#349).
+/// (superseding the prior record) rather than by volatile content.
 const TOOL_TITLE_PREFIXES: &[&str] = &["tool failure:", "tool:", "tool outcome:"];
 
-/// Whether a candidate was produced by tool-result grounding (#349).
+/// Whether a candidate was produced by tool-result grounding.
 ///
 /// Tool-grounding candidates are the only ones built with an empty
 /// `source_quote` *and* a `tool*:` title prefix, so the pair of signals
@@ -1117,7 +1105,7 @@ fn is_tool_derived_candidate(candidate: &MemoryCandidate) -> bool {
             .any(|prefix| candidate.title.starts_with(prefix))
 }
 
-/// Lightweight validity check for tool-derived candidates (#349).
+/// Lightweight validity check for tool-derived candidates.
 ///
 /// Tool-grounding candidates bypass the `source_quote`-in-turn check (their
 /// quote is empty by construction), so they used to pass validation
@@ -1166,7 +1154,7 @@ fn same_memory_content(candidate: &MemoryCandidate, mem: &MemoryItem) -> bool {
 }
 
 /// Cap on how many most-recent same-kind memories the title-based
-/// contradiction scan examines per candidate (#351).
+/// contradiction scan examines per candidate.
 ///
 /// The scan embeds every distinct title once per kind per turn; bounding it
 /// keeps the embedding cost predictable on the post-turn write path even for
@@ -1176,14 +1164,14 @@ fn same_memory_content(candidate: &MemoryCandidate, mem: &MemoryItem) -> bool {
 const MAX_CONTRADICTION_SCAN: usize = 512;
 
 /// Decides whether two memory titles refer to the same subject for the purpose
-/// of contradiction checking (#351).
+/// of contradiction checking.
 ///
 /// When an [`EmbeddingProvider`] is configured, titles are compared by the
 /// cosine similarity of their embeddings and a pair matches once the similarity
 /// reaches the configured threshold — this is what lets synonymous titles
 /// ("職業" vs "仕事", "住んでいる場所" vs "居住地") collapse into one subject
-/// instead of being treated as unrelated, and it removes the old hardcoded
-/// `"nickname"` / `"呼び方"` keyword list so matching works in any language.
+/// instead of being treated as unrelated, so matching works in any language
+/// without a hardcoded keyword list.
 /// Without an embedder (or if embedding ever fails) the matcher degrades to the
 /// deterministic exact fallback (NFKC + lowercase + whitespace-collapsed
 /// equality), so contradiction checks never silently stop running.
@@ -1191,13 +1179,9 @@ const MAX_CONTRADICTION_SCAN: usize = 512;
 /// Embeddings are cached by title for the lifetime of the matcher, so scanning
 /// every existing memory per candidate does not re-embed repeated titles.
 pub(crate) struct TitleMatcher<'a> {
-    /// Embedding provider; `None` selects the exact-match fallback.
     embedder: Option<&'a dyn EmbeddingProvider>,
-    /// Cosine-similarity cutoff for a match (embedding path only).
     threshold: f32,
-    /// Embeddings computed so far, keyed by exact title string.
     cache: HashMap<String, Vec<f32>>,
-    /// Set once embedding fails, after which matching falls back to exact.
     disabled: bool,
 }
 
@@ -1225,7 +1209,6 @@ impl<'a> TitleMatcher<'a> {
         self.embed_one(title).await
     }
 
-    /// Embed one title through the provider, caching and guarding the result.
     async fn embed_one(&mut self, title: &str) -> Option<Vec<f32>> {
         let embedder = self.embedder?;
         match embedder
@@ -1271,7 +1254,7 @@ impl<'a> TitleMatcher<'a> {
     ///
     /// Called once per contradiction scan with all same-kind titles that are
     /// about to be compared, so the per-turn write path issues a small number
-    /// of `embed_batch` calls instead of one round trip per title (#351). A
+    /// of `embed_batch` calls instead of one round trip per title. A
     /// provider failure disables the embedding path for the rest of the batch,
     /// degrading to exact title matching as documented.
     async fn prefetch(&mut self, titles: impl IntoIterator<Item = &str>) {
@@ -1339,10 +1322,9 @@ impl<'a> TitleMatcher<'a> {
         self.embedder.is_some() && !self.disabled
     }
 
-    /// Whether `candidate_title` refers to the same subject as `existing_title`.
-    ///
-    /// Uses embedding similarity when available; if embedding is unavailable or
-    /// fails mid-call, falls back to exact normalized-title equality.
+    /// Whether `candidate_title` refers to the same subject as `existing_title`,
+    /// using embedding similarity when available and falling back to exact
+    /// normalized-title equality if embedding is unavailable or fails mid-call.
     async fn is_match(&mut self, candidate_title: &str, existing_title: &str) -> bool {
         if self.use_embedding()
             && let Some(similarity) = self.similarity(candidate_title, existing_title).await
@@ -1452,7 +1434,7 @@ mod tests {
         &decisions.first().expect("one decision").action
     }
 
-    /// Build a fully-populated [`MemoryItem`] for contradiction tests (#351).
+    /// Build a fully-populated [`MemoryItem`] for contradiction tests.
     fn memory_item(
         id: i64,
         kind: MemoryKind,
@@ -1491,7 +1473,7 @@ mod tests {
     /// Embedder that maps a title to a unit vector keyed by the topic it
     /// mentions, so synonymous titles ("職業"/"仕事" → occupation, "居住地"/
     /// "住所" → residence) share a vector while unrelated topics are
-    /// orthogonal. Deterministic and dependency-free (#351).
+    /// orthogonal. Deterministic and dependency-free.
     struct TopicEmbedder;
 
     fn topic_vector(text: &str) -> Vec<f32> {
@@ -1536,7 +1518,7 @@ mod tests {
     }
 
     /// Embedder whose every call fails, to exercise the exact-match fallback
-    /// that kicks in once embedding is disabled (#351).
+    /// that kicks in once embedding is disabled.
     struct FailingEmbedder;
     #[async_trait::async_trait]
     impl EmbeddingProvider for FailingEmbedder {
@@ -1558,7 +1540,7 @@ mod tests {
         }
     }
 
-    /// An [`ArbiterContext`] wired to a specific embedder (#351).
+    /// An [`ArbiterContext`] wired to a specific embedder.
     fn ctx_with_embedder<'a>(
         turn: TurnInput<'a>,
         embedder: &'a dyn EmbeddingProvider,
@@ -1570,7 +1552,7 @@ mod tests {
     }
 
     /// `TopicEmbedder` that also counts `embed_batch` invocations, to pin the
-    /// once-per-scan batching property of the contradiction title pass (#351).
+    /// once-per-scan batching property of the contradiction title pass.
     struct CountingEmbedder {
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -1887,7 +1869,7 @@ mod tests {
         }
     }
 
-    /// #349: a repeated failure of the same tool (same stable title, different
+    /// A repeated failure of the same tool (same stable title, different
     /// error text) must supersede the prior record rather than add a new row.
     #[tokio::test]
     async fn repeated_tool_failure_supersedes_prior_record() {
@@ -1924,9 +1906,9 @@ mod tests {
         );
     }
 
-    /// #349 acceptance: repeated failures of the same tool do not accumulate
-    /// unbounded active rows — each new failure supersedes the previous one,
-    /// leaving exactly one active Reflection that carries the latest error.
+    /// Repeated failures of the same tool do not accumulate unbounded active
+    /// rows — each new failure supersedes the previous one, leaving exactly one
+    /// active Reflection that carries the latest error.
     #[tokio::test]
     async fn repeated_tool_failures_do_not_accumulate_rows() {
         let store = MemoryStore::open_in_memory(4).await.unwrap();
@@ -1974,8 +1956,6 @@ mod tests {
         );
     }
 
-    /// #349 validity: a tool-derived candidate naming a tool that was not
-    /// actually called in the turn is rejected.
     #[tokio::test]
     async fn tool_derived_candidate_with_unknown_tool_is_rejected() {
         let tools = [ToolResultSummary {
@@ -2002,8 +1982,6 @@ mod tests {
         );
     }
 
-    /// #349 validity: a tool-derived candidate whose content is only the fixed
-    /// failure boilerplate (no real summary) is rejected.
     #[tokio::test]
     async fn tool_derived_candidate_with_boilerplate_only_content_is_rejected() {
         let tools = [ToolResultSummary {
@@ -2488,10 +2466,10 @@ mod tests {
         );
     }
 
-    /// #420 review (MEDIUM 5): a weak contradiction that defers to the user
-    /// records the conflicting memory's identity on the action, and applying
-    /// the decision persists it onto the pending candidate so approval can
-    /// later propagate it to `supersedes_id`.
+    /// A weak contradiction that defers to the user records the conflicting
+    /// memory's identity on the action, and applying the decision persists it
+    /// onto the pending candidate so approval can later propagate it to
+    /// `supersedes_id`.
     #[tokio::test]
     async fn ask_confirmation_captures_conflicting_memory() {
         use crate::memory_writer::test_support::InMemoryMemoryPort;
@@ -2553,7 +2531,6 @@ mod tests {
         };
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[], &arbiter_ctx).await;
 
-        // The decision carries the conflicting memory's id + title.
         match decision_action(&decisions) {
             ArbiterAction::AskConfirmationLater {
                 existing_memory_id,
@@ -2565,7 +2542,6 @@ mod tests {
             other => panic!("expected AskConfirmationLater, got {other:?}"),
         }
 
-        // Applying the decision persists both onto the deferred candidate.
         let port = InMemoryMemoryPort::new();
         MemoryArbiter::apply_decisions(&port, &decisions, &arbiter_ctx)
             .await
@@ -2656,7 +2632,7 @@ mod tests {
         assert_eq!(mem.source, MemorySource::Inferred);
     }
 
-    /// Demonstrates the #270 decoupling: the arbiter's cognitive logic
+    /// Demonstrates the `MemoryPort` decoupling: the arbiter's cognitive logic
     /// (validation, dedup, contradiction resolution) runs against
     /// `&dyn MemoryPort` and can be exercised with a plain in-memory test
     /// double — no `SQLite`, no `ene_store::MemoryStore` — while still
@@ -2673,7 +2649,6 @@ mod tests {
         };
         let arbiter_ctx = ctx(turn);
 
-        // First candidate persists as a brand-new memory.
         let applied =
             MemoryArbiter::arbitrate_and_apply(&port, &[sample_candidate(0.9)], &arbiter_ctx)
                 .await
@@ -2819,7 +2794,6 @@ mod tests {
         assert_eq!(applied.len(), 1);
         assert!(applied[0].inserted_id.is_none());
 
-        // The candidate was deferred to the user-approval queue.
         let pending = store
             .list_pending_candidates("ene", Some(ene_store::PendingCandidateStatus::Pending))
             .await
@@ -2973,7 +2947,7 @@ mod tests {
     #[tokio::test]
     async fn interrupted_candidate_confidence_is_deprioritized() {
         // An interrupted (barge-in) episode is partial and therefore less
-        // reliable: the persisted confidence is reduced by the penalty (#M7).
+        // reliable: the persisted confidence is reduced by the penalty.
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
@@ -2996,7 +2970,7 @@ mod tests {
     #[tokio::test]
     async fn interrupted_candidate_tags_are_serialized_into_content() {
         // The store has no tags column, so tags are serialized into the
-        // content as a metadata footer (#M7).
+        // content as a metadata footer.
         let turn = TurnInput {
             user_message: "remember project X",
             assistant_message: None,
@@ -3040,10 +3014,8 @@ mod tests {
         assert_eq!(append_tags_metadata(content, &[]), content);
     }
 
-    // ── #352: every arbiter threshold is wired through config ──
+    // ── Every arbiter threshold is wired through config ──
 
-    /// `ArbiterOptions::from_config` reads all four arbitration parameters from
-    /// `MindMemoryConfig` instead of leaving three hardcoded (#352).
     #[test]
     fn from_config_wires_all_thresholds() {
         let config = MindMemoryConfig {
@@ -3063,8 +3035,8 @@ mod tests {
         assert!((options.contradiction_title_similarity_threshold - 0.88).abs() < f32::EPSILON);
     }
 
-    /// Defaults flow through unchanged, so wiring config keeps the historical
-    /// behaviour identical (#352).
+    /// Defaults flow through unchanged, so config wiring leaves default
+    /// behaviour identical.
     #[test]
     fn from_config_defaults_match_struct_default() {
         let config = MindMemoryConfig::default();
@@ -3092,7 +3064,7 @@ mod tests {
         );
     }
 
-    // ── #353: staged source_quote verification ──
+    // ── Staged source_quote verification ──
 
     fn quote_candidate(quote: &str) -> MemoryCandidate {
         MemoryCandidate {
@@ -3158,7 +3130,7 @@ mod tests {
         assert!((candidate.confidence - 0.7).abs() < f32::EPSILON);
     }
 
-    // ── #351: contradiction-key matching by title embedding similarity ──
+    // ── Contradiction-key matching by title embedding similarity ──
 
     /// Synonymous titles ("職業" vs "仕事") are matched by embedding similarity
     /// and detected as a contradiction, where exact-title matching missed them.
@@ -3194,10 +3166,8 @@ mod tests {
         );
     }
 
-    /// `Semantic` memories were previously skipped by the `_ => false` arm of
-    /// `same_contradiction_key` (which only special-cased `Preference` and
-    /// `UserProfile`), so even synonymous titles never contradicted. With
-    /// embedding matching they now do.
+    /// `Semantic` memories participate in contradiction matching on synonymous
+    /// titles via embeddings.
     #[tokio::test]
     async fn semantic_kind_contradiction_now_matches() {
         let turn = TurnInput {
@@ -3205,8 +3175,7 @@ mod tests {
             assistant_message: None,
             tool_results: &[],
         };
-        // Synonymous titles ("occupation" / "job") share the occupation vector;
-        // the old `_ => false` arm never even compared Semantic titles.
+        // Synonymous titles ("occupation" / "job") share the occupation vector.
         let existing = memory_item(
             21,
             MemoryKind::Semantic,
@@ -3241,7 +3210,7 @@ mod tests {
     /// The title pass must issue **one** `embed_batch` call per scan, not one
     /// per existing memory: a character with many same-kind memories would
     /// otherwise cost a provider round trip per title on the post-turn write
-    /// path (#351).
+    /// path.
     #[tokio::test]
     async fn contradiction_scan_embeds_distinct_titles_in_one_batch() {
         let turn = TurnInput {
@@ -3290,8 +3259,7 @@ mod tests {
         assert_eq!(embedder.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    /// `Relationship` memories were also skipped by `_ => false`; they now match
-    /// on synonymous titles via embeddings.
+    /// `Relationship` memories also match on synonymous titles via embeddings.
     #[tokio::test]
     async fn relationship_kind_contradiction_now_matches() {
         let turn = TurnInput {
@@ -3403,9 +3371,8 @@ mod tests {
         assert_eq!(decisions[0].reason.code, ArbiterReasonCode::ValidNewMemory);
     }
 
-    /// The old hardcoded `"nickname"` / `"呼び方"` keyword list is gone: a
-    /// rephrased profile title that shares no keyword but is semantically the
-    /// same subject still matches via embeddings.
+    /// A rephrased profile title that shares no keyword with the existing row
+    /// but is semantically the same subject still matches via embeddings.
     #[tokio::test]
     async fn user_profile_matches_without_hardcoded_keyword() {
         let turn = TurnInput {
@@ -3437,7 +3404,7 @@ mod tests {
     }
 
     /// When the embedder fails, matching degrades to exact normalized-title
-    /// equality so contradiction checks never silently stop (#351).
+    /// equality so contradiction checks never silently stop.
     #[tokio::test]
     async fn embedding_failure_falls_back_to_exact_title() {
         let turn = TurnInput {

@@ -87,8 +87,6 @@ async fn main() {
 
     let mut ctx = context::AppContext::new(handle);
 
-    // Dispatch: with a subcommand, run a single non-interactive operation and
-    // exit; without one, start the interactive REPL (#186).
     let code = match &args.command {
         Some(cmd) => noninteractive::execute(cmd, &mut ctx).await,
         None => repl::run(&mut ctx).await,

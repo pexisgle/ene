@@ -23,8 +23,8 @@ pub enum AppEvent {
     /// Streamed AI events mirrored from [`ene_runtime::EneEvent`].
     Ai(AiStreamUpdate),
     /// Raw performance cue name from [`ene_runtime::EneEvent::Performance`].
-    /// Desktop maps this to VRM playback; do not forward `SpecialToken` /
-    /// Expression events (removed in API v1).
+    /// Desktop maps this to VRM playback; the API v1 event stream does not
+    /// include `SpecialToken` / Expression events.
     #[cfg_attr(
         not(test),
         expect(
@@ -33,7 +33,7 @@ pub enum AppEvent {
         )
     )]
     PerformanceCue(String),
-    /// Motion cue with layer routing information (#133).
+    /// Motion cue with layer routing information.
     ///
     /// `layer` carries the canonical [`ene_config::MotionLayer`] from the
     /// performance cue; the consumer converts it to the rendering-side
@@ -44,13 +44,13 @@ pub enum AppEvent {
         priority: u8,
         duration: f32,
     },
-    /// Expression cue with weight and hold duration (#132).
+    /// Expression cue with weight and hold duration.
     ExpressionCue {
         name: String,
         weight: f32,
         hold_secs: f64,
     },
-    /// Cancel cue (#132).
+    /// Cancel cue.
     CancelCue { scope: String },
     /// `LookAt` cue — gaze target hint from LLM performance markers.
     /// Forwarded to VRM gaze when the gaze system is implemented.
@@ -62,9 +62,9 @@ pub enum AppEvent {
     MicStateChanged { active: bool },
     /// Request the event loop to exit.
     Quit,
-    /// The runtime actor broadcast channel closed (#242).
+    /// The runtime actor broadcast channel closed.
     RuntimeDisconnected,
-    /// Pending memory candidates available for user approval (#223).
+    /// Pending memory candidates available for user approval.
     PendingCandidatesCount(usize),
 }
 

@@ -6,7 +6,7 @@
 //!
 //! ## Spec
 //!
-//! [VRMC_node_constraint-1.0](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_node_constraint-1.0)
+//! [`VRMC_node_constraint-1.0`](https://github.com/vrm-c/vrm-specification/tree/master/specification/VRMC_node_constraint-1.0)
 //! defines three constraint types:
 //!
 //! - **Rotation**: copies the source's rotation delta onto the

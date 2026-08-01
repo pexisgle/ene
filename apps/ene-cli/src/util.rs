@@ -19,7 +19,6 @@ pub fn mask_api_key(key: &str) -> String {
     format!("{prefix}…{suffix}")
 }
 
-/// Parse a memory kind string into a [`MemoryKind`](ene_store::MemoryKind).
 pub fn parse_memory_kind(s: &str) -> Option<ene_store::MemoryKind> {
     match s {
         "episodic" => Some(ene_store::MemoryKind::Episodic),

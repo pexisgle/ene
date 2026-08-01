@@ -5,23 +5,23 @@
 //! but fails fast with [`AudioProviderError::Init`] so the crate (and the
 //! workspace) keeps compiling without the whisper.cpp toolchain.
 //!
-//! # Migration to `ene_infer::LocalModel`
+//! # Why `WhisperModel` owns its state exclusively
 //!
-//! This provider used to hold a `parking_lot::Mutex<Option<WhisperState>>`
-//! and `.lock().take()` the cached state out around a `tokio::task::spawn_blocking`
-//! call, putting it back afterward (M14). That pattern had three independent
-//! bugs: two concurrent `transcribe` calls could both observe `None` and each
-//! allocate a fresh multi-hundred-megabyte `WhisperState` (one silently
-//! clobbering the other on put-back), a cancelled or panicking task never
-//! reached the put-back line and lost the cached state permanently, and
-//! nothing actually serialized whisper inference — the mutex only protected
-//! the `Option`, not the inference call itself.
+//! [`WhisperModel`]'s `state` is a plain field owned exclusively by the
+//! single worker thread [`ene_infer::EngineHandle`] spawns for it: there is
+//! no `Arc`, no `Mutex`, no take/put-back, and a cancelled or panicking job
+//! simply leaves the field where it is (or the whole model is rebuilt from
+//! the factory on panic).
 //!
-//! [`WhisperModel`] deletes all of that: `state` is now a plain field owned
-//! exclusively by the single worker thread [`ene_infer::EngineHandle`] spawns
-//! for it. There is no `Arc`, no `Mutex`, and no take/put-back — a cancelled
-//! or panicking job simply leaves the field where it is (or the whole model
-//! is rebuilt from the factory on panic).
+//! Exclusive ownership avoids three failure modes of caching the state
+//! behind a `Mutex<Option<WhisperState>>` around a
+//! `tokio::task::spawn_blocking` call: two concurrent `transcribe` calls
+//! could both observe `None` and each allocate a fresh multi-hundred-megabyte
+//! `WhisperState` (one silently clobbering the other on put-back), a
+//! cancelled or panicking task never reached the put-back line and lost the
+//! cached state permanently, and nothing actually serialized whisper
+//! inference — the mutex only protected the `Option`, not the inference call
+//! itself.
 #[cfg(feature = "local-stt")]
 use std::sync::Arc;
 #[cfg(feature = "local-stt")]
@@ -40,7 +40,7 @@ pub const PROVIDER_NAME: &str = "whisper";
 #[cfg(feature = "local-stt")]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
-/// Number of taps for the anti-aliasing FIR low-pass filter (M15).
+/// Number of taps for the anti-aliasing FIR low-pass filter.
 #[cfg(feature = "local-stt")]
 const FIR_TAPS: usize = 16;
 
@@ -72,7 +72,7 @@ fn resolve_language(ai: &ene_ai::AiConfig) -> Option<String> {
     (!ai.stt.language.trim().is_empty()).then(|| ai.stt.language.clone())
 }
 
-/// Compute windowed-sinc FIR low-pass coefficients (M15).
+/// Compute windowed-sinc FIR low-pass coefficients.
 ///
 /// The cutoff is the target Nyquist (8 kHz for a 16 kHz target) so that
 /// out-of-band content is attenuated before decimation, preventing aliasing.
@@ -130,7 +130,7 @@ fn apply_fir(pcm: &[f32], coeffs: &[f32]) -> Vec<f32> {
 /// whisper.cpp requires a fixed 16 kHz sample rate; microphone capture may
 /// arrive at 44.1 kHz / 48 kHz, so we resample defensively before inference.
 /// When downsampling, a windowed-sinc FIR low-pass filter is applied first to
-/// suppress aliasing (M15).
+/// suppress aliasing.
 #[cfg(feature = "local-stt")]
 fn resample_to_whisper(pcm: &[f32], sample_rate: u32) -> Vec<f32> {
     if sample_rate == WHISPER_SAMPLE_RATE || pcm.is_empty() || sample_rate == 0 {
@@ -216,18 +216,18 @@ const STT_JOB_TIMEOUT: Duration = Duration::from_mins(1);
 /// which could give real mid-call cancellation and a genuine tick source —
 /// left as a follow-up, not attempted here, since it requires either an
 /// `unsafe` pointer-lifetime workaround or a second polling thread per job to
-/// satisfy the callback's `'static` bound, which is more machinery than this
-/// migration's scope (replacing the take/put-back mutex pattern) calls for.
+/// satisfy the callback's `'static` bound, which is more machinery than the
+/// exclusive-ownership design calls for.
 #[cfg(feature = "local-stt")]
 const STT_STALL_TIMEOUT: Option<Duration> = None;
 
 /// The exclusively-owned whisper.cpp inference model.
 ///
 /// Owned by exactly one [`ene_infer::EngineHandle`] worker thread for its
-/// entire lifetime — see this module's migration doc comment for what that
-/// replaces. `state` is reused across jobs purely to avoid reallocating it
-/// per request (each `full()` call reprocesses its input from scratch;
-/// whisper.cpp does not carry decode state between calls), so
+/// entire lifetime — see the module-level doc comment for why exclusive
+/// ownership matters. `state` is reused across jobs purely to avoid
+/// reallocating it per request (each `full()` call reprocesses its input from
+/// scratch; whisper.cpp does not carry decode state between calls), so
 /// [`ene_infer::LocalModel::reset`] has nothing to do and is not overridden.
 #[cfg(feature = "local-stt")]
 pub struct WhisperModel {

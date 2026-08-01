@@ -5,12 +5,10 @@
 //! exposes the per-frame `step`, raycast, and bone-pose update
 //! operations used by [`crate::runtime::Runtime::about_to_wait`].
 //!
-//! ## ECS integration (Phase 4+)
+//! ## ECS integration
 //!
-//! The legacy `entity_to_*` `HashMaps` that previously mapped an
-//! `hecs::Entity` to Rapier handles have been removed. The bevy
-//! `Component`s in [`crate::component::physics`] now carry the
-//! mapping:
+//! The bevy `Component`s in [`crate::component::physics`] carry the
+//! mapping from the character entity to Rapier handles:
 //!
 //! - [`crate::component::physics::PhysicsBody`] for the
 //!   `RigidBodyHandle`.
@@ -33,9 +31,8 @@ use rapier3d::prelude::*;
 
 use crate::character::{BonePose, BoneShapeSpec};
 
-/// Per-entity transform attached to the character entity in the
-/// legacy `hecs::World`. Kept around while the migration is
-/// incomplete; will be retired in Phase 5.
+/// Per-entity transform attached to the character entity. Kept while
+/// the ECS migration is incomplete.
 #[derive(Clone, Copy, Debug)]
 pub struct Transform {
     pub translation: Vec3,
@@ -70,7 +67,6 @@ pub struct CharacterColliderRegistration {
     pub rest_rotations: Vec<Quat>,
 }
 
-/// Wrapper for `Rapier3D` state.
 pub struct PhysicsWorld {
     pub gravity: Vec3,
     pub integration_parameters: IntegrationParameters,
@@ -413,8 +409,6 @@ mod tests {
         );
     }
 
-    /// A ray through the centre of a bone collider must hit it.
-    /// A ray past the collider must miss.
     #[test]
     fn cast_ray_finds_bone_collider() {
         let mut physics = setup();
@@ -435,6 +429,10 @@ mod tests {
         assert!(hit.is_none(), "ray above head must miss all bone colliders");
     }
 
+    /// `cast_ray` must also return the world-space hit point
+    /// (`origin + dir * toi`) and the collider handle so the
+    /// debug overlay can highlight the exact collider that was
+    /// hit.
     /// `cast_ray` must also return the world-space hit point
     /// (`origin + dir * toi`) and the collider handle so the
     /// debug overlay can highlight the exact collider that was
@@ -540,9 +538,6 @@ mod tests {
         );
     }
 
-    /// `remove_character_colliders` must free the body and drop
-    /// the entity mapping, so a subsequent `cast_ray` no longer
-    /// hits.
     #[test]
     fn remove_character_colliders_drops_body() {
         let mut physics = setup();

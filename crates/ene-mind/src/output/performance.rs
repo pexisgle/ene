@@ -1,4 +1,4 @@
-//! Performance cues for chat presentation (#126, #128).
+//! Performance cues for chat presentation.
 //!
 //! Lives in `ene-mind` so `ene-vrm` does not depend on mind/runtime.
 //! Runtime re-exports these types for host apps. `CueSource::Host` is

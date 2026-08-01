@@ -1,11 +1,10 @@
-//! Application startup phases for ene-desktop.
+//! Application startup sequence for ene-desktop.
 //!
-//! | Phase | Function | When |
-//! |-------|----------|------|
-//! | 1 — First launch | [`first_launch_setup`] | Once per install (release asset copy) |
-//! | 2 — App launch | [`load_desktop_settings`], [`init_app_state`] | Every process start (sync) |
-//! | 3 — Runtime warmup | [`AiBridge`] background task via `ene_runtime::bootstrap_runtime` | Every start (async) |
-//! | 4 — Graphics ready | [`crate::runtime::Runtime::resumed`] | After winit surface exists |
+//! [`first_launch_setup`] runs once per install (release asset copy);
+//! [`load_desktop_settings`] / [`init_app_state`] run at every process
+//! start; async runtime warmup happens in [`AiBridge`] via
+//! `ene_runtime::bootstrap_runtime`; the winit surface setup happens in
+//! [`crate::runtime::Runtime::resumed`].
 
 use std::path::PathBuf;
 
@@ -14,7 +13,7 @@ use crate::gpu::GpuContext;
 use crate::settings::CharacterSettings;
 use crate::state::{AppState, AppStateError};
 
-/// Paths resolved during Phase 1 (first-launch asset deployment + CLI overrides).
+/// Paths resolved during first-launch asset deployment + CLI overrides.
 pub struct FirstLaunchPaths {
     /// Absolute path to the assets directory.
     pub assets_dir: PathBuf,
@@ -28,12 +27,12 @@ pub struct FirstLaunchPaths {
     pub default_vrma: String,
 }
 
-/// Phase 1: deploy default assets on first launch (release) and read CLI overrides.
+/// Deploy default assets on first launch (release) and read CLI overrides.
 pub fn first_launch_setup() -> Result<FirstLaunchPaths, AppStateError> {
     let assets_dir =
         ene_config::ensure_resource_dirs().map_err(|e| AppStateError::AssetsDir(e.to_string()))?;
 
-    // Write JSON schemas once at startup rather than on every config load (#325).
+    // Write JSON schemas once at startup rather than on every config load.
     ene_config::write_schemas(&assets_dir);
 
     let (default_vrm, default_vrma) = crate::settings::read_cli_paths();
@@ -44,12 +43,12 @@ pub fn first_launch_setup() -> Result<FirstLaunchPaths, AppStateError> {
     })
 }
 
-/// Phase 2a: discover characters on disk and load persisted settings once.
+/// Discover characters on disk and load persisted settings once.
 pub fn load_desktop_settings(paths: &FirstLaunchPaths) -> CharacterSettings {
     CharacterSettings::discover(&paths.assets_dir, &paths.default_vrm)
 }
 
-/// Phase 2b: construct [`AppState`] with GPU context and the AI bridge.
+/// Construct [`AppState`] with GPU context and the AI bridge.
 pub fn init_app_state(
     gpu: GpuContext,
     settings: CharacterSettings,

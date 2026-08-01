@@ -1,4 +1,4 @@
-//! Deferred post-turn memory extraction must not block Terminal (#100).
+//! Deferred post-turn memory extraction must not block Terminal.
 
 #![expect(
     clippy::unwrap_used,

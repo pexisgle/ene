@@ -1,4 +1,4 @@
-//! GGUF download, cache, and path resolution (#171).
+//! GGUF download, cache, and path resolution.
 
 mod download;
 

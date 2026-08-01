@@ -69,7 +69,6 @@ pub use prompts::{
 pub use resources::ensure_resource_dirs;
 pub use store::ConfigStore;
 
-// Re-export serde / schemars / ctor for sub-crates
 pub use ctor::ctor;
 // The `ctor` proc-macro emits `<crate_path>::__support::ctor_parse!`, so the
 // `define_config!`/`define_tool_config!` macros can redirect their generated

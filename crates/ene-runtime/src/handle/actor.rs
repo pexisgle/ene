@@ -1,35 +1,26 @@
-//! `TurnActor` (formerly `EneActor`): the single-threaded actor that owns
-//! turn-execution state (#271).
+//! `TurnActor`: the single-threaded actor that owns turn-execution state.
 //!
-//! ## What moved out (#271)
-//!
-//! - Read-only session queries and pending-candidate approval used to be
-//!   `EneCommand` variants handled here even though they never touched
-//!   `active_turn` / `stream_handle` / `turn_gate` — see
-//!   [`crate::query::sessions::SessionQueryHandle`] and
-//!   [`crate::query::candidates::MemoryCandidateHandle`], which now talk to
-//!   `MemoryStore` directly.
-//! - Screen-image vision summarization used to run the actual model call
-//!   inside a `vision_tasks` `JoinSet` owned by this actor, with the raw RGB
-//!   buffer riding through `EneCommand`. See [`crate::vision::VisionHandle`],
-//!   which now performs that call itself; this actor only answers a small
-//!   `PrepareVisionSummary` request (busy-check + lazy model handle) and a
-//!   fire-and-forget `StashProactiveScreenImage`.
-//!
-//! ## What stayed (deliberately, see PR description)
+//! ## What runs here
 //!
 //! Turn execution (`Run` / `Cancel`), permission decisions, user-input
 //! responses, snapshot, manual compression/undo, tool calls, character-card
 //! swap, feature/proactive settings updates, tool-index invalidation, `CCv3`
-//! memory hash, and plugin host restart all still go through this single
-//! actor. The issue's ideal design further splits config/control operations
-//! (`SetCharacter`, `UpdateFeatureSettings`, plugin host restart) into a
-//! separate `ControlPlane` actor from turn-execution-critical state
-//! (`turn_gate`, `active_turn`, `stream_handle`, `undo_stack`). That further
-//! split is deferred — see the PR body for why — since it does not
-//! contribute to the head-of-line-blocking problem the issue is about
-//! (config/control commands are already infrequent, low-latency, and never
-//! block behind a `Run` turn any worse than `Run` itself already does).
+//! memory hash, and plugin host restart all go through this single actor.
+//!
+//! Read-only session queries and pending-candidate approval never touch
+//! `active_turn` / `stream_handle` / `turn_gate`, so they are served by
+//! [`crate::query::sessions::SessionQueryHandle`] and
+//! [`crate::query::candidates::MemoryCandidateHandle`] talking to
+//! `MemoryStore` directly instead of queuing behind this mailbox.
+//! Screen-image vision summarization runs its model call outside the actor
+//! in [`crate::vision::VisionHandle`]; this actor only answers a small
+//! `PrepareVisionSummary` request (busy-check + lazy model handle) and a
+//! fire-and-forget `StashProactiveScreenImage`.
+//!
+//! Config/control operations (`SetCharacter`, `UpdateFeatureSettings`,
+//! plugin host restart) stay on this actor rather than a separate control
+//! plane: they are infrequent, low-latency, and never block behind a `Run`
+//! turn any worse than `Run` itself already does.
 
 use super::SharedActorState;
 use super::TurnGate;
@@ -73,13 +64,13 @@ pub(super) struct TurnActor {
     cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
     /// Clone of the command sender so background tasks spawned by the actor
     /// can send internal commands (e.g. [`EneCommand::PluginHostReconfigured`])
-    /// back through the mailbox (#397).
+    /// back through the mailbox.
     cmd_tx: mpsc::UnboundedSender<EneCommand>,
     event_tx: broadcast::Sender<EneEvent>,
-    /// Lifecycle bus sender (#272): `StatusChanged` / `PendingCandidateAvailable`
+    /// Lifecycle bus sender: `StatusChanged` / `PendingCandidateAvailable`
     /// / `ToolBackgroundCompleted` — kept off the chat `event_tx` broadcast.
     lifecycle_tx: broadcast::Sender<LifecycleEvent>,
-    /// Audio channel sender (#272): bounded `mpsc`, cloned into each stream
+    /// Audio channel sender: bounded `mpsc`, cloned into each stream
     /// task's [`crate::streaming::StreamContext`] so TTS chunks never ride
     /// the chat broadcast bus.
     audio_tx: mpsc::Sender<AudioChunk>,
@@ -87,7 +78,7 @@ pub(super) struct TurnActor {
     turn_gate: Arc<TurnGate>,
     config: EneConfig,
     session: ConversationSession,
-    /// Concrete store for IPC server (`connection()`) and `ToolRag` (#309).
+    /// Concrete store for IPC server (`connection()`) and `ToolRag`.
     ///
     /// `session.memory.memory_store` holds the same store as `Arc<dyn MemoryPort>`
     /// for `ene-mind`; this field keeps the concrete type for callers that need
@@ -100,7 +91,7 @@ pub(super) struct TurnActor {
     stream_session_rx: Option<oneshot::Receiver<streaming::StreamOutcome>>,
     /// Shared with the running stream task; accumulates streamed assistant
     /// text deltas so a hard-aborted turn can still recover its partial
-    /// response for interruption recording (#H5).
+    /// response for interruption recording.
     stream_partial_text: Arc<parking_lot::Mutex<String>>,
     active_turn: Option<TurnId>,
     /// Cancellation token for the in-flight [`crate::vision::VisionHandle`]
@@ -108,33 +99,31 @@ pub(super) struct TurnActor {
     /// [`VisionPrepared`] reply; starting a new user turn cancels the
     /// current token and replaces it with a fresh one so a later vision call
     /// is not pre-cancelled. The actual inference call runs entirely outside
-    /// this actor (#271) — this token is the only thread the actor still
+    /// this actor — this token is the only thread the actor still
     /// holds into an in-flight vision request, used solely to ask it to
     /// stop (it flows into `ene_infer::JobContext::should_stop` on the
     /// local llama.cpp worker).
     vision_cancel: CancellationToken,
     pending_permissions: Arc<Mutex<HashMap<RequestId, oneshot::Sender<PermissionDecision>>>>,
     pending_user_inputs: Arc<Mutex<HashMap<RequestId, oneshot::Sender<UserInputResponse>>>>,
-    /// Session-wide permission grants tracked for the permission center (#177).
     permission_scopes: Arc<Mutex<Vec<crate::streaming::PermissionScope>>>,
-    /// Actor-native undo stack of mutating tool calls (#178).
     undo_stack: Arc<Mutex<crate::undo::UndoStack>>,
     context: ene_mind::ContextManager,
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
     memory_writer_tasks: tokio::task::JoinSet<()>,
-    /// In-flight tool-search jobs; reaped so panics are not lost (#236).
+    /// In-flight tool-search jobs; reaped so panics are not lost.
     search_tasks: tokio::task::JoinSet<()>,
-    /// In-flight deferred (background) tool tasks (#196). Each task polls
+    /// In-flight deferred (background) tool tasks. Each task polls
     /// its owning tool until the task reaches a terminal state, then emits
     /// [`LifecycleEvent::ToolBackgroundCompleted`]. Reaped so panics are not lost.
     deferred_tool_tasks: tokio::task::JoinSet<()>,
-    /// Heavy command-handler work spawned to avoid head-of-line blocking
-    /// (#397): GGUF model loads, plugin host restarts. Reaped alongside the
+    /// Heavy command-handler work spawned to avoid head-of-line blocking:
+    /// GGUF model loads, plugin host restarts. Reaped alongside the
     /// other `JoinSet`s so panics surface as diagnostics.
     bg_command_tasks: tokio::task::JoinSet<()>,
     /// Auxiliary stream-task handles (e.g. the TTS synthesis worker) handed
-    /// back by the stream so shutdown can abort them (#401). Each handle is
+    /// back by the stream so shutdown can abort them. Each handle is
     /// wrapped in an [`AbortOnDrop`] guard inside a wrapper task, so aborting
     /// the set (or dropping it on teardown) aborts the underlying worker too
     /// — they cannot outlive the actor. Reaped like the other `JoinSet`s.
@@ -142,43 +131,35 @@ pub(super) struct TurnActor {
     classifier_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
     memory_writer_rx:
         mpsc::UnboundedReceiver<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
-    /// Receiver for deferred (background) tool tasks accepted by the stream (#196).
     deferred_tool_rx: mpsc::UnboundedReceiver<DeferredToolTask>,
-    /// Receiver for auxiliary stream-task handles (e.g. the TTS worker, #401).
+    /// Receiver for auxiliary stream-task handles (e.g. the TTS worker).
     /// Drained by [`TurnActor::admit_aux_handles`] from the run loop, the
     /// `Shutdown` command handler, and the post-loop teardown so a handle
     /// that arrives after the loop's last drain is still admitted and aborted
     /// on shutdown rather than dropped (which would only detach, not cancel,
     /// the worker).
     aux_task_rx: mpsc::UnboundedReceiver<tokio::task::JoinHandle<()>>,
-    /// Sender for classifier `JoinHandles` from the stream task.
     classifier_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
-    /// Sender for deferred memory-writer `JoinHandles` from the stream task.
     memory_writer_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<ene_mind::MemoryWriteOutcome>>,
-    /// Sender for deferred (background) tool tasks accepted by the stream (#196).
     deferred_tool_tx: mpsc::UnboundedSender<DeferredToolTask>,
-    /// Sender for auxiliary stream-task handles from the stream task (#401).
     aux_task_tx: mpsc::UnboundedSender<tokio::task::JoinHandle<()>>,
     /// Shared with the running stream task; first party to flip emits Terminal.
     terminal_emitted: Arc<AtomicBool>,
     /// Held so the broadcast channel retains buffered diagnostic events until the
     /// first subscriber attaches via [`crate::EneHandle::diagnostics().subscribe()`].
     _diag_rx: broadcast::Receiver<DiagnosticEvent>,
-    /// Proactive speech scheduler state (#166).
     proactive: crate::proactive::ProactiveScheduler,
-    /// In-flight decision result channel.
     proactive_decision_rx: Option<oneshot::Receiver<crate::proactive::ProactiveDecisionResult>>,
-    /// Join handle for the in-flight decision task (aborted on user turn / shutdown).
     proactive_decision_handle: Option<tokio::task::JoinHandle<()>>,
     /// Local / cloud decision provider handles (lazy).
     ///
     /// Shared via `Arc` so background init tasks can populate it without
-    /// blocking the actor loop (#397). The `OnceCell` guarantees at-most-once
+    /// blocking the actor loop. The `OnceCell` guarantees at-most-once
     /// initialization; `proactive_llm_init_spawned` prevents duplicate
     /// background spawns.
     proactive_llm: Arc<OnceCell<ene_ai_local::ProactiveLlmHandles>>,
     /// Guards against spawning multiple background init tasks for
-    /// [`Self::proactive_llm`] (#397). Set to `true` when a background load
+    /// [`Self::proactive_llm`]. Set to `true` when a background load
     /// is spawned; reset to `false` if that load *fails* so a later call can
     /// retry — a single transient failure must not permanently disable
     /// proactive features for the process lifetime. On success the `OnceCell`
@@ -187,16 +168,16 @@ pub(super) struct TurnActor {
     /// task can reset it on failure.
     proactive_llm_init_spawned: Arc<AtomicBool>,
     /// Guards against invoking [`ene_ai_local::ProactiveLlmHandles::shutdown`]
-    /// more than once (#397). Both the `EneCommand::Shutdown` arm and the
-    /// post-loop cleanup in [`Self::run`] run on every normal teardown;
-    /// previously `Option::take` made the second of those a no-op, but
-    /// `Arc<OnceCell>` cannot be taken through a shared reference. This flag
-    /// restores the at-most-once guarantee so a future `shutdown()` with real
-    /// side effects (unloading GGUF weights, releasing GPU memory) cannot be
-    /// double-invoked from the two unsynchronized call sites.
+    /// more than once. Both the `EneCommand::Shutdown` arm and the
+    /// post-loop cleanup in [`Self::run`] run on every normal teardown from
+    /// unsynchronized call sites, and `Arc<OnceCell>` cannot be consumed
+    /// through a shared reference to deduplicate them, so this flag provides
+    /// the at-most-once guarantee: a `shutdown()` with real side effects
+    /// (unloading GGUF weights, releasing GPU memory) must never be
+    /// double-invoked.
     proactive_llm_shutdown: AtomicBool,
     /// Guards against spawning duplicate `PrepareVisionSummary` slow-path
-    /// pollers (#397). The screen-capture-driven proactive vision flow can
+    /// pollers. The screen-capture-driven proactive vision flow can
     /// fire `PrepareVisionSummary` several times during the multi-second GGUF
     /// loading window; without deduplication each call would spawn a fresh
     /// up-to-five-minute poller into `bg_command_tasks` (default cap 4),
@@ -207,19 +188,17 @@ pub(super) struct TurnActor {
     vision_slow_path_active: Arc<AtomicBool>,
     /// Origin of the active stream turn (for cancel Terminal).
     active_origin: crate::types::TurnOrigin,
-    /// Provider health monitor for failover routing (#175).
     health_monitor: ene_ai::ProviderHealthMonitor,
     /// Bounded-task admission caps for the five `JoinSet`s above, plus the
-    /// deferred (background) tool poll budget (Stage 8). Loaded once at
+    /// deferred (background) tool poll budget. Loaded once at
     /// construction from the `tools.*` config section (see
     /// [`crate::task_config::ToolRuntimeConfig`]); a config hot-reload does
-    /// not currently re-read it (mirrors `deferred_max_polls`'s prior
+    /// not currently re-read it (matching `deferred_max_polls`'s
     /// once-at-startup behavior).
     task_caps: crate::task_config::ToolRuntimeConfig,
-    /// Resolved TTS provider for streaming audio synthesis (None when TTS is disabled).
     tts_provider: Option<Arc<dyn ene_ai::TtsProvider>>,
     /// Plugin-contributed tool registries, re-merged when the tool registry is
-    /// rebuilt after a Features update (#247).
+    /// rebuilt after a Features update.
     plugin_tool_registries: Vec<Arc<dyn ToolRegistry>>,
     /// Shared plugin host manager handle. Held by the actor so a Features
     /// update that changes the enabled plugin set can restart the host with
@@ -228,7 +207,7 @@ pub(super) struct TurnActor {
     plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
     /// Shared handle to the plugin health → diagnostics bridge task. Kept in
     /// sync when the plugin host is restarted so shutdown aborts the live
-    /// bridge rather than a stale one (#238).
+    /// bridge rather than a stale one.
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Mailbox-free shared actor state: card name (shared with
     /// [`crate::query::candidates::MemoryCandidateHandle`]),
@@ -350,7 +329,7 @@ impl TurnActor {
     }
 
     /// Drains auxiliary stream-task handles (e.g. the TTS worker) sent from
-    /// the stream so shutdown can abort them (#401).
+    /// the stream so shutdown can abort them.
     ///
     /// Each handle is wrapped in an [`AbortOnDrop`] guard inside a wrapper
     /// task: aborting the wrapper (via `aux_tasks.abort_all()`) drops the
@@ -387,7 +366,7 @@ impl TurnActor {
     /// stream task before its `JoinHandle` reached us), so admission control
     /// here only bounds how many *outcome consumers* the actor supervises —
     /// it never cancels the write. A rejected handle is therefore **not**
-    /// dropped on the floor (#398): its outcome is still consumed by a
+    /// dropped on the floor: its outcome is still consumed by a
     /// detached `tokio::spawn` task so
     /// [`LifecycleEvent::PendingCandidateAvailable`] and
     /// [`DiagnosticEvent::MemoryWrite`] fire exactly as they would for an
@@ -426,7 +405,7 @@ impl TurnActor {
                 });
             } else {
                 // Cap reached: keep the outcome consumer alive but detached so
-                // the lifecycle/diagnostic events are not lost (#398).
+                // the lifecycle/diagnostic events are not lost.
                 tokio::spawn(async move {
                     consume_memory_write_outcome(handle, lifecycle_tx, diag_tx, store).await;
                 });
@@ -434,7 +413,7 @@ impl TurnActor {
         }
     }
 
-    /// Test-only hook (#398): injects a memory-writer `JoinHandle` as if the
+    /// Test-only hook: injects a memory-writer `JoinHandle` as if the
     /// stream task had sent it, then runs [`Self::drain_memory_writers`] so
     /// admission-cap behavior can be exercised without a live stream task.
     #[cfg(test)]
@@ -500,11 +479,8 @@ impl TurnActor {
                 &self.diag_tx,
             );
 
-            // Drain auxiliary stream-task handles (e.g. the TTS worker) so
-            // shutdown can abort them (#401).
             self.admit_aux_handles();
 
-            // Drain classifier JoinHandles sent from the stream.
             while let Ok(handle) = self.classifier_rx.try_recv() {
                 if !admit_task(
                     &mut self.classifier_tasks,
@@ -518,7 +494,7 @@ impl TurnActor {
                     // JoinHandle reached us); dropping `handle` here without
                     // awaiting it only stops *our* panic supervision of it —
                     // it does not cancel the task (quality loss, not a
-                    // correctness bug; #Stage8).
+                    // correctness bug).
                     continue;
                 }
                 self.classifier_tasks.spawn(async move {
@@ -532,11 +508,8 @@ impl TurnActor {
                 });
             }
 
-            // Drain deferred memory-writer JoinHandles sent from the stream.
             self.drain_memory_writers();
 
-            // Drain deferred tool tasks accepted by the stream (#196).
-            // Spawn a polling task for each that awaits completion.
             while let Ok(task) = self.deferred_tool_rx.try_recv() {
                 if !admit_task(
                     &mut self.deferred_tool_tasks,
@@ -584,8 +557,6 @@ impl TurnActor {
                         }
                     }
                     res = &mut *rx => {
-                        // The stream task has finished (or the
-                        // sender was dropped).
                         if let Ok(outcome) = res {
                             self.session = outcome.session;
                             // The stream task recorded the assistant
@@ -597,7 +568,7 @@ impl TurnActor {
                             {
                                 self.proactive.on_proactive_completed();
                             }
-                            // Retroactive topic-boundary compression (#368): a
+                            // Retroactive topic-boundary compression: a
                             // boundary detected on the just-completed turn
                             // compresses the span before it. Runs here (after
                             // Terminal, in the actor) so the response is never
@@ -701,7 +672,6 @@ impl TurnActor {
             }
         }
 
-        // Clean up any running stream
         if let Some(handle) = self.stream_handle.take() {
             handle.abort();
         }
@@ -711,10 +681,8 @@ impl TurnActor {
         self.cancel_token.cancel();
         // Admit aux handles that arrived after the run loop's last drain so
         // teardown aborts them rather than dropping them (which would only
-        // detach, not cancel, the worker) (#401).
+        // detach, not cancel, the worker).
         self.admit_aux_handles();
-        // Abort any in-flight direct CallTool, classifier, and memory-writer tasks,
-        // and clear any pending prompt oneshot senders.
         self.classifier_tasks.abort_all();
         self.memory_writer_tasks.abort_all();
         self.call_tool_tasks.abort_all();
@@ -745,9 +713,9 @@ impl TurnActor {
         self.proactive_decision_rx = None;
     }
 
-    /// Restarts the plugin host to apply a changed enabled-plugin set (E1),
+    /// Restarts the plugin host to apply a changed enabled-plugin set,
     /// running the heavy I/O in `bg_command_tasks` so the actor loop is never
-    /// blocked (#397).
+    /// blocked.
     ///
     /// Shuts down the live host (stopping disabled plugins), spawns fresh DB
     /// IPC servers for the newly-detected plugin set, starts a new host with
@@ -806,17 +774,17 @@ impl TurnActor {
     }
 
     /// Kicks off proactive LLM initialization in the background if it has
-    /// not already been started (#397).
+    /// not already been started.
     ///
     /// Returns immediately in all cases — the actor loop is never blocked
     /// on a GGUF model load. Callers that need the handles should check
     /// `self.proactive_llm.get()` after calling this method.
     fn ensure_proactive_llm_non_blocking(&mut self) {
         if self.proactive_llm.get().is_some() {
-            return; // Already loaded.
+            return;
         }
         if self.proactive_llm_init_spawned.swap(true, Ordering::AcqRel) {
-            return; // Init already in progress.
+            return;
         }
 
         let ai_cfg = match self.config.get_section::<ene_ai::AiConfig>() {
@@ -878,14 +846,14 @@ impl TurnActor {
         });
     }
 
-    /// Shuts down the proactive LLM handles at most once (#397).
+    /// Shuts down the proactive LLM handles at most once.
     ///
     /// Both the `EneCommand::Shutdown` arm and the post-loop cleanup in
     /// [`Self::run`] call this on every normal teardown; the
     /// `proactive_llm_shutdown` flag guarantees the underlying
     /// [`ene_ai_local::ProactiveLlmHandles::shutdown`] runs only on the first
-    /// of the two, restoring the at-most-once guarantee the old
-    /// `Option::take` provided before the `Arc<OnceCell>` conversion.
+    /// of the two, since `Arc<OnceCell>` cannot be consumed through a shared
+    /// reference.
     async fn shutdown_proactive_llm_once(&self) {
         if let Some(handles) = self.proactive_llm.get()
             && !self.proactive_llm_shutdown.swap(true, Ordering::AcqRel)
@@ -894,15 +862,14 @@ impl TurnActor {
         }
     }
 
-    /// Handles [`EneCommand::PrepareVisionSummary`] (#271): the busy-check
-    /// and lazy local-model init the legacy inline `SummarizeScreenImage`
-    /// handler used to do, minus the raw RGB buffer and the actual
-    /// (expensive) model call — both of which now live entirely in
-    /// [`crate::vision::VisionHandle`], outside this actor.
+    /// Handles [`EneCommand::PrepareVisionSummary`]: the busy-check
+    /// and lazy local-model init for screen-image vision, minus the raw RGB
+    /// buffer and the actual (expensive) model call — both of which now live
+    /// entirely in [`crate::vision::VisionHandle`], outside this actor.
     ///
     /// Split into a fast path (handles already loaded → synchronous reply)
     /// and a slow path (handles still loading → background wait) so the
-    /// actor loop is never blocked on a GGUF model load (#397). The slow
+    /// actor loop is never blocked on a GGUF model load. The slow
     /// path is deduplicated: at most one background poller runs at a time
     /// (guarded by `vision_slow_path_active`), so a burst of concurrent
     /// requests during the loading window cannot exhaust `bg_command_cap`.
@@ -928,7 +895,6 @@ impl TurnActor {
                 |m| m.emotion.classifier_language.clone(),
             );
 
-        // Kick off background initialization if not already loaded/loading.
         self.ensure_proactive_llm_non_blocking();
 
         // Fast path: handles already loaded — complete synchronously.
@@ -952,7 +918,7 @@ impl TurnActor {
         }
 
         // Slow path: handles still loading — hand off to bg_command_tasks.
-        // Deduplicate concurrent slow-path requests (#397): the screen-capture
+        // Deduplicate concurrent slow-path requests: the screen-capture
         // driven proactive flow can fire `PrepareVisionSummary` several times
         // during the GGUF loading window, and each call would otherwise spawn
         // a fresh up-to-five-minute poller. With `bg_command_cap` defaulting
@@ -981,7 +947,7 @@ impl TurnActor {
 
         // Mint the cancel token on the actor so `Run` can cancel it via
         // `self.vision_cancel` even though the reply is sent from a
-        // background task (#397).
+        // background task.
         self.vision_cancel = CancellationToken::new();
         let cancel = self.vision_cancel.clone();
         let cell = Arc::clone(&self.proactive_llm);
@@ -990,8 +956,6 @@ impl TurnActor {
         // latch the flag and permanently block future slow-path requests.
         slow_path_active.store(true, Ordering::Release);
         self.bg_command_tasks.spawn(async move {
-            // Poll until the OnceCell is populated (init is already running)
-            // or the cancel token fires (a new user turn started).
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_mins(5);
             loop {
                 if cancel.is_cancelled() {
@@ -1040,7 +1004,6 @@ impl TurnActor {
             return;
         }
 
-        // Kick off background init if not already done/loading (#397).
         self.ensure_proactive_llm_non_blocking();
 
         // If handles aren't ready yet, skip this tick — the next interval
@@ -1212,8 +1175,8 @@ impl TurnActor {
                     // after `TurnGate::try_begin` succeeds, so reaching here
                     // means the gate is held for this new turn *and* a stream
                     // is already active. Release the gate we just acquired so
-                    // a later `run()` is not stuck returning `Busy` forever
-                    // (#404); the alternative — leaving it held — would
+                    // a later `run()` is not stuck returning `Busy` forever;
+                    // the alternative — leaving it held — would
                     // permanently wedge the single-flight gate.
                     tracing::error!(
                         component = "TurnActor",
@@ -1224,8 +1187,8 @@ impl TurnActor {
                     return true;
                 }
                 // Discard any in-flight proactive decision and cancel any
-                // in-flight vision summarization (#271 moved the inference
-                // itself off this actor; this token is the only handle back
+                // in-flight vision summarization (the inference runs outside
+                // this actor; this token is the only handle back
                 // into it — see `VisionPrepared::cancel`). Replaced (not
                 // just cancelled) so a vision request prepared *after* this
                 // point is not pre-cancelled by the old token.
@@ -1301,10 +1264,10 @@ impl TurnActor {
                 let _ = self.stream_session_rx.take();
 
                 // Fallback: if the stream task was hard-aborted before it could
-                // record the interruption, capture the partial response here (#206).
+                // record the interruption, capture the partial response here.
                 // Read from the shared partial-text buffer that the stream task
                 // updates live, since the session's display buffer is a pre-stream
-                // snapshot that is empty after finalize (#H5).
+                // snapshot that is empty after finalize.
                 let partial = self.stream_partial_text.lock().clone();
                 if !self.session.has_pending_interruption() && !partial.trim().is_empty() {
                     let spoken_chars = partial.chars().count();
@@ -1353,7 +1316,7 @@ impl TurnActor {
                 self.bg_command_tasks.abort_all();
                 // Admit aux handles that arrived after the run loop's last
                 // drain so shutdown aborts them rather than dropping them
-                // (which would only detach, not cancel, the worker) (#401).
+                // (which would only detach, not cancel, the worker).
                 self.admit_aux_handles();
                 self.aux_tasks.abort_all();
                 self.abort_proactive_decision();
@@ -1361,7 +1324,7 @@ impl TurnActor {
                 self.drain_pending().await;
                 // Release the single-flight gate so a `run()` that races the
                 // actor's teardown is not reported `Busy` by a gate the dying
-                // actor never releases (#404). `EneHandle::run` additionally
+                // actor never releases. `EneHandle::run` additionally
                 // checks the (now closing) command channel first and reports
                 // `ActorDead`; releasing here covers the drain window before
                 // the channel fully closes. Idempotent: `end()` just clears
@@ -1424,8 +1387,8 @@ impl TurnActor {
                     // The enabled plugin set changed: restart the plugin host
                     // so newly-enabled plugins are spawned and disabled ones
                     // are stopped, then rebuild the tool registry from the new
-                    // host (E1). Runs in bg_command_tasks so the actor loop is
-                    // never blocked on process I/O (#397).
+                    // host. Runs in bg_command_tasks so the actor loop is
+                    // never blocked on process I/O.
                     self.spawn_reconfigure_plugin_host();
                 }
                 true
@@ -1741,7 +1704,7 @@ impl TurnActor {
             EneCommand::TestSpawnSlowBgTask { reply } => {
                 // Admit a long-running task into `bg_command_tasks` to
                 // simulate a heavy background command (GGUF load / plugin
-                // host restart) being in flight (#397). The actor loop must
+                // host restart) being in flight. The actor loop must
                 // keep processing subsequent commands while this sleeps.
                 if admit_task(
                     &mut self.bg_command_tasks,
@@ -1850,7 +1813,7 @@ impl TurnActor {
         let aux_task_tx = self.aux_task_tx.clone();
         let tts_provider = self.tts_provider.clone();
         // Reset the shared partial-text buffer for this turn and hand a clone
-        // to the stream task so a hard-abort can recover streamed text (#H5).
+        // to the stream task so a hard-abort can recover streamed text.
         self.stream_partial_text.lock().clear();
         let partial_text = Arc::clone(&self.stream_partial_text);
         self.active_origin = origin;
@@ -1909,9 +1872,8 @@ impl TurnActor {
                 {
                     Ok(outcome) => outcome,
                     Err(e) => {
-                        // The stream task panicked. `EneActor::run_command_isolated`
-                        // (#268) already contains the actor's own panic isolation,
-                        // but that only protects the command loop from panics in
+                        // The stream task panicked. The actor's own panic
+                        // isolation only protects the command loop from panics in
                         // *command handlers* — this is a separately spawned task,
                         // so its panic needs its own catch_unwind or a hard-aborted
                         // turn would otherwise hang forever waiting for `Terminal`.
@@ -1958,7 +1920,7 @@ impl TurnActor {
         }
 
         // Failover path: probe candidates in priority order and pick the first
-        // healthy one (#175). Probes send no user data.
+        // healthy one. Probes send no user data.
         let candidates = ai_config.resolve_chat_candidates();
         if candidates.is_empty() {
             return create_task_chat_provider(&self.config, AiTaskKind::Chat)
@@ -2016,7 +1978,7 @@ impl TurnActor {
             .map_err(EneRuntimeError::from)
     }
 
-    // ── Undo management (#178) ──
+    // ── Undo management ──
 
     /// Undo the most recent reversible tool operation.
     ///
@@ -2086,7 +2048,7 @@ impl TurnActor {
         *self.shared.config.write() = cfg;
     }
 
-    /// Start a new session when the user returns after a long idle period (#369).
+    /// Start a new session when the user returns after a long idle period.
     fn maybe_split_session_on_timeout(&mut self) {
         let mind = self
             .config
@@ -2190,7 +2152,7 @@ impl TurnActor {
                     // Retroactive topic-boundary compression drops the
                     // pre-boundary prefix (keeping the boundary turn onward);
                     // window-pressure/manual compression trims to the
-                    // configured recent window (#368).
+                    // configured recent window.
                     match compression.drop_leading {
                         Some(drop) => {
                             let keep = self.session.history().len().saturating_sub(drop);
@@ -2233,7 +2195,7 @@ impl TurnActor {
     /// dropped from the ring (the summary is served from the DB as the scene
     /// section), leaving the retained tail. `keep` is the recent window for
     /// window-pressure compression, or the boundary turn onward for
-    /// retroactive topic-boundary compression (#368).
+    /// retroactive topic-boundary compression.
     fn trim_history_to_keep(&mut self, keep: usize) {
         let history_len = self.session.history().len();
         if history_len > keep {
@@ -2241,7 +2203,7 @@ impl TurnActor {
         }
     }
 
-    /// Spawn a retroactive compression for a detected topic boundary (#368).
+    /// Spawn a retroactive compression for a detected topic boundary.
     ///
     /// Called from the actor's event loop once the stream task reports a
     /// boundary on the completed turn. The span before the boundary is
@@ -2306,7 +2268,7 @@ impl TurnActor {
 }
 
 /// Completes vision preparation from loaded handles: validates the local
-/// model, checks vision capability, and renders prompts (#397).
+/// model, checks vision capability, and renders prompts.
 ///
 /// Shared by the fast path (handles already loaded, reply sent synchronously
 /// in the actor) and the slow path (handles loaded in background, reply sent
@@ -2355,7 +2317,7 @@ fn stale_llm_factory_names(
         .collect()
 }
 
-/// Background plugin host reconfiguration (#397).
+/// Background plugin host reconfiguration.
 ///
 /// Performs the heavy I/O (host shutdown, DB IPC spawn, host start, health
 /// bridge) off the actor loop. Updates the shared `plugin_host` and
@@ -2393,7 +2355,6 @@ async fn reconfigure_plugin_host_bg(
         factories
     };
 
-    // Spawn DB IPC servers for the (possibly changed) plugin set.
     let db_tokens = match spawn_db_ipc_servers(&config, memory_store.as_ref()) {
         Ok(tokens) => tokens,
         Err(e) => {
@@ -2451,9 +2412,6 @@ async fn reconfigure_plugin_host_bg(
         LlmProviderRegistry::register(Arc::new(ene_ai::OpenAiProviderFactory));
     }
 
-    // Register plugin-provided LLM factories from the fresh host. Existing
-    // kinds are replaced in place; old kinds absent from this host stay
-    // deregistered (#399).
     if let Some(host) = new_host.as_ref() {
         for (kind, factory) in host.llm_factories() {
             tracing::info!(
@@ -2465,7 +2423,6 @@ async fn reconfigure_plugin_host_bg(
         }
     }
 
-    // Re-bridge health events into diagnostics with a fresh task.
     let mut bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
     if let Some(host) = new_host.as_mut()
         && let Some(mut health_rx) = host.take_health_receiver()
@@ -2482,7 +2439,6 @@ async fn reconfigure_plugin_host_bg(
         }));
     }
 
-    // Rebuild the tool registry from the new host's registries.
     let registries = new_host
         .as_ref()
         .map_or_else(Vec::new, |h| h.tool_registries().to_vec());
@@ -2515,7 +2471,7 @@ async fn reconfigure_plugin_host_bg(
 }
 
 /// Runs a future to completion, catching any panic and surfacing it as a
-/// [`DiagnosticEvent::ActorPanic`] instead of unwinding the caller (#236).
+/// [`DiagnosticEvent::ActorPanic`] instead of unwinding the caller.
 ///
 /// Returns `Ok(output)` on normal completion, or `Err(message)` when the
 /// future panicked. This keeps the actor command loop (and any other
@@ -2551,13 +2507,13 @@ where
 /// Drains finished tasks from a `JoinSet`, logging any that panicked.
 ///
 /// Keeps the actor's background task sets from growing without bound while
-/// surfacing panics through structured diagnostics (#236).
+/// surfacing panics through structured diagnostics.
 /// A `tokio::task::JoinHandle` that aborts its task when dropped.
 ///
 /// A bare `JoinHandle` is "detach on drop": dropping it (for example because
 /// the wrapper task that owned it was aborted by `JoinSet::abort_all()` on
 /// shutdown) stops *supervising* the task but does not cancel it. Wrapping
-/// the handle in this guard makes the abort propagate (#401): dropping the
+/// the handle in this guard makes the abort propagate: dropping the
 /// guard calls [`tokio::task::JoinHandle::abort`], so aborting (or dropping)
 /// the wrapper aborts the underlying worker. Aborting a task that already
 /// completed is a no-op, so wrapping a normally-finishing worker is harmless.
@@ -2594,7 +2550,7 @@ fn reap_join_set(
     }
 }
 
-/// Consumes a deferred memory-writer outcome and emits its side effects (#398).
+/// Consumes a deferred memory-writer outcome and emits its side effects.
 ///
 /// Shared by the admitted path (supervised in `memory_writer_tasks`) and the
 /// rejected path (detached) of [`TurnActor::drain_memory_writers`] so both
@@ -2687,7 +2643,7 @@ async fn consume_memory_write_outcome(
 /// `ene_infer::EngineError::Busy` / [`ene_ai::LlmProviderError::Busy`]
 /// semantics.
 ///
-/// ## Reaping before the capacity check (#404)
+/// ## Reaping before the capacity check
 ///
 /// `JoinSet::len()` counts tasks that have *completed* but not yet been
 /// joined (reaped). The run loop only reaps at the top of each iteration,
@@ -2708,7 +2664,7 @@ pub(super) fn admit_task(
     diag_tx: &broadcast::Sender<DiagnosticEvent>,
 ) -> bool {
     // Drop finished-but-unjoined tasks so `len()` reflects only tasks that
-    // are actually still running (#404). Without this, a burst that
+    // are actually still running. Without this, a burst that
     // completed during the actor's `select!` block would over-count and
     // spuriously reject the next admission.
     reap_join_set(set, component, "background task panicked", diag_tx);
@@ -2734,12 +2690,12 @@ pub(super) fn admit_task(
     false
 }
 
-/// Polls a deferred (background) tool task until it reaches a terminal state (#196).
+/// Polls a deferred (background) tool task until it reaches a terminal state.
 ///
 /// Emits [`LifecycleEvent::ToolBackgroundCompleted`] on the lifecycle bus
 /// (not the chat bus) when the task completes, fails, or is cancelled — it
-/// fires asynchronously after the originating turn has already completed
-/// (#272). Runs as a background task in the actor's `deferred_tool_tasks`
+/// fires asynchronously after the originating turn has already completed.
+/// Runs as a background task in the actor's `deferred_tool_tasks`
 /// `JoinSet`.
 ///
 /// `max_polls` controls how many poll iterations (at 100ms each) before the task
@@ -2808,7 +2764,7 @@ async fn poll_deferred_task(
     );
 }
 
-// ── Factory / init helpers (moved from runtime.rs) ──
+// ── Factory / init helpers ──
 
 pub(super) async fn warmup_character_memories_ready(
     config: &EneConfig,
@@ -2929,7 +2885,7 @@ pub(super) fn spawn_db_ipc_servers(
                 continue;
             }
 
-            // Per-plugin DB storage quota (#424). A discovered binary with no
+            // Per-plugin DB storage quota. A discovered binary with no
             // config entry falls back to `PluginEntry::default()`'s quota so
             // the enforcement default applies uniformly; an explicit `null` in
             // config (`None`) disables the cap for that plugin.
@@ -3023,7 +2979,6 @@ fn discover_plugin_names() -> Vec<String> {
             let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            // Strip the exe suffix before matching the plugin prefix.
             let stem = file_name
                 .strip_suffix(exe_suffix)
                 .unwrap_or(file_name)
@@ -3065,7 +3020,6 @@ fn is_plugin_executable(path: &std::path::Path) -> bool {
     }
 }
 
-/// Builds the active composite tool registry from plugin-contributed registries.
 pub(super) fn build_tool_registry(
     plugin_host: Option<&ene_plugin_host::PluginHostManager>,
 ) -> Result<Arc<dyn ToolRegistry>, EneRuntimeError> {
@@ -3082,7 +3036,7 @@ pub(super) fn build_tool_registry(
 }
 
 /// Maps a [`PluginHealthEvent`] to a [`DiagnosticEvent::ToolHealth`]
-/// with a stable English status contract (#238).
+/// with a stable English status contract.
 fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
     let (tool, status, detail) = match event {
         PluginHealthEvent::Unhealthy { plugin, reason } => {
@@ -3196,13 +3150,13 @@ pub(super) fn init_tool_rag(
     }
 
     // The tool RAG persists embeddings through the `EmbeddingStorePort`
-    // abstraction (#302) so `ene-rag` never depends on `ene-store`.
+    // abstraction so `ene-rag` never depends on `ene-store`.
     let store: Option<Arc<dyn ene_core::EmbeddingStorePort>> = concrete_store
         .clone()
         .map(|s| s as Arc<dyn ene_core::EmbeddingStorePort>);
     let opts = ToolRagOptions::from_config(rag_config)?;
     let mut rag = ToolRag::new(embedder.clone(), store, opts);
-    // Recent tool-failure feedback (#349): let selection down-weight tools that
+    // Recent tool-failure feedback: let selection down-weight tools that
     // recently failed, read through a port so `ene-rag` stays store-agnostic.
     if let Some(store) = concrete_store {
         rag = rag.with_failure_signals(store as Arc<dyn ene_core::ToolFailureSignalPort>);
@@ -3214,8 +3168,6 @@ pub(super) fn init_tool_rag(
 mod tests {
     use super::*;
 
-    /// Unwraps a [`DiagnosticEvent::ToolHealth`] into its `(tool, status,
-    /// detail)` parts for assertion.
     fn tool_health_parts(event: DiagnosticEvent) -> (String, String, Option<String>) {
         match event {
             DiagnosticEvent::ToolHealth {
@@ -3228,7 +3180,7 @@ mod tests {
     }
 
     /// The `Disabled` detail string is derived from the structured
-    /// [`DisabledReason`] via an exhaustive match (#429): both variants must
+    /// [`DisabledReason`] via an exhaustive match: both variants must
     /// map to their stable, human-readable detail while the `status` contract
     /// stays `"disabled"`.
     #[test]
@@ -3271,7 +3223,7 @@ mod tests {
         assert_eq!(stale_llm_factory_names(&old_kinds, None), old_kinds);
     }
 
-    /// Regression test for #401: a worker routed through `aux_task_tx` is
+    /// Regression test: a worker routed through `aux_task_tx` is
     /// actually aborted on shutdown, not merely detached.
     ///
     /// The stand-in for the TTS worker never exits on its own — it loops
@@ -3301,12 +3253,9 @@ mod tests {
         // TTS pipeline does with `aux_task_tx`.
         drop(actor.aux_task_tx.send(worker));
 
-        // Let the worker actually start ticking.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert!(ticks.load(Ordering::SeqCst) > 0, "worker never started");
 
-        // Shutdown: drain + `abort_all` must stop the worker, and the turn
-        // token must be cancelled so cooperative workers notice too.
         assert!(
             !actor.handle_command(EneCommand::Shutdown).await,
             "Shutdown must signal the run loop to exit"
@@ -3328,10 +3277,10 @@ mod tests {
         );
     }
 
-    /// Regression test for #404 (item 5): `EneCommand::Shutdown` must release
+    /// Regression test: `EneCommand::Shutdown` must release
     /// the single-flight [`TurnGate`].
     ///
-    /// Before the fix, a `run()` racing the actor's teardown could see a gate
+    /// A `run()` racing the actor's teardown could otherwise see a gate
     /// the dying actor still held and be reported `RunError::Busy` instead of
     /// `RunError::ActorDead`. Releasing the gate on shutdown (combined with
     /// `EneHandle::run` checking the closed channel first) ensures a dead

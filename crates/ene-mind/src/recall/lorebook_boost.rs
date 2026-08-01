@@ -1,4 +1,4 @@
-//! Lorebook recall boosts for constant and key-triggered entries (#83).
+//! Lorebook recall boosts for constant and key-triggered entries.
 
 use ene_config::CharacterCardV3;
 use ene_core::{MemoryItem, MemoryPort, MemoryScoreBreakdown, MemorySource};

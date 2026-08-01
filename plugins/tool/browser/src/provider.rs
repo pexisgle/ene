@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 /// Browser automation tool provider.
 ///
-/// Dispatch is handled by [`ActionSetProvider`] (#139).
+/// Dispatch is handled by [`ActionSetProvider`].
 pub struct BrowserToolProvider {
     inner: ActionSetProvider,
     pub store: Arc<crate::utils::session::BrowserSessionStore>,

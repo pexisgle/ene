@@ -1,5 +1,5 @@
 //! Screen-image vision summarization, decoupled from the turn-execution
-//! actor mailbox (#271).
+//! actor mailbox.
 //!
 //! Before this split, `EneCommand::SummarizeScreenImage` carried a raw RGB8
 //! buffer (`width * height * 3` bytes, up to several megabytes for a
@@ -71,7 +71,7 @@ impl VisionHandle {
 
     /// Summarize a screen RGB8 capture via the local vision (mmproj) model.
     ///
-    /// Part of the API v1 contract (#274): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     ///
     /// The `rgb` buffer and the actual model call never touch the actor's

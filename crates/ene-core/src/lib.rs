@@ -1,15 +1,15 @@
 //! # ene-core
 //!
-//! Persistence-agnostic domain vocabulary for the ene AI companion (#270).
+//! Persistence-agnostic domain vocabulary for the ene AI companion.
 //!
 //! ## Why this crate exists
 //!
-//! Before this crate existed, core cognitive concepts — the PAD affect
-//! state, typed-memory kinds/statuses, the commitment ledger's vocabulary —
-//! were defined inside `ene-store`, the `SQLite` persistence crate. That
-//! inverted the intended dependency direction: `ene-mind` (documented as a
-//! "Pure Cognitive Mind" in `docs/architecture.md`) had to depend on the
-//! concrete persistence crate just to name its own domain concepts.
+//! Core cognitive concepts — the PAD affect state, typed-memory
+//! kinds/statuses, the commitment ledger's vocabulary — live here rather
+//! than in the `SQLite` persistence crate, so that `ene-mind` (documented
+//! as a "Pure Cognitive Mind" in `docs/architecture.md`) does not have to
+//! depend on the concrete persistence crate just to name its own domain
+//! concepts.
 //!
 //! `ene-core` sits below both:
 //!
@@ -23,27 +23,8 @@
 //! needed for [`HybridSearchWeights`]'s `JsonSchema` derive and the
 //! [`MemoryPort`] trait respectively; see each module for details).
 //!
-//! ## What lives here
-//!
-//! - [`AffectState`] / [`DiscreteEmotion`] / [`PendingAffectProposal`] — PAD
-//!   affect state (moved from `ene-store::affect`).
-//! - Typed-memory vocabulary ([`MemoryKind`], [`MemoryItem`],
-//!   [`NewMemoryItem`], [`MemoryStatus`], [`MemoryScope`], [`MemorySource`],
-//!   [`MemoryConfidence`], [`MemorySalience`], [`Query`], [`ScoredMemory`],
-//!   [`MemoryScoreBreakdown`], etc. — moved from `ene-store::typed_memory`).
-//! - Commitment ledger vocabulary ([`CommitmentStatus`], [`Commitment`],
-//!   [`NewCommitment`], [`ActiveCommitmentPrompt`] — moved from
-//!   `ene-store::commitment`).
-//! - [`KeyFact`] — user key/value summarization output.
-//! - [`PendingCandidate`] / [`PendingCandidateStatus`] / [`NaturalDecayReport`]
-//!   — memory-arbiter workflow value types.
-//! - [`MemoryPort`] / [`MemoryPortError`] — the trait abstraction that lets
-//!   `ene-mind`'s cognitive logic run against any store implementation
-//!   (SQLite-backed, in-memory test double, or otherwise) without depending
-//!   on `ene_store::MemoryStore` directly.
-//!
 //! `SeaORM` entities, SQL, and DB-row conversions are NOT here — those stay
-//! in `ene-store`, which re-exports the types above unchanged rather than
+//! in `ene-store`, which re-exports the crate's types unchanged rather than
 //! redefining them.
 #![warn(missing_docs)]
 #![cfg_attr(

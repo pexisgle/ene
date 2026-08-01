@@ -13,11 +13,11 @@ ene_config::define_config!(
     pub struct StoreConfig {
         /// Whether the store is enabled.
         pub enabled: bool = false,
-        /// Create a file backup before applying pending migrations (#239).
+        /// Create a file backup before applying pending migrations.
         pub backup_on_migrate: bool = true,
-        /// Maximum number of `{db}.bak.*` backups to retain (#239).
+        /// Maximum number of `{db}.bak.*` backups to retain.
         pub max_backups: usize = default_max_backups(),
-        /// Run `PRAGMA integrity_check` when opening the database (#239).
+        /// Run `PRAGMA integrity_check` when opening the database.
         pub integrity_check_on_open: bool = false,
         /// Database path.
         #[serde(skip_deserializing, default, skip_serializing)]

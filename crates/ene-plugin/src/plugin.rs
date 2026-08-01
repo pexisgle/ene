@@ -1,12 +1,12 @@
 //! Plugin trait definitions and streaming chunk types.
 //!
-//! Five independent traits replace the old monolithic [`Plugin`] (now removed):
-//! [`ToolPlugin`], [`LlmPlugin`], [`EmbedPlugin`], [`TtsPlugin`], and
-//! [`SttPlugin`]. A plugin struct can implement any subset; the server
-//! dispatches requests to the appropriate trait based on the `PluginDispatch`
-//! routing table. Every trait inherits the shared [`ConfigurablePlugin`]
-//! surface, so **any** plugin — tool or provider — can receive its opaque
-//! configuration blob from the host and advertise a config schema (#313).
+//! Five independent traits — [`ToolPlugin`], [`LlmPlugin`], [`EmbedPlugin`],
+//! [`TtsPlugin`], and [`SttPlugin`]. A plugin struct can implement any subset;
+//! the server dispatches requests to the appropriate trait based on the
+//! `PluginDispatch` routing table. Every trait inherits the shared
+//! [`ConfigurablePlugin`] surface, so any plugin — tool or provider — can
+//! receive its opaque configuration blob from the host and advertise a config
+//! schema.
 
 use std::pin::Pin;
 

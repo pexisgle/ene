@@ -1,14 +1,10 @@
-//! Pending deferred memory-write queue domain types (#240).
-//!
-//! Moved from `ene-store` (#309) — lightweight DTOs for the retry queue
-//! that `ene-mind`'s deferred memory pipeline consumes through
-//! [`crate::MemoryPort`]. The `SeaORM` entity and SQL remain in
-//! `ene-store`; these types carry only the fields cognitive logic needs.
+//! Pending deferred memory-write queue domain types consumed by `ene-mind`'s
+//! deferred memory pipeline through [`crate::MemoryPort`].
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Lifecycle status of a queued memory write (#240).
+/// Lifecycle status of a queued memory write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PendingMemoryWriteStatus {
@@ -39,7 +35,7 @@ impl PendingMemoryWriteStatus {
     }
 }
 
-/// Domain row for a deferred memory-write retry (#240).
+/// Domain row for a deferred memory-write retry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMemoryWrite {
     /// Primary key.

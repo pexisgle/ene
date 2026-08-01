@@ -1,15 +1,12 @@
 //! Affect state domain model (PAD pleasure/arousal/dominance emotion state).
-//!
-//! Moved from `ene-store` (#270) — this is core cognitive-domain vocabulary,
-//! not a persistence concern. `ene-store` re-exports these types unchanged.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Discrete emotional label with intensity.
 ///
-/// Paired with `AffectState` to provide both dimensional (valence/arousal/dominance)
-/// and categorical (joy, sadness, etc.) affect representation.
+/// Paired with [`AffectState`] to provide both dimensional
+/// (valence/arousal/dominance) and categorical affect representation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiscreteEmotion {
     /// Emotion label (e.g., "joy", "sadness", "anger", "fear", "surprise", "neutral").
@@ -35,11 +32,9 @@ impl DiscreteEmotion {
     }
 }
 
-/// Persistent affective / emotional state.
-///
-/// Tracks three PAD dimensions (Pleasure–Arousal–Dominance), relationship
-/// metrics, and optional discrete emotion intensities. The engine updates
-/// this every turn and persists it so it survives restarts.
+/// Persistent affective / emotional state tracking three PAD dimensions
+/// (Pleasure–Arousal–Dominance), relationship metrics, and optional discrete
+/// emotion intensities.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AffectState {
     /// Character identifier.

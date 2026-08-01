@@ -45,9 +45,9 @@ impl From<LlmChatRequest> for LlamaCppRequest {
 /// This crate's [`ene_infer::LocalModel::Response`] for [`LlamaChatModel`].
 pub(crate) struct LlamaCppResponse {
     pub(crate) text: String,
-    /// Tokens the prompt occupied in the context (#365).
+    /// Tokens the prompt occupied in the context.
     pub(crate) prompt_tokens: u32,
-    /// Tokens sampled for the completion (#365).
+    /// Tokens sampled for the completion.
     pub(crate) completion_tokens: u32,
 }
 
@@ -70,9 +70,7 @@ impl From<LlamaCppResponse> for LlmChatResponse {
 ///
 /// # Context caching
 ///
-/// Before this stage, `model.new_context(..)` was called once *per
-/// request* (in what is now `crate::llama_cpp::generate`/`embed`). `ctx` is
-/// now built lazily on the first job this model instance runs and reused
+/// `ctx` is built lazily on the first job this model instance runs and reused
 /// for every job after; [`LocalModel::reset`] below clears its KV cache
 /// between jobs instead of the framework tearing down and rebuilding a
 /// context every time.
@@ -224,7 +222,7 @@ impl LocalModel for LlamaChatModel {
 
 impl From<LlamaStreamChunk> for LlmResponseChunk {
     /// Maps a local llama.cpp stream chunk onto the generic
-    /// [`LlmResponseChunk`] (#365): a [`LlamaStreamChunk::Delta`] becomes a
+    /// [`LlmResponseChunk`]: a [`LlamaStreamChunk::Delta`] becomes a
     /// text delta with no usage, and the single trailing
     /// [`LlamaStreamChunk::Usage`] becomes an empty-text chunk carrying the
     /// generation's exact token counts — the "usage on the final chunk"
@@ -319,7 +317,7 @@ impl StreamingLocalModel for LlamaChatModel {
 /// generic — that this engine's `EngineHandle`/`EngineConfig`/factory
 /// wiring gets queueing, cancellation, panic recovery, and post-cancel
 /// `reset` right — independent of real llama.cpp inference, exactly like
-/// `ene-voice`'s whisper/Kokoro migrations did for their own engines.
+/// `ene-voice`'s whisper/Kokoro engines' own tests.
 #[cfg(test)]
 mod conformance_tests {
     use std::time::{Duration, Instant};

@@ -1,11 +1,11 @@
-//! Screen summary provider: capture → local Gemma vision → drop image (#168).
+//! Screen summary provider: capture → local Gemma vision → drop image.
 //!
 //! Raw pixels stay in the desktop/runtime process. Enabling
 //! `mind.proactive.sources.screen_summary` opts in to a short local
 //! multimodal completion against the proactive GGUF + `mmproj`.
 //! Vision failures mark the source unavailable — no fabricated summaries.
 //!
-//! The pipeline wires in the lightweight observers from #215:
+//! The pipeline wires in the lightweight observers:
 //! - [`super::diff_gate`] skips redundant vision inference when the
 //!   screen hash has not changed significantly, returning the cached
 //!   summary instead.
@@ -33,7 +33,7 @@ pub struct ScreenSummaryProvider {
     handle: EneHandle,
     last_failure_at: Mutex<Option<Instant>>,
     /// Perceptual-hash gate that caches the last summary so unchanged
-    /// screens do not trigger a fresh vision inference (#215).
+    /// screens do not trigger a fresh vision inference.
     diff_gate: Mutex<ScreenDiffGate>,
 }
 
@@ -74,9 +74,6 @@ impl ScreenSummaryProvider {
                 return None;
             }
         };
-
-        // Diff gate: reuse the cached summary when the screen has not
-        // changed significantly since the last inference (#215).
         let hash = average_hash(&captured.image);
         if let Some(cached) = self.diff_gate.lock().check(hash) {
             tracing::debug!(
@@ -146,13 +143,13 @@ impl ScreenSummaryProvider {
     ) -> Result<String, ene_runtime::PublicApiError> {
         // When the cursor position is known, crop a region of interest
         // around it so the vision model receives higher-detail pixels
-        // near the user's focus (#215). Falls back to the full frame
+        // near the user's focus. Falls back to the full frame
         // when the crop is unavailable.
         let focus: DynamicImage = match cursor.and_then(|(x, y)| crop_roi(&captured.image, x, y)) {
             Some(roi) => roi,
             None => captured.image.clone(),
         };
-        // OCR pre-filter hook (#215): surface any extracted text hints
+        // OCR pre-filter hook: surface any extracted text hints
         // from the focus region. The current implementation is a
         // placeholder that returns `None`; wiring the call now keeps the
         // pipeline ready for a real OCR backend.

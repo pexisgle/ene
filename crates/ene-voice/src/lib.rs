@@ -6,7 +6,7 @@
 //! `-D warnings`) whenever the crate is checked without that feature.
 #![warn(missing_docs)]
 
-/// Grapheme-to-phoneme conversion for Kokoro TTS (C4).
+/// Grapheme-to-phoneme conversion for Kokoro TTS.
 pub mod g2p;
 /// Local STT (whisper.cpp) provider.
 pub mod local_stt;
@@ -32,12 +32,12 @@ pub use local_tts::{
 /// Must be called once during host startup, before anything resolves a
 /// `"whisper"` / `"kokoro"` / `"silero"` provider by name (see
 /// `ene_runtime::handle::EneHandle::open`, which calls this immediately
-/// after constructing its command channels). Previously each provider
-/// registered itself via a `#[ctor::ctor]` that ran before `main` — before
-/// `tracing` was initialized, so a registration failure (there isn't one
-/// today; `Arc::new(factory)` cannot fail) would have been invisible. Calling
-/// this explicitly from bootstrap, after `tracing` is up, gives registration
-/// an observable place to log, should that ever change.
+/// after constructing its command channels). A `#[ctor::ctor]`-based
+/// registration would run before `tracing` is initialized, leaving a
+/// registration failure (there isn't one today; `Arc::new(factory)` cannot
+/// fail) invisible. Calling this explicitly from bootstrap, after `tracing`
+/// is up, gives registration an observable place to log, should that ever
+/// change.
 ///
 /// Idempotent to call more than once: each factory is simply reinserted into
 /// the registry's map.

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 ///
 /// With no subcommand, starts the interactive REPL. With a subcommand, runs a
 /// single non-interactive operation and exits — suitable for CI pipelines and
-/// shell scripts (#186).
+/// shell scripts.
 #[derive(Debug, Parser)]
 #[command(name = "ene", version, about, long_about = None)]
 pub struct Cli {
@@ -27,7 +27,7 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// Non-interactive subcommands (#186).
+/// Non-interactive subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run a single prompt and stream the response, then exit.
@@ -88,7 +88,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Backup, restore, and integrity-check the memory database (#239).
+    /// Backup, restore, and integrity-check the memory database.
     Store {
         /// Store subcommand.
         #[command(subcommand)]
@@ -182,7 +182,7 @@ pub enum MemoryAction {
     },
 }
 
-/// `store` subcommands (#239).
+/// `store` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum StoreAction {
     /// Create a timestamped file backup of the memory database.

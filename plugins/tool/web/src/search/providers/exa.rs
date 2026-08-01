@@ -33,7 +33,6 @@ struct ExaSearchRequest {
     include_contents: bool,
 }
 
-/// Exa Search API provider.
 #[derive(Debug)]
 pub struct ExaProvider {
     api_key: String,

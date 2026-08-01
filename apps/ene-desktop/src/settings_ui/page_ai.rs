@@ -1,7 +1,7 @@
 //! AI settings page — chat provider and embedding configuration.
 //!
-//! Chat lives in the dedicated chat window (F2); see #109.
-//! Feature toggles and proactive speech policy live on the Features tab.
+//! Chat lives in the dedicated chat window (F2); feature toggles
+//! and proactive speech policy live on the Features tab.
 
 use super::input::SettingsInputState;
 use crate::ai_bridge::AiBridge;
@@ -199,7 +199,6 @@ pub fn render(
             });
         }
 
-        // Inline validation + connection test (#241).
         let issues = ene_ai::validate_settings(&settings.config());
         if !issues.is_empty() {
             for issue in &issues {
@@ -337,7 +336,6 @@ pub fn render(
     });
 }
 
-/// Provider health and failover status display (#175).
 fn render_provider_health(ui: &mut egui::Ui, ai: &Arc<AiBridge>, ai_cfg: &AiConfig) {
     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "provider-health"));
 

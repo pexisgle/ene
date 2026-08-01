@@ -1,13 +1,11 @@
-//! Read-only query handles that bypass the turn-execution actor mailbox (#271).
+//! Read-only query handles that bypass the turn-execution actor mailbox.
 //!
-//! `ListSessions` / `ExportSession` / `ImportSession` / `SearchSessions` /
-//! `ArchiveSession` / `ListPendingCandidates` / `ApproveCandidate` /
-//! `RejectCandidate` used to be `EneCommand` variants routed through the
-//! single actor mailbox even though they only ever touched `MemoryStore` —
-//! never the actor's turn-execution state (`active_turn` / `stream_handle` /
-//! `turn_gate`). That needlessly serialized read-only queries behind
-//! whatever `Run` turn happened to be in flight. [`sessions::SessionQueryHandle`]
-//! and [`candidates::MemoryCandidateHandle`] talk to `Arc<MemoryStore>`
+//! Session CRUD and candidate approval only ever touch `MemoryStore` —
+//! never the actor's turn-execution state (`active_turn` / `stream_handle`
+//! / `turn_gate`) — so routing them through the single actor mailbox would
+//! needlessly serialize read-only queries behind whatever `Run` turn
+//! happens to be in flight. [`sessions::SessionQueryHandle`] and
+//! [`candidates::MemoryCandidateHandle`] talk to `Arc<MemoryStore>`
 //! directly instead.
 
 /// Pending memory-candidate approval flow (list / approve / reject).

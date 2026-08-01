@@ -1,9 +1,9 @@
-//! Regression tests for #272: the event bus is split into three dedicated
+//! Regression tests: the event bus is split into three dedicated
 //! channels (chat / audio / lifecycle) by traffic class, so a burst on one
 //! channel can never lag or starve consumers of another.
 //!
-//! Before #272, `AudioChunk` rode the same 1024-capacity `broadcast`
-//! channel as chat events (`TextDelta`, `Performance`, …). Because
+//! Chat events and `AudioChunk` PCM payloads must not share a
+//! 1024-capacity `broadcast` channel. Because
 //! `tokio::sync::broadcast` retains a per-subscriber ring buffer, a burst
 //! of heavyweight PCM chunks could evict buffered chat events from a slow
 //! subscriber's window, causing `RecvError::Lagged` for reasons entirely
@@ -41,12 +41,12 @@ fn test_config_memory_off() -> EneConfig {
     config
 }
 
-/// Mirrors the chat bus capacity `EneHandle::open` wires up (#272). Kept as
+/// Mirrors the chat bus capacity `EneHandle::open` wires up. Kept as
 /// a literal (not imported) since it's a private implementation constant —
 /// this test cares about behavior, not the exact number.
 const CHAT_CAPACITY: usize = 1024;
 
-/// A bounded audio channel capacity representative of production (#272);
+/// A bounded audio channel capacity representative of production;
 /// deliberately smaller than the chat capacity so the burst below actually
 /// exercises back-pressure/drop behavior on the audio side.
 const AUDIO_CAPACITY: usize = 64;
@@ -54,7 +54,7 @@ const AUDIO_CAPACITY: usize = 64;
 /// Core regression test: saturating a bounded audio `mpsc` channel with a
 /// burst of heavyweight PCM chunks must not cause a concurrent chat-bus
 /// `broadcast` subscriber to `Lagged` or lose any event. This is the
-/// structural property #272 introduced — chat and audio no longer share a
+/// structural property of the split bus — chat and audio never share a
 /// channel, so audio volume cannot evict buffered chat events regardless of
 /// how large or bursty it is.
 #[tokio::test]
@@ -66,8 +66,8 @@ async fn audio_burst_does_not_lag_chat_subscribers() {
 
     // Simulate a sustained burst of heavyweight PCM chunks -- far more than
     // the chat channel's capacity -- like a slow subscriber sitting behind
-    // real-time TTS synthesis. Before #272 this traffic pattern would have
-    // shared the chat broadcast buffer and evicted chat events.
+    // real-time TTS synthesis. Without the split this traffic pattern would
+    // share the chat broadcast buffer and evict chat events.
     let burst_count = CHAT_CAPACITY * 4;
     let audio_turn = turn.clone();
     let audio_task = tokio::spawn(async move {
@@ -85,7 +85,6 @@ async fn audio_burst_does_not_lag_chat_subscribers() {
         }
     });
 
-    // Drain the audio channel concurrently, as a playback consumer would.
     let drain_task = tokio::spawn(async move {
         let mut received = 0usize;
         while audio_rx.recv().await.is_some() {
@@ -135,7 +134,7 @@ async fn audio_burst_does_not_lag_chat_subscribers() {
 }
 
 /// API-shape regression test: [`EneHandle::take_audio_stream`] models
-/// single-consumer ownership transfer, not a broadcast (#272). The first
+/// single-consumer ownership transfer, not a broadcast. The first
 /// call must succeed; every call after that (including from a cloned
 /// handle) must return `None`.
 #[tokio::test]
@@ -164,7 +163,7 @@ async fn take_audio_stream_transfers_ownership_once() {
 }
 
 /// API-shape regression test: the lifecycle bus is a distinct subscription
-/// from the chat bus (#272) — `subscribe_lifecycle` returns a working
+/// from the chat bus — `subscribe_lifecycle` returns a working
 /// receiver independent of `subscribe`.
 #[tokio::test]
 async fn subscribe_lifecycle_is_independent_of_chat_bus() {

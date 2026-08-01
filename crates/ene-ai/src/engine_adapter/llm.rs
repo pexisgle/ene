@@ -45,7 +45,7 @@ pub struct LlmChatRequest {
 pub struct LlmChatResponse {
     /// The full assistant reply text.
     pub text: String,
-    /// Token usage the local engine counted itself, if any (#365). Local
+    /// Token usage the local engine counted itself, if any. Local
     /// models (llama.cpp) know their exact prompt/completion token counts;
     /// engines that cannot count leave this `None` and callers fall back to a
     /// character-based estimate.
@@ -769,12 +769,6 @@ mod tests {
             crate::error::LlmProviderError::LocalLlm(_)
         ));
     }
-
-    // -----------------------------------------------------------------
-    // `StreamingLocalLlmEngine`: real, chunk-at-a-time delivery through
-    // `create_chat_stream`, on a mock model scripted the same way
-    // `MockChatModel` above is, plus mid-stream failure and pacing.
-    // -----------------------------------------------------------------
 
     use ene_infer::{ChunkSink, StreamingLocalModel};
 

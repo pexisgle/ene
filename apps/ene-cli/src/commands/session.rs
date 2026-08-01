@@ -4,9 +4,8 @@ use async_trait::async_trait;
 use ene_util::Truncate;
 
 /// Map an API v1 [`ene_runtime::PublicApiError`] onto the CLI's own error
-/// type, preserving the actor-dead vs. execution-failure distinction that
-/// used to come from the double-`Result` (`ActorDead` vs.
-/// `ene_store::EneMemoryError`) `EneHandle` returned before #269.
+/// type, preserving the actor-dead vs. execution-failure distinction so
+/// callers can tell the actor has shut down from an ordinary failure.
 fn session_error(e: ene_runtime::PublicApiError) -> CliError {
     match e {
         ene_runtime::PublicApiError::ActorDead => {
@@ -37,7 +36,7 @@ impl CliCommand for SessionCommand {
         let subcmd = parts.first().copied().unwrap_or("");
         let rest = parts.get(1).copied().unwrap_or("").trim();
 
-        // Store-backed subcommands (#176) do not need an actor snapshot.
+        // Store-backed subcommands do not need an actor snapshot.
         match subcmd {
             "list" => return handle_list(ctx).await,
             "export" => return handle_export(ctx, rest).await,

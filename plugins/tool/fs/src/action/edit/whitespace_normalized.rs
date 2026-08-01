@@ -77,11 +77,8 @@ mod tests {
     #[test]
     fn test_multi_line_whitespace_normalized() {
         let content = "  foo\n    bar\n  baz\n";
-        // old with different whitespace pattern
         let old = "foo\nbar";
         let result = whitespace_normalized_replace(content, old, "QUX", false);
-        // normalize("foo\nbar") = "foo bar"
-        // normalize("  foo\n    bar") for the block would be "foo bar"
         assert!(result.is_some());
     }
 

@@ -1,6 +1,6 @@
 //! wgpu + egui window shell for the dedicated chat window.
 //!
-//! TODO(M3): Extract a shared `EguiWindowShell` struct from this and
+//! TODO: extract a shared `EguiWindowShell` struct from this and
 //! `UiWindow` in `runtime.rs` — they share identical surface creation,
 //! egui pass lifecycle, texture free ring-buffer, and error handling.
 

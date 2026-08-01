@@ -1,4 +1,4 @@
-//! VRM 1.0 expression override semantics (this struct).
+//! VRM 1.0 expression override semantics.
 //!
 //! The `VRMC_vrm.expressions` block ships per-expression metadata
 //! — `isBinary`, `overrideMouth`, `overrideBlink`,
@@ -6,7 +6,7 @@
 //! expressions (e.g. `happy`, `sad`) interact with procedural
 //! expressions (e.g. `blink`, `aa`, `lookUp`).
 //!
-//! ships:
+//! This module ships:
 //!
 //! - [`ExpressionOverrideType`] — `None` | `Block` | `Blend`
 //! - [`ExpressionOverrideSettings`] — per-expression triple
@@ -650,7 +650,6 @@ mod tests {
             def_none("blink"),
         ];
         apply_overrides(&mut w, &defs);
-        // block wins
         assert_eq!(w.get(&mk("blink")), Some(&0.0));
     }
 
@@ -1018,8 +1017,8 @@ mod tests {
     // ---- load_expression_overrides (unit test with inline JSON) ----
 
     /// Wrap a `VRMC_vrm` extension block in a minimal glTF 2.0
-    /// document and parse it. Mirrors the pattern in
-    /// `look_at.rs` tests (this struct).
+    /// document and parse it. Mirrors the pattern in the
+    /// `look_at.rs` tests.
     fn gltf_from_vrmc(vrmc: &serde_json::Value) -> gltf::Gltf {
         let json = serde_json::json!({
             "asset": { "version": "2.0" },

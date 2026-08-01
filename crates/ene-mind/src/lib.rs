@@ -19,8 +19,7 @@
 //! The crate implements the [Ene Cognitive Runtime](../../docs/reference/architecture/cognitive-runtime.md)
 //! architecture, treating the LLM as an utterance generator from explicitly managed
 //! cognitive state rather than as the entity that implicitly holds personality and memory.
-//! Conversation session state absorbed from the former standalone session crate
-//! lives under [`session`].
+//! Conversation session state lives under [`session`].
 //!
 //! ## Crate Boundaries
 //!
@@ -31,7 +30,7 @@
 //! - Depends on: `ene-core`, `ene-config`, `ene-ai`
 //! - Does NOT depend on: `ene-runtime` (prevents circular dependencies),
 //!   `ene-store` (production code uses `ene_core::MemoryPort`; `ene-store`
-//!   is a dev-dependency for integration tests only, #309)
+//!   is a dev-dependency for integration tests only)
 //! - Calls the store only through `ene_core::MemoryPort` — never issues
 //!   raw SQL or `sea-orm` queries directly. `ene-store` remains the sole `SQLite` owner.
 //! - Owns mind logic exclusively: memory extraction, recall planning, emotion,
@@ -55,13 +54,13 @@ pub mod commitments;
 pub mod context;
 /// Emotion Engine: deterministic + optional LLM affect computation.
 pub mod emotion;
-/// Diagnostics/CLI memory journal search facade (#123).
+/// Diagnostics/CLI memory journal search facade.
 pub mod memory_journal;
 /// Deterministic/LLM memory extraction and Memory Arbiter.
 pub mod memory_writer;
 /// Output arbitration: expression validation and hysteresis management.
 pub mod output;
-/// Proactive companion speech decision pipeline (#103).
+/// Proactive companion speech decision pipeline.
 pub mod proactive;
 /// Sectioned prompt packet composition with budget-aware assembly.
 pub mod prompt_packet;
@@ -78,7 +77,7 @@ pub mod config;
 pub mod engine;
 /// Cognitive runtime error types.
 pub mod error;
-/// Turn lifecycle DTOs for streaming integration (#100).
+/// Turn lifecycle DTOs for streaming integration.
 pub mod lifecycle;
 
 #[doc(no_inline)]
@@ -102,7 +101,7 @@ pub use context::{
 /// Emotion engine types.
 #[doc(no_inline)]
 pub use emotion::{AffectProposal, EmotionEngine, TurnAffectInput};
-/// Re-export commitment domain types from ene-core for consumers (#309).
+/// Re-export commitment domain types from ene-core for consumers.
 #[doc(no_inline)]
 pub use ene_core::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 /// Central cognitive engine facade.
@@ -114,7 +113,7 @@ pub use lifecycle::{
     ComposePrefetch, ComposedPrompt, HistoryEntry, OwnedPostTurnInput, OwnedTurnInput,
     PostTurnInput, PreTurnOutput, PromptPacketMeta, TurnContext, interruption_note,
 };
-/// Journal-style scored memory search (#123).
+/// Journal-style scored memory search.
 #[doc(no_inline)]
 pub use memory_journal::MemoryJournal;
 /// Memory arbiter and related decision types.
@@ -124,7 +123,7 @@ pub use memory_writer::{
     ArbiterReasonCode, CandidateDecision, CandidateProvenance, ForgettingContext,
     ForgettingLifecycle, ForgettingReport, MemoryArbiter, MemoryWriteProviders, SemanticMatch,
 };
-/// Performance cue types for chat presentation (#126, #128).
+/// Performance cue types for chat presentation.
 #[doc(no_inline)]
 pub use output::{CueSource, MotionLayer, PerfKind, PerformanceCue, cue_source_priority};
 /// Expression arbiter types.
@@ -132,7 +131,7 @@ pub use output::{CueSource, MotionLayer, PerfKind, PerformanceCue, cue_source_pr
 pub use output::{
     ExpressionDecision, ExpressionInput, ExpressionSource, OutputArbiter, PerformanceArbiter,
 };
-/// Proactive companion speech decision types (#103).
+/// Proactive companion speech decision types.
 #[doc(no_inline)]
 pub use proactive::{
     ActivitySnapshot, GateRejectReason, ProactiveContext, ProactiveDecision,
@@ -152,7 +151,7 @@ pub use recall::{
     RecalledMemory, explain_scored_memories, format_recalled_content, infer_recall_reason,
     recall_content_qualifier,
 };
-/// Session types absorbed from the former standalone session crate.
+/// Session types for conversation state and splitting.
 #[doc(no_inline)]
 pub use session::{
     CardName, CharacterAsset, CharacterCardData, CharacterCardV3, ConversationSession,

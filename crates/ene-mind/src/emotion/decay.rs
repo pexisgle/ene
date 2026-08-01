@@ -1,4 +1,4 @@
-//! Time-based affect decay toward neutral baselines (#86).
+//! Time-based affect decay toward neutral baselines.
 
 use std::time::Duration;
 

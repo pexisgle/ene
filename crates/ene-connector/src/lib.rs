@@ -8,9 +8,8 @@
 //! connector identifiers, OAuth permission scopes, and display metadata. It
 //! deliberately does **not** own connection lifecycle — process supervision,
 //! restarts, and health probing live in `ene-plugin-host`. These types have no
-//! consumer yet: the MCP credential bridge that will consume them is
-//! reintroduced in `ene-plugin-host` under #412, backed by the credential vault
-//! landing here under #415.
+//! consumer yet: the MCP credential bridge that will consume them lives in
+//! `ene-plugin-host`, backed by the credential vault in this crate.
 //!
 //! # Architecture
 //!
@@ -23,15 +22,11 @@
 //! - [`ConnectorIdentity`] — display metadata for configuration UIs.
 //! - [`ConnectorError`] — unified error type.
 //!
-//! # History and roadmap
+//! # Connection lifecycle lives elsewhere
 //!
-//! An earlier revision shipped a `Connector` lifecycle trait and a
-//! `ConnectorRegistry`. That layer was never wired into the live MCP path and
-//! duplicated supervision that `ene-plugin-host` already provides, so it was
-//! removed (#416); the MCP bridge's SSRF URL validation now lives in
-//! `ene-plugin-host`'s `mcp_registry`. A credential vault and OAuth flow land
-//! here in #415, and the client-side credential policy (retry / rate limiting)
-//! is reintroduced in `ene-plugin` under #413.
+//! Process supervision, restarts, health probing, and the MCP bridge's SSRF
+//! URL validation all live in `ene-plugin-host`; this crate stays the
+//! credential and identity authority.
 #![warn(missing_docs)]
 #![cfg_attr(
     test,

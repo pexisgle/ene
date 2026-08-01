@@ -1,4 +1,4 @@
-//! Doctor diagnostic command (#179).
+//! Doctor diagnostic command.
 //!
 //! Checks environment health across runtime, config, AI provider,
 //! embedding, store, tool registry, and assets categories. Secrets
@@ -11,23 +11,15 @@ use async_trait::async_trait;
 use ene_runtime::{AiConfig, EneDiagnostics, EneStateSnapshot, StoreConfig};
 use serde::Serialize;
 
-/// Diagnostic category grouping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CheckCategory {
-    /// Actor / runtime health.
     Runtime,
-    /// Configuration validity.
     Config,
-    /// AI provider connectivity.
     AiProvider,
-    /// Embedding backend.
     Embedding,
-    /// Memory store.
     Store,
-    /// Tool registry.
     ToolRegistry,
-    /// Assets directory.
     Assets,
 }
 
@@ -46,32 +38,21 @@ impl std::fmt::Display for CheckCategory {
     }
 }
 
-/// Status of a single diagnostic check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CheckStatus {
-    /// Check passed.
     Ok,
-    /// Non-fatal issue detected.
     Warning,
-    /// Fatal issue detected.
     Error,
-    /// Check was not applicable.
     Skipped,
 }
 
-/// A single diagnostic check result.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CheckResult {
-    /// Category this check belongs to.
     pub(crate) category: CheckCategory,
-    /// Short check name.
     pub(crate) name: String,
-    /// Outcome.
     pub(crate) status: CheckStatus,
-    /// Human-readable detail.
     pub(crate) message: String,
-    /// Suggested fix, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) remediation: Option<String>,
 }
@@ -128,14 +109,12 @@ impl CheckResult {
     }
 }
 
-/// Aggregate report for `--json` output.
 #[derive(Debug, Serialize)]
 struct DoctorReport {
     checks: Vec<CheckResult>,
     summary: DoctorSummary,
 }
 
-/// Counts per status.
 #[derive(Debug, Serialize)]
 struct DoctorSummary {
     total: usize,
@@ -188,7 +167,6 @@ fn mask_path(path: &std::path::Path) -> String {
     }
 }
 
-/// The `/doctor` command.
 pub(crate) struct DoctorCommand;
 
 #[async_trait]
@@ -354,7 +332,6 @@ async fn check_ai_provider(results: &mut Vec<CheckResult>, snapshot: &EneStateSn
     check_provider_fallback(results, &ai_config).await;
 }
 
-/// Per-provider health checks and failover policy display (#175).
 async fn check_provider_fallback(results: &mut Vec<CheckResult>, ai_config: &AiConfig) {
     let fallback = &ai_config.fallback;
     if !fallback.enabled {

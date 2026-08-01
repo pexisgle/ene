@@ -66,7 +66,7 @@ pub struct LlmResponseChunk {
     /// Tool call updates generated in this chunk, if any.
     pub tool_calls_delta: Option<Vec<LlmToolCallChunk>>,
     /// Token usage for the whole completion, carried on the **final** chunk
-    /// when the provider reports it (#365). Intermediate chunks leave this
+    /// when the provider reports it. Intermediate chunks leave this
     /// `None`; providers that never report usage leave every chunk `None` and
     /// the caller falls back to a character-based estimate.
     pub usage: Option<TokenUsage>,
@@ -86,7 +86,7 @@ impl From<String> for LlmResponseChunk {
 }
 
 /// A completed (non-streaming) chat response: the assistant text plus any
-/// token usage the provider reported (#365).
+/// token usage the provider reported.
 ///
 /// Returned by [`crate::LlmProvider::chat_completion`]. `usage` is `None` when
 /// the provider does not report usage, in which case callers that need a count

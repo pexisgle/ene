@@ -5,17 +5,14 @@ use std::path::Path;
 /// Startup overrides sourced from CLI flags.
 #[derive(Debug, Default)]
 pub struct InitOptions {
-    /// Optional explicit path to a `settings.json` file.
     pub config_path: Option<std::path::PathBuf>,
-    /// Optional character card name or path override.
     pub character: Option<String>,
 }
 
-/// Initializes the actor via the ready-handle product path.
 pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
     tracing::info!("[Runtime] Initializing AI runtime...");
 
-    // Write JSON schemas once at startup rather than on every config load (#325).
+    // Write JSON schemas once at startup rather than on every config load.
     ene_config::write_schemas(ene_config::assets_dir());
 
     let mut config = match &opts.config_path {
@@ -48,7 +45,7 @@ pub async fn init(opts: &InitOptions) -> Result<EneHandle, EneRuntimeError> {
 fn load_config_from_path(path: &Path) -> Result<ene_config::EneConfig, EneRuntimeError> {
     // Schemas are written to the global assets dir in `init` above; the
     // `--config-path` override only affects where `settings.json` is read
-    // from (#325), so no per-path assets directory is threaded through here.
+    // from, so no per-path assets directory is threaded through here.
     let config = ene_config::load_config_from(path)?;
     Ok(config)
 }

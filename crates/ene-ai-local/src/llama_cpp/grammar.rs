@@ -1553,7 +1553,7 @@ impl SchemaConverter {
 
     fn format_grammar(&self) -> String {
         let mut ss = String::new();
-        // Move root rule to the beginning if present
+        // GBNF output must lead with the root rule.
         if let Some(root_rule) = self.rules.get("root") {
             ss.push_str("root ::= ");
             ss.push_str(root_rule);
@@ -1636,13 +1636,13 @@ mod tests {
         assert!(grammar.contains("[a-z]"), "{grammar}");
     }
 
-    /// Regression test: `not_strings`'s reject-character-class builder used to
-    /// close its `[^"...]` bracket expression one character too early
-    /// (`out.push_str("[^\"]")` instead of `"[^\""`), producing a malformed
-    /// GBNF terminal like `[^"]ab]` for any object schema that both declares
-    /// named properties and allows additional ones. `LlamaSampler::grammar`
-    /// panics on invalid GBNF (see `llama_cpp/generate.rs`), so this was a
-    /// guaranteed break for a common schema shape, not a cosmetic issue.
+    /// Guards the reject-character-class builder in `not_strings`: the
+    /// `[^"...]` bracket expression must cover every declared property name
+    /// as a single expression — a malformed GBNF terminal like `[^"]ab]`
+    /// (closing the bracket one character early) makes
+    /// `LlamaSampler::grammar` panic on invalid GBNF (see
+    /// `llama_cpp/generate.rs`), a guaranteed break for any object schema
+    /// that declares named properties and allows additional ones.
     #[test]
     fn additional_properties_key_rejection_is_a_single_bracket_expression() {
         let schema = r#"{"type":"object","properties":{"a":{"type":"string"},"b":{"type":"integer"}},"required":["a"],"additionalProperties":true}"#;
@@ -1652,9 +1652,9 @@ mod tests {
         assert!(!grammar.contains("]b]"), "{grammar}");
     }
 
-    /// Same bug, single-property + object-valued `additionalProperties`
-    /// (rather than `additionalProperties: true`) — a second, distinct call
-    /// site that reaches the same `not_strings` code path.
+    /// Same invariant via a second call site: single-property +
+    /// object-valued `additionalProperties` (rather than
+    /// `additionalProperties: true`) reaching the same `not_strings` path.
     #[test]
     fn additional_properties_schema_key_rejection_is_a_single_bracket_expression() {
         let schema = r#"{"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":{"type":"integer"}}"#;

@@ -82,7 +82,7 @@ pub fn parse_decision_json(raw: &str) -> ProactiveDecision {
         .unwrap_or("")
         .trim()
         .to_string();
-    // ADR: topic_hint must not copy reason or screen_digest verbatim.
+    // topic_hint must not copy reason or screen_digest verbatim.
     if !topic_hint.is_empty() && (topic_hint == reason || topic_hint == screen_digest) {
         topic_hint.clear();
     }

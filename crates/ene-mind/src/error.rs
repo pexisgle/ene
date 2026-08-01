@@ -2,7 +2,7 @@ use thiserror::Error;
 
 /// Error type for the *cognition* domain: recall, memory writing/arbitration,
 /// forgetting, character-card memory sync, the affect/emotion classifier,
-/// context budgeting/compression, commitments, and the turn engine (#274).
+/// context budgeting/compression, commitments, and the turn engine.
 ///
 /// This is the error type nearly every function in those submodules returns
 /// (directly, or via the [`CognitionError`] alias) — it is the common
@@ -20,7 +20,7 @@ use thiserror::Error;
 /// cognition-specific variants without re-destructuring.
 #[derive(Error, Debug)]
 pub enum EneCognitionError {
-    /// Memory operation failed via the `MemoryPort` abstraction (#270, #309).
+    /// Memory operation failed via the `MemoryPort` abstraction.
     ///
     /// Used by all cognitive-logic modules that call `&dyn MemoryPort`
     /// instead of the concrete `ene_store::MemoryStore`.
@@ -91,8 +91,7 @@ pub enum EneCognitionError {
 /// docs for why this is *not* the crate boundary type.
 pub type CognitionError = EneCognitionError;
 
-/// Single public error type for the `ene-mind` crate boundary (API v1 / #118,
-/// #274).
+/// Single public error type for the `ene-mind` crate boundary (API v1).
 ///
 /// This — not [`EneCognitionError`] — is the type external embedders
 /// (`ene-runtime` in particular, via `#[from] ene_mind::MindError` on

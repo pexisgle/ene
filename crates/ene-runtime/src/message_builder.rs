@@ -200,7 +200,7 @@ pub fn build_expression_phi(card: &CharacterCardV3, prompts: &PromptLibrary) -> 
     }
 }
 
-/// Builds the natural-dialogue output contract for engine-managed expression (#91).
+/// Builds the natural-dialogue output contract for engine-managed expression.
 ///
 /// Instructs the LLM to respond in plain dialogue without inline performance markers.
 /// Expression is resolved by the cognitive runtime Output Arbiter after the turn.
@@ -248,7 +248,7 @@ pub fn build_cognitive_output_contract(
 /// 4. `System` — Post-history output contract (marker PHI or natural-dialogue, based on `emotion_enabled`)
 /// 5. `User`   — current user input (+ optional runtime context)
 ///
-/// Legacy recalled summaries / keyfacts are no longer injected (#125).
+/// Recalled summaries / keyfacts are not injected into the message list.
 pub fn build_messages(
     ctx: &MessageBuildContext<'_>,
 ) -> Result<Vec<LlmMessage>, crate::error::EneRuntimeError> {
@@ -377,7 +377,7 @@ mod tests {
         );
     }
 
-    /// Regression for #342: the example messages are injected on the first
+    /// Regression test: the example messages are injected on the first
     /// turn (empty history) and dropped once history is non-empty. The
     /// `/prompt` debug command renders `build_messages` output directly, so
     /// pinning the condition here keeps the preview honest.

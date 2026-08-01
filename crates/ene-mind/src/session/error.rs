@@ -15,7 +15,7 @@ pub enum EneSessionError {
     /// Embedding error.
     #[error("Embedding error: {0}")]
     Embedding(String),
-    /// Memory port error (#309).
+    /// Memory port error.
     #[error(transparent)]
     MemoryPort(#[from] ene_core::MemoryPortError),
 }

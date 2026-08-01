@@ -34,7 +34,6 @@ impl Default for SearchOptions {
     }
 }
 
-/// Search backend contract.
 #[async_trait]
 pub trait SearchProvider: Send + Sync + std::fmt::Debug {
     #[expect(dead_code, reason = "implemented by each provider for diagnostics")]

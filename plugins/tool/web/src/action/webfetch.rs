@@ -91,8 +91,6 @@ fn is_blocked_address(ip: IpAddr) -> bool {
     }
 }
 
-/// Returns `true` for MIME types that represent binary content which
-/// cannot be meaningfully displayed as text.
 fn is_binary_content_type(mime: &str) -> bool {
     let lower = mime.to_ascii_lowercase();
     lower.starts_with("image/")

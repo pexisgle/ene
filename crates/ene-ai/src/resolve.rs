@@ -185,7 +185,7 @@ pub struct ResolvedTaskRef<'a> {
     pub dimensions: Option<usize>,
 }
 
-/// A fully resolved cloud chat candidate for failover routing (#175).
+/// A fully resolved cloud chat candidate for failover routing.
 ///
 /// Produced by [`AiConfig::resolve_chat_candidates`], which enumerates the
 /// configured chat provider first (highest priority) followed by every other
@@ -252,7 +252,7 @@ impl ApiKeyConfig {
     }
 }
 
-/// A single settings validation finding (#241).
+/// A single settings validation finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsIssue {
     /// Chat provider API key resolves empty.
@@ -272,7 +272,7 @@ pub enum SettingsIssue {
         /// Human-readable detail.
         detail: String,
     },
-    /// Provider `kind` looks like a typo of a built-in kind (#C3).
+    /// Provider `kind` looks like a typo of a built-in kind.
     SuspiciousKind {
         /// Provider key in `ai.providers`.
         provider: String,
@@ -311,7 +311,7 @@ impl SettingsIssue {
     }
 }
 
-/// Validate provider `kind` values against known built-ins (#C3).
+/// Validate provider `kind` values against known built-ins.
 ///
 /// Catches obvious typos of built-in kinds (e.g. `"openai-compatible"` or
 /// `"anthroic"`) at config load / resolve time instead of failing late and
@@ -333,12 +333,12 @@ pub fn validate_provider_kinds(ai: &AiConfig) -> Vec<SettingsIssue> {
     issues
 }
 
-/// Validate chat-provider settings without performing a network call (#241).
+/// Validate chat-provider settings without performing a network call.
 ///
 /// Checks that the configured chat provider has a non-empty base URL with an
 /// `http`/`https` scheme and a resolvable API key. Returns an empty vec when
 /// the section is missing or the chat provider is local/GGUF. Also reports
-/// provider `kind` values that look like typos of built-in kinds (#C3).
+/// provider `kind` values that look like typos of built-in kinds.
 #[must_use]
 pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
     let Ok(ai) = config.get_section::<crate::AiConfig>() else {
@@ -346,7 +346,7 @@ pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
     };
 
     // Validate every provider's `kind` up front, independent of which provider
-    // the chat task routes to (#C3).
+    // the chat task routes to.
     let mut issues = validate_provider_kinds(&ai);
 
     let provider_key = ai.tasks.chat.provider.clone();
@@ -360,7 +360,7 @@ pub fn validate_settings(config: &ene_config::EneConfig) -> Vec<SettingsIssue> {
         return issues;
     };
     // base_url / api_key are only meaningful for OpenAI-compatible HTTP
-    // providers; plugin-provided kinds validate over IPC instead (#247).
+    // providers; plugin-provided kinds validate over IPC instead.
     if !def.is_openai_compatible() {
         return issues;
     }
@@ -393,7 +393,7 @@ pub fn needs_onboarding(config: &ene_config::EneConfig) -> bool {
 }
 
 /// A task whose configured context window cannot hold its prompt budget plus
-/// output reserve (#366).
+/// output reserve.
 ///
 /// Produced by [`validate_context_budgets`] and surfaced as a startup warning:
 /// when a model's window is smaller than what the prompt composition needs,
@@ -432,7 +432,7 @@ impl ContextBudgetIssue {
 }
 
 /// Validate that each generative task's context window can hold its prompt
-/// budget plus output reserve (#366).
+/// budget plus output reserve.
 ///
 /// `prompt_budget` is the token budget prompt composition targets (the mind's
 /// `max_prompt_tokens`); it is passed in because `ene-ai` does not depend on
@@ -459,7 +459,7 @@ pub fn validate_context_budgets(ai: &AiConfig, prompt_budget: u32) -> Vec<Contex
 }
 
 /// Compare one task's effective window against its required budget and record
-/// a [`ContextBudgetIssue`] when the window is too small (#366).
+/// a [`ContextBudgetIssue`] when the window is too small.
 ///
 /// Only tasks whose window is known at startup are checked: a local model's
 /// [`LocalModelDef::context_size`], or an explicit operator
@@ -526,7 +526,7 @@ fn task_model_label(task: &TaskRef) -> String {
         .unwrap_or_else(|| task.provider.clone())
 }
 
-/// Emit a `tracing::warn!` for each under-sized context window (#366).
+/// Emit a `tracing::warn!` for each under-sized context window.
 ///
 /// Convenience wrapper over [`validate_context_budgets`] for startup paths
 /// that only need the side effect. `prompt_budget` is the mind's
@@ -547,7 +547,7 @@ pub fn warn_on_context_budget_issues(ai: &AiConfig, prompt_budget: u32) {
     }
 }
 
-/// Lightweight API-key validation for an OpenAI-compatible provider (#237).
+/// Lightweight API-key validation for an OpenAI-compatible provider.
 ///
 /// Performs a `GET {base_url}/models` request with a short timeout so an
 /// invalid key is reported before the first turn instead of surfacing as an
@@ -661,7 +661,7 @@ impl AiConfig {
         })
     }
 
-    /// Compute the effective context-window budget for a task (#364).
+    /// Compute the effective context-window budget for a task.
     ///
     /// `provider_advertised` is the window the backend reports for itself —
     /// [`ene_plugin_proto::LlmProviderSpec::context_window`] for a plugin
@@ -670,7 +670,7 @@ impl AiConfig {
     /// the task's provider (as `min`, so config can only shrink the model's
     /// stated limit) and the task's `max_tokens` response reserve, via
     /// [`crate::context_window::effective_window`]. The safety margin uses
-    /// the heuristic default; callers with measured usage (#365) can recompute
+    /// the heuristic default; callers with measured usage can recompute
     /// with a zero margin.
     #[must_use]
     pub fn effective_window_for_task(
@@ -690,7 +690,7 @@ impl AiConfig {
         )
     }
 
-    /// The context window a task's model advertises from config alone (#386).
+    /// The context window a task's model advertises from config alone.
     ///
     /// Returns the local model's [`LocalModelDef::context_size`] when the task
     /// routes to the local provider, or the operator's
@@ -726,7 +726,7 @@ impl AiConfig {
         self.resolve_chat_task(None)
     }
 
-    /// Resolve an ordered list of cloud chat candidates for failover (#175).
+    /// Resolve an ordered list of cloud chat candidates for failover.
     ///
     /// The configured chat provider is first (highest priority), followed by
     /// every other cloud provider in [`AiConfig::providers`] insertion order.
@@ -737,7 +737,6 @@ impl AiConfig {
         let mut candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // Primary: the configured chat task provider.
         if let Ok(resolved) = self.resolve_chat()
             && seen.insert(self.tasks.chat.provider.clone())
         {
@@ -750,9 +749,8 @@ impl AiConfig {
             });
         }
 
-        // Fallbacks: every other OpenAI-compatible provider, in config order.
         // Only HTTP providers are health-probed here; plugin-provided kinds
-        // are checked over IPC instead (#247).
+        // are checked over IPC instead.
         for (name, def) in &self.providers {
             if seen.contains(name) || !def.is_openai_compatible() {
                 continue;
@@ -936,8 +934,7 @@ impl AiConfig {
 }
 
 /// Clamp `value` to `[min, max]`, emitting a `tracing::warn!` when it is
-/// adjusted. Used to sanitize numeric config values at the resolve boundary
-/// (M12).
+/// adjusted. Used to sanitize numeric config values at the resolve boundary.
 fn clamp_with_warn(value: f32, min: f32, max: f32, field: &str) -> f32 {
     let clamped = value.clamp(min, max);
     if (clamped - value).abs() > f32::EPSILON {
@@ -1132,7 +1129,6 @@ mod tests {
             provider: "default".to_string(),
             ..TaskRef::default()
         };
-        // Operator override (32k) caps the advertised 200k window.
         let w = cfg.effective_window_for_task(&task, Some(200_000));
         assert_eq!(w.effective, 32_000);
     }
@@ -1183,14 +1179,13 @@ mod tests {
             provider: "default".to_string(),
             ..TaskRef::default()
         };
-        // A cloud task with no override learns its window at runtime.
         assert_eq!(cfg.advertised_window_for_task(&task), None);
     }
 
     /// Build an [`AiConfig`] whose chat and proactive tasks both route to a
-    /// local model with the given context size and chat output reserve (#366
-    /// test helper). The proactive reserve is fixed at 2,048 (a typical local
-    /// companion utterance).
+    /// local model with the given context size and chat output reserve. The
+    /// proactive reserve is fixed at 2,048 (a typical local companion
+    /// utterance).
     fn local_chat_config(context_size: u32, chat_max_tokens: u32) -> AiConfig {
         let mut cfg = AiConfig::default();
         cfg.local_models.insert(
@@ -1217,7 +1212,7 @@ mod tests {
 
     #[test]
     fn validate_context_budgets_flags_undersized_local_window() {
-        // The old 2,048-token window cannot hold a 12,000 prompt even with a
+        // The 2,048-token window cannot hold a 12,000 prompt even with a
         // modest local reserve.
         let cfg = local_chat_config(2_048, 2_048);
         let issues = validate_context_budgets(&cfg, 12_000);
@@ -1232,7 +1227,6 @@ mod tests {
         assert_eq!(chat.prompt_budget, 12_000);
         assert_eq!(chat.response_reserve, 2_048);
         assert_eq!(chat.required, 14_048);
-        // The message carries the current value, required value, and breakdown.
         let msg = chat.message();
         assert!(msg.contains("2048"), "message: {msg}");
         assert!(msg.contains("14048"), "message: {msg}");
@@ -1241,8 +1235,6 @@ mod tests {
 
     #[test]
     fn validate_context_budgets_passes_with_default_local_window() {
-        // The raised 16,384 default holds a 12,000 prompt plus a local-sized
-        // reserve (the issue's guidance: lower max_tokens for local chat).
         let cfg = local_chat_config(16_384, 2_048);
         assert!(validate_context_budgets(&cfg, 12_000).is_empty());
     }
@@ -1265,16 +1257,12 @@ mod tests {
 
     #[test]
     fn validate_context_budgets_skips_cloud_without_override() {
-        // A cloud chat task with no explicit window is learned at runtime, so
-        // it is not flagged on the conservative default floor.
         let cfg = AiConfig::default();
         assert!(validate_context_budgets(&cfg, 12_000).is_empty());
     }
 
     #[test]
     fn validate_context_budgets_flags_small_cloud_override() {
-        // An operator override that shrinks the window below the budget is a
-        // startup-knowable misconfiguration and is flagged.
         let mut cfg = AiConfig::default();
         if let Some(def) = cfg.providers.get_mut("default") {
             def.context_window = Some(4_096);
@@ -1290,8 +1278,6 @@ mod tests {
 
     #[test]
     fn validate_context_budgets_ignores_classifier_and_embedding() {
-        // Only generative tasks (chat, proactive) are checked; a tiny
-        // embedding/classifier window must not produce an issue.
         let mut cfg = local_chat_config(16_384, 2_048);
         cfg.tasks.embedding = TaskRef {
             provider: crate::config::LOCAL_PROVIDER.to_string(),

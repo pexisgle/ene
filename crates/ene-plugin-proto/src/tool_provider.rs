@@ -6,7 +6,7 @@ use crate::tool_ipc::{CallContext, DeferredStatus};
 use crate::tool_types::{ToolRagProfile, ToolResult, ToolSpec};
 use async_trait::async_trait;
 
-/// Outcome of a deferred (background) tool call (#196).
+/// Outcome of a deferred (background) tool call.
 ///
 /// Returned by [`ToolProvider::call_tool_deferred`]. A background-capable
 /// tool returns [`DeferredOutcome::Deferred`] with a unique `task_id` and
@@ -25,8 +25,8 @@ pub enum DeferredOutcome {
 
 /// Tool provider trait — implemented by each tool crate.
 ///
-/// After IPC separation, each provider on the host side implements this trait.
-/// The host-side `IpcToolRegistry` calls through IPC to the tool binary.
+/// Each provider on the host side implements this trait; the host-side
+/// `IpcToolRegistry` calls through IPC to the tool binary.
 ///
 /// ## Setter-call ordering contract
 ///
@@ -48,7 +48,7 @@ pub trait ToolProvider: Send + Sync {
     /// `filesystem.write`, ...).
     fn list_specs(&self) -> Vec<ToolSpec>;
 
-    /// Returns host/RAG metadata for each callable tool (#137).
+    /// Returns host/RAG metadata for each callable tool.
     ///
     /// Default is empty so hand-written providers keep compiling; prefer
     /// emitting profiles from `#[derive(ToolSpec)]` / `ActionSetProvider`.
@@ -59,7 +59,7 @@ pub trait ToolProvider: Send + Sync {
     /// Executes a tool by name with the given JSON arguments.
     async fn call_tool(&self, name: &str, arguments: &str) -> Result<String, ToolError>;
 
-    /// Executes a tool in deferred (background) mode (#196).
+    /// Executes a tool in deferred (background) mode.
     ///
     /// A background-capable tool should start the work asynchronously and
     /// return [`DeferredOutcome::Deferred`] with a unique `task_id`; the
@@ -77,7 +77,7 @@ pub trait ToolProvider: Send + Sync {
         )))
     }
 
-    /// Polls the status of a deferred (background) task by id (#196).
+    /// Polls the status of a deferred (background) task by id.
     ///
     /// The default returns [`DeferredStatus::Unknown`] for tools that do
     /// not support deferral; background-capable tools should track their
@@ -86,7 +86,7 @@ pub trait ToolProvider: Send + Sync {
         DeferredStatus::Unknown
     }
 
-    /// Cancels a deferred (background) task by id (#196).
+    /// Cancels a deferred (background) task by id.
     ///
     /// The default is a no-op for tools that do not support deferral.
     fn cancel_deferred(&self, _task_id: &str) {}
@@ -107,7 +107,7 @@ pub trait ToolProvider: Send + Sync {
     /// Adds a session-wide permission allow pattern (action + target glob).
     fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// Revokes a previously granted session-wide permission allow pattern (#177).
+    /// Revokes a previously granted session-wide permission allow pattern.
     fn revoke_pattern(&self, _action: &str, _target_pattern: &str) {}
 
     /// Receives tool-specific configuration (called once during Handshake).

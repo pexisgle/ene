@@ -11,7 +11,7 @@
 //! - **Capture** ([`capture`]): `cpal` input stream → `VadEngine` →
 //!   `SttProvider::transcribe` → [`AiBridge::run`](crate::ai_bridge::AiBridge::run).
 //! - **Playback** ([`playback`]): [`AudioChunk`](ene_runtime::AudioChunk)
-//!   (from the dedicated audio channel, #272) → `rodio` sink +
+//!   (from the dedicated audio channel) → `rodio` sink +
 //!   [`VisemeDriver`](viseme_driver::VisemeDriver).
 //! - **Viseme** ([`viseme_driver`]): smoothed mouth-shape weights read
 //!   once per render frame and applied to the VRM expression layer.
@@ -92,13 +92,11 @@ use viseme_driver::VisemeDriver;
 #[cfg(feature = "voice")]
 #[derive(Resource, Clone)]
 pub struct AudioState {
-    /// Whether microphone capture is currently active.
     pub mic_active: Arc<AtomicBool>,
     /// Whether TTS audio is currently playing. Used for self-voice
     /// suppression: capture mutes mic input while this is `true` so the
     /// character's own voice is not transcribed back into a turn.
     pub tts_playing: Arc<AtomicBool>,
-    /// Selected microphone device name, or `None` for the OS default.
     pub mic_device: Option<String>,
     /// AI config snapshot used to resolve STT / VAD provider settings.
     pub config: ene_config::EneConfig,
@@ -118,13 +116,11 @@ impl Default for AudioState {
 
 #[cfg(feature = "voice")]
 impl AudioState {
-    /// Whether microphone capture is currently active.
     #[must_use]
     pub fn is_mic_active(&self) -> bool {
         self.mic_active.load(Ordering::Relaxed)
     }
 
-    /// Whether TTS audio is currently playing.
     #[must_use]
     pub fn is_tts_playing(&self) -> bool {
         self.tts_playing.load(Ordering::Relaxed)
@@ -140,7 +136,7 @@ impl AudioState {
 /// character's expression layer. `Arc`-backed so the playback thread and
 /// the bevy world share one driver.
 ///
-/// ## Time alignment (M4)
+/// ## Time alignment
 ///
 /// PCM is queued with an enqueue timestamp rather than fed to the
 /// analyzer immediately. The render loop consumes the queue paced by
@@ -151,21 +147,16 @@ impl AudioState {
 #[cfg(feature = "voice")]
 #[derive(Resource, Clone, Default)]
 pub struct VisemeState {
-    /// The DSP driver (analyzer + smoothed weights).
     driver: Arc<Mutex<VisemeDriver>>,
-    /// Queued PCM not yet consumed by the render loop, front = oldest.
     queue: Arc<Mutex<VecDeque<VisemeChunk>>>,
-    /// Fractional sample position into the front chunk already consumed.
     cursor: Arc<Mutex<f64>>,
 }
 
-/// A queued TTS PCM chunk awaiting time-aligned playback (M4).
+/// A queued TTS PCM chunk awaiting time-aligned playback.
 #[cfg(feature = "voice")]
 #[derive(Clone)]
 struct VisemeChunk {
-    /// Mono PCM samples normalized to `[-1.0, 1.0]`.
     pcm: Vec<f32>,
-    /// Sample rate in Hz.
     sample_rate: u32,
     /// When the chunk was handed to the playback sink.
     enqueued_at: std::time::Instant,
@@ -212,7 +203,6 @@ impl VisemeState {
             let target = (elapsed * f64::from(front.sample_rate)).floor() as usize;
             let start = *cursor as usize;
             if start >= front.pcm.len() {
-                // Front chunk fully consumed: drop it and move on.
                 queue.pop_front();
                 *cursor = 0.0;
                 continue;
@@ -288,7 +278,7 @@ pub fn toggle_mic_capture(
         .tx
         .clone();
 
-    // Single source of truth (L13): `mic_active` is the authoritative
+    // Single source of truth: `mic_active` is the authoritative
     // "is capture live" flag — the error callback clears it on device
     // unplug even though the `!Send` handle still exists here. Reconcile
     // a stale handle (flag false but handle present) before deciding.
@@ -298,7 +288,6 @@ pub fn toggle_mic_capture(
         // any stale handle so we fall through to a fresh start.
         *mic_handle = None;
     } else if let Some(mut handle) = mic_handle.take() {
-        // Live stream: stop it.
         handle.stop();
         return Ok(());
     }
@@ -359,14 +348,10 @@ mod tests {
         let state = VisemeState::default();
         // Push a chunk of 2400 samples at 24 kHz = 100 ms of audio.
         state.push_chunk(vec![0.5; 2400], 24_000);
-        // Immediately after enqueue, ~0 samples should have "played".
         state.advance();
-        // No weights yet (nothing consumed) or very few samples.
-        // After waiting, advance should consume samples.
         std::thread::sleep(std::time::Duration::from_millis(50));
         state.advance();
         // After 50 ms at 24 kHz, ~1200 samples should be consumed.
-        // Weights should now be available.
         let weights = state.analyze_weights();
         assert!(weights.is_some());
     }
@@ -379,11 +364,9 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         state.advance();
         assert!(state.analyze_weights().is_some());
-        // Reset clears the queue and zeroes the smoothed weights.
         state.reset();
         state.advance();
         let weights = state.analyze_weights();
-        // After reset the analyzer exists but weights are zeroed.
         assert!(
             weights.is_none_or(|w| w.aa + w.ih + w.ou + w.ee + w.oh == 0.0),
             "expected zeroed weights after reset, got {weights:?}"
@@ -407,7 +390,6 @@ mod tests {
         // Wait long enough for both chunks to have "played".
         std::thread::sleep(std::time::Duration::from_millis(120));
         state.advance();
-        // Both chunks should be consumed; weights available.
         assert!(state.analyze_weights().is_some());
     }
 }

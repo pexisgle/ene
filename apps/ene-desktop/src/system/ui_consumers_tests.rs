@@ -1,4 +1,4 @@
-//! Phase 6/7 tests for platform / tray / AI consumer systems.
+//! Tests for platform / tray / AI consumer systems.
 
 use bevy_app::App;
 use bevy_ecs::prelude::*;

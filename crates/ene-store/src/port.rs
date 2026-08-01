@@ -1,4 +1,4 @@
-//! `impl MemoryPort for MemoryStore` (#270).
+//! `impl MemoryPort for MemoryStore`.
 //!
 //! Thin delegation to the inherent methods on [`crate::store::MemoryStore`]
 //! defined elsewhere in this crate; the only real work here is converting
@@ -186,8 +186,6 @@ impl MemoryPort for MemoryStore {
         Ok(Self::list_active_commitments(self, character_id, user_id, limit).await?)
     }
 
-    // ── Affect state (#309) ────────────────────────────────────────────────
-
     async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError> {
         Ok(Self::get_affect_state(self, character_id).await?)
     }
@@ -203,8 +201,6 @@ impl MemoryPort for MemoryStore {
     ) -> Result<Option<PendingAffectProposal>, MemoryPortError> {
         Ok(Self::take_pending_affect_proposal(self, character_id, user_name).await?)
     }
-
-    // ── Commitment CRUD (#309) ─────────────────────────────────────────────
 
     async fn insert_commitment(&self, new: &NewCommitment) -> Result<i64, MemoryPortError> {
         Ok(Self::insert_commitment(self, new).await?)
@@ -230,8 +226,6 @@ impl MemoryPort for MemoryStore {
     async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryPortError> {
         Ok(Self::mark_stale_commitments(self, now).await?)
     }
-
-    // ── Pending memory writes (#309) ───────────────────────────────────────
 
     async fn enqueue_pending_memory_write(
         &self,
@@ -264,8 +258,6 @@ impl MemoryPort for MemoryStore {
     ) -> Result<PendingMemoryWrite, MemoryPortError> {
         Ok(Self::fail_pending_memory_write(self, id, error_message).await?)
     }
-
-    // ── Memory spans / compression (#309) ──────────────────────────────────
 
     async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, MemoryPortError> {
         Ok(Self::insert_memory_span(self, span).await?)

@@ -1,19 +1,14 @@
 //! Tray plugin.
 //!
-//! Phase 6 placeholder. The tray icon is still constructed
-//! by `Runtime::resumed` (it needs a live `winit::Window` to
-//! call `WaylandInputRegionContext::try_new`), and the
-//! `pump_tray_events` background thread already forwards
-//! tray clicks into the `AppEvent::Tray(_)` cross-thread
-//! channel. The pump system reads those events via the
-//! `pump_legacy_events` system in `First` and writes the
-//! typed `OpenSettings { page }` / `SettingsActionEvent::Quit`
-//! messages.
+//! The tray icon is constructed by `Runtime::resumed` (it needs a
+//! live `winit::Window` to call `WaylandInputRegionContext::try_new`);
+//! tray clicks reach the `AppEvent::Tray(_)` cross-thread channel and
+//! are translated into typed `OpenSettings` / `Quit` messages by
+//! `pump_legacy_events`.
 //!
-//! Phase 7.5: `pump_legacy_events` publishes a `TickGtk`
-//! message every frame on Linux; `tick_gtk_system` drains
-//! the queue. The actual `tick_gtk()` call still lives in
-//! `Runtime::about_to_wait` because the
+//! On Linux, `pump_legacy_events` publishes a `TickGtk` message every
+//! frame; `tick_gtk_system` drains the queue. The actual `tick_gtk()`
+//! call lives in `Runtime::about_to_wait` because the
 //! `Rc<RefCell<TrayHandle>>` is not `Send + Sync`.
 use bevy_app::{App, Plugin};
 

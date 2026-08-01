@@ -45,7 +45,7 @@
     expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")
 )]
 
-/// Unified tool action interface (merged from former `ene-tool-sdk`).
+/// Unified tool action interface.
 pub mod action;
 /// Compatibility adapter for wrapping legacy [`ToolProvider`] as [`ToolPlugin`].
 pub mod compat;
@@ -77,7 +77,6 @@ pub use ene_plugin_proto::{IpcListener, IpcStream, cleanup_path};
 /// Shared tool types (re-exported from `ene-plugin-proto`).
 pub use ene_plugin_proto::{ToolError, ToolResult, ToolSpec};
 
-// Re-export additional tool-proto types used by the server.
 pub use ene_plugin_proto::{DeferredStatus, SandboxConfigData};
 
 /// One-line import of the plugin authoring surface, including local-inference
@@ -85,10 +84,10 @@ pub use ene_plugin_proto::{DeferredStatus, SandboxConfigData};
 ///
 /// ## Why `ene-infer` is re-exported here
 ///
-/// The concurrency redesign this crate is part of makes plugin-supplied
-/// providers safe *from the host's side*: [`ConcurrencyHint`] lets a plugin
-/// declare how many concurrent jobs it can take, and the host enforces that
-/// with admission control (see `ene-plugin-host::ipc_provider`). But a
+/// Plugin-supplied providers are made concurrency-safe *from the host's
+/// side*: [`ConcurrencyHint`] lets a plugin declare how many concurrent jobs
+/// it can take, and the host enforces that with admission control (see
+/// `ene-plugin-host::ipc_provider`). But a
 /// plugin that does its own local inference (llama.cpp, whisper.cpp, a
 /// local TTS engine) still has to get concurrency right *inside its own
 /// process* — the host can only throttle how many requests it sends, not
@@ -100,8 +99,8 @@ pub use ene_plugin_proto::{DeferredStatus, SandboxConfigData};
 /// all behind a plain [`LocalModel`] trait instead of hand-rolled
 /// `spawn_blocking`/`block_in_place` concurrency. Re-exporting its types
 /// here means a plugin author reaches for the *same* discipline the host
-/// uses, via one `use ene_plugin::prelude::*;`, instead of this redesign
-/// simply relocating the bug across the process boundary.
+/// uses, via one `use ene_plugin::prelude::*;`, rather than hand-rolled
+/// concurrency relocating the same bug into the plugin process.
 ///
 /// `ene-infer` is a leaf crate (only `tokio`, `tokio-util`, `thiserror`,
 /// `tracing`) with no AI, DB, or wire-ABI concepts of its own, so this
@@ -216,8 +215,6 @@ mod prelude_tests {
         assert_eq!(result, 42);
     }
 
-    /// A plugin declaring a permissive concurrency hint, using only the
-    /// prelude's re-export of [`ConcurrencyHint`].
     #[test]
     fn prelude_reexports_concurrency_hint() {
         let hint = ConcurrencyHint {

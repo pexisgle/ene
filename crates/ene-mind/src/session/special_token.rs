@@ -1,5 +1,5 @@
 //! Streaming-text token splitting, chunk-safe boundary handling, and
-//! `<|perf:…|>` performance-marker parsing (#128).
+//! `<|perf:…|>` performance-marker parsing.
 //!
 //! Markers are authoritative directives emitted mid-utterance by the LLM.
 //! Unknown keys and invalid values soft-fail (log + drop) without aborting
@@ -287,8 +287,6 @@ fn parse_motion_marker(rest: &str) -> Option<PerformanceCue> {
 mod tests {
     use super::*;
 
-    // ── split_text_and_special_tokens ──
-
     #[test]
     fn split_tokens_plain_text_passes_through() {
         let mut carry = String::new();
@@ -360,8 +358,6 @@ mod tests {
         assert!(carry.is_empty());
     }
 
-    // ── strip_markers ──
-
     #[test]
     fn strip_markers_removes_perf_tokens() {
         let input = "Hello <|perf:expr=happy|> <|perf:motion=wave|> world";
@@ -372,8 +368,6 @@ mod tests {
     fn strip_markers_no_markers() {
         assert_eq!(strip_markers("plain text"), "plain text");
     }
-
-    // ── parse_performance_marker ──
 
     #[test]
     fn parse_expression_name_only_without_optional_params() {

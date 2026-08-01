@@ -1,4 +1,4 @@
-//! Decision provider routing for proactive speech (#165 / #171).
+//! Decision provider routing for proactive speech.
 
 use super::{LocalGgufLoadParams, LocalLlamaCppProvider};
 use crate::gguf::{ensure_gguf_available, ensure_mmproj_available};

@@ -1,4 +1,4 @@
-//! Post-turn natural memory decay orchestration (#76).
+//! Post-turn natural memory decay orchestration.
 //!
 //! User explicit forget flows through the Memory Arbiter (`MarkUserDeleted`).
 //! This module handles time-based `Active → Faded → Archived` transitions only.
@@ -28,7 +28,7 @@ pub struct ForgettingReport {
     pub faded_count: usize,
     /// Memories transitioned to `archived`.
     pub archived_count: usize,
-    /// Pending memory candidates removed by the retention policy (#420).
+    /// Pending memory candidates removed by the retention policy.
     pub pruned_candidates: usize,
 }
 
@@ -74,7 +74,7 @@ impl ForgettingLifecycle {
             .map_err(CognitionError::MemoryPort)?;
 
         // Enforce the pending-candidate retention policy on the same batch
-        // path (#420): expire stale candidates and cap the live queue. Scoped
+        // path: expire stale candidates and cap the live queue. Scoped
         // to the same (character, user) as the decay pass so one user's
         // candidates cannot evict another's on a multi-user database.
         let retention = &config.pending_candidate_retention;
@@ -168,8 +168,8 @@ mod tests {
         assert!(report.faded_count >= 1);
     }
 
-    /// #420 review: the lifecycle reports how many pending candidates the
-    /// retention sweep removed (surfaced on the mind side, not just the store).
+    /// The lifecycle reports how many pending candidates the retention sweep
+    /// removed (surfaced on the mind side, not just the store).
     #[tokio::test]
     async fn apply_reports_pruned_candidates() {
         use ene_core::PendingCandidate;

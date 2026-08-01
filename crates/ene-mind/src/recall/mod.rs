@@ -17,13 +17,13 @@ mod result;
 mod runner;
 mod topic;
 
-/// MMR diversification after hybrid search (#78).
+/// MMR diversification after hybrid search.
 pub use diversify::{MemoryDiversifyOptions, MemoryDiversifyPipeline};
 /// Cognition-side mapper from hybrid search output to explainable recall results.
 pub use executor::RecallResultMapper;
 /// Recall planner input DTOs.
 pub use input::{RecallPlannerInput, RecallTurn};
-/// Lorebook constant/key recall merge (#83).
+/// Lorebook constant/key recall merge.
 pub use lorebook_boost::merge_lorebook_recall;
 /// Unconfirmed pending-candidate recall merge.
 pub use pending::gather_pending_candidates;
@@ -31,12 +31,12 @@ pub use pending::gather_pending_candidates;
 pub use plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 /// Recall planner implementation and options.
 pub use planner::{RecallPlanner, RecallPlannerOptions};
-/// Prompt qualifiers for recalled memory content (#76).
+/// Prompt qualifiers for recalled memory content.
 pub use prompt_qualifier::{format_recalled_content, recall_content_qualifier};
 /// Explainable recall result DTOs and helpers.
 pub use result::{
     EMOTIONAL_MATCH_REASON_THRESHOLD, RecallReason, RecalledMemory, explain_scored_memories,
     infer_recall_reason,
 };
-/// Hybrid recall execution for streaming integration (#100).
+/// Hybrid recall execution for streaming integration.
 pub use runner::{ExecuteRecallInput, bump_injected_memory_access, execute_hybrid_recall};

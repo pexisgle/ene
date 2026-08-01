@@ -1,4 +1,4 @@
-//! Effective context-window computation (#364).
+//! Effective context-window computation.
 //!
 //! An LLM's context window is the hard limit on `prompt + completion`
 //! tokens. Two independent sources can name it:
@@ -26,17 +26,17 @@
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 8192;
 
 /// Fraction of the effective window held back as a safety margin against
-/// token-estimation error, when no measured usage is available (#364, #365).
+/// token-estimation error, when no measured usage is available.
 ///
 /// Prompt budgets are computed from a character-based token *estimate*, which
 /// is off by a language-dependent factor (Japanese packs ~2–3× more meaning
 /// per token than English). Reserving one eighth of the window absorbs that
 /// error so an over-estimate does not push the prompt past the model's real
-/// limit. When a provider reports measured usage (#365) the caller can pass a
+/// limit. When a provider reports measured usage the caller can pass a
 /// zero margin, since the estimate is then anchored to a real count.
 pub const DEFAULT_SAFETY_MARGIN_FRACTION: u32 = 8;
 
-/// A fully computed context-window budget for one task (#364).
+/// A fully computed context-window budget for one task.
 ///
 /// `available` is the number of tokens a prompt may occupy once the response
 /// reserve and safety margin have been set aside; it is the value prompt
@@ -55,7 +55,7 @@ pub struct EffectiveWindow {
     pub available: u32,
 }
 
-/// Compute the effective context-window budget for a task (#364).
+/// Compute the effective context-window budget for a task.
 ///
 /// Resolution priority for the window itself:
 ///
@@ -69,8 +69,8 @@ pub struct EffectiveWindow {
 /// From that effective window two reserves are subtracted:
 ///
 /// - `response_reserve` — the completion cap (`tasks.<task>.max_tokens`),
-///   which prior to #364 existed in config but was never honored, so a prompt
-///   could fill the whole window and leave the model no room to reply; and
+///   reserved so a prompt can never fill the whole window and leave the model
+///   no room to reply; and
 /// - a safety margin of `effective / safety_margin_divisor` (pass
 ///   [`DEFAULT_SAFETY_MARGIN_FRACTION`] for the heuristic default, or `0`
 ///   when measured usage is available and the margin is unneeded).
@@ -135,7 +135,6 @@ mod tests {
 
     #[test]
     fn user_override_caps_advertised_window() {
-        // Operator configures a smaller budget than the model supports.
         let w = effective_window(
             Some(200_000),
             Some(32_000),
@@ -147,7 +146,6 @@ mod tests {
 
     #[test]
     fn advertised_caps_larger_user_override() {
-        // Operator cannot exceed the model's stated limit.
         let w = effective_window(
             Some(8_000),
             Some(200_000),
@@ -178,7 +176,6 @@ mod tests {
 
     #[test]
     fn zero_divisor_disables_safety_margin() {
-        // Measured usage (#365) makes the margin unnecessary.
         let w = effective_window(Some(16_000), None, Some(4_096), 0);
         assert_eq!(w.safety_margin, 0);
         assert_eq!(w.available, 16_000 - 4_096);
@@ -192,15 +189,12 @@ mod tests {
             Some(8_000),
             DEFAULT_SAFETY_MARGIN_FRACTION,
         );
-        // Reserve is clamped to the window, leaving nothing for the prompt.
         assert_eq!(w.response_reserve, 4_000);
         assert_eq!(w.available, 0);
     }
 
     #[test]
     fn margin_does_not_eat_into_reserve() {
-        // The margin is bounded by what remains after the reserve, so the two
-        // reserves together never exceed the effective window.
         let w = effective_window(
             Some(8_000),
             None,

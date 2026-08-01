@@ -1,4 +1,4 @@
-//! Permission Center settings page (#177).
+//! Permission Center settings page.
 //!
 //! Surfaces the two halves of the tool-permission model:
 //!
@@ -27,7 +27,6 @@ use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
 use crate::settings::PendingPermission;
 
-/// Render the Permission Center page body.
 pub fn render(ui: &mut egui::Ui, ai: &Arc<AiBridge>, world: &mut World, ui_entity: Entity) {
     ui.heading(fl!(crate::i18n::loader(), "permissions-title"));
     ui.label(fl!(crate::i18n::loader(), "permissions-hint"));

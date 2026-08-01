@@ -5,12 +5,6 @@
 //! into this resource every frame. The character-render path reads
 //! the queue (and tracks the active emotion) instead of
 //! `AppState`-side scratch state.
-//!
-//! Phase 7.5: replaces the legacy `PendingActions::emotion_commands`
-//! buffer. Phase 7.2 wires the renderer call into a system that
-//! reads this resource directly. The current implementation
-//! drains the queue here and the winit driver applies the result
-//! to the VRM model on every redraw.
 use std::collections::VecDeque;
 
 use bevy_ecs::prelude::*;
@@ -88,11 +82,10 @@ pub fn tick_emotions(state: &mut EmotionPipelineState, now_secs: f64) -> Applied
         weight: 0.0,
     };
 
-    // 1. Pop the next command whose target_time has elapsed.
+    // Borrow the front to inspect the target time, then pop and
+    // process it. The `front` borrow must end before `pop_front`
+    // (which needs `&mut self`) can run.
     loop {
-        // Borrow the front to inspect the target time, then pop and
-        // process it. The `front` borrow must end before `pop_front`
-        // (which needs `&mut self`) can run.
         let target_time = match state.pending.front() {
             Some(front) if front.target_time <= now_secs => front.target_time,
             _ => break,
@@ -108,7 +101,6 @@ pub fn tick_emotions(state: &mut EmotionPipelineState, now_secs: f64) -> Applied
         });
     }
 
-    // 2. Tick the active emotion's weight.
     let Some(active) = state.active.as_ref() else {
         return result;
     };
@@ -117,14 +109,11 @@ pub fn tick_emotions(state: &mut EmotionPipelineState, now_secs: f64) -> Applied
     let hold_until_secs = active.hold_until_secs;
 
     if now_secs < hold_until_secs {
-        // Still holding. Weight is at target.
         result.name = name;
         result.weight = target;
     } else {
-        // Hold window expired — fade out over FADE_SECS.
         let fade_elapsed = now_secs - hold_until_secs;
         if fade_elapsed >= FADE_SECS {
-            // Done. Clear and return 0.0.
             state.active = None;
             result.name = name;
             result.weight = 0.0;

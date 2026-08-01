@@ -1,4 +1,4 @@
-//! Pending memory-candidate approval flow (#174, #223, #271).
+//! Pending memory-candidate approval flow.
 //!
 //! See the [`crate::query`] module docs for why this bypasses the actor
 //! mailbox entirely: candidate approval only ever touches `MemoryStore`,
@@ -9,7 +9,7 @@ use ene_store::{MemoryStore, PendingCandidate, PendingCandidateStatus};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Summary of a pending memory candidate for the UI (#174 / #223).
+/// Summary of a pending memory candidate for the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingCandidateSummary {
     /// Database primary key.
@@ -73,9 +73,9 @@ impl MemoryCandidateHandle {
         })
     }
 
-    /// List pending memory candidates awaiting user approval (#174).
+    /// List pending memory candidates awaiting user approval.
     ///
-    /// Part of the API v1 contract (#274): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     pub async fn list_pending(&self) -> Result<Vec<PendingCandidateSummary>, PublicApiError> {
         let character_id = self.card_name.lock().clone();
@@ -86,18 +86,18 @@ impl MemoryCandidateHandle {
         Ok(list.iter().map(PendingCandidateSummary::from).collect())
     }
 
-    /// Approve a pending memory candidate (#174).
+    /// Approve a pending memory candidate.
     ///
-    /// Part of the API v1 contract (#274): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     pub async fn approve(&self, id: i64) -> Result<(), PublicApiError> {
         self.store()?.approve_pending_candidate(id).await?;
         Ok(())
     }
 
-    /// Reject a pending memory candidate (#174).
+    /// Reject a pending memory candidate.
     ///
-    /// Part of the API v1 contract (#274): errors are the stable
+    /// Part of the API v1 contract: errors are the stable
     /// [`PublicApiError`] categories, not a bare `String`.
     pub async fn reject(&self, id: i64) -> Result<(), PublicApiError> {
         self.store()?.resolve_pending_candidate(id, false).await?;
