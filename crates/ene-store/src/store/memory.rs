@@ -38,9 +38,9 @@ fn escape_sql_literal(value: &str) -> String {
 async fn query_sqlite_changes(db: &sea_orm::DatabaseConnection) -> Result<usize, sea_orm::DbErr> {
     use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
     let row = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
-            "SELECT changes() AS n".into(),
+            "SELECT changes() AS n",
         ))
         .await?;
     let count = row
@@ -1469,7 +1469,7 @@ impl MemoryStore {
         fade_threshold: f32,
         archive_threshold: f32,
     ) -> Result<NaturalDecayReport, EneMemoryError> {
-        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+        use sea_orm::ConnectionTrait;
 
         if half_life_days <= 0.0 || half_life_days.is_nan() {
             return Ok(NaturalDecayReport::default());
@@ -1501,20 +1501,10 @@ impl MemoryStore {
             "UPDATE typed_memories SET status = 'archived', updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'faded' AND pinned = 0{user_clause} AND ({decay_faded}) < {archive_threshold}"
         );
 
-        self.db
-            .execute(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                fade_to_faded,
-            ))
-            .await?;
+        self.db.execute_unprepared(&fade_to_faded).await?;
         let faded_count = query_sqlite_changes(&self.db).await?;
 
-        self.db
-            .execute(Statement::from_string(
-                DatabaseBackend::Sqlite,
-                faded_to_archived,
-            ))
-            .await?;
+        self.db.execute_unprepared(&faded_to_archived).await?;
         let archived_count = query_sqlite_changes(&self.db).await?;
 
         Ok(NaturalDecayReport {
