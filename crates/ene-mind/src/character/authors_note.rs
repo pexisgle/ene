@@ -5,6 +5,10 @@
 //! the history at depth N (e.g., 3–5 turns back), keeping the main system
 //! prompt clean while enforcing late-session behavior.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic"
+)]
 use ene_ai::Role;
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +93,10 @@ pub fn apply_authors_note(history: &mut Vec<HistoryEntry>, note: &AuthorsNote) {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
 
     #[test]

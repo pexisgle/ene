@@ -1,5 +1,10 @@
 //! Context budget management and rolling compression (#79, #80, #81).
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 mod budget;
 mod compression;
 mod tokens;

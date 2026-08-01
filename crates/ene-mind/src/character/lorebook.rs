@@ -369,7 +369,8 @@ pub fn build_lorebook_scan_text(
 #[cfg(test)]
 #[expect(
     clippy::default_trait_access,
-    reason = "explicit Default for test fixture clarity"
+    clippy::indexing_slicing,
+    reason = "explicit Default and fixed-index assertions for test fixture clarity"
 )]
 mod tests {
     use super::*;

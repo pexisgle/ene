@@ -320,6 +320,10 @@ pub fn infer_style_intent(text: &str) -> Option<StyleIntent> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
 
     #[test]

@@ -9,7 +9,11 @@
 //! none of the arbiter tests that use this double exercise recall).
 
 #![cfg(test)]
-
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "test support for memory-writer tests uses deliberate id/access-count arithmetic and indexes its in-memory pending-candidate buffer"
+)]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 

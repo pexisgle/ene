@@ -1,5 +1,10 @@
 //! Rolling context compression (#79).
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use std::sync::Arc;
 
 use ene_ai::LlmProvider;

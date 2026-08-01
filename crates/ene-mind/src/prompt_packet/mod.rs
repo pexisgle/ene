@@ -1,5 +1,9 @@
 //! Sectioned prompt packet composition (#87).
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "prompt metadata sums per-bucket recalled-memory counts into PromptPacketMeta"
+)]
 mod section;
 
 pub use section::{PromptSection, PromptSectionKind};
@@ -174,6 +178,10 @@ pub fn render_commitments_block(commitments: &[ActiveCommitmentPrompt]) -> Strin
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use crate::character::{IdentityKernel, StyleExample, StyleIntent};
     use crate::format_recalled_content;

@@ -1,5 +1,9 @@
 //! Prompt qualifiers for recalled typed memories (#76).
 
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
 use ene_core::MemoryStatus;
 
 use crate::recall::RecalledMemory;

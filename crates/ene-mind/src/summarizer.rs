@@ -6,6 +6,11 @@
 //! Prompt templates are loaded from the `PromptLibrary` so all user-facing strings
 //! stay out of compiled code and can be localised without recompilation.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; special-token and summarizer parsers slice at known ASCII delimiters"
+)]
 // `fmt::Error` is `Copy`, so `drop()` would itself trip
 // `clippy::dropping_copy_types`; every `write!`/`writeln!` in this module
 // targets a local `String` buffer via `fmt::Write`, which never actually
@@ -218,6 +223,10 @@ fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, CognitionE
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
 
     #[test]

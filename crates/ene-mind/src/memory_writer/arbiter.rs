@@ -1418,6 +1418,10 @@ fn log_decision(decision: &CandidateDecision) {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use crate::memory_writer::candidate::ToolResultSummary;
     use chrono::Utc;

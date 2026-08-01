@@ -17,6 +17,10 @@ impl RecallResultMapper {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use chrono::Utc;
     use ene_store::{

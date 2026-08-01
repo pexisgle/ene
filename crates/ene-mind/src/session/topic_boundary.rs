@@ -230,6 +230,10 @@ fn topic_length_factor(turns_in_topic: usize, config: &TopicBoundaryConfig) -> f
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
 
     /// A unit vector along axis `i` in a `dim`-dimensional space.
