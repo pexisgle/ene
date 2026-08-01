@@ -211,6 +211,9 @@ struct TestSummaryLlm {
     /// Summary text returned by `chat_completion`. `None` returns an empty
     /// completion, which [`compression_has_usable_summary`] rejects.
     summary: Option<String>,
+    /// When set, `chat_completion` blocks until the gate is notified — a
+    /// compression task can then be held in flight deterministically.
+    gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 #[async_trait::async_trait]
@@ -243,6 +246,9 @@ impl ene_ai::LlmProvider for TestSummaryLlm {
         _messages: &[ene_ai::LlmMessage],
         _json_schema: Option<serde_json::Value>,
     ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+        if let Some(gate) = &self.gate {
+            gate.notified().await;
+        }
         Ok(ene_ai::LlmCompletion::text_only(
             self.summary.clone().unwrap_or_default(),
         ))
@@ -256,8 +262,13 @@ async fn window_pressure_detaches_oldest_span_without_waiting_for_summary() {
             .await
             .expect("store"),
     );
+    // The compression task is held on the gate so the "nothing is written
+    // until the summary arrives" assertions below cannot race the spawned
+    // task (it must not complete before the test says so).
+    let gate = Arc::new(tokio::sync::Notify::new());
     let provider: Arc<dyn ene_ai::LlmProvider> = Arc::new(TestSummaryLlm {
         summary: Some("scene summary text".into()),
+        gate: Some(gate.clone()),
     });
     let mut manager = ene_mind::ContextManager::default();
     let config = window_pressure_config();
@@ -323,7 +334,30 @@ async fn window_pressure_detaches_oldest_span_without_waiting_for_summary() {
         .expect("list spans");
     assert!(
         spans.is_empty(),
-        "no span is written until the compression task completes"
+        "no span is written while the compression task is still in flight"
+    );
+
+    // Release the gate: the task now runs to completion and persists the
+    // span itself — detachment alone never wrote anything.
+    gate.notify_one();
+    loop {
+        if manager.poll_pending().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let spans = store
+        .list_memory_spans_by_session_and_level("sess-371-detach", CompressionLevel::Scene.as_i32())
+        .await
+        .expect("list spans");
+    assert_eq!(
+        spans.len(),
+        1,
+        "the compression task wrote the span on completion"
+    );
+    assert_eq!(
+        spans[0].compressed_summary.as_deref(),
+        Some("scene summary text")
     );
 }
 
@@ -336,6 +370,7 @@ async fn summary_arrival_converges_state_without_further_detachment() {
     );
     let provider: Arc<dyn ene_ai::LlmProvider> = Arc::new(TestSummaryLlm {
         summary: Some("They discussed the plan.".into()),
+        gate: None,
     });
     let mut manager = ene_mind::ContextManager::default();
     let config = window_pressure_config();
@@ -398,8 +433,7 @@ async fn summary_arrival_converges_state_without_further_detachment() {
         "once the summary is applied the prompt no longer detaches"
     );
     assert!(
-        converged.meta.history_messages_dropped == 0
-            || converged.meta.packed_tokens <= budget.total_tokens,
+        converged.meta.packed_tokens <= budget.total_tokens,
         "the window constraint holds after convergence"
     );
     let scene = converged
@@ -433,7 +467,10 @@ async fn repeated_summary_failures_do_not_erase_history() {
             .await
             .expect("store"),
     );
-    let provider: Arc<dyn ene_ai::LlmProvider> = Arc::new(TestSummaryLlm { summary: None });
+    let provider: Arc<dyn ene_ai::LlmProvider> = Arc::new(TestSummaryLlm {
+        summary: None,
+        gate: None,
+    });
     let mut manager = ene_mind::ContextManager::default();
     let config = window_pressure_config();
     let source = exchanges(5);
