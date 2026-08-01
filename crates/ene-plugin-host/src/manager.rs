@@ -91,6 +91,13 @@ struct SupervisedPlugin {
     /// or a restart-time checksum mismatch). The per-plugin supervisor task
     /// skips disabled plugins so it does not keep restarting or re-emitting
     /// `PluginHealthEvent::Disabled` for them.
+    ///
+    /// Terminal for the life of the host: nothing clears this flag, and the
+    /// supervisor exits its loop on observing it. The rolling
+    /// [`RESTART_WINDOW`] therefore governs only whether the limit is *reached*
+    /// — draining the window afterwards cannot bring a disabled plugin back.
+    /// Recovery is a host restart (or a `plugins.list` reconfiguration, which
+    /// builds a fresh [`SupervisedPlugin`]).
     disabled: bool,
 }
 

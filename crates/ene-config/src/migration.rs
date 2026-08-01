@@ -199,6 +199,17 @@ fn read_version(doc: &serde_json::Value) -> Result<u32, EneConfigError> {
     }
 }
 
+/// The schema version a raw settings document declares, for callers that need
+/// it before [`apply_migrations`] consumes the document.
+///
+/// A document whose `version` is missing or malformed reports `1`, matching
+/// [`read_version`]'s treatment of pre-versioning files; callers use this only
+/// to label artifacts (such as the pre-migration backup), so a corrupt value
+/// must not fail on its own — `apply_migrations` reports it properly.
+pub(crate) fn document_version(doc: &serde_json::Value) -> u32 {
+    read_version(doc).unwrap_or(1)
+}
+
 /// Writes the `version` field on a raw settings document, creating the root
 /// object if the document is `null`.
 fn set_version(doc: &mut serde_json::Value, version: u32) -> Result<(), EneConfigError> {

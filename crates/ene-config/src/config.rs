@@ -965,6 +965,7 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
         ))
     })?;
 
+    let from_version = crate::migration::document_version(&doc);
     let migrated = crate::migration::apply_migrations(doc)?;
     let migrated_text = serde_json::to_string_pretty(&migrated)?;
 
@@ -972,11 +973,14 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
     // already-current file is never rewritten (and its mtime/permissions left
     // alone) on every load.
     if migrated_text != raw {
-        // One-shot pre-migration backup so a buggy rewrite is recoverable.
-        // Created at most once; failure is non-fatal (same as a failed persist).
+        // Pre-migration backup so a buggy rewrite is recoverable. Named after
+        // the version being migrated *from*, so a later schema bump keeps its
+        // own snapshot instead of being skipped because an older backup exists.
+        // Written at most once per source version; failure is non-fatal (same
+        // as a failed persist).
         let backup_path = {
             let mut os = config_path.as_os_str().to_owned();
-            os.push(".v1.bak");
+            os.push(format!(".v{from_version}.bak"));
             PathBuf::from(os)
         };
         if !backup_path.exists() {
@@ -986,7 +990,7 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
                     path = %config_path.display(),
                     backup = %backup_path.display(),
                     error = %e,
-                    "could not create settings.json.v1.bak before migration; continuing"
+                    "could not back up settings.json before migration; continuing"
                 );
             } else {
                 tracing::info!(

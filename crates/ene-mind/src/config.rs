@@ -325,24 +325,44 @@ where
     Ok(f64::deserialize(deserializer)?.clamp(0.0, 1.0))
 }
 
-/// Clamp a value into the closed unit interval `0.0..=1.0`.
-/// Non-finite values (`NaN` / ±∞) become `0.0` so a bad hand-edit cannot
-/// silently disable comparisons that treat `NaN >= x` as false.
+/// Clamp a finite value into the closed unit interval `0.0..=1.0`.
+///
+/// Non-finite input is rejected by the caller rather than mapped to a value —
+/// see [`deserialize_unit_interval_f32`] for why no substitute is safe.
 fn clamp_unit_interval_f32(value: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
+    value.clamp(0.0, 1.0)
 }
 
-/// Clamp a deserialized `f32` into the closed unit interval `0.0..=1.0`.
+/// Clamp a deserialized `f32` into the closed unit interval `0.0..=1.0`,
+/// rejecting `NaN` and ±∞.
+///
+/// Finite out-of-range values are clamped so a bad hand-edit degrades
+/// gracefully. Non-finite values are the one case that cannot be clamped into
+/// something safe, because these fields carry two opposite meanings:
+///
+/// - for a *weight*, substituting `0.0` disables that term (harmless);
+/// - for a *threshold*, `0.0` means every comparison passes — a
+///   `boundary_threshold` of `0.0` flags every turn as a topic boundary, and a
+///   title-similarity threshold of `0.0` makes every title match every other,
+///   turning supersede/cancel into a mass operation.
+///
+/// `1.0` inverts the same problem. Since no substitute is safe for both roles
+/// and `NaN` is never an intentional setting, it is reported as a config error
+/// naming the field instead. JSON cannot encode these values at all, so only a
+/// malformed `ENE_…` override can reach here, and a loud message beats any
+/// silent choice.
 fn deserialize_unit_interval_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: ::ene_config::serde::Deserializer<'de>,
 {
-    use ::ene_config::serde::Deserialize;
-    Ok(clamp_unit_interval_f32(f32::deserialize(deserializer)?))
+    use ::ene_config::serde::{Deserialize, de::Error as _};
+    let value = f32::deserialize(deserializer)?;
+    if !value.is_finite() {
+        return Err(D::Error::custom(format!(
+            "expected a finite number in 0.0..=1.0, got `{value}`"
+        )));
+    }
+    Ok(clamp_unit_interval_f32(value))
 }
 
 impl Default for MindMemoryConfig {
@@ -1263,14 +1283,28 @@ mod tests {
     }
 
     #[test]
-    fn topic_boundary_non_finite_weights_become_zero() {
-        // JSON cannot encode NaN/∞; exercise the unit-interval helper via a
-        // dedicated visitor that feeds raw f32s through the same clamp path.
-        assert!((clamp_unit_interval_f32(f32::NAN)).abs() < f32::EPSILON);
-        assert!((clamp_unit_interval_f32(f32::INFINITY)).abs() < f32::EPSILON);
-        assert!((clamp_unit_interval_f32(f32::NEG_INFINITY)).abs() < f32::EPSILON);
+    fn finite_out_of_range_values_clamp_into_the_unit_interval() {
         assert!((clamp_unit_interval_f32(1.7) - 1.0).abs() < f32::EPSILON);
         assert!((clamp_unit_interval_f32(-0.2)).abs() < f32::EPSILON);
+        assert!((clamp_unit_interval_f32(0.42) - 0.42).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn non_finite_unit_interval_values_are_rejected() {
+        // No substitute is safe: `0.0` disables a weight but makes a threshold
+        // match everything, and `1.0` inverts that. Reject instead of guessing.
+        // JSON has no NaN/∞ literal, so drive the deserializer directly.
+        for raw in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let de = ::ene_config::serde::de::value::F32Deserializer::<
+                ::ene_config::serde::de::value::Error,
+            >::new(raw);
+            let err = deserialize_unit_interval_f32(de)
+                .expect_err("non-finite unit-interval values must be rejected");
+            assert!(
+                err.to_string().contains("finite"),
+                "error must name the finiteness requirement, got: {err}"
+            );
+        }
     }
 
     #[test]

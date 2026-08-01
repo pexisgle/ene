@@ -21,7 +21,9 @@ use ene_core::ActiveCommitmentPrompt;
 
 use ene_config::UserPersona;
 
-use crate::character::{AuthorsNote, IdentityKernel, StyleExample, apply_authors_note};
+use crate::character::{
+    AuthorsNote, IdentityKernel, StyleExample, apply_authors_note, render_authors_note,
+};
 use crate::lifecycle::HistoryEntry;
 use crate::prompt_packet::{
     PromptPacket, PromptSection, PromptSectionKind, classify_recalled_memories,
@@ -211,21 +213,24 @@ impl MemorySurvivors {
     }
 }
 
+/// Token cost of one history entry's rendered content (content estimate plus
+/// the per-message overhead every entry carries).
+fn history_entry_tokens_for(content: &str) -> usize {
+    estimate_tokens(content).saturating_add(4)
+}
+
 /// Token cost of a single history entry (content estimate + per-message overhead).
 fn history_entry_tokens(entry: &HistoryEntry) -> usize {
-    estimate_tokens(&entry.content).saturating_add(4)
+    history_entry_tokens_for(&entry.content)
 }
 
 /// Token cost of an author's note if it will be injected into history.
 ///
-/// Mirrors [`apply_authors_note`]: inactive / empty notes cost nothing; active
-/// notes are counted as one history entry with the `[Author's Note]` prefix.
+/// Counted from the same rendered text [`apply_authors_note`] inserts
+/// ([`render_authors_note`]), so the reservation cannot drift from the entry
+/// that later lands in history. Inactive / empty notes cost nothing.
 fn authors_note_tokens(note: &AuthorsNote) -> usize {
-    if !note.active || note.content.trim().is_empty() {
-        return 0;
-    }
-    let content = format!("[Author's Note]\n{}", note.content.trim());
-    estimate_tokens(&content).saturating_add(4)
+    render_authors_note(note).map_or(0, |content| history_entry_tokens_for(&content))
 }
 
 /// Estimate the total token cost of a history slice (per-entry content

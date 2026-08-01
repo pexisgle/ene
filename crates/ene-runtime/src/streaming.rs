@@ -430,8 +430,11 @@ pub(crate) async fn select_relevant_tools(
 /// Tool calls the LLM returns in a single round are split by their declared
 /// side effects:
 ///
-/// - [`EneEvent::ToolCallStart`] is emitted for every call **before** any
-///   dispatch runs, so the UI can show in-flight work during a parallel round.
+/// - [`EneEvent::ToolCallStart`] is emitted when a call actually starts. In a
+///   parallel round every call starts at once, so the whole batch is announced
+///   before dispatch (otherwise the UI would show nothing until all of them
+///   finished). In a sequential round each call is announced as Phase 2 reaches
+///   it, so the event still tracks what is really running.
 /// - When **every** call in the round is side-effect-free
 ///   (`SideEffects::ReadOnly`, non-background), they then run concurrently in a
 ///   bounded batch of at most
@@ -477,17 +480,6 @@ pub(crate) async fn perform_tool_executions(
         turn_id: ctx.turn.to_string(),
     };
 
-    // Emit start events before any dispatch so parallel rounds are visible
-    // while tools are still running (not only after they all complete).
-    for call in &tool_calls {
-        drop(ctx.event_tx.send(EneEvent::ToolCallStart {
-            turn: ctx.turn.clone(),
-            origin: ctx.origin,
-            name: call.name.clone(),
-            arguments: call.arguments.clone(),
-        }));
-    }
-
     // Phase 1 — run side-effect-free calls concurrently (bounded). Results are
     // collected in the original order so Phase 2 can finalize deterministically.
     //
@@ -498,7 +490,24 @@ pub(crate) async fn perform_tool_executions(
         && tool_calls
             .iter()
             .all(|call| ctx.parallelizable.contains(&call.name));
-    let mut parallel_results = if ctx.parallel_tool_calls_max > 0 && all_parallelizable {
+    let parallel_round = ctx.parallel_tool_calls_max > 0 && all_parallelizable;
+
+    // A parallel round genuinely starts every call at once, so announce them
+    // all before dispatching — otherwise the UI would show nothing until the
+    // whole batch completed. A sequential round announces each call as it is
+    // reached in Phase 2, which is when it actually starts.
+    if parallel_round {
+        for call in &tool_calls {
+            drop(ctx.event_tx.send(EneEvent::ToolCallStart {
+                turn: ctx.turn.clone(),
+                origin: ctx.origin,
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            }));
+        }
+    }
+
+    let mut parallel_results = if parallel_round {
         let mut results: Vec<Option<Result<String, PluginHostError>>> =
             std::iter::repeat_with(|| None)
                 .take(tool_calls.len())
@@ -545,6 +554,17 @@ pub(crate) async fn perform_tool_executions(
     for (idx, call) in tool_calls.into_iter().enumerate() {
         let name = call.name.clone();
         let args = call.arguments.clone();
+
+        // Sequential rounds announce each call here, where it actually starts;
+        // a parallel round already announced the whole batch before dispatch.
+        if !parallel_round {
+            drop(ctx.event_tx.send(EneEvent::ToolCallStart {
+                turn: ctx.turn.clone(),
+                origin: ctx.origin,
+                name: name.clone(),
+                arguments: args.clone(),
+            }));
+        }
 
         // Warn before executing an irreversible operation. Such
         // actions are never placed on the undo stack, so the user is told

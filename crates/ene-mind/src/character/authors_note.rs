@@ -67,9 +67,9 @@ impl Default for AuthorsNote {
 /// (e.g., Anthropic) reject system messages in the middle of history. The
 /// `[Author's Note]` prefix makes the instructional intent clear.
 pub fn apply_authors_note(history: &mut Vec<HistoryEntry>, note: &AuthorsNote) {
-    if !note.active || note.content.trim().is_empty() {
+    let Some(content) = render_authors_note(note) else {
         return;
-    }
+    };
 
     let insert_at = if history.len() > note.depth + 1 {
         history.len() - note.depth - 1
@@ -79,10 +79,26 @@ pub fn apply_authors_note(history: &mut Vec<HistoryEntry>, note: &AuthorsNote) {
 
     let note_entry = HistoryEntry {
         role: Role::User,
-        content: format!("[Author's Note]\n{}", note.content.trim()),
+        content,
     };
 
     history.insert(insert_at, note_entry);
+}
+
+/// The exact history-entry content [`apply_authors_note`] would insert, or
+/// `None` when the note is inactive or blank and nothing is inserted.
+///
+/// Prompt packing must reserve the note's tokens before filling the budget, but
+/// the note itself is inserted only after history trimming (so its depth is
+/// relative to the post-trim history). Both steps therefore need the same
+/// rendered text; sharing this function keeps the reservation exact instead of
+/// re-deriving the prefix and risking drift.
+#[must_use]
+pub fn render_authors_note(note: &AuthorsNote) -> Option<String> {
+    if !note.active || note.content.trim().is_empty() {
+        return None;
+    }
+    Some(format!("[Author's Note]\n{}", note.content.trim()))
 }
 
 #[cfg(test)]
