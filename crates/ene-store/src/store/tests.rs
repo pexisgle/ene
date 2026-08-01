@@ -1773,6 +1773,8 @@ async fn transition_active_to_faded_sets_faded_at_from_decay_anchor() {
 
 #[tokio::test]
 async fn single_row_natural_decay_reaches_archived_in_two_passes() {
+    use chrono::Duration as ChronoDuration;
+
     let store = setup_store().await;
     let now = Utc::now();
 
@@ -1786,8 +1788,8 @@ async fn single_row_natural_decay_reaches_archived_in_two_passes() {
             content: "very old fact".into(),
             source: crate::MemorySource::Conversation,
             source_ref: None,
-            confidence: crate::MemoryConfidence::new(0.1),
-            salience: crate::MemorySalience::new(0.1),
+            confidence: crate::MemoryConfidence::new(0.5),
+            salience: crate::MemorySalience::new(0.5),
             affect: crate::AffectAnnotation::default(),
             relationship_impact: 0.0,
             valid_from: None,
@@ -1800,7 +1802,7 @@ async fn single_row_natural_decay_reaches_archived_in_two_passes() {
         })
         .await
         .unwrap();
-    store.test_backdate_typed_memory(id, 365).await.unwrap();
+    store.test_backdate_typed_memory(id, 30).await.unwrap();
 
     let first = store
         .apply_natural_decay_batch(
@@ -1820,11 +1822,12 @@ async fn single_row_natural_decay_reaches_archived_in_two_passes() {
     assert_eq!(faded.status, crate::MemoryStatus::Faded);
     assert!(faded.faded_at.is_some());
 
+    let later = now + ChronoDuration::days(200);
     let second = store
         .apply_natural_decay_batch(
             "ene",
             Some("user1"),
-            now,
+            later,
             30.0,
             ene_rag::FADE_THRESHOLD,
             ene_rag::ARCHIVE_THRESHOLD,

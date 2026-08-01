@@ -1495,7 +1495,7 @@ impl MemoryStore {
         );
 
         let fade_to_faded = format!(
-            "UPDATE typed_memories SET status = 'faded', faded_at = '{now_text}', updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'active' AND pinned = 0{user_clause} AND ({decay_active}) < {fade_threshold}"
+            "UPDATE typed_memories SET status = 'faded', faded_at = updated_at, updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'active' AND pinned = 0{user_clause} AND ({decay_active}) < {fade_threshold}"
         );
         let faded_to_archived = format!(
             "UPDATE typed_memories SET status = 'archived', updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'faded' AND pinned = 0{user_clause} AND ({decay_faded}) < {archive_threshold}"
