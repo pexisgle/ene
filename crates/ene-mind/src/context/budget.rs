@@ -10,12 +10,9 @@
 //! limit, lorebook token budget, identity-kernel cap), not by packing, so
 //! packing only decides *which* sections survive.
 //!
-//! During the async compression gap (#371) — a rolling summary has been
-//! requested but has not arrived, so the session history has not shrunk —
-//! [`pack_prompt`] instead detaches the oldest span from the prompt-visible
-//! history synchronously before touching any section, keeping the section pack
-//! (character definition, memories, style examples) intact until the summary
-//! arrives and the session history shrinks on its own.
+//! During the async compression gap [`pack_prompt`] synchronously detaches the
+//! oldest span from the prompt-visible history instead of shedding sections —
+//! see [`PackInput::compression_pending`].
 
 use ene_core::ActiveCommitmentPrompt;
 
@@ -61,7 +58,7 @@ pub struct BudgetMeta {
     /// Oldest history messages removed to fit the total token ceiling.
     pub history_messages_dropped: usize,
     /// Oldest history messages *detached* from the prompt while a compression
-    /// summary was pending (#371): the `[0, n)` leading range was dropped from
+    /// summary was pending: the `[0, n)` leading range was dropped from
     /// the prompt-visible history synchronously, without waiting for the
     /// summary. Both this and [`Self::history_messages_dropped`] are
     /// prompt-copy-only operations — neither removes anything from the
@@ -119,18 +116,21 @@ pub struct PackInput {
     /// Optional structured user persona for `{{user_persona}}` macro expansion.
     pub user_persona: Option<UserPersona>,
     /// Whether a rolling-compression task is in flight and its summary has not
-    /// yet been applied to the session history (#371).
+    /// yet been applied to the session history.
     ///
     /// During this async compression gap the session history has not shrunk,
     /// so an overflowing prompt would otherwise shed sections (memories, style
     /// examples, …) while waiting for the summary. When this flag is set,
     /// packing detaches the oldest span from the prompt-visible history
-    /// synchronously instead, trading the same history exposure as the old
-    /// last-resort trim for keeping the section pack intact. The pre-window
-    /// span is the one being summarized; the detached recent-window exchange
-    /// stays in the session/DB history until a later compression covers it.
-    /// Detachment is a prompt-construction-time operation only: nothing is
-    /// removed from the session or DB history.
+    /// synchronously instead, keeping the section pack intact. In the compose
+    /// path the pre-window span is already truncated from the prompt by the
+    /// caller, so the messages detached here are the oldest of the recent
+    /// window, which the pending summary does not cover. They stay in the
+    /// session/DB history until a later compression covers them — comparable
+    /// exposure to the old last-resort trim, up to one exchange coarser
+    /// (detachment sheds two-message chunks, while the trim removes the exact
+    /// minimum). Detachment is a prompt-construction-time operation only:
+    /// nothing is removed from the session or DB history.
     pub compression_pending: bool,
     /// Current user input.
     pub user_input: String,
@@ -248,31 +248,14 @@ fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) ->
     drop_count
 }
 
-/// Detach the oldest span(s) from the prompt-visible history while a
-/// compression summary is pending (#371).
-///
-/// Synchronous fallback for the async compression gap: the summary has not
-/// arrived yet, so the session history has not shrunk and the assembled prompt
-/// overflows the window. Detaching the oldest span from the *prompt-only* copy
-/// keeps the section pack (character definition, recalled memories, style
-/// examples) intact during the gap. Up to two leading messages are shed per
-/// pass — one full exchange, or a single message for odd-length histories —
-/// down to the one-exchange floor.
-///
-/// This is a pure priority reordering, not a recovery path: the span being
-/// summarized is the *pre-window* span (already truncated from the prompt by
-/// the caller), so the messages detached here are the oldest of the *recent
-/// window*, which the pending summary does not cover. They remain in the
-/// session/DB history and are recovered only by a later compression — the same
-/// exposure as the old last-resort history trim, traded for keeping the
-/// section pack intact while the summary is in flight.
-///
-/// Below the [`MIN_HISTORY_MESSAGES`] floor (one exchange) detachment stops and
-/// packing falls back to the existing section-dropping behavior, so the most
-/// recent span always survives no matter how many summaries fail.
-///
+/// Synchronous fallback for the async compression gap — see
+/// [`PackInput::compression_pending`] for the contract. Sheds up to two
+/// leading messages per pass (one exchange, or a single message for
+/// odd-length histories) from the *prompt-only* history until it fits or the
+/// [`MIN_HISTORY_MESSAGES`] one-exchange floor is reached — below it packing
+/// falls back to section dropping, so the most recent span always survives.
 /// Returns the number of leading messages detached (the `[0, n)` range) for
-/// diagnostics in [`BudgetMeta::history_messages_detached`].
+/// [`BudgetMeta::history_messages_detached`].
 fn detach_history_spans(history: &mut Vec<HistoryEntry>, max_tokens: usize) -> usize {
     let mut total = estimate_history_tokens(history);
     let mut detached = 0usize;
@@ -414,17 +397,9 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
 ///    whole, lowest-[`PromptSectionKind::priority`] first, until it fits;
 /// 3. as a last resort the oldest history messages are trimmed.
 ///
-/// When [`PackInput::compression_pending`] is set (#371) — a rolling
-/// compression summary has been requested but has not arrived, so the session
-/// history has not shrunk — step 2 is preceded by a *synchronous detachment*
-/// of the oldest span from the prompt-visible history. The pre-window span is
-/// the one being summarized (and is already truncated from the prompt by the
-/// caller); detachment hides the oldest recent-window exchange instead, which
-/// stays in the session/DB until a later compression covers it — the same
-/// exposure as the old last-resort trim, traded for keeping the section pack
-/// (character definition, memories, style examples) intact across the async
-/// gap. Below the one-exchange floor, packing falls back to the existing
-/// section-dropping behavior.
+/// When [`PackInput::compression_pending`] is set, step 2 is preceded by a
+/// synchronous detachment of the oldest span from the prompt-visible history
+/// (see the field's docs for the contract).
 ///
 /// Section *sizes* are bounded by their content producers (recall result limit,
 /// lorebook token budget, identity-kernel cap), not here, so packing only
@@ -451,8 +426,8 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         .saturating_add(estimate_history_tokens(&history));
 
     if total > budget.total_tokens && input.compression_pending {
-        // #371: synchronous detachment fallback during the async compression
-        // gap. Give history the full remaining budget (keeping every section)
+        // Synchronous detachment fallback during the async compression gap.
+        // Give history the full remaining budget (keeping every section)
         // and detach whole spans from the front until the prompt fits or the
         // one-exchange floor is reached. The detached span is prompt-only —
         // the session/DB history is untouched; the pre-window span is the one
@@ -1099,7 +1074,7 @@ mod tests {
     }
 
     /// An alternating user/assistant history of `turns` exchanges for the
-    /// #371 detachment tests.
+    /// detachment tests.
     fn exchanges(turns: usize) -> Vec<crate::lifecycle::HistoryEntry> {
         let mut history = Vec::with_capacity(turns * 2);
         for i in 0..turns {
@@ -1117,7 +1092,7 @@ mod tests {
 
     #[test]
     fn compression_pending_detaches_oldest_span_and_keeps_sections() {
-        // #371: while a compression summary is pending the session history has
+        // While a compression summary is pending the session history has
         // not shrunk, so an overflowing prompt must detach the oldest span
         // from the prompt-visible history synchronously instead of shedding
         // sections. A memory section that the old ordering would have dropped
@@ -1164,7 +1139,7 @@ mod tests {
 
     #[test]
     fn detach_respects_floor_and_falls_back_to_section_drops() {
-        // #371: detachment never removes the most recent span. When the history
+        // Detachment never removes the most recent span. When the history
         // is already at the one-exchange floor, packing falls back to the
         // existing section-dropping behavior instead of detaching further.
         let budget = ContextBudget::with_capacity(15);
@@ -1202,7 +1177,7 @@ mod tests {
 
     #[test]
     fn detach_is_prompt_only_and_leaves_source_history_intact() {
-        // #371: detachment is a prompt-construction-time operation. The caller's
+        // Detachment is a prompt-construction-time operation. The caller's
         // history (the session/DB history) is untouched; only the prompt copy
         // loses the leading span.
         let budget = ContextBudget::with_capacity(60);

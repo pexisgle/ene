@@ -147,7 +147,7 @@ fn pack_prompt_counts_history_toward_total_budget() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// #371: synchronous history detachment during the async compression gap
+// Synchronous history detachment during the async compression gap
 // ──────────────────────────────────────────────────────────────────────────
 
 /// An alternating user/assistant history of `turns` exchanges, each long
@@ -193,7 +193,7 @@ fn base_pack_input() -> PackInput {
     }
 }
 
-/// A context config that fires the window-pressure trigger (#368) on a ~190
+/// A context config that fires the window-pressure trigger on a ~190
 /// token history while keeping the turn-count threshold out of the way.
 fn window_pressure_config() -> ContextConfig {
     ContextConfig {
@@ -413,7 +413,7 @@ async fn summary_arrival_converges_state_without_further_detachment() {
     assert!(compression_has_usable_summary(&result));
 
     // The actor applies it by trimming the session history to the recent
-    // window (#368); the summary is served as the scene section where the
+    // window; the summary is served as the scene section where the
     // detached span used to be.
     let recent_cap = config.recent_turns.saturating_mul(2).max(2);
     let trimmed: Vec<HistoryEntry> = history[history.len() - recent_cap..].to_vec();

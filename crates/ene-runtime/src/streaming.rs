@@ -371,7 +371,7 @@ pub struct StreamContext {
     /// is hard-aborted before it records the interruption itself (#H5).
     pub partial_text: Arc<parking_lot::Mutex<String>>,
     /// Whether a rolling-compression task is in flight for this session (the
-    /// summary has not been applied yet, #371).
+    /// summary has not been applied yet).
     ///
     /// Drives the synchronous history-detachment fallback in prompt packing so
     /// the section pack survives the async compression gap. Captured by the

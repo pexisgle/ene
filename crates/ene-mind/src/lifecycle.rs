@@ -77,13 +77,13 @@ pub struct TurnContext<'a> {
     /// Expression PHI block (emotion protocol + card post-history instructions).
     pub post_history_block: Option<&'a str>,
     /// Whether a rolling-compression task is in flight and its summary has not
-    /// yet been applied to the session history (#371).
+    /// yet been applied to the session history.
     ///
-    /// During this async compression gap the session history has not shrunk.
     /// Prompt packing reads this to synchronously detach the oldest span from
-    /// the prompt-visible history (instead of shedding sections) while the
-    /// summary is in flight. `false` in tests / legacy callers, which keeps
-    /// the pre-#371 packing behavior.
+    /// the prompt-visible history while the summary is in flight — see
+    /// [`crate::context::PackInput::compression_pending`] for the contract.
+    /// `false` in tests / legacy callers, which keeps the pre-existing packing
+    /// behavior.
     pub compression_pending: bool,
     /// Optional override for the prompt packing budget (in tokens).
     ///
@@ -125,7 +125,7 @@ pub struct PromptPacketMeta {
     /// Sections dropped by the budget manager.
     pub dropped_sections: Vec<crate::prompt_packet::PromptSectionKind>,
     /// Oldest history messages *detached* from the prompt while a compression
-    /// summary was pending (#371): the `[0, n)` leading range was dropped from
+    /// summary was pending: the `[0, n)` leading range was dropped from
     /// the prompt-visible history synchronously, without waiting for the
     /// summary. Like `dropped_sections` and the packing trim, this is a
     /// prompt-copy-only operation — nothing is removed from the session/DB

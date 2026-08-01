@@ -288,7 +288,7 @@ async fn scenario_identity_kernel_survives_long_history() {
 
 #[tokio::test]
 async fn scenario_compression_pending_detaches_oldest_recent_exchange() {
-    // #371 compose-level regression: `compose_prompt_packet` truncates the
+    // Compose-level regression: `compose_prompt_packet` truncates the
     // session history to the recent window *before* packing, so the
     // synchronous detachment during the async compression gap only ever
     // reaches the oldest exchange of the recent window — never the pre-window
