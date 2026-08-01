@@ -319,10 +319,10 @@ impl MemoryHandle {
 
     /// Drain due pending memory writes for a character using the mind engine (#240).
     ///
-    /// Schedules the character's pending writes as due (via
-    /// [`Self::schedule_pending_memory_writes_now`]'s sibling store operation
-    /// beforehand by the caller) and runs [`ene_mind::CognitionEngine`]'s
-    /// drain pass with this handle's embedder. Errors are surfaced by
+    /// The caller must schedule the writes as due first (via
+    /// [`Self::schedule_pending_memory_writes_now`]); this method only drains
+    /// the now-due batch, running [`ene_mind::CognitionEngine`]'s drain pass
+    /// with this handle's embedder. Errors are surfaced by
     /// [`ene_mind::CognitionEngine::drain_pending_memory_writes`] silently
     /// (it is a best-effort drain), so this only fails when the store is
     /// unavailable.
@@ -389,6 +389,46 @@ mod tests {
 
     use super::*;
 
+    type StreamResult = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                > + Send,
+        >,
+    >;
+
+    /// Minimal `LlmProvider` double whose completions always fail, used to
+    /// exercise facade methods that take an `&dyn LlmProvider` (the pending
+    /// write drain) without touching a real backend.
+    struct FailingLlm;
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for FailingLlm {
+        fn name(&self) -> &'static str {
+            "failing-test-llm"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<StreamResult, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "test double: streaming not implemented".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "test double: forced extraction failure".to_string(),
+            ))
+        }
+    }
+
     async fn test_handle() -> MemoryHandle {
         let store = ene_store::MemoryStore::open_in_memory(4).await.unwrap();
         MemoryHandle::new(
@@ -396,6 +436,23 @@ mod tests {
             None,
             ene_mind::MindMemoryConfig::default(),
         )
+    }
+
+    fn storeless_handle() -> MemoryHandle {
+        MemoryHandle::new(None, None, ene_mind::MindMemoryConfig::default())
+    }
+
+    /// Assert a facade call failed with the disabled-store connection error.
+    fn assert_connection_error<T: std::fmt::Debug>(result: &Result<T, EneRuntimeError>) {
+        assert!(
+            matches!(
+                result,
+                Err(EneRuntimeError::Memory(
+                    ene_store::EneMemoryError::MemoryStoreConnectionError(_)
+                ))
+            ),
+            "expected connection error, got {result:?}"
+        );
     }
 
     async fn insert_commitment(handle: &MemoryHandle, title: &str) -> i64 {
@@ -466,15 +523,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn memory_disabled_returns_connection_error() {
-        let handle = MemoryHandle::new(None, None, ene_mind::MindMemoryConfig::default());
-        let err = handle.complete_commitment(1).await.unwrap_err();
+    async fn count_pending_memory_writes_reports_permanent_failures() {
+        let handle = test_handle().await;
+        let store = handle.store.as_ref().unwrap();
+        let id = store
+            .enqueue_pending_memory_write("ene", "user1", "{}", "boom")
+            .await
+            .unwrap();
+
+        // Exhaust the retry budget so the row transitions to permanent (#240).
+        for _ in 0..(ene_store::MemoryStore::PENDING_MEMORY_WRITE_MAX_ATTEMPTS - 1) {
+            store
+                .fail_pending_memory_write(id, "retry failed")
+                .await
+                .unwrap();
+        }
+
+        let (pending, permanent) = handle.count_pending_memory_writes("ene").await.unwrap();
+        assert_eq!((pending, permanent), (0, 1), "exhausted row is permanent");
+    }
+
+    #[tokio::test]
+    async fn schedule_and_drain_pending_memory_writes_round_trip() {
+        let handle = test_handle().await;
+        let store = handle.store.as_ref().unwrap();
+        store
+            .enqueue_pending_memory_write(
+                "ene",
+                "user1",
+                r#"{"character_id":"ene","user_id":"user1"}"#,
+                "boom",
+            )
+            .await
+            .unwrap();
+
+        // Freshly enqueued rows wait out their backoff; scheduling forces them
+        // due immediately so a drain can pick them up (#240).
+        let scheduled = handle
+            .schedule_pending_memory_writes_now("ene")
+            .await
+            .unwrap();
+        assert_eq!(scheduled, 1, "one pending row forced due");
+
+        // The drain is best-effort: the facade returns Ok even when the queued
+        // payload cannot be replayed, and the row is retained with its retry
+        // count bumped rather than dropped.
+        handle
+            .drain_pending_memory_writes(&ene_mind::MindConfig::default(), &FailingLlm, 10)
+            .await
+            .unwrap();
+
+        let (pending, permanent) = handle.count_pending_memory_writes("ene").await.unwrap();
+        assert_eq!(
+            (pending, permanent),
+            (1, 0),
+            "row stays pending after failed replay"
+        );
+
+        let rows = handle.list_pending_memory_writes("ene", 10).await.unwrap();
+        assert_eq!(
+            rows.first().map(|r| r.attempts),
+            Some(2),
+            "drain re-failed the row and bumped its retry count"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_path_integrity_and_backup() {
+        let handle = test_handle().await;
+
+        assert_eq!(handle.path(), None, "in-memory store has no file path");
+        handle.check_integrity().await.unwrap();
+
+        let err = handle.backup().await.unwrap_err();
         assert!(
             matches!(
                 err,
-                EneRuntimeError::Memory(ene_store::EneMemoryError::MemoryStoreConnectionError(_))
+                EneRuntimeError::Memory(ene_store::EneMemoryError::BackupError(_))
             ),
-            "expected connection error, got {err:?}"
+            "in-memory stores cannot be backed up to a file, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn storeless_handle_reports_connection_error_across_surface() {
+        let handle = storeless_handle();
+
+        assert_eq!(handle.path(), None, "store-less handle has no db path");
+        assert_connection_error(&handle.complete_commitment(1).await);
+        assert_connection_error(&handle.cancel_commitment(1).await);
+        assert_connection_error(&handle.backup().await);
+        assert_connection_error(&handle.check_integrity().await);
+        assert_connection_error(&handle.schedule_pending_memory_writes_now("ene").await);
+        assert_connection_error(&handle.count_pending_memory_writes("ene").await);
+        assert_connection_error(&handle.list_pending_memory_writes("ene", 10).await);
+        assert_connection_error(
+            &handle
+                .drain_pending_memory_writes(&ene_mind::MindConfig::default(), &FailingLlm, 10)
+                .await,
         );
     }
 }
