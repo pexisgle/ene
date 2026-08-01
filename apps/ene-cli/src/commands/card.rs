@@ -30,7 +30,6 @@ impl CliCommand for CardCommand {
         let card = load_character_card(&name)
             .map_err(|e| CliError::ExecutionFailed(format!("Failed to load card: {e}")))?;
         ctx.handle
-            .diagnostics()
             .set_character(card)
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to load character card: {e}")))?;

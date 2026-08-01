@@ -229,6 +229,7 @@ impl CliCommand for DoctorCommand {
 async fn run_checks(ctx: &mut AppContext) -> Vec<CheckResult> {
     let mut results = Vec::new();
     let diag = ctx.handle.diagnostics();
+    let tools = ctx.handle.tools();
 
     let snapshot = match diag.get_snapshot().await {
         Ok(s) => {
@@ -266,7 +267,7 @@ async fn run_checks(ctx: &mut AppContext) -> Vec<CheckResult> {
                 "Skipped (actor unavailable)",
             ));
         }
-        check_tool_registry(&mut results, diag).await;
+        check_tool_registry(&mut results, &tools).await;
         check_assets(&mut results);
         return results;
     };
@@ -275,7 +276,7 @@ async fn run_checks(ctx: &mut AppContext) -> Vec<CheckResult> {
     check_ai_provider(&mut results, &snapshot).await;
     check_embedding(&mut results, &snapshot);
     check_store(&mut results, diag, &snapshot);
-    check_tool_registry(&mut results, diag).await;
+    check_tool_registry(&mut results, &tools).await;
     check_assets(&mut results);
 
     results
@@ -502,8 +503,8 @@ fn check_store(results: &mut Vec<CheckResult>, diag: &EneDiagnostics, snapshot: 
     }
 }
 
-async fn check_tool_registry(results: &mut Vec<CheckResult>, diag: &EneDiagnostics) {
-    match diag.list_tools().await {
+async fn check_tool_registry(results: &mut Vec<CheckResult>, tools: &ene_runtime::ToolHandle) {
+    match tools.list_tools().await {
         Ok(tools) => {
             if tools.is_empty() {
                 results.push(CheckResult::warning(
