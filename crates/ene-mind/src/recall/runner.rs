@@ -620,4 +620,96 @@ mod tests {
             "configured limit must cap competing pending candidates"
         );
     }
+
+    #[tokio::test]
+    async fn pending_candidate_visibility_is_applied_before_the_cap() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+
+        // Alice's topic-relevant candidate is older than Bob's two rows. With a
+        // limit of 1, a newest-first truncate *before* the user-visibility
+        // filter would let Bob's newer rows eat the cap and drop Alice's
+        // candidate before it ever competes (#356 review) — the visibility
+        // filter must run first so Alice's candidate still appears.
+        store
+            .insert_pending_candidate(ene_core::PendingCandidate {
+                id: 0,
+                character_id: "Ene".into(),
+                user_id: "alice".into(),
+                title: "topic alice".into(),
+                content: "topic related fact for alice".into(),
+                kind: MemoryKind::Semantic,
+                confidence: 0.8,
+                reason_detail: "ambiguous contradiction".into(),
+                existing_memory_title: None,
+                existing_memory_id: None,
+                source_quote: "topic".into(),
+                status: ene_core::PendingCandidateStatus::Pending,
+                created_at: now - chrono::Duration::minutes(2),
+            })
+            .await
+            .unwrap();
+        for i in 0..2i64 {
+            store
+                .insert_pending_candidate(ene_core::PendingCandidate {
+                    id: 0,
+                    character_id: "Ene".into(),
+                    user_id: "bob".into(),
+                    title: format!("topic bob {i}"),
+                    content: format!("topic related fact number {i}"),
+                    kind: MemoryKind::Semantic,
+                    confidence: 0.8,
+                    reason_detail: "ambiguous contradiction".into(),
+                    existing_memory_title: None,
+                    existing_memory_id: None,
+                    source_quote: "topic".into(),
+                    status: ene_core::PendingCandidateStatus::Pending,
+                    created_at: now,
+                })
+                .await
+                .unwrap();
+        }
+
+        let mut config = MindConfig::default();
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory.recall_pending_candidate_limit = 1;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "alice",
+            user_input: "topic related",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+            card: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+
+        let pending: Vec<_> = recalled
+            .iter()
+            .filter(|m| {
+                m.sources
+                    .contains(&ene_core::MemoryCandidateSource::Pending)
+            })
+            .collect();
+        assert_eq!(
+            pending.len(),
+            1,
+            "alice's topic-relevant candidate must still appear after the cap, got {pending:?}"
+        );
+        assert!(
+            pending[0].item.content.contains("alice"),
+            "the surfaced candidate must be alice's, not bob's"
+        );
+        assert!(
+            !recalled.iter().any(|m| m.item.user_id == "bob"),
+            "bob's pending candidates must never leak into alice's recall"
+        );
+    }
 }

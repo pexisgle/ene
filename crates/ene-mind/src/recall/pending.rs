@@ -51,23 +51,26 @@ pub async fn gather_pending_candidates(
         }
     };
 
+    // A user's recall sees only their own pending candidates plus
+    // character-shared (`user_id = ""`) ones, mirroring the typed-memory
+    // visibility rule (`tm.user_id = ? OR tm.user_id = ''`), so one user's
+    // unconfirmed candidates never leak into another user's conversation on a
+    // multi-user database. The filter must run *before* the cap: on a
+    // multi-user database the newest `limit` rows can all belong to other
+    // users, and truncating first would drop this user's topic-relevant
+    // candidates before they ever compete (#356 review).
+    candidates.retain(|candidate| {
+        query
+            .user_id
+            .is_none_or(|user_id| candidate.user_id == user_id || candidate.user_id.is_empty())
+    });
+
     // Newest first: the freshest unconfirmed info is the most relevant to ask
     // about, and the retention policy can hold hundreds of rows per character.
     candidates.sort_by_key(|c| std::cmp::Reverse(c.created_at));
     candidates.truncate(limit);
 
     for candidate in candidates {
-        if let Some(user_id) = query.user_id
-            && candidate.user_id != user_id
-            && !candidate.user_id.is_empty()
-        {
-            // Mirror the typed-memory visibility rule (`tm.user_id = ? OR
-            // tm.user_id = ''`): a user's recall sees only their own pending
-            // candidates plus character-shared (`user_id = ""`) ones, so one
-            // user's unconfirmed candidates never leak into another user's
-            // conversation on a multi-user database.
-            continue;
-        }
         let lexical = lexical_overlap_score(query.query_text, &candidate.title, &candidate.content);
         if lexical <= 0.0 {
             continue;
