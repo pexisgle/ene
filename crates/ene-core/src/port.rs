@@ -181,7 +181,7 @@ pub trait MemoryPort: Send + Sync {
     /// Returns every matching row, oldest first (the live queue is bounded by
     /// the retention policy, see `prune_pending_candidates`). The recall runner
     /// uses this to surface unconfirmed candidates through normal hybrid
-    /// competition (#356); presentation layers use it for the review list.
+    /// competition; presentation layers use it for the review list.
     async fn list_pending_candidates(
         &self,
         character_id: &str,

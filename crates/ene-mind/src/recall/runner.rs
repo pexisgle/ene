@@ -89,8 +89,8 @@ pub async fn execute_hybrid_recall(
         .await
         .map_err(CognitionError::MemoryPort)?;
 
-    // Unconfirmed candidates deferred to the user-approval queue (#174) compete
-    // in the same score competition as typed memories (#356). They carry no
+    // Unconfirmed candidates deferred to the user-approval queue compete
+    // in the same score competition as typed memories. They carry no
     // embedding, so `search` can never gather them; load the live `pending`
     // queue and merge the topic-related ones here. `score_and_rank` below then
     // applies the ordinary min_score floor and result limit, so a pending
@@ -478,7 +478,7 @@ mod tests {
         let now = Utc::now();
 
         // A topic-related unconfirmed candidate: the arbiter deferred it with
-        // AskConfirmationLater (#174), so it sits in the pending queue.
+        // AskConfirmationLater, so it sits in the pending queue.
         store
             .insert_pending_candidate(ene_core::PendingCandidate {
                 id: 0,
@@ -629,7 +629,7 @@ mod tests {
         // Alice's topic-relevant candidate is older than Bob's two rows. With a
         // limit of 1, a newest-first truncate *before* the user-visibility
         // filter would let Bob's newer rows eat the cap and drop Alice's
-        // candidate before it ever competes (#356 review) — the visibility
+        // candidate before it ever competes — the visibility
         // filter must run first so Alice's candidate still appears.
         store
             .insert_pending_candidate(ene_core::PendingCandidate {

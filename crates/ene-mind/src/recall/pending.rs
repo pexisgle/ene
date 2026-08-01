@@ -1,6 +1,6 @@
-//! Surface unconfirmed pending candidates through hybrid recall (#356).
+//! Surface unconfirmed pending candidates through hybrid recall.
 //!
-//! Candidates the arbiter deferred with `AskConfirmationLater` (#174) live in
+//! Candidates the arbiter deferred with `AskConfirmationLater` live in
 //! the user-approval queue — a `pending_candidates` table row, not a typed
 //! memory. They carry no embedding, so the store's gather (`MemoryPort::search`)
 //! can never surface them on its own. This module loads the live `pending`
@@ -12,7 +12,7 @@
 //! recall query is dropped here, and beyond that it must clear the same
 //! `min_score` floor as every typed memory. Unconfirmed information therefore
 //! only reaches the prompt when the conversation actually touches the topic —
-//! nothing is force-injected (unlike lorebook constant entries, #336).
+//! nothing is force-injected (unlike lorebook constant entries).
 
 use ene_core::{
     AffectAnnotation, GatheredCandidate, MemoryCandidateSource, MemoryConfidence, MemoryItem,
@@ -58,7 +58,7 @@ pub async fn gather_pending_candidates(
     // multi-user database. The filter must run *before* the cap: on a
     // multi-user database the newest `limit` rows can all belong to other
     // users, and truncating first would drop this user's topic-relevant
-    // candidates before they ever compete (#356 review).
+    // candidates before they ever compete.
     candidates.retain(|candidate| {
         query
             .user_id

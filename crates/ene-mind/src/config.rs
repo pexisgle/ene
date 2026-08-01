@@ -242,9 +242,9 @@ pub struct MindMemoryConfig {
     pub commitment_title_similarity_threshold: f32,
     /// Maximum pure-recent fallback candidates gathered during hybrid search.
     pub recent_fallback_limit: usize,
-    /// Maximum unconfirmed pending candidates that compete in recall (#356).
+    /// Maximum unconfirmed pending candidates that compete in recall.
     ///
-    /// Candidates the arbiter deferred with `AskConfirmationLater` (#174) sit
+    /// Candidates the arbiter deferred with `AskConfirmationLater` sit
     /// in the user-approval queue rather than the typed-memory table, so the
     /// store's gather cannot surface them. Recall loads the live `pending`
     /// queue and lets up to this many candidates compete in the normal hybrid

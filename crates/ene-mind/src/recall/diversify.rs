@@ -330,7 +330,9 @@ fn best_pool_candidate_for_kind(
         .filter(|c| c.item.kind == kind)
         .filter(|c| {
             let id = c.item.id;
-            !selected.iter().any(|s| s.item.id == id)
+            !selected
+                .iter()
+                .any(|s| s.item.id.is_some() && s.item.id == id)
         })
         .max_by(|a, b| {
             a.breakdown
@@ -708,6 +710,37 @@ mod tests {
 
         let no_bonus = source_diversity_bonus(&lexical, &selected, 0.1);
         assert!(no_bonus < f32::EPSILON);
+    }
+
+    #[test]
+    fn best_pool_candidate_for_kind_treats_none_ids_as_distinct() {
+        // Pending candidates carry `id: None`; a plain `None == None` dedup
+        // would treat every pending candidate of a kind as already selected
+        // once one of them is in `selected`, so the second could never be
+        // promoted into a kind quota. Distinct None ids must stay eligible.
+        let mut first = sample_memory(
+            1,
+            MemoryKind::Preference,
+            "a",
+            "pending preference alpha",
+            0.6,
+        );
+        first.item.id = None;
+        let mut second = sample_memory(
+            2,
+            MemoryKind::Preference,
+            "b",
+            "pending preference beta",
+            0.8,
+        );
+        second.item.id = None;
+
+        let pool = vec![first.clone(), second.clone()];
+        let selected = vec![first];
+
+        let candidate = best_pool_candidate_for_kind(&pool, &selected, MemoryKind::Preference)
+            .expect("remaining None-id candidate must stay eligible for kind quota");
+        assert_eq!(candidate.item.content, "pending preference beta");
     }
 
     #[test]

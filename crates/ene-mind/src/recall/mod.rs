@@ -25,7 +25,7 @@ pub use executor::RecallResultMapper;
 pub use input::{RecallPlannerInput, RecallTurn};
 /// Lorebook constant/key recall merge (#83).
 pub use lorebook_boost::merge_lorebook_recall;
-/// Unconfirmed pending-candidate recall merge (#356).
+/// Unconfirmed pending-candidate recall merge.
 pub use pending::gather_pending_candidates;
 /// Recall plan output DTOs.
 pub use plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};

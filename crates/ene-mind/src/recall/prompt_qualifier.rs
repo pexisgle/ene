@@ -19,8 +19,8 @@ pub fn format_recalled_content(memory: &RecalledMemory) -> String {
 
 /// Return a prompt prefix for uncertain or disputed memories, if any.
 pub fn recall_content_qualifier(memory: &RecalledMemory) -> Option<&'static str> {
-    // Pending candidates are unconfirmed by construction (#356): they sit in
-    // the user-approval queue (#174), so the character should treat them as
+    // Pending candidates are unconfirmed by construction: they sit in
+    // the user-approval queue, so the character should treat them as
     // hearsay to verify in conversation, not as established fact. Checked
     // first — an unconfirmed candidate is at least unconfirmed regardless of
     // its other signals.
