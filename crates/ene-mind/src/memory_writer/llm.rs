@@ -73,13 +73,13 @@ const LOCALE_MISMATCH_MIN_CHARS: usize = 8;
 pub async fn extract(
     provider: &dyn LlmProvider,
     turn: &TurnInput<'_>,
-    locale: Locale,
+    locale: &Locale,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     extract_with_timeout(provider, turn, locale, DEFAULT_EXTRACTION_TIMEOUT_SECS, &[]).await
 }
 
 /// Same as [`extract`], but with an explicit call-timeout budget and optional
-/// remember/forget (and tool) pattern hints.
+/// forget (and tool) pattern hints.
 ///
 /// This is the entry point the runtime should use so the timeout can be driven
 /// by `MindMemoryConfig::extraction_timeout_secs` (issue #66). Pattern hints
@@ -87,14 +87,11 @@ pub async fn extract(
 pub async fn extract_with_timeout(
     provider: &dyn LlmProvider,
     turn: &TurnInput<'_>,
-    locale: Locale,
+    locale: &Locale,
     timeout_secs: u64,
     pattern_hints: &[MemoryCandidate],
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
-    let prompts = PromptLibrary::load(match locale {
-        Locale::Ja => "ja",
-        Locale::En => "en",
-    });
+    let prompts = PromptLibrary::load(locale.code());
 
     let conversation = build_conversation_text(turn);
     let hints_text = format_pattern_hints(pattern_hints);
@@ -243,7 +240,7 @@ fn extraction_schema() -> serde_json::Value {
 /// - Prose with embedded JSON object
 fn parse_candidates_json(
     raw: &str,
-    locale: Locale,
+    locale: &Locale,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     let cleaned = raw
         .trim()
@@ -370,7 +367,7 @@ fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
 /// - Maps unknown `kind` strings to `Semantic` with a warning; `WorldState`
 ///   is reserved, warned about, and falls back to `Semantic` too.
 /// - Caps confidence at `MAX_CONFIDENCE` (0.9).
-fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
+fn raw_to_candidate(raw: RawCandidate, locale: &Locale) -> MemoryCandidate {
     let kind = parse_llm_kind(&raw.kind);
 
     let confidence = raw.confidence.clamp(0.0, MAX_CONFIDENCE);
@@ -403,7 +400,7 @@ fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
 
 /// Simple heuristic: if more than 50% of the characters are CJK and the
 /// locale is `En`, or vice versa, we have a mismatch.
-fn locale_mismatch(text: &str, locale: Locale) -> bool {
+fn locale_mismatch(text: &str, locale: &Locale) -> bool {
     let cjk_count = text
         .chars()
         .filter(|c| {
@@ -420,9 +417,11 @@ fn locale_mismatch(text: &str, locale: Locale) -> bool {
         return false;
     }
     let cjk_ratio = cjk_count as f32 / total as f32;
-    match locale {
-        Locale::Ja => cjk_ratio < 0.1, // Expected Japanese but mostly non-CJK
-        Locale::En => cjk_ratio > 0.5, // Expected English but mostly CJK
+    match locale.code() {
+        "ja" => cjk_ratio < 0.1, // Expected Japanese but mostly non-CJK
+        // English and any language without a dedicated script heuristic are
+        // expected to be mostly non-CJK.
+        _ => cjk_ratio > 0.5,
     }
 }
 
@@ -565,9 +564,13 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("I'm working on Ene"), Locale::En)
-            .await
-            .expect("test fixture produces valid extraction");
+        let result = extract(
+            &provider,
+            &ja_turn("I'm working on Ene"),
+            &Locale::resolve("en"),
+        )
+        .await
+        .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, MemoryKind::Semantic);
         assert_eq!(result[0].title, "project discussion");
@@ -578,7 +581,7 @@ mod tests {
     async fn markdown_wrapper_stripped() {
         let json = "```json\n{\"candidates\": [{\"kind\": \"Preference\", \"title\": \"likes coffee\", \"content\": \"User likes coffee\", \"source_quote\": \"I love coffee\", \"confidence\": 0.7, \"should_persist\": true, \"deletion_target_key\": null, \"commitment_due\": null}]}\n```";
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("I love coffee"), Locale::En)
+        let result = extract(&provider, &ja_turn("I love coffee"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
@@ -588,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn non_json_returns_extraction_failed() {
         let provider = GarbageProvider;
-        let result = extract(&provider, &ja_turn("hello"), Locale::En).await;
+        let result = extract(&provider, &ja_turn("hello"), &Locale::resolve("en")).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -601,7 +604,7 @@ mod tests {
     async fn empty_candidates_returns_empty_vec() {
         let json = r#"{"candidates": []}"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("just chatting"), Locale::En)
+        let result = extract(&provider, &ja_turn("just chatting"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert!(result.is_empty());
@@ -622,7 +625,7 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("test"), Locale::En)
+        let result = extract(&provider, &ja_turn("test"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
@@ -644,7 +647,7 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("test"), Locale::En)
+        let result = extract(&provider, &ja_turn("test"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
@@ -812,7 +815,8 @@ mod tests {
         // `MindMemoryConfig::extraction_timeout_secs`) is honoured and
         // reported in the error message.
         let provider = TimeoutProvider;
-        let result = extract_with_timeout(&provider, &ja_turn("test"), Locale::En, 1, &[]).await;
+        let result =
+            extract_with_timeout(&provider, &ja_turn("test"), &Locale::resolve("en"), 1, &[]).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -848,7 +852,7 @@ mod tests {
         let result = extract(
             &provider,
             &ja_turn("プロジェクトの話をしている"),
-            Locale::En,
+            &Locale::resolve("en"),
         )
         .await
         .expect("test fixture produces valid extraction");
@@ -878,7 +882,7 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("ゆき"), Locale::En)
+        let result = extract(&provider, &ja_turn("ゆき"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
@@ -904,9 +908,13 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("Forget about project X"), Locale::En)
-            .await
-            .expect("test fixture produces valid extraction");
+        let result = extract(
+            &provider,
+            &ja_turn("Forget about project X"),
+            &Locale::resolve("en"),
+        )
+        .await
+        .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert!(!result[0].should_persist);
         assert_eq!(result[0].deletion_target_key.as_deref(), Some("project-x"));
@@ -930,7 +938,7 @@ mod tests {
         let result = extract(
             &provider,
             &ja_turn("I have a meeting tomorrow at 3pm"),
-            Locale::En,
+            &Locale::resolve("en"),
         )
         .await
         .expect("test fixture produces valid extraction");
@@ -978,7 +986,7 @@ mod tests {
         let result = extract(
             &provider,
             &ja_turn("I have a presentation today"),
-            Locale::En,
+            &Locale::resolve("en"),
         )
         .await
         .expect("test fixture produces valid extraction");
@@ -1057,9 +1065,15 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        extract_with_timeout(&provider, &ja_turn("I like coffee"), Locale::En, 5, &[hint])
-            .await
-            .expect("extract");
+        extract_with_timeout(
+            &provider,
+            &ja_turn("I like coffee"),
+            &Locale::resolve("en"),
+            5,
+            &[hint],
+        )
+        .await
+        .expect("extract");
         let user = provider.last_user();
         assert!(
             user.contains("likes coffee") && user.contains("kind=preference"),
@@ -1073,7 +1087,7 @@ mod tests {
         let _ = extract_with_timeout(
             &provider,
             &ja_turn("今日プレゼンがある"),
-            Locale::Ja,
+            &Locale::resolve("ja"),
             5,
             &[],
         )

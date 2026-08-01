@@ -56,6 +56,16 @@ pub enum EneConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// A runtime pattern pack could not be read from the assets directory. The
+    /// caller is expected to fall back to the compile-time embedded library.
+    #[error("Failed to read pattern pack at {path}: {source}")]
+    PatternPackRead {
+        /// The pack path that was attempted.
+        path: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Type alias for internal module usages.

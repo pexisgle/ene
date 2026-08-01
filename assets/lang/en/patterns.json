@@ -1,0 +1,10 @@
+{
+  "forget_patterns": [
+    {
+      "name": "keyword_before_content",
+      "regex": "(?i)(forget|erase|drop|stop remembering)\\s+(?:about\\s+)?(.+)",
+      "target_group": 2,
+      "skip_questions": true
+    }
+  ]
+}

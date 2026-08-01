@@ -43,7 +43,7 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "ja"];
 /// `"JA"`, and `"ja-JP"` all resolve to `"ja"`. The legacy alias `"jp"` also
 /// maps to `"ja"`. The result is not validated against the filesystem; the
 /// caller attempts a runtime load and falls back if the pack is absent.
-fn resolve_language_alias(lang: &str) -> String {
+pub fn resolve_language_alias(lang: &str) -> String {
     let primary = lang.split(['-', '_']).next().unwrap_or_default();
     let lower = primary.to_ascii_lowercase();
     if lower == "jp" {
@@ -54,7 +54,7 @@ fn resolve_language_alias(lang: &str) -> String {
 }
 
 /// Whether `code` has a compile-time embedded pack to fall back to.
-fn is_embedded_language(code: &str) -> bool {
+pub(crate) fn is_embedded_language(code: &str) -> bool {
     SUPPORTED_LANGUAGES.contains(&code)
 }
 

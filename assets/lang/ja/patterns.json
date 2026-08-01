@@ -1,0 +1,16 @@
+{
+  "forget_patterns": [
+    {
+      "name": "object_before_keyword",
+      "regex": "(.+?)を(忘れて|消して|削除して|やめて)",
+      "target_group": 1,
+      "skip_questions": false
+    },
+    {
+      "name": "keyword_before_content",
+      "regex": "(?i)(忘れて|消して|削除して|やめて)[:：]?\\s*(.+)",
+      "target_group": 2,
+      "skip_questions": false
+    }
+  ]
+}
