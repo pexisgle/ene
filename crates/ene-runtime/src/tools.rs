@@ -1,4 +1,4 @@
-//! Tool operations handle, decoupled from the diagnostics facade (#406).
+//! Tool operations handle, decoupled from the diagnostics facade.
 //!
 //! Before this split, the runtime's tool surface (`list_tools`,
 //! `search_tools`, `call_tool`, `invalidate_tool_index`) lived on
@@ -6,7 +6,7 @@
 //! *opt-in diagnostics facade* — observability, not control. [`ToolHandle`]
 //! gives tool operations their own handle, obtained via
 //! [`crate::EneHandle::tools`], mirroring the `sessions()` / `candidates()` /
-//! `vision()` split (#271).
+//! `vision()` split.
 //!
 //! ## Why tool operations stay in the actor mailbox
 //!

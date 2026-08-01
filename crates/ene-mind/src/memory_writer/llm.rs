@@ -335,7 +335,7 @@ fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
         "worldstate" | "world_state" | "world state" => {
             tracing::warn!(
                 raw_kind = %raw_kind,
-                "LLM extractor returned WorldState, which is reserved for structured world-state tracking (#209) and not yet extractable; falling back to Semantic"
+                "LLM extractor returned WorldState, which is reserved for structured world-state tracking and not yet extractable; falling back to Semantic"
             );
             MemoryKind::Semantic
         }
@@ -343,7 +343,7 @@ fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
             tracing::warn!(
                 raw_kind = %raw_kind,
                 normalized = other,
-                "Unknown memory kind from LLM extractor; falling back to Semantic. Misclassified memories enter contradiction checking as Semantic (#348)"
+                "Unknown memory kind from LLM extractor; falling back to Semantic. Misclassified memories enter contradiction checking as Semantic"
             );
             MemoryKind::Semantic
         }

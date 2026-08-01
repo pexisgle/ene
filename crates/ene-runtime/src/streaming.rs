@@ -186,7 +186,7 @@ pub(crate) async fn await_permission_decision(
                 component = "streaming",
                 request_id = %request_id,
                 timeout_ms,
-                "permission prompt timed out with no consumer response; treating as denied (#401)"
+                "permission prompt timed out with no consumer response; treating as denied"
             );
             None
         }
@@ -239,7 +239,7 @@ pub(crate) async fn await_user_input_response(
                 component = "streaming",
                 request_id = %request_id,
                 timeout_ms,
-                "user-input prompt timed out with no consumer response; treating as cancelled (#401)"
+                "user-input prompt timed out with no consumer response; treating as cancelled"
             );
             None
         }
@@ -1850,7 +1850,7 @@ mod tests {
         // suite.
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
             .await
-            .expect("executor hung: unanswered permission prompt was not bounded (#401)");
+            .expect("executor hung: unanswered permission prompt was not bounded");
         let output = result.expect("executor returned error");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1948,7 +1948,7 @@ mod tests {
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
             .await
-            .expect("executor hung: cancel was not observed by the permission wait (#401)");
+            .expect("executor hung: cancel was not observed by the permission wait");
         drop(canceller.await);
         let output = result.expect("executor returned error");
 
@@ -2038,7 +2038,7 @@ mod tests {
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
             .await
-            .expect("executor hung: unanswered user-input prompt was not bounded (#401)");
+            .expect("executor hung: unanswered user-input prompt was not bounded");
         let output = result.expect("executor returned error");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);

@@ -319,7 +319,7 @@ async fn tools_call_intercepts_system_search_tool() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
-/// `EneHandle::set_character` (#406) is a public control method (moved off
+/// `EneHandle::set_character` is a public control method (moved off
 /// the diagnostics facade): the card swap must round-trip through the actor
 /// and be observable via the next snapshot.
 #[tokio::test]
@@ -351,7 +351,7 @@ async fn set_character_round_trips_through_public_handle() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
-/// `EneHandle::compress_context` (#406) is a public control method (moved
+/// `EneHandle::compress_context` is a public control method (moved
 /// off the diagnostics facade and renamed from `manual_split`). With no
 /// conversation history the actor's compression path deterministically
 /// returns `SplitNotNeeded` — proving the command round-trips through the

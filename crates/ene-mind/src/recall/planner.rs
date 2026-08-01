@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(
             search.exclude_kinds,
             vec![ene_store::MemoryKind::Reflection],
-            "recall queries must exclude reflection memories while the pipeline is enabled (#347)"
+            "recall queries must exclude reflection memories while the pipeline is enabled"
         );
 
         // With the pipeline disabled the exclusion must be off too: reflections

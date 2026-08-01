@@ -1,4 +1,4 @@
-//! Redaction of plugin configuration values at the host boundary (#313).
+//! Redaction of plugin configuration values at the host boundary.
 //!
 //! A plugin's `config_schema()` may mark fields with `x-ene-secret: true`; the
 //! host must never log those values, and the UI must mask them. This module

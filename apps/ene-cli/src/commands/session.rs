@@ -275,7 +275,7 @@ fn handle_summaries(_snapshot: &ene_runtime::EneStateSnapshot) {
     println!(
         "{}",
         style::warning(
-            "[Session] Legacy conversation summaries are retired (#125). Use typed memory via /memory list|search, or scene compression via /session split."
+            "[Session] Legacy conversation summaries are retired. Use typed memory via /memory list|search, or scene compression via /session split."
         )
     );
 }

@@ -1727,7 +1727,7 @@ impl TurnActor {
                     "test-turn",
                     vec!["/test/path".to_string()],
                 );
-                panic!("induced panic after mutating shared actor state (#268 regression test)");
+                panic!("induced panic after mutating shared actor state");
             }
             #[cfg(test)]
             EneCommand::TestSpawnSlowBgTask { reply } => {
@@ -3360,7 +3360,7 @@ mod tests {
         assert!(
             gate.active.lock().is_none(),
             "Shutdown must release the single-flight gate so a racing run() \
-             reports ActorDead, not a stale Busy (#404)"
+             reports ActorDead, not a stale Busy"
         );
     }
 

@@ -54,12 +54,12 @@ impl Default for CognitionEngine {
     }
 }
 
-/// Outcome of a deferred memory-write task (#240).
+/// Outcome of a deferred memory-write task.
 #[derive(Debug, Clone)]
 pub enum MemoryWriteOutcome {
     /// Write and forgetting completed successfully.
     Ok {
-        /// Number of memory candidates deferred to the user-approval queue (#174).
+        /// Number of memory candidates deferred to the user-approval queue.
         deferred_candidates: usize,
     },
     /// Write failed; a retry row was enqueued (or marked permanent).
@@ -374,7 +374,7 @@ impl CognitionEngine {
         // Destructure to move the recalled/commitment vectors into the pack
         // input without cloning (#review M2). `recall_plan` is no longer needed
         // here now that packing budgets against the context window, not recall
-        // hints (#370).
+        // hints.
         let PreTurnOutput {
             recall_plan: _,
             affect,
@@ -385,7 +385,7 @@ impl CognitionEngine {
 
         // Size the identity kernel from the model's available window rather
         // than a fixed token count, so larger models carry a fuller character
-        // definition (#386). Fall back to the conservative default window when
+        // definition. Fall back to the conservative default window when
         // the caller does not know it (tests / legacy paths).
         let available_window = ctx.available_window.unwrap_or_else(|| {
             usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX)
@@ -395,7 +395,7 @@ impl CognitionEngine {
         let user_persona = ene_config::get_global_config().user_persona;
         // Seed `{{pick}}` from the character+session so a trait chosen once
         // (hair colour, hometown, …) stays fixed across per-turn kernel
-        // recompilations instead of re-rolling every turn (#343).
+        // recompilations instead of re-rolling every turn.
         let pick_seed = Some(ene_config::session_pick_seed(&format!(
             "{}:{}",
             ctx.character_id, ctx.session_id
@@ -440,7 +440,7 @@ impl CognitionEngine {
         };
 
         // `Some(None)` means the caller checked and there is no pending
-        // interruption; `None` (legacy/test callers) injects nothing (#206).
+        // interruption; `None` (legacy/test callers) injects nothing.
         let interruption_note = prefetch.interruption_note.flatten();
 
         let prompts = PromptLibrary::load(&ctx.config.emotion.classifier_language);
@@ -487,7 +487,7 @@ impl CognitionEngine {
         };
 
         // Budget the prompt against the model's effective context window
-        // (#364, #370): `min(provider-advertised, operator override,
+        //: `min(provider-advertised, operator override,
         // mind.context.max_prompt_tokens)` minus the response reserve and
         // safety margin. Packing then fills that window in priority order
         // rather than against per-section sub-budgets. Tests may inject a
@@ -505,8 +505,8 @@ impl CognitionEngine {
                 .and_then(ene_ai::LlmProvider::context_window);
             // Two operator shrinkage caps, combined as a min so configuration
             // can only ever narrow the model's stated window: the per-provider
-            // `context_window` override and the mind-level `max_prompt_tokens`
-            // (#370). Either being `None` leaves the other (or the advertised
+            // `context_window` override and the mind-level `max_prompt_tokens`.
+            // Either being `None` leaves the other (or the advertised
             // window) in force; both `None` defers entirely to the model, so
             // the prompt auto-follows the model's context size.
             let provider_override = ai_config
@@ -546,7 +546,7 @@ impl CognitionEngine {
             .clone_from(&packed.meta.injected_memory_ids);
 
         // Bump access counters only for memories actually composed into the
-        // message packet (#345). The bump fires here, during prompt composition,
+        // message packet. The bump fires here, during prompt composition,
         // before the request is sent — "injected" means the memory survived
         // budget packing into the packet, not that the LLM has seen it. This
         // moved out of `execute_hybrid_recall` (which bumped every recalled
@@ -598,7 +598,7 @@ impl CognitionEngine {
 
     /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
     ///
-    /// On failure, enqueues a [`ene_core::PendingMemoryWrite`] for later retry (#240).
+    /// On failure, enqueues a [`ene_core::PendingMemoryWrite`] for later retry.
     /// Returns the task handle so callers can track or abort it.
     pub fn spawn_deferred_memory_work(
         store: std::sync::Arc<dyn MemoryPort>,
@@ -615,7 +615,7 @@ impl CognitionEngine {
                     user_id = %input.user_id,
                     "Post-turn memory extraction and forgetting starting"
                 );
-                // Drain due retries before writing the new turn (#240).
+                // Drain due retries before writing the new turn.
                 Self::drain_pending_memory_writes(
                     store.as_ref(),
                     &config,
@@ -699,7 +699,7 @@ impl CognitionEngine {
         )
     }
 
-    /// Retry due pending memory writes from the persistent queue (#240).
+    /// Retry due pending memory writes from the persistent queue.
     pub async fn drain_pending_memory_writes(
         store: &dyn MemoryPort,
         config: &MindConfig,
@@ -768,7 +768,7 @@ impl CognitionEngine {
         }
     }
 
-    /// Resolve the final character expression after an assistant turn (#89).
+    /// Resolve the final character expression after an assistant turn.
     pub fn resolve_expression_turn(
         &self,
         config: &MindConfig,

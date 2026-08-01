@@ -69,7 +69,7 @@ impl PluginDispatch {
     /// A single plugin struct may implement several traits (e.g. `ToolPlugin`
     /// and `LlmPlugin`); each is stored as a separate trait object, so the
     /// config is delivered to every one present. `set_config` is idempotent
-    /// (plugins store the blob), so repeated delivery is harmless (#313).
+    /// (plugins store the blob), so repeated delivery is harmless.
     fn set_config(&self, config: &serde_json::Value) {
         if let Some(tool) = &self.tool {
             tool.set_config(config);
@@ -115,7 +115,7 @@ impl PluginDispatch {
     /// Method-call syntax (closures, not function pointers) is required here:
     /// `ConfigurablePlugin` is implemented for the trait objects themselves,
     /// not for `Arc<dyn …>`, so `and_then(ConfigurablePlugin::config_schema)`
-    /// would fail to satisfy the receiver type (#313).
+    /// would fail to satisfy the receiver type.
     fn config_schema(&self) -> Option<serde_json::Value> {
         self.tool
             .as_ref()
@@ -265,7 +265,7 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
 /// Long-running requests are dispatched in their own spawned tasks while cheap
 /// state mutations are handled inline (see [`connection_read_loop`]), so a slow
 /// request never blocks the read loop: pings are answered while tool calls run,
-/// and multiple tool calls can be in flight at once (#431). Each
+/// and multiple tool calls can be in flight at once. Each
 /// `CreateChatStream` request is additionally guarded by a [`CancellationToken`]
 /// keyed by its `request_id`; a `CancelStream` request looks up that token and
 /// cancels the stream mid-flight (Cr-4).
@@ -356,7 +356,7 @@ fn spawn_deferred_drain(
 /// `SynthesizeSpeech`, `TranscribeAudio`, `PollDeferred`) are dispatched in
 /// their own spawned tasks so the read loop stays responsive regardless of how
 /// long any single one takes: a slow `CallTool` cannot block a `Ping`, and
-/// multiple tool calls can be in flight at once (#431). Responses are sent over
+/// multiple tool calls can be in flight at once. Responses are sent over
 /// `tx`, whose dedicated writer task serializes the outgoing frames, so
 /// concurrent handlers never interleave bytes on the socket (Cr-4 / H-12).
 ///
@@ -368,7 +368,7 @@ fn spawn_deferred_drain(
 /// invariant instead of a client convention: `Handshake` applies the sandbox
 /// (`tool.set_sandbox` / `set_config`) and completes before the first
 /// `CallTool` is even read off the socket, and a permission/pattern mutation
-/// is committed before any subsequent call that depends on it (#431 review).
+/// is committed before any subsequent call that depends on it.
 ///
 /// `CreateChatStream` additionally registers a [`CancellationToken`] so
 /// `CancelStream` can abort it mid-flight; `Shutdown` notifies the server and
@@ -433,7 +433,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             // Long-running requests: dispatch in a spawned task so a slow one
             // (e.g. a tool call or an LLM completion) does not block the read
             // loop from answering pings or accepting further concurrent
-            // requests (#431). Correlation is by `request_id`, so response
+            // requests. Correlation is by `request_id`, so response
             // order need not match request order.
             long_running @ (PluginIpcRequest::CallTool { .. }
             | PluginIpcRequest::ChatCompletion { .. }
@@ -454,7 +454,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             // `GetConfigSchema`, `CancelDeferred`) — is handled inline, in
             // read order. State mutations must be committed before any later
             // request that depends on them is dispatched, so they cannot be
-            // reordered behind a spawned task (#431 review).
+            // reordered behind a spawned task.
             other => {
                 let resp = dispatch_request(dispatch, &other).await;
                 drop(tx.send(resp).await);
@@ -504,8 +504,8 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
                 tool.set_sandbox(sandbox);
             }
             // Configuration is delivered to **every** registered trait
-            // implementation (tool or provider), not just the tool plugin
-            // (#313). Both blobs are opaque to the plugin server; the plugin
+            // implementation (tool or provider), not just the tool plugin.
+            // Both blobs are opaque to the plugin server; the plugin
             // stores them and selects as it needs.
             if let Some(config) = plugin_config {
                 dispatch.set_config(config);
@@ -1096,7 +1096,7 @@ mod tests {
 
     /// A tool plugin whose `call_tool` blocks on a shared gate until released,
     /// counting how many calls are concurrently in flight. Used to prove the
-    /// server dispatches non-streaming requests concurrently (#431): under the
+    /// server dispatches non-streaming requests concurrently: under the
     /// old inline dispatch the counter could never exceed 1.
     struct GatedToolPlugin {
         in_flight: std::sync::atomic::AtomicUsize,
@@ -1498,7 +1498,7 @@ mod tests {
 
     /// A mock LLM plugin that records the config / profiles delivered via
     /// [`ConfigurablePlugin::set_config`] / `set_profiles` and advertises a
-    /// schema with a secret-marked field (#313).
+    /// schema with a secret-marked field.
     struct RecordingLlmPlugin {
         config: std::sync::Mutex<Option<serde_json::Value>>,
         profiles: std::sync::Mutex<Option<serde_json::Value>>,
@@ -2140,7 +2140,7 @@ mod tests {
     }
 
     /// Two `CallTool` requests on one connection must both be in flight
-    /// concurrently (#431). Under the old inline dispatch the read loop blocked
+    /// concurrently. Under the old inline dispatch the read loop blocked
     /// on the first request, so the second was not even read until the first
     /// completed and `in_flight` could never exceed 1.
     #[cfg(unix)]
@@ -2211,7 +2211,7 @@ mod tests {
     }
 
     /// A `Ping` must be answered while a slow tool call is still in flight
-    /// (#431): the read loop dispatches each request in its own task, so the
+    ///: the read loop dispatches each request in its own task, so the
     /// probe is not queued behind the blocked call.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

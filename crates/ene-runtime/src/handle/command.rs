@@ -117,7 +117,7 @@ pub enum EneCommand {
     },
     /// Manually trigger a compression-only pass over the current conversation.
     ///
-    /// Compression (#368/#369) trims history into a stored scene summary but
+    /// Compression trims history into a stored scene summary but
     /// does **not** start a new session: the session id is unchanged and the
     /// result is a [`CompressionResult`], not a [`ene_mind::SplitResult`].
     CompressContext {

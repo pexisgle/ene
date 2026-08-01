@@ -342,7 +342,7 @@ pub struct EneHandle {
     /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
     /// Tool registry operations handle (list / search / call / invalidate).
-    /// Routes through the actor mailbox (#406) — see [`crate::tools`].
+    /// Routes through the actor mailbox — see [`crate::tools`].
     tools: crate::tools::ToolHandle,
     /// RAII guard that triggers graceful shutdown when the last handle clone
     /// drops. Shared via `Arc` across all handle clones so the guard's `Drop`
@@ -779,7 +779,7 @@ impl EneHandle {
     ///
     /// Observability only — the control surface (character swap,
     /// compression, tools) lives on this handle via [`EneHandle::set_character`],
-    /// [`EneHandle::compress_context`], and [`EneHandle::tools`] (#406).
+    /// [`EneHandle::compress_context`], and [`EneHandle::tools`].
     pub const fn diagnostics(&self) -> &crate::diagnostics::EneDiagnostics {
         &self.diagnostics
     }
@@ -887,8 +887,7 @@ impl EneHandle {
         self.vision.clone()
     }
 
-    /// Tool registry operations handle (list / search / call / invalidate)
-    /// (#406).
+    /// Tool registry operations handle (list / search / call / invalidate).
     ///
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     /// Unlike [`EneHandle::sessions`] / [`EneHandle::candidates`] /
@@ -899,7 +898,7 @@ impl EneHandle {
         self.tools.clone()
     }
 
-    /// Hot-swap the character card (CLI `/card`) (#406).
+    /// Hot-swap the character card (CLI `/card`).
     ///
     /// Replaces the loaded card on the actor's session, resets the proactive
     /// scheduler, and keeps the shared card-name slot used by
@@ -918,8 +917,7 @@ impl EneHandle {
         rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
-    /// Manually trigger a compression-only pass over the current
-    /// conversation (#369 / #406).
+    /// Manually trigger a compression-only pass over the current conversation.
     ///
     /// Compression trims history into a stored scene summary but does **not**
     /// start a new session: the session id is unchanged, and the returned
@@ -1841,7 +1839,7 @@ mod tests {
 
         assert!(
             matches!(handle.run("hello"), Err(RunError::ActorDead)),
-            "run() after shutdown must report ActorDead, not a stale Busy (#404)"
+            "run() after shutdown must report ActorDead, not a stale Busy"
         );
     }
 
@@ -2064,7 +2062,7 @@ mod tests {
         // the slot so admission succeeds.
         assert!(
             actor::admit_task(&mut set, 1, "TestSet", None, &diag_tx),
-            "a completed-but-unjoined task must not count against the cap (#404)"
+            "a completed-but-unjoined task must not count against the cap"
         );
         assert_eq!(set.len(), 0, "the finished task should have been reaped");
     }

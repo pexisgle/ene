@@ -333,7 +333,7 @@ async fn handle_status(
         }
         Err(e) => println!("  pending memory writes: error ({e})"),
     }
-    println!("  note: use `/memory pending` to inspect the retry queue (#240)");
+    println!("  note: use `/memory pending` to inspect the retry queue");
     Ok(CommandOutcome::Continue)
 }
 

@@ -200,7 +200,7 @@ pub struct IpcPluginConnection {
     plugin_config: Option<serde_json::Value>,
     /// Per-profile plugin configuration (`plugins.list.<name>.profiles`),
     /// re-sent to the plugin on every (re)connect handshake alongside
-    /// [`plugin_config`](Self::plugin_config) (#313).
+    /// [`plugin_config`](Self::plugin_config).
     plugin_profiles: Option<serde_json::Value>,
     /// Write half of the IPC stream, behind its own lock so the write is
     /// serialized (frames never interleave) but released before the response

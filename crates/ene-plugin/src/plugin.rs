@@ -29,12 +29,12 @@ pub struct PluginStreamChunk {
     /// Incremental tool-call JSON deltas (partial function-call arguments).
     pub tool_calls_delta: Option<Vec<serde_json::Value>>,
     /// Token usage for the whole completion, set on the **final** chunk when
-    /// the provider reports it (#365). Intermediate chunks leave this `None`.
+    /// the provider reports it. Intermediate chunks leave this `None`.
     pub usage: Option<TokenUsage>,
 }
 
 /// A completed (non-streaming) plugin chat response: text plus any token
-/// usage the provider reported (#365).
+/// usage the provider reported.
 ///
 /// Returned by [`LlmPlugin::chat_completion`]; the plugin server maps it onto
 /// [`PluginIpcResponse::ChatCompletionResult`](ene_plugin_proto::PluginIpcResponse).
@@ -216,7 +216,7 @@ pub trait LlmPlugin: ConfigurablePlugin + Send + Sync {
     /// Performs a non-streaming chat completion.
     ///
     /// Returns a [`PluginCompletion`] carrying the assistant text plus any
-    /// token usage the provider reported (#365). The default returns
+    /// token usage the provider reported. The default returns
     /// [`PluginError::NotSupported`] for plugins that do not provide LLM
     /// completions.
     async fn chat_completion(
