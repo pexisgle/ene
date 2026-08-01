@@ -3215,8 +3215,8 @@ async fn recall_bump_does_not_prevent_forgetting() {
             content: "an old fact that keeps getting recalled".into(),
             source: crate::MemorySource::Conversation,
             source_ref: None,
-            confidence: crate::MemoryConfidence::new(0.1),
-            salience: crate::MemorySalience::new(0.1),
+            confidence: crate::MemoryConfidence::new(0.5),
+            salience: crate::MemorySalience::new(0.5),
             affect: crate::AffectAnnotation::default(),
             relationship_impact: 0.0,
             valid_from: None,
@@ -3229,7 +3229,7 @@ async fn recall_bump_does_not_prevent_forgetting() {
         })
         .await
         .unwrap();
-    store.test_backdate_typed_memory(id, 365).await.unwrap();
+    store.test_backdate_typed_memory(id, 30).await.unwrap();
 
     // Simulate a recall that just happened: bump access counters repeatedly.
     for _ in 0..10 {
