@@ -30,8 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      # Drop large-packages (slow apt removes) and swap (frees 0B). Keep the
-      # fast rm/prune paths — they reclaim ~20GiB, enough for nix + cargo.
       - name: Free disk space
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
