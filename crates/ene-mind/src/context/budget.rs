@@ -174,7 +174,10 @@ fn history_entry_tokens(entry: &HistoryEntry) -> usize {
     estimate_tokens(&entry.content).saturating_add(4)
 }
 
-fn estimate_history_tokens(history: &[HistoryEntry]) -> usize {
+/// Estimate the total token cost of a history slice (per-entry content
+/// estimate plus per-message overhead). Shared by prompt packing and the
+/// token-based window-pressure compression trigger (#368).
+pub fn estimate_history_tokens(history: &[HistoryEntry]) -> usize {
     history.iter().map(history_entry_tokens).sum()
 }
 

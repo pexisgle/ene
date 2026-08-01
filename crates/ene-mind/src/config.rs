@@ -72,6 +72,13 @@ pub struct ContextConfig {
     pub recent_turns: usize,
     /// Turn count threshold before scene-level compression runs.
     pub scene_turn_threshold: usize,
+    /// History token estimate at or above which window-pressure compression
+    /// runs (#368). This is the secondary, token-based safety net that
+    /// complements the primary topic-boundary trigger: when a single topic
+    /// runs long without a detected boundary, the oldest span is compressed
+    /// once the retained history reaches this many estimated tokens. Replaces
+    /// the former message-count ratio heuristic.
+    pub context_pressure_tokens: usize,
     /// Number of scene spans before chapter rollup.
     pub chapter_span_threshold: usize,
     /// Number of chapter spans before arc rollup.
@@ -88,6 +95,7 @@ impl Default for ContextConfig {
             max_prompt_tokens: None,
             recent_turns: 8,
             scene_turn_threshold: 12,
+            context_pressure_tokens: 2_000,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,
             compression_timeout_secs: 60,

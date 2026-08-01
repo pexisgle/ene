@@ -2514,6 +2514,7 @@ dependencies = [
 name = "ene-config"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
  "ctor",
  "directories",

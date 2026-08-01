@@ -177,6 +177,7 @@ fn finish_cancelled(
         turn,
         origin,
         TerminalReason::Cancelled,
+        None,
     )
 }
 
@@ -340,6 +341,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             TerminalReason::Failed {
                 message: "No character card loaded".into(),
             },
+            None,
         );
     };
 
@@ -491,6 +493,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 &turn,
                 origin,
                 TerminalReason::Failed { message },
+                None,
             );
         }
     };
@@ -660,6 +663,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 TerminalReason::Failed {
                     message: e.to_string(),
                 },
+                None,
             );
         }
     };
@@ -770,6 +774,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 TerminalReason::Failed {
                     message: e.to_string(),
                 },
+                None,
             );
         }
         Err(_timeout) => {
@@ -782,6 +787,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 TerminalReason::Failed {
                     message: "prompt composition timed out".to_string(),
                 },
+                None,
             );
         }
     };
@@ -973,6 +979,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 TerminalReason::Failed {
                     message: "Max tool call rounds exceeded".into(),
                 },
+                None,
             );
         }
 
@@ -989,6 +996,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     TerminalReason::Failed {
                         message: e.to_string(),
                     },
+                    None,
                 );
             }
         };
@@ -1100,6 +1108,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         TerminalReason::Failed {
                             message: e.to_string(),
                         },
+                        None,
                     );
                 }
             }
@@ -1242,15 +1251,19 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             // Topic-boundary detection (#367): score the completed turn against
             // the running topic centroid after the response text has streamed
             // (so the user-facing reply is never delayed) and before the
-            // deferred memory-writing slot spawns. Detection only —
-            // retrospective compression (#368) and session splitting (#369)
-            // consume the signal in later stages.
+            // deferred memory-writing slot spawns. A detected boundary is
+            // carried back on the `StreamOutcome` so the actor can
+            // retroactively compress the span before the boundary (#368);
+            // session splitting (#369) consumes the same signal in a later
+            // stage.
+            let mut topic_boundary_score: Option<f32> = None;
             if !is_proactive {
                 let utterance_chars = user_input.chars().count();
                 if let Some(signal) =
                     session.detect_topic_boundary(&mind.topic_boundary, utterance_chars)
                 {
                     if signal.boundary {
+                        topic_boundary_score = Some(signal.score);
                         tracing::info!(
                             component = "TopicBoundary",
                             session_id = %session_id,
@@ -1417,6 +1430,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 &turn,
                 origin,
                 TerminalReason::Done,
+                topic_boundary_score,
             );
         }
 
@@ -1462,6 +1476,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     TerminalReason::Failed {
                         message: e.to_string(),
                     },
+                    None,
                 );
             }
         }

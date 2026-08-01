@@ -4,13 +4,15 @@ mod budget;
 mod compression;
 mod tokens;
 
-pub use budget::{BudgetMeta, ContextBudget, PackInput, PackedPrompt, pack_prompt};
+pub use budget::{
+    BudgetMeta, ContextBudget, PackInput, PackedPrompt, estimate_history_tokens, pack_prompt,
+};
 pub use compression::{
     ActiveSceneSummary, CompressionLevel, CompressionReason, CompressionResult,
     CompressionTaskInput, MIN_MESSAGES_TO_COMPRESS, PendingCompressionTask,
-    compression_has_usable_summary, evaluate_compression_trigger, execute_compression,
-    load_active_scene_summary, maybe_roll_up_chapter, poll_compression_result,
-    spawn_compression_task,
+    RetroactiveCompressionPlan, compression_has_usable_summary, evaluate_compression_trigger,
+    execute_compression, load_active_scene_summary, maybe_roll_up_chapter,
+    plan_retroactive_compression, poll_compression_result, spawn_compression_task,
 };
 pub use tokens::{estimate_tokens, tokens_to_chars, truncate_to_tokens};
 
@@ -30,13 +32,14 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
-    /// Evaluate whether compression should be triggered for the current session state.
+    /// Evaluate whether window-pressure compression should be triggered for the
+    /// current session state (#368: token-based).
     pub fn evaluate_compression_trigger(
         config: &ContextConfig,
         turn_count: usize,
-        history_len: usize,
+        history_tokens: usize,
     ) -> Option<CompressionReason> {
-        evaluate_compression_trigger(config, turn_count, history_len)
+        evaluate_compression_trigger(config, turn_count, history_tokens)
     }
 
     /// Load the active scene summary for prompt injection.
@@ -54,9 +57,14 @@ impl ContextManager {
         self.pending_compression.is_some()
     }
 
-    /// Evaluate trigger conditions and spawn a background compression task if warranted.
+    /// Evaluate the window-pressure trigger and spawn a background compression
+    /// task if warranted (#368: token-based).
     ///
-    /// Does nothing if a task is already pending or thresholds are not met.
+    /// This is the *secondary* trigger — a safety net for a topic that runs
+    /// long without a detected boundary (the *primary* trigger is
+    /// [`Self::check_and_trigger_retroactive`]). It compresses the oldest
+    /// messages, keeping the recent window. Does nothing if a task is already
+    /// pending or thresholds are not met.
     pub fn check_and_trigger(
         &mut self,
         config: &ContextConfig,
@@ -71,7 +79,8 @@ impl ContextManager {
         if self.pending_compression.is_some() {
             return;
         }
-        if evaluate_compression_trigger(config, turn_count, history.len()).is_none() {
+        let history_tokens = estimate_history_tokens(history);
+        if evaluate_compression_trigger(config, turn_count, history_tokens).is_none() {
             return;
         }
 
@@ -88,6 +97,85 @@ impl ContextManager {
         let compress_msg_count = i32::try_from(compress_count / 2).unwrap_or(i32::MAX).max(1);
         let turn_start = (turn_end - compress_msg_count).max(0);
 
+        self.spawn_scene_compression(
+            config,
+            session_id,
+            character_name,
+            user_name,
+            turns,
+            turn_start,
+            turn_end,
+            None,
+            store,
+            provider,
+        );
+    }
+
+    /// Plan and spawn a retroactive compression for a detected topic boundary
+    /// (#368).
+    ///
+    /// Called from the deferred post-turn slot once #367's detector signals a
+    /// boundary. The span *before* the boundary (the previous topic) is
+    /// summarized into a single scene span; the boundary turn onward is
+    /// retained, so the next turn sees "previous-topic summary + recent".
+    /// Does nothing if a task is already pending or there is no pre-boundary
+    /// span worth compressing.
+    pub fn check_and_trigger_retroactive(
+        &mut self,
+        config: &ContextConfig,
+        turn_count: usize,
+        history: &[HistoryEntry],
+        boundary_score: f32,
+        session_id: &str,
+        character_name: &str,
+        user_name: &str,
+        store: Arc<dyn MemoryPort>,
+        provider: Arc<dyn LlmProvider>,
+    ) {
+        if self.pending_compression.is_some() {
+            return;
+        }
+        let Some(plan) = plan_retroactive_compression(history, turn_count) else {
+            return;
+        };
+        tracing::info!(
+            component = "ContextCompression",
+            session_id,
+            score = boundary_score,
+            messages = plan.turns.len(),
+            turn_start = plan.turn_start,
+            turn_end = plan.turn_end,
+            "Topic boundary detected; compressing pre-boundary span"
+        );
+        self.spawn_scene_compression(
+            config,
+            session_id,
+            character_name,
+            user_name,
+            plan.turns,
+            plan.turn_start,
+            plan.turn_end,
+            Some(plan.drop_leading),
+            store,
+            provider,
+        );
+    }
+
+    /// Build a scene-level [`CompressionTaskInput`] and spawn it as the pending
+    /// task. Callers must have already checked [`Self::has_pending`].
+    fn spawn_scene_compression(
+        &mut self,
+        config: &ContextConfig,
+        session_id: &str,
+        character_name: &str,
+        user_name: &str,
+        turns: Vec<HistoryEntry>,
+        turn_start: i32,
+        turn_end: i32,
+        drop_leading: Option<usize>,
+        store: Arc<dyn MemoryPort>,
+        provider: Arc<dyn LlmProvider>,
+    ) {
         let input = CompressionTaskInput {
             session_id: session_id.to_string(),
             character_name: character_name.to_string(),
@@ -97,6 +185,7 @@ impl ContextManager {
             turn_end,
             level: CompressionLevel::Scene,
             config: config.clone(),
+            drop_leading,
         };
         spawn_compression_task(&mut self.pending_compression, store, provider, input);
     }
