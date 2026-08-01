@@ -26,6 +26,7 @@ RUST_LOG=info cargo run -p ene-cli
 | コマンド | 説明 |
 |---|---|
 | `/help` | 利用可能なスラッシュコマンドの一覧を表示 |
+| `/prompt` | AI に送信されるメッセージ列をそのままプレビュー（`build_messages` の出力を直接表示） |
 | `/memory list` | アクティブセッションで想起された記憶ファクトを表示 |
 | `/memory clear` | アクティブセッションの記憶をリセット |
 | `/tool list` | 登録済み IPC ツールプラグインおよび MCP サーバーを表示 |

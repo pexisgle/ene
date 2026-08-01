@@ -376,4 +376,57 @@ mod tests {
             "phi should contain output contract directive: {phi}"
         );
     }
+
+    /// Regression for #342: the example messages are injected on the first
+    /// turn (empty history) and dropped once history is non-empty. The
+    /// `/prompt` debug command renders `build_messages` output directly, so
+    /// pinning the condition here keeps the preview honest.
+    #[test]
+    fn build_messages_injects_example_only_on_first_turn() {
+        let lib = PromptLibrary::built_in_english();
+        let mut card = test_card("I am TestChar.", "", "", "");
+        card.data.mes_example = "<START>\n{{user}}: Hi\n{{char}}: Hello!".to_string();
+
+        let first_ctx = MessageBuildContext {
+            card: &card,
+            user_input: "Hi",
+            history: &[],
+            runtime_context: None,
+            runtime_rules: "",
+            user_name: "Alice",
+            prompts: &lib,
+            emotion_enabled: false,
+        };
+        let first = build_messages(&first_ctx).expect("first turn should build");
+        assert!(
+            first.iter().any(|m| matches!(
+                m,
+                LlmMessage::System { content } if content.contains("Hello!")
+            )),
+            "example should be injected on the empty-history (first) turn: {first:?}"
+        );
+
+        let history = vec![ene_mind::HistoryEntry {
+            role: Role::User,
+            content: "Hi".to_string(),
+        }];
+        let later_ctx = MessageBuildContext {
+            card: &card,
+            user_input: "Hi again",
+            history: &history,
+            runtime_context: None,
+            runtime_rules: "",
+            user_name: "Alice",
+            prompts: &lib,
+            emotion_enabled: false,
+        };
+        let later = build_messages(&later_ctx).expect("later turn should build");
+        assert!(
+            !later.iter().any(|m| matches!(
+                m,
+                LlmMessage::System { content } if content.contains("Hello!")
+            )),
+            "example must not be injected once history is non-empty: {later:?}"
+        );
+    }
 }
