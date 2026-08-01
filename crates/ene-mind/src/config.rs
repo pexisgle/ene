@@ -242,6 +242,18 @@ pub struct MindMemoryConfig {
     pub commitment_title_similarity_threshold: f32,
     /// Maximum pure-recent fallback candidates gathered during hybrid search.
     pub recent_fallback_limit: usize,
+    /// Maximum unconfirmed pending candidates that compete in recall.
+    ///
+    /// Candidates the arbiter deferred with `AskConfirmationLater` sit
+    /// in the user-approval queue rather than the typed-memory table, so the
+    /// store's gather cannot surface them. Recall loads the live `pending`
+    /// queue and lets up to this many candidates compete in the normal hybrid
+    /// score competition — topic proximity (lexical overlap with the query)
+    /// gates which of them actually surface, so the character only learns of
+    /// unconfirmed info when the conversation touches the topic. `0` disables
+    /// pending-candidate recall entirely (the settings-screen review list is
+    /// unaffected).
+    pub recall_pending_candidate_limit: usize,
     /// Candidate pool size multiplier base for journal / diagnostics search.
     pub journal_candidate_pool_size: usize,
     /// Minimum vector similarity for journal / diagnostics search (#123).
@@ -344,6 +356,7 @@ impl Default for MindMemoryConfig {
             commitment_boost: 0.25,
             commitment_title_similarity_threshold: 0.82,
             recent_fallback_limit: 5,
+            recall_pending_candidate_limit: 3,
             journal_candidate_pool_size: 64,
             journal_similarity_threshold: 0.45,
             journal_min_score: 0.10,

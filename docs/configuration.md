@@ -258,6 +258,14 @@ All four are probabilities/ratios and are clamped into `0.0..=1.0` on load.
 model's similarity distribution, so re-tune it when the embedding provider is
 swapped.
 
+Candidates deferred to user confirmation (`AskConfirmationLater`) sit in
+the `pending_candidates` queue. Besides the desktop settings-screen review list,
+they also compete in hybrid recall so the character can ask about them when the
+topic comes up — surfacing candidates are marked `[unconfirmed]` in the prompt.
+`recall_pending_candidate_limit` (default `3`) caps how many compete per turn;
+`0` disables the recall path without affecting the settings-screen review list.
+The cap is code-tunable in `MindMemoryConfig` and not yet exposed via settings.
+
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 
 Manages out-of-process tool plugins and Model Context Protocol (MCP) servers:

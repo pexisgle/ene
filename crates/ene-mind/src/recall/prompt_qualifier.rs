@@ -4,7 +4,7 @@
     clippy::option_if_let_else,
     reason = "nursery style; match/if-let clarity preferred locally"
 )]
-use ene_core::MemoryStatus;
+use ene_core::{MemoryCandidateSource, MemoryStatus};
 
 use crate::recall::RecalledMemory;
 
@@ -19,6 +19,14 @@ pub fn format_recalled_content(memory: &RecalledMemory) -> String {
 
 /// Return a prompt prefix for uncertain or disputed memories, if any.
 pub fn recall_content_qualifier(memory: &RecalledMemory) -> Option<&'static str> {
+    // Pending candidates are unconfirmed by construction: they sit in
+    // the user-approval queue, so the character should treat them as
+    // hearsay to verify in conversation, not as established fact. Checked
+    // first — an unconfirmed candidate is at least unconfirmed regardless of
+    // its other signals.
+    if memory.sources.contains(&MemoryCandidateSource::Pending) {
+        return Some("[unconfirmed] ");
+    }
     if memory.item.status == MemoryStatus::Faded {
         return Some("[uncertain] ");
     }
@@ -34,13 +42,12 @@ pub fn recall_content_qualifier(memory: &RecalledMemory) -> Option<&'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recall::{RecallReason, RecalledMemory};
     use chrono::Utc;
     use ene_store::{
         AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemorySalience, MemoryScope,
         MemoryScoreBreakdown, MemorySource, MemoryStatus,
     };
-
-    use crate::recall::{RecallReason, RecalledMemory};
 
     fn sample_recalled(status: MemoryStatus, confidence: f32) -> RecalledMemory {
         RecalledMemory {
@@ -114,5 +121,29 @@ mod tests {
     fn active_high_confidence_has_no_prefix() {
         let memory = sample_recalled(MemoryStatus::Active, 0.9);
         assert_eq!(format_recalled_content(&memory), "likes tea");
+    }
+
+    #[test]
+    fn pending_sourced_memory_gets_unconfirmed_prefix() {
+        let memory = RecalledMemory {
+            sources: vec![MemoryCandidateSource::Pending],
+            ..sample_recalled(MemoryStatus::Active, 0.9)
+        };
+        assert_eq!(format_recalled_content(&memory), "[unconfirmed] likes tea");
+    }
+
+    #[test]
+    fn pending_sourced_memory_gets_unconfirmed_prefix_even_when_disputed_like() {
+        // The Pending marker is keyed on the recall source, not on status or
+        // confidence, so even a high-confidence active candidate is marked.
+        let memory = RecalledMemory {
+            sources: vec![MemoryCandidateSource::Pending],
+            ..sample_recalled(MemoryStatus::Active, 0.95)
+        };
+        assert_eq!(
+            recall_content_qualifier(&memory),
+            Some("[unconfirmed] "),
+            "unconfirmed marker must not depend on status or confidence"
+        );
     }
 }
