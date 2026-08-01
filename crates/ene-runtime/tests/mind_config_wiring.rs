@@ -106,7 +106,7 @@ fn mind_section_defaults_match_macro_definition() {
         MindMemoryConfig::default(),
         "mind.memory should equal the code defaults"
     );
-    assert_eq!(mind.context.max_prompt_tokens, 12_000);
+    assert_eq!(mind.context.max_prompt_tokens, None);
     assert!(mind.emotion.enabled);
     assert!(!mind.proactive.enabled);
     assert_eq!(mind.proactive.interval_seconds, 60);
@@ -122,7 +122,7 @@ fn mind_section_round_trips_public_fields_only() {
     custom.proactive.interval_seconds = 90;
     custom.emotion.enabled = false;
     // Mutating skipped fields must not survive JSON round-trip.
-    custom.context.max_prompt_tokens = 16_384;
+    custom.context.max_prompt_tokens = Some(16_384);
     cfg.set_section(&custom)
         .expect("set_section should succeed for settings-target");
 

@@ -747,6 +747,7 @@ impl PluginHostManager {
                             Arc::clone(&conn),
                             name.clone(),
                             is_builtin_plugin(name),
+                            spec.context_window,
                             spec.concurrency,
                         );
                         llm_factories.insert(

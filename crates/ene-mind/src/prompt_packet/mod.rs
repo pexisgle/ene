@@ -191,8 +191,6 @@ mod tests {
         history: Vec<HistoryEntry>,
         post_history_block: Option<String>,
         user_input: impl Into<String>,
-        max_prompt_tokens: usize,
-        style_example_budget_tokens: usize,
     ) -> PromptPacket {
         let (semantic, profile, episodic) = classify_recalled_memories(recalled);
         let mut sections = Vec::new();
@@ -200,14 +198,12 @@ mod tests {
         sections.push(PromptSection::new(
             PromptSectionKind::IdentityKernel,
             kernel.text,
-            0,
         ));
 
         if let Some(affect) = affect_summary {
             sections.push(PromptSection::new(
                 PromptSectionKind::CharacterState,
                 affect,
-                200,
             ));
         }
 
@@ -218,11 +214,7 @@ mod tests {
                 .map(|line| format!("- {line}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            sections.push(PromptSection::new(
-                PromptSectionKind::SemanticContext,
-                body,
-                max_prompt_tokens / 4,
-            ));
+            sections.push(PromptSection::new(PromptSectionKind::SemanticContext, body));
         }
 
         if !profile.is_empty() {
@@ -232,18 +224,13 @@ mod tests {
                 .map(|line| format!("- {line}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            sections.push(PromptSection::new(
-                PromptSectionKind::UserProfile,
-                body,
-                max_prompt_tokens / 4,
-            ));
+            sections.push(PromptSection::new(PromptSectionKind::UserProfile, body));
         }
 
         if !commitments.is_empty() {
             sections.push(PromptSection::new(
                 PromptSectionKind::ActiveCommitments,
                 render_commitments_block(commitments),
-                400,
             ));
         }
 
@@ -257,7 +244,6 @@ mod tests {
             sections.push(PromptSection::new(
                 PromptSectionKind::EpisodicMemories,
                 body,
-                max_prompt_tokens / 3,
             ));
         }
 
@@ -267,25 +253,16 @@ mod tests {
                 .map(|e| e.text)
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            sections.push(PromptSection::new(
-                PromptSectionKind::StyleExamples,
-                body,
-                style_example_budget_tokens,
-            ));
+            sections.push(PromptSection::new(PromptSectionKind::StyleExamples, body));
         }
 
         if let Some(phi) = post_history_block {
-            sections.push(PromptSection::new(
-                PromptSectionKind::OutputContract,
-                phi,
-                0,
-            ));
+            sections.push(PromptSection::new(PromptSectionKind::OutputContract, phi));
         }
 
         sections.push(PromptSection::new(
             PromptSectionKind::UserInput,
             user_input.into(),
-            0,
         ));
 
         PromptPacket { sections, history }
@@ -311,8 +288,6 @@ mod tests {
             vec![],
             Some("PHI_MARKER".into()),
             "hello",
-            12_000,
-            600,
         );
         let (messages, meta) = packet.to_llm_messages();
         assert!(meta.identity_kernel_included);
@@ -346,18 +321,7 @@ mod tests {
             text: "KERNEL_MARKER".into(),
             post_history_instructions: None,
         };
-        let packet = compose_test_packet(
-            kernel,
-            vec![],
-            &[],
-            &[],
-            None,
-            vec![],
-            None,
-            "hello",
-            12_000,
-            600,
-        );
+        let packet = compose_test_packet(kernel, vec![], &[], &[], None, vec![], None, "hello");
         let (messages, meta) = packet.to_llm_messages();
         assert!(meta.identity_kernel_included);
         let LlmMessage::System { content } = &messages[0] else {
@@ -386,8 +350,6 @@ mod tests {
             history,
             Some("PHI_MARKER".into()),
             "current",
-            12_000,
-            600,
         );
         let (messages, meta) = packet.to_llm_messages();
         assert!(meta.post_history_included);
@@ -462,18 +424,7 @@ mod tests {
             },
             sources: vec![],
         }];
-        let packet = compose_test_packet(
-            kernel,
-            vec![],
-            &recalled,
-            &[],
-            None,
-            vec![],
-            None,
-            "hi",
-            12_000,
-            600,
-        );
+        let packet = compose_test_packet(kernel, vec![], &recalled, &[], None, vec![], None, "hi");
         let (messages, meta) = packet.to_llm_messages();
         assert_eq!(meta.recalled_memory_count, 1);
         let LlmMessage::System { content } = &messages[0] else {

@@ -47,29 +47,29 @@ ene_config::define_config!(
 // Sub-sections
 // ────────────────────────────────────────────
 
-/// Token budget allocation, compression triggers, and rolling summarization.
+/// Context window, compression triggers, and rolling summarization.
 ///
-/// NOTE: Allocation logic validates that the sub-budget fields
-/// (`scene_summary_tokens`, `memory_budget_tokens`, `semantic_budget_tokens`,
-/// `style_example_budget_tokens`) sum to ≤ `max_prompt_tokens` at startup.
+/// Per-section token budgets were removed in #370: prompt packing now fills
+/// the model's effective context window (#364) in priority order rather than
+/// allocating fixed sub-budgets. The only window-related knob here is
+/// `max_prompt_tokens`, an optional operator cap on the prompt window.
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ContextConfig {
-    /// Maximum total prompt tokens across all sections.
-    pub max_prompt_tokens: usize,
+    /// Optional operator cap on the prompt window, in tokens.
+    ///
+    /// When set, combined with the model's advertised window as
+    /// `min(advertised, max_prompt_tokens)` when computing the effective
+    /// context window (#364, #370), so it can only ever *shrink* a model's
+    /// stated limit, never exceed it. When `None` (the default) the prompt
+    /// auto-follows the model's advertised window. Packing then fills that
+    /// window in priority order rather than against per-section sub-budgets.
+    pub max_prompt_tokens: Option<usize>,
     /// Number of recent conversation turns to include in the prompt.
     pub recent_turns: usize,
-    /// Token budget for the scene/summary section.
-    pub scene_summary_tokens: usize,
-    /// Token budget for recalled memories.
-    pub memory_budget_tokens: usize,
-    /// Token budget for semantic (lorebook) memory.
-    pub semantic_budget_tokens: usize,
-    /// Token budget for style examples from `CCv3` lorebook.
-    pub style_example_budget_tokens: usize,
     /// Turn count threshold before scene-level compression runs.
     pub scene_turn_threshold: usize,
     /// Number of scene spans before chapter rollup.
@@ -85,12 +85,8 @@ pub struct ContextConfig {
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            max_prompt_tokens: 12_000,
+            max_prompt_tokens: None,
             recent_turns: 8,
-            scene_summary_tokens: 800,
-            memory_budget_tokens: 1_800,
-            semantic_budget_tokens: 1_200,
-            style_example_budget_tokens: 600,
             scene_turn_threshold: 12,
             chapter_span_threshold: 5,
             arc_span_threshold: 3,

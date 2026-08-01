@@ -10,7 +10,6 @@ use crate::commitments::CommitmentLedger;
 use crate::config::MindConfig;
 use crate::context::{
     ContextBudget, ContextManager, PackInput, load_active_scene_summary, pack_prompt,
-    validate_context_config,
 };
 use crate::emotion::TurnAffectInput;
 use crate::error::CognitionError;
@@ -88,11 +87,6 @@ impl CognitionEngine {
             output: crate::output::OutputArbiter,
             commitments: CommitmentLedger,
         }
-    }
-
-    /// Validate cognitive configuration, including context sub-budgets.
-    pub fn validate_config(config: &MindConfig) -> Result<(), CognitionError> {
-        validate_context_config(&config.context)
     }
 
     /// Sync `CCv3` lorebook and style indices when the card or config changes.
@@ -259,8 +253,6 @@ impl CognitionEngine {
             user_id = %ctx.user_name,
             turn_id = ctx.history.len() + 1,
             result_limit = recall_plan.budget.result_limit,
-            memory_budget_tokens = recall_plan.budget.memory_budget_tokens,
-            semantic_budget_tokens = recall_plan.budget.semantic_budget_tokens,
             recalled_count = recalled.len(),
             "Cognitive recall plan generated"
         );
@@ -306,11 +298,7 @@ impl CognitionEngine {
                 character_id: ctx.character_id.to_string(),
                 user_id: Some(ctx.user_name.to_string()),
             },
-            budget: RecallBudgetHints {
-                memory_budget_tokens: 0,
-                semantic_budget_tokens: 0,
-                result_limit: 0,
-            },
+            budget: RecallBudgetHints { result_limit: 0 },
             search: RecallSearchHints {
                 primary_query_text: String::new(),
                 similarity_threshold: 0.0,
@@ -381,12 +369,12 @@ impl CognitionEngine {
         pre: PreTurnOutput,
         prefetch: ComposePrefetch,
     ) -> Result<ComposedPrompt, CognitionError> {
-        Self::validate_config(ctx.config)?;
-
         // Destructure to move the recalled/commitment vectors into the pack
-        // input without cloning (#review M2).
+        // input without cloning (#review M2). `recall_plan` is no longer needed
+        // here now that packing budgets against the context window, not recall
+        // hints (#370).
         let PreTurnOutput {
-            recall_plan,
+            recall_plan: _,
             affect,
             recalled,
             commitments,
@@ -487,7 +475,57 @@ impl CognitionEngine {
             user_input: ctx.user_input.to_string(),
         };
 
-        let budget = ContextBudget::from_config_and_hints(&ctx.config.context, &recall_plan.budget);
+        // Budget the prompt against the model's effective context window
+        // (#364, #370): `min(provider-advertised, operator override,
+        // mind.context.max_prompt_tokens)` minus the response reserve and
+        // safety margin. Packing then fills that window in priority order
+        // rather than against per-section sub-budgets. Tests may inject a
+        // deterministic budget via `packing_budget_override`.
+        let budget = if let Some(tokens) = ctx.packing_budget_override {
+            ContextBudget::with_capacity(tokens)
+        } else {
+            let ai_config = ene_config::get_global_config()
+                .get_section::<ene_ai::AiConfig>()
+                .unwrap_or_default();
+            let chat_task = &ai_config.tasks.chat;
+            let provider_advertised = ctx
+                .llm_provider
+                .as_deref()
+                .and_then(ene_ai::LlmProvider::context_window);
+            // Two operator shrinkage caps, combined as a min so configuration
+            // can only ever narrow the model's stated window: the per-provider
+            // `context_window` override and the mind-level `max_prompt_tokens`
+            // (#370). Either being `None` leaves the other (or the advertised
+            // window) in force; both `None` defers entirely to the model, so
+            // the prompt auto-follows the model's context size.
+            let provider_override = ai_config
+                .providers
+                .get(&chat_task.provider)
+                .and_then(|def| def.context_window);
+            let max_prompt_cap = ctx
+                .config
+                .context
+                .max_prompt_tokens
+                .and_then(|tokens| u32::try_from(tokens).ok());
+            let user_configured = match (provider_override, max_prompt_cap) {
+                (Some(provider), Some(cap)) => Some(provider.min(cap)),
+                (Some(provider), None) => Some(provider),
+                (None, Some(cap)) => Some(cap),
+                (None, None) => None,
+            };
+            let window = ene_ai::effective_window(
+                provider_advertised,
+                user_configured,
+                chat_task.max_tokens,
+                ene_ai::DEFAULT_SAFETY_MARGIN_FRACTION,
+            );
+            // Guard against the degenerate case where the response reserve eats
+            // the entire window (e.g. no advertised window and max_tokens ==
+            // DEFAULT_CONTEXT_WINDOW): guarantee at least half the effective
+            // window for the prompt so packing always has room to work.
+            let available = window.available.max(window.effective / 2);
+            ContextBudget::with_capacity(usize::try_from(available).unwrap_or(usize::MAX))
+        };
         let packed = pack_prompt(pack_input, &budget);
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections.clone_from(&packed.meta.dropped);
@@ -945,11 +983,7 @@ mod turn_id_tests {
                     character_id: "ene".into(),
                     user_id: Some("user".into()),
                 },
-                budget: RecallBudgetHints {
-                    memory_budget_tokens: 256,
-                    semantic_budget_tokens: 128,
-                    result_limit: 4,
-                },
+                budget: RecallBudgetHints { result_limit: 4 },
                 search: RecallSearchHints {
                     primary_query_text: "hi".into(),
                     similarity_threshold: 0.0,
@@ -984,6 +1018,7 @@ mod turn_id_tests {
             embedder: None,
             llm_provider: None,
             post_history_block: None,
+            packing_budget_override: None,
         };
         let composed = engine
             .compose_prompt_packet(ctx, pre, prefetch)

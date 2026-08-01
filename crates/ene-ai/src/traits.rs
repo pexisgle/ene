@@ -15,6 +15,18 @@ pub trait LlmProvider: Send + Sync {
     /// Provider display name (e.g. `"openai"`, `"ollama"`).
     fn name(&self) -> &str;
 
+    /// Context window the backend advertises for the active model, in tokens.
+    ///
+    /// `None` means the backend does not report a limit — an in-process
+    /// provider that does not know its own window, or an older plugin binary
+    /// that omits `LlmProviderSpec.context_window`. Callers reconcile this with
+    /// any operator override via [`crate::context_window::effective_window`],
+    /// which falls back to [`crate::context_window::DEFAULT_CONTEXT_WINDOW`]
+    /// when neither source names a limit (#364, #370).
+    fn context_window(&self) -> Option<u32> {
+        None
+    }
+
     /// Initiates a chat completion stream with the given messages and tools.
     async fn create_chat_stream(
         &self,

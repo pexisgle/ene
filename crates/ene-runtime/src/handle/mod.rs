@@ -325,7 +325,6 @@ impl EneHandle {
         ene_voice::register_providers();
 
         let mind = config.get_section::<ene_mind::MindConfig>()?;
-        ene_mind::CognitionEngine::validate_config(&mind).map_err(EneRuntimeError::from)?;
 
         // Startup validation (#366): warn when a configured context window is
         // too small for the prompt budget plus output reserve, since prompt

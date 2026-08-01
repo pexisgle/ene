@@ -71,7 +71,7 @@ pub async fn execute_hybrid_recall(
         user_id: Some(input.user_id),
     };
 
-    let options = RecallPlannerOptions::from_config(&config.context, &config.memory);
+    let options = RecallPlannerOptions::from_config(&config.memory);
     let plan = RecallPlanner::plan(&planner_input, &options)?;
 
     let search_options = RecallPlanner::to_memory_search_options(

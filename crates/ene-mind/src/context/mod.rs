@@ -4,9 +4,7 @@ mod budget;
 mod compression;
 mod tokens;
 
-pub use budget::{
-    BudgetMeta, ContextBudget, PackInput, PackedPrompt, pack_prompt, validate_context_config,
-};
+pub use budget::{BudgetMeta, ContextBudget, PackInput, PackedPrompt, pack_prompt};
 pub use compression::{
     ActiveSceneSummary, CompressionLevel, CompressionReason, CompressionResult,
     CompressionTaskInput, MIN_MESSAGES_TO_COMPRESS, PendingCompressionTask,
@@ -32,11 +30,6 @@ pub struct ContextManager {
 }
 
 impl ContextManager {
-    /// Validate context configuration at startup.
-    pub fn validate_config(config: &ContextConfig) -> Result<(), CognitionError> {
-        validate_context_config(config)
-    }
-
     /// Evaluate whether compression should be triggered for the current session state.
     pub fn evaluate_compression_trigger(
         config: &ContextConfig,

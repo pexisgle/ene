@@ -88,30 +88,29 @@ async fn insert_memory(
         .unwrap()
 }
 
-/// Build a config whose sub-budgets satisfy the `max_prompt_tokens` validation
-/// (`scene + memory + semantic + style <= total`).
-fn test_config(max_prompt_tokens: usize, memory_budget_tokens: usize) -> MindConfig {
+/// Build a config for the packing tests.
+///
+/// Per-section budgets are gone (#370); the packing budget is injected
+/// directly via `TurnContext::packing_budget_override` in [`compose`], so the
+/// config only needs its defaults.
+fn test_config() -> MindConfig {
     MindConfig {
-        context: ContextConfig {
-            max_prompt_tokens,
-            scene_summary_tokens: 10,
-            memory_budget_tokens,
-            semantic_budget_tokens: 10,
-            style_example_budget_tokens: 10,
-            ..ContextConfig::default()
-        },
+        context: ContextConfig::default(),
         ..MindConfig::default()
     }
 }
 
 /// Compose a prompt packet for a turn with the given recalled memories.
+///
+/// `packing_budget` is injected via `TurnContext::packing_budget_override` so
+/// the drop/trim behaviour is deterministic and independent of the global AI
+/// config or a live provider (#370).
 async fn compose(
     engine: &CognitionEngine,
     config: &MindConfig,
     store: Option<&dyn ene_core::MemoryPort>,
     recalled: Vec<RecalledMemory>,
-    memory_budget_tokens: usize,
-    semantic_budget_tokens: usize,
+    packing_budget: usize,
 ) -> ComposedPrompt {
     let card = ene_config::CharacterCardV3::default();
     let pre = PreTurnOutput {
@@ -124,11 +123,7 @@ async fn compose(
                 character_id: "ene".into(),
                 user_id: Some("user".into()),
             },
-            budget: RecallBudgetHints {
-                memory_budget_tokens,
-                semantic_budget_tokens,
-                result_limit: 8,
-            },
+            budget: RecallBudgetHints { result_limit: 8 },
             search: RecallSearchHints {
                 primary_query_text: "test".into(),
                 similarity_threshold: 0.0,
@@ -160,6 +155,7 @@ async fn compose(
         embedder: None,
         llm_provider: None,
         post_history_block: None,
+        packing_budget_override: Some(packing_budget),
     };
     engine
         .compose_prompt_packet(ctx, pre, prefetch)
@@ -168,15 +164,13 @@ async fn compose(
 }
 
 #[tokio::test]
-async fn injected_memories_are_bumped_and_truncated_ones_are_not() {
+async fn injected_memories_are_bumped_when_section_fits() {
     let store = MemoryStore::open_in_memory(4).await.unwrap();
     let engine = CognitionEngine::new();
 
-    // Two episodic memories with identical bullet sizes: a 6-token section
-    // budget (24 chars) fits one 16-char bullet but not two, so the
-    // low-confidence memory is trimmed at build time and the high-confidence
-    // one survives.
-    let survivor_id = insert_memory(
+    // Two episodic memories in the same section. With a generous budget the
+    // whole section fits, so both are injected and bumped (#345).
+    let first_id = insert_memory(
         &store,
         MemoryKind::Episodic,
         MemorySource::Conversation,
@@ -184,7 +178,7 @@ async fn injected_memories_are_bumped_and_truncated_ones_are_not() {
         0.9,
     )
     .await;
-    let trimmed_id = insert_memory(
+    let second_id = insert_memory(
         &store,
         MemoryKind::Episodic,
         MemorySource::Conversation,
@@ -193,38 +187,34 @@ async fn injected_memories_are_bumped_and_truncated_ones_are_not() {
     )
     .await;
 
-    let survivor = store.get_typed_memory(survivor_id).await.unwrap().unwrap();
-    let trimmed = store.get_typed_memory(trimmed_id).await.unwrap().unwrap();
+    let first = store.get_typed_memory(first_id).await.unwrap().unwrap();
+    let second = store.get_typed_memory(second_id).await.unwrap().unwrap();
     let recalled = vec![
-        build_recalled(trimmed, RecallReason::SimilarTopic),
-        build_recalled(survivor, RecallReason::SimilarTopic),
+        build_recalled(first, RecallReason::SimilarTopic),
+        build_recalled(second, RecallReason::SimilarTopic),
     ];
 
-    let config = test_config(100_000, 6);
-    let composed = compose(&engine, &config, Some(&store), recalled, 6, 100).await;
+    let config = test_config();
+    let composed = compose(&engine, &config, Some(&store), recalled, 100_000).await;
 
+    let mut injected = composed.meta.injected_memory_ids.clone();
+    injected.sort_unstable();
     assert_eq!(
-        composed.meta.injected_memory_ids,
-        vec![survivor_id],
-        "only the memory that survived the section budget may be injected"
+        injected,
+        vec![first_id, second_id],
+        "both memories in a fitting section must be injected"
     );
     assert!(
         composed.meta.dropped_sections.is_empty(),
-        "a generous total budget should not drop any section"
+        "a generous budget should not drop any section"
     );
 
-    let survivor = store.get_typed_memory(survivor_id).await.unwrap().unwrap();
-    let trimmed = store.get_typed_memory(trimmed_id).await.unwrap().unwrap();
-    assert_eq!(
-        survivor.access_count, 1,
-        "the injected memory must be bumped"
-    );
-    assert!(survivor.last_accessed_at.is_some());
-    assert_eq!(
-        trimmed.access_count, 0,
-        "the section-budget-trimmed memory must not be bumped"
-    );
-    assert!(trimmed.last_accessed_at.is_none());
+    let first = store.get_typed_memory(first_id).await.unwrap().unwrap();
+    let second = store.get_typed_memory(second_id).await.unwrap().unwrap();
+    assert_eq!(first.access_count, 1, "the first memory must be bumped");
+    assert!(first.last_accessed_at.is_some());
+    assert_eq!(second.access_count, 1, "the second memory must be bumped");
+    assert!(second.last_accessed_at.is_some());
 }
 
 #[tokio::test]
@@ -255,8 +245,8 @@ async fn dropped_section_memories_are_not_bumped() {
     // the actual kernel/affect/platform overhead rather than hardcoded token
     // estimates that would depend on the card defaults.
     let baseline = {
-        let config = test_config(100_000, 100);
-        let composed = compose(&engine, &config, Some(&store), vec![], 100, 100).await;
+        let config = test_config();
+        let composed = compose(&engine, &config, Some(&store), vec![], 100_000).await;
         composed.meta.packed_tokens
     };
 
@@ -267,10 +257,12 @@ async fn dropped_section_memories_are_not_bumped() {
         build_recalled(episodic, RecallReason::SimilarTopic),
     ];
 
-    // Baseline + 20 tokens fits the surviving sections; the ~90-token episodic
-    // section pushes the packet over, so the drop loop clears it.
-    let config = test_config(baseline + 20, 6);
-    let composed = compose(&engine, &config, Some(&store), recalled, 100, 100).await;
+    // Baseline + 20 tokens fits the small surviving semantic section but not
+    // the ~90-token episodic section, so the drop loop sheds the
+    // lower-priority episodic section (priority 30) before the semantic one
+    // (priority 40).
+    let config = test_config();
+    let composed = compose(&engine, &config, Some(&store), recalled, baseline + 20).await;
 
     assert!(
         composed
