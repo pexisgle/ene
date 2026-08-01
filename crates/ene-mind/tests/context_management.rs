@@ -192,6 +192,8 @@ fn base_pack_input() -> PackInput {
         user_persona: None,
         compression_pending: false,
         user_input: "hi".into(),
+        lang: "en".into(),
+        now: None,
     }
 }
 
