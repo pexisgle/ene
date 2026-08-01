@@ -684,6 +684,28 @@ impl AiConfig {
         )
     }
 
+    /// The context window a task's model advertises from config alone (#386).
+    ///
+    /// Returns the local model's [`LocalModelDef::context_size`] when the task
+    /// routes to the local provider, or the operator's
+    /// `ai.providers.<name>.context_window` override otherwise. A cloud task
+    /// with no override returns `None` — its real window is only learned from
+    /// the provider at runtime — so callers fall back to
+    /// [`crate::context_window::DEFAULT_CONTEXT_WINDOW`].
+    #[must_use]
+    pub fn advertised_window_for_task(&self, task: &TaskRef) -> Option<u32> {
+        if AiConfig::is_local_provider(&task.provider) {
+            return task
+                .model
+                .as_deref()
+                .and_then(|name| self.local_models.get(name))
+                .map(|def| def.context_size);
+        }
+        self.providers
+            .get(&task.provider)
+            .and_then(|def| def.context_window)
+    }
+
     /// Resolve chat settings for an optional task (`None` → [`AiConfig::tasks`] chat).
     pub fn resolve_chat_task(
         &self,
@@ -1119,6 +1141,44 @@ mod tests {
         };
         let w = cfg.effective_window_for_task(&task, None);
         assert_eq!(w.effective, crate::context_window::DEFAULT_CONTEXT_WINDOW);
+    }
+
+    #[test]
+    fn advertised_window_reads_local_model_context_size() {
+        let cfg = local_chat_config(16_384, 2_048);
+        assert_eq!(
+            cfg.advertised_window_for_task(&cfg.tasks.chat),
+            Some(16_384)
+        );
+    }
+
+    #[test]
+    fn advertised_window_reads_provider_override_for_cloud() {
+        let mut cfg = AiConfig::default();
+        cfg.providers.insert(
+            "default".to_string(),
+            AiProviderDef {
+                kind: "anthropic".to_string(),
+                context_window: Some(128_000),
+                ..AiProviderDef::default()
+            },
+        );
+        let task = TaskRef {
+            provider: "default".to_string(),
+            ..TaskRef::default()
+        };
+        assert_eq!(cfg.advertised_window_for_task(&task), Some(128_000));
+    }
+
+    #[test]
+    fn advertised_window_is_none_for_unconfigured_cloud_task() {
+        let cfg = AiConfig::default();
+        let task = TaskRef {
+            provider: "default".to_string(),
+            ..TaskRef::default()
+        };
+        // A cloud task with no override learns its window at runtime.
+        assert_eq!(cfg.advertised_window_for_task(&task), None);
     }
 
     /// Build an [`AiConfig`] whose chat and proactive tasks both route to a

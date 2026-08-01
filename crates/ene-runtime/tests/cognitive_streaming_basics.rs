@@ -125,6 +125,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm.clone()),
+        available_window: None,
         post_history_block: None,
         packing_budget_override: None,
     };
@@ -152,6 +153,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm),
+        available_window: None,
         post_history_block: None,
         packing_budget_override: None,
     };
@@ -227,6 +229,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm.clone()),
+        available_window: None,
         post_history_block: phi.as_deref(),
         packing_budget_override: None,
     };
@@ -247,6 +250,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm),
+        available_window: None,
         post_history_block: phi.as_deref(),
         packing_budget_override: None,
     };
@@ -305,6 +309,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm.clone()),
+        available_window: None,
         post_history_block: None,
         packing_budget_override: None,
     };
@@ -325,6 +330,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         query_embedding: Some(&query_emb),
         embedder: Some(&embedder),
         llm_provider: Some(llm),
+        available_window: None,
         post_history_block: None,
         packing_budget_override: None,
     };

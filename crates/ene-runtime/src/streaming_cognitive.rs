@@ -131,6 +131,7 @@ fn build_turn_context<'a>(
     query_embedding: Option<&'a [f32]>,
     embedder: Option<&'a std::sync::Arc<dyn ene_ai::EmbeddingProvider>>,
     provider: &std::sync::Arc<dyn ene_ai::LlmProvider>,
+    available_window: usize,
     post_history_block: Option<&'a str>,
 ) -> TurnContext<'a> {
     TurnContext {
@@ -147,6 +148,7 @@ fn build_turn_context<'a>(
         query_embedding,
         embedder,
         llm_provider: Some(provider.clone()),
+        available_window: Some(available_window),
         post_history_block,
         packing_budget_override: None,
     }
@@ -322,6 +324,16 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mind = config.get_section::<MindConfig>().unwrap_or_default();
     let engine = CognitionEngine::new();
 
+    // Prompt tokens the model's context window leaves for this turn, used to
+    // scale window-relative budgets such as the Identity Kernel (#386). A cloud
+    // task with no configured window falls back to the conservative default.
+    let available_window = {
+        let ai_config = config.get_section::<ene_ai::AiConfig>().unwrap_or_default();
+        let advertised = ai_config.advertised_window_for_task(&ai_config.tasks.chat);
+        let window = ai_config.effective_window_for_task(&ai_config.tasks.chat, advertised);
+        usize::try_from(window.available).unwrap_or(usize::MAX)
+    };
+
     let plugin_config = config
         .get_section::<ene_plugin_host::PluginConfig>()
         .unwrap_or_default();
@@ -421,6 +433,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             None,
             Some(sync_embedder),
             &provider,
+            available_window,
             post_history_phi.as_deref(),
         );
         tracing::info!(%turn, "Synchronizing character card memories...");
@@ -525,6 +538,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             query_embedding.as_deref(),
             embedder.as_ref(),
             &provider,
+            available_window,
             post_history_phi.as_deref(),
         );
         let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
@@ -588,6 +602,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             query_embedding.as_deref(),
             embedder.as_ref(),
             &provider,
+            available_window,
             post_history_phi.as_deref(),
         );
         let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
@@ -704,6 +719,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         query_embedding.as_deref(),
         embedder.as_ref(),
         &provider,
+        available_window,
         post_history_phi.as_deref(),
     );
     let prefetch = ComposePrefetch {

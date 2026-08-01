@@ -8,7 +8,7 @@ mod style;
 mod sync;
 
 pub use authors_note::{AuthorsNote, apply_authors_note};
-pub use compiler::{CharacterCompiler, DEFAULT_IDENTITY_KERNEL_MAX_TOKENS};
+pub use compiler::{CharacterCompiler, identity_kernel_budget_tokens};
 pub use kernel::IdentityKernel;
 pub use lorebook::{
     LOREBOOK_SOURCE_PREFIX, LorebookIndexer, build_lorebook_scan_text,
@@ -36,6 +36,9 @@ pub struct CharacterProcessor;
 impl CharacterProcessor {
     /// Compile the identity kernel for a character card.
     ///
+    /// `available_window` is the number of prompt tokens the model's context
+    /// window leaves for this turn; the kernel budget is derived from it as a
+    /// fraction so larger models carry a fuller definition (#386).
     /// `user_persona`, when provided, expands the `{{user_persona}}` CBS macro
     /// in card-derived fields (#H-3).
     ///
@@ -47,20 +50,19 @@ impl CharacterProcessor {
         user_name: &str,
         user_persona: Option<&UserPersona>,
         pick_seed: Option<u64>,
-        max_tokens: usize,
+        available_window: usize,
     ) -> IdentityKernel {
-        CharacterCompiler::compile(card, user_name, user_persona, pick_seed, max_tokens)
+        CharacterCompiler::compile(card, user_name, user_persona, pick_seed, available_window)
     }
 
-    /// Compile the identity kernel using default token budget.
+    /// Compile the identity kernel assuming the conservative default window.
+    ///
+    /// Used when no model window is known (tests and callers outside a live
+    /// turn); the budget is still derived from a window rather than a fixed
+    /// token count (#386).
     pub fn compile_kernel_default(card: &CharacterCardV3, user_name: &str) -> IdentityKernel {
-        Self::compile_kernel(
-            card,
-            user_name,
-            None,
-            None,
-            DEFAULT_IDENTITY_KERNEL_MAX_TOKENS,
-        )
+        let window = usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX);
+        Self::compile_kernel(card, user_name, None, None, window)
     }
 
     /// Synchronize `CCv3` lorebook and style indices into typed memory.

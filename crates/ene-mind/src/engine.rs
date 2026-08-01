@@ -381,7 +381,13 @@ impl CognitionEngine {
             classifier_expression_hint: _,
         } = pre;
 
-        let max_kernel_tokens = ctx.config.character.identity_kernel_max_tokens;
+        // Size the identity kernel from the model's available window rather
+        // than a fixed token count, so larger models carry a fuller character
+        // definition (#386). Fall back to the conservative default window when
+        // the caller does not know it (tests / legacy paths).
+        let available_window = ctx.available_window.unwrap_or_else(|| {
+            usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX)
+        });
         // Load user persona from global config so the identity kernel can expand
         // the `{{user_persona}}` CBS macro at compile time (#H-3).
         let user_persona = ene_config::get_global_config().user_persona;
@@ -397,7 +403,7 @@ impl CognitionEngine {
             ctx.user_name,
             user_persona.as_ref(),
             pick_seed,
-            max_kernel_tokens,
+            available_window,
         );
 
         let style_examples = if let Some(examples) = prefetch.style_examples {
@@ -1017,6 +1023,7 @@ mod turn_id_tests {
             query_embedding: None,
             embedder: None,
             llm_provider: None,
+            available_window: None,
             post_history_block: None,
             packing_budget_override: None,
         };
