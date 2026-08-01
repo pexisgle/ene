@@ -225,13 +225,42 @@ pub(crate) fn redact_paths(input: &str) -> String {
 /// Standalone document names such as `顧客リスト.xlsx` are intentionally
 /// preserved — only the surrounding path is sensitive. The result may be empty
 /// when every token looked sensitive.
+///
+/// Tokenization is not whitespace-only. Japanese and Chinese titles routinely
+/// contain no spaces at all (`田中様_見積書_社外秘.xlsx編集中`), so splitting on
+/// whitespace alone would hand the entire title to the filters as one token —
+/// which then matches nothing, and the level would offer far weaker protection
+/// in CJK than in English. Splitting on the separators these titles actually
+/// use restores per-token filtering.
 fn redact_title(input: &str) -> String {
-    input
-        .split_whitespace()
+    split_title_tokens(input)
+        .into_iter()
         .filter(|t| !looks_like_path_or_email(t) && !looks_like_url(t) && !is_digit_heavy(t))
         .map(strip_digit_runs)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Separators that delimit fields inside a window title.
+///
+/// Whitespace plus the punctuation title bars are built from. Deliberately
+/// excludes anything that holds a path, URL, or filename together, because
+/// [`looks_like_path_or_email`] and [`looks_like_url`] can only recognize those
+/// as whole tokens: `.` and `/` (extensions, path segments) and ASCII `:` / `;`
+/// (drive letters, URL schemes). Their full-width counterparts are listed —
+/// those appear in CJK titles and never inside a path or URL.
+const TITLE_SEPARATORS: &[char] = &[
+    '_', '-', '|', ',', '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '＿', '－', 'ー', '｜',
+    '：', '；', '、', '，', '（', '）', '「', '」', '『', '』', '【', '】', '〔', '〕', '《', '》',
+    '〈', '〉', '·', '・', '…',
+];
+
+/// Split a window title into filterable tokens on whitespace and separators.
+fn split_title_tokens(input: &str) -> Vec<&str> {
+    input
+        .split(|c: char| c.is_whitespace() || TITLE_SEPARATORS.contains(&c))
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 /// Collapse interior runs of whitespace to single ASCII spaces so a raw title
@@ -407,6 +436,54 @@ mod tests {
 
         let cleaned = redact_title("report.docx - Word");
         assert!(cleaned.contains("report.docx"));
+    }
+
+    #[test]
+    fn redact_title_filters_space_free_cjk_titles() {
+        // Japanese titles routinely carry no spaces. Splitting on whitespace
+        // alone made the whole string one token, which matched none of the
+        // filters — so RedactedTitle protected an English title but passed a
+        // Japanese one through nearly untouched.
+        let cleaned = redact_title("見積書_C:\\Users\\tanaka\\secret.xlsx_編集中");
+        assert!(
+            !cleaned.contains("C:\\"),
+            "the embedded path must be dropped, got {cleaned:?}"
+        );
+        assert!(
+            !cleaned.contains("tanaka"),
+            "the path's user name must not survive, got {cleaned:?}"
+        );
+        assert!(
+            cleaned.contains("見積書"),
+            "topical text must survive, got {cleaned:?}"
+        );
+
+        let cleaned = redact_title("連絡先【090-1234-5678】・田中様");
+        assert!(
+            !cleaned.contains("5678"),
+            "a bracketed phone number must be dropped, got {cleaned:?}"
+        );
+        assert!(
+            cleaned.contains("田中様"),
+            "topical text must survive, got {cleaned:?}"
+        );
+
+        let cleaned = redact_title("資料｜https://intra.example.com/secret｜社外秘");
+        assert!(
+            !cleaned.contains("https://"),
+            "a URL between full-width bars must be dropped, got {cleaned:?}"
+        );
+        assert!(cleaned.contains("資料"), "got {cleaned:?}");
+    }
+
+    #[test]
+    fn split_title_tokens_keeps_paths_and_extensions_intact() {
+        // `.` and `/` must not be separators: the path and URL detectors need
+        // whole tokens to recognize, and document extensions carry topic.
+        assert_eq!(
+            split_title_tokens("報告書.docx_C:/tmp/x.txt"),
+            vec!["報告書.docx", "C:/tmp/x.txt"]
+        );
     }
 
     #[test]
