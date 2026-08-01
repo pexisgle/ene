@@ -1193,8 +1193,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 let displayed_expression = resolved
                     .iter()
                     .find(|(cue, _)| cue.kind == PerfKind::Expression)
-                    .map(|(cue, _)| cue.name.clone())
-                    .unwrap_or(fallback_expr);
+                    .map_or(fallback_expr, |(cue, _)| cue.name.clone());
                 turn_affect
                     .last_expression
                     .clone_from(&displayed_expression);
