@@ -68,7 +68,7 @@ pub struct BudgetMeta {
     /// session/DB history; the detached messages stay in the log until a later
     /// compression covers them.
     pub history_messages_detached: usize,
-    /// Approximate total tokens after packing (sections + history).
+    /// Approximate total tokens after packing (sections + history + author's note).
     pub packed_tokens: usize,
     /// IDs of recalled memories that actually survived into the packed prompt.
     ///
@@ -214,6 +214,18 @@ impl MemorySurvivors {
 /// Token cost of a single history entry (content estimate + per-message overhead).
 fn history_entry_tokens(entry: &HistoryEntry) -> usize {
     estimate_tokens(&entry.content).saturating_add(4)
+}
+
+/// Token cost of an author's note if it will be injected into history.
+///
+/// Mirrors [`apply_authors_note`]: inactive / empty notes cost nothing; active
+/// notes are counted as one history entry with the `[Author's Note]` prefix.
+fn authors_note_tokens(note: &AuthorsNote) -> usize {
+    if !note.active || note.content.trim().is_empty() {
+        return 0;
+    }
+    let content = format!("[Author's Note]\n{}", note.content.trim());
+    estimate_tokens(&content).saturating_add(4)
 }
 
 /// Estimate the total token cost of a history slice (per-entry content
@@ -408,13 +420,18 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
 /// Packing is a priority-ordered fill against `budget.total_tokens` (the
 /// effective window's available tokens):
 ///
-/// 1. required sections (platform contract, identity kernel, output contract,
+/// 1. an active author's note reserves its estimated tokens up front so packing
+///    cannot spend the budget the note will occupy after insertion;
+/// 2. required sections (platform contract, identity kernel, output contract,
 ///    user input) are always kept;
-/// 2. if the assembled prompt overflows the window, droppable sections are shed
-///    whole, lowest-[`PromptSectionKind::priority`] first, until it fits;
-/// 3. as a last resort the oldest history messages are trimmed.
+/// 3. if the assembled prompt overflows the remaining window, droppable
+///    sections are shed whole, lowest-[`PromptSectionKind::priority`] first,
+///    until it fits;
+/// 4. as a last resort the oldest history messages are trimmed;
+/// 5. the author's note is inserted into the post-trim history so its depth is
+///    relative to the history the model will see.
 ///
-/// When [`PackInput::compression_pending`] is set, step 2 is preceded by a
+/// When [`PackInput::compression_pending`] is set, step 3 is preceded by a
 /// synchronous detachment of the oldest span from the prompt-visible history
 /// (see the field's docs for the contract).
 ///
@@ -437,12 +454,18 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     let mut history_messages_detached = 0usize;
     let mut history_messages_dropped = 0usize;
 
+    // Reserve the note before packing so section/history fill cannot spend the
+    // tokens the note will add. Insertion still happens after trimming so depth
+    // is relative to the post-trim history length.
+    let note_tokens = input.authors_note.as_ref().map_or(0, authors_note_tokens);
+    let packing_ceiling = budget.total_tokens.saturating_sub(note_tokens);
+
     let mut total = section_tokens_cache
         .iter()
         .sum::<usize>()
         .saturating_add(estimate_history_tokens(&history));
 
-    if total > budget.total_tokens && input.compression_pending {
+    if total > packing_ceiling && input.compression_pending {
         // Synchronous detachment fallback during the async compression gap.
         // Give history the full remaining budget (keeping every section)
         // and detach whole spans from the front until the prompt fits or the
@@ -451,12 +474,12 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         // being summarized and the detached recent-window messages stay in the
         // log until a later compression covers them.
         let all_section_tokens: usize = section_tokens_cache.iter().sum();
-        let history_budget = budget.total_tokens.saturating_sub(all_section_tokens);
+        let history_budget = packing_ceiling.saturating_sub(all_section_tokens);
         history_messages_detached = detach_history_spans(&mut history, history_budget);
         total = all_section_tokens.saturating_add(estimate_history_tokens(&history));
     }
 
-    if total > budget.total_tokens {
+    if total > packing_ceiling {
         // Shed whole droppable sections, lowest priority first. Required
         // sections are never candidates.
         let mut order: Vec<usize> = (0..sections.len())
@@ -469,7 +492,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
                 .cmp(&sections[b].kind.priority())
         });
         for idx in order {
-            if total <= budget.total_tokens {
+            if total <= packing_ceiling {
                 break;
             }
             let kind = sections[idx].kind;
@@ -486,19 +509,17 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     }
 
     let section_tokens: usize = section_tokens_cache.iter().sum();
-    if total > budget.total_tokens {
-        let history_budget = budget.total_tokens.saturating_sub(section_tokens);
+    if total > packing_ceiling {
+        let history_budget = packing_ceiling.saturating_sub(section_tokens);
         history_messages_dropped = trim_history_to_budget(&mut history, history_budget);
         total = section_tokens.saturating_add(estimate_history_tokens(&history));
     }
 
-    // Apply author's note after history trimming so the depth is relative to
-    // the post-trim history length.
     if let Some(ref note) = input.authors_note {
         apply_authors_note(&mut history, note);
     }
 
-    let packed_tokens = total;
+    let packed_tokens = total.saturating_add(note_tokens);
 
     let injected_memory_ids = collect_injected_memory_ids(&survivors);
 
@@ -898,6 +919,75 @@ mod tests {
         assert!(packed.meta.history_messages_dropped > 0);
         assert_eq!(packed.packet.history.len(), 2);
         assert!(packed.meta.packed_tokens <= budget.total_tokens);
+    }
+
+    #[test]
+    fn pack_prompt_reserves_authors_note_tokens_in_budget() {
+        use crate::lifecycle::HistoryEntry;
+
+        let note = AuthorsNote::new("Stay in character and keep the scene tense.".repeat(3), 1);
+        let note_tokens = authors_note_tokens(&note);
+        assert!(note_tokens > 0, "fixture note must occupy budget");
+
+        // Tight enough that reserving the note forces oldest-history trim, yet
+        // still leaves room for the required kernel + one exchange + note.
+        let budget = ContextBudget::with_capacity(80);
+        let input = PackInput {
+            authors_note: Some(note),
+            history: vec![
+                HistoryEntry {
+                    role: ene_ai::Role::User,
+                    content: "old message with lots of text".repeat(4),
+                },
+                HistoryEntry {
+                    role: ene_ai::Role::Assistant,
+                    content: "older reply with lots of text".repeat(4),
+                },
+                HistoryEntry {
+                    role: ene_ai::Role::User,
+                    content: "recent".into(),
+                },
+                HistoryEntry {
+                    role: ene_ai::Role::Assistant,
+                    content: "latest".into(),
+                },
+            ],
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+
+        assert!(
+            packed.meta.history_messages_dropped > 0,
+            "note reservation must force history trim under this budget"
+        );
+        assert!(
+            packed
+                .packet
+                .history
+                .iter()
+                .any(|entry| entry.content.contains("[Author's Note]")),
+            "active author's note must still be inserted after trimming"
+        );
+        let expected = packed
+            .packet
+            .sections
+            .iter()
+            .map(|section| estimate_tokens(&section.content))
+            .sum::<usize>()
+            .saturating_add(estimate_history_tokens(&packed.packet.history));
+        assert_eq!(
+            packed.meta.packed_tokens, expected,
+            "packed_tokens must include the injected note"
+        );
+        assert!(
+            packed.meta.packed_tokens <= budget.total_tokens,
+            "note-inclusive packed_tokens must stay within budget, got {}",
+            packed.meta.packed_tokens
+        );
+        assert!(
+            packed.meta.packed_tokens >= note_tokens,
+            "packed_tokens must account for the reserved note tokens"
+        );
     }
 
     #[test]
