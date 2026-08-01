@@ -9,6 +9,7 @@ mod executor;
 mod input;
 mod intent;
 mod lorebook_boost;
+mod pending;
 mod plan;
 mod planner;
 mod prompt_qualifier;
@@ -24,6 +25,8 @@ pub use executor::RecallResultMapper;
 pub use input::{RecallPlannerInput, RecallTurn};
 /// Lorebook constant/key recall merge (#83).
 pub use lorebook_boost::merge_lorebook_recall;
+/// Unconfirmed pending-candidate recall merge (#356).
+pub use pending::gather_pending_candidates;
 /// Recall plan output DTOs.
 pub use plan::{RecallBudgetHints, RecallPlan, RecallScopeFilter, RecallSearchHints};
 /// Recall planner implementation and options.

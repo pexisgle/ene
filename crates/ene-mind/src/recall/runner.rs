@@ -5,6 +5,7 @@ use ene_config::CharacterCardV3;
 use ene_core::MemoryPort;
 
 use super::lorebook_boost::merge_lorebook_recall;
+use super::pending::gather_pending_candidates;
 use crate::commitments::CommitmentLedger;
 use crate::config::MindConfig;
 use crate::error::CognitionError;
@@ -82,11 +83,23 @@ pub async fn execute_hybrid_recall(
         &config.memory,
     );
 
-    let gathered = input
+    let mut gathered = input
         .store
         .search(&search_options)
         .await
         .map_err(CognitionError::MemoryPort)?;
+
+    // Unconfirmed candidates deferred to the user-approval queue (#174) compete
+    // in the same score competition as typed memories (#356). They carry no
+    // embedding, so `search` can never gather them; load the live `pending`
+    // queue and merge the topic-related ones here. `score_and_rank` below then
+    // applies the ordinary min_score floor and result limit, so a pending
+    // candidate only surfaces when the conversation touches its topic.
+    let pending_limit = config.memory.recall_pending_candidate_limit;
+    if pending_limit > 0 {
+        gather_pending_candidates(input.store, &search_options, &mut gathered, pending_limit).await;
+    }
+
     let mut scored = ene_rag::score_and_rank(&search_options, gathered);
 
     // Close the self-reflection feedback loop (#347): reflections are excluded
@@ -456,6 +469,155 @@ mod tests {
                 .iter()
                 .all(|m| (m.score_breakdown.reflection_multiplier - 1.0).abs() < f32::EPSILON),
             "disabled reflection must not adjust recall scores"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_candidate_surfaces_when_topic_related_only() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+
+        // A topic-related unconfirmed candidate: the arbiter deferred it with
+        // AskConfirmationLater (#174), so it sits in the pending queue.
+        store
+            .insert_pending_candidate(ene_core::PendingCandidate {
+                id: 0,
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "favorite drink".into(),
+                content: "the user's favorite drink is matcha".into(),
+                kind: MemoryKind::Preference,
+                confidence: 0.7,
+                reason_detail: "ambiguous contradiction".into(),
+                existing_memory_title: None,
+                existing_memory_id: None,
+                source_quote: "I like matcha".into(),
+                status: ene_core::PendingCandidateStatus::Pending,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+
+        // A topic-unrelated pending candidate that must not surface (topic
+        // gating): it shares no tokens at all with the query, so the lexical
+        // overlap gate drops it even though `min_score` is 0.0 in this test.
+        store
+            .insert_pending_candidate(ene_core::PendingCandidate {
+                id: 0,
+                character_id: "Ene".into(),
+                user_id: "User".into(),
+                title: "fabrication".into(),
+                content: "quantum entanglement fabrication procedures".into(),
+                kind: MemoryKind::Semantic,
+                confidence: 0.9,
+                reason_detail: "ambiguous contradiction".into(),
+                existing_memory_title: None,
+                existing_memory_id: None,
+                source_quote: "physics".into(),
+                status: ene_core::PendingCandidateStatus::Pending,
+                created_at: now,
+            })
+            .await
+            .unwrap();
+
+        let mut config = MindConfig::default();
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "What does the user like to drink?",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+            card: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+
+        let pending: Vec<_> = recalled
+            .iter()
+            .filter(|m| {
+                m.sources
+                    .contains(&ene_core::MemoryCandidateSource::Pending)
+            })
+            .collect();
+        assert_eq!(
+            pending.len(),
+            1,
+            "only the topic-related pending candidate should surface, got {pending:?}"
+        );
+        assert!(pending[0].item.content.contains("matcha"));
+        assert!(
+            pending[0].item.id.is_none(),
+            "pending candidates carry no typed id and must not be access-bumped"
+        );
+        assert!(
+            !recalled.iter().any(|m| m.item.content.contains("quantum")),
+            "topic-unrelated pending candidates must not surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_candidate_recall_respects_configured_limit() {
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let now = Utc::now();
+        for i in 0..3i64 {
+            store
+                .insert_pending_candidate(ene_core::PendingCandidate {
+                    id: 0,
+                    character_id: "Ene".into(),
+                    user_id: "User".into(),
+                    title: format!("topic {i}"),
+                    content: format!("topic related fact number {i}"),
+                    kind: MemoryKind::Semantic,
+                    confidence: 0.8,
+                    reason_detail: "ambiguous contradiction".into(),
+                    existing_memory_title: None,
+                    existing_memory_id: None,
+                    source_quote: "topic".into(),
+                    status: ene_core::PendingCandidateStatus::Pending,
+                    created_at: now,
+                })
+                .await
+                .unwrap();
+        }
+
+        let mut config = MindConfig::default();
+        config.memory.recall_similarity_threshold = 0.0;
+        config.memory.recall_min_score = 0.0;
+        config.memory.recall_pending_candidate_limit = 1;
+
+        let input = ExecuteRecallInput {
+            store: &store,
+            character_id: "Ene",
+            user_id: "User",
+            user_input: "topic related",
+            recent_turns: &[],
+            query_embedding: &[1.0, 0.0, 0.0, 0.0],
+            embedding_model: "mock",
+            affect: None,
+            card: None,
+        };
+
+        let (_, recalled) = execute_hybrid_recall(&config, &input)
+            .await
+            .expect("recall");
+        let pending = recalled
+            .iter()
+            .filter(|m| {
+                m.sources
+                    .contains(&ene_core::MemoryCandidateSource::Pending)
+            })
+            .count();
+        assert_eq!(
+            pending, 1,
+            "configured limit must cap competing pending candidates"
         );
     }
 }
