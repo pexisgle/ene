@@ -809,6 +809,12 @@ async fn store_command(
             Ok(EXIT_OK)
         }
         StoreAction::ListBackups => {
+            if !memory.is_enabled() {
+                return Err(OutputError::new(
+                    ErrorCode::Runtime,
+                    "memory store is not enabled",
+                ));
+            }
             let db_path = memory.path().ok_or_else(|| {
                 OutputError::new(ErrorCode::Runtime, "in-memory store has no file backups")
             })?;
@@ -827,6 +833,12 @@ async fn store_command(
             Ok(EXIT_OK)
         }
         StoreAction::Restore { path, yes } => {
+            if !memory.is_enabled() {
+                return Err(OutputError::new(
+                    ErrorCode::Runtime,
+                    "memory store is not enabled",
+                ));
+            }
             if !yes {
                 return Err(OutputError::new(
                     ErrorCode::ConfirmationRequired,

@@ -12,7 +12,7 @@
 //! this facade (pin/status/restore/forget, commitment lifecycle, pending-write
 //! inspection/drain, store backup/integrity). It deliberately does **not**
 //! expose the raw `MemoryStore`: the former `store()` accessor was removed
-//! (#409) so consumers must go through the facade's own methods, which carry
+//! so consumers must go through the facade's own methods, which carry
 //! the same `require_store()` errors as the rest of the surface.
 
 use crate::error::EneRuntimeError;
@@ -33,8 +33,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// backup/integrity diagnostics are part of its surface, which is why the
 /// type is named [`MemoryHandle`] rather than a "query" handle (#406).
 ///
-/// The raw `MemoryStore` is intentionally not exposed (`store()` was removed
-/// in #409); every operation routes through the facade's own methods and
+/// The raw `MemoryStore` is intentionally not exposed (`store()` was removed);
+/// every operation routes through the facade's own methods and
 /// reports `EneRuntimeError::Memory` (connection error when memory is
 /// disabled) exactly like the rest of the surface.
 #[derive(Clone)]
@@ -256,7 +256,7 @@ impl MemoryHandle {
     ///
     /// [`ene_mind::commitments::CommitmentLedger`] holds no in-memory cache
     /// and the actor re-reads active commitments from the store at prompt
-    /// injection, so this direct store write cannot desync the actor (#409).
+    /// injection, so this direct store write cannot desync the actor.
     pub async fn complete_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         store
@@ -268,7 +268,7 @@ impl MemoryHandle {
     /// Mark a commitment as cancelled.
     ///
     /// Same actor-consistency guarantee as [`Self::complete_commitment`]:
-    /// the ledger is stateless, so a direct store write is harmless (#409).
+    /// the ledger is stateless, so a direct store write is harmless.
     pub async fn cancel_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         store
@@ -277,7 +277,7 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Count pending (retryable) and permanent failed memory writes (#240).
+    /// Count pending (retryable) and permanent failed memory writes.
     pub async fn count_pending_memory_writes(
         &self,
         character_id: &str,
@@ -289,7 +289,7 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// List pending / permanent memory-write rows for a character (#240).
+    /// List pending / permanent memory-write rows for a character.
     pub async fn list_pending_memory_writes(
         &self,
         character_id: &str,
@@ -302,7 +302,7 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Force pending rows for a character to be due immediately (#240).
+    /// Force pending rows for a character to be due immediately.
     ///
     /// Used by `/memory retry` so the operator can drain the queue without
     /// waiting for exponential backoff.
@@ -317,7 +317,7 @@ impl MemoryHandle {
             .map_err(EneRuntimeError::Memory)
     }
 
-    /// Drain due pending memory writes for a character using the mind engine (#240).
+    /// Drain due pending memory writes for a character using the mind engine.
     ///
     /// The caller must schedule the writes as due first (via
     /// [`Self::schedule_pending_memory_writes_now`]); this method only drains
@@ -345,7 +345,7 @@ impl MemoryHandle {
         Ok(())
     }
 
-    /// Create a timestamped file backup of this store's database (#239).
+    /// Create a timestamped file backup of this store's database.
     ///
     /// Returns an error when the store is in-memory (no path).
     pub async fn backup(&self) -> Result<std::path::PathBuf, EneRuntimeError> {
@@ -353,7 +353,7 @@ impl MemoryHandle {
         store.backup().await.map_err(EneRuntimeError::Memory)
     }
 
-    /// On-disk path of the store's database, when opened from a file (#239).
+    /// On-disk path of the store's database, when opened from a file.
     ///
     /// Exposed (rather than the store itself) so backup/restore commands can
     /// locate the database file without reaching for the store handle.
@@ -362,7 +362,7 @@ impl MemoryHandle {
         self.store.as_ref().and_then(|s| s.path())
     }
 
-    /// Run `PRAGMA integrity_check` on the open connection (#239).
+    /// Run `PRAGMA integrity_check` on the open connection.
     pub async fn check_integrity(&self) -> Result<(), EneRuntimeError> {
         let store = self.require_store()?;
         store
@@ -526,7 +526,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Exhaust the retry budget so the row transitions to permanent (#240).
+        // Exhaust the retry budget so the row transitions to permanent.
         for _ in 0..(ene_store::MemoryStore::PENDING_MEMORY_WRITE_MAX_ATTEMPTS - 1) {
             store
                 .fail_pending_memory_write(id, "retry failed")
@@ -553,7 +553,7 @@ mod tests {
             .unwrap();
 
         // Freshly enqueued rows wait out their backoff; scheduling forces them
-        // due immediately so a drain can pick them up (#240).
+        // due immediately so a drain can pick them up.
         let scheduled = handle
             .schedule_pending_memory_writes_now("ene")
             .await

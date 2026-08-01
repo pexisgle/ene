@@ -45,7 +45,7 @@ const MAX_ACTIVE_MATCH_CHECK: usize = 4096;
 /// at prompt-injection time and only applies the pure
 /// [`Self::active_prompt_candidates`] mapping to those fresh rows.
 ///
-/// Consequence (#409): consumers may complete/cancel commitments directly
+/// Consequence: consumers may complete/cancel commitments directly
 /// through the memory store (e.g. the desktop UI's commitment buttons) with
 /// no actor-side cache to desync. The next prompt injection reads the updated
 /// rows, so no mailbox round-trip is required for consistency.
