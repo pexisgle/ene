@@ -115,19 +115,19 @@ impl MemoryPort for MemoryStore {
         user_id: Option<&str>,
         now: DateTime<Utc>,
         half_life_days: f64,
-        limit: usize,
+        fade_threshold: f32,
+        archive_threshold: f32,
     ) -> Result<NaturalDecayReport, MemoryPortError> {
-        Ok(
-            Self::apply_natural_decay_batch(
-                self,
-                character_id,
-                user_id,
-                now,
-                half_life_days,
-                limit,
-            )
-            .await?,
+        Ok(Self::apply_natural_decay_batch(
+            self,
+            character_id,
+            user_id,
+            now,
+            half_life_days,
+            fade_threshold,
+            archive_threshold,
         )
+        .await?)
     }
 
     async fn upsert_memory_embedding(

@@ -133,7 +133,8 @@ pub trait MemoryPort: Send + Sync {
         user_id: Option<&str>,
         now: DateTime<Utc>,
         half_life_days: f64,
-        limit: usize,
+        fade_threshold: f32,
+        archive_threshold: f32,
     ) -> Result<NaturalDecayReport, MemoryPortError>;
 
     /// Store a content embedding for a typed memory item.

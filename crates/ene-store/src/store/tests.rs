@@ -1562,8 +1562,8 @@ async fn apply_natural_decay_batch_fades_and_archives() {
             content: "old content".into(),
             source: crate::MemorySource::Conversation,
             source_ref: None,
-            confidence: crate::MemoryConfidence::new(0.2),
-            salience: crate::MemorySalience::new(0.1),
+            confidence: crate::MemoryConfidence::new(0.5),
+            salience: crate::MemorySalience::new(0.5),
             affect: crate::AffectAnnotation::default(),
             relationship_impact: 0.0,
             valid_from: None,
@@ -1577,7 +1577,7 @@ async fn apply_natural_decay_batch_fades_and_archives() {
         .await
         .unwrap();
     store
-        .test_backdate_typed_memory(active_id, 120)
+        .test_backdate_typed_memory(active_id, 30)
         .await
         .unwrap();
 
@@ -1611,7 +1611,14 @@ async fn apply_natural_decay_batch_fades_and_archives() {
         .unwrap();
 
     let report = store
-        .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+        .apply_natural_decay_batch(
+            "ene",
+            Some("user1"),
+            now,
+            30.0,
+            ene_rag::FADE_THRESHOLD,
+            ene_rag::ARCHIVE_THRESHOLD,
+        )
         .await
         .unwrap();
     assert!(report.faded_count >= 1);
@@ -1654,7 +1661,14 @@ async fn pin_typed_memory_excludes_from_natural_decay() {
     store.test_backdate_typed_memory(id, 200).await.unwrap();
 
     let report = store
-        .apply_natural_decay_batch("ene", None, Utc::now(), 30.0, 64)
+        .apply_natural_decay_batch(
+            "ene",
+            None,
+            Utc::now(),
+            30.0,
+            ene_rag::FADE_THRESHOLD,
+            ene_rag::ARCHIVE_THRESHOLD,
+        )
         .await
         .unwrap();
     assert_eq!(report.faded_count, 0);
@@ -1662,6 +1676,57 @@ async fn pin_typed_memory_excludes_from_natural_decay() {
     let loaded = store.get_typed_memory(id).await.unwrap().unwrap();
     assert_eq!(loaded.status, crate::MemoryStatus::Active);
     assert!(loaded.pinned);
+}
+
+/// #350: SQL decay processes the full table in one pass (no `BATCH_LIMIT` cap).
+#[tokio::test]
+async fn apply_natural_decay_sql_handles_large_table_in_one_pass() {
+    let store = setup_store().await;
+    let now = Utc::now();
+    for i in 0..300 {
+        let id = store
+            .insert_typed_memory(&crate::NewMemoryItem {
+                scope: crate::MemoryScope::Character,
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                kind: crate::MemoryKind::Semantic,
+                title: format!("bulk-{i}"),
+                content: "stale bulk row".into(),
+                source: crate::MemorySource::Conversation,
+                source_ref: None,
+                confidence: crate::MemoryConfidence::new(0.1),
+                salience: crate::MemorySalience::new(0.1),
+                affect: crate::AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                valid_from: None,
+                valid_until: None,
+                status: crate::MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                created_at: None,
+                commitment_id: None,
+            })
+            .await
+            .unwrap();
+        store.test_backdate_typed_memory(id, 120).await.unwrap();
+    }
+
+    let report = store
+        .apply_natural_decay_batch(
+            "ene",
+            Some("user1"),
+            now,
+            30.0,
+            ene_rag::FADE_THRESHOLD,
+            ene_rag::ARCHIVE_THRESHOLD,
+        )
+        .await
+        .unwrap();
+    assert!(
+        report.faded_count >= 300,
+        "expected all 300 stale rows to fade in a single SQL pass, got {}",
+        report.faded_count
+    );
 }
 
 #[tokio::test]
@@ -1708,6 +1773,8 @@ async fn transition_active_to_faded_sets_faded_at_from_decay_anchor() {
 
 #[tokio::test]
 async fn single_row_natural_decay_reaches_archived_in_two_passes() {
+    use chrono::Duration as ChronoDuration;
+
     let store = setup_store().await;
     let now = Utc::now();
 
@@ -1721,8 +1788,8 @@ async fn single_row_natural_decay_reaches_archived_in_two_passes() {
             content: "very old fact".into(),
             source: crate::MemorySource::Conversation,
             source_ref: None,
-            confidence: crate::MemoryConfidence::new(0.1),
-            salience: crate::MemorySalience::new(0.1),
+            confidence: crate::MemoryConfidence::new(0.5),
+            salience: crate::MemorySalience::new(0.5),
             affect: crate::AffectAnnotation::default(),
             relationship_impact: 0.0,
             valid_from: None,
@@ -1735,10 +1802,17 @@ async fn single_row_natural_decay_reaches_archived_in_two_passes() {
         })
         .await
         .unwrap();
-    store.test_backdate_typed_memory(id, 365).await.unwrap();
+    store.test_backdate_typed_memory(id, 30).await.unwrap();
 
     let first = store
-        .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+        .apply_natural_decay_batch(
+            "ene",
+            Some("user1"),
+            now,
+            30.0,
+            ene_rag::FADE_THRESHOLD,
+            ene_rag::ARCHIVE_THRESHOLD,
+        )
         .await
         .unwrap();
     assert_eq!(first.faded_count, 1);
@@ -1748,8 +1822,16 @@ async fn single_row_natural_decay_reaches_archived_in_two_passes() {
     assert_eq!(faded.status, crate::MemoryStatus::Faded);
     assert!(faded.faded_at.is_some());
 
+    let later = now + ChronoDuration::days(200);
     let second = store
-        .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+        .apply_natural_decay_batch(
+            "ene",
+            Some("user1"),
+            later,
+            30.0,
+            ene_rag::FADE_THRESHOLD,
+            ene_rag::ARCHIVE_THRESHOLD,
+        )
         .await
         .unwrap();
     assert_eq!(second.archived_count, 1);
@@ -3133,8 +3215,8 @@ async fn recall_bump_does_not_prevent_forgetting() {
             content: "an old fact that keeps getting recalled".into(),
             source: crate::MemorySource::Conversation,
             source_ref: None,
-            confidence: crate::MemoryConfidence::new(0.1),
-            salience: crate::MemorySalience::new(0.1),
+            confidence: crate::MemoryConfidence::new(0.5),
+            salience: crate::MemorySalience::new(0.5),
             affect: crate::AffectAnnotation::default(),
             relationship_impact: 0.0,
             valid_from: None,
@@ -3147,7 +3229,7 @@ async fn recall_bump_does_not_prevent_forgetting() {
         })
         .await
         .unwrap();
-    store.test_backdate_typed_memory(id, 365).await.unwrap();
+    store.test_backdate_typed_memory(id, 30).await.unwrap();
 
     // Simulate a recall that just happened: bump access counters repeatedly.
     for _ in 0..10 {
@@ -3159,7 +3241,14 @@ async fn recall_bump_does_not_prevent_forgetting() {
 
     // Despite the fresh accesses, the stale content must still fade.
     let report = store
-        .apply_natural_decay_batch("ene", Some("user1"), now, 30.0, 64)
+        .apply_natural_decay_batch(
+            "ene",
+            Some("user1"),
+            now,
+            30.0,
+            ene_rag::FADE_THRESHOLD,
+            ene_rag::ARCHIVE_THRESHOLD,
+        )
         .await
         .unwrap();
     assert_eq!(

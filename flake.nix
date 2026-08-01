@@ -118,6 +118,7 @@
               export CARGO_TARGET_DIR="$PWD/target"
               export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
               export SCCACHE_DIR="$HOME/.cache/sccache"
+              export LIBSQLITE3_FLAGS="-DSQLITE_ENABLE_MATH_FUNCTIONS"
             '';
           };
       }
