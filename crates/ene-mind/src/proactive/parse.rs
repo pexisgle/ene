@@ -7,9 +7,9 @@
 use crate::proactive::{ProactiveDecision, ProactiveUrgency};
 use serde_json::{Value, json};
 
-/// Inner JSON Schema object (grammar / strict validation).
+/// Plain JSON Schema for proactive decision structured output.
 #[must_use]
-pub fn decision_schema_object() -> Value {
+pub fn decision_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -22,16 +22,6 @@ pub fn decision_schema_object() -> Value {
             "topic_hint": { "type": "string" },
             "urgency": { "type": "string", "enum": ["low", "normal", "high"] }
         }
-    })
-}
-
-/// JSON Schema passed to cloud providers that support structured output wrappers.
-#[must_use]
-pub fn decision_schema() -> Value {
-    json!({
-        "name": "proactive_decision",
-        "strict": true,
-        "schema": decision_schema_object(),
     })
 }
 
@@ -112,12 +102,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decision_schema_object_is_json_schema_root() {
-        let schema = decision_schema_object();
+    fn decision_schema_is_json_schema_root() {
+        let schema = decision_schema();
         assert_eq!(schema.get("type").and_then(|v| v.as_str()), Some("object"));
         assert!(schema.get("properties").is_some());
         assert!(schema.get("required").is_some());
         assert!(schema.get("schema").is_none());
+        assert!(schema.get("name").is_none());
+        assert!(schema.get("strict").is_none());
     }
 
     #[test]
