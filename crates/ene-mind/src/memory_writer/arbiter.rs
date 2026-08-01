@@ -2896,12 +2896,14 @@ mod tests {
     /// `MindMemoryConfig` instead of leaving three hardcoded (#352).
     #[test]
     fn from_config_wires_all_thresholds() {
-        let mut config = MindMemoryConfig::default();
-        config.min_confidence_to_persist = 0.70;
-        config.supersede_confidence_delta = 0.12;
-        config.semantic_similarity_threshold = 0.90;
-        config.dispute_confidence_gap = 0.20;
-        config.contradiction_title_similarity_threshold = 0.88;
+        let config = MindMemoryConfig {
+            min_confidence_to_persist: 0.70,
+            supersede_confidence_delta: 0.12,
+            semantic_similarity_threshold: 0.90,
+            dispute_confidence_gap: 0.20,
+            contradiction_title_similarity_threshold: 0.88,
+            ..MindMemoryConfig::default()
+        };
 
         let options = ArbiterOptions::from_config(&config);
         assert!((options.min_confidence - 0.70).abs() < f32::EPSILON);
