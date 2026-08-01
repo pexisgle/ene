@@ -806,6 +806,35 @@ impl TurnActor {
         });
     }
 
+    /// Pushes updated plugin config/profiles blobs to live IPC connections.
+    fn spawn_push_plugin_configs(
+        &mut self,
+        updates: HashMap<String, (Option<serde_json::Value>, Option<serde_json::Value>)>,
+    ) {
+        if !admit_task(
+            &mut self.bg_command_tasks,
+            self.task_caps.bg_command_cap,
+            "BgCommand",
+            Some("PluginConfigPush".to_string()),
+            &self.diag_tx,
+        ) {
+            tracing::warn!(
+                component = "TurnActor",
+                "Plugin config push rejected: background task capacity exhausted"
+            );
+            return;
+        }
+
+        let plugin_host = Arc::clone(&self.plugin_host);
+        self.bg_command_tasks.spawn(async move {
+            let guard = plugin_host.lock().await;
+            let Some(host) = guard.as_ref() else {
+                return;
+            };
+            host.apply_plugin_configs(&updates).await;
+        });
+    }
+
     /// Kicks off proactive LLM initialization in the background if it has
     /// not already been started.
     ///
@@ -1404,6 +1433,11 @@ impl TurnActor {
                     .get_section::<ene_plugin_host::PluginConfig>()
                     .unwrap_or_default();
                 let plugins_changed = plugin_enable_set_changed(&prev_plugins, &plugins);
+                let config_updates = if plugins_changed {
+                    HashMap::new()
+                } else {
+                    plugin_config_blob_updates(&prev_plugins, &plugins)
+                };
 
                 drop(self.config.set_section(&mind));
                 drop(self.config.set_section(&store));
@@ -1419,6 +1453,11 @@ impl TurnActor {
                     // host. Runs in bg_command_tasks so the actor loop is
                     // never blocked on process I/O.
                     self.spawn_reconfigure_plugin_host();
+                } else if !config_updates.is_empty() {
+                    // Enable-set unchanged but config/profiles blobs changed:
+                    // push SetConfig to live connections (and refresh their
+                    // reconnect cache) without a full host restart.
+                    self.spawn_push_plugin_configs(config_updates);
                 }
                 true
             }
@@ -2882,6 +2921,44 @@ fn plugin_enable_set_changed(
         }
     }
     false
+}
+
+/// Returns per-plugin delivered config/profiles blobs that changed between
+/// `prev` and `next`, for plugins that remain enabled in both.
+///
+/// Used to hot-push `SetConfig` when the enable-set is unchanged. Compares
+/// the nested `config` / `profiles` maps and legacy flat `extra` keys that
+/// fold into the delivered blob.
+fn plugin_config_blob_updates(
+    prev: &ene_plugin_host::PluginConfig,
+    next: &ene_plugin_host::PluginConfig,
+) -> HashMap<String, (Option<serde_json::Value>, Option<serde_json::Value>)> {
+    let mut updates = HashMap::new();
+    let mut keys: Vec<&String> = prev.list.keys().chain(next.list.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        let prev_entry = prev.list.get(key);
+        let next_entry = next.list.get(key);
+        let prev_enable = prev_entry.is_none_or(|e| e.enable);
+        let next_enable = next_entry.is_none_or(|e| e.enable);
+        if !next_enable || prev_enable != next_enable {
+            continue;
+        }
+        let Some(next_e) = next_entry else {
+            continue;
+        };
+        let changed = prev_entry.is_none_or(|p| {
+            p.config != next_e.config || p.profiles != next_e.profiles || p.extra != next_e.extra
+        });
+        if changed {
+            updates.insert(
+                key.clone(),
+                (next_e.delivered_config(key), next_e.delivered_profiles()),
+            );
+        }
+    }
+    updates
 }
 
 /// Spawns per-tool DB IPC servers for tool plugins that need database access.

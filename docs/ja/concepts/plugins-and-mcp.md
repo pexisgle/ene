@@ -1,6 +1,6 @@
 # IPC プラグインシステムと MCP 連携
 
-本ドキュメントでは、Ene のプロセス外 IPC プラグインアーキテクチャ、Protocol v4 ワイヤー仕様、Model Context Protocol (MCP) サーバー連携、および組み込みツールプラグインについて解説します。
+本ドキュメントでは、Ene のプロセス外 IPC プラグインアーキテクチャ、Protocol v5 ワイヤー仕様、Model Context Protocol (MCP) サーバー連携、および組み込みツールプラグインについて解説します。
 
 ---
 
@@ -13,7 +13,7 @@ Ene ホストアプリケーション (ene-runtime)
   │
   └── PluginHostManager (ene-plugin-host)
         │
-        ├── IPC Protocol v4 (stdio 上の長さプレフィックス付き JSON)
+        ├── IPC Protocol v5 (stdio 上の長さプレフィックス付き JSON)
         │     ├── ene-plugin-anthropic (Anthropic LLM プロバイダプラグイン)
         │     ├── ene-plugin-app       (GUI 起動ツール)
         │     ├── ene-plugin-browser   (CDP ブラウザ自動化ツール)
@@ -27,12 +27,12 @@ Ene ホストアプリケーション (ene-runtime)
 
 ---
 
-## 2. IPC Protocol v4 仕様
+## 2. IPC Protocol v5 仕様
 
-プラグインは `stdin`/`stdout` 上で **IPC Protocol v4** を使用して通信します：
+プラグインは `stdin`/`stdout` 上で **IPC Protocol v5** を使用して通信します：
 
 - **フレーミング**: すべてのパケットは 4 バイトのリトルエンディアン `u32` パケットサイズで始まり、UTF-8 JSON ペイロードが続きます。
-- **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 3, max: 4 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。
+- **ハンドシェイクネゴシエーション**: ホストは `PluginIpcRequest::Handshake { version: VersionRange::host_supported() }`、すなわち単一の固定値ではなく `VersionRange { min: 4, max: 5 }` を送信します。プラグインは `VersionRange::negotiate` でその範囲と自身がサポートする範囲の共通部分を取り、両者に共通する最大バージョンを `HandshakeAck { version, capabilities: PluginCapabilities }` として返します。
 - **ハンドシェイクタイムアウト**: ホストは `HandshakeAck` の待ち時間に上限を設けています（`plugins.handshake_timeout_ms`、既定 10 秒）。ソケットを accept しながら応答しないプラグインは、残りのプラグインの起動をブロックする代わりに `PluginHostError::HandshakeFailed` でハンドシェイクに失敗します。プラグイン作者はハンドシェイクに即応答し、重い初期化（モデル読み込み等）はその後へ遅延させる必要があります——`ene-plugin` の `run_plugin_server` を参照してください。
 - **リクエスト相関**: 非同期リクエストおよびレスポンスはすべて必須の `request_id` (`Uuid`) を保持します。
 - **ケーパビリティ**: プラグインはサポートする機能 (`tools`, `llm_providers`, `stt_providers`, `tts_providers`) を宣伝し、各プロバイダ仕様はさらに `concurrency: ConcurrencyHint` を宣言します ([§3](#3-プロバイダの並行度-concurrencyhint) 参照)。
@@ -45,8 +45,8 @@ Ene ホストアプリケーション (ene-runtime)
 - プラグインバイナリ側は範囲をサポートする必要はなく、自身がビルドされたバージョンを `VersionRange { min: N, max: N }` として申告してよいです。互換性を維持する責務はホスト側に集約されており、個々のプラグイン作者に強制されません。
 - **プロトコルバージョンのバンプ**: `PLUGIN_IPC_PROTOCOL_VERSION` を上げる際は `PLUGIN_IPC_MIN_SUPPORTED_VERSION` も同じ数だけ繰り上げ、最も古いサポート対象バージョンのサポートを打ち切ります。
 - **バンプが必要なケース**: 既存メッセージの意味変更、必須フィールドの追加、enum variant の削除・リネームの場合のみです。新しいフィールドは `#[serde(default)]` を使うことで、バージョンバンプなしに新旧のピア間で互換性を保てます。
-- **機能ゲート**: ホストはネゴシエート済みバージョンを `ene-plugin-host` の `IpcPluginConnection` に保持し、`negotiated_version()` で参照できます。最小サポートバージョンより後に追加されたメッセージに依存する挙動はこれをもとにゲートすべきです。たとえば `supports_cancel_stream()` は v4 で追加された `PluginIpcRequest::CancelStream` をゲートしており、v3 のプラグインには理解できないメッセージを送らず、既存のタイムアウトベースのストリーム終了にフォールバックします。
-- **ネゴシエーション失敗の診断**: プラグインが提示する範囲とホストのサポート範囲が重ならない場合、プラグイン側の `HandshakeAck` エラーおよびホスト側の `PluginHostError::HandshakeFailed` / `ProtocolMismatch` はいずれも双方の範囲を明記します（例: "host supports 3..=4, plugin supports 2..=2"）。これにより、単なる汎用的なハンドシェイク失敗ではなく、プラグインバイナリの再ビルドが必要であることが開発者に伝わります。
+- **機能ゲート**: ホストはネゴシエート済みバージョンを `ene-plugin-host` の `IpcPluginConnection` に保持し、`negotiated_version()` で参照できます。最小サポートバージョンより後に追加されたメッセージに依存する挙動はこれをもとにゲートすべきです。たとえば `supports_set_config()` は v5 で追加された `PluginIpcRequest::SetConfig` をゲートしており、v4 のプラグインには理解できないメッセージを送らず、ローカルキャッシュのみ更新して次回再接続ハンドシェイクで新しい設定を届けます。
+- **ネゴシエーション失敗の診断**: プラグインが提示する範囲とホストのサポート範囲が重ならない場合、プラグイン側の `HandshakeAck` エラーおよびホスト側の `PluginHostError::HandshakeFailed` / `ProtocolMismatch` はいずれも双方の範囲を明記します（例: "host supports 4..=5, plugin supports 3..=3"）。これにより、単なる汎用的なハンドシェイク失敗ではなく、プラグインバイナリの再ビルドが必要であることが開発者に伝わります。
 
 ---
 
@@ -303,7 +303,9 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
 
 ### プラグイン設定フロー (`set_config` / `set_profiles`)
 
-ツールプラグイン・**プロバイダープラグインの両方**が、IPC ハンドシェイク中に一度だけホストから設定を受け取ります。`plugins.list.<name>.config` ブロブは `ConfigurablePlugin::set_config` 経由でそのまま配信され、`plugins.list.<name>.profiles.<profile>` マップ（モデル/音声ごとの設定用）は `ConfigurablePlugin::set_profiles` 経由で配信されます。どちらもホストからは不透明です。ホストはそれらをそのまま保存し、キーを解釈せず、再接続時にも再送信します。プロバイダープラグイン（LLM/embed/TTS/STT）はツールプラグインと同じ配信を受けるため、たとえば Anthropic プロバイダーは API キーをリクエストごとではなくハンドシェイク時に受け取れます。
+ツールプラグイン・**プロバイダープラグインの両方**が、IPC ハンドシェイク時およびライブ更新 (`PluginIpcRequest::SetConfig`、protocol v5+) でホストから設定を受け取ります。`plugins.list.<name>.config` ブロブは `ConfigurablePlugin::set_config` 経由でそのまま配信され、`plugins.list.<name>.profiles.<profile>` マップ（モデル/音声ごとの設定用）は `ConfigurablePlugin::set_profiles` 経由で配信されます。どちらもホストからは不透明です。ホストはそれらをそのまま保存し、キーを解釈せず、プッシュ前に接続キャッシュを更新し、再接続時にも再送信します。設定のホットリロードで enable 集合は変わらず config/profiles だけが変わった場合、ランタイムはプラグインホストを再起動せず生きている接続へ `SetConfig` を送ります。v5 未満でネゴシエートしたピアには warn + ローカルキャッシュ更新のみ（ライブ IPC なし）です。プロバイダープラグイン（LLM/embed/TTS/STT）はツールプラグインと同じ配信を受けるため、たとえば Anthropic プロバイダーは API キーをリクエストごとではなくハンドシェイク時に受け取れます。
+
+ネストした `config` オブジェクト内にホスト予約キー（`enable`、`checksum`）を置かないでください——`plugins.list.<name>` のエントリフィールドと衝突します。ホストは配信ブロブにこれらのキーが含まれる場合に警告します。
 
 プラグインは `config_schema()` で受け付ける設定の JSON Schema を広告します。そのスキーマで `x-ene-secret: true` とマークされたフィールドは、UI でマスクされる予定で、ホストのログからは redact されます（正確な形は [`configuration.md`](../ja/configuration.md) を参照）。
 

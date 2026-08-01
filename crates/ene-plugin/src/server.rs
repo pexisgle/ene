@@ -64,7 +64,7 @@ impl PluginDispatch {
     }
 
     /// Delivers the plugin configuration blob to every registered trait
-    /// implementation (called once during Handshake).
+    /// implementation (Handshake and live [`PluginIpcRequest::SetConfig`]).
     ///
     /// A single plugin struct may implement several traits (e.g. `ToolPlugin`
     /// and `LlmPlugin`); each is stored as a separate trait object, so the
@@ -89,7 +89,7 @@ impl PluginDispatch {
     }
 
     /// Delivers the per-profile configuration blob to every registered trait
-    /// implementation (called once during Handshake when
+    /// implementation (Handshake and live [`PluginIpcRequest::SetConfig`] when
     /// `plugins.list.<name>.profiles` is configured).
     fn set_profiles(&self, profiles: &serde_json::Value) {
         if let Some(tool) = &self.tool {
@@ -448,13 +448,13 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
                     drop(tx.send(resp).await);
                 });
             }
-            // Everything else — `Handshake` (applies the sandbox/config),
-            // `SetCallContext`, `ApprovePermission`, `AllowPattern`,
-            // `RevokePattern`, and the cheap queries (`Ping`, `ListTools`,
-            // `GetConfigSchema`, `CancelDeferred`) — is handled inline, in
-            // read order. State mutations must be committed before any later
-            // request that depends on them is dispatched, so they cannot be
-            // reordered behind a spawned task.
+            // Everything else — `Handshake` / `SetConfig` (applies sandbox
+            // and config), `SetCallContext`, `ApprovePermission`,
+            // `AllowPattern`, `RevokePattern`, and the cheap queries (`Ping`,
+            // `ListTools`, `GetConfigSchema`, `CancelDeferred`) — is handled
+            // inline, in read order. State mutations must be committed before
+            // any later request that depends on them is dispatched, so they
+            // cannot be reordered behind a spawned task.
             other => {
                 let resp = dispatch_request(dispatch, &other).await;
                 drop(tx.send(resp).await);
@@ -521,6 +521,19 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
         PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong {
             request_id: request_id.clone(),
         },
+        PluginIpcRequest::SetConfig {
+            request_id,
+            config,
+            profiles,
+        } => {
+            dispatch.set_config(config);
+            if let Some(profiles) = profiles {
+                dispatch.set_profiles(profiles);
+            }
+            PluginIpcResponse::ConfigApplied {
+                request_id: request_id.clone(),
+            }
+        }
         PluginIpcRequest::GetConfigSchema { request_id } => PluginIpcResponse::ConfigSchema {
             request_id: request_id.clone(),
             schema: dispatch.config_schema(),
@@ -1570,6 +1583,41 @@ mod tests {
         assert_eq!(
             plugin.profiles.lock().unwrap().as_ref(),
             Some(&serde_json::json!({"default": {"voice": "af_heart"}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn set_config_updates_live_plugin_without_handshake() {
+        let plugin = Arc::new(RecordingLlmPlugin::new());
+        let dispatch = PluginDispatch {
+            tool: None,
+            llm: Some(Arc::clone(&plugin) as Arc<dyn LlmPlugin>),
+            embed: None,
+            tts: None,
+            stt: None,
+        };
+        let resp = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::SetConfig {
+                request_id: "req-set".into(),
+                config: serde_json::json!({"api_key": "sk-hot"}),
+                profiles: Some(serde_json::json!({"p": {"v": 1}})),
+            },
+        )
+        .await;
+        assert_eq!(
+            resp,
+            PluginIpcResponse::ConfigApplied {
+                request_id: "req-set".into(),
+            }
+        );
+        assert_eq!(
+            plugin.config.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({"api_key": "sk-hot"}))
+        );
+        assert_eq!(
+            plugin.profiles.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({"p": {"v": 1}}))
         );
     }
 

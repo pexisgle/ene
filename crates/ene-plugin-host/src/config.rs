@@ -105,7 +105,8 @@ pub struct PluginEntry {
     #[serde(default = "default_db_quota_mb")]
     pub db_quota_mb: Option<u64>,
     /// Plugin-specific configuration (opaque JSON delivered to the plugin at
-    /// handshake time via `ConfigurablePlugin::set_config`).
+    /// handshake time and via live `SetConfig` IPC through
+    /// `ConfigurablePlugin::set_config`).
     ///
     /// The host does **not** interpret this blob: it is stored and
     /// delivered verbatim. Plugin-owned settings live here (e.g.
@@ -116,6 +117,10 @@ pub struct PluginEntry {
     /// provider parses values with TOML-like syntax, so a full JSON object in
     /// `ENE_PLUGINS__LIST__<NAME>__CONFIG` is not reliably supported — set
     /// individual keys instead.
+    ///
+    /// Do **not** put host-reserved entry keys (`enable`, `checksum`) inside
+    /// this object — they collide with [`PluginEntry`] fields and confuse
+    /// authors. The host warns when they appear in the delivered blob.
     #[serde(default)]
     pub config: serde_json::Value,
     /// Per-profile plugin configuration (opaque JSON), keyed by profile name.
@@ -146,6 +151,82 @@ impl Default for PluginEntry {
             config: serde_json::Value::Object(serde_json::Map::default()),
             profiles: HashMap::new(),
             extra: serde_json::Map::default(),
+        }
+    }
+}
+
+/// Host-owned [`PluginEntry`] field names that must not appear inside the
+/// plugin-delivered `config` object (they collide with typed entry fields).
+const HOST_RESERVED_CONFIG_KEYS: &[&str] = &["enable", "checksum"];
+
+impl PluginEntry {
+    /// Builds the config blob delivered to the plugin, folding legacy flat
+    /// entry-level keys into the nested `config` object (explicit `config`
+    /// keys win). Returns `None` when the resulting blob is empty/null.
+    ///
+    /// Warns when the delivered object contains host-reserved keys
+    /// (`enable`, `checksum`) that would confuse plugin authors.
+    pub fn delivered_config(&self, plugin_name: &str) -> Option<serde_json::Value> {
+        let config = if self.extra.is_empty() {
+            Some(self.config.clone())
+                .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()))
+        } else {
+            // Legacy flat entry-level keys (from the pre-hierarchy
+            // `#[serde(flatten)]` entries) are folded into the delivered
+            // config blob so existing settings.json files keep working.
+            // Explicit `config` keys win. The fold is in-memory only.
+            let mut folded: serde_json::Map<String, serde_json::Value> =
+                match self.config.as_object() {
+                    Some(obj) => obj.clone(),
+                    None => serde_json::Map::new(),
+                };
+            let mut folded_count = 0_usize;
+            for (key, value) in &self.extra {
+                if folded.contains_key(key) {
+                    continue;
+                }
+                folded.insert(key.clone(), value.clone());
+                folded_count += 1;
+            }
+            if folded_count > 0 {
+                tracing::warn!(
+                    component = "PluginEntry",
+                    plugin = %plugin_name,
+                    count = folded_count,
+                    "Folding legacy flat config key(s) into the config blob"
+                );
+            }
+            Some(serde_json::Value::Object(folded))
+        };
+        if let Some(ref blob) = config {
+            warn_reserved_config_keys(plugin_name, blob);
+        }
+        config
+    }
+
+    /// Builds the profiles blob delivered to the plugin, or `None` when empty.
+    pub fn delivered_profiles(&self) -> Option<serde_json::Value> {
+        (!self.profiles.is_empty())
+            .then(|| serde_json::Value::Object(self.profiles.clone().into_iter().collect()))
+    }
+}
+
+/// Emits a warning when a plugin-delivered config object contains keys that
+/// collide with host-owned [`PluginEntry`] fields.
+fn warn_reserved_config_keys(plugin_name: &str, config: &serde_json::Value) {
+    let Some(obj) = config.as_object() else {
+        return;
+    };
+    for key in HOST_RESERVED_CONFIG_KEYS {
+        if obj.contains_key(*key) {
+            tracing::warn!(
+                component = "PluginEntry",
+                plugin = %plugin_name,
+                key = %key,
+                "plugin config blob contains host-reserved key '{key}'; \
+                 this name is also a plugins.list.<name> entry field and will \
+                 confuse authors — nest plugin-owned settings under distinct keys"
+            );
         }
     }
 }
@@ -366,5 +447,26 @@ mod tests {
         );
         assert!(entry.profiles.is_empty());
         assert!(entry.extra.is_empty());
+    }
+
+    #[test]
+    fn delivered_config_warns_on_reserved_keys() {
+        // Acceptance for reserved-key collision: `enable` / `checksum` inside
+        // the nested config blob must be detectable (warn path exercised by
+        // calling `delivered_config`; the blob is still delivered verbatim).
+        let entry = PluginEntry {
+            config: serde_json::json!({
+                "enable": false,
+                "checksum": "deadbeef",
+                "api_key": "sk-test"
+            }),
+            ..PluginEntry::default()
+        };
+        let blob = entry
+            .delivered_config("demo")
+            .expect("non-empty config must be delivered");
+        assert_eq!(blob.get("enable"), Some(&serde_json::json!(false)));
+        assert_eq!(blob.get("checksum"), Some(&serde_json::json!("deadbeef")));
+        assert_eq!(blob.get("api_key"), Some(&serde_json::json!("sk-test")));
     }
 }

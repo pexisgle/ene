@@ -678,41 +678,8 @@ impl PluginHostManager {
                 continue;
             }
 
-            let entry_config = if entry.extra.is_empty() {
-                Some(entry.config.clone())
-                    .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()))
-            } else {
-                // Legacy flat entry-level keys (from the pre-hierarchy
-                // `#[serde(flatten)]` entries) are folded into the delivered
-                // config blob so existing settings.json files keep working.
-                // Explicit `config` keys win. The fold is in-memory only: the
-                // file on disk keeps the flat keys, so it is stable across
-                // reloads.
-                let mut folded: serde_json::Map<String, serde_json::Value> =
-                    match entry.config.as_object() {
-                        Some(obj) => obj.clone(),
-                        None => serde_json::Map::new(),
-                    };
-                let mut folded_count = 0_usize;
-                for (key, value) in &entry.extra {
-                    if folded.contains_key(key) {
-                        continue;
-                    }
-                    folded.insert(key.clone(), value.clone());
-                    folded_count += 1;
-                }
-                if folded_count > 0 {
-                    tracing::warn!(
-                        component = "PluginHostManager",
-                        plugin = %name,
-                        count = folded_count,
-                        "Folding legacy flat config key(s) into the config blob"
-                    );
-                }
-                Some(serde_json::Value::Object(folded))
-            };
-            let entry_profiles = (!entry.profiles.is_empty())
-                .then(|| serde_json::Value::Object(entry.profiles.clone().into_iter().collect()));
+            let entry_config = entry.delivered_config(name);
+            let entry_profiles = entry.delivered_profiles();
 
             match Self::start_plugin(
                 name,
@@ -1007,6 +974,36 @@ impl PluginHostManager {
     /// Set to false if the caller will handle shutdown explicitly.
     pub fn set_shutdown_on_drop(&mut self, value: bool) {
         self.shutdown_on_drop = value;
+    }
+
+    /// Pushes updated config/profiles to live connections whose plugin names
+    /// appear in `updates`.
+    ///
+    /// Each connection updates its stored blobs first so a later reconnect
+    /// handshake uses the fresh values, then sends `SetConfig` when the
+    /// negotiated protocol version supports it (otherwise warns and no-ops
+    /// the IPC). Failures are logged and do not abort the remaining updates.
+    pub async fn apply_plugin_configs(
+        &self,
+        updates: &HashMap<String, (Option<serde_json::Value>, Option<serde_json::Value>)>,
+    ) {
+        if updates.is_empty() {
+            return;
+        }
+        for (plugin, conn) in self.supervised.iter().zip(self.connections.iter()) {
+            let name = plugin.lock().await.name.clone();
+            let Some((config, profiles)) = updates.get(&name) else {
+                continue;
+            };
+            if let Err(e) = conn.set_config(config.clone(), profiles.clone()).await {
+                tracing::warn!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    error = %e,
+                    "Failed to push SetConfig to live plugin"
+                );
+            }
+        }
     }
 
     /// Sends a graceful `Shutdown` to all plugins and kills the processes.
