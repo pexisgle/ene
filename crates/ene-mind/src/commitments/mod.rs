@@ -5,9 +5,9 @@
 //! references (`typed_memories.commitment_id`) and are no longer dual-written
 //! from arbiter persist → sync.
 //!
-//! **Contradiction semantics (#348):** this ledger is where a rephrased or
+//! **Contradiction semantics:** this ledger is where a rephrased or
 //! rescheduled commitment is *merged* into the existing row (title-keyed
-//! matching, #387) instead of both versions surviving as separate valid
+//! matching) instead of both versions surviving as separate valid
 //! commitments. The typed-memory arbiter additionally treats `Commitment` as a
 //! contradiction-checked kind (`MemoryKind::is_contradiction_kind`) as defense
 //! in depth for any direct typed-write path; see the per-kind policy table in
@@ -630,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_supersedes_existing_on_due_date_change_only() {
-        // #348: rescheduling the same commitment — same title and content, only
+        // Rescheduling the same commitment — same title and content, only
         // the due label changes — must update the existing ledger row, not
         // register a second valid commitment that both survive as active.
         let store = MemoryStore::open_in_memory(4).await.unwrap();

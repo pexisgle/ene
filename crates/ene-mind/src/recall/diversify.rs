@@ -50,7 +50,7 @@ impl MemoryDiversifyOptions {
     /// The configured base slot for `kind`, or `0` for dynamic-only kinds.
     ///
     /// Which kinds have a base slot at all is defined by the per-kind policy
-    /// table ([`MemoryKind::has_diversification_base_slot`], #348) — this
+    /// table ([`MemoryKind::has_diversification_base_slot`]) — this
     /// method only reads the matching config field. `effective_min_slots`
     /// filters by the table before consulting it, so the wildcard arm (forced
     /// by `#[non_exhaustive]`) is unreachable for policy purposes: a kind that
@@ -222,7 +222,7 @@ fn effective_min_slots(
     options: MemoryDiversifyOptions,
     limit: usize,
 ) -> Vec<(MemoryKind, usize)> {
-    // Base slots come from the per-kind policy table (#348): only kinds with
+    // Base slots come from the per-kind policy table: only kinds with
     // `has_diversification_base_slot()` reserve guaranteed slots, so a new kind
     // defaults to dynamic-only unless the table says otherwise.
     let mut requested: std::collections::HashMap<MemoryKind, usize> = MemoryKind::ALL
@@ -486,7 +486,7 @@ mod tests {
     /// The diversification base-slot policy and the options lookup must agree:
     /// with default options every kind that
     /// [`MemoryKind::has_diversification_base_slot`] reports gets a configured
-    /// slot, and every dynamic-only kind gets none (#348).
+    /// slot, and every dynamic-only kind gets none.
     #[test]
     fn base_slot_policy_matches_config_lookup() {
         let options = default_options();

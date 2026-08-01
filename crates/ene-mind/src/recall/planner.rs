@@ -138,7 +138,7 @@ impl RecallPlanner {
             // did before this feature (ordinary recall results), so enabling
             // the pipeline is the only observable behavior change. The set of
             // excluded kinds comes from the per-kind policy table
-            // (`MemoryKind::is_recall_eligible`, #348); today it is exactly
+            // (`MemoryKind::is_recall_eligible`); today it is exactly
             // Reflection.
             exclude_kinds: if memory.reflection.enabled {
                 MemoryKind::ALL

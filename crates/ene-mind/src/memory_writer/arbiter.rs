@@ -629,7 +629,7 @@ impl MemoryArbiter {
     ) -> Option<CandidateDecision> {
         // Which kinds are contradiction-checked (and how they are keyed to the
         // same subject) is defined in ONE place — the per-kind policy table on
-        // [`MemoryKind`] (#348), not repeated here.
+        // [`MemoryKind`], not repeated here.
         if !candidate.kind.is_contradiction_kind() {
             return None;
         }
@@ -3329,7 +3329,7 @@ mod tests {
 
     /// `Commitment` is contradiction-checked (defense in depth for the
     /// typed-memory path — the commitment ledger is the primary enforcement
-    /// point, #348). A candidate for the same commitment supersedes the prior
+    /// point). A candidate for the same commitment supersedes the prior
     /// typed row instead of both surviving as separate valid commitments.
     #[tokio::test]
     async fn commitment_kind_contradiction_supersedes_same_title() {

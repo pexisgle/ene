@@ -23,7 +23,8 @@
     reason = "fmt::Write to a String is infallible in practice"
 )]
 //! - Unknown `kind` labels warn and fall back to `Semantic` (never silently
-//!   reclassified); `WorldState` is rejected explicitly (reserved, #209).
+//!   reclassified); `WorldState` is reserved, warned about, and falls back to
+//!   `Semantic` too.
 
 use std::fmt::Write;
 
@@ -303,7 +304,7 @@ struct RawCandidate {
 /// Derived from [`MemoryKind::is_llm_extractable`] so the prompt never
 /// advertises kinds the parse table rejects — in particular
 /// [`MemoryKind::WorldState`], which is reserved for structured world-state
-/// tracking (#209) and has no producer yet.
+/// tracking and has no producer yet.
 fn llm_extractable_kind_description() -> String {
     let names = MemoryKind::ALL
         .iter()
@@ -319,13 +320,13 @@ fn llm_extractable_kind_description() -> String {
 /// (canonical `snake_case` plus a couple of aliases). Two inputs fall back to
 /// [`MemoryKind::Semantic`], both with a `tracing::warn!`:
 ///
-/// - `WorldState` — reserved for structured time-series world state (#209); no
+/// - `WorldState` — reserved for structured time-series world state; no
 ///   producer exists yet, so it must not be silently produced.
 /// - anything else — an unknown label the model invented. The fallback keeps
 ///   the extractor resilient to schema drift, but it is not free: a
 ///   misclassified memory enters the arbiter as `Semantic` and is then
 ///   **contradiction-checked** like any other semantic fact, so this warning is
-///   the only signal that a row may have been reclassified (#348).
+///   the only signal that a row may have been reclassified.
 fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
     match raw_kind.to_lowercase().as_str() {
         "episodic" => MemoryKind::Episodic,
@@ -338,9 +339,9 @@ fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
         "procedure" => MemoryKind::Procedure,
         "reflection" => MemoryKind::Reflection,
         // WorldState is deliberately NOT parseable: it is reserved for
-        // structured time-series world state (#209) and not yet generated
+        // structured time-series world state and not yet generated
         // anywhere, so the extractor must not produce it. Falling back to
-        // Semantic (with a warning) is correct until #209 lands.
+        // Semantic (with a warning) is the correct degradation for now.
         "worldstate" | "world_state" | "world state" => {
             tracing::warn!(
                 raw_kind = %raw_kind,
@@ -362,7 +363,7 @@ fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
 /// Converts a raw JSON candidate into a `MemoryCandidate`.
 ///
 /// - Maps unknown `kind` strings to `Semantic` with a warning; `WorldState`
-///   (reserved, #209) is warned about and falls back to `Semantic` too.
+///   is reserved, warned about, and falls back to `Semantic` too.
 /// - Caps confidence at `MAX_CONFIDENCE` (0.9).
 fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
     let kind = parse_llm_kind(&raw.kind);
@@ -641,11 +642,11 @@ mod tests {
         assert_eq!(result[0].kind, MemoryKind::Semantic);
     }
 
-    // ── #348: unknown / reserved kind handling ──
+    // ── unknown / reserved kind handling ──
 
     /// Minimal `tracing` subscriber that records every WARN event's rendered
     /// fields, so tests can assert the fallback actually logs a warning rather
-    /// than silently reclassifying (#348).
+    /// than silently reclassifying.
     #[derive(Clone, Default)]
     struct CapturingSubscriber {
         warns: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -714,7 +715,7 @@ mod tests {
     }
 
     /// An unknown label warns (naming the label) and lands as Semantic — never
-    /// silently reclassified (#348).
+    /// silently reclassified.
     #[test]
     fn unknown_kind_warns_and_lands_as_semantic() {
         let captured = CapturingSubscriber::default();
@@ -731,7 +732,7 @@ mod tests {
     }
 
     /// `WorldState` must not be produced: it warns with a kind-specific message
-    /// and falls back to Semantic (reserved for #209) (#348).
+    /// and falls back to Semantic (reserved).
     #[test]
     fn world_state_is_rejected_with_warning_not_produced() {
         let captured = CapturingSubscriber::default();
@@ -753,7 +754,7 @@ mod tests {
 
     /// The parse table and the policy table must agree: every
     /// LLM-extractable kind parses from its canonical `snake_case` name, and the
-    /// one non-extractable kind (`WorldState`) does not (#348).
+    /// one non-extractable kind (`WorldState`) does not.
     #[test]
     fn parse_table_accepts_exactly_llm_extractable_kinds() {
         for kind in MemoryKind::ALL {
@@ -778,7 +779,7 @@ mod tests {
     }
 
     /// The schema's `kind` description advertises exactly the extractable
-    /// kinds, so the prompt never invites `WorldState` (#348).
+    /// kinds, so the prompt never invites `WorldState`.
     #[test]
     fn schema_kind_description_lists_only_extractable_kinds() {
         let schema = super::extraction_schema();
