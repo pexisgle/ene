@@ -1029,6 +1029,7 @@ impl PluginHostManager {
             &socket_path,
             sandbox.clone(),
             plugin_config.clone(),
+            None,
             handshake_timeout,
             max_concurrent,
         )

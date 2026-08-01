@@ -142,12 +142,14 @@ impl ToolPlugin for TestPlugin {
         Ok(())
     }
 
-    fn set_config(&self, _config: &serde_json::Value) {
-        self.state.config_received.store(true, Ordering::SeqCst);
-    }
-
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {
         self.state.sandbox_received.store(true, Ordering::SeqCst);
+    }
+}
+
+impl ene_plugin::ConfigurablePlugin for TestPlugin {
+    fn set_config(&self, _config: &serde_json::Value) {
+        self.state.config_received.store(true, Ordering::SeqCst);
     }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
@@ -162,6 +164,7 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             version: host_range,
             sandbox,
             plugin_config,
+            plugin_profiles,
         } => {
             let our_range = VersionRange {
                 min: PLUGIN_IPC_PROTOCOL_VERSION,
@@ -179,8 +182,39 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             let negotiated = host_range.max.min(our_range.max);
             if let Some(tool) = &dispatch.tool {
                 tool.set_sandbox(sandbox);
-                if let Some(config) = plugin_config {
+            }
+            if let Some(config) = plugin_config {
+                if let Some(tool) = &dispatch.tool {
                     tool.set_config(config);
+                }
+                if let Some(llm) = &dispatch.llm {
+                    llm.set_config(config);
+                }
+                if let Some(embed) = &dispatch.embed {
+                    embed.set_config(config);
+                }
+                if let Some(tts) = &dispatch.tts {
+                    tts.set_config(config);
+                }
+                if let Some(stt) = &dispatch.stt {
+                    stt.set_config(config);
+                }
+            }
+            if let Some(profiles) = plugin_profiles {
+                if let Some(tool) = &dispatch.tool {
+                    tool.set_profiles(profiles);
+                }
+                if let Some(llm) = &dispatch.llm {
+                    llm.set_profiles(profiles);
+                }
+                if let Some(embed) = &dispatch.embed {
+                    embed.set_profiles(profiles);
+                }
+                if let Some(tts) = &dispatch.tts {
+                    tts.set_profiles(profiles);
+                }
+                if let Some(stt) = &dispatch.stt {
+                    stt.set_profiles(profiles);
                 }
             }
             PluginIpcResponse::HandshakeAck {
@@ -198,15 +232,17 @@ async fn dispatch_fn(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> Plugi
             request_id: request_id.clone(),
         },
         PluginIpcRequest::GetConfigSchema { request_id } => {
-            let Some(tool) = &dispatch.tool else {
-                return PluginIpcResponse::ConfigSchema {
-                    request_id: request_id.clone(),
-                    schema: None,
-                };
-            };
+            let schema = dispatch
+                .tool
+                .as_ref()
+                .and_then(|t| t.config_schema())
+                .or_else(|| dispatch.llm.as_ref().and_then(|l| l.config_schema()))
+                .or_else(|| dispatch.embed.as_ref().and_then(|e| e.config_schema()))
+                .or_else(|| dispatch.tts.as_ref().and_then(|t| t.config_schema()))
+                .or_else(|| dispatch.stt.as_ref().and_then(|s| s.config_schema()));
             PluginIpcResponse::ConfigSchema {
                 request_id: request_id.clone(),
-                schema: tool.config_schema(),
+                schema,
             }
         }
         PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
@@ -440,6 +476,7 @@ async fn do_handshake(stream: &mut IpcStream) -> PluginCapabilities {
             },
             sandbox: SandboxConfigData::default(),
             plugin_config: Some(serde_json::json!({"test_key": "test_value"})),
+            plugin_profiles: None,
         },
     )
     .await

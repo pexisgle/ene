@@ -140,8 +140,7 @@ async fn dispatch_mock(
     match req {
         PluginIpcRequest::Handshake {
             version: host_range,
-            sandbox: _,
-            plugin_config: _,
+            ..
         } => {
             // Mirrors `VersionRange::negotiate`: pick the highest common
             // version, or fail with a message naming both ranges when they

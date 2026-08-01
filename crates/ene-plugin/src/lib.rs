@@ -23,6 +23,8 @@
 //!
 //! struct MyTool;
 //!
+//! impl ene_plugin::ConfigurablePlugin for MyTool {}
+//!
 //! #[async_trait]
 //! impl ToolPlugin for MyTool {
 //!     fn tool_capabilities(&self) -> ToolPluginCapabilities {
@@ -57,8 +59,8 @@ pub mod tool_provider;
 pub use action::{ToolAction, ToolSpecArgs};
 pub use compat::ToolProviderPlugin;
 pub use plugin::{
-    EmbedPlugin, LlmPlugin, PluginCompletion, PluginStream, PluginStreamChunk, SttPlugin,
-    ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+    ConfigurablePlugin, EmbedPlugin, LlmPlugin, PluginCompletion, PluginStream, PluginStreamChunk,
+    SttPlugin, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
 };
 pub use server::{PluginDispatch, run_plugin_server};
 pub use tool_provider::{ActionSetProvider, SingleActionProvider};
@@ -150,9 +152,9 @@ pub mod prelude {
 
         #[doc(no_inline)]
         pub use crate::{
-            ConcurrencyHint, EmbedPlugin, LlmPlugin, LlmProviderSpec, PluginCompletion,
-            PluginDispatch, PluginError, PluginStream, PluginStreamChunk, SttPlugin,
-            SttProviderSpec, TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+            ConcurrencyHint, ConfigurablePlugin, EmbedPlugin, LlmPlugin, LlmProviderSpec,
+            PluginCompletion, PluginDispatch, PluginError, PluginStream, PluginStreamChunk,
+            SttPlugin, SttProviderSpec, TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
             TtsProviderSpec, run_plugin_server,
         };
     }

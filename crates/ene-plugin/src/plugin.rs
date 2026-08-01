@@ -1,9 +1,12 @@
 //! Plugin trait definitions and streaming chunk types.
 //!
-//! Three independent traits replace the old monolithic [`Plugin`] (now removed):
-//! [`ToolPlugin`], [`LlmPlugin`], and [`EmbedPlugin`]. A plugin struct can
-//! implement any subset; the server dispatches requests to the appropriate
-//! trait based on the `PluginDispatch` routing table.
+//! Five independent traits replace the old monolithic [`Plugin`] (now removed):
+//! [`ToolPlugin`], [`LlmPlugin`], [`EmbedPlugin`], [`TtsPlugin`], and
+//! [`SttPlugin`]. A plugin struct can implement any subset; the server
+//! dispatches requests to the appropriate trait based on the `PluginDispatch`
+//! routing table. Every trait inherits the shared [`ConfigurablePlugin`]
+//! surface, so **any** plugin — tool or provider — can receive its opaque
+//! configuration blob from the host and advertise a config schema (#313).
 
 use std::pin::Pin;
 
@@ -72,6 +75,39 @@ pub struct ToolPluginCapabilities {
     pub tool_count: usize,
 }
 
+// ── ConfigurablePlugin (shared by every plugin trait) ─────────────────
+
+/// Shared configuration surface inherited by every plugin trait.
+///
+/// The host delivers plugin-specific configuration once during the IPC
+/// handshake via [`set_config`](Self::set_config) (the `plugins.list.<name>.config`
+/// blob) and [`set_profiles`](Self::set_profiles) (the
+/// `plugins.list.<name>.profiles.<profile>` map). Both blobs are opaque to the
+/// host — profile *selection* (e.g. per model/voice) is plugin-owned. A plugin
+/// advertises the JSON Schema its config accepts via
+/// [`config_schema`](Self::config_schema); fields it marks with
+/// `x-ene-secret: true` are treated as secrets by the host (masked in logs,
+/// redacted at the host boundary).
+///
+/// Every method has a default no-op implementation so a plugin opts into
+/// exactly the configuration support it needs.
+pub trait ConfigurablePlugin: Send + Sync {
+    /// Receives plugin-specific configuration (called once during Handshake).
+    fn set_config(&self, _config: &serde_json::Value) {}
+
+    /// Receives per-profile plugin configuration (called once during Handshake
+    /// when `plugins.list.<name>.profiles` is configured).
+    ///
+    /// The value is the raw `profiles` JSON object (`Map<profile, config>`);
+    /// profile selection is plugin-owned.
+    fn set_profiles(&self, _profiles: &serde_json::Value) {}
+
+    /// Returns the JSON Schema for the configuration this plugin accepts.
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+}
+
 // ── ToolPlugin ──────────────────────────────────────────────────────────
 
 /// Plugin trait for tool execution.
@@ -80,7 +116,7 @@ pub struct ToolPluginCapabilities {
 /// gating, and configuration. Every method has a sensible default so a
 /// plugin can opt into exactly the capabilities it needs.
 #[async_trait]
-pub trait ToolPlugin: Send + Sync {
+pub trait ToolPlugin: ConfigurablePlugin + Send + Sync {
     /// Returns the tool capabilities advertised during the handshake.
     fn tool_capabilities(&self) -> ToolPluginCapabilities;
 
@@ -140,16 +176,8 @@ pub trait ToolPlugin: Send + Sync {
         Ok(())
     }
 
-    /// Receives plugin-specific configuration (called once during Handshake).
-    fn set_config(&self, _config: &serde_json::Value) {}
-
     /// Receives sandbox configuration (called once during Handshake).
     fn set_sandbox(&self, _sandbox: &SandboxConfigData) {}
-
-    /// Returns the JSON Schema for the configuration this plugin accepts.
-    fn config_schema(&self) -> Option<serde_json::Value> {
-        None
-    }
 
     /// Drain any pending deferred completion notifications.
     ///
@@ -164,7 +192,7 @@ pub trait ToolPlugin: Send + Sync {
 
 /// Plugin trait for LLM chat completions (streaming and non-streaming).
 #[async_trait]
-pub trait LlmPlugin: Send + Sync {
+pub trait LlmPlugin: ConfigurablePlugin + Send + Sync {
     /// Returns the LLM provider capabilities advertised during the handshake.
     fn llm_capabilities(&self) -> Vec<LlmProviderSpec>;
 
@@ -208,7 +236,7 @@ pub trait LlmPlugin: Send + Sync {
 
 /// Plugin trait for batch embedding computation.
 #[async_trait]
-pub trait EmbedPlugin: Send + Sync {
+pub trait EmbedPlugin: ConfigurablePlugin + Send + Sync {
     /// Computes embeddings for a batch of text items.
     ///
     /// The default returns [`PluginError::NotSupported`] for plugins that
@@ -239,7 +267,7 @@ pub trait EmbedPlugin: Send + Sync {
 
 /// Plugin trait for Text-to-Speech synthesis.
 #[async_trait]
-pub trait TtsPlugin: Send + Sync {
+pub trait TtsPlugin: ConfigurablePlugin + Send + Sync {
     /// Returns TTS capabilities advertised during the handshake.
     fn tts_capabilities(&self) -> Vec<TtsProviderSpec>;
 
@@ -263,7 +291,7 @@ pub trait TtsPlugin: Send + Sync {
 
 /// Plugin trait for Speech-to-Text transcription.
 #[async_trait]
-pub trait SttPlugin: Send + Sync {
+pub trait SttPlugin: ConfigurablePlugin + Send + Sync {
     /// Returns STT capabilities advertised during the handshake.
     fn stt_capabilities(&self) -> Vec<SttProviderSpec>;
 

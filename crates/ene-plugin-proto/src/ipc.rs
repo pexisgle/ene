@@ -77,6 +77,9 @@ impl VersionRange {
 ///
 /// v3 extends the tool IPC v2 with:
 /// - `Handshake` gains `plugin_config` (replaces `tool_config` for plugins)
+/// - `Handshake` gains `plugin_profiles` (per-profile plugin configuration,
+///   delivered alongside `plugin_config`; `#[serde(default)]` so older peers
+///   stay wire-compatible without a version bump)
 /// - `HandshakeAck` gains `capabilities: PluginCapabilities`
 /// - Streaming LLM messages (`CreateChatStream`, `StreamChunk`, `StreamEnd`,
 ///   `StreamError`)
@@ -132,6 +135,13 @@ pub enum PluginIpcRequest {
         sandbox: SandboxConfigData,
         /// Plugin-specific configuration JSON.
         plugin_config: Option<serde_json::Value>,
+        /// Per-profile plugin configuration JSON (`plugins.list.<name>.profiles`).
+        ///
+        /// Opaque to the host: profile selection is plugin-owned (a single
+        /// plugin can need different settings per model/profile). Absent for
+        /// older hosts; `#[serde(default)]` keeps the wire ABI stable.
+        #[serde(default)]
+        plugin_profiles: Option<serde_json::Value>,
     },
     /// Graceful shutdown.
     Shutdown,
@@ -633,9 +643,33 @@ mod tests {
             version: VersionRange::host_supported(),
             sandbox: SandboxConfigData::default(),
             plugin_config: Some(serde_json::json!({"api_key": "sk-test"})),
+            plugin_profiles: Some(serde_json::json!({"default": {"voice": "af_heart"}})),
         };
         let got = send_recv_request(&req).await;
         assert_eq!(got, req);
+    }
+
+    #[tokio::test]
+    async fn request_handshake_profiles_default_keeps_old_peers_compatible() {
+        // A plugin built against protocol v3 sends no `plugin_profiles`; the
+        // field must default to `None` rather than failing deserialization
+        // (#313).
+        let json = r#"{
+            "Handshake": {
+                "version": {"min": 3, "max": 4},
+                "sandbox": {},
+                "plugin_config": {"api_key": "sk-test"}
+            }
+        }"#;
+        let got: PluginIpcRequest =
+            serde_json::from_str(json).expect("deserialize without profiles");
+        assert!(matches!(
+            got,
+            PluginIpcRequest::Handshake {
+                plugin_profiles: None,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

@@ -198,6 +198,10 @@ pub struct IpcPluginConnection {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
     plugin_config: Option<serde_json::Value>,
+    /// Per-profile plugin configuration (`plugins.list.<name>.profiles`),
+    /// re-sent to the plugin on every (re)connect handshake alongside
+    /// [`plugin_config`](Self::plugin_config) (#313).
+    plugin_profiles: Option<serde_json::Value>,
     /// Write half of the IPC stream, behind its own lock so the write is
     /// serialized (frames never interleave) but released before the response
     /// wait. The read half is owned by the reader task. `None` while
@@ -269,6 +273,7 @@ impl IpcPluginConnection {
         socket_path: &Path,
         sandbox: SandboxConfigData,
         plugin_config: Option<serde_json::Value>,
+        plugin_profiles: Option<serde_json::Value>,
         handshake_timeout: Duration,
         max_concurrent: usize,
     ) -> Result<Self, PluginHostError> {
@@ -285,6 +290,7 @@ impl IpcPluginConnection {
                 version: VersionRange::host_supported(),
                 sandbox: sandbox.clone(),
                 plugin_config: plugin_config.clone(),
+                plugin_profiles: plugin_profiles.clone(),
             },
         )
         .await
@@ -357,6 +363,7 @@ impl IpcPluginConnection {
             socket_path: socket_path.to_path_buf(),
             sandbox,
             plugin_config,
+            plugin_profiles,
             writer: Mutex::new(Some(writer)),
             capabilities: parking_lot::RwLock::new(capabilities),
             negotiated_version: AtomicU32::new(negotiated_version),
@@ -827,6 +834,7 @@ impl IpcPluginConnection {
                 version: VersionRange::host_supported(),
                 sandbox: self.sandbox.clone(),
                 plugin_config: self.plugin_config.clone(),
+                plugin_profiles: self.plugin_profiles.clone(),
             },
         )
         .await
@@ -1264,6 +1272,7 @@ mod tests {
                 version: VersionRange { min: 4, max: 4 },
                 sandbox: SandboxConfigData::default(),
                 plugin_config: None,
+                plugin_profiles: None,
             },
             PluginIpcRequest::Shutdown,
             PluginIpcRequest::Ping {

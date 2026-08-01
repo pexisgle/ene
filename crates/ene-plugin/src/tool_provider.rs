@@ -21,7 +21,7 @@
 //! fall back to synchronous execution, so existing tools are unaffected.
 
 use crate::action::ToolAction;
-use crate::{ToolPlugin, ToolPluginCapabilities};
+use crate::{ConfigurablePlugin, ToolPlugin, ToolPluginCapabilities};
 use async_trait::async_trait;
 use ene_plugin_proto::{SandboxConfigData, ToolError, ToolProvider, ToolRagProfile, ToolSpec};
 
@@ -288,6 +288,16 @@ impl ToolProvider for ActionSetProvider {
     }
 }
 
+impl ConfigurablePlugin for ActionSetProvider {
+    fn set_config(&self, config: &serde_json::Value) {
+        self.hooks.call_set_config(config);
+    }
+
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        self.hooks.call_config_schema()
+    }
+}
+
 #[async_trait]
 impl ToolPlugin for ActionSetProvider {
     fn tool_capabilities(&self) -> ToolPluginCapabilities {
@@ -350,16 +360,8 @@ impl ToolPlugin for ActionSetProvider {
         Ok(())
     }
 
-    fn set_config(&self, config: &serde_json::Value) {
-        ProviderHooks::call_set_config(&self.hooks, config);
-    }
-
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         ProviderHooks::call_set_sandbox(&self.hooks, sandbox);
-    }
-
-    fn config_schema(&self) -> Option<serde_json::Value> {
-        ProviderHooks::call_config_schema(&self.hooks)
     }
 }
 
@@ -543,16 +545,22 @@ impl ToolPlugin for SingleActionProvider {
         ToolPlugin::revoke_pattern(&self.inner, action, target_pattern)
     }
 
-    fn set_config(&self, config: &serde_json::Value) {
-        ToolPlugin::set_config(&self.inner, config);
-    }
-
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         ToolPlugin::set_sandbox(&self.inner, sandbox);
     }
+}
+
+impl ConfigurablePlugin for SingleActionProvider {
+    fn set_config(&self, config: &serde_json::Value) {
+        ConfigurablePlugin::set_config(&self.inner, config);
+    }
+
+    fn set_profiles(&self, profiles: &serde_json::Value) {
+        ConfigurablePlugin::set_profiles(&self.inner, profiles);
+    }
 
     fn config_schema(&self) -> Option<serde_json::Value> {
-        ToolPlugin::config_schema(&self.inner)
+        ConfigurablePlugin::config_schema(&self.inner)
     }
 }
 
