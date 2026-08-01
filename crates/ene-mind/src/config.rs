@@ -172,8 +172,10 @@ pub struct MindMemoryConfig {
     /// memories as sharing a contradiction key (#351).
     ///
     /// Kind-specific contradiction checks (`Preference`, `UserProfile`,
-    /// `Semantic`, `Relationship`) decide whether an incoming candidate talks
-    /// about the *same* subject as an existing memory by comparing the cosine
+    /// `Semantic`, `Relationship`, and `Commitment` — see
+    /// [`MemoryKind::is_contradiction_kind`](ene_core::MemoryKind::is_contradiction_kind))
+    /// decide whether an incoming candidate talks about the *same* subject as
+    /// an existing memory by comparing the cosine
     /// similarity of their **title embeddings**. A candidate whose title is at
     /// least this similar to an existing memory of the same kind is checked for
     /// contradiction instead of being persisted as a separate row, so synonymous

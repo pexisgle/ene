@@ -136,9 +136,16 @@ impl RecallPlanner {
             // leak into the LLM context. With the pipeline disabled the
             // exclusion is off too: reflections then behave exactly as they
             // did before this feature (ordinary recall results), so enabling
-            // the pipeline is the only observable behavior change.
+            // the pipeline is the only observable behavior change. The set of
+            // excluded kinds comes from the per-kind policy table
+            // (`MemoryKind::is_recall_eligible`, #348); today it is exactly
+            // Reflection.
             exclude_kinds: if memory.reflection.enabled {
-                vec![MemoryKind::Reflection]
+                MemoryKind::ALL
+                    .iter()
+                    .copied()
+                    .filter(|kind| !kind.is_recall_eligible())
+                    .collect()
             } else {
                 vec![]
             },

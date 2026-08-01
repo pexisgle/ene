@@ -627,7 +627,10 @@ impl MemoryArbiter {
         ctx: &ArbiterContext<'_>,
         matcher: &mut TitleMatcher<'_>,
     ) -> Option<CandidateDecision> {
-        if !is_contradiction_kind(candidate.kind) {
+        // Which kinds are contradiction-checked (and how they are keyed to the
+        // same subject) is defined in ONE place — the per-kind policy table on
+        // [`MemoryKind`] (#348), not repeated here.
+        if !candidate.kind.is_contradiction_kind() {
             return None;
         }
 
@@ -1091,16 +1094,6 @@ const fn is_arbitration_visible(status: MemoryStatus) -> bool {
     matches!(
         status,
         MemoryStatus::Active | MemoryStatus::Faded | MemoryStatus::Disputed
-    )
-}
-
-const fn is_contradiction_kind(kind: MemoryKind) -> bool {
-    matches!(
-        kind,
-        MemoryKind::Preference
-            | MemoryKind::UserProfile
-            | MemoryKind::Semantic
-            | MemoryKind::Relationship
     )
 }
 
@@ -3324,6 +3317,46 @@ mod tests {
         let embedder = TopicEmbedder;
         let arbiter_ctx = ctx_with_embedder(turn, &embedder);
         let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &arbiter_ctx).await;
+        assert!(matches!(
+            decision_action(&decisions),
+            ArbiterAction::Supersede { .. }
+        ));
+        assert_eq!(
+            decisions[0].reason.code,
+            ArbiterReasonCode::ContradictionSupersede
+        );
+    }
+
+    /// `Commitment` is contradiction-checked (defense in depth for the
+    /// typed-memory path — the commitment ledger is the primary enforcement
+    /// point, #348). A candidate for the same commitment supersedes the prior
+    /// typed row instead of both surviving as separate valid commitments.
+    #[tokio::test]
+    async fn commitment_kind_contradiction_supersedes_same_title() {
+        let turn = TurnInput {
+            user_message: "the meeting moved to Friday",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let existing = memory_item(
+            81,
+            MemoryKind::Commitment,
+            "meeting",
+            "Meeting on Wednesday",
+            0.7,
+        );
+        let candidate = MemoryCandidate {
+            kind: MemoryKind::Commitment,
+            title: "meeting".to_string(),
+            content: "Meeting on Friday".to_string(),
+            source_quote: "the meeting moved to Friday".to_string(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: Some("Friday".to_string()),
+            tags: Vec::new(),
+        };
+        let decisions = MemoryArbiter::evaluate_all(&[candidate], &[existing], &ctx(turn)).await;
         assert!(matches!(
             decision_action(&decisions),
             ArbiterAction::Supersede { .. }

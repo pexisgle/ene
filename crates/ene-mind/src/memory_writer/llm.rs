@@ -22,7 +22,8 @@
     clippy::let_underscore_must_use,
     reason = "fmt::Write to a String is infallible in practice"
 )]
-//! - Unknown `kind` fallback to `Semantic`
+//! - Unknown `kind` labels warn and fall back to `Semantic` (never silently
+//!   reclassified); `WorldState` is rejected explicitly (reserved, #209).
 
 use std::fmt::Write;
 
@@ -176,6 +177,7 @@ fn build_conversation_text(turn: &TurnInput<'_>) -> String {
 
 /// Returns the JSON schema for the structured extraction output.
 fn extraction_schema() -> serde_json::Value {
+    let kind_description = llm_extractable_kind_description();
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -186,7 +188,7 @@ fn extraction_schema() -> serde_json::Value {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "Memory kind: Episodic, Semantic, UserProfile, Preference, Relationship, Affective, Commitment, Procedure, or Reflection"
+                            "description": kind_description,
                         },
                         "title": {
                             "type": "string",
@@ -295,12 +297,37 @@ struct RawCandidate {
     commitment_due: Option<String>,
 }
 
-/// Converts a raw JSON candidate into a `MemoryCandidate`.
+/// The extractable kind names (Debug form: `Episodic`, `UserProfile`, …) for
+/// the extraction schema's `kind` description.
 ///
-/// - Maps unknown `kind` strings to `Semantic` and logs a warning.
-/// - Caps confidence at `MAX_CONFIDENCE` (0.9).
-fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
-    let kind = match raw.kind.to_lowercase().as_str() {
+/// Derived from [`MemoryKind::is_llm_extractable`] so the prompt never
+/// advertises kinds the parse table rejects — in particular
+/// [`MemoryKind::WorldState`], which is reserved for structured world-state
+/// tracking (#209) and has no producer yet.
+fn llm_extractable_kind_description() -> String {
+    let names = MemoryKind::ALL
+        .iter()
+        .filter(|kind| kind.is_llm_extractable())
+        .map(|kind| format!("{kind:?}"))
+        .collect::<Vec<_>>();
+    format!("Memory kind: {}", names.join(", "))
+}
+
+/// Maps an LLM-provided `kind` string to a [`MemoryKind`].
+///
+/// Accepts exactly the kinds where [`MemoryKind::is_llm_extractable`] is true
+/// (canonical `snake_case` plus a couple of aliases). Two inputs fall back to
+/// [`MemoryKind::Semantic`], both with a `tracing::warn!`:
+///
+/// - `WorldState` — reserved for structured time-series world state (#209); no
+///   producer exists yet, so it must not be silently produced.
+/// - anything else — an unknown label the model invented. The fallback keeps
+///   the extractor resilient to schema drift, but it is not free: a
+///   misclassified memory enters the arbiter as `Semantic` and is then
+///   **contradiction-checked** like any other semantic fact, so this warning is
+///   the only signal that a row may have been reclassified (#348).
+fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
+    match raw_kind.to_lowercase().as_str() {
         "episodic" => MemoryKind::Episodic,
         "semantic" => MemoryKind::Semantic,
         "userprofile" | "user_profile" | "user profile" => MemoryKind::UserProfile,
@@ -310,14 +337,35 @@ fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
         "commitment" => MemoryKind::Commitment,
         "procedure" => MemoryKind::Procedure,
         "reflection" => MemoryKind::Reflection,
-        other => {
+        // WorldState is deliberately NOT parseable: it is reserved for
+        // structured time-series world state (#209) and not yet generated
+        // anywhere, so the extractor must not produce it. Falling back to
+        // Semantic (with a warning) is correct until #209 lands.
+        "worldstate" | "world_state" | "world state" => {
             tracing::warn!(
-                raw_kind = other,
-                "Unknown memory kind from LLM extractor, falling back to Semantic"
+                raw_kind = %raw_kind,
+                "LLM extractor returned WorldState, which is reserved for structured world-state tracking (#209) and not yet extractable; falling back to Semantic"
             );
             MemoryKind::Semantic
         }
-    };
+        other => {
+            tracing::warn!(
+                raw_kind = %raw_kind,
+                normalized = other,
+                "Unknown memory kind from LLM extractor; falling back to Semantic. Misclassified memories enter contradiction checking as Semantic (#348)"
+            );
+            MemoryKind::Semantic
+        }
+    }
+}
+
+/// Converts a raw JSON candidate into a `MemoryCandidate`.
+///
+/// - Maps unknown `kind` strings to `Semantic` with a warning; rejects
+///   `WorldState` explicitly (reserved, #209).
+/// - Caps confidence at `MAX_CONFIDENCE` (0.9).
+fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
+    let kind = parse_llm_kind(&raw.kind);
 
     let confidence = raw.confidence.clamp(0.0, MAX_CONFIDENCE);
 
@@ -591,6 +639,161 @@ mod tests {
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, MemoryKind::Semantic);
+    }
+
+    // ── #348: unknown / reserved kind handling ──
+
+    /// Minimal `tracing` subscriber that records every WARN event's rendered
+    /// fields, so tests can assert the fallback actually logs a warning rather
+    /// than silently reclassifying (#348).
+    #[derive(Clone, Default)]
+    struct CapturingSubscriber {
+        warns: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl CapturingSubscriber {
+        fn warns(&self) -> Vec<String> {
+            self.warns.lock().expect("capture lock").clone()
+        }
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().level() == &tracing::Level::WARN {
+                let mut visitor = FieldVisitor::default();
+                event.record(&mut visitor);
+                self.warns
+                    .lock()
+                    .expect("capture lock")
+                    .push(visitor.message);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// Collects a warning event's fields into `message` in visit order
+    /// (e.g. `raw_kind=CustomType message=Unknown memory kind …`).
+    #[derive(Default)]
+    struct FieldVisitor {
+        message: String,
+    }
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            self.message.push_str(field.name());
+            self.message.push('=');
+            self.message.push_str(value);
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            self.message.push_str(field.name());
+            self.message.push('=');
+            let _ = write!(self.message, "{value:?}");
+        }
+    }
+
+    /// An unknown label warns (naming the label) and lands as Semantic — never
+    /// silently reclassified (#348).
+    #[test]
+    fn unknown_kind_warns_and_lands_as_semantic() {
+        let captured = CapturingSubscriber::default();
+        let kind =
+            tracing::subscriber::with_default(captured.clone(), || parse_llm_kind("CustomType"));
+        assert_eq!(kind, MemoryKind::Semantic);
+        let warns = captured.warns();
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("CustomType") && w.contains("Unknown memory kind")),
+            "expected a warning naming the unknown label, got: {warns:?}"
+        );
+    }
+
+    /// `WorldState` must not be produced: it warns with a kind-specific message
+    /// and falls back to Semantic (reserved for #209) (#348).
+    #[test]
+    fn world_state_is_rejected_with_warning_not_produced() {
+        let captured = CapturingSubscriber::default();
+        let kind =
+            tracing::subscriber::with_default(captured.clone(), || parse_llm_kind("WorldState"));
+        assert_eq!(
+            kind,
+            MemoryKind::Semantic,
+            "WorldState must fall back to Semantic, never be produced"
+        );
+        let warns = captured.warns();
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("WorldState") && w.contains("reserved")),
+            "expected a WorldState-specific warning, got: {warns:?}"
+        );
+    }
+
+    /// The parse table and the policy table must agree: every
+    /// LLM-extractable kind parses from its canonical `snake_case` name, and the
+    /// one non-extractable kind (`WorldState`) does not (#348).
+    #[test]
+    fn parse_table_accepts_exactly_llm_extractable_kinds() {
+        for kind in MemoryKind::ALL {
+            if kind.is_llm_extractable() {
+                assert_eq!(
+                    parse_llm_kind(kind.as_str()),
+                    kind,
+                    "parse table must accept {}",
+                    kind.as_str()
+                );
+            }
+        }
+        assert!(
+            !MemoryKind::WorldState.is_llm_extractable(),
+            "WorldState must not be extractable"
+        );
+        assert_eq!(
+            parse_llm_kind(MemoryKind::WorldState.as_str()),
+            MemoryKind::Semantic,
+            "WorldState must fall back, not parse to itself"
+        );
+    }
+
+    /// The schema's `kind` description advertises exactly the extractable
+    /// kinds, so the prompt never invites `WorldState` (#348).
+    #[test]
+    fn schema_kind_description_lists_only_extractable_kinds() {
+        let schema = super::extraction_schema();
+        let description =
+            schema["properties"]["candidates"]["items"]["properties"]["kind"]["description"]
+                .as_str()
+                .expect("kind description must be a string");
+        for kind in MemoryKind::ALL {
+            let name = format!("{kind:?}");
+            assert_eq!(
+                description.contains(&name),
+                kind.is_llm_extractable(),
+                "schema description must advertise exactly the extractable kinds (mismatch for {name})"
+            );
+        }
     }
 
     #[tokio::test]

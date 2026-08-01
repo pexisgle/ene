@@ -4,6 +4,14 @@
 //! and prompt injection (#124). Typed `MemoryKind::Commitment` rows are optional
 //! references (`typed_memories.commitment_id`) and are no longer dual-written
 //! from arbiter persist → sync.
+//!
+//! **Contradiction semantics (#348):** this ledger is where a rephrased or
+//! rescheduled commitment is *merged* into the existing row (title-keyed
+//! matching, #387) instead of both versions surviving as separate valid
+//! commitments. The typed-memory arbiter additionally treats `Commitment` as a
+//! contradiction-checked kind (`MemoryKind::is_contradiction_kind`) as defense
+//! in depth for any direct typed-write path; see the per-kind policy table in
+//! `ene-core::MemoryKind`.
 
 use std::collections::HashMap;
 
@@ -618,6 +626,46 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].description, "Let's discuss the UI design instead");
         assert_eq!(active[0].due_label.as_deref(), Some("Tomorrow"));
+    }
+
+    #[tokio::test]
+    async fn apply_supersedes_existing_on_due_date_change_only() {
+        // #348: rescheduling the same commitment — same title and content, only
+        // the due label changes — must update the existing ledger row, not
+        // register a second valid commitment that both survive as active.
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let ids1 = CommitmentLedger::apply_commitment_candidates(
+            &store,
+            &sync_ctx(),
+            &[commitment_candidate(0.9)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids1.len(), 1);
+
+        let mut rescheduled = commitment_candidate(0.9);
+        rescheduled.commitment_due = Some("Next week".to_string());
+
+        let ids2 =
+            CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[rescheduled])
+                .await
+                .unwrap();
+        assert_eq!(ids2.len(), 1);
+        assert_eq!(
+            ids2[0], ids1[0],
+            "rescheduling must keep the same commitment id"
+        );
+
+        let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            active.len(),
+            1,
+            "rescheduling must not duplicate the commitment"
+        );
+        assert_eq!(active[0].due_label.as_deref(), Some("Next week"));
     }
 
     #[tokio::test]

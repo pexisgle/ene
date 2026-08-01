@@ -68,10 +68,10 @@ pub use affect::{AffectState, DiscreteEmotion, PendingAffectProposal};
 pub use commitment::{ActiveCommitmentPrompt, Commitment, CommitmentStatus, NewCommitment};
 pub use key_fact::KeyFact;
 pub use memory::{
-    AffectAnnotation, GatheredCandidate, HybridSearchWeights, MemoryCandidateSource,
-    MemoryConfidence, MemoryItem, MemoryJournalListOptions, MemoryKind, MemorySalience,
-    MemoryScope, MemoryScoreBreakdown, MemorySearchOptions, MemorySource, MemoryStatus,
-    NewMemoryItem, Query, ScoredMemory, TimeRange,
+    AffectAnnotation, ContradictionKeyMatch, ForgettingPolicy, GatheredCandidate,
+    HybridSearchWeights, MemoryCandidateSource, MemoryConfidence, MemoryItem,
+    MemoryJournalListOptions, MemoryKind, MemorySalience, MemoryScope, MemoryScoreBreakdown,
+    MemorySearchOptions, MemorySource, MemoryStatus, NewMemoryItem, Query, ScoredMemory, TimeRange,
 };
 pub use pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
 pub use pending_write::{PendingMemoryWrite, PendingMemoryWriteStatus};
