@@ -64,6 +64,41 @@ impl ContextManager {
         self.pending_compression.is_some()
     }
 
+    /// Whether window-pressure compression would spawn if given a provider.
+    ///
+    /// Callers that resolve an LLM provider only when compression actually
+    /// starts (to avoid a health probe on every turn) should gate on this
+    /// before constructing the provider, then call [`Self::check_and_trigger`].
+    pub fn should_trigger_window(
+        &self,
+        config: &ContextConfig,
+        turn_count: usize,
+        history: &[HistoryEntry],
+    ) -> bool {
+        if self.pending_compression.is_some() {
+            return false;
+        }
+        let history_tokens = estimate_history_tokens(history);
+        if evaluate_compression_trigger(config, turn_count, history_tokens).is_none() {
+            return false;
+        }
+        let recent_cap = config.recent_turns.saturating_mul(2).max(2);
+        if history.len() <= recent_cap {
+            return false;
+        }
+        let compress_count = history.len().saturating_sub(recent_cap);
+        compress_count >= MIN_MESSAGES_TO_COMPRESS
+    }
+
+    /// Whether retroactive topic-boundary compression would spawn if given a
+    /// provider. See [`Self::should_trigger_window`].
+    pub fn should_trigger_retroactive(&self, turn_count: usize, history: &[HistoryEntry]) -> bool {
+        if self.pending_compression.is_some() {
+            return false;
+        }
+        plan_retroactive_compression(history, turn_count).is_some()
+    }
+
     /// Evaluate the window-pressure trigger and spawn a background compression
     /// task if warranted.
     ///
@@ -72,6 +107,9 @@ impl ContextManager {
     /// [`Self::check_and_trigger_retroactive`]). It compresses the oldest
     /// messages, keeping the recent window. Does nothing if a task is already
     /// pending or thresholds are not met.
+    ///
+    /// Prefer gating provider construction on [`Self::should_trigger_window`]
+    /// so unused health probes do not run.
     pub fn check_and_trigger(
         &mut self,
         config: &ContextConfig,
@@ -83,22 +121,12 @@ impl ContextManager {
         store: Arc<dyn MemoryPort>,
         provider: Arc<dyn LlmProvider>,
     ) {
-        if self.pending_compression.is_some() {
-            return;
-        }
-        let history_tokens = estimate_history_tokens(history);
-        if evaluate_compression_trigger(config, turn_count, history_tokens).is_none() {
+        if !self.should_trigger_window(config, turn_count, history) {
             return;
         }
 
         let recent_cap = config.recent_turns.saturating_mul(2).max(2);
-        if history.len() <= recent_cap {
-            return;
-        }
         let compress_count = history.len().saturating_sub(recent_cap);
-        if compress_count < MIN_MESSAGES_TO_COMPRESS {
-            return;
-        }
         let turns: Vec<HistoryEntry> = history[..compress_count].to_vec();
         let turn_end = i32::try_from(turn_count).unwrap_or(i32::MAX);
         let compress_msg_count = i32::try_from(compress_count / 2).unwrap_or(i32::MAX).max(1);
@@ -126,6 +154,9 @@ impl ContextManager {
     /// retained, so the next turn sees "previous-topic summary + recent".
     /// Does nothing if a task is already pending or there is no pre-boundary
     /// span worth compressing.
+    ///
+    /// Prefer gating provider construction on [`Self::should_trigger_retroactive`]
+    /// so unused health probes do not run.
     pub fn check_and_trigger_retroactive(
         &mut self,
         config: &ContextConfig,

@@ -61,7 +61,6 @@ use ene_mind::{ConversationSession, SessionId};
 use ene_plugin_host::{DisabledReason, LlmFactoriesByPlugin, PluginHealthEvent};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Bounded capacity for the dedicated audio (PCM) channel.
@@ -219,6 +218,18 @@ impl Drop for HandleShutdownGuard {
     }
 }
 
+/// Cross-slot-atomic session snapshot published by the actor.
+///
+/// `session_id`, `session_started_at`, and `turn_count` are replaced together
+/// under a single write lock so a reader never observes a new session id with
+/// a stale turn count (or any other mid-split mix).
+#[derive(Clone, Debug)]
+pub(crate) struct SharedSessionState {
+    pub(crate) session_id: SessionId,
+    pub(crate) session_started_at: DateTime<Utc>,
+    pub(crate) turn_count: u32,
+}
+
 /// Mailbox-free shared actor state, kept in sync by the turn actor.
 ///
 /// Every field is a shared slot written by the actor at the mutation point —
@@ -242,13 +253,9 @@ pub(crate) struct SharedActorState {
     /// Current character-card name, kept in sync on every
     /// `SetCharacter`.
     pub(crate) card_name: Arc<parking_lot::Mutex<String>>,
-    /// Current session id, replaced when a session split resets the session.
-    pub(crate) session_id: Arc<parking_lot::Mutex<SessionId>>,
-    /// When the current session started (UTC), replaced on session split.
-    pub(crate) session_started_at: Arc<parking_lot::Mutex<DateTime<Utc>>>,
-    /// Turn count of the current session, stored after each recorded user
-    /// input and after each completed stream outcome.
-    pub(crate) turn_count: Arc<AtomicU32>,
+    /// Current session id / started-at / turn count, replaced atomically on
+    /// session split and after each recorded turn.
+    pub(crate) session: Arc<parking_lot::RwLock<SharedSessionState>>,
     /// Current configuration. `RwLock` (readers hold a shared lock and clone
     /// the `Arc`; the actor swaps it under a write lock) so per-frame reads
     /// never serialize against each other — an "ArcSwap-style" sharing
@@ -265,9 +272,11 @@ impl SharedActorState {
     fn new(config: &EneConfig, session: &ConversationSession) -> Self {
         Self {
             card_name: Arc::new(parking_lot::Mutex::new(session.card_name().to_string())),
-            session_id: Arc::new(parking_lot::Mutex::new(session.memory.session_id.clone())),
-            session_started_at: Arc::new(parking_lot::Mutex::new(session.session_started_at())),
-            turn_count: Arc::new(AtomicU32::new(session.current_turn_count() as u32)),
+            session: Arc::new(parking_lot::RwLock::new(SharedSessionState {
+                session_id: session.memory.session_id.clone(),
+                session_started_at: session.session_started_at(),
+                turn_count: session.current_turn_count() as u32,
+            })),
             config: Arc::new(parking_lot::RwLock::new(Arc::new(config.clone()))),
             character_card: Arc::new(parking_lot::Mutex::new(
                 session.character_card.clone().map(Arc::new),
@@ -788,27 +797,29 @@ impl EneHandle {
 
     /// Current session id.
     ///
-    /// Mailbox-free: reads the shared slot the actor replaces when a session
-    /// split resets the session. One `parking_lot` lock, no actor round-trip.
+    /// Mailbox-free: reads the shared session snapshot the actor replaces
+    /// atomically when a session split resets the session (together with
+    /// started-at and turn count). One `parking_lot` read lock, no actor
+    /// round-trip.
     pub fn session_id(&self) -> SessionId {
-        self.shared.session_id.lock().clone()
+        self.shared.session.read().session_id.clone()
     }
 
     /// When the current session started (UTC).
     ///
-    /// Mailbox-free, same shared slot as [`EneHandle::session_id`]; replaced
-    /// on session split.
+    /// Mailbox-free, same shared session snapshot as [`EneHandle::session_id`];
+    /// replaced atomically on session split.
     pub fn session_started_at(&self) -> DateTime<Utc> {
-        *self.shared.session_started_at.lock()
+        self.shared.session.read().session_started_at
     }
 
     /// Turn count of the current session.
     ///
-    /// Mailbox-free: reads an `Arc<AtomicU32>` the actor stores after each
-    /// recorded user input and after each completed stream outcome, and
-    /// resets to zero on a session split. No lock, no actor round-trip.
+    /// Mailbox-free: reads the shared session snapshot the actor updates after
+    /// each recorded user input and completed stream outcome, and resets to
+    /// zero on a session split (atomically with session id / started-at).
     pub fn turn_count(&self) -> u32 {
-        self.shared.turn_count.load(Ordering::Relaxed)
+        self.shared.session.read().turn_count
     }
 
     /// The current configuration.
@@ -2161,14 +2172,12 @@ mod tests {
         );
     }
 
-    /// Mixed admission scenario: with `memory_writer_cap` set to 1,
-    /// the first drained handle is admitted into `memory_writer_tasks` while
-    /// the second is rejected by the cap — yet *both* must still emit
-    /// [`LifecycleEvent::PendingCandidateAvailable`]. Guards the
-    /// admitted-vs-rejected equivalence invariant beyond the all-rejected
-    /// (`cap: 0`) path covered by the tests above.
+    /// Mixed admission scenario: with `memory_writer_cap` set to 1, both
+    /// drained handles are supervised in `memory_writer_tasks` (the second
+    /// waits on the semaphore). Both must still emit
+    /// [`LifecycleEvent::PendingCandidateAvailable`].
     #[tokio::test]
-    async fn mixed_admitted_and_rejected_memory_writers_both_emit_pending_candidate() {
+    async fn mixed_admitted_and_queued_memory_writers_both_emit_pending_candidate() {
         let task_caps = crate::task_config::ToolRuntimeConfig {
             memory_writer_cap: 1,
             ..Default::default()
@@ -2177,10 +2186,8 @@ mod tests {
             build_bare_actor_with_lifecycle(Arc::new(EmptyRegistry), &task_caps);
 
         // Each handle reports a distinct deferred-candidate count so the two
-        // events can be told apart. `inject_and_drain_memory_writer` drains
-        // immediately after each injection, and nothing reaps the JoinSet, so
-        // the first handle deterministically fills the only slot (cap 1) and
-        // the second is rejected by the cap.
+        // events can be told apart. With semaphore concurrency 1, the second
+        // consumer waits in the JoinSet until the first finishes.
         for count in [3_usize, 7_usize] {
             let handle = tokio::spawn(async move {
                 ene_mind::MemoryWriteOutcome::Ok {
@@ -2195,7 +2202,7 @@ mod tests {
             let ev = tokio::time::timeout(std::time::Duration::from_secs(2), lifecycle_rx.recv())
                 .await
                 .expect(
-                    "PendingCandidateAvailable must arrive for both the admitted and the rejected handle",
+                    "PendingCandidateAvailable must arrive for both the running and the queued handle",
                 )
                 .expect("lifecycle channel still open");
             match ev {
@@ -2207,28 +2214,90 @@ mod tests {
         assert_eq!(
             counts,
             vec![3, 7],
-            "both the admitted and the rejected memory writer must emit their pending-candidate event"
+            "both the running and the queued memory writer must emit their pending-candidate event"
         );
 
-        let mut saw_rejected = false;
         while let Ok(ev) = diag_rx.try_recv() {
-            if let DiagnosticEvent::TaskRejected { component, cap, .. } = ev
-                && component == "MemoryWriter"
-                && cap == 1
-            {
-                saw_rejected = true;
+            if let DiagnosticEvent::TaskRejected { component, .. } = ev {
+                panic!(
+                    "queued memory writers must not be hard-dropped, got TaskRejected for {component}"
+                );
+            }
+        }
+    }
+
+    /// When the supervised waiter queue hits the memory-writer hard limit
+    /// (`memory_writer_cap * 4`), further handles are hard-dropped:
+    /// `TaskRejected` fires and no lifecycle event is emitted for the dropped
+    /// handle.
+    #[tokio::test]
+    async fn memory_writer_hard_drop_emits_rejected_without_lifecycle() {
+        let task_caps = crate::task_config::ToolRuntimeConfig {
+            memory_writer_cap: 1,
+            ..Default::default()
+        };
+        let (mut actor, mut diag_rx, mut lifecycle_rx) =
+            build_bare_actor_with_lifecycle(Arc::new(EmptyRegistry), &task_caps);
+
+        // Hold the semaphore with hanging outcome consumers so the JoinSet
+        // fills to the hard limit (cap * 4 = 4) without reaping.
+        let mut blockers = Vec::new();
+        for _ in 0..4 {
+            let (block_tx, block_rx) = oneshot::channel::<()>();
+            blockers.push(block_tx);
+            let handle = tokio::spawn(async move {
+                block_rx.await.ok();
+                ene_mind::MemoryWriteOutcome::Ok {
+                    deferred_candidates: 1,
+                }
+            });
+            actor.inject_and_drain_memory_writer(handle);
+        }
+
+        let dropped = tokio::spawn(async {
+            ene_mind::MemoryWriteOutcome::Ok {
+                deferred_candidates: 99,
+            }
+        });
+        actor.inject_and_drain_memory_writer(dropped);
+
+        let mut saw_rejected = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline && !saw_rejected {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), diag_rx.recv()).await {
+                Ok(Ok(DiagnosticEvent::TaskRejected { component, cap, .. }))
+                    if component == "MemoryWriter" && cap == 4 =>
+                {
+                    saw_rejected = true;
+                }
+                Ok(Err(e)) => panic!("diagnostic channel closed early: {e}"),
+                Ok(Ok(_)) | Err(_) => {}
             }
         }
         assert!(
             saw_rejected,
-            "expected a TaskRejected diagnostic proving the second handle hit the cap"
+            "expected TaskRejected when the memory-writer hard queue limit is hit"
         );
+
+        // The hard-dropped handle must not produce a lifecycle event. Drain
+        // briefly to ensure 99 never arrives; hanging consumers are still
+        // blocked so only a spurious drop would emit.
+        let spurious =
+            tokio::time::timeout(std::time::Duration::from_millis(100), lifecycle_rx.recv()).await;
+        if let Ok(Ok(LifecycleEvent::PendingCandidateAvailable { count: 99 })) = spurious {
+            panic!("hard-dropped memory writer must not emit PendingCandidateAvailable");
+        }
+
+        // Unblock hanging consumers so the JoinSet can finish cleanly.
+        for tx in blockers {
+            tx.send(()).ok();
+        }
     }
 
     /// Regression test on the `Err(e)` arm of
     /// [`actor::consume_memory_write_outcome`]: a memory-writer `JoinHandle`
-    /// whose task panicked resolves to `Err`, and the rejected/detached
-    /// consumer must still surface the failure as a
+    /// whose task panicked resolves to `Err`, and the cap-0 reject+consume
+    /// path must still surface the failure as a
     /// [`DiagnosticEvent::MemoryWrite`] — with an empty `character_id`, a
     /// `"failed"` status, and no pending/permanent counts (no store
     /// configured).

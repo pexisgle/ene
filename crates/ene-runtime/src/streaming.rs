@@ -430,27 +430,28 @@ pub(crate) async fn select_relevant_tools(
 /// Tool calls the LLM returns in a single round are split by their declared
 /// side effects:
 ///
+/// - [`EneEvent::ToolCallStart`] is emitted for every call **before** any
+///   dispatch runs, so the UI can show in-flight work during a parallel round.
 /// - When **every** call in the round is side-effect-free
-///   (`SideEffects::ReadOnly`, non-background), they run first, concurrently,
-///   in a bounded batch of at most
+///   (`SideEffects::ReadOnly`, non-background), they then run concurrently in a
+///   bounded batch of at most
 ///   [`ToolExecutionContext::parallel_tool_calls_max`] at once. Only the raw
-///   dispatch runs in parallel — no events are emitted and no permission /
-///   user-input prompts are resolved in this phase.
+///   dispatch runs in parallel — no permission / user-input prompts are
+///   resolved in this phase.
 /// - **Mixed rounds are strictly sequential.** Parallelizing only the
 ///   read-only calls of a mixed round would let a later read overtake an
 ///   earlier write in the same response (the classic read-after-write: the
 ///   model edits a file, then asks to read it back — the read must observe the
 ///   write). The model's edit-then-verify pattern is real, so correctness wins
 ///   over the modest speedup of a mixed round.
-/// - **All** calls are then finalized in the *original* order: each emits
-///   `ToolCallStart`, consumes its precomputed parallel result (or runs
-///   sequentially when the round was mixed), resolves any chained permission /
-///   user-input prompts, records the audit entry and undo checkpoint, and
-///   emits `ToolCallResult`.
+/// - **All** calls are then finalized in the *original* order: each consumes
+///   its precomputed parallel result (or runs sequentially when the round was
+///   mixed), resolves any chained permission / user-input prompts, records the
+///   audit entry and undo checkpoint, and emits `ToolCallResult`.
 ///
 /// Finalizing in order preserves every ordering-sensitive invariant:
-/// `EneEvent::ToolCallStart` / `ToolCallResult` ordering for the UI, the undo
-/// stack order, [`ToolResultSummary`] order, and the `round_messages` order.
+/// `ToolCallResult` ordering for the UI, the undo stack order,
+/// [`ToolResultSummary`] order, and the `round_messages` order.
 /// A read-only tool that unexpectedly returns `PermissionRequired` /
 /// `UserInputRequired` is resolved on the sequential finalize path, so
 /// interactive prompts are never surfaced concurrently.
@@ -476,6 +477,17 @@ pub(crate) async fn perform_tool_executions(
         turn_id: ctx.turn.to_string(),
     };
 
+    // Emit start events before any dispatch so parallel rounds are visible
+    // while tools are still running (not only after they all complete).
+    for call in &tool_calls {
+        drop(ctx.event_tx.send(EneEvent::ToolCallStart {
+            turn: ctx.turn.clone(),
+            origin: ctx.origin,
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        }));
+    }
+
     // Phase 1 — run side-effect-free calls concurrently (bounded). Results are
     // collected in the original order so Phase 2 can finalize deterministically.
     //
@@ -487,48 +499,39 @@ pub(crate) async fn perform_tool_executions(
             .iter()
             .all(|call| ctx.parallelizable.contains(&call.name));
     let mut parallel_results = if ctx.parallel_tool_calls_max > 0 && all_parallelizable {
-        let parallel_indices: Vec<usize> = tool_calls
-            .iter()
-            .enumerate()
-            .filter(|(_, call)| ctx.parallelizable.contains(&call.name))
-            .map(|(idx, _)| idx)
-            .collect();
-
         let mut results: Vec<Option<Result<String, PluginHostError>>> =
             std::iter::repeat_with(|| None)
                 .take(tool_calls.len())
                 .collect();
-        if !parallel_indices.is_empty() {
-            let stream = futures::stream::iter(parallel_indices.into_iter().map(|idx| {
-                let call = tool_calls[idx].clone();
-                let call_ctx = call_ctx.clone();
-                let registry = ctx.registry;
-                let background_capable = ctx.background_capable;
-                let deferred_tool_tx = ctx.deferred_tool_tx;
-                let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                async move {
-                    let outcome = dispatch_tool_call(
-                        registry,
-                        background_capable,
-                        deferred_tool_tx,
-                        &call.name,
-                        &call.arguments,
-                        &call_ctx,
-                        tool_timeout,
-                    )
-                    .await;
-                    (idx, outcome)
-                }
-            }));
-            // `buffer_unordered` caps in-flight calls at the configured bound;
-            // `collect` drains them all before Phase 2 starts.
-            let completed: Vec<(usize, Result<String, PluginHostError>)> = stream
-                .buffer_unordered(ctx.parallel_tool_calls_max)
-                .collect()
+        let stream = futures::stream::iter((0..tool_calls.len()).map(|idx| {
+            let call = tool_calls[idx].clone();
+            let call_ctx = call_ctx.clone();
+            let registry = ctx.registry;
+            let background_capable = ctx.background_capable;
+            let deferred_tool_tx = ctx.deferred_tool_tx;
+            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+            async move {
+                let outcome = dispatch_tool_call(
+                    registry,
+                    background_capable,
+                    deferred_tool_tx,
+                    &call.name,
+                    &call.arguments,
+                    &call_ctx,
+                    tool_timeout,
+                )
                 .await;
-            for (idx, outcome) in completed {
-                results[idx] = Some(outcome);
+                (idx, outcome)
             }
+        }));
+        // `buffer_unordered` caps in-flight calls at the configured bound;
+        // `collect` drains them all before Phase 2 starts.
+        let completed: Vec<(usize, Result<String, PluginHostError>)> = stream
+            .buffer_unordered(ctx.parallel_tool_calls_max)
+            .collect()
+            .await;
+        for (idx, outcome) in completed {
+            results[idx] = Some(outcome);
         }
         results
     } else {
@@ -542,13 +545,6 @@ pub(crate) async fn perform_tool_executions(
     for (idx, call) in tool_calls.into_iter().enumerate() {
         let name = call.name.clone();
         let args = call.arguments.clone();
-
-        drop(ctx.event_tx.send(EneEvent::ToolCallStart {
-            turn: ctx.turn.clone(),
-            origin: ctx.origin,
-            name: name.clone(),
-            arguments: args.clone(),
-        }));
 
         // Warn before executing an irreversible operation. Such
         // actions are never placed on the undo stack, so the user is told

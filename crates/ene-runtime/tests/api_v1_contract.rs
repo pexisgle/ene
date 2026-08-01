@@ -490,10 +490,10 @@ async fn set_character_updates_shared_sync_state() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
-/// `EneHandle::turn_count()` reads an `Arc<AtomicU32>` the actor publishes
-/// after `record_user_input` — deterministically observable while the turn
-/// is still in flight against a hanging provider (which never lets the
-/// stream complete, so the assistant-side increment never happens).
+/// `EneHandle::turn_count()` reads the shared session snapshot the actor
+/// publishes after `record_user_input` — deterministically observable while
+/// the turn is still in flight against a hanging provider (which never lets
+/// the stream complete, so the assistant-side increment never happens).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_count_reflects_in_flight_turn() {
     let (config, _hanging) = hanging_provider_config().await;
