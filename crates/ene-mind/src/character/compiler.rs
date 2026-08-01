@@ -264,9 +264,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    /// A window large enough that the default card is never truncated.
-    const GENEROUS_WINDOW: usize = 16_384;
-
     fn alicia_card() -> CharacterCardV3 {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/characters/Alicia/character.json");
