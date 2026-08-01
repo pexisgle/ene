@@ -718,8 +718,8 @@ impl IpcPluginConnection {
         config: Option<serde_json::Value>,
         profiles: Option<serde_json::Value>,
     ) -> Result<(), PluginHostError> {
-        *self.plugin_config.write() = config.clone();
-        *self.plugin_profiles.write() = profiles.clone();
+        self.plugin_config.write().clone_from(&config);
+        self.plugin_profiles.write().clone_from(&profiles);
 
         if !self.supports_set_config() {
             tracing::warn!(
