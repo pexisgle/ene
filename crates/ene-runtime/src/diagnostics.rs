@@ -7,6 +7,13 @@
 //! compression ([`crate::EneHandle::compress_context`]), and tool
 //! operations ([`crate::EneHandle::tools`]) — moved back onto
 //! [`crate::EneHandle`] itself (#406).
+//!
+//! The memory surface (`MemoryHandle`) is the one mutation-capable part of
+//! this facade (pin/status/restore/forget, commitment lifecycle, pending-write
+//! inspection/drain, store backup/integrity). It deliberately does **not**
+//! expose the raw `MemoryStore`: the former `store()` accessor was removed
+//! (#409) so consumers must go through the facade's own methods, which carry
+//! the same `require_store()` errors as the rest of the surface.
 
 use crate::error::EneRuntimeError;
 use crate::handle::{EneCommand, EneStateSnapshot};
@@ -19,10 +26,17 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// A handle for querying **and mutating** the memory subsystem.
 ///
 /// Wraps the memory store and embedding provider, exposing the operations
-/// needed by downstream consumers (CLI commands, etc.). Despite living on
-/// the diagnostics facade it is not read-only: pin/status/restore/forget
-/// mutations are part of its surface, which is why the type is named
-/// [`MemoryHandle`] rather than a "query" handle (#406).
+/// needed by downstream consumers (CLI commands, desktop bridge, etc.).
+/// Despite living on the diagnostics facade it is not read-only:
+/// pin/status/restore/forget mutations, commitment lifecycle
+/// (complete/cancel), pending-write inspection and drain, and store
+/// backup/integrity diagnostics are part of its surface, which is why the
+/// type is named [`MemoryHandle`] rather than a "query" handle (#406).
+///
+/// The raw `MemoryStore` is intentionally not exposed (`store()` was removed
+/// in #409); every operation routes through the facade's own methods and
+/// reports `EneRuntimeError::Memory` (connection error when memory is
+/// disabled) exactly like the rest of the surface.
 #[derive(Clone)]
 pub struct MemoryHandle {
     pub(crate) store: Option<Arc<ene_store::MemoryStore>>,
@@ -54,16 +68,6 @@ impl MemoryHandle {
     /// Whether memory is enabled and both store and embedder are available.
     pub fn is_enabled(&self) -> bool {
         self.store.is_some() && self.embedder.is_some()
-    }
-
-    /// Returns the backing memory store when memory is configured.
-    pub const fn store(&self) -> Option<&Arc<ene_store::MemoryStore>> {
-        self.store.as_ref()
-    }
-
-    /// Returns the embedding provider when memory is configured.
-    pub fn embedder(&self) -> Option<&Arc<dyn ene_ai::EmbeddingProvider>> {
-        self.embedder.as_ref()
     }
 
     /// Embed a text query for similarity search.
@@ -247,10 +251,122 @@ impl MemoryHandle {
     }
 
     /// Mark a commitment as done.
+    ///
+    /// # Actor consistency
+    ///
+    /// [`ene_mind::commitments::CommitmentLedger`] holds no in-memory cache
+    /// and the actor re-reads active commitments from the store at prompt
+    /// injection, so this direct store write cannot desync the actor (#409).
     pub async fn complete_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         store
             .complete_commitment(id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Mark a commitment as cancelled.
+    ///
+    /// Same actor-consistency guarantee as [`Self::complete_commitment`]:
+    /// the ledger is stateless, so a direct store write is harmless (#409).
+    pub async fn cancel_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .cancel_commitment(id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Count pending (retryable) and permanent failed memory writes (#240).
+    pub async fn count_pending_memory_writes(
+        &self,
+        character_id: &str,
+    ) -> Result<(usize, usize), EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .count_pending_memory_writes(character_id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// List pending / permanent memory-write rows for a character (#240).
+    pub async fn list_pending_memory_writes(
+        &self,
+        character_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ene_core::PendingMemoryWrite>, EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .list_pending_memory_writes(character_id, limit)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Force pending rows for a character to be due immediately (#240).
+    ///
+    /// Used by `/memory retry` so the operator can drain the queue without
+    /// waiting for exponential backoff.
+    pub async fn schedule_pending_memory_writes_now(
+        &self,
+        character_id: &str,
+    ) -> Result<usize, EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .schedule_pending_memory_writes_now(character_id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Drain due pending memory writes for a character using the mind engine (#240).
+    ///
+    /// Schedules the character's pending writes as due (via
+    /// [`Self::schedule_pending_memory_writes_now`]'s sibling store operation
+    /// beforehand by the caller) and runs [`ene_mind::CognitionEngine`]'s
+    /// drain pass with this handle's embedder. Errors are surfaced by
+    /// [`ene_mind::CognitionEngine::drain_pending_memory_writes`] silently
+    /// (it is a best-effort drain), so this only fails when the store is
+    /// unavailable.
+    pub async fn drain_pending_memory_writes(
+        &self,
+        config: &ene_mind::MindConfig,
+        llm: &dyn ene_ai::LlmProvider,
+        limit: usize,
+    ) -> Result<(), EneRuntimeError> {
+        let store = self.require_store()?;
+        let embedder = self.embedder.as_ref().map(std::convert::AsRef::as_ref);
+        ene_mind::CognitionEngine::drain_pending_memory_writes(
+            store.as_ref(),
+            config,
+            llm,
+            embedder,
+            limit,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Create a timestamped file backup of this store's database (#239).
+    ///
+    /// Returns an error when the store is in-memory (no path).
+    pub async fn backup(&self) -> Result<std::path::PathBuf, EneRuntimeError> {
+        let store = self.require_store()?;
+        store.backup().await.map_err(EneRuntimeError::Memory)
+    }
+
+    /// On-disk path of the store's database, when opened from a file (#239).
+    ///
+    /// Exposed (rather than the store itself) so backup/restore commands can
+    /// locate the database file without reaching for the store handle.
+    #[must_use]
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.store.as_ref().and_then(|s| s.path())
+    }
+
+    /// Run `PRAGMA integrity_check` on the open connection (#239).
+    pub async fn check_integrity(&self) -> Result<(), EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .check_integrity()
             .await
             .map_err(EneRuntimeError::Memory)
     }
@@ -261,6 +377,105 @@ impl MemoryHandle {
                 "Memory store not available".into(),
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![expect(
+        clippy::unwrap_used,
+        reason = "unit tests use unwrap for concise assertions"
+    )]
+
+    use super::*;
+
+    async fn test_handle() -> MemoryHandle {
+        let store = ene_store::MemoryStore::open_in_memory(4).await.unwrap();
+        MemoryHandle::new(
+            Some(std::sync::Arc::new(store)),
+            None,
+            ene_mind::MindMemoryConfig::default(),
+        )
+    }
+
+    async fn insert_commitment(handle: &MemoryHandle, title: &str) -> i64 {
+        let store = handle.store.as_ref().unwrap();
+        store
+            .insert_commitment(&ene_store::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: title.into(),
+                description: format!("{title} description"),
+                status: ene_store::CommitmentStatus::Active,
+                due_at: None,
+                due_label: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn complete_and_cancel_commitment_round_trip() {
+        let handle = test_handle().await;
+
+        let done_id = insert_commitment(&handle, "finish review").await;
+        assert!(
+            handle.complete_commitment(done_id).await.unwrap(),
+            "active commitment completes"
+        );
+        assert!(
+            !handle.complete_commitment(done_id).await.unwrap(),
+            "already-done commitment returns false"
+        );
+
+        let cancelled_id = insert_commitment(&handle, "cancel meeting").await;
+        assert!(
+            handle.cancel_commitment(cancelled_id).await.unwrap(),
+            "active commitment cancels"
+        );
+        assert!(
+            !handle.cancel_commitment(cancelled_id).await.unwrap(),
+            "already-cancelled commitment returns false"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_pending_memory_writes_round_trip() {
+        let handle = test_handle().await;
+
+        let store = handle.store.as_ref().unwrap();
+        store
+            .enqueue_pending_memory_write(
+                "ene",
+                "user1",
+                r#"{"character_id":"ene","user_id":"user1"}"#,
+                "boom",
+            )
+            .await
+            .unwrap();
+
+        let (pending, permanent) = handle.count_pending_memory_writes("ene").await.unwrap();
+        assert_eq!((pending, permanent), (1, 0));
+
+        let rows = handle.list_pending_memory_writes("ene", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows.first().map(|r| r.status),
+            Some(ene_core::PendingMemoryWriteStatus::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_disabled_returns_connection_error() {
+        let handle = MemoryHandle::new(None, None, ene_mind::MindMemoryConfig::default());
+        let err = handle.complete_commitment(1).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EneRuntimeError::Memory(ene_store::EneMemoryError::MemoryStoreConnectionError(_))
+            ),
+            "expected connection error, got {err:?}"
+        );
     }
 }
 

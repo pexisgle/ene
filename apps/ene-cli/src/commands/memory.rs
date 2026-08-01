@@ -335,14 +335,12 @@ async fn handle_status(
     let card_name = snapshot.card_name.as_str();
     println!("--- Memory Status ({card_name}) ---");
     println!("  typed memory store: enabled");
-    if let Some(store) = snapshot.memory.store() {
-        match store.count_pending_memory_writes(card_name).await {
-            Ok((pending, permanent)) => {
-                println!("  pending memory writes: {pending}");
-                println!("  permanent write failures: {permanent}");
-            }
-            Err(e) => println!("  pending memory writes: error ({e})"),
+    match snapshot.memory.count_pending_memory_writes(card_name).await {
+        Ok((pending, permanent)) => {
+            println!("  pending memory writes: {pending}");
+            println!("  permanent write failures: {permanent}");
         }
+        Err(e) => println!("  pending memory writes: error ({e})"),
     }
     println!("  note: use `/memory pending` to inspect the retry queue (#240)");
     Ok(CommandOutcome::Continue)
@@ -356,12 +354,8 @@ async fn handle_pending(
             "Memory is not enabled.".to_string(),
         ));
     }
-    let Some(store) = snapshot.memory.store() else {
-        return Err(CliError::ExecutionFailed(
-            "Memory store is not available.".to_string(),
-        ));
-    };
-    let rows = store
+    let rows = snapshot
+        .memory
         .list_pending_memory_writes(snapshot.card_name.as_str(), 50)
         .await
         .map_err(|e| CliError::ExecutionFailed(format!("List pending error: {e}")))?;
@@ -392,13 +386,9 @@ async fn handle_retry(
             "Memory is not enabled.".to_string(),
         ));
     }
-    let Some(store) = snapshot.memory.store() else {
-        return Err(CliError::ExecutionFailed(
-            "Memory store is not available.".to_string(),
-        ));
-    };
     let character_id = snapshot.card_name.as_str();
-    let scheduled = store
+    let scheduled = snapshot
+        .memory
         .schedule_pending_memory_writes_now(character_id)
         .await
         .map_err(|e| CliError::ExecutionFailed(format!("Schedule pending error: {e}")))?;
@@ -412,16 +402,16 @@ async fn handle_retry(
         .unwrap_or_default();
     let llm = ene_ai::create_task_chat_provider(&snapshot.config, ene_ai::AiTaskKind::Chat)
         .map_err(|e| CliError::ExecutionFailed(format!("Chat provider error: {e}")))?;
-    let embedder = snapshot.memory.embedder().map(std::convert::AsRef::as_ref);
-    ene_mind::CognitionEngine::drain_pending_memory_writes(
-        store.as_ref(),
-        &mind,
-        llm.as_ref(),
-        embedder,
-        scheduled.max(1),
-    )
-    .await;
-    match store.count_pending_memory_writes(character_id).await {
+    snapshot
+        .memory
+        .drain_pending_memory_writes(&mind, llm.as_ref(), scheduled.max(1))
+        .await
+        .map_err(|e| CliError::ExecutionFailed(format!("Drain pending error: {e}")))?;
+    match snapshot
+        .memory
+        .count_pending_memory_writes(character_id)
+        .await
+    {
         Ok((pending, permanent)) => {
             println!(
                 "[Memory] Retried {scheduled} write(s); remaining pending={pending} permanent={permanent}"

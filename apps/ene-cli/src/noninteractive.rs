@@ -793,15 +793,11 @@ async fn store_command(
     action: &StoreAction,
     json: bool,
 ) -> Result<i32, OutputError> {
-    let diag = ctx.handle.diagnostics();
-    let store = diag
-        .memory()
-        .store()
-        .ok_or_else(|| OutputError::new(ErrorCode::Runtime, "memory store is not enabled"))?;
+    let memory = ctx.handle.diagnostics().memory();
 
     match action {
         StoreAction::Backup => {
-            let path = store
+            let path = memory
                 .backup()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
@@ -813,7 +809,7 @@ async fn store_command(
             Ok(EXIT_OK)
         }
         StoreAction::ListBackups => {
-            let db_path = store.path().ok_or_else(|| {
+            let db_path = memory.path().ok_or_else(|| {
                 OutputError::new(ErrorCode::Runtime, "in-memory store has no file backups")
             })?;
             let backups = ene_store::list_backups(db_path)
@@ -837,7 +833,7 @@ async fn store_command(
                     "restore requires --yes (destroys the current database file)",
                 ));
             }
-            let db_path = store
+            let db_path = memory
                 .path()
                 .map(std::path::Path::to_path_buf)
                 .ok_or_else(|| {
@@ -867,7 +863,7 @@ async fn store_command(
             Ok(EXIT_OK)
         }
         StoreAction::Integrity => {
-            store
+            memory
                 .check_integrity()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
