@@ -47,6 +47,46 @@ fn insult_lowers_valence_and_raises_irritation() {
 }
 
 #[test]
+fn japanese_preference_statement_is_not_an_insult() {
+    let config = EmotionConfig::default();
+    let engine = EmotionEngine;
+    let mut state = AffectState::neutral("ene");
+
+    let mut input = TurnAffectInput {
+        state: &mut state,
+        user_message: "きのこが嫌いなんだよね",
+        elapsed_since_update: Duration::ZERO,
+        recent_turn_count: 2,
+        classifier_proposal: None,
+        classifier_min_confidence: 0.5,
+        llm_only: false,
+    };
+    let result = engine.update_turn(&config, &mut input);
+    assert!(!result.reasons.iter().any(|r| r.category == "insult"));
+    assert!((state.valence - 0.0).abs() < f32::EPSILON);
+}
+
+#[test]
+fn japanese_katakana_substring_is_not_an_insult() {
+    let config = EmotionConfig::default();
+    let engine = EmotionEngine;
+    let mut state = AffectState::neutral("ene");
+
+    let mut input = TurnAffectInput {
+        state: &mut state,
+        user_message: "バカンスの予定を立てたい",
+        elapsed_since_update: Duration::ZERO,
+        recent_turn_count: 2,
+        classifier_proposal: None,
+        classifier_min_confidence: 0.5,
+        llm_only: false,
+    };
+    let result = engine.update_turn(&config, &mut input);
+    assert!(!result.reasons.iter().any(|r| r.category == "insult"));
+    assert!((state.valence - 0.0).abs() < f32::EPSILON);
+}
+
+#[test]
 fn decay_reduces_valence_over_time() {
     let config = EmotionConfig::default();
     let engine = EmotionEngine;
