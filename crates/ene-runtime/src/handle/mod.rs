@@ -123,8 +123,8 @@ impl TurnGate {
 ///
 /// This replaces the previous approach of checking
 /// `Arc::strong_count(&cmd_tx) == 1`, which was unreachable because
-/// `EneHandle` internally holds four independent `Arc` clones of `cmd_tx`
-/// (self, diagnostics, vision, tools).
+/// `EneHandle` internally holds five independent `Arc` clones of `cmd_tx`
+/// (self, diagnostics, vision, tools, and the shutdown guard).
 ///
 /// ## Drop shutdown is best-effort
 ///
