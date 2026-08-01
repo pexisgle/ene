@@ -154,6 +154,21 @@ mod tests {
     }
 
     #[test]
+    fn keywords_are_per_language_not_a_union() {
+        // #355 narrowing: keyword matching follows the pack for the configured
+        // language only. A Japanese topic must not trigger intents via the
+        // English pack, and vice versa — the previous en+ja union is gone.
+        assert_eq!(
+            infer_intents("I like coffee", None, "ja"),
+            vec![RecallIntent::Semantic]
+        );
+        assert_eq!(
+            infer_intents("前回", None, "en"),
+            vec![RecallIntent::Semantic]
+        );
+    }
+
+    #[test]
     fn no_keyword_match_yields_semantic_only() {
         assert_eq!(
             infer_intents("what is the weather like", None, "en"),
