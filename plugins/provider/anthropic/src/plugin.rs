@@ -666,8 +666,15 @@ mod tests {
     /// with concurrent env reads in other tests.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    /// Serializes tests that read or write the process-wide `PLUGIN_CONFIG`
+    /// static (every `resolve_api_key` call reads it, and
+    /// `set_config_stores_key_used_by_resolve` writes it). Without this the
+    /// write test can race concurrent readers under parallel test threads.
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
     #[test]
     fn resolve_api_key_plain_string() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": "sk-ant-plain-789"});
         let key = resolve_api_key(&config).unwrap();
         assert_eq!(key, "sk-ant-plain-789");
@@ -675,7 +682,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_plain_string_empty_falls_through() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": ""});
         // An empty string must not be used as the key; resolution falls
         // through to ANTHROPIC_API_KEY (which may or may not be set).
@@ -686,6 +694,7 @@ mod tests {
 
     #[test]
     fn resolve_api_key_inline() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": {"source": "inline", "inline": "sk-ant-test-123"}});
         let key = resolve_api_key(&config).unwrap();
         assert_eq!(key, "sk-ant-test-123");
@@ -693,7 +702,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_inline_empty_falls_through() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": {"source": "inline", "inline": ""}});
         // Should fall through to ANTHROPIC_API_KEY (which may or may not be set).
         let result = resolve_api_key(&config);
@@ -706,7 +716,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_from_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
         unsafe {
             std::env::set_var("ENE_TEST_ANTHROPIC_KEY", "sk-env-test-456");
@@ -722,7 +733,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_auto_source_uses_env_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let original = std::env::var("ANTHROPIC_API_KEY").ok();
         // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
         unsafe {
@@ -749,7 +761,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_no_config_no_env_fails() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({});
         // Without ANTHROPIC_API_KEY set, this should fail.
         // (If the env var happens to be set in CI, this test still passes
@@ -794,6 +807,7 @@ mod tests {
 
     #[test]
     fn set_config_stores_key_used_by_resolve() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         // The static is process-wide; clear it around the case so this test
         // cannot leak into (or be affected by) the other resolve_api_key tests.
         *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;

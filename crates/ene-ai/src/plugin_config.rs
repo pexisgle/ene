@@ -115,9 +115,22 @@ impl LlamaCppPluginConfig {
     /// Reads the llama.cpp plugin config from a specific config document.
     #[must_use]
     pub fn from_config(config: &EneConfig) -> Self {
-        plugin_config_blob(config, LLAMA_CPP_PLUGIN)
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default()
+        match plugin_config_blob(config, LLAMA_CPP_PLUGIN) {
+            Some(blob) => serde_json::from_value(blob).unwrap_or_else(|err| {
+                // A malformed blob silently disabling the loader settings
+                // (mmproj, acceleration) is hard to diagnose; surface the
+                // parse error so the typo that produced it shows up in the
+                // log stream instead of defaulting quietly.
+                tracing::warn!(
+                    component = "Ai",
+                    plugin = LLAMA_CPP_PLUGIN,
+                    error = %err,
+                    "Failed to parse plugin config blob; using defaults"
+                );
+                Self::default()
+            }),
+            None => Self::default(),
+        }
     }
 
     /// Reads the llama.cpp plugin config from the global config singleton.
