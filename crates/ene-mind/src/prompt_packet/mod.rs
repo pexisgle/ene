@@ -2,7 +2,7 @@
 
 #![expect(
     clippy::arithmetic_side_effects,
-    reason = "mind pipeline uses intentional turn/score/index arithmetic"
+    reason = "prompt metadata sums per-bucket recalled-memory counts into PromptPacketMeta"
 )]
 mod section;
 

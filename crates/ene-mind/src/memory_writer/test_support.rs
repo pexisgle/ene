@@ -12,7 +12,7 @@
 #![expect(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
-    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+    reason = "test support for memory-writer tests uses deliberate id/access-count arithmetic and indexes its in-memory pending-candidate buffer"
 )]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
