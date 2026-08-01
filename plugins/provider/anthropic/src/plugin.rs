@@ -7,7 +7,7 @@
 //! whose input schema matches the requested schema.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -33,9 +33,57 @@ const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 /// Shared HTTP client, built once with timeouts and reused for all requests.
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
+/// Configuration delivered by the host at handshake time
+/// (`plugins.list.anthropic.config`), stored per process (#313).
+///
+/// `Mutex` (rather than `OnceLock`) so tests can reset it between cases; in
+/// production the handshake is a one-shot and reconnects resend the same
+/// blob, so last-writer-wins is equivalent.
+static PLUGIN_CONFIG: Mutex<Option<Value>> = Mutex::new(None);
+
 /// Anthropic Claude plugin providing streaming and non-streaming chat
 /// completions via the Anthropic Messages API.
 pub(crate) struct AnthropicPlugin;
+
+impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
+    /// Receives the plugin configuration blob from the host at handshake
+    /// time (currently the `api_key`, per the `{"source": ...}` contract).
+    fn set_config(&self, config: &Value) {
+        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = Some(config.clone());
+    }
+
+    /// Advertises the config schema; `api_key` is marked `x-ene-secret: true`
+    /// so the host masks/redacts it (#313).
+    fn config_schema(&self) -> Option<Value> {
+        Some(json!({
+            "type": "object",
+            "properties": {
+                "api_key": {
+                    "oneOf": [
+                        { "type": "string" },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "source": {
+                                    "type": "string",
+                                    "enum": ["inline", "env", "auto"]
+                                },
+                                "inline": { "type": "string" },
+                                "env": { "type": "string" }
+                            }
+                        }
+                    ],
+                    "x-ene-secret": true,
+                    "description": "Anthropic API key, or a {source: inline|env|auto} descriptor (#305)"
+                },
+                "base_url": {
+                    "type": "string",
+                    "description": "API base URL override (unused today; reserved)"
+                }
+            }
+        }))
+    }
+}
 
 /// Returns the shared HTTP client, building it on first use.
 fn http_client() -> Result<&'static reqwest::Client, PluginError> {
@@ -54,28 +102,27 @@ fn http_client() -> Result<&'static reqwest::Client, PluginError> {
         .ok_or_else(|| PluginError::provider("HTTP client initialization failed"))
 }
 
-/// Resolves the API key from the provider configuration.
+/// Resolves a single `api_key` value per the `{"source": ...}` contract.
 ///
-/// Accepted shapes for `config["api_key"]`:
-/// 1. A plain JSON string (current host contract) — used directly.
+/// Accepted shapes for `value`:
+/// 1. A plain JSON string — used directly.
 /// 2. `{"source": "inline", "inline": "..."}` — the inline value.
 /// 3. `{"source": "env", "env": "VAR"}` — the named environment variable
 ///    (defaults to `ANTHROPIC_API_KEY` when `env` is empty).
-/// 4. `{"source": "auto"}`, any other shape, or missing — falls back to the
-///    `ANTHROPIC_API_KEY` environment variable.
-fn resolve_api_key(config: &Value) -> Result<String, PluginError> {
-    match config.get("api_key") {
-        Some(Value::String(key)) if !key.trim().is_empty() => return Ok(key.trim().to_string()),
-        Some(Value::Object(obj)) => {
+/// 4. Anything else (including `{"source": "auto"}`) — `None`, so the caller
+///    falls back to the process environment.
+fn resolve_key_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(key) if !key.trim().is_empty() => Some(key.trim().to_string()),
+        Value::Object(obj) => {
             let source = obj.get("source").and_then(Value::as_str).unwrap_or("auto");
             match source {
-                "inline" => {
-                    if let Some(inline) = obj.get("inline").and_then(Value::as_str)
-                        && !inline.trim().is_empty()
-                    {
-                        return Ok(inline.trim().to_string());
-                    }
-                }
+                "inline" => obj
+                    .get("inline")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(str::to_string),
                 "env" => {
                     let var_name = obj
                         .get("env")
@@ -83,19 +130,45 @@ fn resolve_api_key(config: &Value) -> Result<String, PluginError> {
                         .map(str::trim)
                         .filter(|name| !name.is_empty())
                         .unwrap_or("ANTHROPIC_API_KEY");
-                    if let Ok(key) = std::env::var(var_name)
-                        && !key.is_empty()
-                    {
-                        return Ok(key);
-                    }
+                    std::env::var(var_name).ok().filter(|key| !key.is_empty())
                 }
-                // "auto" (or unrecognized) falls through to the env fallback.
-                _ => {}
+                // "auto" (or unrecognized) falls through to the caller's
+                // process-env fallback.
+                _ => None,
             }
         }
-        _ => {}
+        _ => None,
     }
+}
 
+/// Resolves the effective API key for a request.
+///
+/// Precedence (#313):
+/// 1. The config delivered by the host at handshake time via
+///    [`ConfigurablePlugin::set_config`] (`plugins.list.anthropic.config`),
+///    resolved with the same `{"source": ...}` contract.
+/// 2. The per-request `config` argument (`ai.providers.<name>.api_key`).
+/// 3. The `ANTHROPIC_API_KEY` environment variable.
+fn resolve_api_key(config: &Value) -> Result<String, PluginError> {
+    let host_config = PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner);
+    resolve_api_key_with_host(host_config.as_ref(), config)
+}
+
+/// The precedence logic behind [`resolve_api_key`], parameterized over the
+/// host-delivered config so tests can exercise it deterministically.
+fn resolve_api_key_with_host(
+    host_config: Option<&Value>,
+    config: &Value,
+) -> Result<String, PluginError> {
+    if let Some(key) = host_config
+        .and_then(|cfg| cfg.get("api_key"))
+        .and_then(resolve_key_value)
+    {
+        return Ok(key);
+    }
+    if let Some(key) = config.get("api_key").and_then(resolve_key_value) {
+        return Ok(key);
+    }
     std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
         PluginError::provider(
             "no API key found: set api_key, api_key.inline, api_key.env, or ANTHROPIC_API_KEY",
@@ -574,25 +647,34 @@ fn process_sse_event(
 
 #[cfg(test)]
 #[expect(
+    clippy::expect_used,
     clippy::unwrap_used,
-    reason = "unit tests use unwrap for concise assertions"
+    reason = "unit tests use expect/unwrap for concise assertions"
 )]
 #[expect(
     clippy::indexing_slicing,
     reason = "test assertions index into known-length vectors"
 )]
 mod tests {
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::Mutex;
 
     use super::*;
+    use ene_plugin::ConfigurablePlugin;
 
     /// Serializes tests that read or mutate the process environment:
     /// `set_var`/`remove_var` are process-global and would otherwise race
     /// with concurrent env reads in other tests.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
+    /// Serializes tests that read or write the process-wide `PLUGIN_CONFIG`
+    /// static (every `resolve_api_key` call reads it, and
+    /// `set_config_stores_key_used_by_resolve` writes it). Without this the
+    /// write test can race concurrent readers under parallel test threads.
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
     #[test]
     fn resolve_api_key_plain_string() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": "sk-ant-plain-789"});
         let key = resolve_api_key(&config).unwrap();
         assert_eq!(key, "sk-ant-plain-789");
@@ -600,7 +682,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_plain_string_empty_falls_through() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": ""});
         // An empty string must not be used as the key; resolution falls
         // through to ANTHROPIC_API_KEY (which may or may not be set).
@@ -611,6 +694,7 @@ mod tests {
 
     #[test]
     fn resolve_api_key_inline() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": {"source": "inline", "inline": "sk-ant-test-123"}});
         let key = resolve_api_key(&config).unwrap();
         assert_eq!(key, "sk-ant-test-123");
@@ -618,7 +702,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_inline_empty_falls_through() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": {"source": "inline", "inline": ""}});
         // Should fall through to ANTHROPIC_API_KEY (which may or may not be set).
         let result = resolve_api_key(&config);
@@ -631,7 +716,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_from_env_var() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
         unsafe {
             std::env::set_var("ENE_TEST_ANTHROPIC_KEY", "sk-env-test-456");
@@ -647,7 +733,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_auto_source_uses_env_fallback() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let original = std::env::var("ANTHROPIC_API_KEY").ok();
         // SAFETY: Test-only env var mutation, serialized by `ENV_MUTEX`.
         unsafe {
@@ -674,7 +761,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_no_config_no_env_fails() {
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        let _env_guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({});
         // Without ANTHROPIC_API_KEY set, this should fail.
         // (If the env var happens to be set in CI, this test still passes
@@ -682,6 +770,63 @@ mod tests {
         if std::env::var("ANTHROPIC_API_KEY").is_err() {
             assert!(resolve_api_key(&config).is_err());
         }
+    }
+
+    #[test]
+    fn host_config_key_wins_over_request_config() {
+        // #313: a key delivered via set_config (host config) must take
+        // precedence over the per-request provider_config.
+        let host = json!({"api_key": "sk-host-wins"});
+        let request = json!({"api_key": "sk-request-loses"});
+        assert_eq!(
+            resolve_api_key_with_host(Some(&host), &request).unwrap(),
+            "sk-host-wins"
+        );
+    }
+
+    #[test]
+    fn host_config_supports_inline_shape() {
+        // The host blob can use the same {"source": "inline", ...} contract.
+        let host = json!({"api_key": {"source": "inline", "inline": "sk-host-inline"}});
+        let request = json!({});
+        assert_eq!(
+            resolve_api_key_with_host(Some(&host), &request).unwrap(),
+            "sk-host-inline"
+        );
+    }
+
+    #[test]
+    fn missing_host_key_falls_back_to_request_config() {
+        let host = json!({"base_url": "https://example.com"});
+        let request = json!({"api_key": "sk-request-fallback"});
+        assert_eq!(
+            resolve_api_key_with_host(Some(&host), &request).unwrap(),
+            "sk-request-fallback"
+        );
+    }
+
+    #[test]
+    fn set_config_stores_key_used_by_resolve() {
+        let _guard = TEST_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        // The static is process-wide; clear it around the case so this test
+        // cannot leak into (or be affected by) the other resolve_api_key tests.
+        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        AnthropicPlugin.set_config(&json!({"api_key": "sk-via-set-config"}));
+        assert_eq!(
+            resolve_api_key(&json!({})).unwrap(),
+            "sk-via-set-config",
+            "key delivered via set_config must be used by request resolution"
+        );
+        *PLUGIN_CONFIG.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    #[test]
+    fn config_schema_marks_api_key_secret() {
+        let schema = AnthropicPlugin.config_schema().expect("schema");
+        assert_eq!(
+            schema.pointer("/properties/api_key/x-ene-secret"),
+            Some(&json!(true))
+        );
     }
 
     #[test]

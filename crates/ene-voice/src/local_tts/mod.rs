@@ -52,15 +52,22 @@ impl LocalTtsProviderFactory {
             )
         })?;
         let model_path = download::resolve_model_path(&ai);
-        let voices_path = download::resolve_voices_path(&ai);
+        let voices_path = download::resolve_voices_path(config);
         let voice_name = resolved.voice.clone().unwrap_or_default();
+        let ort_dylib_path =
+            ene_ai::plugin_config::plugin_config_blob(config, ene_ai::plugin_config::ONNX_PLUGIN)
+                .as_ref()
+                .and_then(|blob| blob.get("ort_dylib_path"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|p| !p.is_empty());
         let engine = provider::open(
             &model_path,
             &voices_path,
             &voice_name,
             resolved.speed,
             resolved.language.clone(),
-            ai.ort_dylib_path.as_deref(),
+            ort_dylib_path.as_deref(),
         )?;
         Ok(Box::new(engine))
     }

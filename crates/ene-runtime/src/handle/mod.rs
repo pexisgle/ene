@@ -542,7 +542,7 @@ impl EneHandle {
             // only fails fast if a file is still missing. Mirrors the GGUF
             // prefetch above. Non-fatal: on failure we log and let provider
             // construction report a clear error.
-            if let Err(e) = ene_voice::prefetch_if_configured(&ai_config).await {
+            if let Err(e) = ene_voice::prefetch_if_configured(&config).await {
                 tracing::warn!(
                     component = "Bootstrap",
                     error = %e,

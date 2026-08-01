@@ -324,18 +324,103 @@ previous fully-sequential behavior. The classification is fail-closed: a tool
 that does not declare `ReadOnly` side effects is never parallelized.
 
 `plugins.list.<name>.db_quota_mb` caps how much of the **shared `memory.db`** a
-plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into
-one shared database, so without a cap a single runaway or malicious plugin
-could exhaust the disk or bloat `memory.db` enough to degrade the memory
-system's queries, backups, and integrity checks. The host measures each
-plugin's footprint (the summed byte length of every cell across its declared
-tables) and rejects any storage-growing write — `Insert`/`Upsert`, including
-those inside a `Batch` — that would push it to or past the cap, returning a
-`QUOTA_EXCEEDED` error. Reads and deletes are never gated, so a plugin over
-quota can always free space. The default is `256` — generous enough that no
-built-in plugin comes close, while still bounding a runaway plugin before it
-does real damage. Set the field to `null` to disable enforcement for a plugin
-that legitimately needs unbounded storage.
+ plugin's tables may occupy, in mebibytes (#424). Stateful plugins write into
+ one shared database, so without a cap a single runaway or malicious plugin
+ could exhaust the disk or bloat `memory.db` enough to degrade the memory
+ system's queries, backups, and integrity checks. The host measures each
+ plugin's footprint (the summed byte length of every cell across its declared
+ tables) and rejects any storage-growing write — `Insert`/`Upsert`, including
+ those inside a `Batch` — that would push it to or past the cap, returning a
+ `QUOTA_EXCEEDED` error. Reads and deletes are never gated, so a plugin over
+ quota can always free space. The default is `256` — generous enough that no
+ built-in plugin comes close, while still bounding a runaway plugin before it
+ does real damage. Set the field to `null` to disable enforcement for a plugin
+ that legitimately needs unbounded storage.
+
+#### `plugins.list.<name>.config` — plugin-owned settings (#313)
+
+Every plugin entry can carry a host-**opaque** configuration blob:
+
+```json
+{
+  "plugins": {
+    "list": {
+      "anthropic": {
+        "enable": true,
+        "config": {
+          "api_key": { "source": "env", "env": "ANTHROPIC_API_KEY" }
+        }
+      },
+      "llama-cpp": {
+        "enable": true,
+        "config": {
+          "mmproj_url": "https://example.com/mmproj.gguf",
+          "acceleration": "vulkan"
+        }
+      }
+    }
+  }
+}
+```
+
+The host stores and delivers this blob **verbatim** — it never interprets,
+rewrites, or drops keys inside it (unknown keys survive load → save
+round-trips). It is sent to the plugin once at handshake time
+(`ConfigurablePlugin::set_config`); plugins that also implement provider
+traits (LLM/embed/TTS/STT) receive it the same way as tool plugins. The
+environment override path for a single key is
+`ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`
+(e.g. `ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`). Provider-specific
+settings that previously lived in `ai.*` moved here — for example
+`plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`
+(was `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`),
+`plugins.list.onnx.config.ort_dylib_path`
+(was `ai.ort_dylib_path`), and
+`plugins.list.kokoro.profiles.kokoro.voices_path`
+(was `ai.tts.voices_path`).
+
+Version-1 `settings.json` files are migrated automatically on load: the
+relocated keys above are moved into their `plugins.list.*` destinations (and
+removed from their old `ai.*` locations) before the file is read, then the
+migrated document is persisted. Files without those keys are left logically
+unchanged. Legacy flat entry-level keys (`plugins.list.<name>.<key>`, from
+before the nested `config`/`profiles` hierarchy) are also folded into the
+delivered config blob at startup, with explicit `config` keys taking
+precedence — the file on disk is not rewritten for this, so the fold is
+stable across reloads.
+
+#### `plugins.list.<name>.profiles.<profile>` — per-profile settings (#313)
+
+A single plugin can need different settings per model/voice/profile. The
+`profiles` map holds host-opaque per-profile blobs, delivered to the plugin at
+handshake time (`ConfigurablePlugin::set_profiles`); profile *selection* is
+plugin-owned:
+
+```json
+{
+  "plugins": {
+    "list": {
+      "kokoro": {
+        "enable": true,
+        "profiles": {
+          "kokoro": { "voices_path": "/data/voices.bin" }
+        }
+      }
+    }
+  }
+}
+```
+
+#### Secret marking
+
+A plugin's `config_schema()` may mark a field with `x-ene-secret: true`. The
+host uses this (plus a well-known-name fallback: `api_key`, `token`,
+`password`, `authorization`, …) to mask the field in the settings UI (planned)
+and to redact it from host log output — an inline API key can never appear in
+the log stream. Storing secrets outside `settings.json` (a keyring/secret
+service) is tracked separately; until then plugin secrets stay in
+`plugins.list.<name>.config`, marked by the schema and redacted at the host
+boundary.
 
 ### `tools.*` — Tool-Execution Runtime Behavior
 

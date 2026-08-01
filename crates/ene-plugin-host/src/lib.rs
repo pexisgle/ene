@@ -52,6 +52,8 @@ pub mod manager;
 pub mod mcp_config;
 /// MCP client for external server connections.
 pub mod mcp_registry;
+/// Redaction of plugin configuration values at the host boundary.
+pub mod redact;
 /// Tool registry trait, composite registry, and deferred call types.
 pub mod tool_registry;
 
@@ -77,6 +79,8 @@ pub use manager::{LlmFactoriesByPlugin, LlmFactoryHandle, PluginHostManager};
 pub use mcp_config::{McpServerConfig, McpTransport};
 /// MCP client for external servers.
 pub use mcp_registry::McpToolRegistry;
+/// Config redaction helpers (see [`redact`]).
+pub use redact::{redact_config, redact_config_unschematized};
 /// Tool registry trait, composite registry, and deferred call types.
 pub use tool_registry::{
     CompositeToolRegistry, DeferredCallResult, ToolRegistry, compute_tool_version_hash,

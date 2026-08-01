@@ -50,8 +50,12 @@
 //!    from a `ctor` in the crate that owns the affected schema, or eagerly at
 //!    startup before the first [`load_config`](crate::load_config).
 //!
-//! No real schema migrations exist yet; the registry ships empty and the
-//! mechanism is exercised by unit tests.
+//! One real migration ships today: version 1 → 2 relocates provider-specific
+//! settings out of `ai.*` into the `plugins.list.*` sections that now own them
+//! (see `migrate_v1_to_v2`). It is registered by a `ctor` in this crate
+//! because `ene-config` owns the settings document schema, and the step must be
+//! in place wherever a `settings.json` is loaded — the runtime, the desktop
+//! app, and the CLI alike.
 
 use crate::error::EneConfigError;
 use std::collections::HashMap;
@@ -63,10 +67,22 @@ use std::sync::OnceLock;
 /// one whose `version` exceeds it is rejected (see
 /// [`EneConfigError::ConfigVersionTooNew`]). Bump this whenever you register a
 /// new migration step.
-pub const CURRENT_CONFIG_VERSION: u32 = 1;
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
 
 /// The JSON key holding the schema version in `settings.json`.
 const VERSION_KEY: &str = "version";
+
+/// Plugin list keys the v1→v2 migration relocates settings into.
+///
+/// Local literals because `ene-config` must not depend on `ene-ai` (which
+/// defines the canonical names in `plugin_config.rs`); the migration tests pin
+/// the two to stay in sync.
+const LLAMA_CPP_PLUGIN: &str = "llama-cpp";
+const ONNX_PLUGIN: &str = "onnx";
+const KOKORO_PLUGIN: &str = "kokoro";
+/// Default profile name under `plugins.list.kokoro.profiles` for the single
+/// Kokoro voice set shipped today.
+const KOKORO_DEFAULT_PROFILE: &str = "kokoro";
 
 /// A single migration step.
 ///
@@ -259,6 +275,224 @@ pub fn apply_migrations(mut doc: serde_json::Value) -> Result<serde_json::Value,
     Ok(doc)
 }
 
+/// A value counts as "present" for the v1→v2 relocation.
+///
+/// Empty strings and `null` are treated as absent: v1 shipped default-valued
+/// entries (`mmproj_url: ""`, `acceleration` always present as `"auto"`), and
+/// moving those over an existing plugin config would silently clobber a
+/// user-configured value with a default.
+fn has_value(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
+/// Sets `plugins.list.<plugin>.config.<key>` to `value`, creating the
+/// intermediate objects as needed.
+fn set_plugin_config_key(
+    doc: &mut serde_json::Value,
+    plugin: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), EneConfigError> {
+    let root = doc.as_object_mut().ok_or_else(|| {
+        EneConfigError::GenericConfigError("config document is not a JSON object".to_string())
+    })?;
+    let plugin_entry = object_at(root, "plugins")
+        .and_then(|p| object_at(p, "list"))
+        .and_then(|l| object_at(l, plugin))
+        .ok_or_else(|| {
+            EneConfigError::GenericConfigError(
+                "plugins.list section is not a JSON object".to_string(),
+            )
+        })?;
+    object_at(plugin_entry, "config")
+        .ok_or_else(|| {
+            EneConfigError::GenericConfigError(
+                "plugins.list.<name>.config is not a JSON object".to_string(),
+            )
+        })?
+        .insert(key.to_string(), value);
+    Ok(())
+}
+
+/// Sets `plugins.list.<plugin>.profiles.<profile>.<key>` to `value`, creating
+/// the intermediate objects as needed.
+fn set_plugin_profile_key(
+    doc: &mut serde_json::Value,
+    plugin: &str,
+    profile: &str,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), EneConfigError> {
+    let root = doc.as_object_mut().ok_or_else(|| {
+        EneConfigError::GenericConfigError("config document is not a JSON object".to_string())
+    })?;
+    let plugin_entry = object_at(root, "plugins")
+        .and_then(|p| object_at(p, "list"))
+        .and_then(|l| object_at(l, plugin))
+        .ok_or_else(|| {
+            EneConfigError::GenericConfigError(
+                "plugins.list section is not a JSON object".to_string(),
+            )
+        })?;
+    let profiles = object_at(plugin_entry, "profiles").ok_or_else(|| {
+        EneConfigError::GenericConfigError(
+            "plugins.list.<name>.profiles is not a JSON object".to_string(),
+        )
+    })?;
+    let profile_obj = object_at(profiles, profile).ok_or_else(|| {
+        EneConfigError::GenericConfigError(
+            "plugins.list.<name>.profiles.<profile> is not a JSON object".to_string(),
+        )
+    })?;
+    profile_obj.insert(key.to_string(), value);
+    Ok(())
+}
+
+/// Returns the object stored under `key` in `parent`, creating it when absent.
+fn object_at<'a>(
+    parent: &'a mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let value = parent.entry(key).or_insert_with(|| serde_json::json!({}));
+    value.as_object_mut()
+}
+
+/// Moves the per-model `ai.local_models.<model>.<key>` value into the single
+/// plugin-level `plugins.list.llama-cpp.config.<key>` slot.
+///
+/// The plugin config can hold only one `mmproj`/`acceleration` setting, so the
+/// **first model with a non-empty value wins** (in the JSON map's iteration
+/// order). The key is then removed from every model: the per-model locations
+/// are dead once the value has been collapsed to the plugin level. A no-op
+/// when no model carries a value for `key`.
+fn move_first_local_model_key(
+    doc: &mut serde_json::Value,
+    key: &str,
+) -> Result<(), EneConfigError> {
+    let Some(models) = doc
+        .pointer("/ai/local_models")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(());
+    };
+    let Some(value) = models
+        .values()
+        .find_map(|model| model.get(key).filter(|v| has_value(v)))
+        .cloned()
+    else {
+        return Ok(());
+    };
+
+    if let Some(models) = doc
+        .pointer_mut("/ai/local_models")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for model in models.values_mut() {
+            if let Some(obj) = model.as_object_mut() {
+                obj.remove(key);
+            }
+        }
+    }
+
+    set_plugin_config_key(doc, LLAMA_CPP_PLUGIN, key, value)
+}
+
+/// Moves `ai.ort_dylib_path` into `plugins.list.onnx.config.ort_dylib_path`.
+fn move_ort_dylib_path(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    let Some(value) = doc
+        .pointer("/ai/ort_dylib_path")
+        .filter(|v| has_value(v))
+        .cloned()
+    else {
+        return Ok(());
+    };
+    if let Some(ai) = doc
+        .pointer_mut("/ai")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        ai.remove("ort_dylib_path");
+    }
+    set_plugin_config_key(doc, ONNX_PLUGIN, "ort_dylib_path", value)
+}
+
+/// Moves `ai.tts.voices_path` into
+/// `plugins.list.kokoro.profiles.kokoro.voices_path`.
+fn move_voices_path(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    let Some(value) = doc
+        .pointer("/ai/tts/voices_path")
+        .filter(|v| has_value(v))
+        .cloned()
+    else {
+        return Ok(());
+    };
+    if let Some(tts) = doc
+        .pointer_mut("/ai/tts")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        tts.remove("voices_path");
+    }
+    set_plugin_profile_key(
+        doc,
+        KOKORO_PLUGIN,
+        KOKORO_DEFAULT_PROFILE,
+        "voices_path",
+        value,
+    )
+}
+
+/// v1 → v2: relocates provider-specific settings out of `ai.*` into the
+/// `plugins.list.*` sections that now own them.
+///
+/// - `ai.local_models.<model>.mmproj_url` / `mmproj_path` / `acceleration` →
+///   `plugins.list.llama-cpp.config.*` (first non-empty model value wins;
+///   per-model keys are then dropped)
+/// - `ai.ort_dylib_path` → `plugins.list.onnx.config.ort_dylib_path`
+/// - `ai.tts.voices_path` → `plugins.list.kokoro.profiles.kokoro.voices_path`
+///
+/// A no-op (still `Ok`) when there is nothing to move: absent `ai`/`plugins`
+/// sections, or only empty-string/`null` values. Existing
+/// `plugins.list.<name>.config` values are left untouched unless the old
+/// document actually carries a corresponding value.
+pub(crate) fn migrate_v1_to_v2(doc: &mut serde_json::Value) -> Result<(), EneConfigError> {
+    // A document without an `ai` section carries none of the relocated keys;
+    // the version stamp is applied by `apply_migrations` regardless.
+    if doc.get("ai").is_none() {
+        return Ok(());
+    }
+
+    for key in ["mmproj_url", "mmproj_path", "acceleration"] {
+        move_first_local_model_key(doc, key)?;
+    }
+    move_ort_dylib_path(doc)?;
+    move_voices_path(doc)?;
+    Ok(())
+}
+
+/// Registers the v1→v2 step at process start, wherever a `settings.json` is
+/// loaded. `ene-config` owns this step because the `version` field and the
+/// migration machinery live here, and the relocated keys are host document
+/// schema rather than the property of any single runtime crate.
+const _: () = {
+    /// # Safety
+    ///
+    /// Called by `ctor` before `main`. Only safe registration code
+    /// is executed; no I/O, TLS, or cross-ctor ordering assumed.
+    #[ene_config::ctor(unsafe, crate_path = ene_config)]
+    fn register_v1_to_v2_migration() {
+        if let Err(err) = register_migration(1, migrate_v1_to_v2) {
+            tracing::error!(
+                component = "Config",
+                error = %err,
+                "failed to register settings.json migration v1->v2"
+            );
+        }
+    }
+};
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -274,6 +508,13 @@ pub(crate) mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+        // Snapshot the registry so it can be restored afterwards: tests run in
+        // arbitrary order, and a test that clears the registry must not leave
+        // the process without the production migration steps for the next
+        // test (the `ctor`-registered v1→v2 step in particular).
+        let saved_registry = registry().lock().clone();
+        let saved_applied = APPLIED.load(std::sync::atomic::Ordering::Acquire);
+
         TEST_VERSION_OVERRIDE.store(version, std::sync::atomic::Ordering::Release);
         registry().lock().clear();
         APPLIED.store(false, std::sync::atomic::Ordering::Release);
@@ -281,8 +522,8 @@ pub(crate) mod tests {
         body();
 
         TEST_VERSION_OVERRIDE.store(0, std::sync::atomic::Ordering::Release);
-        registry().lock().clear();
-        APPLIED.store(false, std::sync::atomic::Ordering::Release);
+        *registry().lock() = saved_registry;
+        APPLIED.store(saved_applied, std::sync::atomic::Ordering::Release);
     }
 
     /// A document already at the current version passes through unchanged.
@@ -455,6 +696,266 @@ pub(crate) mod tests {
             assert!(
                 reg.get(&2).is_none() && reg.get(&5).is_none(),
                 "steps at or above the current version must not be stored"
+            );
+        });
+    }
+
+    /// A full v1 document with every relocated key becomes a v2 document with
+    /// the keys at their new `plugins.list.*` locations and the old keys gone.
+    #[test]
+    fn v1_to_v2_moves_relocated_settings() {
+        with_test_version(2, || {
+            let mut doc = serde_json::json!({
+                "version": 1,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "url": "https://cdn.example/gemma-4-e4b.gguf",
+                            "mmproj_url": "https://cdn.example/mmproj.gguf",
+                            "mmproj_path": "/data/mmproj.gguf",
+                            "acceleration": "vulkan"
+                        }
+                    },
+                    "ort_dylib_path": "/opt/onnxruntime/libonnxruntime.so",
+                    "tts": {
+                        "provider": "kokoro",
+                        "voices_path": "/data/voices.bin"
+                    }
+                }
+            });
+            migrate_v1_to_v2(&mut doc).expect("v1->v2 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
+                Some(&serde_json::json!("https://cdn.example/mmproj.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_path"),
+                Some(&serde_json::json!("/data/mmproj.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/acceleration"),
+                Some(&serde_json::json!("vulkan"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/onnx/config/ort_dylib_path"),
+                Some(&serde_json::json!("/opt/onnxruntime/libonnxruntime.so"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/kokoro/profiles/kokoro/voices_path"),
+                Some(&serde_json::json!("/data/voices.bin"))
+            );
+            // The old per-model and ai-level keys are removed.
+            assert!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/mmproj_url")
+                    .is_none(),
+                "old per-model mmproj_url must be deleted"
+            );
+            assert!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/mmproj_path")
+                    .is_none(),
+                "old per-model mmproj_path must be deleted"
+            );
+            assert!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/acceleration")
+                    .is_none(),
+                "old per-model acceleration must be deleted"
+            );
+            assert!(
+                doc.pointer("/ai/ort_dylib_path").is_none(),
+                "old ai.ort_dylib_path must be deleted"
+            );
+            assert!(
+                doc.pointer("/ai/tts/voices_path").is_none(),
+                "old ai.tts.voices_path must be deleted"
+            );
+            // The untouched model fields survive.
+            assert_eq!(
+                doc.pointer("/ai/local_models/gemma-4-e4b/url"),
+                Some(&serde_json::json!("https://cdn.example/gemma-4-e4b.gguf"))
+            );
+        });
+    }
+
+    /// The first model (in JSON iteration order) carrying a non-empty value
+    /// wins, regardless of which model that happens to be: when only one model
+    /// has `mmproj_url`, that value is the one relocated.
+    #[test]
+    fn v1_to_v2_first_non_empty_model_wins() {
+        with_test_version(2, || {
+            let mut doc = serde_json::json!({
+                "version": 1,
+                "ai": {
+                    "local_models": {
+                        "model-a": {
+                            "url": "a.gguf",
+                            "mmproj_url": "",
+                            "mmproj_path": ""
+                        },
+                        "model-b": {
+                            "url": "b.gguf",
+                            "mmproj_url": "https://cdn.example/b-mmproj.gguf",
+                            "mmproj_path": "/data/b-mmproj.gguf"
+                        },
+                        "model-c": {
+                            "url": "c.gguf",
+                            "mmproj_url": "https://cdn.example/c-mmproj.gguf"
+                        }
+                    }
+                }
+            });
+            migrate_v1_to_v2(&mut doc).expect("v1->v2 migration succeeds");
+
+            // model-b is the first entry with a non-empty mmproj_url; model-c's
+            // later value must not win.
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
+                Some(&serde_json::json!("https://cdn.example/b-mmproj.gguf"))
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_path"),
+                Some(&serde_json::json!("/data/b-mmproj.gguf"))
+            );
+            // The key is removed from every model, empty-valued or not.
+            for model in ["model-a", "model-b", "model-c"] {
+                assert!(
+                    doc.pointer(&format!("/ai/local_models/{model}/mmproj_url"))
+                        .is_none(),
+                    "{model} must no longer carry mmproj_url"
+                );
+            }
+        });
+    }
+
+    /// Empty-string and null values are "no value": they are neither moved nor
+    /// do they clobber an existing plugin config.
+    #[test]
+    fn v1_to_v2_empty_values_are_not_moved() {
+        with_test_version(2, || {
+            let mut doc = serde_json::json!({
+                "version": 1,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "mmproj_url": "",
+                            "mmproj_path": null,
+                            "acceleration": "auto"
+                        }
+                    },
+                    "ort_dylib_path": null,
+                    "tts": { "voices_path": "" }
+                }
+            });
+            migrate_v1_to_v2(&mut doc).expect("v1->v2 migration succeeds");
+
+            // Empty/null values are not relocated.
+            assert!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_url")
+                    .is_none(),
+                "empty mmproj_url must not be moved"
+            );
+            assert!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_path")
+                    .is_none(),
+                "null mmproj_path must not be moved"
+            );
+            assert!(
+                doc.pointer("/plugins/list/onnx").is_none(),
+                "null ort_dylib_path must not be moved"
+            );
+            assert!(
+                doc.pointer("/plugins/list/kokoro").is_none(),
+                "empty voices_path must not be moved"
+            );
+            // A non-empty `"auto"` acceleration IS a real value and moves.
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/acceleration"),
+                Some(&serde_json::json!("auto"))
+            );
+        });
+    }
+
+    /// A document without an `ai` section has nothing to migrate and is left
+    /// untouched (still `Ok`).
+    #[test]
+    fn v1_to_v2_without_ai_section_is_noop() {
+        with_test_version(2, || {
+            let mut doc = serde_json::json!({
+                "version": 1,
+                "character": "Alicia"
+            });
+            let before = doc.clone();
+            migrate_v1_to_v2(&mut doc).expect("no-ai document migrates ok");
+            assert_eq!(doc, before, "document without an ai section is unchanged");
+        });
+    }
+
+    /// Existing `plugins.list.<name>.config` values are left alone when the
+    /// old document carries no corresponding key (config wins over defaults).
+    #[test]
+    fn v1_to_v2_preserves_existing_plugin_config_when_old_key_absent() {
+        with_test_version(2, || {
+            let mut doc = serde_json::json!({
+                "version": 1,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "mmproj_url": "",
+                            "acceleration": ""
+                        }
+                    }
+                },
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "enable": true,
+                            "config": {
+                                "mmproj_url": "https://cdn.example/user-configured.gguf",
+                                "acceleration": "cuda"
+                            }
+                        }
+                    }
+                }
+            });
+            migrate_v1_to_v2(&mut doc).expect("v1->v2 migration succeeds");
+
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
+                Some(&serde_json::json!(
+                    "https://cdn.example/user-configured.gguf"
+                )),
+                "existing plugin config must win over an empty old value"
+            );
+            assert_eq!(
+                doc.pointer("/plugins/list/llama-cpp/config/acceleration"),
+                Some(&serde_json::json!("cuda"))
+            );
+        });
+    }
+
+    /// The end-to-end chain: a v1 document with the old keys reaches version 2
+    /// via [`apply_migrations`] and the relocated values are in place.
+    #[test]
+    fn apply_migrations_migrates_v1_to_v2() {
+        with_test_version(2, || {
+            register_migration(1, migrate_v1_to_v2).expect("registration succeeds");
+
+            let doc = serde_json::json!({
+                "version": 1,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "mmproj_url": "https://cdn.example/mmproj.gguf"
+                        }
+                    }
+                }
+            });
+            let migrated = apply_migrations(doc).expect("migration chain succeeds");
+
+            assert_eq!(migrated.get("version"), Some(&serde_json::json!(2)));
+            assert_eq!(
+                migrated.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
+                Some(&serde_json::json!("https://cdn.example/mmproj.gguf"))
             );
         });
     }

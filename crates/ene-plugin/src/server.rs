@@ -62,6 +62,69 @@ impl PluginDispatch {
             stt,
         }
     }
+
+    /// Delivers the plugin configuration blob to every registered trait
+    /// implementation (called once during Handshake).
+    ///
+    /// A single plugin struct may implement several traits (e.g. `ToolPlugin`
+    /// and `LlmPlugin`); each is stored as a separate trait object, so the
+    /// config is delivered to every one present. `set_config` is idempotent
+    /// (plugins store the blob), so repeated delivery is harmless (#313).
+    fn set_config(&self, config: &serde_json::Value) {
+        if let Some(tool) = &self.tool {
+            tool.set_config(config);
+        }
+        if let Some(llm) = &self.llm {
+            llm.set_config(config);
+        }
+        if let Some(embed) = &self.embed {
+            embed.set_config(config);
+        }
+        if let Some(tts) = &self.tts {
+            tts.set_config(config);
+        }
+        if let Some(stt) = &self.stt {
+            stt.set_config(config);
+        }
+    }
+
+    /// Delivers the per-profile configuration blob to every registered trait
+    /// implementation (called once during Handshake when
+    /// `plugins.list.<name>.profiles` is configured).
+    fn set_profiles(&self, profiles: &serde_json::Value) {
+        if let Some(tool) = &self.tool {
+            tool.set_profiles(profiles);
+        }
+        if let Some(llm) = &self.llm {
+            llm.set_profiles(profiles);
+        }
+        if let Some(embed) = &self.embed {
+            embed.set_profiles(profiles);
+        }
+        if let Some(tts) = &self.tts {
+            tts.set_profiles(profiles);
+        }
+        if let Some(stt) = &self.stt {
+            stt.set_profiles(profiles);
+        }
+    }
+
+    /// Returns the first non-`None` config schema among the registered trait
+    /// implementations, preferring the tool plugin (the historical source).
+    ///
+    /// Method-call syntax (closures, not function pointers) is required here:
+    /// `ConfigurablePlugin` is implemented for the trait objects themselves,
+    /// not for `Arc<dyn …>`, so `and_then(ConfigurablePlugin::config_schema)`
+    /// would fail to satisfy the receiver type (#313).
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        self.tool
+            .as_ref()
+            .and_then(|t| t.config_schema())
+            .or_else(|| self.llm.as_ref().and_then(|l| l.config_schema()))
+            .or_else(|| self.embed.as_ref().and_then(|e| e.config_schema()))
+            .or_else(|| self.tts.as_ref().and_then(|t| t.config_schema()))
+            .or_else(|| self.stt.as_ref().and_then(|s| s.config_schema()))
+    }
 }
 
 /// Starts a plugin as an IPC server.
@@ -87,6 +150,7 @@ impl PluginDispatch {
 /// ```rust,no_run
 /// # use ene_plugin::{PluginDispatch, ToolPlugin, PluginStreamChunk};
 /// # struct MyTool;
+/// # impl ene_plugin::ConfigurablePlugin for MyTool {}
 /// # #[async_trait::async_trait]
 /// # impl ToolPlugin for MyTool {
 /// #     fn tool_capabilities(&self) -> ene_plugin::ToolPluginCapabilities {
@@ -410,6 +474,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             version: host_range,
             sandbox,
             plugin_config,
+            plugin_profiles,
         } => {
             let our_range = VersionRange {
                 min: PLUGIN_IPC_PROTOCOL_VERSION,
@@ -437,9 +502,16 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             };
             if let Some(tool) = &dispatch.tool {
                 tool.set_sandbox(sandbox);
-                if let Some(config) = plugin_config {
-                    tool.set_config(config);
-                }
+            }
+            // Configuration is delivered to **every** registered trait
+            // implementation (tool or provider), not just the tool plugin
+            // (#313). Both blobs are opaque to the plugin server; the plugin
+            // stores them and selects as it needs.
+            if let Some(config) = plugin_config {
+                dispatch.set_config(config);
+            }
+            if let Some(profiles) = plugin_profiles {
+                dispatch.set_profiles(profiles);
             }
             PluginIpcResponse::HandshakeAck {
                 version: negotiated,
@@ -451,7 +523,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
         },
         PluginIpcRequest::GetConfigSchema { request_id } => PluginIpcResponse::ConfigSchema {
             request_id: request_id.clone(),
-            schema: dispatch.tool.as_ref().and_then(|t| t.config_schema()),
+            schema: dispatch.config_schema(),
         },
         PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
             request_id: request_id.clone(),
@@ -973,7 +1045,9 @@ async fn run_chat_stream(
 )]
 mod tests {
     use super::*;
-    use crate::plugin::{PluginCompletion, PluginStreamChunk, ToolPluginCapabilities};
+    use crate::plugin::{
+        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, ToolPluginCapabilities,
+    };
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
@@ -1012,7 +1086,9 @@ mod tests {
                 })
             }
         }
+    }
 
+    impl ConfigurablePlugin for MockToolPlugin {
         fn config_schema(&self) -> Option<serde_json::Value> {
             Some(serde_json::json!({"type": "object"}))
         }
@@ -1079,6 +1155,8 @@ mod tests {
             Ok(ene_plugin_proto::ToolResult::text(args.to_string()))
         }
     }
+
+    impl ConfigurablePlugin for GatedToolPlugin {}
 
     /// Waits (with a deadlock backstop) until `plugin.in_flight()` reaches
     /// `expected`.
@@ -1148,6 +1226,8 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for MockLlmPlugin {}
+
     /// A mock LLM plugin whose stream emits one chunk and then blocks until
     /// cancelled, used to exercise `CancelStream` (Cr-4).
     struct SlowMockLlmPlugin;
@@ -1186,6 +1266,8 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for SlowMockLlmPlugin {}
+
     /// A mock TTS plugin for testing dispatch logic.
     struct MockTtsPlugin;
 
@@ -1212,6 +1294,8 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for MockTtsPlugin {}
+
     /// A mock STT plugin for testing dispatch logic.
     struct MockSttPlugin;
 
@@ -1237,6 +1321,8 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for MockSttPlugin {}
+
     /// A mock embed plugin for testing dispatch logic.
     struct MockEmbedPlugin;
 
@@ -1253,6 +1339,8 @@ mod tests {
             Ok(_items.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
         }
     }
+
+    impl ConfigurablePlugin for MockEmbedPlugin {}
 
     fn make_dispatch(tool: bool, llm: bool, embed: bool) -> PluginDispatch {
         PluginDispatch {
@@ -1294,6 +1382,7 @@ mod tests {
             },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: Some(serde_json::json!({"key": "value"})),
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
@@ -1316,6 +1405,7 @@ mod tests {
             version: VersionRange { min: 999, max: 999 },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: None,
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
@@ -1333,6 +1423,7 @@ mod tests {
             },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: None,
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
@@ -1400,6 +1491,115 @@ mod tests {
             PluginIpcResponse::ConfigSchema { request_id, schema } => {
                 assert_eq!(request_id, "req-1");
                 assert!(schema.is_none());
+            }
+            other => panic!("expected ConfigSchema, got {other:?}"),
+        }
+    }
+
+    /// A mock LLM plugin that records the config / profiles delivered via
+    /// [`ConfigurablePlugin::set_config`] / `set_profiles` and advertises a
+    /// schema with a secret-marked field (#313).
+    struct RecordingLlmPlugin {
+        config: std::sync::Mutex<Option<serde_json::Value>>,
+        profiles: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+
+    impl RecordingLlmPlugin {
+        fn new() -> Self {
+            Self {
+                config: std::sync::Mutex::new(None),
+                profiles: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmPlugin for RecordingLlmPlugin {
+        fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+            Vec::new()
+        }
+    }
+
+    impl ConfigurablePlugin for RecordingLlmPlugin {
+        fn set_config(&self, config: &serde_json::Value) {
+            *self.config.lock().unwrap() = Some(config.clone());
+        }
+
+        fn set_profiles(&self, profiles: &serde_json::Value) {
+            *self.profiles.lock().unwrap() = Some(profiles.clone());
+        }
+
+        fn config_schema(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "api_key": { "type": "string", "x-ene-secret": true }
+                }
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_delivers_config_and_profiles_to_provider_plugins() {
+        // #313: `set_config` / `set_profiles` must reach provider traits
+        // (LLM/embed/TTS/STT), not just the tool trait, so provider plugins
+        // can receive their configuration at handshake time.
+        let plugin = Arc::new(RecordingLlmPlugin::new());
+        let dispatch = PluginDispatch {
+            tool: None,
+            llm: Some(Arc::clone(&plugin) as Arc<dyn LlmPlugin>),
+            embed: None,
+            tts: None,
+            stt: None,
+        };
+        let req = PluginIpcRequest::Handshake {
+            version: VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            },
+            sandbox: ene_plugin_proto::SandboxConfigData::default(),
+            plugin_config: Some(serde_json::json!({"api_key": {"source": "env"}})),
+            plugin_profiles: Some(serde_json::json!({"default": {"voice": "af_heart"}})),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::HandshakeAck { .. }));
+        assert_eq!(
+            plugin.config.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({"api_key": {"source": "env"}}))
+        );
+        assert_eq!(
+            plugin.profiles.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({"default": {"voice": "af_heart"}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_config_schema_from_provider_plugin() {
+        // #313: `GetConfigSchema` must aggregate schemas from provider traits
+        // (here: an LLM-only dispatch) rather than returning `None` when no
+        // tool plugin is registered.
+        let dispatch = PluginDispatch {
+            tool: None,
+            llm: Some(Arc::new(RecordingLlmPlugin::new()) as Arc<dyn LlmPlugin>),
+            embed: None,
+            tts: None,
+            stt: None,
+        };
+        let resp = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::GetConfigSchema {
+                request_id: "req-1".into(),
+            },
+        )
+        .await;
+        match resp {
+            PluginIpcResponse::ConfigSchema { request_id, schema } => {
+                assert_eq!(request_id, "req-1");
+                let schema = schema.expect("LLM plugin must advertise a schema");
+                assert_eq!(
+                    schema.pointer("/properties/api_key/x-ene-secret"),
+                    Some(&serde_json::json!(true))
+                );
             }
             other => panic!("expected ConfigSchema, got {other:?}"),
         }
@@ -1736,6 +1936,7 @@ mod tests {
             },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: None,
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {

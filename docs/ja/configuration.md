@@ -297,6 +297,59 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 
 `plugins.list.<name>.db_quota_mb` は、プラグインのテーブルが**共有 `memory.db`** 内で占有できる上限をメビバイト単位で設定します (#424)。ステートフルなプラグインはすべて 1 つの共有データベースへ書き込むため、上限がなければ 1 つの暴走（または悪意ある）プラグインがディスクを使い切ったり、`memory.db` を肥大化させて記憶システムのクエリ・バックアップ・整合性検査を劣化させたりするおそれがあります。ホストは各プラグインの使用量（宣言済みテーブル全体の全セルのバイト長合計）を測定し、上限に達するか超えるようなストレージを増やす書き込み（`Insert`/`Upsert`、`Batch` 内のものを含む）を拒否し、`QUOTA_EXCEEDED` エラーを返します。読み取りと削除は一切制限されないため、上限に達したプラグインでも常に空きを確保できます。既定値は `256` で、組み込みプラグインが近づけないほど十分に大きい一方、暴走プラグインが実際の被害を出す前に抑制できます。無制限のストレージが正当に必要なプラグインには、このフィールドを `null` に設定して強制を無効化できます。
 
+#### `plugins.list.<name>.config` — プラグイン所有の設定 (#313)
+
+各プラグインエントリは、ホストからは**不透明**な設定ブロブを保持できます：
+
+```json
+{
+  "plugins": {
+    "list": {
+      "anthropic": {
+        "enable": true,
+        "config": {
+          "api_key": { "source": "env", "env": "ANTHROPIC_API_KEY" }
+        }
+      },
+      "llama-cpp": {
+        "enable": true,
+        "config": {
+          "mmproj_url": "https://example.com/mmproj.gguf",
+          "acceleration": "vulkan"
+        }
+      }
+    }
+  }
+}
+```
+
+ホストはこのブロブを**そのまま**保存・配信します。ブロブ内のキーを解釈・書き換え・破棄することは決してありません（未知のキーもロード→セーブの往復で保持されます）。ブロブはハンドシェイク時に一度だけプラグインへ送信されます（`ConfigurablePlugin::set_config`）。プロバイダートレイト（LLM/embed/TTS/STT）を実装するプラグインも、ツールプラグインと同じ方法で受け取ります。単一キーの環境変数オーバーライドは `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`（例：`ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`）です。従来 `ai.*` にあったプロバイダー固有設定はここへ移動しました。たとえば `plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`（旧 `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`）、`plugins.list.onnx.config.ort_dylib_path`（旧 `ai.ort_dylib_path`）、`plugins.list.kokoro.profiles.kokoro.voices_path`（旧 `ai.tts.voices_path`）。
+
+バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
+
+#### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
+
+1 つのプラグインがモデル/音声/プロファイルごとに異なる設定を必要とすることがあります。`profiles` マップは、ホストからは不透明なプロファイル別ブロブを保持し、ハンドシェイク時にプラグインへ配信されます（`ConfigurablePlugin::set_profiles`）。プロファイルの*選択*はプラグイン側の責務です：
+
+```json
+{
+  "plugins": {
+    "list": {
+      "kokoro": {
+        "enable": true,
+        "profiles": {
+          "kokoro": { "voices_path": "/data/voices.bin" }
+        }
+      }
+    }
+  }
+}
+```
+
+#### シークレットのマーキング
+
+プラグインの `config_schema()` は、フィールドに `x-ene-secret: true` を付与できます。ホストはこれ（および既知の名前によるフォールバック：`api_key`・`token`・`password`・`authorization` など）を使って、設定 UI でフィールドをマスクする予定であり、ホストのログ出力からは値を削除（redact）します。インラインの API キーがログストリームに現れることはありません。`settings.json` の外部（キーリング/シークレットサービス）へのシークレット保存は別途追跡されており、それまではプラグインのシークレットは `plugins.list.<name>.config` 内に置かれ、スキーマでマークされ、ホスト境界で redact されます。
+
 ### `tools.*` — ツール実行ランタイムの挙動
 
 `plugins.*`（プラグインの プロセス／IPC 層を管理）とは別に、`tools.*` は

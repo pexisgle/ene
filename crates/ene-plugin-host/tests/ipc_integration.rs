@@ -55,6 +55,10 @@ struct MockState {
     /// Set once the mock has emitted a `DeferredCompleted` push, so the push
     /// is only emitted a single time (Cr-5 test).
     pushed: bool,
+    /// The config blob the host delivered during the handshake, if any.
+    plugin_config: Option<serde_json::Value>,
+    /// The per-profile blobs the host delivered during the handshake, if any.
+    plugin_profiles: Option<serde_json::Value>,
 }
 
 /// Runs a mock plugin server that handles all v3 request types.
@@ -140,8 +144,9 @@ async fn dispatch_mock(
     match req {
         PluginIpcRequest::Handshake {
             version: host_range,
-            sandbox: _,
-            plugin_config: _,
+            plugin_config,
+            plugin_profiles,
+            ..
         } => {
             // Mirrors `VersionRange::negotiate`: pick the highest common
             // version, or fail with a message naming both ranges when they
@@ -155,6 +160,11 @@ async fn dispatch_mock(
                     ),
                 };
             };
+            {
+                let mut s = state.lock().await;
+                s.plugin_config = plugin_config;
+                s.plugin_profiles = plugin_profiles;
+            }
             PluginIpcResponse::HandshakeAck {
                 version: negotiated,
                 capabilities: PluginCapabilities {
@@ -543,6 +553,7 @@ async fn spawn_concurrent_and_connect(
         &socket_path,
         SandboxConfigData::default(),
         None,
+        None,
         TEST_HANDSHAKE_TIMEOUT,
         max_concurrent,
     )
@@ -581,6 +592,7 @@ async fn spawn_and_connect(name: &str) -> (IpcPluginConnection, Arc<Mutex<MockSt
         &socket_path,
         SandboxConfigData::default(),
         Some(serde_json::json!({"test": true})),
+        None,
         TEST_HANDSHAKE_TIMEOUT,
         TEST_MAX_CONCURRENT,
     )
@@ -613,6 +625,7 @@ async fn try_connect_with_plugin_version(
         &socket_path,
         SandboxConfigData::default(),
         None,
+        None,
         TEST_HANDSHAKE_TIMEOUT,
         TEST_MAX_CONCURRENT,
     )
@@ -641,6 +654,54 @@ async fn handshake_succeeds_and_returns_capabilities() {
     // the v4 `CancelStream` feature gate agree.
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_PROTOCOL_VERSION);
     assert!(conn.supports_cancel_stream());
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn handshake_delivers_config_and_profiles() {
+    // The host passes `plugins.list.<name>.config` and `.profiles` through
+    // the handshake; the mock records what it received so host→plugin
+    // delivery is pinned on the host side.
+    let socket_path = test_socket_path("config-profiles");
+    let state = Arc::new(Mutex::new(MockState::default()));
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_mock_server(server_path, server_state).await;
+    });
+
+    // Give the server a moment to bind.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let config = serde_json::json!({"api_key": {"source": "env"}});
+    let profiles = serde_json::json!({
+        "kokoro": {"voices_path": "/data/voices.bin"}
+    });
+    let _conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        Some(config.clone()),
+        Some(profiles.clone()),
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_config,
+        Some(config),
+        "config blob must reach the plugin handshake"
+    );
+    assert_eq!(
+        s.plugin_profiles,
+        Some(profiles),
+        "profiles blob must reach the plugin handshake"
+    );
+    drop(s);
 
     cleanup_path(&socket_path);
 }
@@ -676,6 +737,7 @@ async fn handshake_times_out_when_plugin_never_responds() {
     let result = IpcPluginConnection::connect(
         &socket_path,
         SandboxConfigData::default(),
+        None,
         None,
         short_timeout,
         TEST_MAX_CONCURRENT,
@@ -1061,6 +1123,7 @@ async fn transparent_reconnection_after_transport_failure() {
         &socket_path,
         SandboxConfigData::default(),
         None,
+        None,
         TEST_HANDSHAKE_TIMEOUT,
         TEST_MAX_CONCURRENT,
     )
@@ -1308,6 +1371,7 @@ async fn concurrent_transport_failures_coalesce_into_one_reconnect() {
         IpcPluginConnection::connect(
             &socket_path,
             SandboxConfigData::default(),
+            None,
             None,
             TEST_HANDSHAKE_TIMEOUT,
             TEST_MAX_CONCURRENT,

@@ -1515,6 +1515,59 @@ mod tests {
         });
     }
 
+    /// End-to-end for the real v1→v2 step: a version-1 `settings.json` holding
+    /// the relocated keys is migrated to version 2 on load, persisted, and the
+    /// plugin-owned settings land under `plugins.list.*`.
+    #[test]
+    fn load_migrates_v1_relocated_settings_to_v2() {
+        crate::migration::tests::with_test_version(2, || {
+            crate::migration::register_migration(1, crate::migration::migrate_v1_to_v2)
+                .expect("registration below current version succeeds");
+
+            let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+            let path = tmp.path().join("settings.json");
+            let v1 = r#"{
+                "version": 1,
+                "ai": {
+                    "local_models": {
+                        "gemma-4-e4b": {
+                            "mmproj_url": "https://cdn.example/mmproj.gguf",
+                            "acceleration": "auto"
+                        }
+                    },
+                    "ort_dylib_path": "/opt/onnx/libonnxruntime.so",
+                    "tts": { "voices_path": "/data/voices.bin" }
+                }
+            }"#;
+            std::fs::write(&path, v1).expect("write old-version settings fixture");
+
+            let config = load_full_config_from(&path).expect("old-version config loads");
+            assert_eq!(config.version, 2, "loaded config carries the new version");
+            // The relocated values are reachable through the plugins section.
+            assert_eq!(
+                config.get_path("plugins.list.llama-cpp.config.mmproj_url"),
+                Some(serde_json::json!("https://cdn.example/mmproj.gguf"))
+            );
+            assert_eq!(
+                config.get_path("plugins.list.onnx.config.ort_dylib_path"),
+                Some(serde_json::json!("/opt/onnx/libonnxruntime.so"))
+            );
+
+            let on_disk: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read back"))
+                    .expect("persisted JSON is valid");
+            assert_eq!(
+                on_disk.get("version"),
+                Some(&serde_json::json!(2)),
+                "migrated version must be persisted to disk"
+            );
+            assert!(
+                on_disk.pointer("/ai/ort_dylib_path").is_none(),
+                "old ai.ort_dylib_path must be gone from disk"
+            );
+        });
+    }
+
     /// A current-version `settings.json` is loaded without being rewritten: the
     /// on-disk document is logically identical after the load, and because the
     /// migration is a no-op the file is not re-written (its bytes, mtime, and
@@ -1895,6 +1948,108 @@ mod tests {
             config.get_path("tools.rag.enabled"),
             Some(serde_json::Value::Bool(true)),
             "unknown sibling sub-key must survive the section write"
+        );
+    }
+
+    /// #313: the host-opaque `plugins.list.<name>.config` / `.profiles` blobs
+    /// are stored and restored verbatim through a load → save → load
+    /// round-trip, so the host never drops plugin-owned settings (including
+    /// keys it does not understand) when persisting.
+    #[test]
+    fn plugins_list_config_and_profiles_round_trip_verbatim() {
+        let _guard = migration_guard();
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "plugins": {
+                    "list": {
+                        "llama-cpp": {
+                            "enable": true,
+                            "config": {
+                                "mmproj_url": "https://cdn.example/mmproj.gguf",
+                                "future_field": {"nested": [1, 2, 3]}
+                            },
+                            "profiles": {
+                                "default": {"voices_path": "/data/voices.bin"}
+                            }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("seed settings");
+
+        let config = extract_layered_config(&path).expect("load");
+        // A genuine mutation elsewhere must still trigger a save and the
+        // three-way merge must preserve the plugin blobs untouched.
+        let mut config = config;
+        config.user_name = "ChangedByUser".to_string();
+
+        let json = serialize_json_layer(&config, &path).expect("serialize");
+        let saved: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(
+            saved.pointer("/plugins/list/llama-cpp/config/mmproj_url"),
+            Some(&serde_json::json!("https://cdn.example/mmproj.gguf")),
+            "nested config key must survive the save"
+        );
+        assert_eq!(
+            saved.pointer("/plugins/list/llama-cpp/config/future_field"),
+            Some(&serde_json::json!({"nested": [1, 2, 3]})),
+            "unknown nested config keys must survive the save"
+        );
+        assert_eq!(
+            saved.pointer("/plugins/list/llama-cpp/profiles/default/voices_path"),
+            Some(&serde_json::json!("/data/voices.bin")),
+            "profiles must survive the save"
+        );
+
+        // And a second load sees the identical tree.
+        let reloaded = extract_layered_config(&path).expect("reload");
+        assert_eq!(
+            reloaded.get_path("plugins.list.llama-cpp.config.future_field"),
+            Some(serde_json::json!({"nested": [1, 2, 3]}))
+        );
+        assert_eq!(
+            reloaded.get_path("plugins.list.llama-cpp.profiles.default.voices_path"),
+            Some(serde_json::json!("/data/voices.bin"))
+        );
+    }
+
+    /// #313: the `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>` env override path
+    /// (single plugin-config key) must keep resolving into the nested
+    /// `plugins.list.<name>.config` blob.
+    #[test]
+    fn plugins_list_config_env_override_resolves_nested_key() {
+        let _guard = migration_guard();
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().expect("OS allows temp directory creation");
+        let path = tmp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"plugins": {"list": {"anthropic": {"enable": true}}}}"#,
+        )
+        .expect("seed settings");
+
+        // SAFETY: serialized by ENV_LOCK; no other threads touch this env var.
+        unsafe {
+            std::env::set_var(
+                "ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY",
+                "sk-env-override",
+            );
+        }
+        let config = extract_layered_config(&path).expect("load");
+        unsafe {
+            std::env::remove_var("ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY");
+        }
+
+        assert_eq!(
+            config.get_path("plugins.list.anthropic.config.api_key"),
+            Some(serde_json::json!("sk-env-override")),
+            "env override must land inside the nested config blob"
         );
     }
 
