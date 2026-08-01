@@ -508,21 +508,21 @@ const fn default_classifier_min_confidence() -> f32 {
 }
 
 /// Character card compilation settings.
+///
+/// The Identity Kernel budget is no longer a fixed setting: it is derived from
+/// the model's available context window at compile time (#386), so there are
+/// currently no user-facing fields here. The section is retained as the home
+/// for future character-compilation settings.
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
-pub struct CharacterMemoryConfig {
-    /// Maximum approximate token budget for the Identity Kernel section.
-    pub identity_kernel_max_tokens: usize,
-}
+pub struct CharacterMemoryConfig {}
 
 impl Default for CharacterMemoryConfig {
     fn default() -> Self {
-        Self {
-            identity_kernel_max_tokens: 400,
-        }
+        Self {}
     }
 }
 

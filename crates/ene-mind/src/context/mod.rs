@@ -14,7 +14,9 @@ pub use compression::{
     execute_compression, load_active_scene_summary, maybe_roll_up_chapter,
     plan_retroactive_compression, poll_compression_result, spawn_compression_task,
 };
-pub use tokens::{estimate_tokens, tokens_to_chars, truncate_to_tokens};
+pub use tokens::{
+    estimate_tokens, estimate_tokens_language_aware, tokens_to_chars, truncate_to_tokens,
+};
 
 use std::sync::Arc;
 

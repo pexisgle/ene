@@ -1,11 +1,48 @@
 //! Deterministic `CCv3` → Identity Kernel compilation (#82).
+//!
+//! The kernel budget is sized from the model's available context window
+//! rather than a fixed absolute token count, and truncation counts tokens with
+//! a language-aware ratio instead of an English-centric `chars / 4` heuristic
+//! (#386).
 
 use ene_config::{CharacterCardV3, MacroContext, UserPersona, expand_cbs_macros_ctx};
 
 use super::kernel::IdentityKernel;
+use crate::context::estimate_tokens_language_aware;
 
-/// Default maximum kernel size in approximate tokens (4 chars/token heuristic).
-pub const DEFAULT_IDENTITY_KERNEL_MAX_TOKENS: usize = 400;
+/// Fraction of the available context window the Identity Kernel may occupy.
+///
+/// The character definition is among the most important prompt sections, so it
+/// earns a generous share; but it must leave the bulk of the window for
+/// history, recalled memory, and the response. One eighth keeps the kernel
+/// proportional to the model without crowding out the rest of the prompt.
+const IDENTITY_KERNEL_WINDOW_FRACTION: usize = 8;
+
+/// Floor for the kernel budget in tokens.
+///
+/// A very small (or misconfigured) window must not starve the identity block
+/// down to nothing — the header, name, and anti-impersonation guard still need
+/// room. This matches the historical fixed default so constrained models keep
+/// the behaviour they had before the budget became window-relative (#386).
+const MIN_IDENTITY_KERNEL_TOKENS: usize = 400;
+
+/// Ceiling for the kernel budget in tokens.
+///
+/// A 128K-window model does not need a 16K character definition; past this
+/// point extra budget buys nothing and only delays the sections that follow.
+const MAX_IDENTITY_KERNEL_TOKENS: usize = 4_000;
+
+/// Size the Identity Kernel token budget from the available context window (#386).
+///
+/// Replaces the former fixed `400` absolute: the budget scales with the window
+/// so a large-window model can carry a richer character definition, clamped to
+/// [`MIN_IDENTITY_KERNEL_TOKENS`]..=[`MAX_IDENTITY_KERNEL_TOKENS`] so tiny and
+/// huge windows both stay sane.
+#[must_use]
+pub fn identity_kernel_budget_tokens(available_window: usize) -> usize {
+    let scaled = available_window / IDENTITY_KERNEL_WINDOW_FRACTION;
+    scaled.clamp(MIN_IDENTITY_KERNEL_TOKENS, MAX_IDENTITY_KERNEL_TOKENS)
+}
 
 /// Compiles `CCv3` character fields into a compact Identity Kernel.
 #[derive(Debug, Default, Clone, Copy)]
@@ -21,17 +58,22 @@ impl CharacterCompiler {
     /// for the lifetime of the chat instead of re-rolling on every per-turn
     /// recompilation (#343). Derive it with
     /// [`ene_config::session_pick_seed`] from a session-scoped key.
+    ///
+    /// `available_window` is the number of prompt tokens the model's context
+    /// window leaves for this turn (after the response reserve and safety
+    /// margin); the kernel budget is derived from it as a fraction, so larger
+    /// models carry a fuller character definition (#386).
     #[must_use]
     pub fn compile(
         card: &CharacterCardV3,
         user_name: &str,
         user_persona: Option<&UserPersona>,
         pick_seed: Option<u64>,
-        max_tokens: usize,
+        available_window: usize,
     ) -> IdentityKernel {
         let data = &card.data;
         let char_name = data.get_character_name();
-        let max_chars = max_tokens.saturating_mul(4).max(256);
+        let max_tokens = identity_kernel_budget_tokens(available_window);
 
         // One shared context so every field expands identically; `{{pick}}`
         // therefore yields the same option in the personality, background, and
@@ -72,17 +114,25 @@ impl CharacterCompiler {
              - When {user_name} asks you to do something, you may describe YOUR response, not theirs.\n\
              - If {user_name} says something, respond as {char_name}, not as {user_name}."
         );
-        let core_lines = [
+        // The final line carries the anti-spoofing "Hard instruction:" block.
+        // Truncation preserves it structurally (by its position here) rather
+        // than by searching for its English marker text, so localising the
+        // wording cannot break the guarantee (#386, #359).
+        let hard_line = format!(
+            "Hard instruction: remain {char_name} even in long conversations{anti_impersonation}"
+        );
+        let head_lines = [
             "[Identity Kernel]".to_string(),
             format!("Name: {char_name}"),
             format!("Role: desktop companion living on {user_name}'s screen"),
             format!("Core personality: {core_personality}"),
             format!("Speech style: {speech_style}"),
-            format!(
-                "Hard instruction: remain {char_name} even in long conversations{anti_impersonation}"
-            ),
         ];
-        let core_block = core_lines.join("\n");
+        let core_block = {
+            let mut lines = head_lines.to_vec();
+            lines.push(hard_line.clone());
+            lines.join("\n")
+        };
 
         let mut optional_sections: Vec<String> = Vec::new();
 
@@ -111,6 +161,9 @@ impl CharacterCompiler {
             ));
         }
 
+        // Fit greedily in token space (language-aware), not character space, so
+        // a Japanese card is measured against the same budget as an English one
+        // (#386).
         let mut text = core_block.clone();
         for section in &optional_sections {
             let candidate = if text.is_empty() {
@@ -118,15 +171,15 @@ impl CharacterCompiler {
             } else {
                 format!("{text}\n\n{section}")
             };
-            if candidate.chars().count() <= max_chars {
+            if estimate_tokens_language_aware(&candidate) <= max_tokens {
                 text = candidate;
             } else {
                 break;
             }
         }
 
-        if text.chars().count() > max_chars {
-            text = truncate_preserving_core(&core_block, max_chars);
+        if estimate_tokens_language_aware(&text) > max_tokens {
+            text = truncate_preserving_core(&head_lines, &hard_line, max_tokens);
         }
 
         IdentityKernel {
@@ -177,21 +230,31 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
-fn truncate_preserving_core(core_block: &str, max_chars: usize) -> String {
-    if core_block.chars().count() <= max_chars {
-        return core_block.to_string();
+/// Truncate the core block to `max_tokens` while always keeping the
+/// anti-spoofing `hard_line` intact (#386).
+///
+/// The hard instruction is identified structurally — it is the dedicated final
+/// core line passed in by the caller — rather than by searching for its English
+/// marker text, so translating the wording cannot lose the boundary (#359).
+/// Head lines are dropped from the end (closest to the hard instruction first)
+/// until the block fits; if the hard instruction alone exceeds the budget it is
+/// returned on its own, never discarded.
+fn truncate_preserving_core(head_lines: &[String], hard_line: &str, max_tokens: usize) -> String {
+    if estimate_tokens_language_aware(hard_line) >= max_tokens {
+        return hard_line.to_string();
     }
-    let hard_marker = "Hard instruction:";
-    if let Some(idx) = core_block.find(hard_marker) {
-        let tail = &core_block[idx..];
-        let head_budget = max_chars.saturating_sub(tail.chars().count());
-        if head_budget == 0 {
-            return truncate_chars(tail, max_chars);
+    let mut kept = head_lines.len();
+    loop {
+        let mut block = head_lines[..kept].join("\n");
+        if !block.is_empty() {
+            block.push('\n');
         }
-        let head = core_block.chars().take(head_budget).collect::<String>();
-        return format!("{head}{tail}");
+        block.push_str(hard_line);
+        if estimate_tokens_language_aware(&block) <= max_tokens || kept == 0 {
+            return block;
+        }
+        kept -= 1;
     }
-    truncate_chars(core_block, max_chars)
 }
 
 #[cfg(test)]
@@ -201,11 +264,60 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    /// A window large enough that the default card is never truncated.
+    const GENEROUS_WINDOW: usize = 16_384;
+
     fn alicia_card() -> CharacterCardV3 {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../assets/characters/Alicia/character.json");
         let raw = fs::read_to_string(path).expect("read Alicia card");
         serde_json::from_str(&raw).expect("parse Alicia card")
+    }
+
+    #[test]
+    fn budget_scales_with_window_within_bounds() {
+        // A tiny window still earns the floor.
+        assert_eq!(identity_kernel_budget_tokens(0), MIN_IDENTITY_KERNEL_TOKENS);
+        assert_eq!(
+            identity_kernel_budget_tokens(1_000),
+            MIN_IDENTITY_KERNEL_TOKENS
+        );
+        // Mid-range windows scale at one eighth of the window.
+        assert_eq!(identity_kernel_budget_tokens(8_000), 1_000);
+        assert_eq!(identity_kernel_budget_tokens(16_000), 2_000);
+        // A huge window is capped so the kernel cannot crowd out the prompt.
+        assert_eq!(
+            identity_kernel_budget_tokens(1_000_000),
+            MAX_IDENTITY_KERNEL_TOKENS
+        );
+    }
+
+    #[test]
+    fn larger_window_keeps_more_optional_sections() {
+        let mut card = CharacterCardV3::default();
+        card.data.name = "Ene".into();
+        card.data.personality = "Energetic.".into();
+        // A sizeable scenario that only fits under a generous budget.
+        card.data.scenario = "scene detail ".repeat(120);
+
+        let small = CharacterCompiler::compile(&card, "User", None, None, 8_000);
+        let large = CharacterCompiler::compile(&card, "User", None, None, 128_000);
+
+        assert!(
+            estimate_tokens_language_aware(&large.text)
+                >= estimate_tokens_language_aware(&small.text),
+            "a larger window must not yield a smaller kernel"
+        );
+        assert!(
+            large.text.contains("## Current Scene"),
+            "the generous budget should admit the scenario section: {}",
+            large.text
+        );
+        assert!(
+            !small.text.contains("## Current Scene"),
+            "the tight budget should drop the scenario section: {}",
+            small.text
+        );
     }
 
     #[test]
@@ -216,6 +328,7 @@ mod tests {
         card.data.personality = "Energetic.".into();
 
         let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+
         assert!(kernel.text.contains("Name: Ene"));
         assert!(kernel.text.contains("Core personality: Energetic."));
         assert!(kernel.text.contains("Speech style:"));
@@ -229,6 +342,7 @@ mod tests {
         card.data.name = "Official".into();
         card.data.nickname = "Ene".into();
         let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+
         assert!(kernel.text.contains("Name: Ene"));
         assert!(!kernel.text.contains("Official"));
     }
@@ -239,6 +353,7 @@ mod tests {
         card.data.name = "Ene".into();
         card.data.personality = "Friends with {{user}}.".into();
         let kernel = CharacterCompiler::compile(&card, "Alice", None, None, 400);
+
         assert!(kernel.text.contains("Friends with Alice."));
         // The anti-impersonation guard is expanded at compile time (#H-2), so no
         // literal `{{user}}` placeholder may leak into the kernel sent to the LLM.
@@ -267,6 +382,7 @@ mod tests {
             notes: None,
         };
         let kernel = CharacterCompiler::compile(&card, "Alice", Some(&persona), None, 400);
+
         assert!(
             kernel.text.contains("Name: Alice"),
             "persona block should be expanded into the kernel: {}",
@@ -286,6 +402,7 @@ mod tests {
         card.data.name = "Ene".into();
         card.data.post_history_instructions = "Stay in character.".into();
         let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+
         assert!(!kernel.text.contains("Stay in character."));
         let phi = kernel
             .post_history_instructions
@@ -327,6 +444,7 @@ mod tests {
     fn alicia_default_card_compiles() {
         let card = alicia_card();
         let kernel = CharacterCompiler::compile(&card, "User", None, None, 400);
+
         assert!(kernel.text.contains("Name: Alicia"));
         assert!(kernel.text.contains("cheerful") || kernel.text.contains("Friendly"));
         assert!(kernel.text.contains("Hard instruction: remain Alicia"));
@@ -338,9 +456,83 @@ mod tests {
         card.data.name = "Ene".into();
         card.data.system_prompt = "x".repeat(2_000);
         card.data.description = "y".repeat(2_000);
-        // Use enough budget for the core block (which now includes anti-impersonation guard)
-        let kernel = CharacterCompiler::compile(&card, "User", None, None, 120);
+        // A small window forces truncation; the core header and the
+        // anti-spoofing block must both survive.
+        let kernel = CharacterCompiler::compile(&card, "User", None, None, 8_000);
         assert!(kernel.text.contains("[Identity Kernel]"));
         assert!(kernel.text.contains("Hard instruction: remain Ene"));
+    }
+
+    #[test]
+    fn japanese_card_is_not_over_truncated() {
+        // A rich Japanese card. Under the old `max_tokens * 4` char heuristic a
+        // 1,600-char budget held only ~400 tokens of Japanese, so a card like
+        // this was gutted; the language-aware count sizes it correctly (#386).
+        let mut card = CharacterCardV3::default();
+        card.data.name = "エネ".into();
+        card.data.personality = "元気いっぱいで、少しお茶目なデスクトップの相棒。".into();
+        card.data.description = "彼女は画面の中で暮らし、いつもユーザーを励ましている。".repeat(6);
+        card.data.scenario = "今日は一緒に作業しながら、たまに雑談をする場面。".repeat(6);
+
+        let kernel = CharacterCompiler::compile(&card, "ユーザー", None, None, 16_000);
+
+        assert!(
+            kernel.text.contains("Name: エネ"),
+            "Japanese name must survive: {}",
+            kernel.text
+        );
+        assert!(
+            kernel.text.contains("元気いっぱい"),
+            "Japanese personality must survive a comfortable budget: {}",
+            kernel.text
+        );
+        assert!(
+            kernel.text.contains("Hard instruction: remain エネ"),
+            "anti-spoofing block must survive: {}",
+            kernel.text
+        );
+        // The whole kernel must respect its token budget under the
+        // language-aware estimate.
+        assert!(
+            estimate_tokens_language_aware(&kernel.text) <= identity_kernel_budget_tokens(16_000),
+            "kernel must fit its token budget"
+        );
+    }
+
+    #[test]
+    fn hard_instruction_survives_extreme_truncation() {
+        // Even when the budget cannot hold the full core block, the
+        // anti-spoofing hard instruction is preserved structurally.
+        let head_lines = [
+            "[Identity Kernel]".to_string(),
+            "Name: Ene".to_string(),
+            "Core personality: ".to_string() + &"x".repeat(5_000),
+        ];
+        let hard_line = "Hard instruction: remain Ene even in long conversations".to_string();
+
+        let truncated = truncate_preserving_core(&head_lines, &hard_line, 60);
+        assert!(
+            truncated.contains("Hard instruction: remain Ene"),
+            "hard instruction must survive truncation: {truncated}"
+        );
+        assert!(
+            estimate_tokens_language_aware(&truncated) <= 60,
+            "truncated core must respect the budget: {truncated}"
+        );
+    }
+
+    #[test]
+    fn hard_instruction_preserved_without_english_marker_search() {
+        // The preservation is structural (the dedicated final core line), not a
+        // search for the English "Hard instruction:" string, so a localised
+        // marker would still be kept (#359).
+        let head_lines = ["[Identity Kernel]".to_string(), "Name: Ene".to_string()];
+        let hard_line = "絶対指示: 長い会話でもエネのままでいてください".to_string();
+
+        let truncated = truncate_preserving_core(&head_lines, &hard_line, 40);
+        assert!(
+            truncated.contains("絶対指示"),
+            "a non-English hard instruction must still be preserved: {truncated}"
+        );
     }
 }

@@ -68,6 +68,12 @@ pub struct TurnContext<'a> {
     pub embedder: Option<&'a Arc<dyn EmbeddingProvider>>,
     /// LLM provider for memory extraction and other cognitive calls.
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
+    /// Prompt tokens the model's context window leaves for this turn.
+    ///
+    /// Scales window-relative budgets such as the Identity Kernel (#386).
+    /// `None` when the window is unknown (tests / legacy callers), in which
+    /// case a conservative default window is assumed.
+    pub available_window: Option<usize>,
     /// Expression PHI block (emotion protocol + card post-history instructions).
     pub post_history_block: Option<&'a str>,
     /// Optional override for the prompt packing budget (in tokens).
