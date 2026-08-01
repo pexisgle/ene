@@ -373,16 +373,16 @@ impl MemoryArbiter {
         matcher: &mut TitleMatcher<'_>,
     ) -> CandidateDecision {
         let mut candidate = candidate.clone();
-        if candidate.should_persist {
-            if let Some(reason) =
+        if candidate.should_persist
+            && !(candidate.source_quote.trim().is_empty() && is_tool_derived_candidate(&candidate))
+            && let Some(reason) =
                 apply_source_quote_verdict(&mut candidate, &ctx.turn, &ctx.options)
-            {
-                return CandidateDecision {
-                    candidate,
-                    action: ArbiterAction::Ignore,
-                    reason,
-                };
-            }
+        {
+            return CandidateDecision {
+                candidate,
+                action: ArbiterAction::Ignore,
+                reason,
+            };
         }
 
         if !candidate.should_persist {
@@ -437,6 +437,20 @@ impl MemoryArbiter {
         existing: &[MemoryItem],
         ctx: &ArbiterContext<'_>,
     ) -> CandidateDecision {
+        if !candidate.source_quote.trim().is_empty()
+            && verify_source_quote(candidate, &ctx.turn, &ctx.options)
+                == SourceQuoteVerdict::Invalid
+        {
+            return CandidateDecision {
+                candidate: candidate.clone(),
+                action: ArbiterAction::Ignore,
+                reason: ArbiterReason::new(
+                    ArbiterReasonCode::SourceQuoteNotInTurn,
+                    "source_quote not found in turn text",
+                ),
+            };
+        }
+
         if let Some(reason) = Self::validate_candidate(candidate, ctx) {
             return CandidateDecision {
                 candidate: candidate.clone(),
@@ -1040,14 +1054,6 @@ fn verify_source_quote(
     }
 
     SourceQuoteVerdict::Invalid
-}
-
-fn source_quote_valid(
-    candidate: &MemoryCandidate,
-    turn: &TurnInput<'_>,
-    options: &ArbiterOptions,
-) -> bool {
-    verify_source_quote(candidate, turn, options) != SourceQuoteVerdict::Invalid
 }
 
 fn char_bigram_jaccard(a: &str, b: &str) -> f32 {
