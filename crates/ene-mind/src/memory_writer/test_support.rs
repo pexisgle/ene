@@ -229,7 +229,8 @@ impl MemoryPort for InMemoryMemoryPort {
         _user_id: Option<&str>,
         _now: DateTime<Utc>,
         _half_life_days: f64,
-        _limit: usize,
+        _fade_threshold: f32,
+        _archive_threshold: f32,
     ) -> Result<NaturalDecayReport, MemoryPortError> {
         Ok(NaturalDecayReport::default())
     }

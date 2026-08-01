@@ -31,6 +31,24 @@ fn user_visibility_condition(user_id: &str) -> sea_orm::Condition {
         .add(entities::typed_memories::Column::UserId.eq(""))
 }
 
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+async fn query_sqlite_changes(db: &sea_orm::DatabaseConnection) -> Result<usize, sea_orm::DbErr> {
+    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+    let row = db
+        .query_one(Statement::from_string(
+            DatabaseBackend::Sqlite,
+            "SELECT changes() AS n".into(),
+        ))
+        .await?;
+    let count = row
+        .and_then(|r| r.try_get::<i64>("", "n").ok())
+        .unwrap_or(0);
+    Ok(usize::try_from(count).unwrap_or(0))
+}
+
 /// Strip the trailing `ene:tags` metadata footer from memory content.
 ///
 /// The memory arbiter appends `\n\n<!-- ene:tags {"tags":[...]} -->` at
@@ -1439,48 +1457,70 @@ impl MemoryStore {
     }
 
     /// Apply natural decay transitions for recallable memories in a scope.
+    ///
+    /// Uses a single SQL `UPDATE` per transition edge (active→faded, faded→archived)
+    /// so the pass scales to the full table without a `BATCH_LIMIT` (#350).
     pub async fn apply_natural_decay_batch(
         &self,
         character_id: &str,
         user_id: Option<&str>,
         now: DateTime<Utc>,
         half_life_days: f64,
-        limit: usize,
+        fade_threshold: f32,
+        archive_threshold: f32,
     ) -> Result<NaturalDecayReport, EneMemoryError> {
-        let candidates = self
-            .list_memories_for_decay(
-                character_id,
-                user_id,
-                &[crate::MemoryStatus::Active, crate::MemoryStatus::Faded],
-                limit,
-            )
-            .await?;
+        use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 
-        let mut report = NaturalDecayReport::default();
-        for item in candidates {
-            let Some(id) = item.id else {
-                continue;
-            };
-            if item.pinned {
-                continue;
-            }
-            let score = crate::forgetting::decay_score(&item, now, half_life_days);
-            let Some(target) = crate::forgetting::target_status_after_decay(item.status, score)
-            else {
-                continue;
-            };
-            self.set_memory_status(id, target).await?;
-            match target {
-                crate::MemoryStatus::Faded => {
-                    report.faded_count = report.faded_count.saturating_add(1);
-                }
-                crate::MemoryStatus::Archived => {
-                    report.archived_count = report.archived_count.saturating_add(1);
-                }
-                _ => {}
-            }
+        if half_life_days <= 0.0 || half_life_days.is_nan() {
+            return Ok(NaturalDecayReport::default());
         }
-        Ok(report)
+
+        let now_text = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        let cid = escape_sql_literal(character_id);
+        let user_clause = match user_id {
+            Some(uid) => format!(
+                " AND (user_id = '{}' OR user_id = '')",
+                escape_sql_literal(uid)
+            ),
+            None => String::new(),
+        };
+
+        let emotional = "CASE WHEN sqrt(affective_valence * affective_valence + affective_arousal * affective_arousal) / 2.83 > 1.0 THEN 1.0 ELSE sqrt(affective_valence * affective_valence + affective_arousal * affective_arousal) / 2.83 END";
+
+        let decay_active = format!(
+            "exp(-0.6931471805599453 / {half_life_days} * (julianday('{now_text}') - julianday(updated_at))) * (0.5 * salience + 0.5) * (0.5 * confidence + 0.5) * (0.3 * {emotional} + 0.7)"
+        );
+        let decay_faded = format!(
+            "exp(-0.6931471805599453 / {half_life_days} * (julianday('{now_text}') - julianday(coalesce(faded_at, created_at)))) * (0.5 * salience + 0.5) * (0.5 * confidence + 0.5) * (0.3 * {emotional} + 0.7)"
+        );
+
+        let fade_to_faded = format!(
+            "UPDATE typed_memories SET status = 'faded', faded_at = '{now_text}', updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'active' AND pinned = 0{user_clause} AND ({decay_active}) < {fade_threshold}"
+        );
+        let faded_to_archived = format!(
+            "UPDATE typed_memories SET status = 'archived', updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'faded' AND pinned = 0{user_clause} AND ({decay_faded}) < {archive_threshold}"
+        );
+
+        self.db
+            .execute(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                fade_to_faded,
+            ))
+            .await?;
+        let faded_count = query_sqlite_changes(&self.db).await?;
+
+        self.db
+            .execute(Statement::from_string(
+                DatabaseBackend::Sqlite,
+                faded_to_archived,
+            ))
+            .await?;
+        let archived_count = query_sqlite_changes(&self.db).await?;
+
+        Ok(NaturalDecayReport {
+            faded_count,
+            archived_count,
+        })
     }
 
     /// Backdate typed memory timestamps for integration tests (#76).

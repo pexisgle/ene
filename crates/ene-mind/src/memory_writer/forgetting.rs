@@ -54,9 +54,6 @@ impl From<NaturalDecayReport> for ForgettingReport {
 pub struct ForgettingLifecycle;
 
 impl ForgettingLifecycle {
-    /// Maximum memories evaluated per lifecycle pass.
-    const BATCH_LIMIT: usize = 256;
-
     /// Apply natural decay transitions for the given scope.
     pub async fn apply(
         store: &dyn MemoryPort,
@@ -70,7 +67,8 @@ impl ForgettingLifecycle {
                 ctx.user_id,
                 ctx.now,
                 half_life,
-                Self::BATCH_LIMIT,
+                config.fade_threshold,
+                config.archive_threshold,
             )
             .await
             .map_err(CognitionError::MemoryPort)?;

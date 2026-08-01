@@ -107,6 +107,12 @@ impl Default for ContextConfig {
 pub struct MindMemoryConfig {
     /// Half-life in days for lifecycle decay score and recall recency scoring.
     pub default_forgetting_half_life_days: f64,
+    /// Score below which an active memory transitions to faded (#350).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub fade_threshold: f32,
+    /// Score below which a faded memory transitions to archived (#350).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub archive_threshold: f32,
     /// Minimum confidence threshold for persisting a memory. This is a
     /// probability, so values outside `0.0..=1.0` are clamped on load
     /// (issue #95 confidence range guard).
@@ -265,6 +271,8 @@ impl Default for MindMemoryConfig {
     fn default() -> Self {
         Self {
             default_forgetting_half_life_days: 30.0,
+            fade_threshold: ene_rag::FADE_THRESHOLD,
+            archive_threshold: ene_rag::ARCHIVE_THRESHOLD,
             min_confidence_to_persist: 0.65,
             extraction_timeout_secs: 30,
             contradiction_title_similarity_threshold: 0.82,
