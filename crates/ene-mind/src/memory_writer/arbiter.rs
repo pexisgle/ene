@@ -1068,8 +1068,8 @@ fn char_bigrams(s: &str) -> std::collections::HashSet<(char, char)> {
     let chars: Vec<char> = s.chars().collect();
     let mut set = std::collections::HashSet::new();
     if chars.len() < 2 {
-        if let [only] = chars.as_slice() {
-            set.insert((only, '\0'));
+        if let Some(only) = chars.first() {
+            set.insert((*only, '\0'));
         }
         return set;
     }
