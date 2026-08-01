@@ -76,6 +76,15 @@ pub struct TurnContext<'a> {
     pub available_window: Option<usize>,
     /// Expression PHI block (emotion protocol + card post-history instructions).
     pub post_history_block: Option<&'a str>,
+    /// Whether a rolling-compression task is in flight and its summary has not
+    /// yet been applied to the session history (#371).
+    ///
+    /// During this async compression gap the session history has not shrunk.
+    /// Prompt packing reads this to synchronously detach the oldest span from
+    /// the prompt-visible history (instead of shedding sections) until the
+    /// summary arrives. `false` in tests / legacy callers, which keeps the
+    /// pre-#371 packing behavior.
+    pub compression_pending: bool,
     /// Optional override for the prompt packing budget (in tokens).
     ///
     /// When `None` (production), the budget is derived from the model's
@@ -115,6 +124,13 @@ pub struct PromptPacketMeta {
     pub scene_summary_included: bool,
     /// Sections dropped by the budget manager.
     pub dropped_sections: Vec<crate::prompt_packet::PromptSectionKind>,
+    /// Oldest history messages *detached* from the prompt while a compression
+    /// summary was pending (#371): the `[0, n)` leading range was dropped from
+    /// the prompt-visible history synchronously, without waiting for the
+    /// summary. Unlike `dropped_sections` / the packing trim, the detached span
+    /// is **not** removed from the session/DB history — the arriving summary
+    /// replaces it, so nothing is lost.
+    pub history_messages_detached: usize,
     /// Approximate packed token count.
     pub packed_tokens: usize,
     /// IDs of recalled memories that actually made it into the packed prompt.

@@ -145,6 +145,7 @@ async fn run_before_turn(
         llm_provider: Some(llm),
         available_window: None,
         post_history_block: None,
+        compression_pending: false,
         packing_budget_override: None,
     };
     engine.before_turn(ctx).await.unwrap()
@@ -267,6 +268,7 @@ async fn scenario_identity_kernel_survives_long_history() {
                 llm_provider: Some(llm),
                 available_window: None,
                 post_history_block: None,
+                compression_pending: false,
                 packing_budget_override: None,
             },
             pre,

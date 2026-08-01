@@ -136,6 +136,7 @@ async fn proactive_stream_does_not_add_user_history() {
         aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        compression_pending: false,
         concrete_store: None,
     };
 
@@ -224,6 +225,7 @@ async fn proactive_stream_attaches_screen_image_when_provided() {
         aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        compression_pending: false,
         concrete_store: None,
     };
 
@@ -296,6 +298,7 @@ async fn proactive_stream_without_memory_store() {
         aux_task_tx: tokio::sync::mpsc::unbounded_channel().0,
         tts_provider: None,
         partial_text: Arc::new(parking_lot::Mutex::new(String::new())),
+        compression_pending: false,
         concrete_store: None,
     };
 

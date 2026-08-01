@@ -133,6 +133,7 @@ fn build_turn_context<'a>(
     provider: &std::sync::Arc<dyn ene_ai::LlmProvider>,
     available_window: usize,
     post_history_block: Option<&'a str>,
+    compression_pending: bool,
 ) -> TurnContext<'a> {
     TurnContext {
         config: mind,
@@ -150,6 +151,7 @@ fn build_turn_context<'a>(
         llm_provider: Some(provider.clone()),
         available_window: Some(available_window),
         post_history_block,
+        compression_pending,
         packing_budget_override: None,
     }
 }
@@ -299,6 +301,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         aux_task_tx,
         tts_provider,
         partial_text,
+        compression_pending,
         concrete_store,
     } = ctx;
 
@@ -435,6 +438,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &provider,
             available_window,
             post_history_phi.as_deref(),
+            compression_pending,
         );
         tracing::info!(%turn, "Synchronizing character card memories...");
         match engine
@@ -540,6 +544,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &provider,
             available_window,
             post_history_phi.as_deref(),
+            compression_pending,
         );
         let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
         let style_span = tracing::info_span!(parent: &span_pre_b, "style_examples");
@@ -604,6 +609,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             &provider,
             available_window,
             post_history_phi.as_deref(),
+            compression_pending,
         );
         let recall_span = tracing::info_span!(parent: &span_pre_b, "recall");
         let tools_span = tracing::info_span!(parent: &span_pre_b, "tools");
@@ -721,6 +727,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         &provider,
         available_window,
         post_history_phi.as_deref(),
+        compression_pending,
     );
     let prefetch = ComposePrefetch {
         style_examples: Some(style_examples),

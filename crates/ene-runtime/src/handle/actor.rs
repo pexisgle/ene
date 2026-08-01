@@ -1809,6 +1809,12 @@ impl TurnActor {
             self.check_and_perform_split(&user_input).await;
         }
 
+        // Snapshot whether a rolling-compression summary is still pending for
+        // this session. Prompt packing reads it to synchronously detach the
+        // oldest span from the prompt-visible history while the summary is in
+        // flight, instead of shedding sections (#371).
+        let compression_pending = self.context.has_pending();
+
         let config = self.config.clone();
         let session = self.session.clone();
         let embedder = self.session.memory.embedding_provider.clone();
@@ -1880,6 +1886,7 @@ impl TurnActor {
                         aux_task_tx,
                         tts_provider,
                         partial_text,
+                        compression_pending,
                         concrete_store: concrete_store_for_stream,
                     })
                     .await
