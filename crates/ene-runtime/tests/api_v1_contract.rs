@@ -268,12 +268,12 @@ async fn cancel_frees_gate_for_next_run() {
 }
 
 #[tokio::test]
-async fn diagnostics_search_tools_returns_empty_when_no_tools() {
+async fn tools_search_returns_empty_when_no_tools() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
         .expect("open initializes handle");
     let result = handle
-        .diagnostics()
+        .tools()
         .search_tools("nonexistent".to_string())
         .await
         .expect("search tools succeeds");
@@ -282,12 +282,12 @@ async fn diagnostics_search_tools_returns_empty_when_no_tools() {
 }
 
 #[tokio::test]
-async fn diagnostics_list_tools_includes_system_search_tool() {
+async fn tools_list_includes_system_search_tool() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
         .expect("open initializes handle");
     let result = handle
-        .diagnostics()
+        .tools()
         .list_tools()
         .await
         .expect("list tools succeeds");
@@ -295,18 +295,18 @@ async fn diagnostics_list_tools_includes_system_search_tool() {
         result
             .iter()
             .any(|t| t.name.as_str() == "system.search_tools"),
-        "expected system.search_tools in diagnostics tool list"
+        "expected system.search_tools in tool list"
     );
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
 #[tokio::test]
-async fn diagnostics_call_tool_intercepts_system_search_tool() {
+async fn tools_call_intercepts_system_search_tool() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
         .await
         .expect("open initializes handle");
     let result = handle
-        .diagnostics()
+        .tools()
         .call_tool(
             "system.search_tools".to_string(),
             serde_json::json!({ "query": "filesystem" }).to_string(),
@@ -317,6 +317,63 @@ async fn diagnostics_call_tool_intercepts_system_search_tool() {
         result.contains("No matching tools found."),
         "expected search tool response, got: {result}"
     );
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+}
+
+/// `EneHandle::set_character` (#406) is a public control method (moved off
+/// the diagnostics facade): the card swap must round-trip through the actor
+/// and be observable via the next snapshot.
+#[tokio::test]
+async fn set_character_round_trips_through_public_handle() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+
+    let mut replacement = test_card();
+    replacement.data.name = "ReplacementCard".into();
+    replacement.data.system_prompt = "You are the replacement.".into();
+    handle
+        .set_character(replacement.clone())
+        .await
+        .expect("set_character succeeds through the public handle");
+
+    let snapshot = handle
+        .diagnostics()
+        .get_snapshot()
+        .await
+        .expect("snapshot succeeds");
+    let card = snapshot
+        .character_card
+        .expect("replacement card must be loaded");
+    assert_eq!(card.data.name, "ReplacementCard");
+    assert_eq!(card.data.system_prompt, "You are the replacement.");
+    assert_eq!(snapshot.card_name.as_str(), "ReplacementCard");
+
+    drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
+}
+
+/// `EneHandle::compress_context` (#406) is a public control method (moved
+/// off the diagnostics facade and renamed from `manual_split`). With no
+/// conversation history the actor's compression path deterministically
+/// returns `SplitNotNeeded` — proving the command round-trips through the
+/// actor (a dropped channel or dead actor would surface as
+/// `ChannelClosed` / `ActorDead` instead), and that the reply carries the
+/// actor-side error, not a facade-local one.
+#[tokio::test]
+async fn compress_context_routes_through_actor_when_history_empty() {
+    let handle = EneHandle::open(test_config_memory_off(), test_card())
+        .await
+        .expect("open initializes handle");
+
+    let err = handle
+        .compress_context()
+        .await
+        .expect_err("empty history must be rejected by the actor's compression path");
+    assert!(
+        matches!(err, ene_runtime::EneRuntimeError::Mind(_)),
+        "expected the actor's SplitNotNeeded Mind error, got {err:?}"
+    );
+
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 

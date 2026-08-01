@@ -22,7 +22,7 @@
 //!   `broadcast`, small capacity. Turn-independent notifications. Multiple
 //!   subscribers via [`crate::EneHandle::subscribe_lifecycle`].
 
-use crate::diagnostics::MemoryQueryHandle;
+use crate::diagnostics::MemoryHandle;
 use crate::types::{RequestId, TurnId};
 use chrono::{DateTime, Utc};
 use ene_config::EneConfig;
@@ -223,9 +223,9 @@ pub struct EneStateSnapshot {
     pub session_id: SessionId,
     /// Character card name.
     pub card_name: CardName,
-    /// Memory query handle (enabled only if memory is configured).
+    /// Memory handle (enabled only if memory is configured).
     /// Prefer [`crate::EneDiagnostics::memory`] for new code.
-    pub memory: MemoryQueryHandle,
+    pub memory: MemoryHandle,
     /// Current conversation turn count.
     pub current_turn_count: u32,
     /// When the session started (UTC).
