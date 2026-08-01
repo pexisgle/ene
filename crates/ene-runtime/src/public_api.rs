@@ -518,7 +518,6 @@ impl PublicLifecycleEvent {
                 status: match status {
                     EneStatus::Idle => "idle".to_string(),
                     EneStatus::Running => "running".to_string(),
-                    EneStatus::Error => "error".to_string(),
                 },
             },
             LifecycleEvent::PendingCandidateAvailable { count } => {

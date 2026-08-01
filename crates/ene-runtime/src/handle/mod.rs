@@ -211,6 +211,11 @@ impl Drop for HandleShutdownGuard {
 /// tools, mind session, and warmup before returning. When the last clone is
 /// dropped the underlying `mpsc` channel closes and the actor exits.
 pub struct EneHandle {
+    /// Command mailbox sender. Deliberately an *unbounded* `mpsc` — see the
+    /// rationale at the channel's construction in [`EneHandle::open`] (#404):
+    /// it is shared with the actor's internal feedback path and the
+    /// drop-guard `Shutdown`, neither of which may be dropped by backpressure.
+    /// Expensive work is bounded at `JoinSet` admission, not here.
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     event_tx: broadcast::Sender<EneEvent>,
     /// Lifecycle bus sender (#272): `StatusChanged` / `PendingCandidateAvailable`
@@ -305,6 +310,33 @@ impl EneHandle {
     /// memory warmup **before** returning `Ok`. Config file I/O stays in the
     /// host / `ene-config` — pass an already-loaded config and card.
     pub async fn open(config: EneConfig, card: CharacterCardV3) -> Result<Self, EneRuntimeError> {
+        // The command mailbox is deliberately an *unbounded* `mpsc` (#404).
+        //
+        // Stage 8 bounded the five background `JoinSet`s (admission control),
+        // but the channel feeding them was left unbounded. Bounding it here
+        // was considered and rejected for this shared channel:
+        //
+        // - It is shared by three very different producers: external consumers
+        //   (UI / CLI), the actor's own background tasks (which feed
+        //   `PluginHostReconfigured` back through it), and the
+        //   [`HandleShutdownGuard`] drop path (which sends `Shutdown` from a
+        //   synchronous `Drop`). A bounded channel with `try_send` semantics
+        //   would let a full mailbox silently drop the shutdown command or an
+        //   internal reconfiguration — both correctness bugs, not backpressure.
+        // - The only externally floodable command is
+        //   [`EneCommand::UpdateProactiveObservation`], pushed once per screen
+        //   capture by the desktop proactive observer. That producer is
+        //   rate-limited at its source (capture cadence), not by the mailbox,
+        //   so the realistic flood vector is already bounded upstream.
+        // - Backpressure for the genuinely expensive work (tool calls,
+        //   searches, deferred pollers, GGUF loads) is enforced where it
+        //   matters — at `JoinSet` admission — and fails fast with
+        //   [`crate::error::EneRuntimeError::Busy`] rather than queueing.
+        //
+        // The trade-off is documented rather than enforced: a misbehaving
+        // consumer that loops `update_proactive_observation` without awaiting
+        // the actor can grow this mailbox. That is a caller bug, surfaced by
+        // the actor's own throughput, not a condition the runtime masks.
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let cmd_tx = Arc::new(cmd_tx);
         let (event_tx, _event_rx) = broadcast::channel(1024);
@@ -682,8 +714,20 @@ impl EneHandle {
 
     /// Start a turn. Returns [`RunError::Busy`] if a turn is already in flight
     /// — never silently aborts the active turn.
+    ///
+    /// A dead actor is reported as [`RunError::ActorDead`] rather than
+    /// [`RunError::Busy`]: the closed-channel check runs *before* the
+    /// single-flight gate (#404). Previously the gate was consulted first, so
+    /// a `run()` racing the actor's shutdown could see a gate the dying actor
+    /// still held and report `Busy` even though the actor was gone.
     #[must_use = "the returned TurnId is needed for cancellation"]
     pub fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError> {
+        // Dead-actor check first: the command channel closes when the actor
+        // task exits, so a closed channel is the authoritative "actor is
+        // gone" signal and must win over a stale single-flight gate (#404).
+        if self.cmd_tx.is_closed() {
+            return Err(RunError::ActorDead);
+        }
         let turn = TurnId::new();
         if !self.turn_gate.try_begin(&turn) {
             return Err(RunError::Busy);
@@ -1563,6 +1607,36 @@ mod tests {
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 
+    /// Regression test for #404 (item 5): after the actor has shut down, a
+    /// subsequent `run()` must report [`RunError::ActorDead`], never
+    /// [`RunError::Busy`].
+    ///
+    /// Before the fix, `run()` consulted the single-flight gate *before* the
+    /// command channel, so a gate the dying actor still held could surface as
+    /// `Busy` even though the actor was gone. The fix checks the closed
+    /// channel first and releases the gate on `Shutdown`, so a dead actor is
+    /// reported as dead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_after_shutdown_reports_actor_dead_not_busy() {
+        let config = test_config_memory_off();
+        let handle = EneHandle::open(config, test_card())
+            .await
+            .expect("open initializes handle");
+
+        // Drain the actor and wait for its task to fully exit; `shutdown`
+        // awaits the actor's `JoinHandle`, so on return the command channel
+        // is closed.
+        handle
+            .shutdown(std::time::Duration::from_secs(2))
+            .await
+            .expect("shutdown completes");
+
+        assert!(
+            matches!(handle.run("hello"), Err(RunError::ActorDead)),
+            "run() after shutdown must report ActorDead, not a stale Busy (#404)"
+        );
+    }
+
     // ── Stage 8: bounded actor task admission ──
 
     /// A `ToolRegistry` with no tools, whose `call_tool` always succeeds.
@@ -1618,6 +1692,23 @@ mod tests {
         broadcast::Receiver<DiagnosticEvent>,
         broadcast::Receiver<LifecycleEvent>,
     ) {
+        let (actor, diag_rx, lifecycle_rx, _gate) = build_bare_actor_with_gate(registry, task_caps);
+        (actor, diag_rx, lifecycle_rx)
+    }
+
+    /// Like [`build_bare_actor_with_lifecycle`] but also hands back the shared
+    /// [`TurnGate`], so tests can assert on single-flight gate state — e.g.
+    /// that `Shutdown` releases it (#404). `pub(super)` so `actor::tests` can
+    /// reuse it.
+    pub(super) fn build_bare_actor_with_gate(
+        registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+        task_caps: &crate::task_config::ToolRuntimeConfig,
+    ) -> (
+        actor::TurnActor,
+        broadcast::Receiver<DiagnosticEvent>,
+        broadcast::Receiver<LifecycleEvent>,
+        Arc<TurnGate>,
+    ) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, _event_rx) = broadcast::channel(16);
         let (lifecycle_tx, lifecycle_rx) = broadcast::channel(16);
@@ -1629,6 +1720,7 @@ mod tests {
             .expect("set_section(ToolRuntimeConfig) succeeds");
         let health_monitor =
             ene_ai::ProviderHealthMonitor::new(std::time::Duration::from_secs(1), 8);
+        let gate = Arc::new(TurnGate::new());
         let actor = actor::TurnActor::new(
             cmd_rx,
             cmd_tx,
@@ -1637,7 +1729,7 @@ mod tests {
             audio_tx,
             diag_tx.clone(),
             diag_tx.subscribe(),
-            Arc::new(TurnGate::new()),
+            Arc::clone(&gate),
             config,
             ConversationSession::new(),
             None,
@@ -1650,7 +1742,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(parking_lot::Mutex::new(String::new())),
         );
-        (actor, diag_rx, lifecycle_rx)
+        (actor, diag_rx, lifecycle_rx, gate)
     }
 
     /// Pure test of the shared admission mechanism (`actor::admit_task`),
@@ -1665,12 +1757,20 @@ mod tests {
         let (diag_tx, mut diag_rx) = broadcast::channel(16);
         let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-        assert!(actor::admit_task(&set, 2, "TestSet", None, &diag_tx));
-        set.spawn(async {});
-        assert!(actor::admit_task(&set, 2, "TestSet", None, &diag_tx));
-        set.spawn(async {});
+        // Placeholder tasks must stay in-flight (not complete) so they are
+        // still counted when `admit_task` reaps before its capacity check
+        // (#404); an `async {}` body would finish instantly and be reaped
+        // away, so the cap would never be reached.
+        assert!(actor::admit_task(&mut set, 2, "TestSet", None, &diag_tx));
+        set.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        assert!(actor::admit_task(&mut set, 2, "TestSet", None, &diag_tx));
+        set.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
         assert!(!actor::admit_task(
-            &set,
+            &mut set,
             2,
             "TestSet",
             Some("detail".to_string()),
@@ -1692,6 +1792,49 @@ mod tests {
             }
             other => panic!("expected TaskRejected, got {other:?}"),
         }
+    }
+
+    /// Regression test for #404 (item 1): `admit_task` must reap
+    /// completed-but-unjoined tasks *before* checking the cap, so a burst
+    /// that finished during the actor's `select!` block does not cause a
+    /// spurious `EneRuntimeError::Busy`.
+    ///
+    /// Also guards the converse: a task that is *still running* must keep
+    /// counting against the cap, so a genuine `Busy` is preserved.
+    #[tokio::test]
+    async fn admit_task_reaps_finished_tasks_and_preserves_real_busy() {
+        let (diag_tx, _diag_rx) = broadcast::channel(16);
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+        // A task that stays in-flight until we release it.
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release_task = std::sync::Arc::clone(&release);
+        assert!(actor::admit_task(&mut set, 1, "TestSet", None, &diag_tx));
+        set.spawn(async move {
+            release_task.notified().await;
+        });
+
+        // Still running → genuinely at capacity → rejected (real Busy).
+        assert!(
+            !actor::admit_task(&mut set, 1, "TestSet", None, &diag_tx),
+            "an in-flight task must still count against the cap"
+        );
+
+        // Release the task and let it run to completion. It is now
+        // completed but not yet joined, so `set.len()` still counts it.
+        release.notify_one();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        // Before #404 this saw the stale `len() == 1` and rejected
+        // spuriously. The fix reaps the finished task first, freeing the
+        // slot so admission succeeds.
+        assert!(
+            actor::admit_task(&mut set, 1, "TestSet", None, &diag_tx),
+            "a completed-but-unjoined task must not count against the cap (#404)"
+        );
+        assert_eq!(set.len(), 0, "the finished task should have been reaped");
     }
 
     /// Regression test for #398: a memory-writer handle rejected by the

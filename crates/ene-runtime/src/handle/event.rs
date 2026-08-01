@@ -233,14 +233,19 @@ pub struct EneStateSnapshot {
 }
 
 /// Current status of the actor.
+///
+/// Status only answers "is a turn running?" — it is deliberately *not* an
+/// error channel. Failures are reported through the turn's
+/// [`EneEvent::Terminal`] with [`TerminalReason::Failed`], so there is no
+/// `Error` status variant: an `Error` member was never emitted anywhere and
+/// its presence invited consumers (e.g. the old `minimal_chat` example) to
+/// wait on a condition that could never fire (#404).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EneStatus {
     /// Not currently processing anything.
     Idle,
     /// An AI stream is running.
     Running,
-    /// An error state (non-fatal).
-    Error,
 }
 
 /// Event receiver handle obtained from [`crate::EneHandle::subscribe`].
