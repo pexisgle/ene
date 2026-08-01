@@ -1310,6 +1310,10 @@ impl TurnActor {
                     let spoken_chars = partial.chars().count();
                     self.session
                         .mark_interrupted(&turn.to_string(), &partial, spoken_chars);
+                    // `mark_interrupted` records an assistant response (turn
+                    // count +1); republish so the shared `turn_count` slot
+                    // does not lag the actor's session (#407).
+                    self.sync_shared_session_state();
                 }
 
                 self.drain_pending().await;
