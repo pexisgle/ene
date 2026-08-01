@@ -5,10 +5,6 @@
 //! [`crate::output::arbiter::resolve_expression`]; mid-turn stream markers
 //! feed that resolver as proposals instead of permanently winning this slot.
 
-#![expect(
-    clippy::option_if_let_else,
-    reason = "nursery style; match/if-let clarity preferred locally"
-)]
 use crate::output::arbiter::affect_to_expression;
 use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 use ene_core::AffectState;
