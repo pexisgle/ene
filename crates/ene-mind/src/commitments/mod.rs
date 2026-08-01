@@ -4,7 +4,19 @@
 //! and prompt injection. Typed `MemoryKind::Commitment` rows are optional
 //! references (`typed_memories.commitment_id`) and are not dual-written from
 //! arbiter persist.
+//!
+//! **Contradiction semantics:** this ledger is where a rephrased or
+//! rescheduled commitment is *merged* into the existing row (title-keyed
+//! matching) instead of both versions surviving as separate valid
+//! commitments. The typed-memory arbiter additionally treats `Commitment` as a
+//! contradiction-checked kind (`MemoryKind::is_contradiction_kind`) as defense
+//! in depth for any direct typed-write path; see the per-kind policy table in
+//! `ene-core::MemoryKind`.
 
+#![expect(
+    clippy::indexing_slicing,
+    reason = "history/token helpers index into bounds-checked conversational buffers"
+)]
 use std::collections::HashMap;
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider, cosine_similarity};
@@ -22,6 +34,21 @@ use crate::memory_writer::{AppliedDecision, ArbiterContext, MemoryArbiter};
 const MAX_ACTIVE_MATCH_CHECK: usize = 4096;
 
 /// Companion Commitment Ledger: promises, tasks, follow-ups.
+///
+/// # No in-memory cache
+///
+/// This ledger is **stateless** — the struct has no fields. Every operation
+/// (`apply_commitment_candidates`, `list_active`, `complete`, `cancel`,
+/// `mark_stale_overdue`) takes `&dyn MemoryPort` and reads or writes the
+/// `commitments` table on each call. The runtime actor likewise holds no
+/// commitment snapshot: it re-reads `list_active_commitments` from the store
+/// at prompt-injection time and only applies the pure
+/// [`Self::active_prompt_candidates`] mapping to those fresh rows.
+///
+/// Consequence: consumers may complete/cancel commitments directly
+/// through the memory store (e.g. the desktop UI's commitment buttons) with
+/// no actor-side cache to desync. The next prompt injection reads the updated
+/// rows, so no mailbox round-trip is required for consistency.
 #[derive(Debug, Default)]
 pub struct CommitmentLedger;
 
@@ -609,6 +636,46 @@ mod tests {
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].description, "Let's discuss the UI design instead");
         assert_eq!(active[0].due_label.as_deref(), Some("Tomorrow"));
+    }
+
+    #[tokio::test]
+    async fn apply_supersedes_existing_on_due_date_change_only() {
+        // Rescheduling the same commitment — same title and content, only
+        // the due label changes — must update the existing ledger row, not
+        // register a second valid commitment that both survive as active.
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+
+        let ids1 = CommitmentLedger::apply_commitment_candidates(
+            &store,
+            &sync_ctx(),
+            &[commitment_candidate(0.9)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids1.len(), 1);
+
+        let mut rescheduled = commitment_candidate(0.9);
+        rescheduled.commitment_due = Some("Next week".to_string());
+
+        let ids2 =
+            CommitmentLedger::apply_commitment_candidates(&store, &sync_ctx(), &[rescheduled])
+                .await
+                .unwrap();
+        assert_eq!(ids2.len(), 1);
+        assert_eq!(
+            ids2[0], ids1[0],
+            "rescheduling must keep the same commitment id"
+        );
+
+        let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            active.len(),
+            1,
+            "rescheduling must not duplicate the commitment"
+        );
+        assert_eq!(active[0].due_label.as_deref(), Some("Next week"));
     }
 
     #[tokio::test]

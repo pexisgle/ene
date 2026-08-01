@@ -21,7 +21,7 @@ use crate::types::{RequestId, TurnId};
 use crate::vision::VisionPrepared;
 use chrono::{DateTime, Utc};
 use ene_config::CharacterCardV3;
-use ene_mind::SplitResult;
+use ene_mind::CompressionResult;
 use ene_plugin_proto::ToolSpec;
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -105,10 +105,24 @@ pub enum EneCommand {
         /// Reply channel for the snapshot.
         reply: oneshot::Sender<super::event::EneStateSnapshot>,
     },
-    /// Manually trigger a session split for the current conversation.
-    ManualSplit {
-        /// Result channel carrying the split result or an error.
-        reply: oneshot::Sender<Result<SplitResult, EneRuntimeError>>,
+    /// Request the full conversation history only.
+    ///
+    /// The lightweight state reads (card name, session id, turn count,
+    /// config, card) are mailbox-free on [`crate::EneHandle`]; history is a
+    /// large payload that stays mailbox-based, and this command lets a
+    /// consumer fetch just it without paying for a full snapshot.
+    GetHistory {
+        /// Reply channel carrying the history entries.
+        reply: oneshot::Sender<Vec<ene_mind::HistoryEntry>>,
+    },
+    /// Manually trigger a compression-only pass over the current conversation.
+    ///
+    /// Compression (#368/#369) trims history into a stored scene summary but
+    /// does **not** start a new session: the session id is unchanged and the
+    /// result is a [`CompressionResult`], not a [`ene_mind::SplitResult`].
+    CompressContext {
+        /// Result channel carrying the compression result or an error.
+        reply: oneshot::Sender<Result<CompressionResult, EneRuntimeError>>,
     },
     /// List all tools in the active tool registry.
     ListTools {

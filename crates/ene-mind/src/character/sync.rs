@@ -1,5 +1,9 @@
 //! `CCv3` character memory index synchronization.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic"
+)]
 use std::collections::HashSet;
 use std::sync::Arc;
 

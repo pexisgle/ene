@@ -5,7 +5,8 @@
 //! ## Key Types
 //!
 //! - [`ConversationSession`] — Central session holder: history, display buffer, memory context, character card
-//! - [`SplitReason`] / [`SplitResult`] — Outcome types for manual compression and diagnostics
+//! - [`SplitReason`] / [`SplitResult`] — Outcome types for session splits (which issue a new [`SessionId`]) and diagnostics
+//! - [`crate::context::CompressionResult`] — Outcome of a compression-only pass (manual compression)
 //!
 //! ## Performance Markers
 //!

@@ -80,6 +80,9 @@ pub fn log_empty_response_if_needed(ctx: &EmptyResponseContext<'_>) {
         if !meta.dropped_sections.is_empty() {
             warn.record("dropped_sections", format!("{:?}", meta.dropped_sections));
         }
+        if meta.history_messages_detached > 0 {
+            warn.record("history_messages_detached", meta.history_messages_detached);
+        }
     }
 
     if !ctx.emotion_tokens.is_empty() {

@@ -428,10 +428,10 @@ async fn tool_command(
     action: &ToolAction,
     json: bool,
 ) -> Result<i32, OutputError> {
-    let diag = ctx.handle.diagnostics();
+    let tools = ctx.handle.tools();
     match action {
         ToolAction::List => {
-            let tools = diag
+            let tools = tools
                 .list_tools()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list tools: {e}")))?;
@@ -443,7 +443,7 @@ async fn tool_command(
             Ok(EXIT_OK)
         }
         ToolAction::Search { query } => {
-            let tools = diag
+            let tools = tools
                 .search_tools(query.clone())
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("search tools: {e}")))?;
@@ -455,7 +455,7 @@ async fn tool_command(
             Ok(EXIT_OK)
         }
         ToolAction::Help { name } => {
-            let tools = diag
+            let tools = tools
                 .list_tools()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list tools: {e}")))?;
@@ -478,7 +478,7 @@ async fn tool_command(
             Ok(EXIT_OK)
         }
         ToolAction::Call { name, arguments } => {
-            let result = diag
+            let result = tools
                 .call_tool(name.clone(), arguments.clone())
                 .await
                 .map_err(|e| {
@@ -655,10 +655,9 @@ async fn memory_command(
 
     match action {
         MemoryAction::List { kind } => {
-            require_memory(&snapshot)?;
+            require_memory(memory)?;
             let kind = parse_kind(kind.as_deref())?;
-            let memories = snapshot
-                .memory
+            let memories = memory
                 .list_typed_memories(snapshot.card_name.as_str(), kind, 50)
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list memories: {e}")))?;
@@ -677,7 +676,7 @@ async fn memory_command(
             }
             Ok(EXIT_OK)
         }
-        MemoryAction::Inspect { id } => match snapshot.memory.inspect_typed_memory(*id).await {
+        MemoryAction::Inspect { id } => match memory.inspect_typed_memory(*id).await {
             Ok(Some(m)) => {
                 if json {
                     output::print_json(&m)?;
@@ -700,7 +699,7 @@ async fn memory_command(
             )),
         },
         MemoryAction::Search { query } => {
-            require_memory(&snapshot)?;
+            require_memory(memory)?;
             let results = memory
                 .search_typed_memories_hybrid(
                     snapshot.card_name.as_str(),
@@ -730,8 +729,8 @@ async fn memory_command(
     }
 }
 
-fn require_memory(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), OutputError> {
-    if snapshot.memory.is_enabled() {
+fn require_memory(memory: &ene_runtime::MemoryHandle) -> Result<(), OutputError> {
+    if memory.is_enabled() {
         Ok(())
     } else {
         Err(OutputError::new(
@@ -781,15 +780,11 @@ async fn store_command(
     action: &StoreAction,
     json: bool,
 ) -> Result<i32, OutputError> {
-    let diag = ctx.handle.diagnostics();
-    let store = diag
-        .memory()
-        .store()
-        .ok_or_else(|| OutputError::new(ErrorCode::Runtime, "memory store is not enabled"))?;
+    let memory = ctx.handle.diagnostics().memory();
 
     match action {
         StoreAction::Backup => {
-            let path = store
+            let path = memory
                 .backup()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;
@@ -801,7 +796,13 @@ async fn store_command(
             Ok(EXIT_OK)
         }
         StoreAction::ListBackups => {
-            let db_path = store.path().ok_or_else(|| {
+            if !memory.is_enabled() {
+                return Err(OutputError::new(
+                    ErrorCode::Runtime,
+                    "memory store is not enabled",
+                ));
+            }
+            let db_path = memory.path().ok_or_else(|| {
                 OutputError::new(ErrorCode::Runtime, "in-memory store has no file backups")
             })?;
             let backups = ene_store::list_backups(db_path)
@@ -819,13 +820,19 @@ async fn store_command(
             Ok(EXIT_OK)
         }
         StoreAction::Restore { path, yes } => {
+            if !memory.is_enabled() {
+                return Err(OutputError::new(
+                    ErrorCode::Runtime,
+                    "memory store is not enabled",
+                ));
+            }
             if !yes {
                 return Err(OutputError::new(
                     ErrorCode::ConfirmationRequired,
                     "restore requires --yes (destroys the current database file)",
                 ));
             }
-            let db_path = store
+            let db_path = memory
                 .path()
                 .map(std::path::Path::to_path_buf)
                 .ok_or_else(|| {
@@ -855,7 +862,7 @@ async fn store_command(
             Ok(EXIT_OK)
         }
         StoreAction::Integrity => {
-            store
+            memory
                 .check_integrity()
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, e.to_string()))?;

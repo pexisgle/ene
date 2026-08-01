@@ -1,0 +1,23 @@
+{
+  "forget_patterns": [
+    {
+      "name": "object_before_keyword",
+      "regex": "(.+?)を(忘れて|消して|削除して|やめて)",
+      "target_group": 1,
+      "skip_questions": false
+    },
+    {
+      "name": "keyword_before_content",
+      "regex": "(?i)(忘れて|消して|削除して|やめて)[:：]?\\s*(.+)",
+      "target_group": 2,
+      "skip_questions": false
+    }
+  ],
+  "intent_keywords": {
+    "episodic": ["前回", "この前", "覚えて", "思い出", "あのとき", "あの時"],
+    "preference": ["好き", "嫌い", "好み", "お気に入り"],
+    "relationship": ["関係", "信頼", "友達", "仲良", "一緒"],
+    "affective": ["気持ち", "嬉しい", "悲しい", "怒", "不安"],
+    "procedure": ["やり方", "手順", "方法", "設定"]
+  }
+}

@@ -233,7 +233,9 @@ async fn handle_split(
             "Cannot compress: No conversation history.".to_string(),
         ));
     }
-    if !snapshot.memory.is_enabled() {
+    // The snapshot no longer carries the memory handle; it lives on
+    // the diagnostics facade, which is the documented access path.
+    if !ctx.handle.diagnostics().memory().is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));
@@ -243,7 +245,7 @@ async fn handle_split(
         "{}",
         style::header("[Session] Manually triggering context compression...")
     );
-    match ctx.handle.diagnostics().manual_split().await {
+    match ctx.handle.compress_context().await {
         Ok(result) => {
             println!(
                 "{}",
@@ -256,7 +258,7 @@ async fn handle_split(
                 "{}",
                 style::warning(format!(
                     "[Session] Session ID unchanged: {}",
-                    result.new_session_id
+                    result.session_id
                 ))
             );
             println!(

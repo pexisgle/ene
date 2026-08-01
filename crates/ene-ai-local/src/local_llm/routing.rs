@@ -267,7 +267,7 @@ mod smoke {
 
     #[tokio::test]
     async fn optional_local_llama_smoke() {
-        let Some((model, accel)) = env_smoke_enabled() else {
+        let Some((model, _accel)) = env_smoke_enabled() else {
             return;
         };
         let mut cfg = AiConfig::default();
@@ -275,7 +275,6 @@ mod smoke {
             "smoke".to_string(),
             LocalModelDef {
                 model_path: model,
-                acceleration: accel,
                 gpu_layers: "auto".to_string(),
                 context_size: 1024,
                 ..LocalModelDef::default()

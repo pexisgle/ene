@@ -11,10 +11,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ene_ai::{
     EmbeddingKind, EmbeddingProvider, LlmCompletion, LlmMessage, LlmProvider, LlmProviderError,
-    LlmResponseChunk, embed_query,
+    LlmResponseChunk, UserMessagePart, embed_query,
 };
 use ene_config::CharacterCardV3;
-use ene_mind::{CognitionEngine, HistoryEntry, MindConfig, TurnContext};
+use ene_mind::{CognitionEngine, ContextConfig, HistoryEntry, MindConfig, TurnContext};
 use ene_store::{
     AffectAnnotation, CommitmentStatus, MemoryConfidence, MemoryKind, MemorySalience, MemoryScope,
     MemorySource, MemoryStatus, MemoryStore, NewCommitment, NewMemoryItem, PendingAffectProposal,
@@ -145,6 +145,7 @@ async fn run_before_turn(
         llm_provider: Some(llm),
         available_window: None,
         post_history_block: None,
+        compression_pending: false,
         packing_budget_override: None,
     };
     engine.before_turn(ctx).await.unwrap()
@@ -267,6 +268,7 @@ async fn scenario_identity_kernel_survives_long_history() {
                 llm_provider: Some(llm),
                 available_window: None,
                 post_history_block: None,
+                compression_pending: false,
                 packing_budget_override: None,
             },
             pre,
@@ -282,6 +284,144 @@ async fn scenario_identity_kernel_survives_long_history() {
         content.contains("Ene") && content.contains("Always stay in character"),
         "identity kernel missing from prompt packet: {content}"
     );
+}
+
+#[tokio::test]
+async fn scenario_compression_pending_detaches_oldest_recent_exchange() {
+    // Compose-level regression: `compose_prompt_packet` truncates the
+    // session history to the recent window *before* packing, so the
+    // synchronous detachment during the async compression gap only ever
+    // reaches the oldest exchange of the recent window — never the pre-window
+    // span that the pending summary actually covers. `pack_prompt` alone
+    // bypasses the truncation, so this drives the exact path production runs.
+    let store = MemoryStore::open_in_memory(4).await.unwrap();
+    let embedder: Arc<dyn EmbeddingProvider> = Arc::new(EvalEmbedder);
+    let llm: Arc<dyn LlmProvider> = Arc::new(EvalLlm);
+    let engine = CognitionEngine::new();
+    let config = MindConfig {
+        context: ContextConfig {
+            recent_turns: 2, // recent window = 2 exchanges (4 messages)
+            ..ContextConfig::default()
+        },
+        ..MindConfig::default()
+    };
+    let card = eval_card();
+
+    // 5 exchanges (10 messages): the pre-window span is the first 3
+    // exchanges (the span `check_and_trigger` is summarizing), the recent
+    // window is the last 2.
+    let history: Vec<HistoryEntry> = (0..5)
+        .flat_map(|i| {
+            [
+                HistoryEntry {
+                    role: ene_ai::Role::User,
+                    content: format!("user message {i} ").repeat(4),
+                },
+                HistoryEntry {
+                    role: ene_ai::Role::Assistant,
+                    content: format!("assistant reply {i} ").repeat(4),
+                },
+            ]
+        })
+        .collect();
+    let recent_limit = config.context.recent_turns.saturating_mul(2).max(2);
+    let recent_start = history.len() - recent_limit; // = 6: pre-window is [0..6)
+
+    let pre = run_before_turn(
+        &engine,
+        &store,
+        &config,
+        &card,
+        embedder.clone(),
+        llm.clone(),
+        "quick check",
+        &history,
+    )
+    .await;
+
+    let query = embed_query(embedder.as_ref(), "quick check").await.unwrap();
+    let composed = engine
+        .compose_prompt_packet(
+            TurnContext {
+                config: &config,
+                card: &card,
+                character_id: "ene",
+                user_name: "user",
+                session_id: "sess-eval",
+                user_input: "quick check",
+                history: &history,
+                store: Some(&store),
+                query_embedding: Some(&query),
+                embedder: Some(&embedder),
+                llm_provider: Some(llm),
+                available_window: None,
+                post_history_block: None,
+                compression_pending: true,
+                packing_budget_override: Some(60),
+            },
+            pre,
+            ene_mind::ComposePrefetch::default(),
+        )
+        .await
+        .unwrap();
+
+    let detached = composed.meta.history_messages_detached;
+    // The 4-message recent window (~76 tokens) cannot fit the 60-token
+    // budget, so the oldest recent-window exchange must be detached.
+    assert!(
+        detached > 0,
+        "the oldest recent-window exchange must be detached during the compression gap, meta={:?}",
+        composed.meta
+    );
+    // Detachment is bounded by the one-exchange floor and only reaches the
+    // recent window: the pre-window span was truncated before packing, so it
+    // is never a detachment candidate.
+    assert!(
+        detached <= recent_limit - 2,
+        "detachment must stay within the recent window, detached={detached}, recent_limit={recent_limit}"
+    );
+
+    // The composed prompt's history (the messages between the system block and
+    // the final user input) must be exactly the surviving tail of the recent
+    // window — proving both that the pre-window span never entered the prompt
+    // and that detachment hid only recent-window messages.
+    let history_messages = &composed.messages[1..composed.messages.len() - 1];
+    let expected: Vec<&HistoryEntry> = history[recent_start + detached..].iter().collect();
+    assert_eq!(
+        history_messages.len(),
+        expected.len(),
+        "composed history length must equal the surviving recent window, detached={detached}"
+    );
+    for (msg, entry) in history_messages.iter().zip(expected) {
+        match msg {
+            LlmMessage::User { parts } => {
+                assert_eq!(entry.role, ene_ai::Role::User);
+                let text = parts.first().map_or("", |p| match p {
+                    UserMessagePart::Text { text } => text.as_str(),
+                    UserMessagePart::Image { .. } => "",
+                });
+                assert_eq!(
+                    text,
+                    entry.content.as_str(),
+                    "user history content mismatch"
+                );
+            }
+            LlmMessage::Assistant { content, .. } => {
+                assert_eq!(entry.role, ene_ai::Role::Assistant);
+                assert_eq!(
+                    content.as_deref(),
+                    Some(entry.content.as_str()),
+                    "assistant history content mismatch"
+                );
+            }
+            LlmMessage::System { .. } => {
+                panic!("unexpected system message inside the composed history");
+            }
+            LlmMessage::Tool { .. } => {
+                panic!("unexpected tool message inside the composed history");
+            }
+        }
+    }
 }
 
 #[tokio::test]

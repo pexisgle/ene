@@ -4,6 +4,11 @@
 //! rather than a fixed absolute token count, and truncation counts tokens with
 //! a language-aware ratio instead of an English-centric `chars / 4` heuristic.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use ene_config::{CharacterCardV3, MacroContext, UserPersona, expand_cbs_macros_ctx};
 
 use super::kernel::IdentityKernel;

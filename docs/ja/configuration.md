@@ -214,10 +214,12 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 約束を表面化させます。
 
 `mind.emotion.classifier_language`（デフォルト `"en"`）は、感情分類器と認知出力契約で
-使用されるプロンプトライブラリの言語を選択します。ユーザー向け LLM 指示文字列は
-`assets/lang/{lang}/prompts.json` から実行時にロードされます。そのパックが存在しない
-場合、`ene_config::SUPPORTED_LANGUAGES`（`en`, `ja`）の言語についてはコンパイル時
-埋め込みパックへ、それ以外は英語へフォールバックします。詳細は
+使用されるプロンプトライブラリの言語を選択し、決定論的なパターンパック（忘却正規表現と
+想起意図キーワードリスト）も駆動します。
+ユーザー向け LLM 指示文字列は `assets/lang/{lang}/prompts.json` から、決定論的な
+パターンは `assets/lang/{lang}/patterns.json` から実行時にロードされます。その
+パックが存在しない場合、`ene_config::SUPPORTED_LANGUAGES`（`en`, `ja`）の言語に
+ついてはコンパイル時埋め込みパックへ、それ以外は英語へフォールバックします。詳細は
 [ターン・セッション](concepts/turn-and-session.md) §3 を参照してください。
 
 コミットメント台帳は、着信したコミットメントをタイトル埋め込みの類似度でアクティブな
@@ -248,6 +250,13 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 4 つとも確率・比率であり、読み込み時に `0.0..=1.0` へ clamp されます。
 特に `semantic_similarity_threshold` は埋め込みモデルの類似度分布に強く依存するため、
 埋め込みプロバイダーを切り替えた際は再調整してください。
+
+ユーザー確認へ回された候補（`AskConfirmationLater`）は `pending_candidates` キューに保持されます。
+デスクトップの設定画面のレビュー一覧に加えて、これらはハイブリッド想起にも参加します。
+話題が浮上したときにキャラクターが自然に確認できるよう、表面化した候補はプロンプト内で `[unconfirmed]` とマークされます。
+`recall_pending_candidate_limit`（デフォルト `3`）はターンごとに競争へ参加する数を上限し、
+`0` にすると設定画面のレビュー一覧に影響を与えずに想起経路を無効化できます。
+この上限は `MindMemoryConfig` でコード調整でき、設定としてはまだ公開されていません。
 
 ### `plugins.*` — IPC プラグインおよび MCP サーバー接続
 
@@ -288,6 +297,59 @@ HTTP の MCP エンドポイントは接続前に URL を検証します (既定
 `parallel_tool_calls_max` は、1 つの LLM 応答に含まれる**副作用のない**ツール呼び出しを同時にいくつ実行するかの上限です。モデルが 1 ターンで複数のツール呼び出しを出力したとき、`ToolSpec` で `side_effects: ReadOnly` を宣言しているもの（かつバックグラウンド非対応のもの）を、この上限まで並列にディスパッチします。並列化は応答内の*すべて*の呼び出しが副作用のない場合にのみ適用されます。混合ラウンドでは、読み取り専用の呼び出しが同じ応答内の先行する書き込みを追い越してはならない（read-after-write）ため、厳密に元の順序で逐次実行されます。それ以外 — 副作用のあるツール、副作用を宣言していないツール、`system.search_tools` — は従来どおり逐次実行されます。結果は元の `tool_calls` の順序へ並べ戻されるため、権限/ユーザー入力のプロンプト、undo スタック、`ToolCallStart`/`ToolCallResult` イベント、`ToolResultSummary` の順序はすべて保たれます。`0` を設定すると並列化が完全に無効になり、以前の完全逐次動作に戻ります。分類はフェイルクローズドです。`ReadOnly` の副作用を宣言していないツールは決して並列化されません。
 
 `plugins.list.<name>.db_quota_mb` は、プラグインのテーブルが**共有 `memory.db`** 内で占有できる上限をメビバイト単位で設定します (#424)。ステートフルなプラグインはすべて 1 つの共有データベースへ書き込むため、上限がなければ 1 つの暴走（または悪意ある）プラグインがディスクを使い切ったり、`memory.db` を肥大化させて記憶システムのクエリ・バックアップ・整合性検査を劣化させたりするおそれがあります。ホストは各プラグインの使用量（宣言済みテーブル全体の全セルのバイト長合計）を測定し、上限に達するか超えるようなストレージを増やす書き込み（`Insert`/`Upsert`、`Batch` 内のものを含む）を拒否し、`QUOTA_EXCEEDED` エラーを返します。読み取りと削除は一切制限されないため、上限に達したプラグインでも常に空きを確保できます。既定値は `256` で、組み込みプラグインが近づけないほど十分に大きい一方、暴走プラグインが実際の被害を出す前に抑制できます。無制限のストレージが正当に必要なプラグインには、このフィールドを `null` に設定して強制を無効化できます。
+
+#### `plugins.list.<name>.config` — プラグイン所有の設定 (#313)
+
+各プラグインエントリは、ホストからは**不透明**な設定ブロブを保持できます：
+
+```json
+{
+  "plugins": {
+    "list": {
+      "anthropic": {
+        "enable": true,
+        "config": {
+          "api_key": { "source": "env", "env": "ANTHROPIC_API_KEY" }
+        }
+      },
+      "llama-cpp": {
+        "enable": true,
+        "config": {
+          "mmproj_url": "https://example.com/mmproj.gguf",
+          "acceleration": "vulkan"
+        }
+      }
+    }
+  }
+}
+```
+
+ホストはこのブロブを**そのまま**保存・配信します。ブロブ内のキーを解釈・書き換え・破棄することは決してありません（未知のキーもロード→セーブの往復で保持されます）。ブロブはハンドシェイク時に一度だけプラグインへ送信されます（`ConfigurablePlugin::set_config`）。プロバイダートレイト（LLM/embed/TTS/STT）を実装するプラグインも、ツールプラグインと同じ方法で受け取ります。単一キーの環境変数オーバーライドは `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`（例：`ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`）です。従来 `ai.*` にあったプロバイダー固有設定はここへ移動しました。たとえば `plugins.list.llama-cpp.config.{mmproj_url,mmproj_path,acceleration}`（旧 `ai.local_models.<name>.{mmproj_url,mmproj_path,acceleration}`）、`plugins.list.onnx.config.ort_dylib_path`（旧 `ai.ort_dylib_path`）、`plugins.list.kokoro.profiles.kokoro.voices_path`（旧 `ai.tts.voices_path`）。
+
+バージョン 1 の `settings.json` は読み込み時に自動でマイグレーションされます。上記の移設対象キーは `plugins.list.*` の移動先へ移され（旧 `ai.*` の場所からは削除され）、その後にファイルが読み込まれて、マイグレーション後のドキュメントが永続化されます。対象キーを持たないファイルは論理的に変更されません。また、ネストした `config`/`profiles` 階層より前のレガシーなフラットなエントリレベルキー（`plugins.list.<name>.<key>`）も、起動時に配信される設定ブロブへ折り込まれます（明示的な `config` キーが優先）。この折り込みはディスク上のファイルを書き換えないため、リロードをまたいで安定しています。
+
+#### `plugins.list.<name>.profiles.<profile>` — プロファイル別設定 (#313)
+
+1 つのプラグインがモデル/音声/プロファイルごとに異なる設定を必要とすることがあります。`profiles` マップは、ホストからは不透明なプロファイル別ブロブを保持し、ハンドシェイク時にプラグインへ配信されます（`ConfigurablePlugin::set_profiles`）。プロファイルの*選択*はプラグイン側の責務です：
+
+```json
+{
+  "plugins": {
+    "list": {
+      "kokoro": {
+        "enable": true,
+        "profiles": {
+          "kokoro": { "voices_path": "/data/voices.bin" }
+        }
+      }
+    }
+  }
+}
+```
+
+#### シークレットのマーキング
+
+プラグインの `config_schema()` は、フィールドに `x-ene-secret: true` を付与できます。ホストはこれ（および既知の名前によるフォールバック：`api_key`・`token`・`password`・`authorization` など）を使って、設定 UI でフィールドをマスクする予定であり、ホストのログ出力からは値を削除（redact）します。インラインの API キーがログストリームに現れることはありません。`settings.json` の外部（キーリング/シークレットサービス）へのシークレット保存は別途追跡されており、それまではプラグインのシークレットは `plugins.list.<name>.config` 内に置かれ、スキーマでマークされ、ホスト境界で redact されます。
 
 ### `tools.*` — ツール実行ランタイムの挙動
 

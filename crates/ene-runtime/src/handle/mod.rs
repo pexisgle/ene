@@ -6,7 +6,17 @@
 //! and delegates read-only session/candidate queries and screen-image vision
 //! summarization to dedicated handles that bypass the actor mailbox entirely
 //! — see [`EneHandle::sessions`], [`EneHandle::candidates`], and
-//! [`EneHandle::vision`].
+//! [`EneHandle::vision`]. Tool operations get their own handle via
+//! [`EneHandle::tools`]; unlike the read-only handles it still routes
+//! through the mailbox — see [`crate::tools`] for why.
+//!
+//! Small per-frame state (card name, session id, turn count, config, loaded
+//! card) is additionally mirrored into a mailbox-free [`SharedActorState`]
+//! the actor keeps in sync at the mutation points — see
+//! [`EneHandle::card_name`], [`EneHandle::session_id`],
+//! [`EneHandle::turn_count`], [`EneHandle::config`], and
+//! [`EneHandle::character_card`]. Only the large history payload stays
+//! mailbox-based ([`EneHandle::history`]).
 //!
 //! ## Module layout
 //!
@@ -21,6 +31,8 @@
 //! - [`crate::query::sessions`] / [`crate::query::candidates`] — read-only
 //!   session and pending-candidate handles.
 //! - [`crate::vision`] — screen-image vision summarization handle.
+//! - [`crate::tools`] — tool registry handle (list / search / call /
+//!   invalidate).
 
 mod actor;
 mod command;
@@ -41,13 +53,15 @@ use crate::error::EneRuntimeError;
 use crate::public_api::PublicApiError;
 use crate::streaming::{PermissionDecision, UserInputResponse};
 use crate::types::{CancelError, RequestId, RunError, TurnId};
+use chrono::{DateTime, Utc};
 use ene_ai::LlmProviderRegistry;
 use ene_config::CharacterCardV3;
 use ene_config::EneConfig;
-use ene_mind::ConversationSession;
+use ene_mind::{ConversationSession, SessionId};
 use ene_plugin_host::{DisabledReason, LlmFactoriesByPlugin, PluginHealthEvent};
 use ene_rag::ToolRagConfig;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Bounded capacity for the dedicated audio (PCM) channel.
@@ -117,9 +131,10 @@ impl TurnGate {
 /// current tokio runtime.
 ///
 /// This guard exists because the `Arc::strong_count(&cmd_tx) == 1`
-/// approach is unreliable: `EneHandle` internally holds three independent
-/// `Arc` clones of `cmd_tx` (self, diagnostics, vision), so the count never
-/// reaches 1 while the handle is alive.
+/// approach is unreliable: `EneHandle` internally holds four independent
+/// `Arc` clones of `cmd_tx` (self, diagnostics, vision, tools), so the count
+/// never reaches 1 while the handle is alive; the shutdown guard holds a bare
+/// sender clone.
 ///
 /// ## Drop shutdown is best-effort
 ///
@@ -204,6 +219,63 @@ impl Drop for HandleShutdownGuard {
     }
 }
 
+/// Mailbox-free shared actor state, kept in sync by the turn actor.
+///
+/// Every field is a shared slot written by the actor at the mutation point —
+/// session split ([`actor::TurnActor`]'s `split_session`), `SetCharacter`,
+/// per-turn bookkeeping (`record_user_input` / the stream outcome), and
+/// feature-settings updates — and read synchronously by [`EneHandle`]'s
+/// lightweight accessors ([`EneHandle::card_name`],
+/// [`EneHandle::session_id`], [`EneHandle::session_started_at`],
+/// [`EneHandle::turn_count`], [`EneHandle::config`],
+/// [`EneHandle::character_card`]). No mailbox round-trip is involved, so the
+/// reads are safe to call from egui immediate mode and never queue behind an
+/// in-flight `Run` turn.
+///
+/// `card_name` is the precedent: it already shared an
+/// `Arc<Mutex<String>>` between the actor and
+/// [`crate::query::candidates::MemoryCandidateHandle`]; the other slots
+/// extend the same pattern to the rest of the snapshot-ish surface instead
+/// of duplicating state.
+#[derive(Clone)]
+pub(crate) struct SharedActorState {
+    /// Current character-card name, kept in sync on every
+    /// `SetCharacter`.
+    pub(crate) card_name: Arc<parking_lot::Mutex<String>>,
+    /// Current session id, replaced when a session split resets the session.
+    pub(crate) session_id: Arc<parking_lot::Mutex<SessionId>>,
+    /// When the current session started (UTC), replaced on session split.
+    pub(crate) session_started_at: Arc<parking_lot::Mutex<DateTime<Utc>>>,
+    /// Turn count of the current session, stored after each recorded user
+    /// input and after each completed stream outcome.
+    pub(crate) turn_count: Arc<AtomicU32>,
+    /// Current configuration. `RwLock` (readers hold a shared lock and clone
+    /// the `Arc`; the actor swaps it under a write lock) so per-frame reads
+    /// never serialize against each other — an "ArcSwap-style" sharing
+    /// pattern without the dependency.
+    pub(crate) config: Arc<parking_lot::RwLock<Arc<EneConfig>>>,
+    /// Loaded character card, replaced on `SetCharacter`.
+    pub(crate) character_card: Arc<parking_lot::Mutex<Option<Arc<CharacterCardV3>>>>,
+}
+
+impl SharedActorState {
+    /// Builds the shared slots from the bootstrap config and session. Called
+    /// once from [`EneHandle::open`]; the actor keeps the slots in sync from
+    /// then on.
+    fn new(config: &EneConfig, session: &ConversationSession) -> Self {
+        Self {
+            card_name: Arc::new(parking_lot::Mutex::new(session.card_name().to_string())),
+            session_id: Arc::new(parking_lot::Mutex::new(session.memory.session_id.clone())),
+            session_started_at: Arc::new(parking_lot::Mutex::new(session.session_started_at())),
+            turn_count: Arc::new(AtomicU32::new(session.current_turn_count() as u32)),
+            config: Arc::new(parking_lot::RwLock::new(Arc::new(config.clone()))),
+            character_card: Arc::new(parking_lot::Mutex::new(
+                session.character_card.clone().map(Arc::new),
+            )),
+        }
+    }
+}
+
 /// Thread-safe handle to the ready actor.
 ///
 /// Constructed only via [`EneHandle::open`], which initializes provider, store,
@@ -216,6 +288,11 @@ pub struct EneHandle {
     /// drop-guard `Shutdown`, neither of which may be dropped by backpressure.
     /// Expensive work is bounded at `JoinSet` admission, not here.
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
+    /// Mailbox-free shared actor state (card name, session id, turn count,
+    /// config, character card) kept in sync by the actor. Read via the
+    /// lightweight accessors below; large payloads (history) still go through
+    /// the mailbox via [`EneHandle::history`].
+    shared: Arc<SharedActorState>,
     event_tx: broadcast::Sender<EneEvent>,
     /// Lifecycle bus sender: `StatusChanged` / `PendingCandidateAvailable`
     /// / `ToolBackgroundCompleted`. Separate broadcast channel from `event_tx`
@@ -255,6 +332,9 @@ pub struct EneHandle {
     candidates: crate::query::candidates::MemoryCandidateHandle,
     /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
+    /// Tool registry operations handle (list / search / call / invalidate).
+    /// Routes through the actor mailbox (#406) — see [`crate::tools`].
+    tools: crate::tools::ToolHandle,
     /// RAII guard that triggers graceful shutdown when the last handle clone
     /// drops. Shared via `Arc` across all handle clones so the guard's `Drop`
     /// fires exactly once — when the last clone is released. Declared as the
@@ -278,6 +358,7 @@ impl Clone for EneHandle {
     fn clone(&self) -> Self {
         Self {
             cmd_tx: Arc::clone(&self.cmd_tx),
+            shared: Arc::clone(&self.shared),
             event_tx: self.event_tx.clone(),
             lifecycle_tx: self.lifecycle_tx.clone(),
             audio_tx: self.audio_tx.clone(),
@@ -296,6 +377,7 @@ impl Clone for EneHandle {
             sessions: self.sessions.clone(),
             candidates: self.candidates.clone(),
             vision: self.vision.clone(),
+            tools: self.tools.clone(),
             shutdown_guard: Arc::clone(&self.shutdown_guard),
         }
     }
@@ -505,7 +587,7 @@ impl EneHandle {
         }
 
         let mind_memory = mind.memory.clone();
-        let memory = crate::diagnostics::MemoryQueryHandle::new(
+        let memory = crate::diagnostics::MemoryHandle::new(
             memory_store.clone(),
             session.memory.embedding_provider.clone(),
             mind_memory,
@@ -526,7 +608,7 @@ impl EneHandle {
             // only fails fast if a file is still missing. Mirrors the GGUF
             // prefetch above. Non-fatal: on failure we log and let provider
             // construction report a clear error.
-            if let Err(e) = ene_voice::prefetch_if_configured(&ai_config).await {
+            if let Err(e) = ene_voice::prefetch_if_configured(&config).await {
                 tracing::warn!(
                     component = "Bootstrap",
                     error = %e,
@@ -583,18 +665,20 @@ impl EneHandle {
         let plugin_host = Arc::new(tokio::sync::Mutex::new(plugin_host));
         let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
 
-        // Current character-card name, shared with `MemoryCandidateHandle` so
-        // pending-candidate queries never need a mailbox round-trip.
-        let card_name = Arc::new(parking_lot::Mutex::new(
-            card.data.get_character_name().to_string(),
-        ));
+        // Mailbox-free shared actor state: card name (shared with
+        // `MemoryCandidateHandle` so pending-candidate queries
+        // never need a mailbox round-trip), session id / started-at / turn
+        // count, config, and the loaded card. The actor keeps the slots in
+        // sync at the mutation points; `EneHandle` reads them synchronously.
+        let shared = Arc::new(SharedActorState::new(&config, &session));
 
         let sessions = crate::query::sessions::SessionQueryHandle::new(memory_store.clone());
         let candidates = crate::query::candidates::MemoryCandidateHandle::new(
             memory_store.clone(),
-            Arc::clone(&card_name),
+            Arc::clone(&shared.card_name),
         );
         let vision = crate::vision::VisionHandle::new(Arc::clone(&cmd_tx));
+        let tools = crate::tools::ToolHandle::new(Arc::clone(&cmd_tx));
 
         let actor = actor::TurnActor::new(
             cmd_rx,
@@ -615,7 +699,7 @@ impl EneHandle {
             plugin_tool_registries,
             Arc::clone(&plugin_host),
             Arc::clone(&health_bridge_handle),
-            card_name,
+            Arc::clone(&shared),
         );
         let join = tokio::spawn(actor.run());
 
@@ -629,6 +713,7 @@ impl EneHandle {
 
         Ok(Self {
             cmd_tx,
+            shared,
             event_tx,
             lifecycle_tx,
             audio_tx,
@@ -642,6 +727,7 @@ impl EneHandle {
             sessions,
             candidates,
             vision,
+            tools,
             shutdown_guard,
         })
     }
@@ -680,9 +766,90 @@ impl EneHandle {
             .map(|inner| AudioStreamReceiver { inner })
     }
 
-    /// Concrete diagnostics facade (pipeline detail, memory, tools).
+    /// Opt-in diagnostics facade: pipeline detail, provider health, memory.
+    ///
+    /// Observability only — the control surface (character swap,
+    /// compression, tools) lives on this handle via [`EneHandle::set_character`],
+    /// [`EneHandle::compress_context`], and [`EneHandle::tools`] (#406).
     pub const fn diagnostics(&self) -> &crate::diagnostics::EneDiagnostics {
         &self.diagnostics
+    }
+
+    /// Current character-card name.
+    ///
+    /// Mailbox-free: reads the shared card-name slot the actor keeps in sync
+    /// on every `SetCharacter` (the same slot
+    /// [`crate::query::candidates::MemoryCandidateHandle`] uses). One
+    /// `parking_lot` lock, no actor round-trip — safe to call from egui
+    /// immediate mode.
+    pub fn card_name(&self) -> String {
+        self.shared.card_name.lock().clone()
+    }
+
+    /// Current session id.
+    ///
+    /// Mailbox-free: reads the shared slot the actor replaces when a session
+    /// split resets the session. One `parking_lot` lock, no actor round-trip.
+    pub fn session_id(&self) -> SessionId {
+        self.shared.session_id.lock().clone()
+    }
+
+    /// When the current session started (UTC).
+    ///
+    /// Mailbox-free, same shared slot as [`EneHandle::session_id`]; replaced
+    /// on session split.
+    pub fn session_started_at(&self) -> DateTime<Utc> {
+        *self.shared.session_started_at.lock()
+    }
+
+    /// Turn count of the current session.
+    ///
+    /// Mailbox-free: reads an `Arc<AtomicU32>` the actor stores after each
+    /// recorded user input and after each completed stream outcome, and
+    /// resets to zero on a session split. No lock, no actor round-trip.
+    pub fn turn_count(&self) -> u32 {
+        self.shared.turn_count.load(Ordering::Relaxed)
+    }
+
+    /// The current configuration.
+    ///
+    /// Mailbox-free: clones the shared `Arc<EneConfig>` under a
+    /// `parking_lot` read lock (readers never serialize against each other).
+    /// The actor swaps the `Arc` under a write lock when a feature-settings
+    /// update or proactive-settings update changes the config — read-only
+    /// sharing here, consistent with the write-path fixes.
+    pub fn config(&self) -> Arc<EneConfig> {
+        self.shared.config.read().clone()
+    }
+
+    /// The loaded character card, if any.
+    ///
+    /// Mailbox-free: reads the shared slot the actor replaces on every
+    /// `SetCharacter`. Returns `None` only if no card was ever loaded (the
+    /// actor always loads the bootstrap card, so this is `Some` in practice).
+    pub fn character_card(&self) -> Option<Arc<CharacterCardV3>> {
+        self.shared.character_card.lock().clone()
+    }
+
+    /// Fetch the full conversation history.
+    ///
+    /// The one deliberately mailbox-based read: history is a large payload
+    /// (`Vec<ene_mind::HistoryEntry>`), so it is *not* mirrored into the
+    /// mailbox-free shared state. Use the synchronous accessors
+    /// ([`EneHandle::card_name`], [`EneHandle::turn_count`], ...) for the
+    /// small per-frame state and reserve this for history re-sync / bulk
+    /// dumps.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PublicApiError::ActorDead`] if the actor is no longer
+    /// running.
+    pub async fn history(&self) -> Result<Vec<ene_mind::HistoryEntry>, PublicApiError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::GetHistory { reply: tx })
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
     /// Read-only session query handle (list / export / import / search /
@@ -707,6 +874,58 @@ impl EneHandle {
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn vision(&self) -> crate::vision::VisionHandle {
         self.vision.clone()
+    }
+
+    /// Tool registry operations handle (list / search / call / invalidate)
+    /// (#406).
+    ///
+    /// Cheap to call repeatedly; the returned handle is a small `Clone`.
+    /// Unlike [`EneHandle::sessions`] / [`EneHandle::candidates`] /
+    /// [`EneHandle::vision`] it routes through the actor mailbox — tool
+    /// calls and searches are admission-capped there (Stage 8) and the
+    /// registry is actor-owned state; see [`crate::tools`].
+    pub fn tools(&self) -> crate::tools::ToolHandle {
+        self.tools.clone()
+    }
+
+    /// Hot-swap the character card (CLI `/card`) (#406).
+    ///
+    /// Replaces the loaded card on the actor's session, resets the proactive
+    /// scheduler, and keeps the shared card-name slot used by
+    /// [`EneHandle::candidates`] in sync.
+    pub async fn set_character(
+        &self,
+        card: ene_config::CharacterCardV3,
+    ) -> Result<(), EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::SetCharacter {
+                card: Box::new(card),
+                reply: tx,
+            })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
+    }
+
+    /// Manually trigger a compression-only pass over the current
+    /// conversation (#369 / #406).
+    ///
+    /// Compression trims history into a stored scene summary but does **not**
+    /// start a new session: the session id is unchanged, and the returned
+    /// [`ene_mind::CompressionResult`] reflects those compression-only
+    /// semantics (no `SplitReason`, no `new_session_id`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EneRuntimeError::Mind`] wrapping
+    /// [`ene_mind::EneSessionError::SplitNotNeeded`] when there is no
+    /// history to compress or memory is disabled.
+    pub async fn compress_context(&self) -> Result<ene_mind::CompressionResult, EneRuntimeError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::CompressContext { reply: tx })
+            .map_err(|_| EneRuntimeError::ChannelClosed)?;
+        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 
     /// Start a turn. Returns [`RunError::Busy`] if a turn is already in flight
@@ -1310,8 +1529,8 @@ mod tests {
 
     /// Regression test: the `Drop` for `EneHandle` must not gate shutdown
     /// on `Arc::strong_count(&cmd_tx) == 1`, which never holds because a
-    /// single handle holds three independent `Arc` clones of `cmd_tx`
-    /// (self, diagnostics, vision). The [`HandleShutdownGuard`]
+    /// single handle holds four independent `Arc` clones of `cmd_tx`
+    /// (self, diagnostics, vision, tools). The [`HandleShutdownGuard`]
     /// is shared via one `Arc` across all handle clones, so its `Drop` must
     /// fire exactly once — when the *last* clone is released. Dropping an
     /// intermediate clone must leave the actor alive; dropping the last
@@ -1687,18 +1906,43 @@ mod tests {
         broadcast::Receiver<LifecycleEvent>,
         Arc<TurnGate>,
     ) {
+        let (actor, diag_rx, lifecycle_rx, gate, _shared) = build_bare_actor_with_session_and_gate(
+            registry,
+            task_caps,
+            ConversationSession::new(),
+            EneConfig::default(),
+        );
+        (actor, diag_rx, lifecycle_rx, gate)
+    }
+
+    /// Like [`build_bare_actor_with_gate`] but with an injected session and
+    /// config, and also hands back the shared [`SharedActorState`] so tests
+    /// can assert on the mailbox-free slots. `pub(super)` so
+    /// `actor::tests` can reuse it for session-split / config-sync tests.
+    pub(super) fn build_bare_actor_with_session_and_gate(
+        registry: Arc<dyn ene_plugin_host::ToolRegistry>,
+        task_caps: &crate::task_config::ToolRuntimeConfig,
+        session: ConversationSession,
+        mut config: EneConfig,
+    ) -> (
+        actor::TurnActor,
+        broadcast::Receiver<DiagnosticEvent>,
+        broadcast::Receiver<LifecycleEvent>,
+        Arc<TurnGate>,
+        Arc<SharedActorState>,
+    ) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, _event_rx) = broadcast::channel(16);
         let (lifecycle_tx, lifecycle_rx) = broadcast::channel(16);
         let (audio_tx, _audio_rx) = mpsc::channel(8);
         let (diag_tx, diag_rx) = broadcast::channel(64);
-        let mut config = EneConfig::default();
         config
             .set_section(task_caps)
             .expect("set_section(ToolRuntimeConfig) succeeds");
         let health_monitor =
             ene_ai::ProviderHealthMonitor::new(std::time::Duration::from_secs(1), 8);
         let gate = Arc::new(TurnGate::new());
+        let shared = Arc::new(SharedActorState::new(&config, &session));
         let actor = actor::TurnActor::new(
             cmd_rx,
             cmd_tx,
@@ -1709,7 +1953,7 @@ mod tests {
             diag_tx.subscribe(),
             Arc::clone(&gate),
             config,
-            ConversationSession::new(),
+            session,
             None,
             registry,
             None,
@@ -1718,9 +1962,9 @@ mod tests {
             Vec::new(),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
-            Arc::new(parking_lot::Mutex::new(String::new())),
+            Arc::clone(&shared),
         );
-        (actor, diag_rx, lifecycle_rx, gate)
+        (actor, diag_rx, lifecycle_rx, gate, shared)
     }
 
     /// Pure test of the shared admission mechanism (`actor::admit_task`),

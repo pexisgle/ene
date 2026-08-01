@@ -1,5 +1,9 @@
 //! Prompt section kinds and deterministic ordering.
 
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
 /// Logical section of a [`super::PromptPacket`].
 ///
 /// Variant order matches the deterministic render order in

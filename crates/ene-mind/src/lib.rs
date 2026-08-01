@@ -1,20 +1,4 @@
 #![warn(missing_docs)]
-#![expect(
-    clippy::option_if_let_else,
-    reason = "nursery style; match/if-let clarity preferred locally"
-)]
-#![expect(
-    clippy::arithmetic_side_effects,
-    reason = "mind turn pipeline uses intentional turn/score/index arithmetic"
-)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "history/token helpers index into bounds-checked conversational buffers"
-)]
-#![expect(
-    clippy::string_slice,
-    reason = "special-token and summarizer parsers slice at known ASCII delimiters"
-)]
 #![cfg_attr(
     test,
     expect(
@@ -76,8 +60,6 @@ pub mod memory_journal;
 pub mod memory_writer;
 /// Output arbitration: expression validation and hysteresis management.
 pub mod output;
-/// Pre-turn input analysis and turn intent classification.
-pub mod pre_turn;
 /// Proactive companion speech decision pipeline.
 pub mod proactive;
 /// Sectioned prompt packet composition with budget-aware assembly.
@@ -182,6 +164,13 @@ pub use session::{
 #[doc(no_inline)]
 pub use summarizer::{ConversationSummaryResult, summarize_conversation};
 
-pub(crate) fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|n| haystack.contains(n))
+/// Returns `true` if `haystack` contains any of `needles` as a substring.
+pub(crate) fn contains_any<I, S>(haystack: &str, needles: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    needles
+        .into_iter()
+        .any(|needle| haystack.contains(needle.as_ref()))
 }

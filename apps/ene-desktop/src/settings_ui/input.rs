@@ -95,7 +95,8 @@ impl SettingsInputState {
         self.tts_voice.clone_from(&ai_cfg.tts.voice);
         self.tts_language.clone_from(&ai_cfg.tts.language);
         self.tts_model_path = ai_cfg.tts.model_path.clone().unwrap_or_default();
-        self.tts_voices_path = ai_cfg.tts.voices_path.clone().unwrap_or_default();
+        // #313: `voices_path` moved from `ai.tts` to the Kokoro plugin profile.
+        self.tts_voices_path = settings.kokoro_voices_path();
 
         self.stt_provider.clone_from(&ai_cfg.stt.provider);
         self.stt_model.clone_from(&ai_cfg.stt.model);

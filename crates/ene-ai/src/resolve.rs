@@ -44,14 +44,20 @@ pub struct ResolvedLocalModel {
 
 impl ResolvedLocalModel {
     pub(crate) fn from_named(name: &str, def: &LocalModelDef) -> Self {
+        // #313: `mmproj_url` / `mmproj_path` / `acceleration` moved out of
+        // `LocalModelDef` into the llama.cpp plugin config
+        // (`plugins.list.llama-cpp.config`). Until the llama.cpp provider
+        // plugin exists, the in-process readers keep working by sourcing them
+        // from the plugin config here at resolve time.
+        let llama_cpp = crate::plugin_config::LlamaCppPluginConfig::global();
         Self {
             name: name.to_string(),
             url: def.url.clone(),
             model_path: def.model_path.clone(),
-            mmproj_url: def.mmproj_url.clone(),
-            mmproj_path: def.mmproj_path.clone(),
+            mmproj_url: llama_cpp.mmproj_url,
+            mmproj_path: llama_cpp.mmproj_path,
             quantization: def.quantization.clone(),
-            acceleration: def.acceleration,
+            acceleration: llama_cpp.acceleration,
             gpu_layers: def.gpu_layers.clone(),
             context_size: def.context_size,
         }

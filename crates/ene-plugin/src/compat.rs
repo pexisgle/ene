@@ -12,7 +12,7 @@ use ene_plugin_proto::{
 };
 use tokio::sync::Mutex;
 
-use crate::plugin::{ToolPlugin, ToolPluginCapabilities};
+use crate::plugin::{ConfigurablePlugin, ToolPlugin, ToolPluginCapabilities};
 
 /// Wraps any [`ToolProvider`] into a [`ToolPlugin`].
 ///
@@ -148,7 +148,9 @@ impl<T: ToolProvider + Send + Sync> ToolPlugin for ToolProviderPlugin<T> {
     fn set_sandbox(&self, sandbox: &SandboxConfigData) {
         self.provider.set_sandbox(sandbox);
     }
+}
 
+impl<T: ToolProvider> ConfigurablePlugin for ToolProviderPlugin<T> {
     fn set_config(&self, config: &serde_json::Value) {
         self.provider.set_config(config);
     }

@@ -1,38 +1,58 @@
 //! Diagnostics facade for opt-in pipeline and memory APIs.
 //!
-//! Chat-critical events stay on [`crate::EneEvent`]. Pipeline phases/metrics
-//! and memory/journal/tool inspection live here.
+//! Chat-critical events stay on [`crate::EneEvent`]. This facade is strictly
+//! *observability*: pipeline phases/metrics, provider health/fallback
+//! history, actor snapshots, and memory/journal inspection. Control surface —
+//! character-card swap ([`crate::EneHandle::set_character`]), manual context
+//! compression ([`crate::EneHandle::compress_context`]), and tool
+//! operations ([`crate::EneHandle::tools`]) — moved back onto
+//! [`crate::EneHandle`] itself.
+//!
+//! The memory surface (`MemoryHandle`) is the one mutation-capable part of
+//! this facade (pin/status/restore/forget, commitment lifecycle, pending-write
+//! inspection/drain, store backup/integrity). It deliberately does **not**
+//! expose the raw `MemoryStore`: the former `store()` accessor was removed
+//! so consumers must go through the facade's own methods, which carry
+//! the same `require_store()` errors as the rest of the surface.
 
 use crate::error::EneRuntimeError;
 use crate::handle::{EneCommand, EneStateSnapshot};
 use crate::public_api::PublicApiError;
 use crate::types::TurnId;
-use ene_mind::SplitResult;
-use ene_plugin_proto::ToolSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-/// A read-only handle for querying the memory subsystem.
+/// A handle for querying **and mutating** the memory subsystem.
 ///
-/// Wraps the memory store and embedding provider, exposing only
-/// the operations needed by downstream consumers (CLI commands, etc.).
+/// Wraps the memory store and embedding provider, exposing the operations
+/// needed by downstream consumers (CLI commands, desktop bridge, etc.).
+/// Despite living on the diagnostics facade it is not read-only:
+/// pin/status/restore/forget mutations, commitment lifecycle
+/// (complete/cancel), pending-write inspection and drain, and store
+/// backup/integrity diagnostics are part of its surface, which is why the
+/// type is named [`MemoryHandle`] rather than a "query" handle.
+///
+/// The raw `MemoryStore` is intentionally not exposed (`store()` was removed);
+/// every operation routes through the facade's own methods and
+/// reports `EneRuntimeError::Memory` (connection error when memory is
+/// disabled) exactly like the rest of the surface.
 #[derive(Clone)]
-pub struct MemoryQueryHandle {
+pub struct MemoryHandle {
     pub(crate) store: Option<Arc<ene_store::MemoryStore>>,
     pub(crate) embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
     pub(crate) mind_memory: ene_mind::MindMemoryConfig,
 }
 
-impl std::fmt::Debug for MemoryQueryHandle {
+impl std::fmt::Debug for MemoryHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemoryQueryHandle")
+        f.debug_struct("MemoryHandle")
             .field("enabled", &self.is_enabled())
             .finish()
     }
 }
 
-impl MemoryQueryHandle {
+impl MemoryHandle {
     pub(crate) fn new(
         store: Option<Arc<ene_store::MemoryStore>>,
         embedder: Option<Arc<dyn ene_ai::EmbeddingProvider>>,
@@ -48,16 +68,6 @@ impl MemoryQueryHandle {
     /// Whether memory is enabled and both store and embedder are available.
     pub fn is_enabled(&self) -> bool {
         self.store.is_some() && self.embedder.is_some()
-    }
-
-    /// Returns the backing memory store when memory is configured.
-    pub const fn store(&self) -> Option<&Arc<ene_store::MemoryStore>> {
-        self.store.as_ref()
-    }
-
-    /// Returns the embedding provider when memory is configured.
-    pub fn embedder(&self) -> Option<&Arc<dyn ene_ai::EmbeddingProvider>> {
-        self.embedder.as_ref()
     }
 
     /// Embed a text query for similarity search.
@@ -241,10 +251,122 @@ impl MemoryQueryHandle {
     }
 
     /// Mark a commitment as done.
+    ///
+    /// # Actor consistency
+    ///
+    /// [`ene_mind::commitments::CommitmentLedger`] holds no in-memory cache
+    /// and the actor re-reads active commitments from the store at prompt
+    /// injection, so this direct store write cannot desync the actor.
     pub async fn complete_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
         let store = self.require_store()?;
         store
             .complete_commitment(id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Mark a commitment as cancelled.
+    ///
+    /// Same actor-consistency guarantee as [`Self::complete_commitment`]:
+    /// the ledger is stateless, so a direct store write is harmless.
+    pub async fn cancel_commitment(&self, id: i64) -> Result<bool, EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .cancel_commitment(id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Count pending (retryable) and permanent failed memory writes.
+    pub async fn count_pending_memory_writes(
+        &self,
+        character_id: &str,
+    ) -> Result<(usize, usize), EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .count_pending_memory_writes(character_id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// List pending / permanent memory-write rows for a character.
+    pub async fn list_pending_memory_writes(
+        &self,
+        character_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ene_core::PendingMemoryWrite>, EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .list_pending_memory_writes(character_id, limit)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Force pending rows for a character to be due immediately.
+    ///
+    /// Used by `/memory retry` so the operator can drain the queue without
+    /// waiting for exponential backoff.
+    pub async fn schedule_pending_memory_writes_now(
+        &self,
+        character_id: &str,
+    ) -> Result<usize, EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .schedule_pending_memory_writes_now(character_id)
+            .await
+            .map_err(EneRuntimeError::Memory)
+    }
+
+    /// Drain due pending memory writes for a character using the mind engine.
+    ///
+    /// The caller must schedule the writes as due first (via
+    /// [`Self::schedule_pending_memory_writes_now`]); this method only drains
+    /// the now-due batch, running [`ene_mind::CognitionEngine`]'s drain pass
+    /// with this handle's embedder. Errors are surfaced by
+    /// [`ene_mind::CognitionEngine::drain_pending_memory_writes`] silently
+    /// (it is a best-effort drain), so this only fails when the store is
+    /// unavailable.
+    pub async fn drain_pending_memory_writes(
+        &self,
+        config: &ene_mind::MindConfig,
+        llm: &dyn ene_ai::LlmProvider,
+        limit: usize,
+    ) -> Result<(), EneRuntimeError> {
+        let store = self.require_store()?;
+        let embedder = self.embedder.as_ref().map(std::convert::AsRef::as_ref);
+        ene_mind::CognitionEngine::drain_pending_memory_writes(
+            store.as_ref(),
+            config,
+            llm,
+            embedder,
+            limit,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Create a timestamped file backup of this store's database.
+    ///
+    /// Returns an error when the store is in-memory (no path).
+    pub async fn backup(&self) -> Result<std::path::PathBuf, EneRuntimeError> {
+        let store = self.require_store()?;
+        store.backup().await.map_err(EneRuntimeError::Memory)
+    }
+
+    /// On-disk path of the store's database, when opened from a file.
+    ///
+    /// Exposed (rather than the store itself) so backup/restore commands can
+    /// locate the database file without reaching for the store handle.
+    #[must_use]
+    pub fn path(&self) -> Option<&std::path::Path> {
+        self.store.as_ref().and_then(|s| s.path())
+    }
+
+    /// Run `PRAGMA integrity_check` on the open connection.
+    pub async fn check_integrity(&self) -> Result<(), EneRuntimeError> {
+        let store = self.require_store()?;
+        store
+            .check_integrity()
             .await
             .map_err(EneRuntimeError::Memory)
     }
@@ -255,6 +377,246 @@ impl MemoryQueryHandle {
                 "Memory store not available".into(),
             ))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type StreamResult = std::pin::Pin<
+        Box<
+            dyn tokio_stream::Stream<
+                    Item = Result<ene_ai::LlmResponseChunk, ene_ai::LlmProviderError>,
+                > + Send,
+        >,
+    >;
+
+    /// Minimal `LlmProvider` double whose completions always fail, used to
+    /// exercise facade methods that take an `&dyn LlmProvider` (the pending
+    /// write drain) without touching a real backend.
+    struct FailingLlm;
+
+    #[async_trait::async_trait]
+    impl ene_ai::LlmProvider for FailingLlm {
+        fn name(&self) -> &'static str {
+            "failing-test-llm"
+        }
+
+        async fn create_chat_stream(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _tools: &[ene_plugin_proto::ToolSpec],
+        ) -> Result<StreamResult, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "test double: streaming not implemented".to_string(),
+            ))
+        }
+
+        async fn chat_completion(
+            &self,
+            _messages: &[ene_ai::LlmMessage],
+            _json_schema: Option<serde_json::Value>,
+        ) -> Result<ene_ai::LlmCompletion, ene_ai::LlmProviderError> {
+            Err(ene_ai::LlmProviderError::Provider(
+                "test double: forced extraction failure".to_string(),
+            ))
+        }
+    }
+
+    async fn test_handle() -> MemoryHandle {
+        let store = ene_store::MemoryStore::open_in_memory(4).await.unwrap();
+        MemoryHandle::new(
+            Some(std::sync::Arc::new(store)),
+            None,
+            ene_mind::MindMemoryConfig::default(),
+        )
+    }
+
+    fn storeless_handle() -> MemoryHandle {
+        MemoryHandle::new(None, None, ene_mind::MindMemoryConfig::default())
+    }
+
+    /// Assert a facade call failed with the disabled-store connection error.
+    fn assert_connection_error<T: std::fmt::Debug>(result: &Result<T, EneRuntimeError>) {
+        assert!(
+            matches!(
+                result,
+                Err(EneRuntimeError::Memory(
+                    ene_store::EneMemoryError::MemoryStoreConnectionError(_)
+                ))
+            ),
+            "expected connection error, got {result:?}"
+        );
+    }
+
+    async fn insert_commitment(handle: &MemoryHandle, title: &str) -> i64 {
+        let store = handle.store.as_ref().unwrap();
+        store
+            .insert_commitment(&ene_store::NewCommitment {
+                character_id: "ene".into(),
+                user_id: "user1".into(),
+                title: title.into(),
+                description: format!("{title} description"),
+                status: ene_store::CommitmentStatus::Active,
+                due_at: None,
+                due_label: None,
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn complete_and_cancel_commitment_round_trip() {
+        let handle = test_handle().await;
+
+        let done_id = insert_commitment(&handle, "finish review").await;
+        assert!(
+            handle.complete_commitment(done_id).await.unwrap(),
+            "active commitment completes"
+        );
+        assert!(
+            !handle.complete_commitment(done_id).await.unwrap(),
+            "already-done commitment returns false"
+        );
+
+        let cancelled_id = insert_commitment(&handle, "cancel meeting").await;
+        assert!(
+            handle.cancel_commitment(cancelled_id).await.unwrap(),
+            "active commitment cancels"
+        );
+        assert!(
+            !handle.cancel_commitment(cancelled_id).await.unwrap(),
+            "already-cancelled commitment returns false"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_pending_memory_writes_round_trip() {
+        let handle = test_handle().await;
+
+        let store = handle.store.as_ref().unwrap();
+        store
+            .enqueue_pending_memory_write(
+                "ene",
+                "user1",
+                r#"{"character_id":"ene","user_id":"user1"}"#,
+                "boom",
+            )
+            .await
+            .unwrap();
+
+        let (pending, permanent) = handle.count_pending_memory_writes("ene").await.unwrap();
+        assert_eq!((pending, permanent), (1, 0));
+
+        let rows = handle.list_pending_memory_writes("ene", 10).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows.first().map(|r| r.status),
+            Some(ene_core::PendingMemoryWriteStatus::Pending)
+        );
+    }
+
+    #[tokio::test]
+    async fn count_pending_memory_writes_reports_permanent_failures() {
+        let handle = test_handle().await;
+        let store = handle.store.as_ref().unwrap();
+        let id = store
+            .enqueue_pending_memory_write("ene", "user1", "{}", "boom")
+            .await
+            .unwrap();
+
+        // Exhaust the retry budget so the row transitions to permanent.
+        for _ in 0..(ene_store::MemoryStore::PENDING_MEMORY_WRITE_MAX_ATTEMPTS - 1) {
+            store
+                .fail_pending_memory_write(id, "retry failed")
+                .await
+                .unwrap();
+        }
+
+        let (pending, permanent) = handle.count_pending_memory_writes("ene").await.unwrap();
+        assert_eq!((pending, permanent), (0, 1), "exhausted row is permanent");
+    }
+
+    #[tokio::test]
+    async fn schedule_and_drain_pending_memory_writes_round_trip() {
+        let handle = test_handle().await;
+        let store = handle.store.as_ref().unwrap();
+        store
+            .enqueue_pending_memory_write(
+                "ene",
+                "user1",
+                r#"{"character_id":"ene","user_id":"user1"}"#,
+                "boom",
+            )
+            .await
+            .unwrap();
+
+        // Freshly enqueued rows wait out their backoff; scheduling forces them
+        // due immediately so a drain can pick them up.
+        let scheduled = handle
+            .schedule_pending_memory_writes_now("ene")
+            .await
+            .unwrap();
+        assert_eq!(scheduled, 1, "one pending row forced due");
+
+        // The drain is best-effort: the facade returns Ok even when the queued
+        // payload cannot be replayed, and the row is retained with its retry
+        // count bumped rather than dropped.
+        handle
+            .drain_pending_memory_writes(&ene_mind::MindConfig::default(), &FailingLlm, 10)
+            .await
+            .unwrap();
+
+        let (pending, permanent) = handle.count_pending_memory_writes("ene").await.unwrap();
+        assert_eq!(
+            (pending, permanent),
+            (1, 0),
+            "row stays pending after failed replay"
+        );
+
+        let rows = handle.list_pending_memory_writes("ene", 10).await.unwrap();
+        assert_eq!(
+            rows.first().map(|r| r.attempts),
+            Some(2),
+            "drain re-failed the row and bumped its retry count"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_path_integrity_and_backup() {
+        let handle = test_handle().await;
+
+        assert_eq!(handle.path(), None, "in-memory store has no file path");
+        handle.check_integrity().await.unwrap();
+
+        let err = handle.backup().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                EneRuntimeError::Memory(ene_store::EneMemoryError::BackupError(_))
+            ),
+            "in-memory stores cannot be backed up to a file, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn storeless_handle_reports_connection_error_across_surface() {
+        let handle = storeless_handle();
+
+        assert_eq!(handle.path(), None, "store-less handle has no db path");
+        assert_connection_error(&handle.complete_commitment(1).await);
+        assert_connection_error(&handle.cancel_commitment(1).await);
+        assert_connection_error(&handle.backup().await);
+        assert_connection_error(&handle.check_integrity().await);
+        assert_connection_error(&handle.schedule_pending_memory_writes_now("ene").await);
+        assert_connection_error(&handle.count_pending_memory_writes("ene").await);
+        assert_connection_error(&handle.list_pending_memory_writes("ene", 10).await);
+        assert_connection_error(
+            &handle
+                .drain_pending_memory_writes(&ene_mind::MindConfig::default(), &FailingLlm, 10)
+                .await,
+        );
     }
 }
 
@@ -439,10 +801,15 @@ impl DiagnosticEventReceiver {
 }
 
 /// Concrete diagnostics facade returned by [`crate::EneHandle::diagnostics`].
+///
+/// Observability-only surface: memory/journal inspection, provider health,
+/// diagnostic-event subscription, and actor snapshots. Control operations
+/// (character swap, compression, tools) live on [`crate::EneHandle`].
 pub struct EneDiagnostics {
     pub(crate) cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     pub(crate) diag_tx: broadcast::Sender<DiagnosticEvent>,
-    pub(crate) memory: MemoryQueryHandle,
+    pub(crate) memory: MemoryHandle,
+    /// Provider health monitor for failover diagnostics.
     pub(crate) health_monitor: ene_ai::ProviderHealthMonitor,
 }
 
@@ -455,8 +822,8 @@ impl std::fmt::Debug for EneDiagnostics {
 }
 
 impl EneDiagnostics {
-    /// Memory / journal query surface.
-    pub const fn memory(&self) -> &MemoryQueryHandle {
+    /// Memory / journal query-and-mutation surface.
+    pub const fn memory(&self) -> &MemoryHandle {
         &self.memory
     }
 
@@ -490,78 +857,6 @@ impl EneDiagnostics {
             .send(EneCommand::GetSnapshot { reply: tx })
             .map_err(|_| PublicApiError::ActorDead)?;
         rx.await.map_err(|_| PublicApiError::ActorDead)
-    }
-
-    /// List available tools from the registry.
-    pub async fn list_tools(&self) -> Result<Vec<ToolSpec>, PublicApiError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ListTools { reply: tx })
-            .map_err(|_| PublicApiError::ActorDead)?;
-        rx.await.map_err(|_| PublicApiError::ActorDead)
-    }
-
-    /// Search tools in the registry using RAG if available.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EneRuntimeError::Busy`] when the actor's tool-search task
-    /// set is at capacity (Stage 8).
-    pub async fn search_tools(&self, query: String) -> Result<Vec<ToolSpec>, EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::SearchTools { query, reply: tx })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
-    }
-
-    /// Call a tool directly by name with arguments.
-    pub async fn call_tool(
-        &self,
-        name: String,
-        arguments: String,
-    ) -> Result<String, EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::CallTool {
-                name,
-                arguments,
-                turn: None,
-                reply: tx,
-            })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
-    }
-
-    /// Manually trigger a session split / compression pass.
-    pub async fn manual_split(&self) -> Result<SplitResult, EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::ManualSplit { reply: tx })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
-    }
-
-    /// Invalidate the Tool RAG index.
-    pub fn invalidate_tool_index(&self) -> Result<(), PublicApiError> {
-        self.cmd_tx
-            .send(EneCommand::InvalidateToolIndex)
-            .map_err(|_| PublicApiError::ActorDead)
-    }
-
-    /// Hot-swap the character card (CLI `/card`).
-    pub async fn set_character(
-        &self,
-        card: ene_config::CharacterCardV3,
-    ) -> Result<(), EneRuntimeError> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(EneCommand::SetCharacter {
-                card: Box::new(card),
-                reply: tx,
-            })
-            .map_err(|_| EneRuntimeError::ChannelClosed)?;
-        rx.await.map_err(|_| EneRuntimeError::ChannelClosed)?
     }
 }
 

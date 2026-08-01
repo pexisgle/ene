@@ -40,7 +40,11 @@
 #![warn(missing_docs)]
 #![cfg_attr(
     test,
-    expect(clippy::unwrap_used, reason = "unit tests use unwrap for assertions")
+    expect(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "unit tests use expect/unwrap for concise assertions"
+    )
 )]
 
 /// Plugin capability declarations.

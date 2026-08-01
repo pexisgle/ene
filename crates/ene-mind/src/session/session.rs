@@ -1,3 +1,7 @@
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic"
+)]
 use super::session_split::generate_session_id;
 use super::special_token::split_text_and_special_tokens;
 use super::types::SessionId;

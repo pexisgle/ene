@@ -301,6 +301,23 @@ configuration.
 MCP stdio servers support the same `env_passthrough` field in their
 `plugins.mcp_servers` entry for parity.
 
+### Plugin configuration flow (`set_config` / `set_profiles`)
+
+Every plugin — tool **or** provider — receives its configuration from the
+host once, during the IPC handshake. The `plugins.list.<name>.config` blob is
+delivered verbatim via `ConfigurablePlugin::set_config`; the
+`plugins.list.<name>.profiles.<profile>` map (for per-model/voice settings) is
+delivered via `ConfigurablePlugin::set_profiles`. Both are host-opaque: the
+host stores them as-is, never interprets their keys, and re-sends them on
+reconnect. Provider plugins (LLM/embed/TTS/STT) get the same delivery as tool
+plugins, so e.g. the Anthropic provider can receive its API key at handshake
+time rather than per request.
+
+A plugin advertises the JSON Schema its config accepts via
+`config_schema()`. Fields marked `x-ene-secret: true` in that schema will be
+masked in the UI (planned) and redacted from host logs (see
+[`configuration.md`](../configuration.md) for the exact shape).
+
 ### Binary checksum verification (TOFU)
 
 On first activation, the host computes the SHA-256 checksum of the plugin

@@ -284,8 +284,16 @@ impl SileroVadFactory {
             )
         })?;
         let path = resolve_model_path(&ai);
-        let engine =
-            SileroVadEngine::open(&path, resolved.threshold, ai.ort_dylib_path.as_deref())?;
+        // #313: the ONNX Runtime dylib path moved from `AiConfig` to the ONNX
+        // plugin config (`plugins.list.onnx.config.ort_dylib_path`).
+        let ort_dylib_path =
+            ene_ai::plugin_config::plugin_config_blob(config, ene_ai::plugin_config::ONNX_PLUGIN)
+                .as_ref()
+                .and_then(|blob| blob.get("ort_dylib_path"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|p| !p.is_empty());
+        let engine = SileroVadEngine::open(&path, resolved.threshold, ort_dylib_path.as_deref())?;
         Ok(Box::new(engine))
     }
 }

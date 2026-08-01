@@ -9,7 +9,11 @@
 //! none of the arbiter tests that use this double exercise recall).
 
 #![cfg(test)]
-
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "test support for memory-writer tests uses deliberate id/access-count arithmetic and indexes its in-memory pending-candidate buffer"
+)]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -304,6 +308,22 @@ impl MemoryPort for InMemoryMemoryPort {
         }
 
         Ok(before - pending.len())
+    }
+
+    async fn list_pending_candidates(
+        &self,
+        character_id: &str,
+        status_filter: Option<ene_core::PendingCandidateStatus>,
+    ) -> Result<Vec<PendingCandidate>, MemoryPortError> {
+        let pending = self.pending.lock();
+        Ok(pending
+            .iter()
+            .filter(|c| {
+                c.character_id == character_id
+                    && status_filter.is_none_or(|status| c.status == status)
+            })
+            .cloned()
+            .collect())
     }
 
     async fn list_active_commitments(

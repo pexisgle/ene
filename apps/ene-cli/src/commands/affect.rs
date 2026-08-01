@@ -24,15 +24,17 @@ impl CliCommand for AffectCommand {
 
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let sub = parse_subcommand(arg);
-        let snapshot = ctx
-            .handle
-            .diagnostics()
+        let diag = ctx.handle.diagnostics();
+        let snapshot = diag
             .get_snapshot()
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
         let card_name = snapshot.card_name.as_str();
+        // The snapshot no longer carries the memory handle; it lives on
+        // the diagnostics facade, which is the documented access path.
+        let memory = diag.memory();
         match sub {
-            "show" => match snapshot.memory.show_affect_state(card_name).await {
+            "show" => match memory.show_affect_state(card_name).await {
                 Ok(state) => {
                     println!(
                         "[Affect] mood={} valence={:.2} arousal={:.2} trust={:.2} affinity={:.2}",
@@ -42,7 +44,7 @@ impl CliCommand for AffectCommand {
                 }
                 Err(e) => Err(CliError::ExecutionFailed(format!("Show error: {e}"))),
             },
-            "reset" => match snapshot.memory.reset_affect_state(card_name).await {
+            "reset" => match memory.reset_affect_state(card_name).await {
                 Ok(()) => {
                     println!("{}", style::success("[Affect] Reset to neutral state"));
                     Ok(CommandOutcome::Continue)

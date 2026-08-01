@@ -1,6 +1,13 @@
 //! Configuration for the Ene mind runtime.
+//!
+//! Defines `MindConfig` and its sub-sections for context management,
+//! memory, emotion, and character processing.
 
 use ene_config::schemars;
+
+// ────────────────────────────────────────────
+// Top-level MindConfig — registered under "mind" key in settings.json
+// ────────────────────────────────────────────
 
 ene_config::define_config!(
     settings,
@@ -28,22 +35,27 @@ ene_config::define_config!(
         #[schemars(skip)]
         pub character: CharacterMemoryConfig,
 
-        /// Proactive companion speech policy.
+        /// Proactive companion speech policy (#103).
         pub proactive: ProactiveConfig,
 
-        /// Topic-boundary detection policy.
+        /// Topic-boundary detection policy (#367).
         pub topic_boundary: TopicBoundaryConfig,
 
-        /// Session lifecycle settings.
+        /// Session lifecycle settings (#369).
         pub session: SessionConfig,
     }
 );
 
+// ────────────────────────────────────────────
+// Sub-sections
+// ────────────────────────────────────────────
+
 /// Context window, compression triggers, and rolling summarization.
 ///
-/// Prompt packing fills the model's effective context window in priority order
-/// rather than allocating fixed sub-budgets. The only window-related knob here
-/// is `max_prompt_tokens`, an optional operator cap on the prompt window.
+/// Per-section token budgets were removed in #370: prompt packing now fills
+/// the model's effective context window (#364) in priority order rather than
+/// allocating fixed sub-budgets. The only window-related knob here is
+/// `max_prompt_tokens`, an optional operator cap on the prompt window.
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
@@ -54,18 +66,21 @@ pub struct ContextConfig {
     ///
     /// When set, combined with the model's advertised window as
     /// `min(advertised, max_prompt_tokens)` when computing the effective
-    /// context window, so it can only ever *shrink* a model's
+    /// context window (#364, #370), so it can only ever *shrink* a model's
     /// stated limit, never exceed it. When `None` (the default) the prompt
-    /// auto-follows the model's advertised window.
+    /// auto-follows the model's advertised window. Packing then fills that
+    /// window in priority order rather than against per-section sub-budgets.
     pub max_prompt_tokens: Option<usize>,
     /// Number of recent conversation turns to include in the prompt.
     pub recent_turns: usize,
     /// Turn count threshold before scene-level compression runs.
     pub scene_turn_threshold: usize,
-    /// Secondary, token-based safety net complementing the topic-boundary
-    /// trigger: when a single topic runs long without a detected boundary,
-    /// the oldest span is compressed once the retained history reaches this
-    /// many estimated tokens.
+    /// History token estimate at or above which window-pressure compression
+    /// runs (#368). This is the secondary, token-based safety net that
+    /// complements the primary topic-boundary trigger: when a single topic
+    /// runs long without a detected boundary, the oldest span is compressed
+    /// once the retained history reaches this many estimated tokens. Replaces
+    /// the former message-count ratio heuristic.
     pub context_pressure_tokens: usize,
     /// Number of scene spans before chapter rollup.
     pub chapter_span_threshold: usize,
@@ -99,38 +114,46 @@ impl Default for ContextConfig {
 pub struct MindMemoryConfig {
     /// Half-life in days for lifecycle decay score and recall recency scoring.
     pub default_forgetting_half_life_days: f64,
-    /// Score below which an active memory transitions to faded.
+    /// Score below which an active memory transitions to faded (#350).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub fade_threshold: f32,
-    /// Score below which a faded memory transitions to archived.
+    /// Score below which a faded memory transitions to archived (#350).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub archive_threshold: f32,
-    /// A probability; values outside `0.0..=1.0` are clamped on load.
+    /// Minimum confidence threshold for persisting a memory. This is a
+    /// probability, so values outside `0.0..=1.0` are clamped on load
+    /// (issue #95 confidence range guard).
     #[serde(deserialize_with = "deserialize_unit_interval")]
     pub min_confidence_to_persist: f64,
     /// Minimum confidence margin by which an incoming candidate must exceed an
-    /// existing contradictory memory to *supersede* (replace) it. One of the
-    /// four arbiter thresholds (with [`Self::min_confidence_to_persist`],
-    /// [`Self::semantic_similarity_threshold`], and
-    /// [`Self::dispute_confidence_gap`]); a smaller margin falls through to
-    /// dispute / user-confirmation handling.
+    /// existing contradictory memory to *supersede* (replace) it (#352).
+    ///
+    /// One of the four arbiter thresholds (with [`Self::min_confidence_to_persist`],
+    /// [`Self::semantic_similarity_threshold`], and [`Self::dispute_confidence_gap`]).
+    /// When the candidate's confidence exceeds the existing memory's by at least
+    /// this delta the arbiter replaces the old row; a smaller margin falls
+    /// through to dispute / user-confirmation handling.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub supersede_confidence_delta: f32,
     /// Cosine similarity at or above which two memories are treated as semantic
-    /// duplicates during deduplication.
+    /// duplicates during deduplication (#352).
     ///
     /// This value is strongly dependent on the embedding model's similarity
     /// distribution, so it should be re-tuned when the embedding provider is
-    /// swapped (the provider layer is designed for exactly that).
+    /// swapped (the provider layer is designed for exactly that, #318).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub semantic_similarity_threshold: f32,
     /// Confidence gap below which a contradictory candidate marks the existing
-    /// memory as *disputed* rather than superseding it: the existing memory is
-    /// flagged disputed when `candidate − existing > -dispute_confidence_gap`;
-    /// a larger shortfall defers the decision to user confirmation.
+    /// memory as *disputed* rather than superseding it or escalating to user
+    /// confirmation (#352).
+    ///
+    /// When the candidate's confidence is within this gap of the existing
+    /// memory's (i.e. `candidate − existing > -dispute_confidence_gap`) the
+    /// existing memory is flagged disputed; a larger shortfall defers the
+    /// decision to user confirmation.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub dispute_confidence_gap: f32,
-    /// Character bigram Jaccard threshold for a relaxed `source_quote` match.
+    /// Character bigram Jaccard threshold for a relaxed `source_quote` match (#353).
     ///
     /// When normalized substring matching fails, the arbiter compares character
     /// bigrams between the quote and turn text. A score at or above this value
@@ -138,19 +161,21 @@ pub struct MindMemoryConfig {
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub source_quote_ngram_threshold: f32,
     /// Confidence subtracted when a `source_quote` passes only via the n-gram
-    /// fallback.
+    /// fallback (#353).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub source_quote_ngram_confidence_penalty: f32,
     /// Timeout in seconds for a single LLM memory-extraction call. When the
     /// provider does not respond within this budget the extraction fails and
-    /// the pipeline falls back to deterministic candidates.
+    /// the pipeline falls back to deterministic candidates (issue #66).
     pub extraction_timeout_secs: u64,
     /// Minimum title-embedding cosine similarity for the arbiter to treat two
-    /// memories as sharing a contradiction key.
+    /// memories as sharing a contradiction key (#351).
     ///
     /// Kind-specific contradiction checks (`Preference`, `UserProfile`,
-    /// `Semantic`, `Relationship`) decide whether an incoming candidate talks
-    /// about the *same* subject as an existing memory by comparing the cosine
+    /// `Semantic`, `Relationship`, and `Commitment` — see
+    /// [`MemoryKind::is_contradiction_kind`](ene_core::MemoryKind::is_contradiction_kind))
+    /// decide whether an incoming candidate talks about the *same* subject as
+    /// an existing memory by comparing the cosine
     /// similarity of their **title embeddings**. A candidate whose title is at
     /// least this similar to an existing memory of the same kind is checked for
     /// contradiction instead of being persisted as a separate row, so synonymous
@@ -161,7 +186,7 @@ pub struct MindMemoryConfig {
     /// embedding path.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub contradiction_title_similarity_threshold: f32,
-    /// Tool-result grounding and guardrail settings.
+    /// Tool-result grounding and guardrail settings (#92).
     pub tool_grounding: ToolGroundingConfig,
     /// Maximum number of typed memories requested by recall planning.
     pub recall_result_limit: usize,
@@ -184,18 +209,18 @@ pub struct MindMemoryConfig {
     /// MMR relevance-vs-diversity tradeoff in `[0.0, 1.0]`; higher favors relevance.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_lambda: f32,
-    /// Lexical similarity threshold for duplicate cluster merging.
+    /// Lexical similarity threshold for duplicate cluster merging (#78).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_duplicate_cluster_threshold: f32,
-    /// Minimum recalled slots reserved for semantic memories.
+    /// Minimum recalled slots reserved for semantic memories (#78).
     pub mmr_min_slots_semantic: usize,
-    /// Minimum recalled slots reserved for episodic memories.
+    /// Minimum recalled slots reserved for episodic memories (#78).
     pub mmr_min_slots_episodic: usize,
-    /// Minimum recalled slots reserved for user profile memories.
+    /// Minimum recalled slots reserved for user profile memories (#78).
     pub mmr_min_slots_user_profile: usize,
-    /// Minimum recalled slots reserved for commitment memories.
+    /// Minimum recalled slots reserved for commitment memories (#78).
     pub mmr_min_slots_commitment: usize,
-    /// Bonus added to MMR score when a candidate introduces a new recall source.
+    /// Bonus added to MMR score when a candidate introduces a new recall source (#78).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub mmr_source_diversity_bonus: f32,
     /// Hybrid scoring component weights (product defaults live here; store only applies them).
@@ -203,7 +228,7 @@ pub struct MindMemoryConfig {
     /// Score boost when a candidate is sourced from an active commitment.
     pub commitment_boost: f32,
     /// Minimum title embedding similarity for the commitment ledger to treat two
-    /// commitments as the same one.
+    /// commitments as the same one (#387).
     ///
     /// The ledger matches incoming commitment candidates against active rows by
     /// comparing the cosine similarity of their **title embeddings**. A candidate
@@ -217,25 +242,37 @@ pub struct MindMemoryConfig {
     pub commitment_title_similarity_threshold: f32,
     /// Maximum pure-recent fallback candidates gathered during hybrid search.
     pub recent_fallback_limit: usize,
-    /// Candidate pool size for journal / diagnostics hybrid search.
+    /// Maximum unconfirmed pending candidates that compete in recall.
+    ///
+    /// Candidates the arbiter deferred with `AskConfirmationLater` sit
+    /// in the user-approval queue rather than the typed-memory table, so the
+    /// store's gather cannot surface them. Recall loads the live `pending`
+    /// queue and lets up to this many candidates compete in the normal hybrid
+    /// score competition — topic proximity (lexical overlap with the query)
+    /// gates which of them actually surface, so the character only learns of
+    /// unconfirmed info when the conversation touches the topic. `0` disables
+    /// pending-candidate recall entirely (the settings-screen review list is
+    /// unaffected).
+    pub recall_pending_candidate_limit: usize,
+    /// Candidate pool size multiplier base for journal / diagnostics search.
     pub journal_candidate_pool_size: usize,
-    /// Minimum vector similarity for journal / diagnostics search.
+    /// Minimum vector similarity for journal / diagnostics search (#123).
     ///
     /// Distinct from `recall_similarity_threshold` — journal search is
     /// user-facing and uses a stricter similarity gate (default 0.45 vs 0.35
     /// for recall) while accepting the same hybrid score floor (default 0.10
     /// for both).
     pub journal_similarity_threshold: f32,
-    /// Minimum hybrid score for journal / diagnostics search.
+    /// Minimum hybrid score for journal / diagnostics search (#123).
     ///
     /// Distinct from `recall_min_score`. The journal defaults to the same
     /// floor (0.10) so user-facing search returns broad results; the cognitive
     /// recall path can raise it per-character if needed.
     pub journal_min_score: f32,
-    /// Self-reflection pipeline configuration.
+    /// Self-reflection pipeline configuration (#210).
     #[serde(default)]
     pub reflection: ReflectionConfig,
-    /// Pending memory-candidate retention policy.
+    /// Pending memory-candidate retention policy (#420).
     #[serde(default)]
     pub pending_candidate_retention: PendingCandidateRetentionConfig,
 }
@@ -245,17 +282,23 @@ pub struct MindMemoryConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ToolGroundingConfig {
-    /// Enable grounding tool call results into cognitive memory.
+    /// Enable grounding tool call results into cognitive memory (#92).
     pub enabled: bool,
     /// Maximum characters kept for each tool summary stored in memory.
     pub max_summary_chars: usize,
+    /// Persist successful tool calls as procedure memories.
+    ///
     /// Default `false`: lasting value is decided by the post-turn LLM
     /// extractor. Enable only as a deterministic fallback when LLM extraction
     /// is disabled or returns nothing.
     pub persist_success_procedure: bool,
+    /// Persist failed tool calls as reflection memories.
+    ///
     /// Used as a fallback when LLM extraction does not own the turn; the LLM
     /// path may still choose to persist important failures itself.
     pub persist_failure_reflection: bool,
+    /// Persist concise user-visible tool outcomes as episodic memories.
+    ///
     /// Default `false` for the same reason as [`Self::persist_success_procedure`].
     pub persist_user_visible_episodic: bool,
     /// Minimum confidence for tool-derived candidates.
@@ -275,6 +318,7 @@ where
     Ok(f64::deserialize(deserializer)?.clamp(0.0, 1.0))
 }
 
+/// Clamp a deserialized `f32` into the closed unit interval `0.0..=1.0`.
 fn deserialize_unit_interval_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: ::ene_config::serde::Deserializer<'de>,
@@ -312,6 +356,7 @@ impl Default for MindMemoryConfig {
             commitment_boost: 0.25,
             commitment_title_similarity_threshold: 0.82,
             recent_fallback_limit: 5,
+            recall_pending_candidate_limit: 3,
             journal_candidate_pool_size: 64,
             journal_similarity_threshold: 0.45,
             journal_min_score: 0.10,
@@ -321,9 +366,9 @@ impl Default for MindMemoryConfig {
     }
 }
 
-/// Retention policy for the pending memory-candidate approval queue.
+/// Retention policy for the pending memory-candidate approval queue (#420).
 ///
-/// Candidates persist to the `pending_candidates` table so they survive
+/// Candidates now persist to the `pending_candidates` table so they survive
 /// restarts; without a policy that table would grow without bound. Both limits
 /// are enforced together on the post-turn forgetting sweep
 /// (`ForgettingLifecycle`), and each can be disabled independently with `0`.
@@ -364,6 +409,8 @@ impl Default for ToolGroundingConfig {
         Self {
             enabled: true,
             max_summary_chars: 500,
+            // Successes are judged by the post-turn LLM extractor by default.
+            // These flags are fallbacks when LLM extraction is off/empty/failed.
             persist_success_procedure: false,
             persist_failure_reflection: true,
             persist_user_visible_episodic: false,
@@ -372,12 +419,12 @@ impl Default for ToolGroundingConfig {
     }
 }
 
-/// Self-reflection pipeline configuration.
+/// Self-reflection pipeline configuration (#210).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct ReflectionConfig {
-    /// Enable the self-reflection pipeline.
+    /// Enable the self-reflection pipeline (#210).
     pub enabled: bool,
     /// Minimum number of turns between reflection generation passes.
     pub interval_turns: usize,
@@ -440,7 +487,7 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub llm_expression_is_advisory: bool,
-    /// Timeout in seconds for a single LLM affect-classifier call.
+    /// Timeout in seconds for a single LLM affect-classifier call (#88).
     #[serde(
         skip_deserializing,
         default = "default_classifier_timeout_secs",
@@ -448,7 +495,7 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub classifier_timeout_secs: u64,
-    /// Minimum classifier confidence to apply LLM affect deltas.
+    /// Minimum classifier confidence to apply LLM affect deltas (#88).
     #[serde(
         skip_deserializing,
         default = "default_classifier_min_confidence",
@@ -501,10 +548,10 @@ const fn default_classifier_min_confidence() -> f32 {
 
 /// Character card compilation settings.
 ///
-/// The Identity Kernel budget is derived from the model's available context
-/// window at compile time, so there are currently no user-facing fields here.
-/// The section is retained as the home for future character-compilation
-/// settings.
+/// The Identity Kernel budget is no longer a fixed setting: it is derived from
+/// the model's available context window at compile time (#386), so there are
+/// currently no user-facing fields here. The section is retained as the home
+/// for future character-compilation settings.
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
@@ -513,10 +560,10 @@ const fn default_classifier_min_confidence() -> f32 {
 #[derive(Default)]
 pub struct CharacterMemoryConfig {}
 
-/// Session lifecycle policy.
+/// Session lifecycle policy (#369).
 ///
 /// Automatic splits are limited to inactivity timeouts and manual requests.
-/// Topic changes are handled by compression, not session splits.
+/// Topic changes are handled by compression (#368), not session splits.
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
@@ -536,7 +583,7 @@ impl Default for SessionConfig {
     }
 }
 
-/// Topic-boundary detection policy.
+/// Topic-boundary detection policy (#367).
 ///
 /// Detection maintains a topic **centroid** (an exponentially weighted moving
 /// average of the embeddings belonging to the current topic) and scores each
@@ -544,7 +591,7 @@ impl Default for SessionConfig {
 /// the silence since the previous utterance, and the topic's turn count. A
 /// boundary is signalled once the composite score reaches
 /// [`Self::boundary_threshold`]. The detector only produces a signal/score;
-/// acting on it (compression, session split) is a later stage.
+/// acting on it (compression #368, session split #369) is a later stage.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -552,8 +599,8 @@ pub struct TopicBoundaryConfig {
     /// Master switch for topic-boundary detection.
     pub enabled: bool,
     /// Composite score (`0.0..=1.0`) at or above which a turn is flagged as a
-    /// topic boundary. Session splitting is expected to use a higher
-    /// threshold than compression.
+    /// topic boundary. Session splitting (#369) is expected to use a higher
+    /// threshold than compression (#368).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub boundary_threshold: f32,
     /// Weight of the centroid-distance term in the composite score.
@@ -566,7 +613,7 @@ pub struct TopicBoundaryConfig {
     /// factor saturates at `1.0` once a topic reaches `max_topic_turns`, so a
     /// weight at or above the threshold would fire a boundary on its own —
     /// turning the soft cap into a hard cap that force-splits every coherent
-    /// topic at `max_topic_turns` regardless of drift or silence.
+    /// topic at `max_topic_turns` regardless of drift or silence (#367).
     pub weight_topic_length: f32,
     /// Moving-average blend factor for the centroid: the fraction of a new
     /// qualifying embedding folded in each turn. A small value keeps the
@@ -603,14 +650,14 @@ impl Default for TopicBoundaryConfig {
     }
 }
 
-/// How much of the focused window's title the activity observer captures.
+/// How much of the focused window's title the activity observer captures (#378).
 ///
 /// Window titles routinely contain private data — document and file names
 /// (which can embed customer or project names), page URLs, chat contact
 /// names, and email subjects. This text is fed to the proactive-speech
 /// decision LLM and, when a cloud provider is configured, leaves the local
 /// machine. The level is therefore a privacy knob: it defaults to
-/// [`WindowTitleLevel::AppOnly`] (the app-name-only behaviour) and
+/// [`WindowTitleLevel::AppOnly`] (the historical app-name-only behaviour) and
 /// higher levels are an explicit opt-in.
 #[derive(
     Debug,
@@ -626,8 +673,8 @@ impl Default for TopicBoundaryConfig {
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case")]
 #[schemars(crate = "::ene_config::schemars")]
 pub enum WindowTitleLevel {
-    /// Capture only the application name (the most-private behaviour). The
-    /// window title is never read.
+    /// Capture only the application name (the historical, most-private
+    /// behaviour). The window title is never read.
     #[default]
     AppOnly,
     /// Capture the window title with obvious sensitive fragments removed:
@@ -639,7 +686,7 @@ pub enum WindowTitleLevel {
     FullTitle,
 }
 
-/// Input sources for proactive speech decisions.
+/// Input sources for proactive speech decisions (#103).
 #[derive(
     Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq, Eq,
 )]
@@ -652,7 +699,7 @@ pub struct ProactiveSourcesConfig {
     pub activity: bool,
     /// Include a short-lived screen text summary (never raw image bytes).
     pub screen_summary: bool,
-    /// Window-title capture level for the activity source.
+    /// Window-title capture level for the activity source (#378).
     ///
     /// Only consulted when [`Self::activity`] is enabled. Defaults to
     /// [`WindowTitleLevel::AppOnly`]; see that type for the privacy
@@ -679,7 +726,7 @@ impl ProactiveSourcesConfig {
     }
 }
 
-/// Decision confidence threshold for proactive speech.
+/// Decision confidence threshold for proactive speech (#103).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
@@ -697,7 +744,7 @@ impl Default for ProactiveDecisionConfig {
     }
 }
 
-/// Proactive companion speech policy.
+/// Proactive companion speech policy (#103).
 ///
 /// Default is disabled so existing chat behaviour is unchanged until the user
 /// explicitly opts in.
@@ -850,12 +897,16 @@ where
     test,
     expect(
         clippy::expect_used,
-        reason = "unit/integration tests use unwrap/expect for concise assertions"
+        clippy::indexing_slicing,
+        reason = "unit/integration tests use unwrap/expect and fixed indices for concise assertions"
     )
 )]
 mod tests {
     use super::*;
 
+    /// Out-of-range `min_confidence_to_persist` values from a
+    /// hand-edited config are clamped into `0.0..=1.0` on load rather
+    /// than accepted verbatim (issue #95 confidence range guard).
     #[test]
     fn min_confidence_out_of_range_is_clamped() {
         let high: MindMemoryConfig =
@@ -916,6 +967,8 @@ mod tests {
         assert!(low.commitment_title_similarity_threshold < f32::EPSILON);
     }
 
+    /// The three arbiter thresholds added in #352 clamp out-of-range config
+    /// values into `0.0..=1.0` on load, matching `min_confidence_to_persist`.
     #[test]
     fn arbiter_thresholds_out_of_range_are_clamped() {
         let high: MindMemoryConfig = serde_json::from_str(
@@ -944,7 +997,7 @@ mod tests {
     }
 
     /// The arbiter threshold defaults match `ArbiterOptions::default()` so
-    /// wiring them through config keeps behaviour identical.
+    /// wiring them through config keeps behaviour identical (#352).
     #[test]
     fn arbiter_threshold_defaults_match_arbiter_options() {
         let cfg = MindMemoryConfig::default();
@@ -1002,8 +1055,8 @@ mod tests {
     }
 
     /// The window-title capture level defaults to the most-private
-    /// `app_only` when absent, so configs without the field keep the
-    /// app-name-only behaviour.
+    /// `app_only` when absent, so existing configs keep the historical
+    /// app-name-only behaviour (#378).
     #[test]
     fn proactive_window_title_level_defaults_to_app_only() {
         let cfg: ProactiveConfig =
@@ -1015,6 +1068,8 @@ mod tests {
         );
     }
 
+    /// All three window-title levels round-trip through the public schema
+    /// using their `snake_case` wire names (#378).
     #[test]
     fn proactive_window_title_level_round_trips() {
         for (raw, level) in [

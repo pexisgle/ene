@@ -1,3 +1,8 @@
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use std::time::Duration;
 
 use chrono::Utc;
@@ -25,14 +30,21 @@ use crate::recall::{ExecuteRecallInput, execute_hybrid_recall};
     reason = "facade fields are constructed and held for sub-component lifecycle; access is through engine methods"
 )]
 pub struct CognitionEngine {
-    pub(crate) pre_turn: crate::pre_turn::PreTurnAnalyzer,
+    /// Context budget and compression management.
     pub(crate) context: ContextManager,
+    /// Memory extraction and arbitration.
     pub(crate) memory_writer: MemoryWriter,
+    /// Memory recall planning.
     pub(crate) recall: crate::recall::RecallPlanner,
+    /// Deterministic and LLM emotion computation.
     pub(crate) emotion: crate::emotion::EmotionEngine,
+    /// Character identity and lorebook processing.
     pub(crate) character: CharacterProcessor,
+    /// Sectioned prompt composition.
     pub(crate) prompt_packet: crate::prompt_packet::PromptPacket,
+    /// Expression arbitration and output validation.
     pub(crate) output: crate::output::OutputArbiter,
+    /// Companion promise and task tracking.
     pub(crate) commitments: CommitmentLedger,
 }
 
@@ -42,12 +54,12 @@ impl Default for CognitionEngine {
     }
 }
 
-/// Outcome of a deferred memory-write task.
+/// Outcome of a deferred memory-write task (#240).
 #[derive(Debug, Clone)]
 pub enum MemoryWriteOutcome {
     /// Write and forgetting completed successfully.
     Ok {
-        /// Number of memory candidates deferred to the user-approval queue.
+        /// Number of memory candidates deferred to the user-approval queue (#174).
         deferred_candidates: usize,
     },
     /// Write failed; a retry row was enqueued (or marked permanent).
@@ -68,7 +80,6 @@ impl CognitionEngine {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pre_turn: crate::pre_turn::PreTurnAnalyzer,
             context: ContextManager::default(),
             memory_writer: MemoryWriter,
             recall: crate::recall::RecallPlanner,
@@ -361,7 +372,9 @@ impl CognitionEngine {
         prefetch: ComposePrefetch,
     ) -> Result<ComposedPrompt, CognitionError> {
         // Destructure to move the recalled/commitment vectors into the pack
-        // input without cloning. `recall_plan` is discarded here.
+        // input without cloning (#review M2). `recall_plan` is no longer needed
+        // here now that packing budgets against the context window, not recall
+        // hints (#370).
         let PreTurnOutput {
             recall_plan: _,
             affect,
@@ -370,15 +383,19 @@ impl CognitionEngine {
             classifier_expression_hint: _,
         } = pre;
 
+        // Size the identity kernel from the model's available window rather
+        // than a fixed token count, so larger models carry a fuller character
+        // definition (#386). Fall back to the conservative default window when
+        // the caller does not know it (tests / legacy paths).
         let available_window = ctx.available_window.unwrap_or_else(|| {
             usize::try_from(ene_ai::DEFAULT_CONTEXT_WINDOW).unwrap_or(usize::MAX)
         });
         // Load user persona from global config so the identity kernel can expand
-        // the `{{user_persona}}` CBS macro at compile time.
+        // the `{{user_persona}}` CBS macro at compile time (#H-3).
         let user_persona = ene_config::get_global_config().user_persona;
         // Seed `{{pick}}` from the character+session so a trait chosen once
         // (hair colour, hometown, …) stays fixed across per-turn kernel
-        // recompilations instead of re-rolling every turn.
+        // recompilations instead of re-rolling every turn (#343).
         let pick_seed = Some(ene_config::session_pick_seed(&format!(
             "{}:{}",
             ctx.character_id, ctx.session_id
@@ -423,7 +440,7 @@ impl CognitionEngine {
         };
 
         // `Some(None)` means the caller checked and there is no pending
-        // interruption; `None` (legacy/test callers) injects nothing.
+        // interruption; `None` (legacy/test callers) injects nothing (#206).
         let interruption_note = prefetch.interruption_note.flatten();
 
         let prompts = PromptLibrary::load(&ctx.config.emotion.classifier_language);
@@ -442,6 +459,7 @@ impl CognitionEngine {
             ctx.history.to_vec()
         };
 
+        // Build author's note from character card data if present
         let authors_note = ctx
             .card
             .data
@@ -462,15 +480,18 @@ impl CognitionEngine {
             interruption_note,
             authors_note,
             user_persona,
+            compression_pending: ctx.compression_pending,
             user_input: ctx.user_input.to_string(),
+            lang: ctx.config.emotion.classifier_language.clone(),
+            now: None,
         };
 
-        // Budget the prompt against the model's effective context window:
-        // `min(provider-advertised, operator override,
+        // Budget the prompt against the model's effective context window
+        // (#364, #370): `min(provider-advertised, operator override,
         // mind.context.max_prompt_tokens)` minus the response reserve and
-        // safety margin. Packing then fills that window in priority order.
-        // Tests may inject a deterministic budget via
-        // `packing_budget_override`.
+        // safety margin. Packing then fills that window in priority order
+        // rather than against per-section sub-budgets. Tests may inject a
+        // deterministic budget via `packing_budget_override`.
         let budget = if let Some(tokens) = ctx.packing_budget_override {
             ContextBudget::with_capacity(tokens)
         } else {
@@ -484,8 +505,8 @@ impl CognitionEngine {
                 .and_then(ene_ai::LlmProvider::context_window);
             // Two operator shrinkage caps, combined as a min so configuration
             // can only ever narrow the model's stated window: the per-provider
-            // `context_window` override and the mind-level `max_prompt_tokens`.
-            // Either being `None` leaves the other (or the advertised
+            // `context_window` override and the mind-level `max_prompt_tokens`
+            // (#370). Either being `None` leaves the other (or the advertised
             // window) in force; both `None` defers entirely to the model, so
             // the prompt auto-follows the model's context size.
             let provider_override = ai_config
@@ -519,16 +540,18 @@ impl CognitionEngine {
         let packed = pack_prompt(pack_input, &budget);
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections.clone_from(&packed.meta.dropped);
+        meta.history_messages_detached = packed.meta.history_messages_detached;
         meta.packed_tokens = packed.meta.packed_tokens;
         meta.injected_memory_ids
             .clone_from(&packed.meta.injected_memory_ids);
 
         // Bump access counters only for memories actually composed into the
-        // message packet. The bump fires here, during prompt composition,
+        // message packet (#345). The bump fires here, during prompt composition,
         // before the request is sent — "injected" means the memory survived
-        // budget packing into the packet, not that the LLM has seen it.
-        // Bumping only survivors keeps recalled-but-dropped memories from
-        // being reinforced and shielded from forgetting.
+        // budget packing into the packet, not that the LLM has seen it. This
+        // moved out of `execute_hybrid_recall` (which bumped every recalled
+        // memory) so that being recalled-but-dropped no longer reinforces a
+        // memory's score and shields it from forgetting.
         if let Some(store) = ctx.store {
             crate::recall::bump_injected_memory_access(store, &meta.injected_memory_ids).await;
         }
@@ -542,6 +565,7 @@ impl CognitionEngine {
             message_count = messages.len(),
             packed_tokens = meta.packed_tokens,
             dropped_sections = meta.dropped_sections.len(),
+            history_messages_detached = meta.history_messages_detached,
             injected_memory_ids = meta.injected_memory_ids.len(),
             "Prompt packet composed"
         );
@@ -574,7 +598,7 @@ impl CognitionEngine {
 
     /// Spawn deferred post-turn memory extraction (LLM + arbiter) and forgetting lifecycle.
     ///
-    /// On failure, enqueues a [`ene_core::PendingMemoryWrite`] for later retry.
+    /// On failure, enqueues a [`ene_core::PendingMemoryWrite`] for later retry (#240).
     /// Returns the task handle so callers can track or abort it.
     pub fn spawn_deferred_memory_work(
         store: std::sync::Arc<dyn MemoryPort>,
@@ -591,7 +615,7 @@ impl CognitionEngine {
                     user_id = %input.user_id,
                     "Post-turn memory extraction and forgetting starting"
                 );
-                // Drain due retries before writing the new turn.
+                // Drain due retries before writing the new turn (#240).
                 Self::drain_pending_memory_writes(
                     store.as_ref(),
                     &config,
@@ -675,7 +699,7 @@ impl CognitionEngine {
         )
     }
 
-    /// Retry due pending memory writes from the persistent queue.
+    /// Retry due pending memory writes from the persistent queue (#240).
     pub async fn drain_pending_memory_writes(
         store: &dyn MemoryPort,
         config: &MindConfig,
@@ -744,7 +768,7 @@ impl CognitionEngine {
         }
     }
 
-    /// Resolve the final character expression after an assistant turn.
+    /// Resolve the final character expression after an assistant turn (#89).
     pub fn resolve_expression_turn(
         &self,
         config: &MindConfig,
@@ -1008,6 +1032,7 @@ mod turn_id_tests {
             llm_provider: None,
             available_window: None,
             post_history_block: None,
+            compression_pending: false,
             packing_budget_override: None,
         };
         let composed = engine

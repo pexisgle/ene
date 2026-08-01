@@ -21,17 +21,18 @@ impl CliCommand for CommitmentsCommand {
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError> {
         let parts: Vec<&str> = arg.split_whitespace().collect();
         let sub = parts.first().copied().unwrap_or("");
-        let snapshot = ctx
-            .handle
-            .diagnostics()
+        let diag = ctx.handle.diagnostics();
+        let snapshot = diag
             .get_snapshot()
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
         let card_name = snapshot.card_name.as_str();
         let user_id = snapshot.config.user_name.as_str();
+        // The snapshot no longer carries the memory handle; it lives on
+        // the diagnostics facade, which is the documented access path.
+        let memory = diag.memory();
         match sub {
-            "list" => match snapshot
-                .memory
+            "list" => match memory
                 .list_active_commitments(card_name, Some(user_id), 50)
                 .await
             {
@@ -60,7 +61,7 @@ impl CliCommand for CommitmentsCommand {
                         usage: "Usage: /commitments done <id>".to_string(),
                     });
                 };
-                match snapshot.memory.complete_commitment(id).await {
+                match memory.complete_commitment(id).await {
                     Ok(true) => {
                         println!("{}", style::success(format!("[Commitments] done id={id}")));
                         Ok(CommandOutcome::Continue)

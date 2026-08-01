@@ -7,6 +7,11 @@
 //! enforces per-kind minimum slots, and rewards source diversity. Hybrid scores
 //! on each [`ScoredMemory`] are preserved unchanged.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use ene_core::{MemoryCandidateSource, MemoryKind, ScoredMemory};
 use ene_rag::document_lexical_similarity;
 
@@ -44,6 +49,24 @@ impl MemoryDiversifyOptions {
             min_slots_user_profile: config.mmr_min_slots_user_profile,
             min_slots_commitment: config.mmr_min_slots_commitment,
             source_diversity_bonus: config.mmr_source_diversity_bonus.clamp(0.0, 1.0),
+        }
+    }
+
+    /// The configured base slot for `kind`, or `0` for dynamic-only kinds.
+    ///
+    /// Which kinds have a base slot at all is defined by the per-kind policy
+    /// table ([`MemoryKind::has_diversification_base_slot`]) — this
+    /// method only reads the matching config field. `effective_min_slots`
+    /// filters by the table before consulting it, so the wildcard arm (forced
+    /// by `#[non_exhaustive]`) is unreachable for policy purposes: a kind that
+    /// has no base slot is simply never queried here.
+    fn min_slots_for(self, kind: MemoryKind) -> usize {
+        match kind {
+            MemoryKind::Semantic => self.min_slots_semantic,
+            MemoryKind::Episodic => self.min_slots_episodic,
+            MemoryKind::UserProfile => self.min_slots_user_profile,
+            MemoryKind::Commitment => self.min_slots_commitment,
+            _ => 0,
         }
     }
 }
@@ -204,13 +227,15 @@ fn effective_min_slots(
     options: MemoryDiversifyOptions,
     limit: usize,
 ) -> Vec<(MemoryKind, usize)> {
-    let mut requested: std::collections::HashMap<MemoryKind, usize> =
-        std::collections::HashMap::from([
-            (MemoryKind::Semantic, options.min_slots_semantic),
-            (MemoryKind::Episodic, options.min_slots_episodic),
-            (MemoryKind::UserProfile, options.min_slots_user_profile),
-            (MemoryKind::Commitment, options.min_slots_commitment),
-        ]);
+    // Base slots come from the per-kind policy table: only kinds with
+    // `has_diversification_base_slot()` reserve guaranteed slots, so a new kind
+    // defaults to dynamic-only unless the table says otherwise.
+    let mut requested: std::collections::HashMap<MemoryKind, usize> = MemoryKind::ALL
+        .iter()
+        .copied()
+        .filter(|kind| kind.has_diversification_base_slot())
+        .map(|kind| (kind, options.min_slots_for(kind)))
+        .collect();
 
     for kind in &plan.required_kinds {
         requested
@@ -231,7 +256,10 @@ fn effective_min_slots(
     }
 
     // Highest-priority kinds are allocated first when the budget is tight.
-    const KIND_QUOTA_PRIORITY: [MemoryKind; 9] = [
+    // Covers every variant (WorldState included) so a kind promoted via
+    // `plan.required_kinds` still receives a slot; kinds never requested are
+    // skipped via `desired == 0`.
+    const KIND_QUOTA_PRIORITY: [MemoryKind; 10] = [
         MemoryKind::Commitment,
         MemoryKind::UserProfile,
         MemoryKind::Preference,
@@ -241,6 +269,7 @@ fn effective_min_slots(
         MemoryKind::Affective,
         MemoryKind::Procedure,
         MemoryKind::Reflection,
+        MemoryKind::WorldState,
     ];
 
     let mut allocated = Vec::new();
@@ -301,7 +330,9 @@ fn best_pool_candidate_for_kind(
         .filter(|c| c.item.kind == kind)
         .filter(|c| {
             let id = c.item.id;
-            !selected.iter().any(|s| s.item.id == id)
+            !selected
+                .iter()
+                .any(|s| s.item.id.is_some() && s.item.id == id)
         })
         .max_by(|a, b| {
             a.breakdown
@@ -456,6 +487,23 @@ mod tests {
             min_slots_user_profile: 1,
             min_slots_commitment: 1,
             source_diversity_bonus: 0.05,
+        }
+    }
+
+    /// The diversification base-slot policy and the options lookup must agree:
+    /// with default options every kind that
+    /// [`MemoryKind::has_diversification_base_slot`] reports gets a configured
+    /// slot, and every dynamic-only kind gets none.
+    #[test]
+    fn base_slot_policy_matches_config_lookup() {
+        let options = default_options();
+        for kind in MemoryKind::ALL {
+            let has_base_slot = kind.has_diversification_base_slot();
+            let configured = options.min_slots_for(kind) > 0;
+            assert_eq!(
+                configured, has_base_slot,
+                "base-slot policy mismatch for {kind:?}"
+            );
         }
     }
 
@@ -662,6 +710,37 @@ mod tests {
 
         let no_bonus = source_diversity_bonus(&lexical, &selected, 0.1);
         assert!(no_bonus < f32::EPSILON);
+    }
+
+    #[test]
+    fn best_pool_candidate_for_kind_treats_none_ids_as_distinct() {
+        // Pending candidates carry `id: None`; a plain `None == None` dedup
+        // would treat every pending candidate of a kind as already selected
+        // once one of them is in `selected`, so the second could never be
+        // promoted into a kind quota. Distinct None ids must stay eligible.
+        let mut first = sample_memory(
+            1,
+            MemoryKind::Preference,
+            "a",
+            "pending preference alpha",
+            0.6,
+        );
+        first.item.id = None;
+        let mut second = sample_memory(
+            2,
+            MemoryKind::Preference,
+            "b",
+            "pending preference beta",
+            0.8,
+        );
+        second.item.id = None;
+
+        let pool = vec![first.clone(), second.clone()];
+        let selected = vec![first];
+
+        let candidate = best_pool_candidate_for_kind(&pool, &selected, MemoryKind::Preference)
+            .expect("remaining None-id candidate must stay eligible for kind quota");
+        assert_eq!(candidate.item.content, "pending preference beta");
     }
 
     #[test]

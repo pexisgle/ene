@@ -1,5 +1,9 @@
 //! Decision JSON schema and fail-closed parser.
 
+#![expect(
+    clippy::string_slice,
+    reason = "special-token and summarizer parsers slice at known ASCII delimiters"
+)]
 use crate::proactive::{ProactiveDecision, ProactiveUrgency};
 use serde_json::{Value, json};
 

@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::plugin::{EmbedPlugin, LlmPlugin, SttPlugin, ToolPlugin, TtsPlugin};
 
 /// How often an idle connection polls the tool plugin for deferred task
-/// completions to push to the host. Completions are delivered on this
+/// completions to push to the host (Cr-5). Completions are delivered on this
 /// cadence even when no request is in flight, rather than only piggybacking on
 /// the next request/response cycle.
 const DEFERRED_DRAIN_INTERVAL: Duration = Duration::from_millis(100);
@@ -62,6 +62,69 @@ impl PluginDispatch {
             stt,
         }
     }
+
+    /// Delivers the plugin configuration blob to every registered trait
+    /// implementation (called once during Handshake).
+    ///
+    /// A single plugin struct may implement several traits (e.g. `ToolPlugin`
+    /// and `LlmPlugin`); each is stored as a separate trait object, so the
+    /// config is delivered to every one present. `set_config` is idempotent
+    /// (plugins store the blob), so repeated delivery is harmless (#313).
+    fn set_config(&self, config: &serde_json::Value) {
+        if let Some(tool) = &self.tool {
+            tool.set_config(config);
+        }
+        if let Some(llm) = &self.llm {
+            llm.set_config(config);
+        }
+        if let Some(embed) = &self.embed {
+            embed.set_config(config);
+        }
+        if let Some(tts) = &self.tts {
+            tts.set_config(config);
+        }
+        if let Some(stt) = &self.stt {
+            stt.set_config(config);
+        }
+    }
+
+    /// Delivers the per-profile configuration blob to every registered trait
+    /// implementation (called once during Handshake when
+    /// `plugins.list.<name>.profiles` is configured).
+    fn set_profiles(&self, profiles: &serde_json::Value) {
+        if let Some(tool) = &self.tool {
+            tool.set_profiles(profiles);
+        }
+        if let Some(llm) = &self.llm {
+            llm.set_profiles(profiles);
+        }
+        if let Some(embed) = &self.embed {
+            embed.set_profiles(profiles);
+        }
+        if let Some(tts) = &self.tts {
+            tts.set_profiles(profiles);
+        }
+        if let Some(stt) = &self.stt {
+            stt.set_profiles(profiles);
+        }
+    }
+
+    /// Returns the first non-`None` config schema among the registered trait
+    /// implementations, preferring the tool plugin (the historical source).
+    ///
+    /// Method-call syntax (closures, not function pointers) is required here:
+    /// `ConfigurablePlugin` is implemented for the trait objects themselves,
+    /// not for `Arc<dyn …>`, so `and_then(ConfigurablePlugin::config_schema)`
+    /// would fail to satisfy the receiver type (#313).
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        self.tool
+            .as_ref()
+            .and_then(|t| t.config_schema())
+            .or_else(|| self.llm.as_ref().and_then(|l| l.config_schema()))
+            .or_else(|| self.embed.as_ref().and_then(|e| e.config_schema()))
+            .or_else(|| self.tts.as_ref().and_then(|t| t.config_schema()))
+            .or_else(|| self.stt.as_ref().and_then(|s| s.config_schema()))
+    }
 }
 
 /// Starts a plugin as an IPC server.
@@ -87,6 +150,7 @@ impl PluginDispatch {
 /// ```rust,no_run
 /// # use ene_plugin::{PluginDispatch, ToolPlugin, PluginStreamChunk};
 /// # struct MyTool;
+/// # impl ene_plugin::ConfigurablePlugin for MyTool {}
 /// # #[async_trait::async_trait]
 /// # impl ToolPlugin for MyTool {
 /// #     fn tool_capabilities(&self) -> ene_plugin::ToolPluginCapabilities {
@@ -196,19 +260,19 @@ pub async fn run_plugin_server(dispatch: PluginDispatch) -> Result<(), PluginErr
 /// writer task serializes every outgoing frame received over an internal
 /// channel, so any number of producer tasks (request handlers, chat-stream
 /// tasks, the deferred-completion drainer) can emit responses concurrently
-/// without contending for the socket.
+/// without contending for the socket (Cr-4 / H-12).
 ///
 /// Long-running requests are dispatched in their own spawned tasks while cheap
 /// state mutations are handled inline (see [`connection_read_loop`]), so a slow
 /// request never blocks the read loop: pings are answered while tool calls run,
-/// and multiple tool calls can be in flight at once. Each
+/// and multiple tool calls can be in flight at once (#431). Each
 /// `CreateChatStream` request is additionally guarded by a [`CancellationToken`]
 /// keyed by its `request_id`; a `CancelStream` request looks up that token and
-/// cancels the stream mid-flight.
+/// cancels the stream mid-flight (Cr-4).
 ///
 /// A periodic drainer pushes [`PluginIpcResponse::DeferredCompleted`] messages
 /// on a timer, so background task completions reach the host even while the
-/// connection is idle instead of piggybacking on the next request.
+/// connection is idle instead of piggybacking on the next request (Cr-5).
 async fn handle_connection(
     dispatch: Arc<PluginDispatch>,
     stream: IpcStream,
@@ -219,10 +283,11 @@ async fn handle_connection(
 
     let writer_task = tokio::spawn(write_loop(write_half, rx));
 
-    // In-flight chat streams keyed by request_id, for cancellation.
+    // In-flight chat streams keyed by request_id, for cancellation (Cr-4).
     let streams: Arc<parking_lot::Mutex<HashMap<String, CancellationToken>>> =
         Arc::new(parking_lot::Mutex::new(HashMap::new()));
 
+    // Periodic deferred-completion drainer (Cr-5 idle delivery).
     let drain_task = spawn_deferred_drain(Arc::clone(&dispatch), tx.clone());
 
     let read_result = connection_read_loop(&dispatch, read_half, &tx, &streams, &shutdown).await;
@@ -232,9 +297,10 @@ async fn handle_connection(
     //
     // Note on teardown latency: spawned dispatch tasks hold `tx` clones, so
     // `drop(tx); writer_task.await` below waits for every in-flight request to
-    // finish (or be cancelled) before the writer channel closes. This is
-    // bounded: `run_plugin_server` joins each connection task with a 5 s
-    // timeout, so a hung request cannot stall shutdown indefinitely.
+    // finish (or be cancelled) before the writer channel closes. This is new
+    // with the spawned-dispatch design but bounded: `run_plugin_server` joins
+    // each connection task with a 5 s timeout, so a hung request cannot stall
+    // shutdown indefinitely.
     for (_, token) in streams.lock().drain() {
         token.cancel();
     }
@@ -261,7 +327,7 @@ async fn write_loop<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 /// Spawns a task that periodically drains deferred task completions from the
-/// tool plugin and pushes them to the host over `tx`.
+/// tool plugin and pushes them to the host over `tx` (Cr-5).
 fn spawn_deferred_drain(
     dispatch: Arc<PluginDispatch>,
     tx: mpsc::Sender<PluginIpcResponse>,
@@ -290,9 +356,9 @@ fn spawn_deferred_drain(
 /// `SynthesizeSpeech`, `TranscribeAudio`, `PollDeferred`) are dispatched in
 /// their own spawned tasks so the read loop stays responsive regardless of how
 /// long any single one takes: a slow `CallTool` cannot block a `Ping`, and
-/// multiple tool calls can be in flight at once. Responses are sent over
+/// multiple tool calls can be in flight at once (#431). Responses are sent over
 /// `tx`, whose dedicated writer task serializes the outgoing frames, so
-/// concurrent handlers never interleave bytes on the socket.
+/// concurrent handlers never interleave bytes on the socket (Cr-4 / H-12).
 ///
 /// Cheap *state-mutating* requests (`Handshake`, `SetCallContext`,
 /// `ApprovePermission`, `AllowPattern`, `RevokePattern`) and lightweight
@@ -302,7 +368,7 @@ fn spawn_deferred_drain(
 /// invariant instead of a client convention: `Handshake` applies the sandbox
 /// (`tool.set_sandbox` / `set_config`) and completes before the first
 /// `CallTool` is even read off the socket, and a permission/pattern mutation
-/// is committed before any subsequent call that depends on it.
+/// is committed before any subsequent call that depends on it (#431 review).
 ///
 /// `CreateChatStream` additionally registers a [`CancellationToken`] so
 /// `CancelStream` can abort it mid-flight; `Shutdown` notifies the server and
@@ -367,7 +433,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             // Long-running requests: dispatch in a spawned task so a slow one
             // (e.g. a tool call or an LLM completion) does not block the read
             // loop from answering pings or accepting further concurrent
-            // requests. Correlation is by `request_id`, so response
+            // requests (#431). Correlation is by `request_id`, so response
             // order need not match request order.
             long_running @ (PluginIpcRequest::CallTool { .. }
             | PluginIpcRequest::ChatCompletion { .. }
@@ -388,7 +454,7 @@ async fn connection_read_loop<R: tokio::io::AsyncRead + Unpin>(
             // `GetConfigSchema`, `CancelDeferred`) — is handled inline, in
             // read order. State mutations must be committed before any later
             // request that depends on them is dispatched, so they cannot be
-            // reordered behind a spawned task.
+            // reordered behind a spawned task (#431 review).
             other => {
                 let resp = dispatch_request(dispatch, &other).await;
                 drop(tx.send(resp).await);
@@ -408,11 +474,14 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             version: host_range,
             sandbox,
             plugin_config,
+            plugin_profiles,
         } => {
             let our_range = VersionRange {
                 min: PLUGIN_IPC_PROTOCOL_VERSION,
                 max: PLUGIN_IPC_PROTOCOL_VERSION,
             };
+            // Negotiate the highest protocol version supported by both sides.
+            // `negotiate` returns `None` when the ranges do not overlap.
             let Some(negotiated) = our_range.negotiate(host_range) else {
                 tracing::error!(
                     component = "PluginServer",
@@ -433,9 +502,16 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
             };
             if let Some(tool) = &dispatch.tool {
                 tool.set_sandbox(sandbox);
-                if let Some(config) = plugin_config {
-                    tool.set_config(config);
-                }
+            }
+            // Configuration is delivered to **every** registered trait
+            // implementation (tool or provider), not just the tool plugin
+            // (#313). Both blobs are opaque to the plugin server; the plugin
+            // stores them and selects as it needs.
+            if let Some(config) = plugin_config {
+                dispatch.set_config(config);
+            }
+            if let Some(profiles) = plugin_profiles {
+                dispatch.set_profiles(profiles);
             }
             PluginIpcResponse::HandshakeAck {
                 version: negotiated,
@@ -447,7 +523,7 @@ async fn dispatch_request(dispatch: &PluginDispatch, req: &PluginIpcRequest) -> 
         },
         PluginIpcRequest::GetConfigSchema { request_id } => PluginIpcResponse::ConfigSchema {
             request_id: request_id.clone(),
-            schema: dispatch.tool.as_ref().and_then(|t| t.config_schema()),
+            schema: dispatch.config_schema(),
         },
         PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
             request_id: request_id.clone(),
@@ -836,7 +912,7 @@ fn collect_capabilities(dispatch: &PluginDispatch) -> PluginCapabilities {
 /// Runs a `CreateChatStream` request to completion, sending `StreamChunk` /
 /// `StreamEnd` / `StreamError` responses over `tx`.
 ///
-/// The stream is aborted as soon as `cancel` fires: the chunk loop
+/// The stream is aborted as soon as `cancel` fires (Cr-4): the chunk loop
 /// selects between the next stream item and the cancellation token, so a
 /// `CancelStream` request stops the underlying LLM stream promptly rather than
 /// waiting for it to drain.
@@ -902,7 +978,7 @@ async fn run_chat_stream(
     loop {
         tokio::select! {
             // `biased` checks cancellation first so a cancel that races with a
-            // ready stream item wins deterministically.
+            // ready stream item wins deterministically (Cr-4).
             biased;
             () = cancel.cancelled() => {
                 tracing::info!(
@@ -969,7 +1045,9 @@ async fn run_chat_stream(
 )]
 mod tests {
     use super::*;
-    use crate::plugin::{PluginCompletion, PluginStreamChunk, ToolPluginCapabilities};
+    use crate::plugin::{
+        ConfigurablePlugin, PluginCompletion, PluginStreamChunk, ToolPluginCapabilities,
+    };
     use async_trait::async_trait;
     use ene_plugin_proto::ToolName;
     use ene_plugin_proto::{
@@ -977,6 +1055,7 @@ mod tests {
         TtsProviderSpec, VersionRange,
     };
 
+    /// A mock tool plugin for testing dispatch logic.
     struct MockToolPlugin;
 
     #[async_trait]
@@ -1007,7 +1086,9 @@ mod tests {
                 })
             }
         }
+    }
 
+    impl ConfigurablePlugin for MockToolPlugin {
         fn config_schema(&self) -> Option<serde_json::Value> {
             Some(serde_json::json!({"type": "object"}))
         }
@@ -1015,8 +1096,8 @@ mod tests {
 
     /// A tool plugin whose `call_tool` blocks on a shared gate until released,
     /// counting how many calls are concurrently in flight. Used to prove the
-    /// server dispatches non-streaming requests concurrently: with serial
-    /// dispatch the counter could never exceed 1.
+    /// server dispatches non-streaming requests concurrently (#431): under the
+    /// old inline dispatch the counter could never exceed 1.
     struct GatedToolPlugin {
         in_flight: std::sync::atomic::AtomicUsize,
         released: std::sync::atomic::AtomicBool,
@@ -1032,6 +1113,7 @@ mod tests {
             }
         }
 
+        /// Blocks until [`release`](Self::release) is called.
         async fn wait(&self) {
             use std::sync::atomic::Ordering;
             while !self.released.load(Ordering::Acquire) {
@@ -1039,12 +1121,14 @@ mod tests {
             }
         }
 
+        /// Releases every current and future [`wait`](Self::wait) call.
         fn release(&self) {
             use std::sync::atomic::Ordering;
             self.released.store(true, Ordering::Release);
             self.notify.notify_waiters();
         }
 
+        /// Current number of blocked `gated.slow` calls.
         fn in_flight(&self) -> usize {
             self.in_flight.load(std::sync::atomic::Ordering::Acquire)
         }
@@ -1072,6 +1156,10 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for GatedToolPlugin {}
+
+    /// Waits (with a deadlock backstop) until `plugin.in_flight()` reaches
+    /// `expected`.
     async fn wait_for_in_flight(plugin: &GatedToolPlugin, expected: usize) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while plugin.in_flight() < expected {
@@ -1083,6 +1171,7 @@ mod tests {
         }
     }
 
+    /// A mock LLM plugin for testing dispatch logic.
     struct MockLlmPlugin;
 
     #[async_trait]
@@ -1137,8 +1226,10 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for MockLlmPlugin {}
+
     /// A mock LLM plugin whose stream emits one chunk and then blocks until
-    /// cancelled, used to exercise `CancelStream`.
+    /// cancelled, used to exercise `CancelStream` (Cr-4).
     struct SlowMockLlmPlugin;
 
     #[async_trait]
@@ -1175,6 +1266,9 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for SlowMockLlmPlugin {}
+
+    /// A mock TTS plugin for testing dispatch logic.
     struct MockTtsPlugin;
 
     #[async_trait]
@@ -1200,6 +1294,9 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for MockTtsPlugin {}
+
+    /// A mock STT plugin for testing dispatch logic.
     struct MockSttPlugin;
 
     #[async_trait]
@@ -1224,6 +1321,9 @@ mod tests {
         }
     }
 
+    impl ConfigurablePlugin for MockSttPlugin {}
+
+    /// A mock embed plugin for testing dispatch logic.
     struct MockEmbedPlugin;
 
     #[async_trait]
@@ -1239,6 +1339,8 @@ mod tests {
             Ok(_items.iter().map(|_| vec![0.1, 0.2, 0.3]).collect())
         }
     }
+
+    impl ConfigurablePlugin for MockEmbedPlugin {}
 
     fn make_dispatch(tool: bool, llm: bool, embed: bool) -> PluginDispatch {
         PluginDispatch {
@@ -1280,6 +1382,7 @@ mod tests {
             },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: Some(serde_json::json!({"key": "value"})),
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
@@ -1302,6 +1405,7 @@ mod tests {
             version: VersionRange { min: 999, max: 999 },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: None,
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
@@ -1310,7 +1414,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_handshake_partial_overlap_negotiates_highest_common() {
         // Host advertises {3,4}, plugin supports {4,4}; the negotiated version
-        // must be the highest common version (4), not the lowest.
+        // must be the highest common version (4), not the lowest (H-11).
         let dispatch = make_dispatch(true, false, false);
         let req = PluginIpcRequest::Handshake {
             version: VersionRange {
@@ -1319,6 +1423,7 @@ mod tests {
             },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: None,
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
@@ -1386,6 +1491,115 @@ mod tests {
             PluginIpcResponse::ConfigSchema { request_id, schema } => {
                 assert_eq!(request_id, "req-1");
                 assert!(schema.is_none());
+            }
+            other => panic!("expected ConfigSchema, got {other:?}"),
+        }
+    }
+
+    /// A mock LLM plugin that records the config / profiles delivered via
+    /// [`ConfigurablePlugin::set_config`] / `set_profiles` and advertises a
+    /// schema with a secret-marked field (#313).
+    struct RecordingLlmPlugin {
+        config: std::sync::Mutex<Option<serde_json::Value>>,
+        profiles: std::sync::Mutex<Option<serde_json::Value>>,
+    }
+
+    impl RecordingLlmPlugin {
+        fn new() -> Self {
+            Self {
+                config: std::sync::Mutex::new(None),
+                profiles: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmPlugin for RecordingLlmPlugin {
+        fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+            Vec::new()
+        }
+    }
+
+    impl ConfigurablePlugin for RecordingLlmPlugin {
+        fn set_config(&self, config: &serde_json::Value) {
+            *self.config.lock().unwrap() = Some(config.clone());
+        }
+
+        fn set_profiles(&self, profiles: &serde_json::Value) {
+            *self.profiles.lock().unwrap() = Some(profiles.clone());
+        }
+
+        fn config_schema(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "api_key": { "type": "string", "x-ene-secret": true }
+                }
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_delivers_config_and_profiles_to_provider_plugins() {
+        // #313: `set_config` / `set_profiles` must reach provider traits
+        // (LLM/embed/TTS/STT), not just the tool trait, so provider plugins
+        // can receive their configuration at handshake time.
+        let plugin = Arc::new(RecordingLlmPlugin::new());
+        let dispatch = PluginDispatch {
+            tool: None,
+            llm: Some(Arc::clone(&plugin) as Arc<dyn LlmPlugin>),
+            embed: None,
+            tts: None,
+            stt: None,
+        };
+        let req = PluginIpcRequest::Handshake {
+            version: VersionRange {
+                min: PLUGIN_IPC_PROTOCOL_VERSION,
+                max: PLUGIN_IPC_PROTOCOL_VERSION,
+            },
+            sandbox: ene_plugin_proto::SandboxConfigData::default(),
+            plugin_config: Some(serde_json::json!({"api_key": {"source": "env"}})),
+            plugin_profiles: Some(serde_json::json!({"default": {"voice": "af_heart"}})),
+        };
+        let resp = dispatch_request(&dispatch, &req).await;
+        assert!(matches!(resp, PluginIpcResponse::HandshakeAck { .. }));
+        assert_eq!(
+            plugin.config.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({"api_key": {"source": "env"}}))
+        );
+        assert_eq!(
+            plugin.profiles.lock().unwrap().as_ref(),
+            Some(&serde_json::json!({"default": {"voice": "af_heart"}}))
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_get_config_schema_from_provider_plugin() {
+        // #313: `GetConfigSchema` must aggregate schemas from provider traits
+        // (here: an LLM-only dispatch) rather than returning `None` when no
+        // tool plugin is registered.
+        let dispatch = PluginDispatch {
+            tool: None,
+            llm: Some(Arc::new(RecordingLlmPlugin::new()) as Arc<dyn LlmPlugin>),
+            embed: None,
+            tts: None,
+            stt: None,
+        };
+        let resp = dispatch_request(
+            &dispatch,
+            &PluginIpcRequest::GetConfigSchema {
+                request_id: "req-1".into(),
+            },
+        )
+        .await;
+        match resp {
+            PluginIpcResponse::ConfigSchema { request_id, schema } => {
+                assert_eq!(request_id, "req-1");
+                let schema = schema.expect("LLM plugin must advertise a schema");
+                assert_eq!(
+                    schema.pointer("/properties/api_key/x-ene-secret"),
+                    Some(&serde_json::json!(true))
+                );
             }
             other => panic!("expected ConfigSchema, got {other:?}"),
         }
@@ -1685,6 +1899,8 @@ mod tests {
 
     #[tokio::test]
     async fn chat_stream_cancel_aborts_mid_stream() {
+        // A pre-cancelled token must stop the stream before any chunk is
+        // emitted and produce a terminal StreamError (Cr-4).
         let dispatch = make_dispatch(false, true, false);
         let req = PluginIpcRequest::CreateChatStream {
             request_id: "stream-cancel".into(),
@@ -1706,6 +1922,7 @@ mod tests {
             matches!(resp, PluginIpcResponse::StreamError { ref message, .. } if message == "stream cancelled"),
             "expected cancellation StreamError, got {resp:?}"
         );
+        // No chunks should follow the cancellation.
         assert!(rx.try_recv().is_err());
     }
 
@@ -1719,6 +1936,7 @@ mod tests {
             },
             sandbox: ene_plugin_proto::SandboxConfigData::default(),
             plugin_config: None,
+            plugin_profiles: None,
         };
         let resp = dispatch_request(&dispatch, &req).await;
         match resp {
@@ -1821,7 +2039,7 @@ mod tests {
         assert!(matches!(resp, PluginIpcResponse::Error { .. }));
     }
 
-    /// Full `CancelStream` round-trip through `handle_connection`.
+    /// Full `CancelStream` round-trip through `handle_connection` (Cr-4).
     ///
     /// A slow stream emits one chunk and then blocks; a `CancelStream` request
     /// must abort it and produce a terminal `StreamError`, while the read loop
@@ -1850,6 +2068,7 @@ mod tests {
 
         let mut client = client;
 
+        // Start a chat stream that will block after the first chunk.
         write_plugin_request(
             &mut client,
             &PluginIpcRequest::CreateChatStream {
@@ -1865,6 +2084,7 @@ mod tests {
         .await
         .expect("write create stream");
 
+        // Read the first (and only) chunk before cancelling.
         let first = read_plugin_response(&mut client)
             .await
             .expect("read")
@@ -1874,6 +2094,7 @@ mod tests {
             "expected partial chunk, got {first:?}"
         );
 
+        // Cancel the in-flight stream.
         write_plugin_request(
             &mut client,
             &PluginIpcRequest::CancelStream {
@@ -1919,9 +2140,9 @@ mod tests {
     }
 
     /// Two `CallTool` requests on one connection must both be in flight
-    /// concurrently: with serial dispatch the read loop blocks on the first
-    /// request, so the second is not even read until the first completes and
-    /// `in_flight` could never exceed 1.
+    /// concurrently (#431). Under the old inline dispatch the read loop blocked
+    /// on the first request, so the second was not even read until the first
+    /// completed and `in_flight` could never exceed 1.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_tool_calls_overlap_in_flight() {
@@ -1962,6 +2183,7 @@ mod tests {
             .expect("write call");
         }
 
+        // Both calls must reach the plugin and be blocked at the same time.
         wait_for_in_flight(&plugin, 2).await;
 
         plugin.release();
@@ -1988,8 +2210,8 @@ mod tests {
         );
     }
 
-    /// A `Ping` must be answered while a slow tool call is still in flight:
-    /// the read loop dispatches each request in its own task, so the
+    /// A `Ping` must be answered while a slow tool call is still in flight
+    /// (#431): the read loop dispatches each request in its own task, so the
     /// probe is not queued behind the blocked call.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2029,6 +2251,7 @@ mod tests {
         .await
         .expect("write call");
 
+        // Wait until the slow call is in flight, then ping.
         wait_for_in_flight(&plugin, 1).await;
 
         write_plugin_request(

@@ -62,7 +62,7 @@ impl RecallPlanner {
             .ok_or_else(|| {
                 CognitionError::RecallFailed("cannot plan recall without turn text".to_string())
             })?;
-        let intents = infer_intents(&topic, input.affect);
+        let intents = infer_intents(&topic, input.affect, input.language);
         let has_commitments = !input.commitments.is_empty();
         let required_kinds = kinds_for_intents(&intents, has_commitments);
 
@@ -135,10 +135,16 @@ impl RecallPlanner {
             // every gather path so they cannot compete with normal memories or
             // leak into the LLM context. With the pipeline disabled the
             // exclusion is off too: reflections behave as ordinary recall
-            // results, so enabling the pipeline is the only switch in their
-            // treatment.
+            // results, so enabling the pipeline is the only observable behavior
+            // change. The set of excluded kinds comes from the per-kind policy
+            // table (`MemoryKind::is_recall_eligible`); today it is exactly
+            // Reflection.
             exclude_kinds: if memory.reflection.enabled {
-                vec![MemoryKind::Reflection]
+                MemoryKind::ALL
+                    .iter()
+                    .copied()
+                    .filter(|kind| !kind.is_recall_eligible())
+                    .collect()
             } else {
                 vec![]
             },
@@ -184,7 +190,7 @@ fn semantic_queries(
     }
     if crate::contains_any(
         &lower,
-        &["what do you know", "tell me about", "とは", "について"],
+        ["what do you know", "tell me about", "とは", "について"],
     ) {
         push_query(&mut queries, &format!("{topic} facts"));
     }
@@ -264,6 +270,7 @@ mod tests {
             scene_summary,
             affect,
             commitments,
+            language: "en",
             character_id: "ene",
             user_id: Some("user1"),
         }

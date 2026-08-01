@@ -4,12 +4,35 @@ use ene_core::MemoryKind;
 use serde::{Deserialize, Serialize};
 
 /// Language locale for extraction pattern selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Locale {
-    /// Japanese.
-    Ja,
-    /// English.
-    En,
+///
+/// Carries a resolved primary language code (e.g. `"ja"`, `"en"`, `"ko"`) so
+/// extraction can select per-language packs at runtime. Languages without a
+/// dedicated pack fall back to English patterns in the deterministic
+/// extractor.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Locale {
+    /// Resolved primary language code (e.g. `"ja"`, `"en"`).
+    code: String,
+}
+
+impl Locale {
+    /// Resolves a free-form language tag to a [`Locale`].
+    ///
+    /// Matching is case-insensitive and keeps only the primary subtag, so
+    /// `"ja"`, `"JA"`, and `"ja-JP"` all resolve to `"ja"`. The legacy alias
+    /// `"jp"` also maps to `"ja"`. The result is not validated against the
+    /// language packs; the loader falls back to English when no pack exists
+    /// for the resolved code.
+    pub fn resolve(lang: &str) -> Self {
+        Self {
+            code: ene_config::resolve_language_alias(lang),
+        }
+    }
+
+    /// The resolved primary language code (e.g. `"ja"`, `"en"`).
+    pub fn code(&self) -> &str {
+        &self.code
+    }
 }
 
 /// Summary of a tool call result, used for procedure memory extraction.

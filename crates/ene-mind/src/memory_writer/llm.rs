@@ -13,7 +13,15 @@
     clippy::let_underscore_must_use,
     reason = "fmt::Write to a String is infallible in practice"
 )]
+//! - Unknown `kind` labels warn and fall back to `Semantic` (never silently
+//!   reclassified); `WorldState` is reserved, warned about, and falls back to
+//!   `Semantic` too.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; special-token and summarizer parsers slice at known ASCII delimiters"
+)]
 use std::fmt::Write;
 
 use ene_ai::{LlmMessage, LlmProvider, UserMessagePart};
@@ -56,13 +64,13 @@ const LOCALE_MISMATCH_MIN_CHARS: usize = 8;
 pub async fn extract(
     provider: &dyn LlmProvider,
     turn: &TurnInput<'_>,
-    locale: Locale,
+    locale: &Locale,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     extract_with_timeout(provider, turn, locale, DEFAULT_EXTRACTION_TIMEOUT_SECS, &[]).await
 }
 
 /// Same as [`extract`], but with an explicit call-timeout budget and optional
-/// remember/forget (and tool) pattern hints.
+/// forget (and tool) pattern hints.
 ///
 /// This is the entry point the runtime should use so the timeout can be driven
 /// by `MindMemoryConfig::extraction_timeout_secs`. Pattern hints
@@ -70,14 +78,11 @@ pub async fn extract(
 pub async fn extract_with_timeout(
     provider: &dyn LlmProvider,
     turn: &TurnInput<'_>,
-    locale: Locale,
+    locale: &Locale,
     timeout_secs: u64,
     pattern_hints: &[MemoryCandidate],
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
-    let prompts = PromptLibrary::load(match locale {
-        Locale::Ja => "ja",
-        Locale::En => "en",
-    });
+    let prompts = PromptLibrary::load(locale.code());
 
     let conversation = build_conversation_text(turn);
     let hints_text = format_pattern_hints(pattern_hints);
@@ -166,6 +171,7 @@ fn build_conversation_text(turn: &TurnInput<'_>) -> String {
 
 /// Returns the JSON schema for the structured extraction output.
 fn extraction_schema() -> serde_json::Value {
+    let kind_description = llm_extractable_kind_description();
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -176,7 +182,7 @@ fn extraction_schema() -> serde_json::Value {
                     "properties": {
                         "kind": {
                             "type": "string",
-                            "description": "Memory kind: Episodic, Semantic, UserProfile, Preference, Relationship, Affective, Commitment, Procedure, or Reflection"
+                            "description": kind_description,
                         },
                         "title": {
                             "type": "string",
@@ -225,7 +231,7 @@ fn extraction_schema() -> serde_json::Value {
 /// - Prose with embedded JSON object
 fn parse_candidates_json(
     raw: &str,
-    locale: Locale,
+    locale: &Locale,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     let cleaned = raw
         .trim()
@@ -282,12 +288,37 @@ struct RawCandidate {
     commitment_due: Option<String>,
 }
 
-/// Converts a raw JSON candidate into a `MemoryCandidate`.
+/// The extractable kind names (Debug form: `Episodic`, `UserProfile`, …) for
+/// the extraction schema's `kind` description.
 ///
-/// - Maps unknown `kind` strings to `Semantic` and logs a warning.
-/// - Caps confidence at `MAX_CONFIDENCE` (0.9).
-fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
-    let kind = match raw.kind.to_lowercase().as_str() {
+/// Derived from [`MemoryKind::is_llm_extractable`] so the prompt never
+/// advertises kinds the parse table rejects — in particular
+/// [`MemoryKind::WorldState`], which is reserved for structured world-state
+/// tracking and has no producer yet.
+fn llm_extractable_kind_description() -> String {
+    let names = MemoryKind::ALL
+        .iter()
+        .filter(|kind| kind.is_llm_extractable())
+        .map(|kind| format!("{kind:?}"))
+        .collect::<Vec<_>>();
+    format!("Memory kind: {}", names.join(", "))
+}
+
+/// Maps an LLM-provided `kind` string to a [`MemoryKind`].
+///
+/// Accepts exactly the kinds where [`MemoryKind::is_llm_extractable`] is true
+/// (canonical `snake_case` plus a couple of aliases). Two inputs fall back to
+/// [`MemoryKind::Semantic`], both with a `tracing::warn!`:
+///
+/// - `WorldState` — reserved for structured time-series world state; no
+///   producer exists yet, so it must not be silently produced.
+/// - anything else — an unknown label the model invented. The fallback keeps
+///   the extractor resilient to schema drift, but it is not free: a
+///   misclassified memory enters the arbiter as `Semantic` and is then
+///   **contradiction-checked** like any other semantic fact, so this warning is
+///   the only signal that a row may have been reclassified.
+fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
+    match raw_kind.to_lowercase().as_str() {
         "episodic" => MemoryKind::Episodic,
         "semantic" => MemoryKind::Semantic,
         "userprofile" | "user_profile" | "user profile" => MemoryKind::UserProfile,
@@ -297,14 +328,35 @@ fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
         "commitment" => MemoryKind::Commitment,
         "procedure" => MemoryKind::Procedure,
         "reflection" => MemoryKind::Reflection,
-        other => {
+        // WorldState is deliberately NOT parseable: it is reserved for
+        // structured time-series world state and not yet generated
+        // anywhere, so the extractor must not produce it. Falling back to
+        // Semantic (with a warning) is the correct degradation for now.
+        "worldstate" | "world_state" | "world state" => {
             tracing::warn!(
-                raw_kind = other,
-                "Unknown memory kind from LLM extractor, falling back to Semantic"
+                raw_kind = %raw_kind,
+                "LLM extractor returned WorldState, which is reserved for structured world-state tracking (#209) and not yet extractable; falling back to Semantic"
             );
             MemoryKind::Semantic
         }
-    };
+        other => {
+            tracing::warn!(
+                raw_kind = %raw_kind,
+                normalized = other,
+                "Unknown memory kind from LLM extractor; falling back to Semantic. Misclassified memories enter contradiction checking as Semantic (#348)"
+            );
+            MemoryKind::Semantic
+        }
+    }
+}
+
+/// Converts a raw JSON candidate into a `MemoryCandidate`.
+///
+/// - Maps unknown `kind` strings to `Semantic` with a warning; `WorldState`
+///   is reserved, warned about, and falls back to `Semantic` too.
+/// - Caps confidence at `MAX_CONFIDENCE` (0.9).
+fn raw_to_candidate(raw: RawCandidate, locale: &Locale) -> MemoryCandidate {
+    let kind = parse_llm_kind(&raw.kind);
 
     let confidence = raw.confidence.clamp(0.0, MAX_CONFIDENCE);
 
@@ -336,7 +388,7 @@ fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
 
 /// Simple heuristic: if more than 50% of the characters are CJK and the
 /// locale is `En`, or vice versa, we have a mismatch.
-fn locale_mismatch(text: &str, locale: Locale) -> bool {
+fn locale_mismatch(text: &str, locale: &Locale) -> bool {
     let cjk_count = text
         .chars()
         .filter(|c| {
@@ -353,14 +405,20 @@ fn locale_mismatch(text: &str, locale: Locale) -> bool {
         return false;
     }
     let cjk_ratio = cjk_count as f32 / total as f32;
-    match locale {
-        Locale::Ja => cjk_ratio < 0.1, // Expected Japanese but mostly non-CJK
-        Locale::En => cjk_ratio > 0.5, // Expected English but mostly CJK
+    match locale.code() {
+        "ja" => cjk_ratio < 0.1, // Expected Japanese but mostly non-CJK
+        // English and any language without a dedicated script heuristic are
+        // expected to be mostly non-CJK.
+        _ => cjk_ratio > 0.5,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use ene_ai::LlmCompletion;
 
@@ -494,9 +552,13 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("I'm working on Ene"), Locale::En)
-            .await
-            .expect("test fixture produces valid extraction");
+        let result = extract(
+            &provider,
+            &ja_turn("I'm working on Ene"),
+            &Locale::resolve("en"),
+        )
+        .await
+        .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, MemoryKind::Semantic);
         assert_eq!(result[0].title, "project discussion");
@@ -507,7 +569,7 @@ mod tests {
     async fn markdown_wrapper_stripped() {
         let json = "```json\n{\"candidates\": [{\"kind\": \"Preference\", \"title\": \"likes coffee\", \"content\": \"User likes coffee\", \"source_quote\": \"I love coffee\", \"confidence\": 0.7, \"should_persist\": true, \"deletion_target_key\": null, \"commitment_due\": null}]}\n```";
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("I love coffee"), Locale::En)
+        let result = extract(&provider, &ja_turn("I love coffee"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
@@ -517,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn non_json_returns_extraction_failed() {
         let provider = GarbageProvider;
-        let result = extract(&provider, &ja_turn("hello"), Locale::En).await;
+        let result = extract(&provider, &ja_turn("hello"), &Locale::resolve("en")).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -530,7 +592,7 @@ mod tests {
     async fn empty_candidates_returns_empty_vec() {
         let json = r#"{"candidates": []}"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("just chatting"), Locale::En)
+        let result = extract(&provider, &ja_turn("just chatting"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert!(result.is_empty());
@@ -551,7 +613,7 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("test"), Locale::En)
+        let result = extract(&provider, &ja_turn("test"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
@@ -573,11 +635,166 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("test"), Locale::En)
+        let result = extract(&provider, &ja_turn("test"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].kind, MemoryKind::Semantic);
+    }
+
+    // ── unknown / reserved kind handling ──
+
+    /// Minimal `tracing` subscriber that records every WARN event's rendered
+    /// fields, so tests can assert the fallback actually logs a warning rather
+    /// than silently reclassifying.
+    #[derive(Clone, Default)]
+    struct CapturingSubscriber {
+        warns: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl CapturingSubscriber {
+        fn warns(&self) -> Vec<String> {
+            self.warns.lock().expect("capture lock").clone()
+        }
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            if event.metadata().level() == &tracing::Level::WARN {
+                let mut visitor = FieldVisitor::default();
+                event.record(&mut visitor);
+                self.warns
+                    .lock()
+                    .expect("capture lock")
+                    .push(visitor.message);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// Collects a warning event's fields into `message` in visit order
+    /// (e.g. `raw_kind=CustomType message=Unknown memory kind …`).
+    #[derive(Default)]
+    struct FieldVisitor {
+        message: String,
+    }
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            self.message.push_str(field.name());
+            self.message.push('=');
+            self.message.push_str(value);
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if !self.message.is_empty() {
+                self.message.push(' ');
+            }
+            self.message.push_str(field.name());
+            self.message.push('=');
+            let _ = write!(self.message, "{value:?}");
+        }
+    }
+
+    /// An unknown label warns (naming the label) and lands as Semantic — never
+    /// silently reclassified.
+    #[test]
+    fn unknown_kind_warns_and_lands_as_semantic() {
+        let captured = CapturingSubscriber::default();
+        let kind =
+            tracing::subscriber::with_default(captured.clone(), || parse_llm_kind("CustomType"));
+        assert_eq!(kind, MemoryKind::Semantic);
+        let warns = captured.warns();
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("CustomType") && w.contains("Unknown memory kind")),
+            "expected a warning naming the unknown label, got: {warns:?}"
+        );
+    }
+
+    /// `WorldState` must not be produced: it warns with a kind-specific message
+    /// and falls back to Semantic (reserved).
+    #[test]
+    fn world_state_is_rejected_with_warning_not_produced() {
+        let captured = CapturingSubscriber::default();
+        let kind =
+            tracing::subscriber::with_default(captured.clone(), || parse_llm_kind("WorldState"));
+        assert_eq!(
+            kind,
+            MemoryKind::Semantic,
+            "WorldState must fall back to Semantic, never be produced"
+        );
+        let warns = captured.warns();
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("WorldState") && w.contains("reserved")),
+            "expected a WorldState-specific warning, got: {warns:?}"
+        );
+    }
+
+    /// The parse table and the policy table must agree: every
+    /// LLM-extractable kind parses from its canonical `snake_case` name, and the
+    /// one non-extractable kind (`WorldState`) does not.
+    #[test]
+    fn parse_table_accepts_exactly_llm_extractable_kinds() {
+        for kind in MemoryKind::ALL {
+            if kind.is_llm_extractable() {
+                assert_eq!(
+                    parse_llm_kind(kind.as_str()),
+                    kind,
+                    "parse table must accept {}",
+                    kind.as_str()
+                );
+            }
+        }
+        assert!(
+            !MemoryKind::WorldState.is_llm_extractable(),
+            "WorldState must not be extractable"
+        );
+        assert_eq!(
+            parse_llm_kind(MemoryKind::WorldState.as_str()),
+            MemoryKind::Semantic,
+            "WorldState must fall back, not parse to itself"
+        );
+    }
+
+    /// The schema's `kind` description advertises exactly the extractable
+    /// kinds, so the prompt never invites `WorldState`.
+    #[test]
+    fn schema_kind_description_lists_only_extractable_kinds() {
+        let schema = super::extraction_schema();
+        let description =
+            schema["properties"]["candidates"]["items"]["properties"]["kind"]["description"]
+                .as_str()
+                .expect("kind description must be a string");
+        for kind in MemoryKind::ALL {
+            let name = format!("{kind:?}");
+            assert_eq!(
+                description.contains(&name),
+                kind.is_llm_extractable(),
+                "schema description must advertise exactly the extractable kinds (mismatch for {name})"
+            );
+        }
     }
 
     #[tokio::test]
@@ -586,7 +803,8 @@ mod tests {
         // `MindMemoryConfig::extraction_timeout_secs`) is honoured and
         // reported in the error message.
         let provider = TimeoutProvider;
-        let result = extract_with_timeout(&provider, &ja_turn("test"), Locale::En, 1, &[]).await;
+        let result =
+            extract_with_timeout(&provider, &ja_turn("test"), &Locale::resolve("en"), 1, &[]).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -621,7 +839,7 @@ mod tests {
         let result = extract(
             &provider,
             &ja_turn("プロジェクトの話をしている"),
-            Locale::En,
+            &Locale::resolve("en"),
         )
         .await
         .expect("test fixture produces valid extraction");
@@ -650,7 +868,7 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("ゆき"), Locale::En)
+        let result = extract(&provider, &ja_turn("ゆき"), &Locale::resolve("en"))
             .await
             .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
@@ -676,9 +894,13 @@ mod tests {
             }]
         }"#;
         let provider = MockProvider::new(json);
-        let result = extract(&provider, &ja_turn("Forget about project X"), Locale::En)
-            .await
-            .expect("test fixture produces valid extraction");
+        let result = extract(
+            &provider,
+            &ja_turn("Forget about project X"),
+            &Locale::resolve("en"),
+        )
+        .await
+        .expect("test fixture produces valid extraction");
         assert_eq!(result.len(), 1);
         assert!(!result[0].should_persist);
         assert_eq!(result[0].deletion_target_key.as_deref(), Some("project-x"));
@@ -702,7 +924,7 @@ mod tests {
         let result = extract(
             &provider,
             &ja_turn("I have a meeting tomorrow at 3pm"),
-            Locale::En,
+            &Locale::resolve("en"),
         )
         .await
         .expect("test fixture produces valid extraction");
@@ -750,7 +972,7 @@ mod tests {
         let result = extract(
             &provider,
             &ja_turn("I have a presentation today"),
-            Locale::En,
+            &Locale::resolve("en"),
         )
         .await
         .expect("test fixture produces valid extraction");
@@ -829,9 +1051,15 @@ mod tests {
             commitment_due: None,
             tags: Vec::new(),
         };
-        extract_with_timeout(&provider, &ja_turn("I like coffee"), Locale::En, 5, &[hint])
-            .await
-            .expect("extract");
+        extract_with_timeout(
+            &provider,
+            &ja_turn("I like coffee"),
+            &Locale::resolve("en"),
+            5,
+            &[hint],
+        )
+        .await
+        .expect("extract");
         let user = provider.last_user();
         assert!(
             user.contains("likes coffee") && user.contains("kind=preference"),
@@ -845,7 +1073,7 @@ mod tests {
         let _ = extract_with_timeout(
             &provider,
             &ja_turn("今日プレゼンがある"),
-            Locale::Ja,
+            &Locale::resolve("ja"),
             5,
             &[],
         )

@@ -5,6 +5,11 @@
 //! Unknown keys and invalid values soft-fail (log + drop) without aborting
 //! the turn.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; special-token and summarizer parsers slice at known ASCII delimiters"
+)]
 use crate::output::{MotionLayer, PerformanceCue};
 
 /// Splits streaming text into normal text deltas and special tokens (like `<|perf:expr=happy|>`).

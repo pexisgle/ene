@@ -330,14 +330,17 @@ pub async fn resolve_decision_gguf_path(
     if decision_model_url.trim().is_empty() {
         return Ok(None);
     }
+    // #313: `mmproj` / `acceleration` are sourced from the llama.cpp plugin
+    // config (`plugins.list.llama-cpp.config`) rather than per-model config.
+    let llama_cpp = ene_ai::plugin_config::LlamaCppPluginConfig::global();
     let local = ResolvedLocalModel {
         name: String::new(),
         url: decision_model_url.to_string(),
         model_path: String::new(),
-        mmproj_url: String::new(),
-        mmproj_path: String::new(),
+        mmproj_url: llama_cpp.mmproj_url,
+        mmproj_path: llama_cpp.mmproj_path,
         quantization: String::new(),
-        acceleration: ene_ai::config::ProactiveAcceleration::Auto,
+        acceleration: llama_cpp.acceleration,
         gpu_layers: "auto".to_string(),
         context_size: 2048,
     };

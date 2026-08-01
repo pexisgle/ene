@@ -621,6 +621,31 @@ impl CharacterSettings {
         self.store.read().with_config_mut(f);
     }
 
+    /// Reads the Kokoro `voices.bin` path from the Kokoro plugin profile
+    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`, #313). Empty when
+    /// unset.
+    pub fn kokoro_voices_path(&self) -> String {
+        let value = self
+            .config()
+            .get_path("plugins.list.kokoro.profiles.kokoro.voices_path");
+        value
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_default()
+    }
+
+    /// Writes the Kokoro `voices.bin` path into the Kokoro plugin profile
+    /// (`plugins.list.kokoro.profiles.kokoro.voices_path`, #313). Passing an
+    /// empty string clears it (`null`).
+    pub fn set_kokoro_voices_path(&self, path: &str) {
+        let trimmed = path.trim();
+        let value = if trimmed.is_empty() { "null" } else { trimmed };
+        self.with_config_mut(|c| {
+            drop(c.set_path("plugins.list.kokoro.profiles.kokoro.voices_path", value));
+        });
+    }
+
     // ── Desktop-section accessors ─────────────────────────────────
 
     pub fn graphics(&self) -> GraphicsSettings {

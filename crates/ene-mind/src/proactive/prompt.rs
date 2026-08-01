@@ -136,6 +136,10 @@ fn affect_value(summary: &str) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use crate::config::{ProactiveConfig, ProactiveSourcesConfig};
     use crate::lifecycle::HistoryEntry;

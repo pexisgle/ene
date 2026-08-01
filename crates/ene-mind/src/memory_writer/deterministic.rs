@@ -1,20 +1,29 @@
 //! Deterministic memory extractor — minimal pattern safety net.
 //!
-//! Only explicit remember / forget instructions are pattern-matched.
-//! Preferences, schedules, nicknames, and other soft signals are left to the
-//! LLM extractor. Tool-result grounding remains a separate, configurable path.
+//! Only explicit forget (deletion) instructions are pattern-matched. Explicit
+//! remember requests are owned by the LLM extractor; preferences,
+//! schedules, nicknames, and other soft signals are left to the LLM too.
+//! Tool-result grounding remains a separate, configurable path.
+//!
+//! Forget patterns are loaded from per-language packs
+//! (`assets/lang/{lang}/patterns.json`) via [`ene_config::PatternLibrary`], so
+//! adding a language is a data-only change — no Rust code. A language without
+//! a pack falls back to English patterns.
 //!
 //! Confidence calibration:
-//! - Explicit「覚えて」 / remember: 0.85
 //! - Forget (deletion request): 0.90
 //! - Tool-grounded procedure/reflection/episodic: 0.60–0.70 (when enabled)
 
-use regex::Regex;
+#![expect(
+    clippy::string_slice,
+    reason = "deterministic extractor slices query text at known ASCII keyword boundaries"
+)]
 
-use super::candidate::{Locale, MemoryCandidate, ToolResultSummary, TurnInput};
+use super::candidate::{Locale, MemoryCandidate, TurnInput};
 use super::tool_grounding;
 use crate::config::ToolGroundingConfig;
 use crate::error::CognitionError;
+use ene_config::PatternLibrary;
 use ene_core::MemoryKind;
 
 /// Normalise Unicode with NFKC (fullwidth → ASCII, combined → single).
@@ -22,9 +31,9 @@ fn nfkc(s: &str) -> String {
     unicode_normalization::UnicodeNormalization::nfkc(s).collect()
 }
 
-/// Interrogative sentence openers (lowercase). A `remember` / `forget`
-/// keyword inside a question is not an instruction — e.g.
-/// "do you remember my birthday".
+/// Interrogative sentence openers (lowercase). A `forget` keyword inside a
+/// question is not an instruction — e.g. "did you forget my name?" (a
+/// precision guard).
 const EN_QUESTION_STARTERS: &[&str] = &[
     "do you",
     "did you",
@@ -64,219 +73,78 @@ fn is_en_question(msg: &str) -> bool {
     })
 }
 
-/// Return `true` when `msg` reads as a Japanese question rather than an
-/// instruction: it contains a `?` (the fullwidth `？` is already folded
-/// to ASCII by [`nfkc`]) or ends with the interrogative particle `か`
-/// (covers `〜ますか` / `〜ですか` / `覚えてるか`). This prevents phrasing
-/// like `私の誕生日を覚えてますか` from being captured as a remember
-/// instruction.
-fn is_ja_question(msg: &str) -> bool {
-    let trimmed = msg.trim();
-    trimmed.contains('?') || trimmed.ends_with('か')
-}
+/// Confidence for deterministic forget candidates.
+const FORGET_CONFIDENCE: f32 = 0.90;
 
-// ---------------------------------------------------------------------------
-// Pattern matcher type
-// ---------------------------------------------------------------------------
-
-type PatternMatcher = fn(&str, &str, &[ToolResultSummary]) -> Option<MemoryCandidate>;
-
-// ---------------------------------------------------------------------------
-// Japanese patterns
-// ---------------------------------------------------------------------------
-
-fn ja_explicit_remember(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    // Questions such as `私の誕生日を覚えてますか` are requests, not
-    // instructions, and must not be captured.
-    if is_ja_question(user_msg) {
-        return None;
-    }
-    // Japanese places the object before the verb, so the memorable content
-    // precedes the keyword: `X を覚えて(おいて)`. Capturing group 1 is the
-    // object. `教えて` ("tell me") is deliberately excluded because it is a
-    // request for information, not a memory instruction.
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE_WO: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(.+?)を(覚えて|記憶して|メモして|保存して)").unwrap()
-    });
-    // Explicit colon annotation `覚えて: X`, where the content follows the
-    // keyword. The colon is required so a trailing verb continuation such as
-    // `覚えておいて` is not mis-captured as content (`おいて`).
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE_COLON: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(覚えて|記憶して|メモして|保存して)[:：]\s*(.+)").unwrap()
-    });
-
-    let content = RE_WO
-        .captures(user_msg)
-        .map(|cap| cap[1].trim().to_string())
-        .or_else(|| {
-            RE_COLON
-                .captures(user_msg)
-                .map(|cap| cap[2].trim().to_string())
-        })?;
-
-    if content.is_empty() {
-        return None;
-    }
-    let title: String = content.chars().take(20).collect();
-    Some(MemoryCandidate {
+/// Builds a deletion-request candidate from a forget pattern match.
+fn forget_candidate(user_msg: &str, target: &str) -> MemoryCandidate {
+    let title_trunc: String = target.chars().take(20).collect();
+    MemoryCandidate {
         kind: MemoryKind::Semantic,
-        title: format!("{title}..."),
-        content,
+        title: format!("forget: {title_trunc}"),
+        content: format!("User requested to forget: {target}"),
         source_quote: user_msg.to_string(),
-        confidence: 0.85,
-        should_persist: true,
-        deletion_target_key: None,
+        confidence: FORGET_CONFIDENCE,
+        should_persist: false,
+        deletion_target_key: Some(target.to_string()),
         commitment_due: None,
         tags: Vec::new(),
-    })
+    }
 }
 
-fn ja_forget_request(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    // Pattern 1: content + を + keyword (e.g., "プロジェクトを忘れて")
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE_WO: std::sync::LazyLock<Regex> =
-        std::sync::LazyLock::new(|| Regex::new(r"(.+?)を(忘れて|消して|削除して|やめて)").unwrap());
-    // Pattern 2: keyword + content (e.g., "忘れて プロジェクトの話")
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE_AFTER: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(忘れて|消して|削除して|やめて)[:：]?\s*(.+)").unwrap()
-    });
-
-    if let Some(cap) = RE_WO.captures(user_msg) {
-        let target = cap[1].trim().to_string();
-        let title_trunc: String = target.chars().take(20).collect();
-        return Some(MemoryCandidate {
-            kind: MemoryKind::Semantic,
-            title: format!("forget: {title_trunc}"),
-            content: format!("User requested to forget: {target}"),
-            source_quote: user_msg.to_string(),
-            confidence: 0.90,
-            should_persist: false,
-            deletion_target_key: Some(target),
-            commitment_due: None,
-            tags: Vec::new(),
-        });
-    }
-
-    RE_AFTER.captures(user_msg).and_then(|cap| {
-        let after = cap[2].trim();
-        if after.is_empty() {
-            return None;
+/// Matches forget patterns from `patterns` against `user_msg`, returning the
+/// candidate of the **first** matching pattern in pack order. This preserves
+/// the historical semantics of the hand-written matchers, where the
+/// object-before-keyword pattern (`Xを忘れて`) took precedence over the
+/// keyword-first pattern (`忘れて X`). A pattern is skipped when the message
+/// reads as a question and the pattern opts into the question guard. Regexes
+/// are compiled once per pack load (see
+/// [`PatternLibrary::compiled_forget_patterns`]), so a bad pack entry is
+/// skipped at load time and cannot break extraction.
+fn match_forget_patterns(user_msg: &str, patterns: &PatternLibrary) -> Option<MemoryCandidate> {
+    for compiled in patterns.compiled_forget_patterns() {
+        let pattern = &compiled.pattern;
+        if pattern.skip_questions && is_en_question(user_msg) {
+            continue;
         }
-        let target = after.to_string();
-        let title_trunc: String = target.chars().take(20).collect();
-        Some(MemoryCandidate {
-            kind: MemoryKind::Semantic,
-            title: format!("forget: {title_trunc}"),
-            content: format!("User requested to forget: {target}"),
-            source_quote: user_msg.to_string(),
-            confidence: 0.90,
-            should_persist: false,
-            deletion_target_key: Some(target),
-            commitment_due: None,
-            tags: Vec::new(),
-        })
-    })
-}
-
-// ---------------------------------------------------------------------------
-// English patterns
-// ---------------------------------------------------------------------------
-
-fn en_explicit_remember(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    if is_en_question(user_msg) {
-        return None;
-    }
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(
-            r"(?i)(please\s+)?(remember|note|keep in mind|don't forget)[:：]?\s+(?:that\s+)?(.+)",
-        )
-        .unwrap()
-    });
-    RE.captures(user_msg).and_then(|cap| {
-        let content = cap[3].trim().to_string();
-        if content.is_empty() {
-            return None;
+        let Some(caps) = compiled.regex.captures(user_msg) else {
+            continue;
+        };
+        let Some(group) = caps.get(pattern.target_group) else {
+            tracing::warn!(
+                name = %pattern.name,
+                target_group = pattern.target_group,
+                "forget pattern has no such capture group; skipping pattern"
+            );
+            continue;
+        };
+        let target = group.as_str().trim();
+        if target.is_empty() {
+            continue;
         }
-        Some(MemoryCandidate {
-            kind: MemoryKind::Semantic,
-            title: format!("{}...", content.chars().take(20).collect::<String>()),
-            content,
-            source_quote: user_msg.to_string(),
-            confidence: 0.85,
-            should_persist: true,
-            deletion_target_key: None,
-            commitment_due: None,
-            tags: Vec::new(),
-        })
-    })
-}
-
-fn en_forget_request(
-    user_msg: &str,
-    _asst_msg: &str,
-    _tool_results: &[ToolResultSummary],
-) -> Option<MemoryCandidate> {
-    if is_en_question(user_msg) {
-        return None;
+        return Some(forget_candidate(user_msg, target));
     }
-    #[expect(clippy::unwrap_used, reason = "constant regex pattern")]
-    static RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-        Regex::new(r"(?i)(forget|erase|drop|stop remembering)\s+(?:about\s+)?(.+)").unwrap()
-    });
-    RE.captures(user_msg).map(|cap| {
-        let target = cap[2].trim().to_string();
-        MemoryCandidate {
-            kind: MemoryKind::Semantic,
-            title: format!("forget: {}", target.chars().take(20).collect::<String>()),
-            content: format!("User requested to forget: {target}"),
-            source_quote: user_msg.to_string(),
-            confidence: 0.90,
-            should_persist: false,
-            deletion_target_key: Some(target),
-            commitment_due: None,
-            tags: Vec::new(),
-        }
-    })
+    None
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Japanese message matchers: explicit remember / forget only.
-const JA_MATCHERS: &[PatternMatcher] = &[ja_explicit_remember, ja_forget_request];
-
-/// English message matchers: explicit remember / forget only.
-const EN_MATCHERS: &[PatternMatcher] = &[en_explicit_remember, en_forget_request];
-
 /// Extract memory candidates deterministically from a conversation turn.
 ///
-/// Pattern matching is locale-aware and limited to explicit remember / forget
-/// instructions. Soft signals (preferences, schedules, nicknames, …) are not
-/// pattern-matched — the LLM extractor owns those. Tool-result grounding is
-/// applied when enabled via [`ToolGroundingConfig`].
+/// Matching is limited to explicit forget instructions driven by the language
+/// pack for `locale` (see [`ene_config::PatternLibrary`]); languages without a
+/// pack fall back to English patterns. Explicit remember requests are owned by
+/// the LLM extractor and are not pattern-matched. Soft signals (preferences,
+/// schedules, nicknames, …) are not pattern-matched either. Tool-result
+/// grounding is applied when enabled via [`ToolGroundingConfig`].
 ///
-/// Candidates are deduplicated by (title, kind) when multiple matchers fire on
-/// the same message. Only the first match (by matcher order) is kept.
+/// Candidates are deduplicated by (title, kind, `should_persist`) across
+/// pattern and tool-grounding hits.
 pub fn extract(
     turn: &TurnInput<'_>,
-    locale: Locale,
+    locale: &Locale,
     min_confidence: f32,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     extract_with_tool_grounding(
@@ -290,23 +158,19 @@ pub fn extract(
 /// Same as [`extract`], but with explicit tool-grounding configuration.
 pub fn extract_with_tool_grounding(
     turn: &TurnInput<'_>,
-    locale: Locale,
+    locale: &Locale,
     min_confidence: f32,
     tool_grounding_cfg: &ToolGroundingConfig,
 ) -> Result<Vec<MemoryCandidate>, CognitionError> {
     let user_norm = nfkc(turn.user_message);
-    let asst_norm = turn.assistant_message.map(nfkc).unwrap_or_default();
 
     let mut candidates: Vec<MemoryCandidate> = Vec::new();
 
-    let matchers = match locale {
-        Locale::Ja => JA_MATCHERS,
-        Locale::En => EN_MATCHERS,
-    };
-    for matcher in matchers {
-        if let Some(c) = matcher(&user_norm, &asst_norm, turn.tool_results) {
-            candidates.push(c);
-        }
+    // Forget-pattern matcher (language-pack driven; falls back to English
+    // patterns for languages without a pack).
+    let patterns = PatternLibrary::load(locale.code());
+    if let Some(candidate) = match_forget_patterns(&user_norm, &patterns) {
+        candidates.push(candidate);
     }
 
     // Tool-result matcher (always applied when enabled).
@@ -315,6 +179,7 @@ pub fn extract_with_tool_grounding(
         tool_grounding_cfg,
     ));
 
+    // Filter by min_confidence and deduplicate by (title, kind)
     let mut seen = std::collections::HashSet::new();
     let filtered: Vec<MemoryCandidate> = candidates
         .into_iter()
@@ -343,10 +208,12 @@ pub fn extract_with_tool_grounding(
     test,
     expect(
         clippy::expect_used,
-        reason = "unit/integration tests use unwrap/expect for concise assertions"
+        clippy::indexing_slicing,
+        reason = "unit/integration tests use unwrap/expect and fixed indices for concise assertions"
     )
 )]
 mod tests {
+    use super::super::candidate::ToolResultSummary;
     use super::*;
 
     fn ja_turn(msg: &str) -> TurnInput<'_> {
@@ -373,58 +240,97 @@ mod tests {
         }
     }
 
-    // ── Japanese remember ─────────────────────────────────────────────
+    // ── Remember is LLM-owned ─────────────────────────────────────────
 
     #[test]
-    fn ja_explicit_remember_pickup() {
-        let out = extract(
-            &ja_turn("覚えて: プロジェクトXの話をしている"),
-            Locale::Ja,
-            0.0,
-        )
-        .expect("deterministic extraction always succeeds");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Semantic);
-        assert!(out[0].should_persist);
-        assert!(out[0].content.contains("プロジェクトX"));
-    }
-
-    #[test]
-    fn ja_remember_captures_object_before_keyword() {
-        let out = extract(&ja_turn("私の誕生日を覚えておいて"), Locale::Ja, 0.0)
-            .expect("deterministic extraction always succeeds");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Semantic);
-        assert!(
-            out[0].content.contains("私の誕生日") && !out[0].content.contains("おいて"),
-            "expected content 私の誕生日 without おいて, got: {out:?}"
-        );
+    fn remember_is_no_longer_detected_deterministically() {
+        for (msg, locale) in [
+            (
+                "覚えて: プロジェクトXの話をしている",
+                &Locale::resolve("ja"),
+            ),
+            ("私の誕生日を覚えておいて", &Locale::resolve("ja")),
+            (
+                "Please remember that I have a meeting tomorrow",
+                &Locale::resolve("en"),
+            ),
+        ] {
+            let out = extract(&ja_turn(msg), locale, 0.0)
+                .expect("deterministic extraction always succeeds");
+            assert!(
+                out.is_empty(),
+                "explicit remember must be LLM-owned, not pattern-matched: {msg:?} -> {out:?}"
+            );
+        }
     }
 
     #[test]
     fn ja_teach_request_is_not_remembered() {
-        let out = extract(&ja_turn("今日の天気を教えて"), Locale::Ja, 0.0)
+        let out = extract(&ja_turn("今日の天気を教えて"), &Locale::resolve("ja"), 0.0)
             .expect("deterministic extraction always succeeds");
         assert!(out.is_empty(), "教えて must not be captured: {out:?}");
     }
 
-    #[test]
-    fn ja_remember_question_is_skipped() {
-        let out = extract(&ja_turn("私の誕生日を覚えてますか"), Locale::Ja, 0.0)
-            .expect("deterministic extraction always succeeds");
-        assert!(out.is_empty(), "remember question must not match: {out:?}");
-    }
+    // ── Japanese forget ───────────────────────────────────────────────
 
     #[test]
     fn ja_forget_request_creates_deletion_candidate() {
-        let out = extract(&ja_turn("さっきのプロジェクトを忘れて"), Locale::Ja, 0.0)
-            .expect("deterministic extraction always succeeds");
+        let out = extract(
+            &ja_turn("さっきのプロジェクトを忘れて"),
+            &Locale::resolve("ja"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].kind, MemoryKind::Semantic);
         assert!(!out[0].should_persist);
         assert_eq!(
             out[0].deletion_target_key.as_deref(),
             Some("さっきのプロジェクト")
+        );
+    }
+
+    #[test]
+    fn ja_forget_after_keyword_captures_content() {
+        let out = extract(
+            &ja_turn("忘れて プロジェクトの話"),
+            &Locale::resolve("ja"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].deletion_target_key.as_deref(),
+            Some("プロジェクトの話")
+        );
+    }
+
+    #[test]
+    fn ja_forget_question_still_matches() {
+        // Japanese forget patterns do not opt into the English question guard,
+        // so a question-marked forget request is still applied.
+        let out = extract(
+            &ja_turn("さっきの話を忘れて？"),
+            &Locale::resolve("ja"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].deletion_target_key.as_deref(), Some("さっきの話"));
+    }
+
+    #[test]
+    fn fullwidth_colon_still_matches() {
+        let out = extract(
+            &ja_turn("忘れて：全角コロンテスト"),
+            &Locale::resolve("ja"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].deletion_target_key.as_deref(),
+            Some("全角コロンテスト")
         );
     }
 
@@ -437,7 +343,7 @@ mod tests {
             "あとで X を確認する",
             "今日はこのアプリeneの進捗報告をします。メリットを教えて",
         ] {
-            let out = extract(&ja_turn(msg), Locale::Ja, 0.0)
+            let out = extract(&ja_turn(msg), &Locale::resolve("ja"), 0.0)
                 .expect("deterministic extraction always succeeds");
             assert!(
                 out.is_empty(),
@@ -446,59 +352,46 @@ mod tests {
         }
     }
 
-    // ── English remember ──────────────────────────────────────────────
-
-    #[test]
-    fn en_explicit_remember_pickup() {
-        let out = extract(
-            &en_turn("Please remember that I have a meeting tomorrow"),
-            Locale::En,
-            0.0,
-        )
-        .expect("deterministic extraction always succeeds");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].kind, MemoryKind::Semantic);
-        assert!(out[0].content.contains("meeting"));
-    }
-
-    #[test]
-    fn indirect_question_without_mark_is_skipped() {
-        let out = extract(&en_turn("do you remember my birthday"), Locale::En, 0.0)
-            .expect("deterministic extraction always succeeds");
-        assert!(out.is_empty(), "indirect question must not match: {out:?}");
-    }
-
-    #[test]
-    fn imperative_remember_still_matches() {
-        let out = extract(
-            &en_turn("please remember that I take my coffee black"),
-            Locale::En,
-            0.0,
-        )
-        .expect("deterministic extraction always succeeds");
-        assert_eq!(out.len(), 1, "imperative remember must still match");
-    }
-
-    #[test]
-    fn en_remember_empty_content_is_rejected() {
-        let out = extract(&en_turn("please remember    "), Locale::En, 0.0)
-            .expect("deterministic extraction always succeeds");
-        assert!(
-            out.is_empty(),
-            "empty remember content must not match: {out:?}"
-        );
-    }
+    // ── English forget ────────────────────────────────────────────────
 
     #[test]
     fn en_forget_request_creates_deletion_candidate() {
-        let out = extract(&en_turn("Forget about my ex-girlfriend"), Locale::En, 0.0)
-            .expect("deterministic extraction always succeeds");
+        let out = extract(
+            &en_turn("Forget about my ex-girlfriend"),
+            &Locale::resolve("en"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert!(!out[0].should_persist);
         assert_eq!(
             out[0].deletion_target_key.as_deref(),
             Some("my ex-girlfriend")
         );
+    }
+
+    #[test]
+    fn en_forget_question_is_skipped() {
+        let out = extract(
+            &en_turn("did you forget my name?"),
+            &Locale::resolve("en"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert!(out.is_empty(), "forget question must not match: {out:?}");
+    }
+
+    #[test]
+    fn en_forget_question_without_mark_is_skipped() {
+        // The interrogative-opener guard fires without a trailing `?`, so an
+        // opener phrase must not be captured as a forget instruction.
+        let out = extract(
+            &en_turn("did you forget my name"),
+            &Locale::resolve("en"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert!(out.is_empty(), "forget question must not match: {out:?}");
     }
 
     #[test]
@@ -509,13 +402,47 @@ mod tests {
             "Next time, let's discuss the design",
             "today I have a presentation about ene",
         ] {
-            let out = extract(&en_turn(msg), Locale::En, 0.0)
+            let out = extract(&en_turn(msg), &Locale::resolve("en"), 0.0)
                 .expect("deterministic extraction always succeeds");
             assert!(
                 out.is_empty(),
                 "soft signal must not match pattern: {msg:?} -> {out:?}"
             );
         }
+    }
+
+    // ── Language fallback ─────────────────────────────────────────────
+
+    #[test]
+    fn language_without_pack_falls_back_to_english_patterns() {
+        // "zh" has no pattern pack: the loader falls back to English patterns,
+        // so English forget requests still work for zh users.
+        let out = extract(
+            &en_turn("Forget about my ex-girlfriend"),
+            &Locale::resolve("zh"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].deletion_target_key.as_deref(),
+            Some("my ex-girlfriend")
+        );
+    }
+
+    #[test]
+    fn jp_alias_resolves_to_ja_patterns() {
+        let out = extract(
+            &ja_turn("さっきのプロジェクトを忘れて"),
+            &Locale::resolve("jp"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].deletion_target_key.as_deref(),
+            Some("さっきのプロジェクト")
+        );
     }
 
     // ── Tool procedure ────────────────────────────────────────────────
@@ -536,7 +463,7 @@ mod tests {
             persist_success_procedure: true,
             ..ToolGroundingConfig::default()
         };
-        let out = extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &cfg)
+        let out = extract_with_tool_grounding(&turn, &Locale::resolve("ja"), 0.0, &cfg)
             .expect("deterministic extraction always succeeds");
         assert!(out.iter().any(|c| c.kind == MemoryKind::Procedure));
         assert!(out.iter().any(|c| c.content.contains("fs")));
@@ -554,9 +481,13 @@ mod tests {
             assistant_message: None,
             tool_results: &tools,
         };
-        let out =
-            extract_with_tool_grounding(&turn, Locale::Ja, 0.0, &ToolGroundingConfig::default())
-                .expect("deterministic extraction always succeeds");
+        let out = extract_with_tool_grounding(
+            &turn,
+            &Locale::resolve("ja"),
+            0.0,
+            &ToolGroundingConfig::default(),
+        )
+        .expect("deterministic extraction always succeeds");
         assert!(
             out.is_empty(),
             "default tool grounding must not auto-persist successes: {out:?}"
@@ -567,28 +498,28 @@ mod tests {
 
     #[test]
     fn empty_input_returns_empty() {
-        let out = extract(&empty_turn(), Locale::Ja, 0.0)
+        let out = extract(&empty_turn(), &Locale::resolve("ja"), 0.0)
             .expect("deterministic extraction always succeeds");
         assert!(out.is_empty());
     }
 
     #[test]
-    fn locale_mismatch_returns_empty() {
-        let out = extract(&ja_turn("覚えて: test"), Locale::En, 0.0)
+    fn japanese_message_with_english_locale_returns_empty() {
+        let out = extract(&ja_turn("さっきの話を忘れて"), &Locale::resolve("en"), 0.0)
             .expect("deterministic extraction always succeeds");
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "en patterns must not match Japanese text");
     }
 
     #[test]
     fn no_pattern_match_returns_empty() {
-        let out = extract(&ja_turn("今日の天気は？"), Locale::Ja, 0.0)
+        let out = extract(&ja_turn("今日の天気は？"), &Locale::resolve("ja"), 0.0)
             .expect("deterministic extraction always succeeds");
         assert!(out.is_empty());
     }
 
     #[test]
     fn confidence_above_threshold_passes() {
-        let out = extract(&ja_turn("覚えて: 重要なこと"), Locale::Ja, 0.80)
+        let out = extract(&ja_turn("さっきの話を忘れて"), &Locale::resolve("ja"), 0.80)
             .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
         assert!(out[0].confidence >= 0.80);
@@ -598,26 +529,30 @@ mod tests {
     fn does_not_extract_from_assistant_message() {
         let turn = TurnInput {
             user_message: "hello",
-            assistant_message: Some("覚えて: 私の秘密"),
+            assistant_message: Some("忘れて: 私の秘密"),
             tool_results: &[],
         };
-        let out =
-            extract(&turn, Locale::Ja, 0.0).expect("deterministic extraction always succeeds");
+        let out = extract(&turn, &Locale::resolve("ja"), 0.0)
+            .expect("deterministic extraction always succeeds");
         assert!(out.is_empty());
     }
 
     #[test]
-    fn deduplicates_by_title_and_kind() {
-        let msg = "覚えて: プロジェクトX";
-        let out = extract(&ja_turn(msg), Locale::Ja, 0.0)
-            .expect("deterministic extraction always succeeds");
+    fn first_matching_pattern_wins() {
+        // "Xを忘れて Y" matches both Japanese patterns; the object-before-
+        // keyword pattern comes first in the pack and takes precedence (the
+        // historical RE_WO early-return semantics).
+        let out = extract(
+            &ja_turn("プロジェクトXを忘れて 明日の話"),
+            &Locale::resolve("ja"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
         assert_eq!(out.len(), 1);
-    }
-
-    #[test]
-    fn fullwidth_colon_still_matches() {
-        let out = extract(&ja_turn("覚えて：全角コロンテスト"), Locale::Ja, 0.0)
-            .expect("deterministic extraction always succeeds");
-        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].deletion_target_key.as_deref(),
+            Some("プロジェクトX"),
+            "RE_WO (object before keyword) must win over RE_AFTER"
+        );
     }
 }

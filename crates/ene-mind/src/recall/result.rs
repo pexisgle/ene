@@ -99,6 +99,10 @@ pub fn infer_recall_reason(scored: &ScoredMemory) -> RecallReason {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use chrono::Utc;
     use ene_store::{AffectAnnotation, MemoryConfidence, MemorySalience, MemoryStatus};

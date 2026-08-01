@@ -282,6 +282,10 @@ fn parse_strategies(reflections: &[ene_core::MemoryItem]) -> (Vec<String>, Vec<S
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use crate::config::ReflectionConfig;
     use crate::memory_writer::arbiter::{
