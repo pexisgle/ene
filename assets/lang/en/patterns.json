@@ -6,5 +6,12 @@
       "target_group": 2,
       "skip_questions": true
     }
-  ]
+  ],
+  "intent_keywords": {
+    "episodic": ["remember", "last time", "previous", "before"],
+    "preference": ["i like", "i love", "i dislike", "i hate", "favorite", "prefer"],
+    "relationship": ["between us", "our relationship", "trust", "friend", "together"],
+    "affective": ["feel", "felt", "happy", "sad", "angry", "anxious"],
+    "procedure": ["how do i", "how to", "steps", "procedure", "setup"]
+  }
 }
