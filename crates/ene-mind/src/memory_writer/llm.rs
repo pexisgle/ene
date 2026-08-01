@@ -361,8 +361,8 @@ fn parse_llm_kind(raw_kind: &str) -> MemoryKind {
 
 /// Converts a raw JSON candidate into a `MemoryCandidate`.
 ///
-/// - Maps unknown `kind` strings to `Semantic` with a warning; rejects
-///   `WorldState` explicitly (reserved, #209).
+/// - Maps unknown `kind` strings to `Semantic` with a warning; `WorldState`
+///   (reserved, #209) is warned about and falls back to `Semantic` too.
 /// - Caps confidence at `MAX_CONFIDENCE` (0.9).
 fn raw_to_candidate(raw: RawCandidate, locale: Locale) -> MemoryCandidate {
     let kind = parse_llm_kind(&raw.kind);
