@@ -545,6 +545,46 @@ pub fn warn_on_context_budget_issues(ai: &AiConfig, prompt_budget: u32) {
             issue.message()
         );
     }
+    report_assumed_context_windows(ai);
+}
+
+/// Report every task running on the assumed default context window.
+///
+/// [`validate_context_budgets`] deliberately skips tasks whose window is
+/// unknown, to avoid warning about the conservative floor on a normal cloud
+/// setup. But the floor is not hypothetical: prompt packing budgets against
+/// [`crate::context_window::DEFAULT_CONTEXT_WINDOW`] for those tasks, so a
+/// 200k-window model that simply does not advertise its limit has its prompt
+/// truncated to 8192 tokens with nothing said about it. Reported at info level
+/// — this is a "you may want to set this" note, not a misconfiguration.
+fn report_assumed_context_windows(ai: &AiConfig) {
+    let report = |task_name: &str, task: &TaskRef| {
+        if local_advertised_window(ai, task).is_some()
+            || ai
+                .providers
+                .get(&task.provider)
+                .and_then(|def| def.context_window)
+                .is_some()
+        {
+            return;
+        }
+        tracing::info!(
+            component = "AiConfig",
+            task = task_name,
+            model = %task_model_label(task),
+            provider = %task.provider,
+            assumed_window = crate::context_window::DEFAULT_CONTEXT_WINDOW,
+            "no context window advertised by the provider or set in config; \
+             assuming the conservative default. Set \
+             `ai.providers.{}.context_window` to use the model's real limit.",
+            task.provider
+        );
+    };
+
+    report("chat", &ai.tasks.chat);
+    if let Some(proactive) = ai.tasks.proactive.as_ref() {
+        report("proactive", proactive);
+    }
 }
 
 /// Lightweight API-key validation for an OpenAI-compatible provider.
@@ -1236,6 +1276,37 @@ mod tests {
     #[test]
     fn validate_context_budgets_passes_with_default_local_window() {
         let cfg = local_chat_config(16_384, 2_048);
+        assert!(validate_context_budgets(&cfg, 12_000).is_empty());
+    }
+
+    #[test]
+    fn assumed_window_is_reported_only_when_no_source_names_one() {
+        // An unadvertised, unconfigured task silently runs on the conservative
+        // default, so it is worth an info note even though it is not an issue.
+        let mut cfg = AiConfig::default();
+        cfg.tasks.chat = TaskRef {
+            provider: "default".to_string(),
+            ..TaskRef::default()
+        };
+        assert!(
+            local_advertised_window(&cfg, &cfg.tasks.chat).is_none()
+                && cfg
+                    .providers
+                    .get(&cfg.tasks.chat.provider)
+                    .and_then(|d| d.context_window)
+                    .is_none(),
+            "fixture must have no window from either source"
+        );
+
+        // Naming the window in config removes the reason to report.
+        if let Some(def) = cfg.providers.get_mut("default") {
+            def.context_window = Some(200_000);
+        }
+        assert_eq!(
+            cfg.advertised_window_for_task(&cfg.tasks.chat),
+            Some(200_000),
+            "an explicit override must be picked up as the advertised window"
+        );
         assert!(validate_context_budgets(&cfg, 12_000).is_empty());
     }
 
