@@ -167,8 +167,9 @@ pub fn classify_recalled_memories(
 /// Deadlines are appended in parentheses: `- {title}: {description}（期限: 明日）`,
 /// with overdue commitments explicitly marked (`（期限切れ）`). `lang` selects
 /// the wording ("ja" vs anything else, which falls back to English); the strings
-/// belong in a language pack once #338 lands. `now` anchors the relative-deadline
-/// computation so every bullet in the block shares one reference instant.
+/// belong in a language pack once mind-side i18n extraction lands. `now` anchors
+/// the relative-deadline computation so every bullet in the block shares one
+/// reference instant.
 pub fn render_commitments_block(
     commitments: &[ActiveCommitmentPrompt],
     lang: &str,
@@ -205,7 +206,8 @@ pub fn render_commitments_block(
 /// A parsed `due_at` wins over the raw `due_label`: the label is only a
 /// fallback for hints extraction could not parse (e.g. "next time"), and is
 /// rendered as-is. Overdue detection uses the ledger's `due_at < now` rule,
-/// mirroring `mark_stale_commitments`.
+/// mirroring `mark_stale_commitments`. Offsets are against the UTC calendar
+/// day, matching the ledger's UTC deadline comparisons.
 fn render_due_expression(
     commitment: &ActiveCommitmentPrompt,
     now: DateTime<Utc>,
@@ -525,7 +527,7 @@ mod tests {
 
     #[test]
     fn commitments_block_renders_future_due_at_as_relative() {
-        // #385: a parsed `due_at` in the future becomes a relative expression
+        // A parsed `due_at` in the future becomes a relative expression
         // anchored at the renderer's `now` (calendar-day offset).
         let now = chrono::Utc::now();
         let commitment = sample_commitment(
@@ -548,7 +550,7 @@ mod tests {
 
     #[test]
     fn commitments_block_renders_today_and_tomorrow_terms() {
-        // #385: natural relative terms for the same-day and next-day cases.
+        // Natural relative terms for the same-day and next-day cases.
         // Anchor `now` to a fixed instant and derive both due dates from its
         // calendar date at midday, so a late-evening UTC run cannot roll the
         // same-day deadline across midnight (which would flip days to 1).
@@ -596,7 +598,7 @@ mod tests {
 
     #[test]
     fn commitments_block_marks_past_due_at_as_overdue() {
-        // #385: a `due_at` before `now` is explicitly marked overdue, mirroring
+        // A `due_at` before `now` is explicitly marked overdue, mirroring
         // the ledger's `mark_stale_commitments` (`due_at < now`).
         let now = chrono::Utc::now();
         let commitment = sample_commitment(
@@ -613,7 +615,7 @@ mod tests {
 
     #[test]
     fn commitments_block_renders_due_label_as_is() {
-        // #385: without a parseable `due_at`, the raw `due_label` is rendered
+        // Without a parseable `due_at`, the raw `due_label` is rendered
         // verbatim ("期限: 明日"), because the label is the only deadline hint.
         let now = chrono::Utc::now();
         let commitment =
@@ -629,7 +631,7 @@ mod tests {
 
     #[test]
     fn commitments_block_without_deadline_is_unchanged() {
-        // #385: commitments with neither `due_at` nor `due_label` keep the
+        // Commitments with neither `due_at` nor `due_label` keep the
         // historical title/description-only rendering.
         let now = chrono::Utc::now();
         let commitment = sample_commitment("buy milk", "from the corner store", None, None);
@@ -639,7 +641,7 @@ mod tests {
 
     #[test]
     fn commitments_block_prefers_due_at_over_due_label() {
-        // #385: a parseable `due_at` wins over the raw label; the relative
+        // A parseable `due_at` wins over the raw label; the relative
         // expression is not clobbered by a stale/conflicting label.
         let now = chrono::Utc::now();
         let commitment = sample_commitment(

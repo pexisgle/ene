@@ -141,11 +141,11 @@ pub struct PackInput {
     pub user_input: String,
     /// Section-renderer language (`classifier_language` from the mind config):
     /// "ja" selects Japanese wording, anything else falls back to English —
-    /// used for e.g. commitment deadline expressions (#385). Belongs in a
-    /// language pack with #338.
+    /// used for e.g. commitment deadline expressions. Belongs in a
+    /// language pack.
     pub lang: String,
     /// Reference instant for relative expressions such as commitment
-    /// deadlines (#385). `None` uses a single `Utc::now()` captured per pack,
+    /// deadlines. `None` uses a single `Utc::now()` captured per pack,
     /// shared by every bullet in a block; an explicit value pins the instant
     /// (tests).
     pub now: Option<chrono::DateTime<chrono::Utc>>,
@@ -1232,7 +1232,7 @@ mod tests {
 
     #[test]
     fn commitments_section_renders_deadline_through_packing() {
-        // #385: the deadline reaches the packed prompt — `due_at` becomes a
+        // The deadline reaches the packed prompt — `due_at` becomes a
         // relative expression in the configured language, overdue is marked.
         // The reference instant is pinned so the calendar-day offsets can
         // never roll across a UTC-midnight boundary between this test and the
