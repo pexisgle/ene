@@ -382,11 +382,6 @@ impl MemoryHandle {
 
 #[cfg(test)]
 mod tests {
-    #![expect(
-        clippy::unwrap_used,
-        reason = "unit tests use unwrap for concise assertions"
-    )]
-
     use super::*;
 
     type StreamResult = std::pin::Pin<
