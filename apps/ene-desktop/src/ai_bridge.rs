@@ -58,10 +58,9 @@ const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// This is the desktop app's own thin boundary type, not a second
 /// competing definition of `ene_runtime::PublicApiError` — it wraps that
-/// type (plus [`ene_runtime::EneRuntimeError`] and
-/// [`ene_store::EneMemoryError`], both already `thiserror`-typed at their
-/// own crate boundaries) and adds exactly one desktop-local concern that
-/// doesn't belong in `ene-runtime`: a blocking call that exceeded
+/// type (plus [`ene_runtime::EneRuntimeError`], already `thiserror`-typed
+/// at its own crate boundary) and adds exactly one desktop-local concern
+/// that doesn't belong in `ene-runtime`: a blocking call that exceeded
 /// [`BLOCKING_TIMEOUT`] and was cancelled before the actor replied.
 ///
 /// As of #408 a dead actor reaches this type solely as
@@ -94,11 +93,6 @@ pub enum AiBridgeError {
     /// returned a stable [`ene_runtime::PublicApiError`] category.
     #[error(transparent)]
     Api(#[from] ene_runtime::PublicApiError),
-    /// A memory-store operation invoked directly from the desktop bridge
-    /// (bypassing the actor command channel via `MemoryHandle::store`)
-    /// failed.
-    #[error(transparent)]
-    Storage(#[from] ene_store::EneMemoryError),
     /// An AI provider call made directly from the bridge (outside the
     /// actor) failed.
     #[error(transparent)]
@@ -413,13 +407,8 @@ impl AiBridge {
             let commitments = memory
                 .list_active_commitments(character_id, Some(&user_id), limit)
                 .await?;
-            let (pending_writes, permanent_writes) = memory
-                .store()
-                .ok_or_else(|| {
-                    ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
-                })?
-                .count_pending_memory_writes(character_id)
-                .await?;
+            let (pending_writes, permanent_writes) =
+                memory.count_pending_memory_writes(character_id).await?;
             Ok(MemoryJournalPayload {
                 memories,
                 affect,
@@ -536,10 +525,7 @@ impl AiBridge {
     pub fn complete_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
-            let store = memory.store().ok_or_else(|| {
-                ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
-            })?;
-            store
+            memory
                 .complete_commitment(id)
                 .await
                 .map_err(AiBridgeError::from)
@@ -550,10 +536,7 @@ impl AiBridge {
     pub fn cancel_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
         let memory = self.handle.diagnostics().memory().clone();
         self.block_on_timeout(async {
-            let store = memory.store().ok_or_else(|| {
-                ene_store::EneMemoryError::Other("Memory store is not enabled".to_string())
-            })?;
-            store
+            memory
                 .cancel_commitment(id)
                 .await
                 .map_err(AiBridgeError::from)

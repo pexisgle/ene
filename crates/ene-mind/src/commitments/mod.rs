@@ -34,6 +34,21 @@ use crate::memory_writer::{AppliedDecision, ArbiterContext, MemoryArbiter};
 const MAX_ACTIVE_MATCH_CHECK: usize = 4096;
 
 /// Companion Commitment Ledger: promises, tasks, follow-ups.
+///
+/// # No in-memory cache
+///
+/// This ledger is **stateless** — the struct has no fields. Every operation
+/// (`apply_commitment_candidates`, `list_active`, `complete`, `cancel`,
+/// `mark_stale_overdue`) takes `&dyn MemoryPort` and reads or writes the
+/// `commitments` table on each call. The runtime actor likewise holds no
+/// commitment snapshot: it re-reads `list_active_commitments` from the store
+/// at prompt-injection time and only applies the pure
+/// [`Self::active_prompt_candidates`] mapping to those fresh rows.
+///
+/// Consequence: consumers may complete/cancel commitments directly
+/// through the memory store (e.g. the desktop UI's commitment buttons) with
+/// no actor-side cache to desync. The next prompt injection reads the updated
+/// rows, so no mailbox round-trip is required for consistency.
 #[derive(Debug, Default)]
 pub struct CommitmentLedger;
 

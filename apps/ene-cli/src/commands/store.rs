@@ -40,18 +40,19 @@ impl CliCommand for StoreCommand {
     }
 }
 
-fn require_store(ctx: &AppContext) -> Result<std::sync::Arc<ene_store::MemoryStore>, CliError> {
-    let diag = ctx.handle.diagnostics();
-    let memory = diag.memory();
-    let store = memory
-        .store()
-        .ok_or_else(|| CliError::ExecutionFailed("Memory store is not enabled.".to_string()))?;
-    Ok(std::sync::Arc::clone(store))
+fn require_store(ctx: &AppContext) -> Result<&ene_runtime::MemoryHandle, CliError> {
+    let memory = ctx.handle.diagnostics().memory();
+    if !memory.is_enabled() {
+        return Err(CliError::ExecutionFailed(
+            "Memory store is not enabled.".to_string(),
+        ));
+    }
+    Ok(memory)
 }
 
 async fn backup(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
-    let store = require_store(ctx)?;
-    let path = store
+    let memory = require_store(ctx)?;
+    let path = memory
         .backup()
         .await
         .map_err(|e| CliError::DatabaseError(e.to_string()))?;
@@ -63,8 +64,8 @@ async fn backup(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
 }
 
 fn list(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
-    let store = require_store(ctx)?;
-    let Some(db_path) = store.path() else {
+    let memory = require_store(ctx)?;
+    let Some(db_path) = memory.path() else {
         return Err(CliError::ExecutionFailed(
             "In-memory store has no file backups.".to_string(),
         ));
@@ -87,8 +88,8 @@ async fn restore(ctx: &mut AppContext, backup_path: &str) -> Result<CommandOutco
             usage: "/store restore <backup-path>".to_string(),
         });
     }
-    let store = require_store(ctx)?;
-    let Some(db_path) = store.path().map(std::path::Path::to_path_buf) else {
+    let memory = require_store(ctx)?;
+    let Some(db_path) = memory.path().map(std::path::Path::to_path_buf) else {
         return Err(CliError::ExecutionFailed(
             "In-memory store cannot be restored from a file.".to_string(),
         ));
@@ -112,8 +113,8 @@ async fn restore(ctx: &mut AppContext, backup_path: &str) -> Result<CommandOutco
 }
 
 async fn integrity(ctx: &AppContext) -> Result<CommandOutcome, CliError> {
-    let store = require_store(ctx)?;
-    store
+    let memory = require_store(ctx)?;
+    memory
         .check_integrity()
         .await
         .map_err(|e| CliError::DatabaseError(e.to_string()))?;
