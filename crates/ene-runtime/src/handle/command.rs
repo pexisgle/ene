@@ -109,7 +109,7 @@ pub enum EneCommand {
         /// Reply channel for the snapshot.
         reply: oneshot::Sender<super::event::EneStateSnapshot>,
     },
-    /// Request the full conversation history only (#407).
+    /// Request the full conversation history only.
     ///
     /// The lightweight state reads (card name, session id, turn count,
     /// config, card) are mailbox-free on [`crate::EneHandle`]; history is a

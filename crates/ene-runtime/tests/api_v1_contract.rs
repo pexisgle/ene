@@ -431,7 +431,7 @@ fn public_chat_event_mirrors_terminal_done() {
     assert_eq!(value["turn"], turn.to_string());
 }
 
-// ── #407: mailbox-free lightweight state reads ──
+// ── mailbox-free lightweight state reads ──
 
 /// The synchronous accessors ([`EneHandle::card_name`],
 /// [`EneHandle::session_id`], [`EneHandle::session_started_at`],
@@ -519,8 +519,8 @@ async fn turn_count_reflects_in_flight_turn() {
 }
 
 /// `EneHandle::config()` returns the shared `Arc<EneConfig>` the actor swaps
-/// under a write lock on `UpdateFeatureSettings` (#407) — the read-only
-/// sharing side of the #325/#327/#331 write-path fixes.
+/// under a write lock on `UpdateFeatureSettings` — the read-only
+/// sharing side of the write-path fixes.
 #[tokio::test]
 async fn shared_config_reflects_feature_settings_update() {
     let handle = EneHandle::open(test_config_memory_off(), test_card())
@@ -574,7 +574,7 @@ async fn shared_config_reflects_feature_settings_update() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
-/// `EneHandle::history()` is the dedicated mailbox-based history read (#407):
+/// `EneHandle::history()` is the dedicated mailbox-based history read:
 /// large payload, so it stays off the mailbox-free shared state, but it must
 /// still round-trip through the actor and return the session's entries.
 #[tokio::test]

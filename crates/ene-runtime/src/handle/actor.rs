@@ -230,8 +230,8 @@ pub(super) struct TurnActor {
     /// sync when the plugin host is restarted so shutdown aborts the live
     /// bridge rather than a stale one (#238).
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Mailbox-free shared actor state (#407): card name (shared with
-    /// [`crate::query::candidates::MemoryCandidateHandle`] since #271),
+    /// Mailbox-free shared actor state: card name (shared with
+    /// [`crate::query::candidates::MemoryCandidateHandle`]),
     /// session id / started-at / turn count, config, and the loaded card.
     /// [`crate::EneHandle`] reads these slots synchronously; this actor keeps
     /// them in sync at the mutation points (session split, `SetCharacter`,
@@ -590,7 +590,7 @@ impl TurnActor {
                             self.session = outcome.session;
                             // The stream task recorded the assistant
                             // response on its session clone; publish the
-                            // (possibly incremented) turn count (#407).
+                            // (possibly incremented) turn count.
                             self.sync_shared_session_state();
                             if self.active_origin == crate::types::TurnOrigin::Proactive
                                 && outcome.terminal == TerminalReason::Done
@@ -1312,7 +1312,7 @@ impl TurnActor {
                         .mark_interrupted(&turn.to_string(), &partial, spoken_chars);
                     // `mark_interrupted` records an assistant response (turn
                     // count +1); republish so the shared `turn_count` slot
-                    // does not lag the actor's session (#407).
+                    // does not lag the actor's session.
                     self.sync_shared_session_state();
                 }
 
@@ -2047,10 +2047,10 @@ impl TurnActor {
     // ── Split management ──
 
     /// Starts a new session: resets the session and publishes the new id /
-    /// started-at / turn count to the mailbox-free shared state (#407).
+    /// started-at / turn count to the mailbox-free shared state.
     ///
     /// This is the single place a session split (currently only the
-    /// inactivity-timeout path, #369 / #505) may occur, so it is also the
+    /// inactivity-timeout path) may occur, so it is also the
     /// single place the shared [`SharedActorState`] session slots are
     /// refreshed — [`crate::EneHandle::session_id`] / `session_started_at` /
     /// `turn_count` must reflect the fresh session immediately.
@@ -2061,10 +2061,12 @@ impl TurnActor {
     }
 
     /// Publishes the current session id / started-at / turn count to the
-    /// mailbox-free shared state (#407). Idempotent; called after a session
+    /// mailbox-free shared state. Idempotent; called after a session
     /// split, after a user input is recorded, and after a stream outcome is
     /// applied (the stream task records the assistant response on its own
-    /// session clone).
+    /// session clone). The slots are individually consistent, not cross-slot
+    /// atomic: mid-split a reader can observe the new session id with a stale
+    /// turn count. No current consumer reads them as a pair.
     fn sync_shared_session_state(&self) {
         *self.shared.session_id.lock() = self.session.memory.session_id.clone();
         *self.shared.session_started_at.lock() = self.session.session_started_at();
@@ -2073,7 +2075,7 @@ impl TurnActor {
             .store(self.session.current_turn_count() as u32, Ordering::Relaxed);
     }
 
-    /// Publishes the current config to the mailbox-free shared state (#407).
+    /// Publishes the current config to the mailbox-free shared state.
     ///
     /// Called after every in-place config mutation (`UpdateFeatureSettings`,
     /// `UpdateProactiveSettings`) so [`crate::EneHandle::config`] stays
@@ -3360,8 +3362,8 @@ mod tests {
         );
     }
 
-    /// The mailbox-free shared session state (#407) must be published the
-    /// moment a session split resets the session (#369): the shared session
+    /// The mailbox-free shared session state must be published the
+    /// moment a session split resets the session: the shared session
     /// id and started-at change, and the shared turn count resets to zero.
     /// Drives the same `split_session` helper the inactivity-timeout path
     /// (`maybe_split_session_on_timeout`) calls once its elapsed check fires,

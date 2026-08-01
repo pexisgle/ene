@@ -33,7 +33,7 @@ impl CliCommand for MemoryCommand {
             .get_snapshot()
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
-        // The snapshot no longer carries the memory handle (#407); it lives on
+        // The snapshot no longer carries the memory handle; it lives on
         // the diagnostics facade, which is the documented access path.
         let memory = diag.memory();
 
@@ -397,10 +397,7 @@ async fn handle_retry(
         .drain_pending_memory_writes(&mind, llm.as_ref(), scheduled.max(1))
         .await
         .map_err(|e| CliError::ExecutionFailed(format!("Drain pending error: {e}")))?;
-    match memory
-        .count_pending_memory_writes(character_id)
-        .await
-    {
+    match memory.count_pending_memory_writes(character_id).await {
         Ok((pending, permanent)) => {
             println!(
                 "[Memory] Retried {scheduled} write(s); remaining pending={pending} permanent={permanent}"

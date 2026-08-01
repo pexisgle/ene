@@ -12,7 +12,7 @@
 //!
 //! Small per-frame state (card name, session id, turn count, config, loaded
 //! card) is additionally mirrored into a mailbox-free [`SharedActorState`]
-//! the actor keeps in sync at the mutation points (#407) — see
+//! the actor keeps in sync at the mutation points — see
 //! [`EneHandle::card_name`], [`EneHandle::session_id`],
 //! [`EneHandle::turn_count`], [`EneHandle::config`], and
 //! [`EneHandle::character_card`]. Only the large history payload stays
@@ -220,7 +220,7 @@ impl Drop for HandleShutdownGuard {
     }
 }
 
-/// Mailbox-free shared actor state, kept in sync by the turn actor (#407).
+/// Mailbox-free shared actor state, kept in sync by the turn actor.
 ///
 /// Every field is a shared slot written by the actor at the mutation point —
 /// session split ([`actor::TurnActor`]'s `split_session`), `SetCharacter`,
@@ -233,14 +233,14 @@ impl Drop for HandleShutdownGuard {
 /// reads are safe to call from egui immediate mode and never queue behind an
 /// in-flight `Run` turn.
 ///
-/// `card_name` is the #271 precedent: it already shared an
+/// `card_name` is the precedent: it already shared an
 /// `Arc<Mutex<String>>` between the actor and
 /// [`crate::query::candidates::MemoryCandidateHandle`]; the other slots
 /// extend the same pattern to the rest of the snapshot-ish surface instead
 /// of duplicating state.
 #[derive(Clone)]
 pub(crate) struct SharedActorState {
-    /// Current character-card name (#271), kept in sync on every
+    /// Current character-card name, kept in sync on every
     /// `SetCharacter`.
     pub(crate) card_name: Arc<parking_lot::Mutex<String>>,
     /// Current session id, replaced when a session split resets the session.
@@ -290,7 +290,7 @@ pub struct EneHandle {
     /// Expensive work is bounded at `JoinSet` admission, not here.
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     /// Mailbox-free shared actor state (card name, session id, turn count,
-    /// config, character card) kept in sync by the actor (#407). Read via the
+    /// config, character card) kept in sync by the actor. Read via the
     /// lightweight accessors below; large payloads (history) still go through
     /// the mailbox via [`EneHandle::history`].
     shared: Arc<SharedActorState>,
@@ -672,8 +672,8 @@ impl EneHandle {
         let plugin_host = Arc::new(tokio::sync::Mutex::new(plugin_host));
         let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
 
-        // Mailbox-free shared actor state (#407): card name (shared with
-        // `MemoryCandidateHandle` since #271 so pending-candidate queries
+        // Mailbox-free shared actor state: card name (shared with
+        // `MemoryCandidateHandle` so pending-candidate queries
         // never need a mailbox round-trip), session id / started-at / turn
         // count, config, and the loaded card. The actor keeps the slots in
         // sync at the mutation points; `EneHandle` reads them synchronously.
@@ -782,10 +782,10 @@ impl EneHandle {
         &self.diagnostics
     }
 
-    /// Current character-card name (#407).
+    /// Current character-card name.
     ///
     /// Mailbox-free: reads the shared card-name slot the actor keeps in sync
-    /// on every `SetCharacter` (the same #271 slot
+    /// on every `SetCharacter` (the same slot
     /// [`crate::query::candidates::MemoryCandidateHandle`] uses). One
     /// `parking_lot` lock, no actor round-trip — safe to call from egui
     /// immediate mode.
@@ -793,7 +793,7 @@ impl EneHandle {
         self.shared.card_name.lock().clone()
     }
 
-    /// Current session id (#407).
+    /// Current session id.
     ///
     /// Mailbox-free: reads the shared slot the actor replaces when a session
     /// split resets the session. One `parking_lot` lock, no actor round-trip.
@@ -801,7 +801,7 @@ impl EneHandle {
         self.shared.session_id.lock().clone()
     }
 
-    /// When the current session started (UTC) (#407).
+    /// When the current session started (UTC).
     ///
     /// Mailbox-free, same shared slot as [`EneHandle::session_id`]; replaced
     /// on session split.
@@ -809,7 +809,7 @@ impl EneHandle {
         *self.shared.session_started_at.lock()
     }
 
-    /// Turn count of the current session (#407).
+    /// Turn count of the current session.
     ///
     /// Mailbox-free: reads an `Arc<AtomicU32>` the actor stores after each
     /// recorded user input and after each completed stream outcome, and
@@ -818,18 +818,18 @@ impl EneHandle {
         self.shared.turn_count.load(Ordering::Relaxed)
     }
 
-    /// The current configuration (#407).
+    /// The current configuration.
     ///
     /// Mailbox-free: clones the shared `Arc<EneConfig>` under a
     /// `parking_lot` read lock (readers never serialize against each other).
     /// The actor swaps the `Arc` under a write lock when a feature-settings
     /// update or proactive-settings update changes the config — read-only
-    /// sharing here, consistent with the #325/#327/#331 write-path fixes.
+    /// sharing here, consistent with the write-path fixes.
     pub fn config(&self) -> Arc<EneConfig> {
         self.shared.config.read().clone()
     }
 
-    /// The loaded character card, if any (#407).
+    /// The loaded character card, if any.
     ///
     /// Mailbox-free: reads the shared slot the actor replaces on every
     /// `SetCharacter`. Returns `None` only if no card was ever loaded (the
@@ -838,7 +838,7 @@ impl EneHandle {
         self.shared.character_card.lock().clone()
     }
 
-    /// Fetch the full conversation history (#407).
+    /// Fetch the full conversation history.
     ///
     /// The one deliberately mailbox-based read: history is a large payload
     /// (`Vec<ene_mind::HistoryEntry>`), so it is *not* mirrored into the
@@ -1943,7 +1943,7 @@ mod tests {
 
     /// Like [`build_bare_actor_with_gate`] but with an injected session and
     /// config, and also hands back the shared [`SharedActorState`] so tests
-    /// can assert on the mailbox-free slots (#407). `pub(super)` so
+    /// can assert on the mailbox-free slots. `pub(super)` so
     /// `actor::tests` can reuse it for session-split / config-sync tests.
     pub(super) fn build_bare_actor_with_session_and_gate(
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,

@@ -387,7 +387,7 @@ impl AiBridge {
         include_archived: bool,
         include_superseded: bool,
     ) -> Result<MemoryJournalPayload, AiBridgeError> {
-        // Mailbox-free state reads (#407): the journal is refreshed from UI
+        // Mailbox-free state reads: the journal is refreshed from UI
         // actions, so it must never queue behind an in-flight turn.
         let character_id = self.handle.card_name();
         let user_id = self.handle.config().user_name.clone();
@@ -409,7 +409,7 @@ impl AiBridge {
                 .list_active_commitments(&character_id, Some(&user_id), limit)
                 .await?;
             let (pending_writes, permanent_writes) =
-                memory.count_pending_memory_writes(character_id).await?;
+                memory.count_pending_memory_writes(&character_id).await?;
             Ok(MemoryJournalPayload {
                 memories,
                 affect,
@@ -426,7 +426,7 @@ impl AiBridge {
         query: &str,
         limit: usize,
     ) -> Result<Vec<MemoryJournalRecallRow>, AiBridgeError> {
-        // Mailbox-free state reads (#407); see `refresh_memory_journal`.
+        // Mailbox-free state reads; see `refresh_memory_journal`.
         let character_id = self.handle.card_name();
         let user_id = self.handle.config().user_name.clone();
         let memory = self.handle.diagnostics().memory().clone();

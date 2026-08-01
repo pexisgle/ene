@@ -217,7 +217,7 @@ pub enum TerminalReason {
 /// [`crate::EneHandle::session_id`], [`crate::EneHandle::session_started_at`],
 /// [`crate::EneHandle::turn_count`], [`crate::EneHandle::config`], and
 /// [`crate::EneHandle::character_card`] — which never queue behind an
-/// in-flight `Run` turn (#407). History is the one deliberately mailbox-based
+/// in-flight `Run` turn. History is the one deliberately mailbox-based
 /// read: [`crate::EneHandle::history`] ships the large payload over the
 /// command mailbox, so unlike the accessors above it *does* queue behind an
 /// in-flight `Run` turn. Memory access lives on [`crate::EneDiagnostics::memory`]
