@@ -109,6 +109,16 @@ pub enum EneCommand {
         /// Reply channel for the snapshot.
         reply: oneshot::Sender<super::event::EneStateSnapshot>,
     },
+    /// Request the full conversation history only (#407).
+    ///
+    /// The lightweight state reads (card name, session id, turn count,
+    /// config, card) are mailbox-free on [`crate::EneHandle`]; history is a
+    /// large payload that stays mailbox-based, and this command lets a
+    /// consumer fetch just it without paying for a full snapshot.
+    GetHistory {
+        /// Reply channel carrying the history entries.
+        reply: oneshot::Sender<Vec<ene_mind::HistoryEntry>>,
+    },
     /// Manually trigger a compression-only pass over the current conversation.
     ///
     /// Compression (#368/#369) trims history into a stored scene summary but
