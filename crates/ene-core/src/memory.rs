@@ -638,6 +638,13 @@ pub enum MemoryCandidateSource {
     Recent,
     /// Active companion commitment ledger.
     Commitment,
+    /// Unconfirmed candidate awaiting user approval (#174).
+    ///
+    /// Candidates the arbiter deferred with `AskConfirmationLater` live in the
+    /// pending queue rather than the typed-memory table. They still compete in
+    /// hybrid recall (#356) so the character can ask about them when the topic
+    /// comes up; this source marks them as unconfirmed in the prompt.
+    Pending,
 }
 
 /// Weights for hybrid memory search scoring components (#346).

@@ -27,7 +27,7 @@ use crate::commitment::{Commitment, NewCommitment};
 use crate::memory::{
     GatheredCandidate, MemoryItem, MemoryKind, MemoryStatus, NewMemoryItem, Query,
 };
-use crate::pending::{NaturalDecayReport, PendingCandidate};
+use crate::pending::{NaturalDecayReport, PendingCandidate, PendingCandidateStatus};
 use crate::pending_write::PendingMemoryWrite;
 use crate::span::{ActiveSceneSummaryRow, NewMemorySpan};
 
@@ -175,6 +175,18 @@ pub trait MemoryPort: Send + Sync {
         max_per_character: usize,
         now: DateTime<Utc>,
     ) -> Result<usize, MemoryPortError>;
+
+    /// List pending candidates for a character, optionally filtered by status.
+    ///
+    /// Returns every matching row, oldest first (the live queue is bounded by
+    /// the retention policy, see `prune_pending_candidates`). The recall runner
+    /// uses this to surface unconfirmed candidates through normal hybrid
+    /// competition (#356); presentation layers use it for the review list.
+    async fn list_pending_candidates(
+        &self,
+        character_id: &str,
+        status_filter: Option<PendingCandidateStatus>,
+    ) -> Result<Vec<PendingCandidate>, MemoryPortError>;
 
     /// List active commitments for prompt injection (independent of vector recall).
     async fn list_active_commitments(

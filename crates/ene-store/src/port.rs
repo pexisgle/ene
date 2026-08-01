@@ -169,6 +169,14 @@ impl MemoryPort for MemoryStore {
         .await?)
     }
 
+    async fn list_pending_candidates(
+        &self,
+        character_id: &str,
+        status_filter: Option<ene_core::PendingCandidateStatus>,
+    ) -> Result<Vec<PendingCandidate>, MemoryPortError> {
+        Ok(Self::list_pending_candidates(self, character_id, status_filter).await?)
+    }
+
     async fn list_active_commitments(
         &self,
         character_id: &str,
