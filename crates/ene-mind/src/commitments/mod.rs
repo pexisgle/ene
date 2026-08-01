@@ -101,14 +101,17 @@ impl CommitmentLedger {
     ) -> Result<Vec<i64>, CognitionError> {
         let mut inserted = Vec::new();
 
-        // The matcher caches title embeddings across iterations, so re-listing
-        // active commitments per candidate (needed so an insert/supersede in one
-        // iteration is visible to the next) does not re-embed repeated titles.
         let mut matcher = TitleMatcher::new(
             ctx.embedder,
             ctx.title_similarity_threshold,
             "CommitmentLedger",
         );
+
+        // Read the active set once and mirror each write into it, rather than
+        // re-listing (up to `MAX_ACTIVE_MATCH_CHECK` rows) per candidate. A
+        // candidate still sees what earlier candidates in the same batch did,
+        // which is the only reason the read was inside the loop.
+        let mut active = list_active_for_match(store, ctx).await?;
 
         for candidate in candidates {
             if candidate.kind != MemoryKind::Commitment {
@@ -116,29 +119,14 @@ impl CommitmentLedger {
             }
 
             if !candidate.should_persist {
-                Self::cancel_matching(store, ctx, &mut matcher, &candidate.title).await?;
+                Self::cancel_matching(store, &mut matcher, &candidate.title, &mut active).await?;
                 continue;
             }
 
-            let active = list_active_for_match(store, ctx).await?;
-            let titles = commitment_titles(&active);
-            matcher
-                .prefetch(std::iter::once(candidate.title.as_str()).chain(titles.iter().copied()))
-                .await;
-            let mode = matcher.match_mode();
-            let mut best = matcher
-                .best_match_with(mode, &candidate.title, &titles)
-                .await;
-            // A mid-scan embedding failure would leave the first titles compared
-            // by similarity and the rest by exact equality; redo the whole scan
-            // under the fallback so one pass has one semantics.
-            if mode == TitleMatchMode::Embedding && matcher.embedding_degraded() {
-                best = matcher
-                    .best_match_with(TitleMatchMode::Exact, &candidate.title, &titles)
-                    .await;
-            }
-            if let Some(existing) = best.map(|idx| &active[idx]) {
+            if let Some(idx) = Self::find_best_match(&mut matcher, &candidate.title, &active).await
+            {
                 // Same commitment exists — supersede (update description/due_label) if content differs.
+                let existing = &active[idx];
                 let content_changed = existing.description != candidate.content;
                 let due_changed =
                     existing.due_label.as_deref() != candidate.commitment_due.as_deref();
@@ -158,6 +146,9 @@ impl CommitmentLedger {
                             title = %candidate.title,
                             "superseded active commitment (description/due_label updated)"
                         );
+                        let row = &mut active[idx];
+                        row.description.clone_from(&candidate.content);
+                        row.due_label.clone_from(&candidate.commitment_due);
                         inserted.push(id);
                     }
                 } else {
@@ -191,6 +182,7 @@ impl CommitmentLedger {
                 title = %candidate.title,
                 "inserted active commitment (ledger-first)"
             );
+            active.push(inserted_commitment(id, ctx, candidate));
             inserted.push(id);
         }
 
@@ -290,65 +282,66 @@ impl CommitmentLedger {
     /// title ("資料をまとめる") instead of silently missing it.
     async fn cancel_matching(
         store: &dyn MemoryPort,
-        ctx: &CommitmentSyncContext<'_>,
         matcher: &mut TitleMatcher<'_>,
         title: &str,
+        active: &mut Vec<Commitment>,
     ) -> Result<(), CognitionError> {
-        let active = list_active_for_match(store, ctx).await?;
-
-        // Pin semantics for the whole cancel pass; redo under exact if embedding
-        // degrades mid-loop so exact and embedding matches never mix.
-        let mode = matcher.match_mode();
-        let mut matching = collect_title_matches(matcher, mode, title, &active).await;
-        if mode == TitleMatchMode::Embedding && matcher.embedding_degraded() {
-            matching = collect_title_matches(matcher, TitleMatchMode::Exact, title, &active).await;
-        }
-
-        if matching.len() > 1 {
-            warn!(
-                component = "CommitmentLedger",
-                title = %title,
-                count = matching.len(),
-                ids = ?matching.iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                "cancel_matching matched multiple active commitments; ambiguity may cause unintended cancellation"
-            );
-        }
-
-        // Accumulate errors across all rows so a single failure
-        // does not leave the caller in a partially-cancelled state.
-        let mut errors: Vec<String> = Vec::new();
-        for (id, _) in &matching {
-            if let Err(e) = store.cancel_commitment(*id).await {
-                errors.push(format!("commitment {id}: {e}"));
-            }
-        }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(CognitionError::Aggregate(errors.join("; ")))
-        }
-    }
-}
-
-async fn collect_title_matches(
-    matcher: &mut TitleMatcher<'_>,
-    mode: TitleMatchMode,
-    title: &str,
-    active: &[Commitment],
-) -> Vec<(i64, String)> {
-    let mut matching: Vec<(i64, String)> = Vec::new();
-    for row in active {
-        let Some(id) = row.id else {
-            continue;
+        let Some(idx) = Self::find_best_match(matcher, title, active).await else {
+            return Ok(());
         };
-        if matcher.is_match_with(mode, &row.title, title).await {
-            matching.push((id, row.title.clone()));
-        }
-    }
-    matching
-}
+        let Some(id) = active[idx].id else {
+            return Ok(());
+        };
 
+        store
+            .cancel_commitment(id)
+            .await
+            .map_err(CognitionError::MemoryPort)?;
+        debug!(
+            component = "CommitmentLedger",
+            commitment_id = id,
+            title = %active[idx].title,
+            requested = %title,
+            "cancelled active commitment"
+        );
+        // No longer active, so it must not match a later candidate in this batch.
+        active.remove(idx);
+        Ok(())
+    }
+
+    /// Index of the active commitment that best matches `title`, or `None`.
+    ///
+    /// Shared by the supersede and cancel paths so both resolve a candidate to
+    /// **one** commitment. Cancelling every row above the similarity threshold
+    /// would be actively wrong now that matching is fuzzy: "資料作成はやめる"
+    /// scores highly against "資料をまとめる" and "資料のレビュー" alike, so a
+    /// single retraction would silently retire unrelated promises. Superseding
+    /// already picks the single closest row; cancellation — which is far harder
+    /// to notice and undo — must not be looser than that.
+    ///
+    /// The pass pins one match mode and redoes the whole search under the exact
+    /// fallback if embedding degrades partway, so one scan never mixes
+    /// cosine-similarity and exact-equality decisions.
+    async fn find_best_match(
+        matcher: &mut TitleMatcher<'_>,
+        title: &str,
+        active: &[Commitment],
+    ) -> Option<usize> {
+        let titles = commitment_titles(active);
+        matcher
+            .prefetch(std::iter::once(title).chain(titles.iter().copied()))
+            .await;
+
+        let mode = matcher.match_mode();
+        let best = matcher.best_match_with(mode, title, &titles).await;
+        if mode == TitleMatchMode::Embedding && matcher.embedding_degraded() {
+            return matcher
+                .best_match_with(TitleMatchMode::Exact, title, &titles)
+                .await;
+        }
+        best
+    }
+}
 /// List active commitments for title matching, warning if the cap is hit.
 async fn list_active_for_match(
     store: &dyn MemoryPort,
@@ -373,6 +366,33 @@ async fn list_active_for_match(
 /// Titles of `active`, in order, for [`TitleMatcher`]'s slice-based API.
 fn commitment_titles(active: &[Commitment]) -> Vec<&str> {
     active.iter().map(|c| c.title.as_str()).collect()
+}
+
+/// The row a just-inserted candidate becomes, for mirroring into the in-batch
+/// active set.
+///
+/// Only the fields title matching and supersede comparison read are meaningful;
+/// timestamps are approximated with "now" because nothing in the batch reads
+/// them. The authoritative row is the one the store wrote.
+fn inserted_commitment(
+    id: i64,
+    ctx: &CommitmentSyncContext<'_>,
+    candidate: &MemoryCandidate,
+) -> Commitment {
+    let now = chrono::Utc::now();
+    Commitment {
+        id: Some(id),
+        character_id: ctx.character_id.to_string(),
+        user_id: ctx.user_id.to_string(),
+        title: candidate.title.clone(),
+        description: candidate.content.clone(),
+        status: CommitmentStatus::Active,
+        due_at: None,
+        due_label: candidate.commitment_due.clone(),
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+    }
 }
 
 #[cfg(test)]
@@ -951,5 +971,93 @@ mod tests {
             "a degraded scan must still supersede, not insert a duplicate"
         );
         assert_eq!(active[0].description, "review the design once more");
+    }
+
+    /// A retraction must retire exactly the commitment it names. Under fuzzy
+    /// matching several active promises can clear the similarity threshold at
+    /// once ("design review", "design doc", "design sync" all embed alike), and
+    /// cancelling every one of them would silently retire promises the user
+    /// never withdrew.
+    #[tokio::test]
+    async fn cancellation_retires_only_the_closest_commitment() {
+        /// Graded so "design review" is nearer the retraction than "design doc"
+        /// while both clear the 0.8 threshold — the ambiguous case the single
+        /// best match has to resolve.
+        struct GradedEmbedder;
+
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for GradedEmbedder {
+            async fn embed_batch(
+                &self,
+                items: &[(&str, EmbeddingKind)],
+            ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+                Ok(items
+                    .iter()
+                    .map(|(text, _)| {
+                        let lowered = text.to_lowercase();
+                        if lowered.contains("review") {
+                            vec![1.0, 0.0, 0.0]
+                        } else if lowered.contains("design") {
+                            vec![0.9, 0.436, 0.0]
+                        } else {
+                            vec![0.0, 0.0, 1.0]
+                        }
+                    })
+                    .collect())
+            }
+
+            fn dimensions(&self) -> usize {
+                3
+            }
+
+            fn model_name(&self) -> &'static str {
+                "graded-test"
+            }
+        }
+
+        let store = MemoryStore::open_in_memory(4).await.unwrap();
+        let embedder = GradedEmbedder;
+        let ctx = fuzzy_sync_ctx(&embedder);
+
+        for title in ["design review", "design doc", "buy groceries"] {
+            CommitmentLedger::apply_commitment_candidates(
+                &store,
+                &sync_ctx(),
+                &[commitment_candidate_titled(title, title)],
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let mut retract = commitment_candidate_titled("design review", "never mind");
+        retract.should_persist = false;
+        CommitmentLedger::apply_commitment_candidates(&store, &ctx, &[retract])
+            .await
+            .unwrap();
+
+        let active = CommitmentLedger::list_active(&store, "ene", Some("user1"), 10)
+            .await
+            .unwrap();
+        let titles: Vec<&str> = active.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(
+            active.len(),
+            2,
+            "exactly one commitment should be cancelled, got {titles:?}"
+        );
+        assert!(
+            titles.contains(&"buy groceries"),
+            "an unrelated commitment must survive, got {titles:?}"
+        );
+        assert!(
+            titles.contains(&"design doc"),
+            "a merely similar commitment must survive, got {titles:?}"
+        );
     }
 }
