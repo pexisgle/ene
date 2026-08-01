@@ -1,6 +1,6 @@
 //! Anthropic Claude plugin: Messages API streaming and completion.
 //!
-//! Implements the [`Plugin`] trait for the Anthropic Messages API, supporting
+//! Implements [`LlmPlugin`] for the Anthropic Messages API, supporting
 //! both SSE streaming (`create_chat_stream`) and non-streaming
 //! (`chat_completion`) chat completions with tool use and vision.
 //! Structured output (`json_schema`) is emulated by forcing a synthetic tool
@@ -313,7 +313,7 @@ impl LlmPlugin for AnthropicPlugin {
                 max_in_flight: 8,
                 queue_depth: 16,
             },
-            // Claude models expose a 200k-token context window (#364).
+            // Claude models expose a 200k-token context window.
             context_window: Some(200_000),
         }]
     }
@@ -418,7 +418,7 @@ impl LlmPlugin for AnthropicPlugin {
     }
 }
 
-/// Extract [`TokenUsage`] from an Anthropic message response body (#365).
+/// Extract [`TokenUsage`] from an Anthropic message response body.
 ///
 /// Anthropic reports `usage.input_tokens` and `usage.output_tokens` (it has no
 /// single `total` field, so the total is derived as their sum). Returns `None`
@@ -619,7 +619,7 @@ fn process_sse_event(
         }
         "message_delta" => {
             // Anthropic reports the cumulative output token count on the final
-            // `message_delta` event (#365); emit it as a usage-only chunk so
+            // `message_delta` event; emit it as a usage-only chunk so
             // the host can attach it to the stream's final chunk.
             let usage = parsed.get("usage")?;
             let output = usage.get("output_tokens").and_then(Value::as_u64)?;
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn host_config_key_wins_over_request_config() {
-        // #313: a key delivered via set_config (host config) must take
+        // A key delivered via set_config (host config) must take
         // precedence over the per-request provider_config.
         let host = json!({"api_key": "sk-host-wins"});
         let request = json!({"api_key": "sk-request-loses"});
