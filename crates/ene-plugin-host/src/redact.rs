@@ -92,10 +92,6 @@ pub fn redact_config_unschematized(config: &serde_json::Value) -> serde_json::Va
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::expect_used,
-    reason = "unit tests use Result::expect for concise assertions"
-)]
 mod tests {
     use super::*;
 

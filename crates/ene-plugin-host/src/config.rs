@@ -307,7 +307,7 @@ mod tests {
         });
         let entry: PluginEntry =
             serde_json::from_value(json.clone()).expect("deserialize plugin entry");
-        assert_eq!(entry.enable, true);
+        assert!(entry.enable);
         assert_eq!(entry.checksum.as_deref(), Some("abc123"));
         assert_eq!(
             entry
@@ -353,7 +353,12 @@ mod tests {
     #[test]
     fn plugin_entry_default_is_empty() {
         let entry = PluginEntry::default();
-        assert!(entry.config.as_object().is_some_and(|o| o.is_empty()));
+        assert!(
+            entry
+                .config
+                .as_object()
+                .is_some_and(serde_json::Map::is_empty)
+        );
         assert!(entry.profiles.is_empty());
         assert!(entry.extra.is_empty());
     }
