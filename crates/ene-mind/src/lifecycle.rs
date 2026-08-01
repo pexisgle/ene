@@ -81,9 +81,9 @@ pub struct TurnContext<'a> {
     ///
     /// During this async compression gap the session history has not shrunk.
     /// Prompt packing reads this to synchronously detach the oldest span from
-    /// the prompt-visible history (instead of shedding sections) until the
-    /// summary arrives. `false` in tests / legacy callers, which keeps the
-    /// pre-#371 packing behavior.
+    /// the prompt-visible history (instead of shedding sections) while the
+    /// summary is in flight. `false` in tests / legacy callers, which keeps
+    /// the pre-#371 packing behavior.
     pub compression_pending: bool,
     /// Optional override for the prompt packing budget (in tokens).
     ///
@@ -127,9 +127,10 @@ pub struct PromptPacketMeta {
     /// Oldest history messages *detached* from the prompt while a compression
     /// summary was pending (#371): the `[0, n)` leading range was dropped from
     /// the prompt-visible history synchronously, without waiting for the
-    /// summary. Unlike `dropped_sections` / the packing trim, the detached span
-    /// is **not** removed from the session/DB history — the arriving summary
-    /// replaces it, so nothing is lost.
+    /// summary. Like `dropped_sections` and the packing trim, this is a
+    /// prompt-copy-only operation — nothing is removed from the session/DB
+    /// history; the detached messages stay in the log until a later
+    /// compression covers them.
     pub history_messages_detached: usize,
     /// Approximate packed token count.
     pub packed_tokens: usize,

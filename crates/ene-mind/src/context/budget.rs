@@ -15,7 +15,7 @@
 //! [`pack_prompt`] instead detaches the oldest span from the prompt-visible
 //! history synchronously before touching any section, keeping the section pack
 //! (character definition, memories, style examples) intact until the summary
-//! replaces the span.
+//! arrives and the session history shrinks on its own.
 
 use ene_core::ActiveCommitmentPrompt;
 
@@ -63,9 +63,10 @@ pub struct BudgetMeta {
     /// Oldest history messages *detached* from the prompt while a compression
     /// summary was pending (#371): the `[0, n)` leading range was dropped from
     /// the prompt-visible history synchronously, without waiting for the
-    /// summary. Unlike [`Self::history_messages_dropped`], the detached span is
-    /// **not** removed from the session/DB history — the arriving summary
-    /// replaces it, so nothing is lost.
+    /// summary. Both this and [`Self::history_messages_dropped`] are
+    /// prompt-copy-only operations — neither removes anything from the
+    /// session/DB history; the detached messages stay in the log until a later
+    /// compression covers them.
     pub history_messages_detached: usize,
     /// Approximate total tokens after packing (sections + history).
     pub packed_tokens: usize,
@@ -124,10 +125,12 @@ pub struct PackInput {
     /// so an overflowing prompt would otherwise shed sections (memories, style
     /// examples, …) while waiting for the summary. When this flag is set,
     /// packing detaches the oldest span from the prompt-visible history
-    /// synchronously instead — the span is being summarized anyway, and the
-    /// summary replaces it when it arrives. Detachment is a
-    /// prompt-construction-time operation only: nothing is removed from the
-    /// session or DB history.
+    /// synchronously instead, trading the same history exposure as the old
+    /// last-resort trim for keeping the section pack intact. The pre-window
+    /// span is the one being summarized; the detached recent-window exchange
+    /// stays in the session/DB history until a later compression covers it.
+    /// Detachment is a prompt-construction-time operation only: nothing is
+    /// removed from the session or DB history.
     pub compression_pending: bool,
     /// Current user input.
     pub user_input: String,
@@ -250,12 +253,19 @@ fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) ->
 ///
 /// Synchronous fallback for the async compression gap: the summary has not
 /// arrived yet, so the session history has not shrunk and the assembled prompt
-/// overflows the window. Detaching the oldest span — one exchange, i.e. two
-/// messages — from the *prompt-only* copy keeps the section pack (character
-/// definition, recalled memories, style examples) intact at the cost of an
-/// already-committed span that is being summarized anyway. Nothing is removed
-/// from the session or DB history; the arriving summary replaces the detached
-/// span.
+/// overflows the window. Detaching the oldest span from the *prompt-only* copy
+/// keeps the section pack (character definition, recalled memories, style
+/// examples) intact during the gap. Up to two leading messages are shed per
+/// pass — one full exchange, or a single message for odd-length histories —
+/// down to the one-exchange floor.
+///
+/// This is a pure priority reordering, not a recovery path: the span being
+/// summarized is the *pre-window* span (already truncated from the prompt by
+/// the caller), so the messages detached here are the oldest of the *recent
+/// window*, which the pending summary does not cover. They remain in the
+/// session/DB history and are recovered only by a later compression — the same
+/// exposure as the old last-resort history trim, traded for keeping the
+/// section pack intact while the summary is in flight.
 ///
 /// Below the [`MIN_HISTORY_MESSAGES`] floor (one exchange) detachment stops and
 /// packing falls back to the existing section-dropping behavior, so the most
@@ -407,11 +417,14 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
 /// When [`PackInput::compression_pending`] is set (#371) — a rolling
 /// compression summary has been requested but has not arrived, so the session
 /// history has not shrunk — step 2 is preceded by a *synchronous detachment*
-/// of the oldest span from the prompt-visible history. The span is being
-/// summarized anyway and stays in the session/DB; shedding it first keeps the
-/// section pack (character definition, memories, style examples) intact across
-/// the async gap. Below the one-exchange floor, packing falls back to the
-/// existing section-dropping behavior.
+/// of the oldest span from the prompt-visible history. The pre-window span is
+/// the one being summarized (and is already truncated from the prompt by the
+/// caller); detachment hides the oldest recent-window exchange instead, which
+/// stays in the session/DB until a later compression covers it — the same
+/// exposure as the old last-resort trim, traded for keeping the section pack
+/// (character definition, memories, style examples) intact across the async
+/// gap. Below the one-exchange floor, packing falls back to the existing
+/// section-dropping behavior.
 ///
 /// Section *sizes* are bounded by their content producers (recall result limit,
 /// lorebook token budget, identity-kernel cap), not here, so packing only
@@ -442,8 +455,9 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         // gap. Give history the full remaining budget (keeping every section)
         // and detach whole spans from the front until the prompt fits or the
         // one-exchange floor is reached. The detached span is prompt-only —
-        // the session/DB history is untouched and the arriving summary
-        // replaces the span.
+        // the session/DB history is untouched; the pre-window span is the one
+        // being summarized and the detached recent-window messages stay in the
+        // log until a later compression covers them.
         let all_section_tokens: usize = section_tokens_cache.iter().sum();
         let history_budget = budget.total_tokens.saturating_sub(all_section_tokens);
         history_messages_detached = detach_history_spans(&mut history, history_budget);
