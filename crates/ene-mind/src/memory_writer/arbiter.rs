@@ -2,6 +2,7 @@
 //! for [`MemoryCandidate`] items before they are persisted.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider, cosine_similarity};
 use ene_core::{
@@ -644,8 +645,43 @@ impl MemoryArbiter {
             .collect::<std::collections::HashSet<_>>();
         matcher.prefetch(distinct_titles).await;
 
+        // Pin match semantics for the whole scan so a mid-scan embed failure
+        // cannot mix embedding similarity with exact-title fallback.
+        let mode = matcher.match_mode();
+        if let Some(decision) =
+            Self::contradiction_scan_loop(candidate, same_kind.clone(), ctx, matcher, mode).await
+        {
+            return Some(decision);
+        }
+        if mode == TitleMatchMode::Embedding && matcher.embedding_degraded() {
+            return Self::contradiction_scan_loop(
+                candidate,
+                same_kind,
+                ctx,
+                matcher,
+                TitleMatchMode::Exact,
+            )
+            .await;
+        }
+
+        None
+    }
+
+    async fn contradiction_scan_loop<'a, I>(
+        candidate: &MemoryCandidate,
+        same_kind: I,
+        ctx: &ArbiterContext<'_>,
+        matcher: &mut TitleMatcher<'_>,
+        mode: TitleMatchMode,
+    ) -> Option<CandidateDecision>
+    where
+        I: Iterator<Item = &'a MemoryItem>,
+    {
         for mem in same_kind {
-            if !matcher.is_match(&candidate.title, &mem.title).await {
+            if !matcher
+                .is_match_with(mode, &candidate.title, &mem.title)
+                .await
+            {
                 continue;
             }
             if same_memory_content(candidate, mem) {
@@ -1172,17 +1208,44 @@ const MAX_CONTRADICTION_SCAN: usize = 512;
 /// ("職業" vs "仕事", "住んでいる場所" vs "居住地") collapse into one subject
 /// instead of being treated as unrelated, so matching works in any language
 /// without a hardcoded keyword list.
-/// Without an embedder (or if embedding ever fails) the matcher degrades to the
-/// deterministic exact fallback (NFKC + lowercase + whitespace-collapsed
-/// equality), so contradiction checks never silently stop running.
+/// How [`TitleMatcher`] compares two titles for a single scan.
+///
+/// Pinned at scan start (after prefetch) so a mid-scan embedding failure cannot
+/// mix cosine-similarity matches with exact-title fallback inside one pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitleMatchMode {
+    /// Compare by title-embedding cosine similarity against the threshold.
+    Embedding,
+    /// Compare by normalized exact title equality.
+    Exact,
+}
+
+/// Decides whether two memory titles refer to the same contradiction subject.
+///
+/// When an [`EmbeddingProvider`] is configured, titles are compared by the
+/// cosine similarity of their embeddings and a pair matches once the similarity
+/// reaches the configured threshold — this is what lets "職業" and "仕事"
+/// collapse into one subject. Without an embedder (or if embedding ever fails)
+/// the matcher degrades to the deterministic exact fallback (NFKC + lowercase +
+/// whitespace-collapsed equality), so contradiction checks never silently stop
+/// running.
 ///
 /// Embeddings are cached by title for the lifetime of the matcher, so scanning
 /// every existing memory per candidate does not re-embed repeated titles.
+/// Cache values are [`Arc<[f32]>`] so pairwise similarity only bumps refcounts.
+///
+/// Callers must pin [`TitleMatchMode`] once per scan (via [`Self::match_mode`]
+/// after [`Self::prefetch`]) and pass it to [`Self::is_match_with`]. A mid-scan
+/// degrade sets [`Self::embedding_degraded`] so the caller can redo the whole
+/// scan under [`TitleMatchMode::Exact`] instead of mixing semantics.
 pub(crate) struct TitleMatcher<'a> {
     embedder: Option<&'a dyn EmbeddingProvider>,
     threshold: f32,
-    cache: HashMap<String, Vec<f32>>,
+    cache: HashMap<String, Arc<[f32]>>,
     disabled: bool,
+    /// Set when embedding fails and the matcher falls back to exact matching.
+    /// Observable degrade signal for callers (alongside the `warn!` log).
+    degraded: bool,
 }
 
 impl<'a> TitleMatcher<'a> {
@@ -1193,23 +1256,48 @@ impl<'a> TitleMatcher<'a> {
             threshold,
             cache: HashMap::new(),
             disabled: false,
+            degraded: false,
         }
     }
 
-    /// Embed a single title, caching the result. Returns `None` when no embedder
-    /// is available, embedding has been disabled by a prior failure, or the
-    /// provider rejects this title.
-    async fn embed(&mut self, title: &str) -> Option<Vec<f32>> {
+    /// Match semantics to pin for the current scan.
+    fn match_mode(&self) -> TitleMatchMode {
+        if self.use_embedding() {
+            TitleMatchMode::Embedding
+        } else {
+            TitleMatchMode::Exact
+        }
+    }
+
+    /// Whether embedding failed at least once and the matcher degraded to exact.
+    const fn embedding_degraded(&self) -> bool {
+        self.degraded
+    }
+
+    fn note_degraded(&mut self, detail: &str) {
+        warn!(
+            component = "MemoryArbiter",
+            degraded = true,
+            detail = %detail,
+            "contradiction title embedding unavailable; falling back to exact title matching"
+        );
+        self.disabled = true;
+        self.degraded = true;
+    }
+
+    /// Ensure `title` is cached. Returns `false` when embedding is unavailable
+    /// or the provider rejects this title (and marks the matcher degraded).
+    async fn ensure_embedded(&mut self, title: &str) -> bool {
         if !self.use_embedding() {
-            return None;
+            return false;
         }
-        if let Some(embedding) = self.cache.get(title) {
-            return Some(embedding.clone());
+        if self.cache.contains_key(title) {
+            return true;
         }
-        self.embed_one(title).await
+        self.embed_one(title).await.is_some()
     }
 
-    async fn embed_one(&mut self, title: &str) -> Option<Vec<f32>> {
+    async fn embed_one(&mut self, title: &str) -> Option<Arc<[f32]>> {
         let embedder = self.embedder?;
         match embedder
             .embed_batch(&[(title, EmbeddingKind::Summary)])
@@ -1218,32 +1306,19 @@ impl<'a> TitleMatcher<'a> {
             Ok(mut vectors) if vectors.len() == 1 => {
                 let embedding = vectors.swap_remove(0);
                 if embedding.iter().all(|v| *v == 0.0) {
-                    warn!(
-                        component = "MemoryArbiter",
-                        "contradiction title embedding returned a zero vector; falling back to exact title matching"
-                    );
-                    self.disabled = true;
+                    self.note_degraded("zero vector");
                     return None;
                 }
-                self.cache.insert(title.to_string(), embedding.clone());
+                let embedding: Arc<[f32]> = Arc::from(embedding);
+                self.cache.insert(title.to_string(), Arc::clone(&embedding));
                 Some(embedding)
             }
             Ok(vectors) => {
-                warn!(
-                    component = "MemoryArbiter",
-                    returned = vectors.len(),
-                    "contradiction title embedding batch size mismatch; falling back to exact title matching"
-                );
-                self.disabled = true;
+                self.note_degraded(&format!("batch size mismatch (returned {})", vectors.len()));
                 None
             }
             Err(error) => {
-                warn!(
-                    component = "MemoryArbiter",
-                    error = %error,
-                    "contradiction title embedding failed; falling back to exact title matching"
-                );
-                self.disabled = true;
+                self.note_degraded(&format!("provider error: {error}"));
                 None
             }
         }
@@ -1279,42 +1354,39 @@ impl<'a> TitleMatcher<'a> {
             Ok(vectors) if vectors.len() == missing.len() => {
                 for (title, vector) in missing.iter().zip(vectors) {
                     if vector.iter().all(|v| *v == 0.0) {
-                        warn!(
-                            component = "MemoryArbiter",
-                            "contradiction title embedding returned a zero vector; falling back to exact title matching"
-                        );
-                        self.disabled = true;
+                        self.note_degraded("zero vector");
                         self.cache.clear();
                         return;
                     }
-                    self.cache.insert(title.to_string(), vector);
+                    self.cache.insert((*title).to_string(), Arc::from(vector));
                 }
             }
             Ok(vectors) => {
-                warn!(
-                    component = "MemoryArbiter",
-                    returned = vectors.len(),
-                    requested = missing.len(),
-                    "contradiction title embedding batch size mismatch; falling back to exact title matching"
-                );
-                self.disabled = true;
+                self.note_degraded(&format!(
+                    "batch size mismatch (returned {}, requested {})",
+                    vectors.len(),
+                    missing.len()
+                ));
             }
             Err(error) => {
-                warn!(
-                    component = "MemoryArbiter",
-                    error = %error,
-                    "contradiction title embedding failed; falling back to exact title matching"
-                );
-                self.disabled = true;
+                self.note_degraded(&format!("provider error: {error}"));
             }
         }
     }
 
     /// Cosine similarity between two titles' embeddings, embedding on demand.
+    ///
+    /// Uses cached [`Arc<[f32]>`] slices — no full vector clones on cache hits.
     async fn similarity(&mut self, left: &str, right: &str) -> Option<f32> {
-        let left_embedding = self.embed(left).await?;
-        let right_embedding = self.embed(right).await?;
-        Some(cosine_similarity(&left_embedding, &right_embedding))
+        if !self.ensure_embedded(left).await || !self.ensure_embedded(right).await {
+            return None;
+        }
+        let left_embedding = self.cache.get(left)?;
+        let right_embedding = self.cache.get(right)?;
+        Some(cosine_similarity(
+            left_embedding.as_ref(),
+            right_embedding.as_ref(),
+        ))
     }
 
     /// Whether the embedding path is currently usable.
@@ -1322,16 +1394,24 @@ impl<'a> TitleMatcher<'a> {
         self.embedder.is_some() && !self.disabled
     }
 
-    /// Whether `candidate_title` refers to the same subject as `existing_title`,
-    /// using embedding similarity when available and falling back to exact
-    /// normalized-title equality if embedding is unavailable or fails mid-call.
-    async fn is_match(&mut self, candidate_title: &str, existing_title: &str) -> bool {
-        if self.use_embedding()
-            && let Some(similarity) = self.similarity(candidate_title, existing_title).await
-        {
-            return similarity >= self.threshold;
+    /// Whether `candidate_title` refers to the same subject as `existing_title`
+    /// under the pinned `mode`. Embedding mode never falls back to exact
+    /// mid-call — a failed embed yields no match so the scan stays uniform.
+    async fn is_match_with(
+        &mut self,
+        mode: TitleMatchMode,
+        candidate_title: &str,
+        existing_title: &str,
+    ) -> bool {
+        match mode {
+            TitleMatchMode::Embedding => self
+                .similarity(candidate_title, existing_title)
+                .await
+                .is_some_and(|similarity| similarity >= self.threshold),
+            TitleMatchMode::Exact => {
+                normalize_text(candidate_title) == normalize_text(existing_title)
+            }
         }
-        normalize_text(candidate_title) == normalize_text(existing_title)
     }
 }
 

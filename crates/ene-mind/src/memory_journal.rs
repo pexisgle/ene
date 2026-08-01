@@ -103,6 +103,7 @@ impl MemoryJournal {
             query_affect: None,
             weights: mind_memory.hybrid_weights,
             decay_half_life_days: mind_memory.default_forgetting_half_life_days.max(0.0),
+            access_boost_half_life_days: mind_memory.access_boost_half_life_days.max(0.0),
             now: Utc::now(),
             min_score: mind_memory.journal_min_score.clamp(0.0, 1.0),
             commitment_boost: mind_memory.commitment_boost,

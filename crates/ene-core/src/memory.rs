@@ -726,6 +726,13 @@ pub struct Query<'a> {
     pub weights: HybridSearchWeights,
     /// Half-life in days for recency decay.
     pub decay_half_life_days: f64,
+    /// Half-life in days for the access-boost recency decay.
+    ///
+    /// Independent of [`Self::decay_half_life_days`]: access history fades on
+    /// this shorter timescale so old accesses stop boosting recall score well
+    /// before the memory itself would fade. Defaults to
+    /// `ene_rag::ACCESS_BOOST_HALF_LIFE_DAYS` (14.0) via mind config.
+    pub access_boost_half_life_days: f64,
     /// Reference time for recency and expiry checks.
     pub now: DateTime<Utc>,
     /// Minimum hybrid total score required to return a result.

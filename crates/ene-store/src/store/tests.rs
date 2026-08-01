@@ -983,6 +983,7 @@ fn hybrid_search_options<'a>(
         query_affect: None,
         weights: crate::HybridSearchWeights::default(),
         decay_half_life_days: 30.0,
+        access_boost_half_life_days: 14.0,
         now,
         time_range: None,
         min_score: 0.0,

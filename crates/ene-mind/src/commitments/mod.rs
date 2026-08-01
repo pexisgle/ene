@@ -18,6 +18,7 @@
     reason = "history/token helpers index into bounds-checked conversational buffers"
 )]
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider, cosine_similarity};
 use ene_core::{ActiveCommitmentPrompt, Commitment, MemoryPort};
@@ -280,14 +281,12 @@ impl CommitmentLedger {
     ) -> Result<(), CognitionError> {
         let active = list_active_for_match(store, ctx).await?;
 
-        let mut matching: Vec<(i64, String)> = Vec::new();
-        for row in &active {
-            let Some(id) = row.id else {
-                continue;
-            };
-            if matcher.is_match(&row.title, title).await {
-                matching.push((id, row.title.clone()));
-            }
+        // Pin semantics for the whole cancel pass; redo under exact if embedding
+        // degrades mid-loop so exact and embedding matches never mix.
+        let mode = matcher.match_mode();
+        let mut matching = collect_title_matches(matcher, mode, title, &active).await;
+        if mode == TitleMatchMode::Embedding && matcher.embedding_degraded() {
+            matching = collect_title_matches(matcher, TitleMatchMode::Exact, title, &active).await;
         }
 
         if matching.len() > 1 {
@@ -317,6 +316,33 @@ impl CommitmentLedger {
     }
 }
 
+async fn collect_title_matches(
+    matcher: &mut TitleMatcher<'_>,
+    mode: TitleMatchMode,
+    title: &str,
+    active: &[Commitment],
+) -> Vec<(i64, String)> {
+    let mut matching: Vec<(i64, String)> = Vec::new();
+    for row in active {
+        let Some(id) = row.id else {
+            continue;
+        };
+        if matcher.is_match_with(mode, &row.title, title).await {
+            matching.push((id, row.title.clone()));
+        }
+    }
+    matching
+}
+
+/// How [`TitleMatcher`] compares two titles for a single scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TitleMatchMode {
+    /// Compare by title-embedding cosine similarity against the threshold.
+    Embedding,
+    /// Compare by normalized exact title equality.
+    Exact,
+}
+
 /// Decides whether two commitment titles refer to the same commitment.
 ///
 /// When an [`EmbeddingProvider`] is configured, titles are compared by the
@@ -328,11 +354,19 @@ impl CommitmentLedger {
 ///
 /// Embeddings are cached by title for the lifetime of the matcher, so re-listing
 /// active commitments per candidate does not re-embed repeated titles.
+/// Cache values are [`Arc<[f32]>`] so pairwise similarity only bumps refcounts.
+///
+/// Callers pin [`TitleMatchMode`] once per scan via [`Self::match_mode`] and
+/// pass it to [`Self::is_match_with`] / [`Self::best_match`]. A mid-scan
+/// degrade sets [`Self::embedding_degraded`] so the whole scan can be redone
+/// under exact matching instead of mixing semantics.
 struct TitleMatcher<'a> {
     embedder: Option<&'a dyn EmbeddingProvider>,
     threshold: f32,
-    cache: HashMap<String, Vec<f32>>,
+    cache: HashMap<String, Arc<[f32]>>,
     disabled: bool,
+    /// Set when embedding fails and the matcher falls back to exact matching.
+    degraded: bool,
 }
 
 impl<'a> TitleMatcher<'a> {
@@ -343,72 +377,106 @@ impl<'a> TitleMatcher<'a> {
             threshold,
             cache: HashMap::new(),
             disabled: false,
+            degraded: false,
         }
     }
 
-    /// Embed a single title, caching the result. Returns `None` when no embedder
-    /// is available, embedding has been disabled by a prior failure, or the
-    /// provider rejects this title.
-    async fn embed(&mut self, title: &str) -> Option<Vec<f32>> {
+    fn match_mode(&self) -> TitleMatchMode {
+        if self.use_embedding() {
+            TitleMatchMode::Embedding
+        } else {
+            TitleMatchMode::Exact
+        }
+    }
+
+    const fn embedding_degraded(&self) -> bool {
+        self.degraded
+    }
+
+    fn note_degraded(&mut self, detail: &str) {
+        warn!(
+            component = "CommitmentLedger",
+            degraded = true,
+            detail = %detail,
+            "commitment title embedding unavailable; falling back to exact title matching"
+        );
+        self.disabled = true;
+        self.degraded = true;
+    }
+
+    async fn ensure_embedded(&mut self, title: &str) -> bool {
         if !self.use_embedding() {
-            return None;
+            return false;
         }
-        if let Some(embedding) = self.cache.get(title) {
-            return Some(embedding.clone());
+        if self.cache.contains_key(title) {
+            return true;
         }
-        let embedder = self.embedder?;
+        let Some(embedder) = self.embedder else {
+            return false;
+        };
         match embedder
             .embed_batch(&[(title, EmbeddingKind::Summary)])
             .await
         {
             Ok(mut vectors) if vectors.len() == 1 => {
-                let embedding = vectors.swap_remove(0);
-                self.cache.insert(title.to_string(), embedding.clone());
-                Some(embedding)
+                let embedding: Arc<[f32]> = Arc::from(vectors.swap_remove(0));
+                self.cache.insert(title.to_string(), Arc::clone(&embedding));
+                true
             }
             Ok(vectors) => {
-                warn!(
-                    component = "CommitmentLedger",
-                    returned = vectors.len(),
-                    "commitment title embedding batch size mismatch; falling back to exact title matching"
-                );
-                self.disabled = true;
-                None
+                self.note_degraded(&format!("batch size mismatch (returned {})", vectors.len()));
+                false
             }
             Err(error) => {
-                warn!(
-                    component = "CommitmentLedger",
-                    error = %error,
-                    "commitment title embedding failed; falling back to exact title matching"
-                );
-                self.disabled = true;
-                None
+                self.note_degraded(&format!("provider error: {error}"));
+                false
             }
         }
     }
 
     /// Cosine similarity between two titles' embeddings, embedding on demand.
     async fn similarity(&mut self, left: &str, right: &str) -> Option<f32> {
-        let left_embedding = self.embed(left).await?;
-        let right_embedding = self.embed(right).await?;
-        Some(cosine_similarity(&left_embedding, &right_embedding))
+        if !self.ensure_embedded(left).await || !self.ensure_embedded(right).await {
+            return None;
+        }
+        let left_embedding = self.cache.get(left)?;
+        let right_embedding = self.cache.get(right)?;
+        Some(cosine_similarity(
+            left_embedding.as_ref(),
+            right_embedding.as_ref(),
+        ))
     }
 
     fn use_embedding(&self) -> bool {
         self.embedder.is_some() && !self.disabled
     }
 
+    async fn is_match_with(
+        &mut self,
+        mode: TitleMatchMode,
+        active_title: &str,
+        candidate_title: &str,
+    ) -> bool {
+        match mode {
+            TitleMatchMode::Embedding => self
+                .similarity(active_title, candidate_title)
+                .await
+                .is_some_and(|similarity| similarity >= self.threshold),
+            TitleMatchMode::Exact => {
+                normalize_title(active_title) == normalize_title(candidate_title)
+            }
+        }
+    }
+
     /// Whether `candidate_title` refers to the same commitment as `active_title`.
     ///
-    /// Uses embedding similarity when available; if embedding is unavailable or
-    /// fails mid-call, falls back to exact normalized-title equality.
+    /// Pins mode at call time. Prefer [`Self::is_match_with`] when scanning many
+    /// rows so semantics stay fixed for the whole pass.
+    #[cfg(test)]
     async fn is_match(&mut self, active_title: &str, candidate_title: &str) -> bool {
-        if self.use_embedding()
-            && let Some(similarity) = self.similarity(active_title, candidate_title).await
-        {
-            return similarity >= self.threshold;
-        }
-        normalize_title(active_title) == normalize_title(candidate_title)
+        let mode = self.match_mode();
+        self.is_match_with(mode, active_title, candidate_title)
+            .await
     }
 
     /// The index of the active commitment whose title best matches
@@ -416,29 +484,42 @@ impl<'a> TitleMatcher<'a> {
     ///
     /// On the exact path this is the first normalized-title equality; on the
     /// embedding path it is the highest-similarity row at or above the threshold.
-    /// If embedding fails mid-call, the search falls back to exact matching so a
-    /// transient model error never lets a duplicate slip through.
+    /// If embedding fails mid-scan, the whole search is redone under exact
+    /// matching so semantics never mix inside one pass.
     async fn best_match(&mut self, candidate_title: &str, active: &[Commitment]) -> Option<usize> {
-        if self.use_embedding() {
-            let mut best: Option<(f32, usize)> = None;
-            for (idx, commitment) in active.iter().enumerate() {
-                let Some(similarity) = self.similarity(&commitment.title, candidate_title).await
-                else {
-                    continue;
-                };
-                if similarity >= self.threshold
-                    && best.is_none_or(|(best_similarity, _)| similarity > best_similarity)
-                {
-                    best = Some((similarity, idx));
+        let mode = self.match_mode();
+        match mode {
+            TitleMatchMode::Embedding => {
+                let best = self.best_match_embedding(candidate_title, active).await;
+                if self.embedding_degraded() {
+                    return Self::best_match_exact(candidate_title, active);
                 }
+                best
             }
-            // A match wins; a clean (non-disabled) miss returns `None`. Only an
-            // embedding failure (now disabled) falls through to exact matching.
-            if best.is_some() || !self.disabled {
-                return best.map(|(_, idx)| idx);
+            TitleMatchMode::Exact => Self::best_match_exact(candidate_title, active),
+        }
+    }
+
+    async fn best_match_embedding(
+        &mut self,
+        candidate_title: &str,
+        active: &[Commitment],
+    ) -> Option<usize> {
+        let mut best: Option<(f32, usize)> = None;
+        for (idx, commitment) in active.iter().enumerate() {
+            let Some(similarity) = self.similarity(&commitment.title, candidate_title).await else {
+                continue;
+            };
+            if similarity >= self.threshold
+                && best.is_none_or(|(best_similarity, _)| similarity > best_similarity)
+            {
+                best = Some((similarity, idx));
             }
         }
+        best.map(|(_, idx)| idx)
+    }
 
+    fn best_match_exact(candidate_title: &str, active: &[Commitment]) -> Option<usize> {
         active.iter().position(|commitment| {
             normalize_title(&commitment.title) == normalize_title(candidate_title)
         })
@@ -973,7 +1054,8 @@ mod tests {
         let mut matcher = TitleMatcher::new(None, 0.8);
         assert!(matcher.is_match("Design Review", "  design review ").await);
         assert!(!matcher.is_match("design review", "write design doc").await);
-        assert!(matcher.embed("anything").await.is_none());
+        assert_eq!(matcher.match_mode(), TitleMatchMode::Exact);
+        assert!(!matcher.embedding_degraded());
     }
 
     #[tokio::test]
@@ -1001,5 +1083,83 @@ mod tests {
         let best = matcher.best_match("write design doc", &active).await;
         assert_eq!(best, Some(0));
         assert!(matcher.best_match("buy groceries", &active).await.is_none());
+    }
+
+    /// Mid-scan embedding failure pins the pass, then redoes the whole search
+    /// under exact matching — never mixes cosine and exact inside one scan.
+    #[tokio::test]
+    async fn title_matcher_degrade_redoes_whole_scan_under_exact() {
+        struct FailAfterFirstEmbedder {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl EmbeddingProvider for FailAfterFirstEmbedder {
+            async fn embed_batch(
+                &self,
+                items: &[(&str, EmbeddingKind)],
+            ) -> Result<Vec<Vec<f32>>, ene_ai::EmbeddingError> {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n >= 1 {
+                    return Err(ene_ai::EmbeddingError::Provider(
+                        "forced mid-scan failure".to_string(),
+                    ));
+                }
+                Ok(items.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+            }
+
+            fn dimensions(&self) -> usize {
+                4
+            }
+
+            fn model_name(&self) -> &'static str {
+                "fail-after-first"
+            }
+        }
+
+        let embedder = FailAfterFirstEmbedder {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        // First active title embeds; second triggers degrade. Exact redo must
+        // still find the normalized duplicate at index 1.
+        let active = vec![
+            Commitment {
+                id: Some(1),
+                character_id: "ene".to_string(),
+                user_id: "user1".to_string(),
+                title: "unrelated topic".to_string(),
+                description: String::new(),
+                status: CommitmentStatus::Active,
+                due_at: None,
+                due_label: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                completed_at: None,
+            },
+            Commitment {
+                id: Some(2),
+                character_id: "ene".to_string(),
+                user_id: "user1".to_string(),
+                title: "Design Review".to_string(),
+                description: String::new(),
+                status: CommitmentStatus::Active,
+                due_at: None,
+                due_label: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                completed_at: None,
+            },
+        ];
+
+        let mut matcher = TitleMatcher::new(Some(&embedder), 0.8);
+        let best = matcher.best_match("  design review ", &active).await;
+        assert!(
+            matcher.embedding_degraded(),
+            "mid-scan failure must set the observable degrade flag"
+        );
+        assert_eq!(
+            best,
+            Some(1),
+            "exact redo after degrade must find the normalized title"
+        );
     }
 }

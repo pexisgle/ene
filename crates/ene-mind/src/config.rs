@@ -114,6 +114,13 @@ impl Default for ContextConfig {
 pub struct MindMemoryConfig {
     /// Half-life in days for lifecycle decay score and recall recency scoring.
     pub default_forgetting_half_life_days: f64,
+    /// Half-life in days for the access-boost recency decay used in hybrid
+    /// recall scoring.
+    ///
+    /// Access history fades on this timescale so old accesses stop boosting a
+    /// memory's recall score. Defaults to [`ene_rag::ACCESS_BOOST_HALF_LIFE_DAYS`]
+    /// (14.0), shorter than the typical content-forgetting half-life.
+    pub access_boost_half_life_days: f64,
     /// Score below which an active memory transitions to faded (#350).
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub fade_threshold: f32,
@@ -342,6 +349,7 @@ impl Default for MindMemoryConfig {
     fn default() -> Self {
         Self {
             default_forgetting_half_life_days: 30.0,
+            access_boost_half_life_days: ene_rag::ACCESS_BOOST_HALF_LIFE_DAYS,
             fade_threshold: ene_rag::FADE_THRESHOLD,
             archive_threshold: ene_rag::ARCHIVE_THRESHOLD,
             min_confidence_to_persist: 0.65,

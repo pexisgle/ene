@@ -432,6 +432,7 @@ async fn build_semantic_matches(
             query_affect: None,
             weights: config.hybrid_weights,
             decay_half_life_days: config.default_forgetting_half_life_days,
+            access_boost_half_life_days: config.access_boost_half_life_days.max(0.0),
             now: Utc::now(),
             min_score: 0.0,
             commitment_boost: 0.0,
