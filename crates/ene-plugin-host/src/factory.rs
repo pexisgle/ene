@@ -42,7 +42,7 @@ pub struct IpcLlmProviderFactory {
     /// Context window the plugin advertised for this provider kind
     /// (`LlmProviderSpec.context_window`), forwarded to every
     /// [`IpcLlmProvider`] this factory creates so prompt packing can budget
-    /// against the model's real limit (#364, #370).
+    /// against the model's real limit.
     context_window: Option<u32>,
     /// Shared across every [`IpcLlmProvider`] this factory creates, since a
     /// fresh provider instance is built per call
@@ -104,7 +104,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
         let plugin_config = config.get_section::<PluginConfig>().unwrap_or_default();
 
         // Honor the active cognitive task's own model / max_tokens overrides
-        // rather than always falling back to `tasks.chat` (#C1). When the task
+        // rather than always falling back to `tasks.chat`. When the task
         // carries no override, fall back to the chat defaults.
         let model = task
             .model
@@ -115,7 +115,6 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
 
         let trusted = self.is_trusted(&plugin_config);
 
-        // Build provider_config from the AiProviderDef that matches this kind.
         let provider_config = ai_config
             .providers
             .values()
@@ -137,7 +136,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
             );
 
         // Apply the same retry policy as the OpenAI path so plugin providers
-        // retry transient (transport / rate-limit) failures consistently (#C2).
+        // retry transient (transport / rate-limit) failures consistently.
         let retry_policy = ai_config.retry.to_policy();
 
         let provider = IpcLlmProvider::new(
@@ -176,7 +175,6 @@ fn build_provider_config(def: &AiProviderDef, trusted: bool) -> serde_json::Valu
             map.insert("api_key".to_string(), serde_json::Value::String(api_key));
         }
     }
-    // Merge provider-specific extra fields.
     for (k, v) in &def.extra {
         map.insert(k.clone(), v.clone());
     }

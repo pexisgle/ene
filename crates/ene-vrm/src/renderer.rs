@@ -1,37 +1,37 @@
 //! VRM renderer — wgpu render pipeline + bind group layouts that
 //! can draw a [`VrmModel`] into a `wgpu::TextureView`.
 //!
-//! ships a **basic PBR-lite** shader (`lit + base color`):
+//! Ships a PBR-lite shader (`lit + base color`) for primitives
+//! without the `VRMC_materials_mtoon` extension and the full
+//! `MToon` shader (`shaders/mtoon_full.wgsl`) for primitives that
+//! carry it:
 //!
 //! - Lit lambertian + half-Lambert blend on the base-color texture.
 //! - Single directional light from `(0.3, 0.8, 0.5)` in world
 //!   space (kept fixed even when the model translates, since the
-//!   light direction is now sourced from `world_pos`).
+//!   light direction is sourced from `world_pos`).
 //! - Alpha-blend output (pre-multiplied) so transparent textures
 //!   (e.g. `MToon`'s outline-transparent pass) composite correctly.
-//! - ****: per-frame `ModelUniform` (bind group 1) is applied
-//!   between view-proj and the vertex position. The runtime
-//!   composes it from `CharacterState::character_position` +
-//!   `model_scale`, so the Character settings page X/Y/Z sliders
-//!   now move the model in world space.
-//! - ****: bind group `(3)` carries the morph-target data
-//!   (storage + uniform). Primitives that define morph targets
-//!   get a per-primitive storage buffer (the position
-//!   displacements, already normalized by the loader) and a
-//!   uniform [`PrimitiveMorphMeta`] that the renderer fills
-//!   every frame from the model's global
-//!   `BTreeMap<ExpressionName, f32>` weight map. Primitives
-//!   without morph targets bind a shared dummy layout with
-//!   `target_count = 0`; the shader's `if (target_count > 0u)`
-//!   early-out makes the cost near zero. The slot index used
-//!   to look up weights is the **per-primitive local** index
-//!   (the position of the target in `PrimitiveMorphs::targets`)
-//!   — not a global name-flattened index — so the shader's
+//! - Per-frame `ModelUniform` (bind group 1) is applied between
+//!   view-proj and the vertex position. The runtime composes it
+//!   from `CharacterState::character_position` + `model_scale`,
+//!   so the Character settings page X/Y/Z sliders move the model
+//!   in world space.
+//! - Bind group `(3)` carries the morph-target data (storage +
+//!   uniform). Primitives that define morph targets get a
+//!   per-primitive storage buffer (the position displacements,
+//!   in the vertex buffer's raw space) and a uniform
+//!   [`PrimitiveMorphMeta`] that the renderer fills every frame
+//!   from the model's global `BTreeMap<ExpressionName, f32>`
+//!   weight map. Primitives without morph targets bind a shared
+//!   dummy layout with `target_count = 0`; the shader's
+//!   `if (target_count > 0u)` early-out makes the cost near
+//!   zero. The slot index used to look up weights is the
+//!   **per-primitive local** index (the position of the target
+//!   in `PrimitiveMorphs::targets`) — not a global
+//!   name-flattened index — so the shader's
 //!   `weights[t / 4][t % 4]` lookup always matches the
 //!   corresponding row in the offsets storage buffer.
-//!
-//! The full `MToon` shader (rim / matcap / outline / emission) is a
-//! follow-up PR.
 use wgpu::util::DeviceExt;
 
 use crate::camera::{CameraUniform, ModelUniform, OrthographicCamera};
@@ -100,7 +100,7 @@ struct DummyMorphGpu {
     bind_group: wgpu::BindGroup,
 }
 
-// per-model skin-matrix palette. One `mat4x4<f32>` per
+/// Per-model skin-matrix palette. One `mat4x4<f32>` per
 /// joint, uploaded once at construction time with the
 /// pre-baked `bind_matrices` (i.e. `inverse_bind[i].inverse()`).
 /// Overwritten every frame with the current joint world
@@ -115,7 +115,7 @@ struct SkinGpu {
     joint_count: u32,
 }
 
-// per-primitive MToon uniform buffer (group 5).
+/// Per-primitive `MToon` uniform buffer (group 5).
 struct MToonUniformGpu {
     bind_group: wgpu::BindGroup,
 }
@@ -173,10 +173,10 @@ pub struct VrmRenderer {
     /// avoid a per-draw allocation. Default-initialised to
     /// all zeros.
     meta_scratch: PrimitiveMorphMeta,
-    /// skin-matrix palette (group 4). Uploaded once
-    /// with the model's `bind_matrices` (rest pose). Phase 2
-    /// will rewrite this every frame to drive look-at
-    /// rotations.
+    /// Skin-matrix palette (group 4). Uploaded once
+    /// with the model's `bind_matrices` (rest pose) and
+    /// overwritten every frame with the current joint world
+    /// transforms.
     skin: SkinGpu,
     /// `MToon` per-material uniform buffer (group 5).
     /// One buffer per primitive that has `MToon`; `None` for
@@ -239,7 +239,7 @@ impl VrmRenderer {
             }],
         });
 
-        // Bind group `(1)` — model transform uniform (this struct).
+        // Bind group `(1)` — model transform uniform.
         let model_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vrm.model_buf"),
             size: std::mem::size_of::<ModelUniform>() as wgpu::BufferAddress,
@@ -248,7 +248,7 @@ impl VrmRenderer {
         });
         // Pre-fill the model buffer with identity so the first
         // frame is correct even before the runtime composes a
-        // transform. (We do have the queue here now.)
+        // transform.
         queue.write_buffer(&model_buf, 0, bytemuck::bytes_of(&ModelUniform::default()));
         let model_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.model_bgl"),
@@ -319,7 +319,7 @@ impl VrmRenderer {
             ],
         });
 
-        // Bind group (4): — skin-matrix palette. The
+        // Bind group (4) — skin-matrix palette. The
         // renderer uploads one `mat4x4<f32>` per joint, or a
         // single `Mat4::IDENTITY` for models without a skin
         // (the default MeshVertex falls back to
@@ -339,7 +339,7 @@ impl VrmRenderer {
             }],
         });
 
-        // Bind group (5): — MToon per-material uniform.
+        // Bind group (5) — MToon per-material uniform.
         let mtoon_uniform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vrm.mtoon_uniform_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -356,7 +356,7 @@ impl VrmRenderer {
             }],
         });
 
-        // Bind group (6): — MToon textures (14 bindings: 7 tex + 7 smp).
+        // Bind group (6) — MToon textures (14 bindings: 7 tex + 7 smp).
         let mtoon_textures_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("vrm.mtoon_textures_bgl"),
@@ -514,7 +514,6 @@ impl VrmRenderer {
             source: wgpu::ShaderSource::Wgsl(UNLIT_SHADER_SOURCE.into()),
         });
 
-        // MToon full shader.
         let mtoon_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vrm.mtoon_shader"),
             source: wgpu::ShaderSource::Wgsl(MTOON_SHADER_SOURCE.into()),
@@ -677,8 +676,6 @@ impl VrmRenderer {
                 cache: None,
             });
 
-        // MToon opaque pipeline. Uses the full MToon
-        // shader with 7 bind groups.
         let pipeline_mtoon_opaque =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("vrm.pipeline_mtoon_opaque"),
@@ -717,7 +714,6 @@ impl VrmRenderer {
                 cache: None,
             });
 
-        // MToon transparent pipeline.
         let pipeline_mtoon_transparent =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("vrm.pipeline_mtoon_transparent"),
@@ -785,8 +781,6 @@ impl VrmRenderer {
         // `pos`.
         let skin = build_skin_gpu(device, queue, &skin_bgl, model);
 
-        // Build per-primitive MToon uniform buffers.
-        // Primitives without MToon get `None` slots.
         let mut mtoon_uniforms: Vec<Option<MToonUniformGpu>> = Vec::new();
         for mesh in &model.meshes {
             for prim in &mesh.primitives {
@@ -983,8 +977,6 @@ impl VrmRenderer {
         rp.set_bind_group(1, &self.model_bind_group, &[]);
         rp.set_bind_group(4, &self.skin.bind_group, &[]);
 
-        // Use the cached draw order (sorted opaque/mask before
-        // transparent at construction time).
         let all_prims: Vec<&_> = model
             .meshes
             .iter()
@@ -1011,7 +1003,7 @@ impl VrmRenderer {
         // Phase 2: transparent (depth write off, premultiplied
         // alpha blending). Drawn in declaration order (which is
         // roughly back-to-front for most humanoid VRM models);
-        // a proper view-Z depth sort is a follow-up PR.
+        // a proper view-Z depth sort is a follow-up.
         for item in self
             .draw_order
             .iter()
@@ -1123,7 +1115,6 @@ impl VrmRenderer {
         } else {
             rp.set_bind_group(3, &self.dummy_morph.bind_group, &[]);
         }
-        // Bind MToon uniform + textures if present.
         if let Some(mtoon) = self
             .mtoon_uniforms
             .get(linear_index)
@@ -1185,7 +1176,7 @@ impl VrmRenderer {
         queue.write_buffer(&morph.meta_buf, 0, bytemuck::bytes_of(&meta));
     }
 
-    /// overwrite the skin-palette storage buffer with
+    /// Overwrite the skin-palette storage buffer with
     /// the joint world transforms returned by
     /// [`VrmModel::update_skin_palette`].
     ///
@@ -1199,7 +1190,7 @@ impl VrmRenderer {
     /// No-op when the model has no skin (the renderer was
     /// built with the identity one-element palette) or
     /// when `palette.len()` is zero. The runtime should
-    /// not call this on every frame for an unsninned
+    /// not call this on every frame for an unskinned
     /// model — the GPU write would be wasted.
     pub fn update_skin_palette(&self, queue: &wgpu::Queue, palette: &[glam::Mat4]) {
         if palette.is_empty() || self.skin.joint_count == 0 {
@@ -1213,7 +1204,7 @@ impl VrmRenderer {
         queue.write_buffer(&self.skin.matrices_buf, 0, bytemuck::cast_slice(palette));
     }
 
-    /// the joint count of the renderer's skin
+    /// The joint count of the renderer's skin
     /// palette. Zero for models built with the identity
     /// one-element palette (no skin).
     pub const fn skin_joint_count(&self) -> u32 {
@@ -1223,7 +1214,7 @@ impl VrmRenderer {
 
 /// Build a one-shot morph bind group for a single primitive that
 /// has at least one morph target. The storage buffer is uploaded
-/// once with the loader's normalized displacement data; the meta
+/// once with the loader's displacement data; the meta
 /// uniform is rewritten every frame by
 /// [`VrmRenderer::upload_morph_meta`].
 ///
@@ -1330,18 +1321,17 @@ fn build_dummy_morph_gpu(
     }
 }
 
-// build the per-model skin-matrix palette. For models
+/// Build the per-model skin-matrix palette. For models
 /// with a populated `Skeleton` the palette is the pre-baked
 /// `bind_matrices` (i.e. `inverse_bind[i].inverse()`). For
 /// models with no skin a one-element `Mat4::IDENTITY` palette
 /// is uploaded and the default `MeshVertex` (`joints=[0,0,0,0]`,
 /// `weights=[1,0,0,0]`) reduces the shader math to `pos`.
 ///
-/// The buffer is allocated with `COPY_DST` so Phase 2 can
+/// The buffer is allocated with `COPY_DST` so the runtime can
 /// overwrite the palette every frame with
-/// `current_joint_world[i] * bind_matrices[i]` to drive the
-/// cursor look-at + two-bone IK. Phase 1 (this PR) uploads once
-/// at construction and never touches the buffer again.
+/// `current_joint_world[i] * inverse_bind[i]` via
+/// [`VrmRenderer::update_skin_palette`].
 fn build_skin_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1373,7 +1363,6 @@ fn build_skin_gpu(
             joint_count: IDENTITY_SKIN_PALETTE_LEN as u32,
         };
     }
-    // Skinned palette: one `mat4x4<f32>` per joint, initialized to identity at rest pose.
     let mut palette: Vec<[[f32; 4]; 4]> = Vec::with_capacity(joint_count);
     for _ in 0..joint_count {
         palette.push(glam::Mat4::IDENTITY.to_cols_array_2d());
@@ -1383,11 +1372,9 @@ fn build_skin_gpu(
         contents: bytemuck::cast_slice(&palette),
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
-    // Make sure the storage is on the GPU before the first
-    // draw (create_buffer_init with a non-mapped buffer does
-    // not need an explicit write — the contents are placed at
-    // creation time, but we issue a no-op write to keep the
-    // API symmetric with future Phase 2 per-frame updates).
+    // `create_buffer_init` uploads the contents at creation
+    // time; `queue` is kept in the signature so the API
+    // stays symmetric with the per-frame palette overwrite.
     let _ = queue;
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("vrm.skin_bg"),

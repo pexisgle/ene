@@ -1,11 +1,8 @@
-//! Systems that drain the legacy `AppEvent` bus and translate it
-//! into typed `bevy_ecs::message::Message`s + `PendingActions`.
+//! Systems that drain the `AppEvent` bus and translate it
+//! into typed `bevy_ecs::message::Message`s.
 //!
 //! The pump runs in the `First` stage. Messages written by the pump
-//! are normally consumed by `Update` stage systems; the
-//! `PendingActions` resource is the bridge the legacy
-//! `Runtime::about_to_wait` body reads to apply per-frame work
-//! before handing control back to the winit event loop.
+//! are consumed by `Update` stage systems.
 use std::time::Instant;
 
 use bevy_ecs::prelude::*;
@@ -20,15 +17,14 @@ use crate::event::settings::OpenSettings;
 use crate::events::{AiStreamUpdate, AppEvent};
 use crate::resource::{event_channels::EventChannels, exit::ExitRequested};
 
-/// Drains the legacy `AppEvent` bus and writes typed [`Message`]s.
+/// Drains the `AppEvent` bus and writes typed [`Message`]s.
 /// Runs in the `First` stage so any `Update` systems see fresh
 /// events.
 ///
-/// Phase 7.5: this pump is the single producer of every typed
-/// `Message` the desktop runtime consumes; the legacy
-/// `PendingActions` mirror has been removed. Per-frame actions
-/// are now handled by the consumer systems in
-/// `system::ui_consumers.rs` reading the `Message` queue.
+/// This pump is the single producer of every typed `Message` the
+/// desktop runtime consumes; per-frame actions are handled by the
+/// consumer systems in `system::ui_consumers.rs` reading the
+/// `Message` queue.
 pub fn pump_legacy_events(
     mut channels: ResMut<EventChannels>,
     mut exit: ResMut<ExitRequested>,
@@ -66,9 +62,9 @@ pub fn pump_legacy_events(
             &mut pending_candidates,
         );
     }
-    // Phase 7.5: publish a `TickGtk` every frame on Linux so the
-    // tray icon library makes progress. The actual `tick_gtk()`
-    // call still lives in `Runtime::about_to_wait` because the
+    // Publish a `TickGtk` every frame on Linux so the tray icon
+    // library makes progress. The actual `tick_gtk()` call still
+    // lives in `Runtime::about_to_wait` because the
     // `Rc<RefCell<TrayHandle>>` is not `Send + Sync`.
     #[cfg(target_os = "linux")]
     tick_gtk.write(TickGtk);
@@ -186,10 +182,8 @@ fn translate_event(
     }
 }
 
-/// Helper used by `pump_legacy_events` to indicate the GTK pump
-/// should run this frame. Phase 7.5: replaced by the
-/// `Messages<TickGtk>` queue; the consumer system
-/// `tick_gtk_system` (Phase 7.4) handles the tick.
+/// No-op retained for API symmetry; the GTK tick now flows through the
+/// `Messages<TickGtk>` queue consumed by `tick_gtk_system`.
 #[expect(
     dead_code,
     reason = "Replaced by Messages<TickGtk>; kept for API symmetry"

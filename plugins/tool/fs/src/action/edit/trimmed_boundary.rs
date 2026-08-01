@@ -91,13 +91,10 @@ mod tests {
     #[test]
     fn test_multi_line_trimmed() {
         let content = "  foo\n  bar  \n";
-        // old with extra whitespace that when trimmed matches content's trimmed version
         let old = "  foo\n  bar  ";
+        // `old.trim()` doesn't occur verbatim in `content`, so matching falls
+        // through to the line-by-line trimmed comparison.
         let result = trimmed_boundary_replace(content, old, "QUX", false);
-        // trimmed_boundary only applies when old.trim() != old
-        // Here old.trim() = "foo\nbar", content = "  foo\n  bar  \n"
-        // content.contains("foo\nbar") is false because content has extra spaces
-        // So it falls through to line-by-line trimmed matching
         assert!(result.is_some());
     }
 

@@ -1,4 +1,4 @@
-//! LLM-based affect classifier (#88).
+//! LLM-based affect classifier.
 
 use ene_ai::{LlmMessage, LlmProvider, UserMessagePart};
 use ene_config::PromptLibrary;

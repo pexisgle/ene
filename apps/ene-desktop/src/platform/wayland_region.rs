@@ -224,7 +224,6 @@ impl WaylandInputRegionContext {
         };
     }
 
-    /// Accept input on the whole surface.
     pub fn set_full_input(&mut self) {
         self.state = InputRegionState::Full;
     }
@@ -260,7 +259,6 @@ impl WaylandInputRegionContext {
             if let Err(e) = queue.dispatch_pending(&mut data) {
                 tracing::trace!(?e, "wayland pump: dispatch_pending error");
             }
-            // Hint the connection that we just consumed events.
             let _ = connection;
         }
     }
@@ -305,7 +303,6 @@ impl WaylandInputRegionContext {
         }
     }
 
-    /// Apply the cached policy to the winit window's `wl_surface`.
     pub fn apply_to_winit_surface(&mut self) {
         if let Some(surface) = self.winit_surface.clone() {
             self.apply_to_surface(&surface);

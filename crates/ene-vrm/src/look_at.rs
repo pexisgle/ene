@@ -50,11 +50,9 @@
 //! has been projected to a world target. For `"expression"`
 //! models the result is written straight into
 //! [`crate::expression::ExpressionLayer::set_expression`]; for
-//! `"bone"` models the result is currently **stored but not
-//! uploaded** to the skinning palette (the per-frame joint
-//! update is the next pass — see the
-//! [`apps/ene-desktop-v2/src/look_at.rs`] docstring). The
-//! `Bone` output is the contract the next PR will consume.
+//! `"bone"` models the result is fed to
+//! [`crate::model::VrmModel::update_skin_palette`], which
+//! composes the head / eye deltas onto the VRMA pose.
 //!
 //! ## Status
 //!
@@ -189,13 +187,14 @@ pub enum LookAtType {
     /// morph-target weights. This is what the legacy
     /// `bevy_vrm1` silently no-op'd: the cursor followed the
     /// camera pan, but the expressions were never written, so
-    /// the face never moved. fixes the silent no-op.
+    /// the face never moved. This implementation writes the
+    /// morph weights.
     Expression,
 }
 
 /// The full `VRMC_vrm.lookAt` block. The spec considers every
 /// field optional and applies the defaults above when a field
-/// is missing. preserves the same defaults.
+/// is missing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LookAtProperties {
     /// Offset from the head bone to the look-at origin (in

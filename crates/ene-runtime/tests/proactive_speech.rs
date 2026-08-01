@@ -1,4 +1,4 @@
-//! Proactive speech runtime integration tests (#169).
+//! Proactive speech runtime integration tests.
 
 #![expect(
     clippy::expect_used,

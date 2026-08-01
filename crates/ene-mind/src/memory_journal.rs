@@ -1,4 +1,4 @@
-//! Diagnostics / CLI / desktop memory journal facade (#123).
+//! Diagnostics / CLI / desktop memory journal facade.
 //!
 //! Scored search always goes through mind policy (`MindMemoryConfig`) and
 //! `MemoryStore::search`. Persistence CRUD (list/pin/transition) may call the

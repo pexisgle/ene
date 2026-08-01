@@ -5,7 +5,7 @@ use ene_plugin_proto::{ToolError, ToolProvider, ToolSpec};
 
 /// App tool provider managing GUI automation tasks.
 ///
-/// Dispatch is handled by [`ActionSetProvider`] (#139).
+/// Dispatch is handled by [`ActionSetProvider`].
 pub struct AppToolProvider {
     inner: ActionSetProvider,
 }
@@ -14,13 +14,11 @@ impl AppToolProvider {
     /// Creates a new `AppToolProvider` and registers all app tool actions.
     pub fn new() -> Self {
         let actions: Vec<Box<dyn ToolAction>> = vec![
-            // Window management (5)
             Box::new(action::ListWindowsAction::default()),
             Box::new(action::FocusWindowAction::default()),
             Box::new(action::GetActiveWindowAction::default()),
             Box::new(action::ListMonitorsAction::default()),
             Box::new(action::CaptureWindowAction::default()),
-            // Input simulation (5)
             Box::new(action::TypeTextAction::default()),
             Box::new(action::PressKeyAction::default()),
             Box::new(action::KeyComboAction::default()),
@@ -28,9 +26,7 @@ impl AppToolProvider {
             Box::new(action::MouseClickAction::default()),
             Box::new(action::MouseDragAction::default()),
             Box::new(action::MouseScrollAction::default()),
-            // Screen capture (1)
             Box::new(action::ScreenshotAction::default()),
-            // Clipboard (2)
             Box::new(action::ClipboardReadAction::default()),
             Box::new(action::ClipboardWriteAction::default()),
         ];

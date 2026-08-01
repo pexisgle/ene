@@ -1,4 +1,4 @@
-//! Shared ONNX Runtime initialization for local audio providers (C3).
+//! Shared ONNX Runtime initialization for local audio providers.
 //!
 //! `ort` requires its dynamic library to be loaded and its environment
 //! committed before any [`ort::session::Session`] is built. Both the Kokoro

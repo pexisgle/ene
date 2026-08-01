@@ -12,8 +12,6 @@ use sea_orm::{
 };
 
 impl MemoryStore {
-    // ── Tool Embeddings (multi-vector) ──────────────────────────────────────
-
     /// Inserts or updates one field's embedding for a tool.
     ///
     /// `field` must be one of `"summary"`, `"description"`, `"capability"`,
@@ -157,7 +155,7 @@ impl MemoryStore {
     /// aggregated similarity.
     ///
     /// Uses the `vec0` ANN index (`vec_tool_embeddings`) for candidate
-    /// retrieval (#304).
+    /// retrieval.
     pub async fn search_tools(
         &self,
         query_embedding: &[f32],

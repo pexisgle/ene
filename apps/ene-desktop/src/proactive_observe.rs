@@ -1,4 +1,4 @@
-//! Privacy-aware activity / screen observation for proactive speech (#168).
+//! Privacy-aware activity / screen observation for proactive speech.
 //!
 //! Collects host signals on a background tokio task and pushes
 //! [`ene_mind::ProactiveObservation`] into the runtime. Raw screenshots are
@@ -40,7 +40,6 @@ struct ObserveConfig {
 }
 
 impl ProactiveObserveControl {
-    /// Build from mind proactive config.
     #[must_use]
     pub fn from_mind(mind: &MindConfig) -> Self {
         Self {
@@ -55,7 +54,6 @@ impl ProactiveObserveControl {
         }
     }
 
-    /// Update control flags from the latest mind config.
     pub fn apply_mind(&self, mind: &MindConfig) {
         let mut guard = self.inner.lock();
         guard.enabled = mind.proactive.enabled;
@@ -161,7 +159,7 @@ fn collect_activity(level: WindowTitleLevel, last_label: &mut String) -> Activit
 }
 
 /// Summarize the change from the previous observation's label to the current
-/// one (#378). Returns an empty string when nothing changed so the decision
+/// one. Returns an empty string when nothing changed so the decision
 /// prompt is not padded with noise; otherwise a short phrase naming the
 /// previous and/or current focus.
 fn describe_change(last_label: &mut String, label: &str) -> String {
@@ -177,7 +175,7 @@ fn describe_change(last_label: &mut String, label: &str) -> String {
     change
 }
 
-/// Build the privacy-aware label for the focused window at `level` (#378).
+/// Build the privacy-aware label for the focused window at `level`.
 ///
 /// Returns `None` when no window is focused or the app name is empty. The app
 /// name is always included; the window title is appended only at
@@ -219,7 +217,7 @@ pub(crate) fn redact_paths(input: &str) -> String {
         .join(" ")
 }
 
-/// Redact a window title for [`WindowTitleLevel::RedactedTitle`] (#378).
+/// Redact a window title for [`WindowTitleLevel::RedactedTitle`].
 ///
 /// Reuses the path / email filter from [`redact_paths`] and additionally drops
 /// URL-like tokens and digit-heavy numbers (phone / account / card numbers),

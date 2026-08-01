@@ -1,9 +1,9 @@
-//! Creates `vec0` virtual tables for ANN-accelerated embedding search (#304).
+//! Creates `vec0` virtual tables for ANN-accelerated embedding search.
 //!
 //! The `vec_memory_embeddings` and `vec_tool_embeddings` tables mirror
 //! `memory_embeddings` and `tool_embedding_index` respectively, enabling
 //! approximate nearest-neighbor (ANN) search via the `sqlite-vec` `vec0`
-//! module instead of the previous brute-force `vec_distance_cosine` scan.
+//! module rather than a brute-force `vec_distance_cosine` scan.
 //!
 //! Because the `vec0` column definition requires a fixed vector dimension
 //! (`float[N]`) and the dimension is a runtime parameter of

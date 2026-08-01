@@ -263,7 +263,7 @@ pub enum DbErrorCode {
     /// A write was rejected because it would push the plugin's storage in the
     /// shared `memory.db` past its configured quota
     /// (`plugins.list.<name>.db_quota_mb`). Reads and deletes are still
-    /// permitted so the plugin can free space (#424).
+    /// permitted so the plugin can free space.
     QuotaExceeded,
     /// An internal server error occurred.
     Internal,

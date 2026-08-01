@@ -1,4 +1,4 @@
-//! Expression resolution: affect mapping, LLM hints, hysteresis (#89).
+//! Expression resolution: affect mapping, LLM hints, hysteresis.
 
 use ene_core::AffectState;
 
@@ -84,8 +84,8 @@ pub fn resolve_expression(
 
     // Hysteresis: hold previous expression unless irritation spike
     // or the current candidate comes from an authoritative source
-    // (LLM command/advisory).  Hysteresis only gates affect-driven
-    // and fallback choices (#152 / #126 decision #5).
+    // (LLM command/advisory). Hysteresis only gates affect-driven
+    // and fallback choices.
     if !input.irritation_spike
         && !input.previous_expression.is_empty()
         && candidate != input.previous_expression
@@ -130,7 +130,6 @@ pub fn normalize_expression(name: &str, available: &[String]) -> String {
     if available.iter().any(|n| n == &lower) {
         return lower;
     }
-    // Simple alias map.
     let alias = match lower.as_str() {
         "joy" | "joyful" | "excited" => "happy",
         "anger" | "mad" | "upset" => "angry",
@@ -142,7 +141,6 @@ pub fn normalize_expression(name: &str, available: &[String]) -> String {
     if available.iter().any(|n| n == alias) {
         return alias.to_string();
     }
-    // Nearest Levenshtein among available.
     if let Some(best) = available.iter().min_by_key(|n| levenshtein(&lower, n))
         && levenshtein(&lower, best) <= 2
     {

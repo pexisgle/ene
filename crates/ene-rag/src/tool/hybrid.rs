@@ -1,5 +1,4 @@
-//! Hybrid `HyDE` / rerank helpers wrapping a primary embedder with optional LLMs
-//! (#302, moved from `ene-tool-rag`).
+//! Hybrid `HyDE` / rerank helpers wrapping a primary embedder with optional LLMs.
 //!
 //! These are pipeline helpers — not `EmbeddingProvider` trait methods.
 

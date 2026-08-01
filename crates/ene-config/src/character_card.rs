@@ -8,7 +8,7 @@ use std::collections::HashMap;
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
 /// A V3-format character card following the
-/// [Character Card Spec](https://github.com/kwaroran/character-card-spec-v3).
+/// [Character Card Spec V3](https://github.com/kwaroran/character-card-spec-v3).
 pub struct CharacterCardV3 {
     /// Spec identifier (e.g. `"chara_card_v3"`).
     pub spec: String,
@@ -108,8 +108,8 @@ pub struct Extensions {
     /// Catch-all for other extension keys.
     ///
     /// An [`IndexMap`] (not `HashMap`) so iteration order is deterministic:
-    /// `HashMap` reseeds per process, which made saving the same card twice
-    /// produce different bytes (#331).
+    /// `HashMap` reseeds per process and would make saving the same card twice
+    /// produce different bytes.
     #[serde(flatten)]
     pub extra: IndexMap<String, serde_json::Value>,
 }
@@ -348,8 +348,6 @@ pub struct ResolvedExpression {
 
 /// Built-in default expressions. Used when the card has no `extensions.expressions`,
 /// and as the base that card overrides are merged on top of.
-///
-/// Uses `LazyLock` to compute the list once and reuse it across calls.
 fn default_expressions() -> &'static [ResolvedExpression] {
     use std::sync::LazyLock;
     static DEFAULT: LazyLock<Vec<ResolvedExpression>> = LazyLock::new(|| {
@@ -507,7 +505,7 @@ fn default_ene_expressions() -> Option<Vec<ExpressionDefinition>> {
 #[serde(crate = "crate::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "crate::schemars")]
 pub struct EneExtension {
-    /// Structured motion catalog with layer classification (#130).
+    /// Structured motion catalog with layer classification.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_catalog: Option<crate::character_config::MotionCatalog>,
     /// Optional expressions list
@@ -520,7 +518,7 @@ pub struct EneExtension {
 /// Bundles every input a macro may need so that expansion is a pure function
 /// of the context: the same context always yields the same output. This is
 /// what makes `{{pick}}` stable across the per-turn recompilations of the
-/// identity kernel (#343) and what keeps time macros testable via an
+/// identity kernel and what keeps time macros testable via an
 /// injectable clock.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MacroContext<'a> {
@@ -562,7 +560,7 @@ impl<'a> MacroContext<'a> {
 ///
 /// Pass a value that is constant for the lifetime of a chat (e.g.
 /// `"{character_id}:{session_id}"`) so that `{{pick}}` resolves to the same
-/// choice on every turn of that chat (#343). The digest is truncated to the
+/// choice on every turn of that chat. The digest is truncated to the
 /// leading eight bytes; the result is deterministic for a given key.
 #[must_use]
 pub fn session_pick_seed(key: &str) -> u64 {
@@ -596,7 +594,7 @@ pub fn expand_cbs_macros(text: &str, char_name: &str, user_name: &str) -> String
 /// `{{pick:a,b,c}}` is **stable within a session**: the choice is derived
 /// deterministically from the option text plus a per-session seed, so a
 /// character trait chosen once (hair colour, hometown, …) does not change when
-/// the identity kernel is recompiled on later turns (#343). `{{random:a,b,c}}`
+/// the identity kernel is recompiled on later turns. `{{random:a,b,c}}`
 /// keeps re-rolling on every evaluation. Without a seed (the default here)
 /// `{{pick}}` falls back to a random draw; pass a seed through
 /// [`expand_cbs_macros_ctx`] to get stable behaviour.
@@ -637,7 +635,6 @@ pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
 
     result = result.replace("{{user}}", ctx.user_name);
 
-    // Expand {{user_persona}} if persona data is available
     if let Some(persona) = ctx.user_persona {
         let rendered = persona.render_lines("");
         result = result.replace("{{user_persona}}", &rendered);
@@ -645,8 +642,6 @@ pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
         result = result.replace("{{user_persona}}", "");
     }
 
-    // Card-field reference macros (#343). Only expanded when a card is present;
-    // otherwise the literal macro is left in place.
     if let Some(card) = ctx.card {
         let data = &card.data;
         result = result.replace("{{description}}", data.description.trim());
@@ -656,7 +651,7 @@ pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
         result = result.replace("{{mesExamples}}", data.mes_example.trim());
     }
 
-    // Time macros (#343), evaluated against an injectable clock so they are
+    // Time macros, evaluated against an injectable clock so they are
     // deterministic in tests.
     let now = ctx.now.unwrap_or_else(Local::now);
     result = result.replace("{{isotime}}", &now.format("%H:%M:%S").to_string());
@@ -688,11 +683,10 @@ pub fn expand_cbs_macros_ctx(text: &str, ctx: &MacroContext<'_>) -> String {
         }
     }
 
-    // `{{random:…}}` re-rolls on every evaluation.
     expand_template_macro(&mut result, "{{random:", random_option);
 
     // `{{pick:…}}` is stable within a session: the index is derived from the
-    // option text and the per-session seed, never from the thread RNG (#343).
+    // option text and the per-session seed, never from the thread RNG.
     let pick_seed = ctx.pick_seed;
     expand_template_macro(&mut result, "{{pick:", move |inner| {
         let options = split_options(inner);
@@ -862,9 +856,9 @@ mod tests {
         assert!(out.contains("- Notes: Prefers concise answers"));
     }
 
-    /// Regression for #331: `Extensions.extra` is an `IndexMap`, so serialising
-    /// the same card twice yields byte-identical output. With the previous
-    /// `HashMap`, per-process random seeding made the two saves differ.
+    /// `Extensions.extra` is an `IndexMap`, so serialising the same card twice
+    /// yields byte-identical output; a `HashMap` reseeds per process and would
+    /// make the two saves differ.
     #[test]
     fn card_save_is_deterministic() {
         let mut card = CharacterCardV3::default();
@@ -930,7 +924,6 @@ mod tests {
                 "{{pick}} must return the same option on every evaluation"
             );
         }
-        // The chosen option is one of the declared choices.
         assert!(
             ["red", "blue", "green", "gold", "silver"]
                 .iter()

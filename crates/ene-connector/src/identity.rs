@@ -18,9 +18,8 @@ use std::str::FromStr;
 ///
 /// Accepted characters are ASCII alphanumerics plus `.`, `_`, and `-`. The `-`
 /// is essential: natural connector names such as `github-mcp` and
-/// `google-calendar` are hyphenated. (Its historical absence was the root cause
-/// of #417, where the second hyphenated MCP server collided on a fallback id
-/// and was silently dropped.)
+/// `google-calendar` are hyphenated. (Without it, two hyphenated servers can
+/// collide on a fallback id, with the second silently dropped.)
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct ConnectorId(String);
 
@@ -104,7 +103,7 @@ impl From<ConnectorId> for String {
 ///
 /// A thin, validated-by-construction wrapper over the scope string; used when
 /// describing what access a connector needs and when driving an OAuth consent
-/// flow (see #415).
+/// flow.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct PermissionScope(String);
 
@@ -145,9 +144,6 @@ impl<'a> From<&'a str> for PermissionScope {
 /// Intended for configuration UIs: a stable [`ConnectorId`] plus a friendly
 /// `display_name` and optional version/vendor/base-URL/description. It carries
 /// no secrets and no lifecycle state.
-///
-/// The declarative connector design in #414 may fold this metadata into a
-/// broader declaration; until then it is retained for display purposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorIdentity {
     /// Stable connector identifier.
@@ -224,8 +220,8 @@ mod tests {
 
     #[test]
     fn hyphenated_id_round_trips() {
-        // Root cause of #417: hyphenated names must be accepted, not forced
-        // onto a colliding fallback id.
+        // Hyphenated names must be accepted, not forced onto a colliding
+        // fallback id.
         let id = ConnectorId::try_new("mcp.github-mcp").unwrap();
         assert_eq!(id.as_str(), "mcp.github-mcp");
         assert_eq!(id.namespace(), "mcp");

@@ -52,8 +52,8 @@ pub struct EngineConfig {
     /// engine is marked down. Defaults to 3: a job that stops ticking for
     /// one `stall_timeout` is logged as suspected; only if the silence
     /// reaches three `stall_timeout`s is the engine permanently disabled.
-    /// Set to 1 to make the first detection immediately final (the
-    /// pre-graduated behavior). Coerced up to at least 1. Only meaningful
+    /// Set to 1 to make the first detection immediately final. Coerced up
+    /// to at least 1. Only meaningful
     /// when [`Self::stall_timeout`] is `Some`.
     pub stall_escalation_factor: u32,
 }

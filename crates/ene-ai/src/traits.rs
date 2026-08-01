@@ -22,7 +22,7 @@ pub trait LlmProvider: Send + Sync {
     /// that omits `LlmProviderSpec.context_window`. Callers reconcile this with
     /// any operator override via [`crate::context_window::effective_window`],
     /// which falls back to [`crate::context_window::DEFAULT_CONTEXT_WINDOW`]
-    /// when neither source names a limit (#364, #370).
+    /// when neither source names a limit.
     fn context_window(&self) -> Option<u32> {
         None
     }
@@ -40,7 +40,7 @@ pub trait LlmProvider: Send + Sync {
     /// Executes a non-streaming chat completion with optional JSON schema response.
     ///
     /// Returns an [`LlmCompletion`] carrying the assistant text plus any token
-    /// usage the provider reported (#365); `usage` is `None` when the provider
+    /// usage the provider reported; `usage` is `None` when the provider
     /// does not report it.
     async fn chat_completion(
         &self,
@@ -54,7 +54,7 @@ pub trait LlmProvider: Send + Sync {
     /// requests but may hang or exceed budgets on non-streaming `chat().create()`.
     ///
     /// Returns an [`LlmCompletion`]: the concatenated text plus any usage the
-    /// provider attached to the stream's final chunk (#365).
+    /// provider attached to the stream's final chunk.
     async fn collect_stream_completion(
         &self,
         messages: &[LlmMessage],
@@ -252,7 +252,7 @@ impl LlmProviderRegistry {
         }
     }
 
-    /// Removes a previously registered factory by provider name (#399).
+    /// Removes a registered factory by provider name.
     ///
     /// Returns `true` when a factory was actually removed, `false` when no
     /// factory was registered under `name`. Deregistration is what lets a
@@ -295,7 +295,7 @@ impl LlmProviderRegistry {
         }
     }
 
-    /// Snapshot of the currently registered provider names (#399).
+    /// Snapshot of the currently registered provider names.
     ///
     /// Intended for diagnostics and tests; the registry is process-global, so
     /// the set can change immediately after this returns.
@@ -358,9 +358,6 @@ mod registry_tests {
             _config: &ene_config::EneConfig,
             _task: &TaskRef,
         ) -> Result<Box<dyn LlmProvider>, LlmProviderError> {
-            // A variant distinct from the `Provider` error the registry
-            // returns for an unregistered name, so a resolved factory can be
-            // told apart from a missing one.
             Err(LlmProviderError::LocalLlm("marker factory".to_string()))
         }
     }
@@ -390,8 +387,6 @@ mod registry_tests {
         const NAME: &str = "registry-test-ephemeral";
         LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
 
-        // Registered: the factory resolves and its own error surfaces (not the
-        // "no factory registered" error).
         let err = unwrap_err(LlmProviderRegistry::create_provider(
             NAME,
             &config(),
@@ -399,12 +394,9 @@ mod registry_tests {
         ));
         assert!(matches!(err, LlmProviderError::LocalLlm(_)));
 
-        // Deregister: the entry is removed and reported as such.
         assert!(LlmProviderRegistry::deregister(NAME));
         assert!(!LlmProviderRegistry::registered_names().contains(&NAME.to_string()));
 
-        // Lookup now fails with the "no factory registered" error, proving the
-        // deregistered factory is no longer returned.
         let err = unwrap_err(LlmProviderRegistry::create_provider(
             NAME,
             &config(),
@@ -452,7 +444,6 @@ mod registry_tests {
         const NAME: &str = "registry-test-idempotent";
         LlmProviderRegistry::register(Arc::new(MarkerFactory { name: NAME }));
         assert!(LlmProviderRegistry::deregister(NAME));
-        // A second deregistration of the same name removes nothing.
         assert!(!LlmProviderRegistry::deregister(NAME));
     }
 
@@ -909,8 +900,6 @@ mod audio_tests {
     #[test]
     fn tts_registration_lookup_round_trip() {
         AudioProviderRegistry::register_tts(Arc::new(DummyTtsFactory));
-        // Registered factory is found; its own init error surfaces (not the
-        // "no factory registered" error).
         let err = unwrap_err(AudioProviderRegistry::create_tts_provider(
             "dummy-tts",
             &config(),

@@ -1,4 +1,4 @@
-//! ECS components for the dedicated chat window (#109).
+//! ECS components for the dedicated chat window.
 
 use bevy_ecs::prelude::*;
 

@@ -7,13 +7,10 @@
 //! `world.get::<&UiPage>(entity)` instead of carrying a
 //! side-table of fields on `SettingsUi`.
 //!
-//! Migration goal: the legacy
-//! `apps/ene-desktop/src/settings_ui/mod.rs::SettingsUi` struct is
-//! split into the components below so that
-//! `apply_action` can run as a bevy system consuming a
+//! The state below is owned by these components so `apply_action`
+//! (a bevy system consuming a
 //! [`SettingsActionEvent`](crate::event::ui_action::SettingsActionEvent)
-//! message instead of being a free function with seven
-//! parameters.
+//! message) can read it from the entity instead of from `SettingsUi`.
 use std::time::Instant;
 
 use bevy_ecs::prelude::*;
@@ -22,14 +19,11 @@ use crate::character_state::{AnimationControl, EmotionQueue};
 use crate::settings::UiState;
 use crate::settings_ui::{PageKind, input::SettingsInputState};
 
-/// Marker placed on the single settings-window entity. Phase 5 keeps
-/// exactly one UI entity for the whole process; Phase 6 will spawn
-/// extra entities for the platform / AI windows.
+/// Marker placed on the single settings-window entity.
 #[derive(Component, Default)]
 pub struct UiWindow;
 
-/// Currently-visible page. Mirrors the legacy
-/// `SettingsUi::current_page` field.
+/// Currently-visible page; mirrors `SettingsUi::current_page`.
 #[derive(Component, Default)]
 #[cfg_attr(
     not(test),
@@ -37,10 +31,9 @@ pub struct UiWindow;
 )]
 pub struct UiPage(pub PageKind);
 
-/// Editable text-field buffers. Mirrors the legacy
-/// `SettingsUi::input` field. Mirrored on the on-disk
-/// `CharacterSettings` via `sync_from_settings` when the window
-/// transitions hidden → visible.
+/// Editable text-field buffers; mirrors `SettingsUi::input`. Synced
+/// from the on-disk `CharacterSettings` via `sync_from_settings` when
+/// the window transitions hidden → visible.
 #[derive(Component, Default)]
 #[cfg_attr(
     not(test),
@@ -48,22 +41,20 @@ pub struct UiPage(pub PageKind);
 )]
 pub struct UiInputDrafts(pub SettingsInputState);
 
-/// Animation play / pause toggle. Mirrors the legacy
-/// `SettingsUi::animation` field.
+/// Animation play / pause toggle; mirrors `SettingsUi::animation`.
 #[derive(Component, Default)]
 pub struct UiAnimation(pub AnimationControl);
 
 /// Pending emotion commands emitted by the AI bridge or the
-/// settings UI's manual-expression buttons. Mirrors the legacy
-/// `SettingsUi::emotion_queue` field; the
-/// `apply_emotions_system` (in `AiPlugin`) drains this queue
-/// into the legacy per-frame buffer.
+/// settings UI's manual-expression buttons; mirrors
+/// `SettingsUi::emotion_queue`. The `apply_emotions_system` (in
+/// `AiPlugin`) drains this queue into `EmotionPipelineState::pending`.
 #[derive(Component, Default)]
 pub struct UiEmotionQueue(pub EmotionQueue);
 
 /// Runtime-startup `Instant` so that `now_secs` used by
-/// `apply_action` is consistent across systems. Mirrors the legacy
-/// `SettingsUi::started_at` field.
+/// `apply_action` is consistent across systems; mirrors
+/// `SettingsUi::started_at`.
 #[derive(Component)]
 #[cfg_attr(
     not(test),
@@ -78,16 +69,14 @@ impl Default for UiStartedAt {
 }
 
 /// Persistent UI state (visibility, debug toggles, AI chat
-/// scratch). Mirrors `SettingsUi::UiState` field but lifted from
-/// lifted from the legacy `AppState` field into the bevy world. The runtime reads
+/// scratch); mirrors `SettingsUi::UiState`. The runtime reads
 /// / writes this via `Mut<UiStateComponent>`.
 ///
-/// TODO(#dual-source-of-truth): `runtime_startup_error`,
-/// `runtime_disconnected`, and `reconnect_attempted` are duplicated
-/// between this component and `AppState` (in `state.rs`). The
-/// `AppState::sync_runtime_health_to_ui` / `pull_runtime_health_from_ui`
-/// methods manually copy these fields every frame. A future refactor
-/// should pick a single source of truth and remove the duplication.
+/// TODO: deduplicate `runtime_startup_error`, `runtime_disconnected`,
+/// and `reconnect_attempted` between this component and `AppState`
+/// (in `state.rs`) — `sync_runtime_health_to_ui` /
+/// `pull_runtime_health_from_ui` copy them every frame. Pick a single
+/// source of truth once the health-sync path settles.
 #[derive(Component, Default)]
 pub struct UiStateComponent(pub UiState);
 

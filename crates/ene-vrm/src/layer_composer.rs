@@ -1,5 +1,5 @@
 //! Layer Composer: manages motion playback across body layers with
-//! priority-based collision rules (#131).
+//! priority-based collision rules.
 //!
 //! ## Layers
 //!
@@ -208,7 +208,7 @@ impl LayerComposer {
     ///
     /// Full preempts Upper and Lower — when Full is active, only
     /// the Full slot advances and Upper/Lower clocks are paused.
-    /// Once animations are auto-cleared when playback finishes.
+    /// Slots are auto-cleared when their playback finishes.
     pub fn tick(&mut self, dt: f32) {
         if let Some(ref mut s) = self.full {
             if s.duration > 0.0 {

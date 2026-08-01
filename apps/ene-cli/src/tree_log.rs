@@ -264,7 +264,7 @@ where
             return;
         }
 
-        // New root (or parent already closed / unknown).
+        // New root, or the parent is already closed / unknown.
         state.ensure_fresh_forest_for_new_root();
         state.forest.roots.push(id.clone());
         state.forest.nodes.insert(

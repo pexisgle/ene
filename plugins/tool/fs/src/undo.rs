@@ -190,9 +190,9 @@ impl UndoManager {
     /// removing it from the database. Callers should
     /// apply the operations and, only on success, call
     /// [`discard`](Self::discard) with the returned
-    /// entry's `id` to remove it. The previous
-    /// pop-then-apply ordering lost the entry on
-    /// apply failure, making a retry impossible.
+    /// entry's `id` to remove it. Keeping the entry in
+    /// the database until the apply succeeds makes a
+    /// failed apply retryable.
     ///
     /// Tiebreaking: when two entries share a timestamp
     /// the sort is nondeterministic (RFC3339 string

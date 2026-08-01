@@ -21,7 +21,7 @@ fn embedding_bytes_roundtrip() {
 
 /// The cosine-similarity helpers take a typed [`EmbeddingCol`] rather than a
 /// `&str` + allowlist, so only the two permitted columns are representable and
-/// there is no `assert!`/panic path to guard them (#427 item 2).
+/// there is no `assert!`/panic path to guard them.
 #[test]
 fn embedding_col_renders_expected_sql() {
     assert_eq!(EmbeddingCol::Bare.as_sql(), "embedding");
@@ -59,20 +59,17 @@ async fn session_upsert_get_list_archive() {
         .unwrap();
     assert_ne!(id_a, id_b);
 
-    // Upserting an existing session refreshes updated_at but keeps the row.
     let id_a2 = store
         .upsert_session(&new_session_meta("sess-a", "card"))
         .await
         .unwrap();
     assert_eq!(id_a, id_a2);
 
-    // Touch bumps turn_count.
     store.touch_session("sess-a", 5).await.unwrap();
     let meta = store.get_session("sess-a").await.unwrap().unwrap();
     assert_eq!(meta.turn_count, 5);
     assert!(!meta.archived);
 
-    // Listing (newest first) excludes archived by default.
     store.set_session_archived("sess-b", true).await.unwrap();
     let active = store.list_sessions(false, 10).await.unwrap();
     assert_eq!(active.len(), 1);
@@ -81,7 +78,6 @@ async fn session_upsert_get_list_archive() {
     let all = store.list_sessions(true, 10).await.unwrap();
     assert_eq!(all.len(), 2);
 
-    // Archiving a missing session reports no update.
     let updated = store.set_session_archived("nope", true).await.unwrap();
     assert!(!updated);
 }
@@ -111,7 +107,6 @@ async fn message_search_is_case_insensitive_and_paginated() {
         .await
         .unwrap();
 
-    // Case-insensitive match across sessions.
     let hits = store.search_messages("HELLO", 10, 0).await.unwrap();
     assert_eq!(hits.len(), 2);
     let sessions: std::collections::HashSet<&str> =
@@ -119,13 +114,11 @@ async fn message_search_is_case_insensitive_and_paginated() {
     assert!(sessions.contains("s1"));
     assert!(sessions.contains("s2"));
 
-    // Pagination.
     let page = store.search_messages("hello", 1, 0).await.unwrap();
     assert_eq!(page.len(), 1);
     let page2 = store.search_messages("hello", 1, 1).await.unwrap();
     assert_eq!(page2.len(), 1);
 
-    // Empty query returns nothing.
     let empty = store.search_messages("", 10, 0).await.unwrap();
     assert!(empty.is_empty());
 }
@@ -198,9 +191,9 @@ async fn message_search_query_plan_uses_created_at_index() {
     // query builder, so the EXPLAIN plan reflects the real SQL (the
     // hand-written string below it is kept only as documentation). The
     // leading-wildcard `LIKE` cannot use a B-tree index on `content` (that
-    // requires FTS5, #424), but the ordering must be served by
+    // requires FTS5), but the ordering must be served by
     // `idx_log_created_at` so the query walks rows newest-first and stops at
-    // the limit instead of sorting the whole table (#422).
+    // the limit instead of sorting the whole table.
     let built = crate::entities::conversation_logs::Entity::find()
         .filter(
             Func::lower(Expr::col(
@@ -264,12 +257,10 @@ async fn export_import_roundtrip_and_conflict() {
     assert!(joined.contains("[redacted]"));
     assert!(!joined.contains("sk-secret123"));
 
-    // JSON round-trip.
     let json = export.to_json().unwrap();
     let parsed = crate::export::SessionExport::from_json(&json).unwrap();
     assert_eq!(parsed.session.session_id, "orig");
 
-    // Importing under an existing session_id allocates a new one.
     let new_id = store.import_export(&parsed).await.unwrap();
     let sessions = store.list_sessions(true, 10).await.unwrap();
     assert_eq!(sessions.len(), 2);
@@ -278,7 +269,6 @@ async fn export_import_roundtrip_and_conflict() {
     let imported_msgs = store.list_messages(&imported.session_id).await.unwrap();
     assert_eq!(imported_msgs.len(), 2);
 
-    // Importing a brand-new session_id preserves it.
     let mut fresh = parsed.clone();
     fresh.session.session_id = "brand-new".to_string();
     store.import_export(&fresh).await.unwrap();
@@ -336,7 +326,6 @@ async fn tool_embedding_field_upsert_overwrites_and_list_filters() {
     assert!(fields.contains("description"));
     assert!(fields.contains("negative"));
 
-    // Upsert (replace) on the same (tool_name, field, field_key, model_name) overwrites.
     let emb2 = vec![0.0_f32, 1.0, 0.0, 0.0];
     store
         .upsert_tool_embedding_field(
@@ -382,7 +371,7 @@ async fn delete_tool_embeddings_cascades_to_fields() {
     assert_eq!(store.list_tool_embedding_fields().await.unwrap().len(), 1);
 }
 
-/// Regression test for #41 (bug 4): embedding insert
+/// Regression test: embedding insert
 /// must reject vectors whose length does not match
 /// `embedding_dim` and vectors containing NaN /
 /// Infinity, returning a typed `InvalidEmbedding`
@@ -453,7 +442,7 @@ async fn upsert_memory_embedding_rejects_bad_embedding() {
         .unwrap();
 }
 
-/// Regression test for #41 (bug 1): the memory store
+/// Regression test: the memory store
 /// must apply `foreign_keys=ON` (and the other
 /// safety PRAGMAs) on every connection it opens. For
 /// an in-memory store `journal_mode=WAL` is a no-op
@@ -642,7 +631,6 @@ async fn recent_tool_failures_lists_recallable_reflections_only() {
         commitment_id: None,
     };
 
-    // Two active failures for distinct tools.
     store
         .insert_typed_memory(&reflection("tool failure:web", crate::MemoryStatus::Active))
         .await
@@ -1082,7 +1070,6 @@ async fn hybrid_search_exclude_kinds_drops_reflection_memories() {
     insert_memory_with_embedding(&store, &normal, &query_emb).await;
     insert_memory_with_embedding(&store, &reflection, &query_emb).await;
 
-    // Without exclusion, the reflection memory competes as an ordinary result.
     let mut options = hybrid_search_options("pizza", &query_emb, now);
     let gathered = store.search(&options).await.unwrap();
     let results = ene_rag::score_and_rank(&options, gathered);
@@ -1093,7 +1080,6 @@ async fn hybrid_search_exclude_kinds_drops_reflection_memories() {
         "reflection memory is gathered when not excluded"
     );
 
-    // With the kind excluded, it never reaches the candidate pool.
     options.exclude_kinds = vec![crate::MemoryKind::Reflection];
     let gathered = store.search(&options).await.unwrap();
     let results = ene_rag::score_and_rank(&options, gathered);
@@ -1678,7 +1664,7 @@ async fn pin_typed_memory_excludes_from_natural_decay() {
     assert!(loaded.pinned);
 }
 
-/// #350: SQL decay processes the full table in one pass (no `BATCH_LIMIT` cap).
+/// SQL decay processes the full table in one pass (no `BATCH_LIMIT` cap).
 #[tokio::test]
 async fn apply_natural_decay_sql_handles_large_table_in_one_pass() {
     let store = setup_store().await;
@@ -1966,10 +1952,8 @@ async fn pending_memory_write_queue_roundtrip() {
     assert_eq!(pending, 1);
     assert_eq!(permanent, 0);
 
-    // Force due by setting next_retry_at to the past via fail/complete path:
-    // take_due only returns rows with next_retry_at <= now; freshly enqueued
-    // rows wait 30s, so mark due by failing with attempts that keep pending
-    // and a zero delay — instead, complete and re-enqueue is enough to prove CRUD.
+    // Freshly enqueued rows wait 30s before becoming due, so `take_due` would
+    // return nothing here; listing and completing proves the queue CRUD instead.
     let listed = store
         .list_pending_memory_writes("ene", 10)
         .await
@@ -2058,7 +2042,6 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
     assert_eq!(listed[0].title, "likes tea");
     assert_eq!(listed[0].status, PendingCandidateStatus::Pending);
 
-    // Approving persists the candidate to typed memory.
     let memory_id = store.approve_pending_candidate(id).await.expect("approve");
     let memory = store
         .get_typed_memory(memory_id)
@@ -2069,7 +2052,6 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
     assert_eq!(memory.kind, crate::MemoryKind::Preference);
     assert_eq!(memory.status, crate::MemoryStatus::Active);
 
-    // The candidate is now approved and no longer pending.
     let pending = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Pending))
         .await
@@ -2081,7 +2063,6 @@ async fn pending_candidate_insert_list_approve_persists_typed_memory() {
         .expect("list approved");
     assert_eq!(approved.len(), 1);
 
-    // Approving again fails because it is already resolved.
     assert!(store.approve_pending_candidate(id).await.is_err());
 }
 
@@ -2104,7 +2085,6 @@ async fn pending_candidate_reject_does_not_persist() {
         .expect("list rejected");
     assert_eq!(rejected.len(), 1);
 
-    // No typed memory was created for a rejected candidate.
     let count = store
         .count_typed_memories("ene", None)
         .await
@@ -2112,10 +2092,9 @@ async fn pending_candidate_reject_does_not_persist() {
     assert_eq!(count, 0);
 }
 
-/// #420: candidates persist to the `pending_candidates` table, so they
+/// Candidates persist to the `pending_candidates` table, so they
 /// survive a restart (a fresh store instance on the same file) and are
-/// shared across instances — the inverse of the old in-memory behaviour.
-/// Listing remains isolated per character.
+/// shared across instances. Listing remains isolated per character.
 #[tokio::test]
 async fn pending_candidates_persist_across_instances_and_isolate_per_character() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2132,10 +2111,8 @@ async fn pending_candidates_persist_across_instances_and_isolate_per_character()
         .expect("insert mira");
     drop(store);
 
-    // Reopen a fresh instance on the same database file (simulated restart).
     let reopened = MemoryStore::open(&path, 4).await.expect("reopen");
 
-    // Candidates survived the restart and are shared via the DB.
     let ene = reopened
         .list_pending_candidates("ene", None)
         .await
@@ -2143,7 +2120,6 @@ async fn pending_candidates_persist_across_instances_and_isolate_per_character()
     assert_eq!(ene.len(), 1);
     assert_eq!(ene[0].title, "ene fact");
 
-    // Listing is isolated per character: "ene" does not see "mira"'s queue.
     let mira = reopened
         .list_pending_candidates("mira", None)
         .await
@@ -2152,7 +2128,7 @@ async fn pending_candidates_persist_across_instances_and_isolate_per_character()
     assert_eq!(mira[0].title, "mira fact");
 }
 
-// ── #420: pending-candidate retention policy ──
+// ── Pending-candidate retention policy ──
 
 #[tokio::test]
 async fn pending_candidate_age_prune_removes_expired() {
@@ -2196,7 +2172,6 @@ async fn pending_candidate_count_prune_caps_queue() {
             .expect("insert");
     }
 
-    // Cap at 3: the two oldest pending candidates are dropped.
     let removed = store
         .prune_pending_candidates("ene", Some("user1"), 0, 3, Utc::now())
         .await
@@ -2208,7 +2183,6 @@ async fn pending_candidate_count_prune_caps_queue() {
         .await
         .expect("list");
     assert_eq!(remaining.len(), 3);
-    // Oldest-first ordering means "cand 0" and "cand 1" were culled.
     assert_eq!(remaining[0].title, "cand 2");
 }
 
@@ -2225,7 +2199,6 @@ async fn pending_candidate_prune_disabled_with_zero() {
         .await
         .expect("backdate");
 
-    // Both limits disabled (0): nothing is removed despite the age.
     let removed = store
         .prune_pending_candidates("ene", Some("user1"), 0, 0, Utc::now())
         .await
@@ -2240,7 +2213,7 @@ async fn pending_candidate_prune_disabled_with_zero() {
 }
 
 /// Build a sample candidate for a specific user, optionally recording a
-/// conflicting existing memory (#420 review tests).
+/// conflicting existing memory.
 fn sample_pending_candidate_for(
     character_id: &str,
     user_id: &str,
@@ -2264,7 +2237,7 @@ fn sample_pending_candidate_for(
     }
 }
 
-/// #420 review: pruning is character-scoped — pruning "ene" must leave
+/// Pruning is character-scoped — pruning "ene" must leave
 /// "mira"'s queue untouched.
 #[tokio::test]
 async fn pending_candidate_prune_is_character_scoped() {
@@ -2281,7 +2254,6 @@ async fn pending_candidate_prune_is_character_scoped() {
         .await
         .expect("insert mira");
 
-    // Cap "ene" at 2 (drops 3); "mira" is a different character and is ignored.
     let removed = store
         .prune_pending_candidates("ene", Some("user1"), 0, 2, Utc::now())
         .await
@@ -2306,7 +2278,7 @@ async fn pending_candidate_prune_is_character_scoped() {
     );
 }
 
-/// #420 review (MEDIUM 4): the count cap is scoped to the acting user (plus
+/// The count cap is scoped to the acting user (plus
 /// character-shared rows), so one user's overflow cannot evict another's.
 #[tokio::test]
 async fn pending_candidate_prune_count_cap_is_user_scoped() {
@@ -2335,7 +2307,6 @@ async fn pending_candidate_prune_count_cap_is_user_scoped() {
             .expect("insert bob");
     }
 
-    // Cap at 2 as alice: only alice's queue overflows (5 -> 2), bob is intact.
     let removed = store
         .prune_pending_candidates("ene", Some("alice"), 0, 2, Utc::now())
         .await
@@ -2352,7 +2323,7 @@ async fn pending_candidate_prune_count_cap_is_user_scoped() {
     assert_eq!(bob_rows, 2);
 }
 
-/// #420 review: the age sweep removes *resolved* (approved / rejected) rows
+/// The age sweep removes *resolved* (approved / rejected) rows
 /// too, not just pending ones — resolved rows have no further UI value once
 /// stale.
 #[tokio::test]
@@ -2376,7 +2347,6 @@ async fn pending_candidate_age_prune_removes_resolved_rows() {
         .await
         .expect("reject");
 
-    // Backdate both resolved rows past the age limit.
     store
         .test_backdate_pending_candidate(approved_id, 30)
         .await
@@ -2385,7 +2355,6 @@ async fn pending_candidate_age_prune_removes_resolved_rows() {
         .test_backdate_pending_candidate(rejected_id, 30)
         .await
         .expect("backdate rejected");
-    // A fresh pending row that must survive.
     store
         .insert_pending_candidate(sample_pending_candidate("ene", "fresh pending"))
         .await
@@ -2405,13 +2374,12 @@ async fn pending_candidate_age_prune_removes_resolved_rows() {
     assert_eq!(remaining[0].title, "fresh pending");
 }
 
-/// #420 review: with both limits active, `removed` must not double-count a row
+/// With both limits active, `removed` must not double-count a row
 /// the age pass already deleted when the count pass runs afterwards.
 #[tokio::test]
 async fn pending_candidate_prune_both_limits_no_double_count() {
     let store = setup_store().await;
 
-    // Two ancient pending rows (removed by the age pass) ...
     for i in 0..2 {
         let id = store
             .insert_pending_candidate(sample_pending_candidate("ene", &format!("ancient {i}")))
@@ -2422,7 +2390,6 @@ async fn pending_candidate_prune_both_limits_no_double_count() {
             .await
             .expect("backdate");
     }
-    // ... plus four fresh pending rows.
     for i in 0..4 {
         store
             .insert_pending_candidate(sample_pending_candidate("ene", &format!("fresh {i}")))
@@ -2445,7 +2412,7 @@ async fn pending_candidate_prune_both_limits_no_double_count() {
     assert_eq!(remaining.len(), 3);
 }
 
-/// #420 review (MEDIUM 5): approving a candidate that recorded a conflicting
+/// Approving a candidate that recorded a conflicting
 /// existing memory propagates it to the typed memory's `supersedes_id`.
 #[tokio::test]
 async fn pending_candidate_approve_propagates_existing_memory_id() {
@@ -2470,9 +2437,9 @@ async fn pending_candidate_approve_propagates_existing_memory_id() {
     assert_eq!(memory.supersedes_id, Some(42));
 }
 
-/// #420 review (HIGH 1): resolving a candidate across a simulated restart —
+/// Resolving a candidate across a simulated restart —
 /// insert on one instance, then approve / reject on a fresh instance over the
-/// same file, which is what #420's shared-queue design promises.
+/// same file, which the shared-queue design promises.
 #[tokio::test]
 async fn pending_candidate_resolve_across_restart() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2489,7 +2456,6 @@ async fn pending_candidate_resolve_across_restart() {
         .expect("insert reject");
     drop(store);
 
-    // Fresh instance on the same database (simulated restart).
     let reopened = MemoryStore::open(&path, 4).await.expect("reopen");
     let memory_id = reopened
         .approve_pending_candidate(approve_id)
@@ -2524,7 +2490,7 @@ async fn pending_candidate_resolve_across_restart() {
     assert!(pending.is_empty());
 }
 
-/// #420 review (HIGH 1): concurrent approvals of the same candidate must insert
+/// Concurrent approvals of the same candidate must insert
 /// exactly one typed memory — one call wins the conditional status flip, the
 /// other errors.
 #[tokio::test]
@@ -2553,14 +2519,12 @@ async fn pending_candidate_concurrent_approve_inserts_once() {
     }
     assert_eq!(successes, 1, "exactly one concurrent approval may win");
 
-    // Exactly one typed memory was created.
     let count = store
         .count_typed_memories("ene", None)
         .await
         .expect("count");
     assert_eq!(count, 1);
 
-    // The candidate is approved, not left pending.
     let approved = store
         .list_pending_candidates("ene", Some(PendingCandidateStatus::Approved))
         .await
@@ -2568,9 +2532,9 @@ async fn pending_candidate_concurrent_approve_inserts_once() {
     assert_eq!(approved.len(), 1);
 }
 
-// ── #419: PRAGMAs must reach every pooled connection ──
+// ── PRAGMAs must reach every pooled connection ──
 
-/// Regression test for #419: the per-connection PRAGMAs must set
+/// The per-connection PRAGMAs must set
 /// `foreign_keys=ON` (and the other safety PRAGMAs) on **every**
 /// connection in the pool, not just the first one. A file-backed
 /// store uses a pool of eight connections; we deterministically
@@ -2620,7 +2584,7 @@ async fn pragmas_apply_to_all_pool_connections() {
     }
 }
 
-// ── #421: FK cascade and unique index correctness ──
+// ── FK cascade and unique index correctness ──
 
 /// Builds a minimal [`crate::NewMemoryItem`] for test use.
 fn test_memory_item(title: &str, content: &str) -> crate::NewMemoryItem {
@@ -2649,7 +2613,7 @@ fn test_memory_item(title: &str, content: &str) -> crate::NewMemoryItem {
 
 /// Deleting a `typed_memories` row must cascade-delete its
 /// `memory_embeddings` rows now that `foreign_keys=ON` is
-/// enforced on every pooled connection (#419).
+/// enforced on every pooled connection.
 #[tokio::test]
 async fn delete_typed_memory_cascades_to_embeddings() {
     use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter};
@@ -2739,7 +2703,7 @@ async fn upsert_memory_embedding_does_not_create_duplicates() {
     );
 }
 
-// ── #304: vec0 ANN index tests ──
+// ── vec0 ANN index tests ──
 
 /// The vec0 indexed search must return the same results as the brute-force
 /// scan for a small dataset where both paths are exhaustive.
@@ -2825,7 +2789,6 @@ async fn vec0_sync_on_upsert() {
     let item = test_memory_item("sync test", "content for sync");
     let id = store.insert_typed_memory(&item).await.unwrap();
 
-    // Insert path: first upsert creates the vec0 row.
     let emb1 = vec![1.0, 0.0, 0.0, 0.0];
     store
         .upsert_memory_embedding(id, "test-model", "content", &emb1)
@@ -2839,7 +2802,6 @@ async fn vec0_sync_on_upsert() {
     assert_eq!(results.len(), 1, "vec0 must contain the inserted embedding");
     assert_eq!(results[0].0.id, Some(id));
 
-    // Update path: second upsert replaces the vec0 row.
     let emb2 = vec![0.0, 1.0, 0.0, 0.0];
     store
         .upsert_memory_embedding(id, "test-model", "content", &emb2)
@@ -2857,7 +2819,6 @@ async fn vec0_sync_on_upsert() {
         "vec0 must still contain exactly one row after update"
     );
 
-    // Search with the new vector should find it with higher similarity.
     let results_new = store
         .search_typed_memories_vector(&emb2, "ene", "test-model", None, &["active"], 10, 0.0)
         .await
@@ -2883,7 +2844,6 @@ async fn vec0_sync_on_cascade_delete() {
         .await
         .unwrap();
 
-    // Verify the vec0 row exists.
     let before = store
         .search_typed_memories_vector(
             &[1.0, 0.0, 0.0, 0.0],
@@ -2949,7 +2909,6 @@ async fn vec0_tool_search_sync() {
     assert_eq!(results.len(), 1, "tool must be found via vec0");
     assert_eq!(results[0].0, "weather");
 
-    // Delete and verify removal.
     store.delete_tool_embeddings("weather").await.unwrap();
     let results = store.search_tools(&emb, 10, 0.0).await.unwrap();
     assert_eq!(
@@ -2974,7 +2933,6 @@ async fn vec0_search_respects_threshold() {
 
     let query = vec![1.0, 0.0, 0.0, 0.0];
 
-    // With threshold 0.0, the orthogonal vector (similarity ≈ 0) should appear.
     let results = store
         .search_typed_memories_vector(&query, "ene", "test-model", None, &["active"], 10, 0.0)
         .await
@@ -2985,7 +2943,6 @@ async fn vec0_search_respects_threshold() {
         "orthogonal vector must pass threshold 0.0"
     );
 
-    // With threshold 0.5, it should be filtered out.
     let results = store
         .search_typed_memories_vector(&query, "ene", "test-model", None, &["active"], 10, 0.5)
         .await
@@ -3006,7 +2963,6 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("memory.db");
 
-    // Open with dim=4 and populate embeddings.
     let store = MemoryStore::open(&path, 4).await.expect("open dim=4");
     let item = test_memory_item("dim change", "content before model switch");
     let id = store.insert_typed_memory(&item).await.unwrap();
@@ -3017,8 +2973,8 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
     drop(store);
 
     // Reopen with a different embedding model (dim=8). This must succeed —
-    // previously the backfill of 4-dim vectors into the recreated float[8]
-    // table failed and `MemoryStore::open` errored forever after (#304).
+    // backfilling 4-dim vectors into a recreated float[8]
+    // table would fail and leave `MemoryStore::open` erroring forever after.
     let store = MemoryStore::open(&path, 8).await.expect("reopen dim=8");
     let results = store
         .search_typed_memories_vector(
@@ -3039,7 +2995,6 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
         "old vectors must not appear after dim change"
     );
 
-    // The store must still accept new-dimension embeddings.
     let item2 = test_memory_item("dim change 2", "content after model switch");
     let id2 = store.insert_typed_memory(&item2).await.unwrap();
     store
@@ -3066,7 +3021,7 @@ async fn vec0_dimension_change_rebuilds_empty_not_fail() {
     assert_eq!(results.len(), 1, "new vectors must be searchable");
 }
 
-// ── #426: audit_log session_id and session export tool history ──
+// ── audit_log session_id and session export tool history ──
 
 /// Builds a [`crate::NewAuditEntry`] for test use.
 fn test_audit_entry(session_id: &str, tool_name: &str) -> crate::NewAuditEntry {
@@ -3109,8 +3064,6 @@ async fn audit_rows_carry_session_id() {
     assert_eq!(entry.session_id.as_deref(), Some("sess-a"));
     assert_eq!(entry.tool_name, "fs.write_file");
 
-    // The out-of-band row has a NULL session_id and is never attributed
-    // to any session.
     let all = store.list_audit_entries(10).await.expect("list all");
     assert_eq!(all.len(), 2);
     let diag = all
@@ -3165,7 +3118,6 @@ async fn session_export_includes_only_own_tool_history() {
     assert_eq!(log.decision, "allow_once");
     assert!(log.success);
 
-    // The other session's export sees only its own history.
     let export_b = store.build_export("sess-b").await.expect("export sess-b");
     assert_eq!(export_b.tool_logs.len(), 1);
     assert_eq!(
@@ -3195,10 +3147,10 @@ async fn session_export_without_audit_rows_is_empty() {
     assert!(export.tool_logs.is_empty());
 }
 
-/// #345 regression: bumping a memory's access counters (as recall does) must
-/// not shield it from the forgetting lifecycle. Before the fix the decay anchor
-/// was `last_accessed_at`, so a recently-recalled memory reset its age to zero
-/// and could never reach `FADE_THRESHOLD`. The anchor is now `updated_at`, so a
+/// Bumping a memory's access counters (as recall does) must
+/// not shield it from the forgetting lifecycle. If the decay anchor were
+/// `last_accessed_at`, a recently-recalled memory would reset its age to zero
+/// and never reach `FADE_THRESHOLD`. The anchor is `updated_at`, so a
 /// stale-but-recalled memory still fades.
 #[tokio::test]
 async fn recall_bump_does_not_prevent_forgetting() {
@@ -3239,7 +3191,6 @@ async fn recall_bump_does_not_prevent_forgetting() {
     assert_eq!(recalled.access_count, 10);
     assert!(recalled.last_accessed_at.is_some());
 
-    // Despite the fresh accesses, the stale content must still fade.
     let report = store
         .apply_natural_decay_batch(
             "ene",

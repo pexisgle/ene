@@ -20,7 +20,6 @@ pub fn loader() -> &'static FluentLanguageLoader {
         let loader = fluent_language_loader!();
         drop(loader.load_languages(&Localizations, &[loader.fallback_language().clone()]));
 
-        // Negotiate language with system locale on startup.
         let requested_languages = i18n_embed::DesktopLanguageRequester::requested_languages();
         let localizer = i18n_embed::DefaultLocalizer::new(&loader, &Localizations);
         drop(localizer.select(&requested_languages));

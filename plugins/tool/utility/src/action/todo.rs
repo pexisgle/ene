@@ -35,8 +35,6 @@ fn default_state() -> Arc<UtilityState> {
     Arc::new(UtilityState::new())
 }
 
-// ───────────────────────── todo_list ─────────────────────────
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "utility",
@@ -81,8 +79,6 @@ impl TodoListAction {
         ok_json(&body)
     }
 }
-
-// ───────────────────────── todo_add ─────────────────────────
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
@@ -132,8 +128,6 @@ impl TodoAddAction {
         ok_json(&item)
     }
 }
-
-// ───────────────────────── todo_update ─────────────────────────
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
@@ -216,8 +210,6 @@ impl TodoUpdateAction {
     }
 }
 
-// ───────────────────────── todo_complete ─────────────────────────
-
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(
     namespace = "utility",
@@ -258,8 +250,6 @@ impl TodoCompleteAction {
         }))
     }
 }
-
-// ───────────────────────── todo_delete ─────────────────────────
 
 #[derive(Clone, Deserialize, JsonSchema, ToolAction)]
 #[tool(

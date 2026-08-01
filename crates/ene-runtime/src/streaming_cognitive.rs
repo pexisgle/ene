@@ -1,5 +1,3 @@
-//! Cognitive runtime streaming path (#100).
-
 use ene_ai::LlmToolCallChunk;
 use ene_config::PromptLibrary;
 use ene_mind::memory_writer::candidate::{ToolResultSummary, TurnInput};
@@ -31,8 +29,7 @@ use tracing::Instrument;
 /// Maximum sentence buffer length before forcing a TTS flush (chars).
 const TTS_MAX_BUFFER_CHARS: usize = 100;
 
-/// Sends a synthesized audio chunk on the dedicated bounded audio channel
-/// (#272).
+/// Sends a synthesized audio chunk on the dedicated bounded audio channel.
 ///
 /// Back-pressure policy: a full channel means the playback consumer is
 /// falling behind, so non-final chunks are dropped with a warning rather
@@ -87,7 +84,7 @@ async fn send_audio_chunk(audio_tx: &tokio::sync::mpsc::Sender<AudioChunk>, chun
 /// - The buffer exceeding [`TTS_MAX_BUFFER_CHARS`] characters.
 ///
 /// `char_count` is the caller-maintained character count of `buf`, tracked
-/// incrementally to avoid an O(n) rescan on every streaming delta (#L8).
+/// incrementally to avoid an O(n) rescan on every streaming delta.
 /// Returns `None` when no boundary is found.
 fn find_tts_sentence_boundary(buf: &str, char_count: usize) -> Option<usize> {
     if char_count > TTS_MAX_BUFFER_CHARS {
@@ -155,11 +152,11 @@ fn build_turn_context<'a>(
 }
 
 /// Finish a cancelled turn: record the partial response as an interruption so
-/// the next turn can acknowledge/resume it, then emit `TerminalReason::Cancelled` (#206).
+/// the next turn can acknowledge/resume it, then emit `TerminalReason::Cancelled`.
 ///
 /// When the trimmed partial text is empty (e.g. cancel arrived before any
 /// visible text), the interruption record is skipped entirely — an empty
-/// snapshot carries no useful context for the next turn (#M9).
+/// snapshot carries no useful context for the next turn.
 fn finish_cancelled(
     mut session: ene_mind::ConversationSession,
     event_tx: &tokio::sync::broadcast::Sender<EneEvent>,
@@ -183,7 +180,7 @@ fn finish_cancelled(
     )
 }
 
-/// Spawn deferred memory work for an interrupted (barge-in / cancelled) turn (#M7).
+/// Spawn deferred memory work for an interrupted (barge-in / cancelled) turn.
 ///
 /// Tags the turn as `interrupted` and includes the partial `spoken_text` so
 /// downstream memory extraction can distinguish partial episodes.
@@ -306,13 +303,13 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     // Auxiliary tasks spawned by this turn that are not otherwise tracked.
     // Held in a local `JoinSet` so they are aborted when the turn ends
     // (every `return` path drops it), instead of lingering until they finish
-    // on their own (#401). A `JoinSet`'s `Drop` aborts all contained tasks.
+    // on their own. A `JoinSet`'s `Drop` aborts all contained tasks.
     let mut aux_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
     if let Some(timeout) = generation_timeout {
         let token = cancel_token.clone();
         // Tracked in `aux_tasks` rather than a bare `tokio::spawn`: if the
         // turn ends early, the sleeper is aborted immediately instead of
-        // idling for the full timeout holding a (stale) cancel token (#401).
+        // idling for the full timeout holding a (stale) cancel token.
         aux_tasks.spawn(async move {
             tokio::time::sleep(timeout).await;
             token.cancel();
@@ -325,7 +322,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let engine = CognitionEngine::new();
 
     // Prompt tokens the model's context window leaves for this turn, used to
-    // scale window-relative budgets such as the Identity Kernel (#386). A cloud
+    // scale window-relative budgets such as the Identity Kernel. A cloud
     // task with no configured window falls back to the conservative default.
     let available_window = {
         let ai_config = config.get_section::<ene_ai::AiConfig>().unwrap_or_default();
@@ -725,7 +722,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let prefetch = ComposePrefetch {
         style_examples: Some(style_examples),
         scene_summary: Some(scene_summary),
-        // Consume any pending interruption so the model can resume it (#206).
+        // Consume any pending interruption so the model can resume it.
         interruption_note: Some(
             session
                 .take_interruption()
@@ -735,7 +732,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 
     // Extract the small fields still needed after composition, then move
     // `pre_turn` by value into `compose_prompt_packet` to avoid cloning the
-    // recalled/commitment vectors (#review M2).
+    // recalled/commitment vectors.
     let classifier_expression_hint = pre_turn.classifier_expression_hint.clone();
     let pre_turn_affect = pre_turn.affect.clone();
 
@@ -822,7 +819,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
     let mut turn_tool_results: Vec<ToolResultSummary> = Vec::new();
 
     // Classify the tools available this turn once, rather than re-listing (and
-    // cloning every `ToolSpec`) at the top of each tool-execution round (#400).
+    // cloning every `ToolSpec`) at the top of each tool-execution round.
     // `tools` is exactly the set offered to the LLM, so it bounds every call
     // the model can make. `parallelizable` is fail-closed: only tools that
     // explicitly declare `SideEffects::ReadOnly` (and are not background-capable)
@@ -842,9 +839,9 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 
     // TTS pipeline: spawn a background worker that synthesizes sentences into
     // PCM audio chunks and emits them through the dedicated audio channel
-    // (#272; not the chat broadcast bus — see `send_audio_chunk`).
+    // (not the chat broadcast bus — see `send_audio_chunk`).
     // The worker monitors the turn's CancellationToken so barge-in can stop
-    // synthesis immediately instead of finishing the current sentence (#H4).
+    // synthesis immediately instead of finishing the current sentence.
     let (tts_tx, tts_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let tts_tx: Option<tokio::sync::mpsc::UnboundedSender<String>> = if tts_provider.is_some() {
         Some(tts_tx)
@@ -860,7 +857,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             async move {
                 let mut rx = tts_rx;
                 loop {
-                    // Wait for the next sentence or cancellation (#H4).
                     let sentence = tokio::select! {
                         biased;
                         () = tts_cancel.cancelled() => break,
@@ -877,7 +873,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         Ok(mut stream) => {
                             use tokio_stream::StreamExt as _;
                             loop {
-                                // Consume synthesis chunks or bail on cancel (#H4).
                                 let chunk_res = tokio::select! {
                                     biased;
                                     () = tts_cancel.cancelled() => break,
@@ -918,7 +913,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                             );
                         }
                     }
-                    // If cancelled mid-synthesis, stop processing further sentences.
                     if tts_cancel.is_cancelled() {
                         break;
                     }
@@ -949,14 +943,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
         // a normal `Cancel` stops it cooperatively; on shutdown the actor
         // cancels the token **and** aborts the worker task itself — handles
         // that arrive after the run loop's last drain are still admitted and
-        // aborted, so the worker genuinely cannot outlive the actor (#401). A
+        // aborted, so the worker genuinely cannot outlive the actor. A
         // send failure means the actor is already gone, in which case the
         // worker runs to completion as a detached orphan — acceptable at
         // shutdown.
         drop(aux_task_tx.send(tts_handle));
     }
     let mut tts_sentence_buf = String::new();
-    // Incremental char count for `tts_sentence_buf` to avoid O(n) rescans (#L8).
+    // Incremental char count for `tts_sentence_buf` to avoid O(n) rescans.
     let mut tts_sentence_buf_chars: usize = 0;
 
     loop {
@@ -1068,7 +1062,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                         for text in text_deltas {
                             // Mirror streamed text into the shared buffer so a
                             // hard-aborted turn can recover its partial response
-                            // for interruption recording (#H5).
+                            // for interruption recording.
                             partial_text.lock().push_str(&text);
                             drop(event_tx.send(EneEvent::TextDelta {
                                 turn: turn.clone(),
@@ -1182,7 +1176,7 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                     "Expression arbiter selected expression"
                 );
                 // Feed the final expression decision into arbiter
-                // and consolidate with mid-turn cue accumulations (#129).
+                // and consolidate with mid-turn cue accumulations.
                 let expr_cue = PerformanceCue::expression(decision.expression.clone());
                 let expr_source = CueSource::from(decision.source);
                 perf_arbiter.accept(expr_cue, expr_source);
@@ -1264,13 +1258,13 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
             session.finalize_response();
             session.record_assistant_response();
 
-            // Topic-boundary detection (#367): score the completed turn against
+            // Topic-boundary detection: score the completed turn against
             // the running topic centroid after the response text has streamed
             // (so the user-facing reply is never delayed) and before the
             // deferred memory-writing slot spawns. A detected boundary is
             // carried back on the `StreamOutcome` so the actor can
-            // retroactively compress the span before the boundary (#368);
-            // session splitting (#369) consumes the same signal in a later
+            // retroactively compress the span before the boundary;
+            // session splitting consumes the same signal in a later
             // stage.
             let mut topic_boundary_score: Option<f32> = None;
             if !is_proactive {
@@ -1431,7 +1425,6 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
                 drop(classifier_tx.send(classifier_handle));
             }
 
-            // Flush any remaining TTS buffer before Terminal.
             if let Some(ref tx) = tts_tx
                 && !tts_sentence_buf.trim().is_empty()
             {
@@ -1507,14 +1500,14 @@ pub async fn run_stream_cognitive(ctx: StreamContext) -> StreamOutcome {
 mod tests {
     use super::*;
 
-    /// Helper: char count for the incremental-tracking tests (#L8).
+    /// Helper: char count for the incremental-tracking tests.
     fn char_count(buf: &str) -> usize {
         buf.chars().count()
     }
 
     #[test]
     fn ja_sentence_splits_at_cjk_period_without_trailing_space() {
-        // Japanese has no space after 。 — must split unconditionally (#M8).
+        // Japanese has no space after 。 — must split unconditionally.
         let buf = "こんにちは。元気ですか？";
         let end =
             find_tts_sentence_boundary(buf, char_count(buf)).expect("should find a boundary at 。");
@@ -1582,7 +1575,6 @@ mod tests {
 
     #[test]
     fn overlong_buffer_forces_flush() {
-        // Exceeding TTS_MAX_BUFFER_CHARS forces a flush of the whole buffer.
         let buf: String = "あ".repeat(TTS_MAX_BUFFER_CHARS + 1);
         let end = find_tts_sentence_boundary(&buf, char_count(&buf))
             .expect("overlong buffer should force a flush");
@@ -1592,7 +1584,7 @@ mod tests {
     #[test]
     fn incremental_char_count_matches_recount() {
         // The incremental count passed by the caller must agree with a fresh
-        // recount, otherwise the overlong flush threshold would misfire (#L8).
+        // recount, otherwise the overlong flush threshold would misfire.
         let buf = "こんにちは。Hello. ";
         assert_eq!(char_count(buf), buf.chars().count());
         let end = find_tts_sentence_boundary(buf, char_count(buf)).expect("boundary");

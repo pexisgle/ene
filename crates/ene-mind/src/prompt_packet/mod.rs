@@ -1,4 +1,4 @@
-//! Sectioned prompt packet composition (#87).
+//! Sectioned prompt packet composition.
 
 mod section;
 

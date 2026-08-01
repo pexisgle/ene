@@ -1,16 +1,15 @@
 //! Tool RAG pipeline — multi-vector embedding, field-weighted similarity,
-//! optional cosine rerank, and per-category limits (#302, moved from
-//! `ene-tool-rag`; scoring restructured by #436).
+//! optional cosine rerank, and per-category limits.
 //!
 //! The per-tool relevance score is a *normalized* weighted average over the
 //! fields a tool actually has (best match per field), so it lives in
 //! `[-1, 1]` and does not grow with the number of declared fields or examples.
 //! Negative examples act as an exclusion gate rather than a subtracted
 //! penalty. This mirrors the relevance-driven structure of the memory hybrid
-//! score (#346) so the two policies cannot diverge.
+//! score so the two policies cannot diverge.
 //!
-//! LLM `HyDE` expansion is disabled and its config knobs have been removed;
-//! the [`hybrid`] helpers still expose [`hyde_document`](hybrid::hyde_document)
+//! LLM `HyDE` expansion is disabled and exposes no config knobs; the
+//! [`hybrid`] helpers still expose [`hyde_document`](hybrid::hyde_document)
 //! for callers that supply their own LLM. Cosine reranking is available but
 //! off by default ([`ToolRagOptions::use_rerank`]): the normalized field score
 //! is already field-count-independent, so the extra per-query re-embeddings
@@ -51,7 +50,7 @@ pub use hybrid::{HybridRerankProvider, hybrid_embed, hyde_document, rerank_tool_
 // ── Per-field similarity weights ──────────────────────────────────────────
 
 /// Controls how strongly each embedding field contributes to the per-tool
-/// relevance score (#436).
+/// relevance score.
 ///
 /// The score is a weighted average over the fields a tool *actually has*,
 /// taking the best match when a field has several embeddings (examples), so it
@@ -72,20 +71,20 @@ pub struct FieldWeights {
     pub example: f32,
     /// Deprecated soft-penalty weight for the negative embedding.
     ///
-    /// Negative examples are now a gate ([`negative_threshold`](Self::negative_threshold))
+    /// Negative examples act as a gate ([`negative_threshold`](Self::negative_threshold))
     /// rather than a subtracted score; this field is retained for configuration
-    /// compatibility and is no longer used in scoring.
+    /// compatibility and is not used in scoring.
     pub negative: f32,
     /// Similarity at or above which a tool's negative-example embedding excludes
-    /// it from selection (#436). Range `[0, 1]`; `1.0` effectively disables the
+    /// it from selection. Range `[0, 1]`; `1.0` effectively disables the
     /// gate.
     pub negative_threshold: f32,
 }
 
 impl FieldWeights {
-    /// The weight for a given embedding field (#436).
+    /// The weight for a given embedding field.
     ///
-    /// Retained for compatibility with the pre-#436 additive API; the
+    /// Retained for compatibility with the additive configuration API; the
     /// scoring pipeline uses [`Self::averaging_weight`] so the negative
     /// field is handled as a gate rather than a subtracted component.
     pub const fn for_field(&self, field: EmbeddingField) -> f32 {
@@ -98,7 +97,7 @@ impl FieldWeights {
         }
     }
 
-    /// The averaging weight for a positive embedding field (#436).
+    /// The averaging weight for a positive embedding field.
     ///
     /// Returns `None` for [`EmbeddingField::Negative`], which is handled as an
     /// exclusion gate rather than an averaged component.
@@ -153,14 +152,14 @@ pub struct ToolRagOptions {
     pub final_n: usize,
     /// Whether to cosine-rerank candidates (no LLM).
     ///
-    /// Defaults to `false`: the weighted field-similarity score (#436) is
+    /// Defaults to `false`: the weighted field-similarity score is
     /// already normalized and field-count-independent, so the extra
     /// `rerank_candidates` description re-embeddings per query are not worth
     /// their cost by default.
     pub use_rerank: bool,
     /// Number of candidates to consider during reranking.
     pub rerank_candidates: usize,
-    /// Minimum normalized similarity (`[-1, 1]`) for a tool to be included (#436).
+    /// Minimum normalized similarity (`[-1, 1]`) for a tool to be included.
     pub min_similarity: f32,
     /// Whether to index tools in the background on startup.
     pub background_index_on_startup: bool,
@@ -170,9 +169,9 @@ pub struct ToolRagOptions {
     pub weights: FieldWeights,
     /// Cap how many tools per category may appear (`ToolCategory::config_key`).
     pub per_category_limits: HashMap<String, usize>,
-    /// Whether to down-weight tools with a recent failure memory (#349).
+    /// Whether to down-weight tools with a recent failure memory.
     pub use_failure_feedback: bool,
-    /// Score multiplier applied to a recently-failed tool (#349).
+    /// Score multiplier applied to a recently-failed tool.
     pub failure_penalty: f32,
 }
 
@@ -265,7 +264,7 @@ pub struct ToolRag {
         reason = "Arc<Vec> is intentional: select clones the handle, not the embeddings"
     )]
     cached_field_rows: RwLock<Arc<Vec<CachedFieldRow>>>,
-    /// Optional source of recent tool-failure signals (#349). When present and
+    /// Optional source of recent tool-failure signals. When present and
     /// [`ToolRagOptions::use_failure_feedback`] is enabled, recently-failed
     /// tools are down-weighted during selection. Read through a port so this
     /// crate never depends on `ene-store`/`ene-mind`.
@@ -292,7 +291,7 @@ impl ToolRag {
         }
     }
 
-    /// Attach a source of recent tool-failure signals (#349).
+    /// Attach a source of recent tool-failure signals.
     ///
     /// Consumes and returns `self` so it can be chained at construction. When
     /// set (and [`ToolRagOptions::use_failure_feedback`] is enabled), selection
@@ -336,7 +335,7 @@ impl ToolRag {
         self.store.is_some()
     }
 
-    /// Tools that recently failed for `character_id`, when feedback is on (#349).
+    /// Tools that recently failed for `character_id`, when feedback is on.
     ///
     /// Returns an empty set when failure feedback is disabled, no signal source
     /// is wired, or the lookup fails — selection then proceeds without any
@@ -375,7 +374,6 @@ impl ToolRag {
             for profile in profiles {
                 map.insert(profile.name.clone(), profile.clone());
             }
-            // Fill gaps with synthesized profiles from specs.
             for spec in specs {
                 map.entry(spec.name.clone())
                     .or_insert_with(|| ToolRagProfile::from_tool_spec(spec));
@@ -587,7 +585,7 @@ impl ToolRag {
     /// rerank → `final_n` + forced. On embed failure, returns forced tools only
     /// (fail-closed).
     ///
-    /// `character_id` scopes the recent-failure feedback (#349): tools that
+    /// `character_id` scopes the recent-failure feedback: tools that
     /// recently failed for this character are down-weighted.
     pub async fn select(&self, query: &str, character_id: &str) -> Vec<ToolSpec> {
         let query_vec = match embed_query(self.embedder.as_ref(), query).await {
@@ -608,7 +606,7 @@ impl ToolRag {
 
     /// Select the most relevant tools using a pre-computed query embedding.
     ///
-    /// `character_id` scopes the recent-failure feedback (#349).
+    /// `character_id` scopes the recent-failure feedback.
     pub async fn select_with_embedding(
         &self,
         query: &str,
@@ -666,8 +664,6 @@ impl ToolRag {
         };
         let t_load = t_start.elapsed();
 
-        // Recent-failure feedback (#349): read the tools that recently failed
-        // for this character so their scores can be down-weighted below.
         let failed_tools: HashSet<String> = self.recent_failures(character_id).await;
 
         let mut scored = score_tools(
@@ -686,7 +682,6 @@ impl ToolRag {
             self.opts.min_similarity,
         );
 
-        // Cap to top_k before rerank.
         if scored.len() > self.opts.top_k {
             scored.truncate(self.opts.top_k);
         }
@@ -733,7 +728,7 @@ impl ToolRag {
                     // The reranker overwrites the pre-rerank scores, so the
                     // failure penalty applied earlier must be re-applied to
                     // the reranked scores — otherwise a recently-failed tool
-                    // could rank first again despite the penalty (#349).
+                    // could rank first again despite the penalty.
                     apply_rerank_penalty(&mut candidates, &failed_tools, self.opts.failure_penalty);
                     candidates
                         .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -848,7 +843,7 @@ pub(crate) fn is_zero_norm(emb: &[f32]) -> bool {
     norm_sq == 0.0 || norm_sq.is_nan()
 }
 
-/// Core scoring + filtering pipeline, extracted for testability (#436).
+/// Core scoring + filtering pipeline.
 ///
 /// Returns `(tool_name, score)` pairs sorted descending by score,
 /// filtered by `min_similarity` and per-category limits.
@@ -871,7 +866,6 @@ fn score_tools(
     per_category_limits: &HashMap<String, usize>,
     profiles: &HashMap<ToolName, ToolRagProfile>,
 ) -> Vec<(String, f32)> {
-    // Best (max) similarity per (tool, field).
     let mut best_by_field: HashMap<(String, EmbeddingField), f32> = HashMap::new();
     for row in field_rows {
         if is_zero_norm(&row.embedding) {
@@ -885,7 +879,6 @@ fn score_tools(
         }
     }
 
-    // Aggregate positive fields into a weighted average; track the negative gate.
     let mut weighted_sum: HashMap<String, f32> = HashMap::new();
     let mut weight_total: HashMap<String, f32> = HashMap::new();
     let mut negative_sim: HashMap<String, f32> = HashMap::new();
@@ -950,7 +943,7 @@ fn score_tools(
     scored
 }
 
-/// Down-weight tools that recently failed for the queried character (#349).
+/// Down-weight tools that recently failed for the queried character.
 ///
 /// Multiplies the score of each recently-failed tool by `penalty` (clamped to
 /// `[0, 1]`), then drops any tool that falls below `min_similarity`. Tools that
@@ -975,7 +968,7 @@ fn apply_failure_penalty(
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 }
 
-/// Re-apply the failure penalty to candidates after a rerank pass (#349).
+/// Re-apply the failure penalty to candidates after a rerank pass.
 ///
 /// The reranker overwrites the pre-rerank scores that
 /// [`apply_failure_penalty`] already adjusted, so without this the failure
@@ -1332,8 +1325,6 @@ mod tests {
 
     #[test]
     fn score_tools_is_independent_of_field_count() {
-        // Regression for #436: a tool with many fields must not beat a
-        // more-relevant tool that declares fewer fields.
         let query = vec![1.0, 0.0];
         // Cosine similarity is direction-based, so use a vector at a real
         // angle to the query (sim ~0.707), not merely a shorter one.
@@ -1361,15 +1352,12 @@ mod tests {
         );
         assert_eq!(scored.len(), 2);
         assert_eq!(scored[0].0, "focused");
-        // Normalized scores stay within cosine-similarity range.
         assert!(scored[0].1 <= 1.0);
         assert!(scored[1].1 <= 1.0);
     }
 
     #[test]
     fn score_tools_multiple_examples_do_not_inflate_score() {
-        // Regression for #436: adding more examples must not raise the score;
-        // only the best example counts.
         let query = vec![1.0, 0.0];
         let one_example = vec![row("one", EmbeddingField::Example, vec![0.4, 0.0])];
         let many_examples = vec![
@@ -1406,7 +1394,7 @@ mod tests {
         );
     }
 
-    // ── #349 failure-feedback tests ────────────────────────────────────────
+    // ── failure-feedback tests ─────────────────────────────────────────────
 
     #[test]
     fn apply_failure_penalty_downweights_failed_tool() {
@@ -1436,8 +1424,8 @@ mod tests {
         assert_eq!(scored, vec![("a".to_string(), 0.8), ("b".to_string(), 0.6)]);
     }
 
-    /// #349: after a rerank overwrites the pre-rerank scores, the failure
-    /// penalty must be re-applied — otherwise a recently-failed tool that the
+    /// After a rerank overwrites the pre-rerank scores, the failure penalty
+    /// must be re-applied — otherwise a recently-failed tool that the
     /// reranker scores highest would rank first anyway.
     #[test]
     fn rerank_penalty_reapplied_so_failed_tool_cannot_win() {
@@ -1472,7 +1460,7 @@ mod tests {
         );
     }
 
-    /// #349: a recently-failed tool is down-weighted end-to-end through the
+    /// A recently-failed tool is down-weighted end-to-end through the
     /// scoring + penalty composition, so it ranks below an equally-relevant
     /// tool with no recent failure.
     #[test]

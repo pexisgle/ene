@@ -53,7 +53,7 @@ struct MockState {
     revoked: Vec<(String, String)>,
     cancelled: Vec<String>,
     /// Set once the mock has emitted a `DeferredCompleted` push, so the push
-    /// is only emitted a single time (Cr-5 test).
+    /// is only emitted a single time.
     pushed: bool,
 }
 
@@ -98,7 +98,7 @@ async fn run_mock_server_with_version(
                 break;
             };
 
-            // Cr-5: a `mock.push` tool call triggers a `DeferredCompleted`
+            // A `mock.push` tool call triggers a `DeferredCompleted`
             // push frame ahead of the normal response, exercising the host's
             // single-reader push routing (the push must be cached, not
             // swallowed by request/response correlation).
@@ -371,7 +371,7 @@ async fn wait_for_in_flight(in_flight: &AtomicUsize, expected: usize) {
 }
 
 /// A mock plugin server that dispatches each request in its own spawned task,
-/// mirroring the real `ene-plugin` server's concurrent read loop (#431). A
+/// mirroring the real `ene-plugin` server's concurrent read loop. A
 /// dedicated writer lock serializes outgoing frames so concurrent handlers
 /// never interleave bytes on the socket.
 ///
@@ -631,7 +631,6 @@ async fn handshake_succeeds_and_returns_capabilities() {
     assert_eq!(caps.tools, 1);
     assert!(caps.llm_providers.is_empty());
 
-    // Verify ListTools returns the actual spec.
     let tools = conn.list_tools().await.expect("list_tools should succeed");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name.as_str(), "mock.echo");
@@ -645,7 +644,7 @@ async fn handshake_succeeds_and_returns_capabilities() {
     cleanup_path(&socket_path);
 }
 
-// ── Test: Handshake timeout (issue #430) ─────────────────────────────────
+// ── Test: Handshake timeout ─────────────────────────────────────────────
 
 #[tokio::test]
 async fn handshake_times_out_when_plugin_never_responds() {
@@ -663,7 +662,6 @@ async fn handshake_times_out_when_plugin_never_responds() {
         let Ok(_stream) = listener.accept().await else {
             return;
         };
-        // Hold the stream open without responding until the test drops it.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
     });
 
@@ -690,7 +688,6 @@ async fn handshake_times_out_when_plugin_never_responds() {
         matches!(err, PluginHostError::HandshakeFailed { .. }),
         "expected HandshakeFailed, got {err:?}"
     );
-    // The error message must make the timeout nature explicit.
     assert!(
         err.to_string().contains("no HandshakeAck within"),
         "diagnostic should mention the handshake timeout, got: {err}"
@@ -705,7 +702,7 @@ async fn handshake_times_out_when_plugin_never_responds() {
     cleanup_path(&socket_path);
 }
 
-// ── Test: N-1 backward compatibility (issue #275) ────────────────────────
+// ── Test: N-1 backward compatibility ─────────────────────────────────────
 
 #[tokio::test]
 async fn handshake_negotiates_min_supported_version_for_older_plugin() {
@@ -979,7 +976,7 @@ async fn deferred_call_sync_fallback() {
     cleanup_path(&socket_path);
 }
 
-// ── Test: DeferredCompleted push routing (Cr-5 / H-12) ───────────────────
+// ── Test: DeferredCompleted push routing ─────────────────────────────────
 
 #[tokio::test]
 async fn deferred_completed_push_is_routed_without_breaking_correlation() {
@@ -988,7 +985,7 @@ async fn deferred_completed_push_is_routed_without_breaking_correlation() {
     // `mock.push` makes the server emit a `DeferredCompleted` push frame
     // *ahead* of the normal `CallResult`. The single reader task must route
     // the push into the completion cache and still correlate the `CallResult`
-    // with this request (Cr-5 / H-12).
+    // with this request.
     let result = conn
         .call_tool("mock.push", r#"{"x":1}"#, None)
         .await
@@ -1008,7 +1005,6 @@ async fn deferred_completed_push_is_routed_without_breaking_correlation() {
         }
     );
 
-    // The push was emitted exactly once.
     assert!(state.lock().await.pushed);
 
     cleanup_path(&socket_path);
@@ -1096,11 +1092,11 @@ async fn transparent_reconnection_after_transport_failure() {
     cleanup_path(&socket_path);
 }
 
-// ── Test: Request multiplexing (#431) ────────────────────────────────────
+// ── Test: Request multiplexing ──────────────────────────────────────────
 
 /// Two slow tool calls against the *same* connection must be in flight
 /// concurrently: both reach the plugin (the gate observes two in-flight) before
-/// either is released. Under the old per-connection serialization the second
+/// either is released. With per-connection serialization the second
 /// call could not even be written until the first completed, so the in-flight
 /// count would never exceed one.
 #[tokio::test]
@@ -1113,10 +1109,8 @@ async fn two_slow_tool_calls_overlap_in_flight() {
     let c2 = Arc::clone(&conn);
     let t2 = tokio::spawn(async move { c2.call_tool("mock.slow", "two", None).await });
 
-    // Both requests must reach the plugin and be in flight at the same time.
     wait_for_in_flight(&in_flight, 2).await;
 
-    // Release both and collect results.
     gate.release();
     let (r1, r2) = (t1.await.expect("t1 join"), t2.await.expect("t2 join"));
     assert_eq!(r1.expect("call one").text_for_llm(), "one");
@@ -1156,21 +1150,17 @@ async fn ping_completes_while_slow_call_pending() {
 /// The connection-level concurrency bound (sourced from `max_concurrent`) caps
 /// in-flight requests: with a bound of 1, a second slow call cannot reach the
 /// plugin until the first completes. This is the host-side protection that
-/// keeps the plugin from being flooded (#431 / #435).
+/// keeps the plugin from being flooded.
 #[tokio::test]
 async fn in_flight_requests_are_bounded_by_max_concurrent() {
-    // Bound of 1: strictly serial in-flight.
     let (conn, _state, in_flight, _call_count, gate, _server, socket_path) =
         spawn_concurrent_and_connect("bounded", 1).await;
 
     let c1 = Arc::clone(&conn);
     let t1 = tokio::spawn(async move { c1.call_tool("mock.slow", "one", None).await });
 
-    // The first call occupies the single permit and reaches the plugin.
     wait_for_in_flight(&in_flight, 1).await;
 
-    // A second call cannot acquire a permit, so it never reaches the plugin:
-    // the in-flight count stays at exactly 1 while the gate is held.
     let c2 = Arc::clone(&conn);
     let t2 = tokio::spawn(async move { c2.call_tool("mock.slow", "two", None).await });
 
@@ -1187,7 +1177,6 @@ async fn in_flight_requests_are_bounded_by_max_concurrent() {
         "bound of 1 must keep exactly one request in flight"
     );
 
-    // Release the first; the second may now proceed.
     gate.release();
     assert_eq!(t1.await.expect("join").expect("call").text_for_llm(), "one");
     assert_eq!(t2.await.expect("join").expect("call").text_for_llm(), "two");
@@ -1197,21 +1186,20 @@ async fn in_flight_requests_are_bounded_by_max_concurrent() {
 
 /// Dropping the plugin while N calls are in flight must fail every caller
 /// **promptly** — well inside the 2-minute `DEFAULT_TIMEOUT` — rather than
-/// leaving the waiters orphaned until their own timeout (#431 review, items 1
-/// and 3).
+/// leaving the waiters orphaned until their own timeout.
 ///
 /// `reconnect_from` aborts the old reader task, which is suspended inside
 /// `read_plugin_response` and therefore never reaches the trailing `fail_all()`
-/// in `reader_loop`; the reconnect must fail the waiters itself (item 1). And
-/// because waiter registration is atomic with the frame write under the writer
-/// lock (item 3), no request can be written to the fresh stream and then
+/// in `reader_loop`; the reconnect must fail the waiters itself. And because
+/// waiter registration is atomic with the frame write under the writer
+/// lock, no request can be written to the fresh stream and then
 /// replayed by the retry path — so the plugin observes each request exactly
 /// once, preserving the "a transport error means the request never reached the
 /// plugin" invariant for non-idempotent `CallTool`.
 ///
-/// Without the item 1 fix the callers would block for the full `DEFAULT_TIMEOUT`
-/// (the mock never comes back, so the reconnect cannot succeed) and this test
-/// would fail on its deadline.
+/// Without that `fail_all()` the callers would block for the full
+/// `DEFAULT_TIMEOUT` (the mock never comes back, so the reconnect cannot
+/// succeed) and this test would fail on its deadline.
 #[tokio::test]
 async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     let (conn, _state, in_flight, call_count, gate, server_handle, socket_path) =
@@ -1226,7 +1214,6 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
         }));
     }
 
-    // All N calls must reach the plugin and be blocked on the gate at once.
     wait_for_in_flight(&in_flight, N).await;
     assert_eq!(
         call_count.load(Ordering::Acquire),
@@ -1250,7 +1237,7 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     // writer lock and the generation does not advance on a *failed* reconnect,
     // so the last of the N callers returns after roughly N × 2.5 s. The bound
     // below accommodates that with margin while staying an order of magnitude
-    // under DEFAULT_TIMEOUT — without the item 1 `fail_all()` fix the waiters
+    // under DEFAULT_TIMEOUT — without the `fail_all()` fix the waiters
     // would instead block for the full 2 min and blow well past this deadline.
     let deadline =
         tokio::time::Instant::now() + std::time::Duration::from_millis(2_500 * N as u64 + 10_000);
@@ -1267,7 +1254,7 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     }
 
     // The plugin observed each request exactly once: no request was replayed to
-    // a fresh stream by the retry path (item 3).
+    // a fresh stream by the retry path.
     assert_eq!(
         call_count.load(Ordering::Acquire),
         N,
@@ -1277,8 +1264,7 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     cleanup_path(&socket_path);
 }
 
-/// Concurrent transport failures must coalesce into a single reconnect (#431
-/// review, item 4).
+/// Concurrent transport failures must coalesce into a single reconnect.
 ///
 /// Two `mock.echo` calls are issued back to back against a plugin whose socket
 /// has been removed, so both writes fail with a transport error and both enter

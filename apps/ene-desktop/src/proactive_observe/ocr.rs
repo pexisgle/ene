@@ -1,5 +1,5 @@
 //! Lightweight heuristics for detecting code / terminal windows and
-//! extracting rough text hints from captured screen regions (#215).
+//! extracting rough text hints from captured screen regions.
 //!
 //! This module does **not** perform full OCR. The `is_code_window` function is
 //! a cheap window-title/class-based filter that lets the observer signal to the
@@ -59,8 +59,6 @@ pub fn is_code_window(window_title: &str, window_class: &str) -> bool {
 /// The function signature is stabilised so callers can be written today and
 /// filled in later.
 pub fn extract_text_hints(_img: &DynamicImage) -> Option<String> {
-    // Placeholder: full OCR requires tesseract or similar.
-    // For now, return None to indicate "could not extract".
     None
 }
 

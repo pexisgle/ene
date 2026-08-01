@@ -50,12 +50,12 @@ pub struct MotionEntry {
     pub name: String,
     /// Relative path to the motion file (e.g. `"motions/VRMA_01.vrma"`).
     pub path: String,
-    /// Body layer this motion targets (#130).
+    /// Body layer this motion targets.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<MotionLayer>,
 }
 
-/// Structured motion catalog for a character (#130).
+/// Structured motion catalog for a character.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, Default)]
 #[serde(crate = "crate::serde")]
 #[schemars(crate = "crate::schemars")]
@@ -86,9 +86,9 @@ pub struct CharacterConfig {
 
     /// Catch-all for extra configurations.
     ///
-    /// An [`IndexMap`] so the user's section order is preserved across a save
-    /// (#331); its order-insensitive `PartialEq` keeps the dirty-tracking
-    /// equality guard behaving as before.
+    /// An [`IndexMap`] so the user's section order is preserved across a save;
+    /// its order-insensitive `PartialEq` keeps the dirty-tracking equality
+    /// guard from tripping on key reordering.
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: IndexMap<String, serde_json::Value>,
@@ -147,10 +147,10 @@ impl CharacterConfig {
     /// Serialise and merge a sub-section into the `extra` map using the type's associated path.
     ///
     /// Serialisation goes through [`section_to_value`](crate::config::section_to_value)
-    /// to avoid the f32→f64 widening artefact (#329).
+    /// to avoid the f32→f64 widening artefact.
     ///
     /// Only the section's *declared* fields are written; unknown sub-keys
-    /// already present beneath the section path are preserved (#327).
+    /// already present beneath the section path are preserved.
     ///
     /// Reuses [`merge_section`](crate::config::merge_section) and
     /// [`set_nested`](crate::config::set_nested) for direct map mutation
@@ -203,8 +203,8 @@ mod tests {
         }
     }
 
-    /// Regression for #327: writing a character section must merge its declared
-    /// fields into the existing subtree, preserving unknown sibling sub-keys.
+    /// Writing a character section must merge its declared fields into the
+    /// existing subtree, preserving unknown sibling sub-keys.
     #[test]
     fn set_section_preserves_unknown_subkeys() {
         let mut config = CharacterConfig::default();

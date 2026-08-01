@@ -11,7 +11,7 @@
 //!
 //! Migrations run on [`serde_json::Value`] rather than on
 //! [`EneConfig`](crate::EneConfig) because a schema change may alter a field's
-//! *type*. If a field that used to be a string becomes an object, deserialising
+//! *type*. If a field that is a string becomes an object, deserialising
 //! the old file into the current struct fails outright — there is nothing to
 //! migrate. Rewriting the JSON first sidesteps that: each step only has to
 //! understand the shape of the two versions it bridges.
@@ -39,8 +39,8 @@
 //!
 //! This mechanism covers the host `settings.json` only. Per-character
 //! `character_settings.json` and character cards (`character.json`) do not
-//! carry a `version` field today; applying the same scheme to them is recorded
-//! as a follow-up decision (see #330) and is intentionally out of scope here.
+//! carry a `version` field today; applying the same scheme to them is a
+//! follow-up decision and is intentionally out of scope here.
 //!
 //! # Adding a real migration
 //!
@@ -299,8 +299,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A document with no `version` field is treated as version 1 and, when the
-    /// current version is 1, returned with the field stamped in.
     #[test]
     fn missing_version_defaults_to_one() {
         with_test_version(1, || {
@@ -314,7 +312,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A document newer than the build supports is rejected without mutation.
     #[test]
     fn newer_version_errors() {
         with_test_version(1, || {
@@ -333,8 +330,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// An old document is migrated to the current version on load, and the
-    /// `version` field is updated to the current version.
     #[test]
     fn old_version_is_migrated_to_current() {
         with_test_version(2, || {
@@ -384,8 +379,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// When several versions are behind, steps run in ascending order and each
-    /// sees the output of the previous one.
     #[test]
     fn migrations_run_in_order() {
         with_test_version(4, || {
@@ -406,8 +399,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A gap in the migration chain (no step for some intermediate version) is
-    /// a hard error rather than a silent skip.
     #[test]
     fn missing_intermediate_step_errors() {
         with_test_version(3, || {
@@ -423,7 +414,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// A non-numeric `version` is reported as an error, not silently defaulted.
     #[test]
     fn non_numeric_version_errors() {
         with_test_version(1, || {
@@ -436,9 +426,6 @@ pub(crate) mod tests {
         });
     }
 
-    /// Registering a step at or above the current version is rejected, since
-    /// there is no target version to migrate to, while a valid lower version is
-    /// accepted.
     #[test]
     fn register_at_or_above_current_is_rejected() {
         with_test_version(2, || {

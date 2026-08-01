@@ -1,6 +1,4 @@
 //! Key-fact domain model (user-specific key/value summarization output).
-//!
-//! Moved from `ene-store` (#270).
 
 use serde::{Deserialize, Serialize};
 

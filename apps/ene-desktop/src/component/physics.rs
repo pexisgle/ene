@@ -18,9 +18,7 @@ pub struct PhysicsBody(
     #[expect(dead_code, reason = "yet to be wired to step/update systems")] pub RigidBodyHandle,
 );
 
-/// One Rapier `ColliderHandle` per bone of the character. Mirrors
-/// the data that the legacy `PhysicsWorld::entity_to_colliders`
-/// `HashMap` used to provide.
+/// One Rapier `ColliderHandle` per bone of the character.
 #[derive(Component, Debug, Default, Clone)]
 pub struct PhysicsColliders(
     #[expect(dead_code, reason = "yet to be wired to step/update systems")] pub Vec<ColliderHandle>,

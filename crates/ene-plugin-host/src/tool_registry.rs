@@ -1,7 +1,4 @@
 //! Tool registry trait, composite registry, and deferred call types.
-//!
-//! These types were formerly in `ene-tool-host` and are now the canonical
-//! definitions for the unified plugin system.
 
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -10,7 +7,7 @@ use std::sync::Arc;
 use crate::error::PluginHostError;
 use ene_plugin_proto::{CallContext, DeferredStatus, ToolRagProfile, ToolResult, ToolSpec};
 
-/// Result of a deferred (background) tool call (#196).
+/// Result of a deferred (background) tool call.
 ///
 /// Mirrors [`ene_plugin_proto::DeferredOutcome`] at the host registry layer.
 /// A background-capable tool returns [`DeferredCallResult::Deferred`] with a
@@ -39,7 +36,7 @@ pub trait ToolRegistry: Send + Sync {
     /// All currently registered tools.
     fn list_tools(&self) -> Vec<ToolSpec>;
 
-    /// Returns host/RAG metadata profiles for indexed tools (#137).
+    /// Returns host/RAG metadata profiles for indexed tools.
     ///
     /// Default synthesizes minimal profiles from [`list_tools`](Self::list_tools)
     /// so MCP / legacy registries keep working without an IPC round-trip.
@@ -63,7 +60,7 @@ pub trait ToolRegistry: Send + Sync {
         context: Option<&CallContext>,
     ) -> Result<ToolResult, PluginHostError>;
 
-    /// Executes a tool in deferred (background) mode (#196).
+    /// Executes a tool in deferred (background) mode.
     ///
     /// A background-capable tool returns [`DeferredCallResult::Deferred`]
     /// with a `task_id` and delivers the result later out-of-band. The
@@ -81,7 +78,7 @@ pub trait ToolRegistry: Send + Sync {
         ))
     }
 
-    /// Polls the status of a deferred (background) task by id (#196).
+    /// Polls the status of a deferred (background) task by id.
     ///
     /// `tool_name` identifies the owning tool so composite registries can
     /// route the poll to the correct sub-registry (task ids are assigned
@@ -92,7 +89,7 @@ pub trait ToolRegistry: Send + Sync {
         DeferredStatus::Unknown
     }
 
-    /// Cancels a deferred (background) task by id (#196).
+    /// Cancels a deferred (background) task by id.
     ///
     /// `tool_name` identifies the owning tool for routing in composite
     /// registries. The default is a no-op for registries that do not
@@ -116,11 +113,11 @@ pub trait ToolRegistry: Send + Sync {
     /// [`approve_permission_for`](Self::approve_permission_for) when the
     /// owning tool is known: a permission request originates from a single
     /// tool call, so routing the approval straight to its owner avoids
-    /// fanning out to unrelated plugins (#434).
+    /// fanning out to unrelated plugins.
     async fn approve_permission(&self, _request_id: &str) {}
 
     /// Approves a pending permission request, routed to the sub-registry
-    /// that owns `tool_name` (#434).
+    /// that owns `tool_name`.
     ///
     /// A permission request is raised by exactly one tool call, so the
     /// approval only needs to reach the plugin that owns that tool. The
@@ -135,7 +132,7 @@ pub trait ToolRegistry: Send + Sync {
     /// Adds a session-wide permission allow pattern (action + target glob).
     async fn allow_pattern(&self, _action: &str, _target_pattern: &str) {}
 
-    /// Revokes a previously granted session-wide permission allow pattern (#177).
+    /// Revokes a previously granted session-wide permission allow pattern.
     async fn revoke_pattern(&self, _action: &str, _target_pattern: &str) {}
 
     /// Returns the JSON Schema for the configuration this tool accepts.
@@ -149,7 +146,7 @@ pub trait ToolRegistry: Send + Sync {
 /// Tool RAG indexing and selection is handled by `ene-rag`.
 /// This registry only handles dispatch (list, call, config).
 ///
-/// Name collision across sub-registries is a hard error — per API v1 / #135,
+/// Name collision across sub-registries is a hard error — per API v1,
 /// every tool must have a unique public name.
 pub struct CompositeToolRegistry {
     state: parking_lot::RwLock<CompositeState>,
@@ -255,7 +252,6 @@ impl CompositeToolRegistry {
                 },
             ));
         };
-        // Check if the registry slot is dead (unregistered external source)
         if guard.dead_indices.contains(&idx) {
             return Err(PluginHostError::Protocol(
                 ene_plugin_proto::ToolError::NotFound {
@@ -341,8 +337,6 @@ impl CompositeToolRegistry {
                 }
             }
 
-            // Commit: tombstone the old registration and drop its tools from
-            // the index, then install the new one.
             if let Some(old_idx) = old_idx {
                 state.dead_indices.insert(old_idx);
                 for name in &old_tool_names {
@@ -368,7 +362,6 @@ impl CompositeToolRegistry {
     pub fn unregister_external(&self, source: &str) {
         self.with_state_mut(|state| {
             if let Some(&idx) = state.external_sources.get(source) {
-                // Remove all tools belonging to this registry from the index
                 if let Some(registry) = state.registries.get(idx) {
                     for tool in registry.list_tools() {
                         state.tool_index.remove(tool.name.as_str());
@@ -445,7 +438,7 @@ impl ToolRegistry for CompositeToolRegistry {
     async fn set_call_context(&self, ctx: &ene_plugin_proto::CallContext) {
         // The sub-registries are independent connections, so fan the calls out
         // concurrently: the worst-case latency is the slowest single plugin,
-        // not the sum over every plugin (#434).
+        // not the sum over every plugin.
         let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         futures::future::join_all(
             registries
@@ -467,7 +460,7 @@ impl ToolRegistry for CompositeToolRegistry {
 
     async fn approve_permission(&self, request_id: &str) {
         // Ownership of the request is unknown here, so broadcast — but
-        // concurrently, so one slow plugin cannot stall the others (#434).
+        // concurrently, so one slow plugin cannot stall the others.
         let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         futures::future::join_all(
             registries
@@ -480,7 +473,7 @@ impl ToolRegistry for CompositeToolRegistry {
     async fn approve_permission_for(&self, tool_name: &str, request_id: &str) {
         // Route the approval straight to the plugin that owns the tool which
         // raised the request: a single round-trip instead of a broadcast, so
-        // an unrelated plugin mid-long-tool-call can no longer delay it (#434).
+        // an unrelated plugin mid-long-tool-call can no longer delay it.
         //
         // Ownership is resolved against the *current* tool index: if the
         // owning external source is re-registered between the request being
@@ -511,7 +504,7 @@ impl ToolRegistry for CompositeToolRegistry {
 
     async fn allow_pattern(&self, action: &str, target_pattern: &str) {
         // Session-wide grants apply to every plugin, so broadcast — but
-        // concurrently, so the slowest plugin bounds the latency (#434).
+        // concurrently, so the slowest plugin bounds the latency.
         let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         futures::future::join_all(
             registries
@@ -603,7 +596,7 @@ mod tests {
     }
 
     /// A registry whose control methods stall for a fixed duration, used to
-    /// assert that composite broadcasts run concurrently (#434).
+    /// assert that composite broadcasts run concurrently.
     struct SlowRegistry {
         tools: Vec<ToolSpec>,
         delay: std::time::Duration,
@@ -631,7 +624,7 @@ mod tests {
 
     /// A registry whose control methods record entry and then block on a
     /// shared barrier, used to prove composite broadcasts run concurrently
-    /// without any wall-clock timing (#434).
+    /// without any wall-clock timing.
     struct BarrierRegistry {
         tools: Vec<ToolSpec>,
         barrier: Arc<tokio::sync::Barrier>,
@@ -740,7 +733,6 @@ mod tests {
     fn register_external_replaces_same_source_atomically() {
         let composite = CompositeToolRegistry::try_new(vec![]).unwrap();
 
-        // First registration of source "mcp.a".
         let v1 = MockRegistry::new(vec![make_tool("a.tool1"), make_tool("a.tool2")]);
         composite
             .register_external("mcp.a".to_string(), Arc::new(v1))
@@ -750,8 +742,6 @@ mod tests {
         assert!(names.contains(&"a.tool1"));
         assert!(names.contains(&"a.tool2"));
 
-        // Re-registering the same source replaces its tools (no collision with
-        // its own previous tools), and the old tools disappear.
         let v2 = MockRegistry::new(vec![make_tool("a.tool1"), make_tool("a.tool3")]);
         composite
             .register_external("mcp.a".to_string(), Arc::new(v2))
@@ -767,13 +757,11 @@ mod tests {
     fn register_external_collision_keeps_old_registration() {
         let composite = CompositeToolRegistry::try_new(vec![]).unwrap();
 
-        // A baseline source owns "shared".
         let base = MockRegistry::new(vec![make_tool("shared")]);
         composite
             .register_external("base".to_string(), Arc::new(base))
             .unwrap();
 
-        // A second source also owns "unique".
         let other = MockRegistry::new(vec![make_tool("unique")]);
         composite
             .register_external("other".to_string(), Arc::new(other))
@@ -791,9 +779,7 @@ mod tests {
 
         let tools = composite.list_tools();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-        // Old "other" registration survived.
         assert!(names.contains(&"unique"));
-        // The colliding new tools were not installed.
         assert!(!names.contains(&"unique2"));
         assert_eq!(names.iter().filter(|n| **n == "shared").count(), 1);
     }
@@ -868,7 +854,7 @@ mod tests {
             CompositeToolRegistry::try_new(vec![Arc::new(mock1), Arc::new(mock2)]).unwrap();
 
         // The request originated from tool "b", owned by the second registry;
-        // only that registry should receive the approval (#434).
+        // only that registry should receive the approval.
         composite.approve_permission_for("b", "req-routed").await;
 
         assert!(approvals1.lock().unwrap().is_empty());
@@ -898,7 +884,7 @@ mod tests {
     async fn composite_broadcast_latency_is_bounded_by_slowest_registry() {
         // Three registries each stall 200ms. A sequential broadcast would take
         // ~600ms; a concurrent one completes in ~200ms (the slowest single
-        // registry). This is the core latency fix of #434.
+        // registry).
         let delay = std::time::Duration::from_millis(200);
         let registries: Vec<Arc<dyn ToolRegistry>> = (0..3)
             .map(|i| {
@@ -929,7 +915,7 @@ mod tests {
         // *concurrently*; a sequential fan-out would leave the first registry
         // waiting forever. The timeout only guards against that deadlock — it
         // is not the assertion, so this test is independent of wall-clock
-        // timing (#434).
+        // timing.
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
         let entered: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let registries: Vec<Arc<dyn ToolRegistry>> = (0..3)
@@ -954,8 +940,6 @@ mod tests {
              on the barrier and is caught by the timeout"
         );
 
-        // All three registries must have entered (and, per the barrier
-        // semantics, were still blocked) before any of them completed.
         let entered = entered.lock().unwrap();
         assert_eq!(entered.len(), 3);
         assert!(entered.iter().all(|id| id == "req-barrier"));

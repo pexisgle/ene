@@ -6,7 +6,6 @@ use crate::search::types::{SearchOptions, SearchProvider, SearchResult};
 
 use super::extract_domain;
 
-/// `DuckDuckGo` HTML search provider.
 #[derive(Debug)]
 pub struct DuckDuckGoProvider {
     client: reqwest::Client,

@@ -1,4 +1,4 @@
-//! Stable public API v1 surface for external clients (#189).
+//! Stable public API v1 surface for external clients.
 //!
 //! The actor facade remains [`crate::EneHandle`]. This module defines the
 //! versioned JSON/serde mirror of chat events, session DTOs, the unified
@@ -26,7 +26,7 @@
 //! explicitly out of contract, same as `streaming` / `message_builder`.
 //! They may freely take or return internal crate types.
 //!
-//! ## Three-channel event bus (#272)
+//! ## Three-channel event bus
 //!
 //! [`PublicChatEvent`] mirrors only the chat bus ([`EneEvent`]). Lifecycle
 //! notifications (`StatusChanged`, `PendingCandidateAvailable`,
@@ -45,14 +45,12 @@
 //! job, not a leak. A leak is an internal type appearing in a `Public*`
 //! type's own field list or in a contract method's return/parameter type.
 //!
-//! ## Fixed asymmetry (#269)
+//! ## Fixed asymmetry
 //!
-//! Before #269, the event side ([`PublicChatEvent::from_ene_event`]) had a
-//! DTO conversion layer but the command/response side of `EneHandle` did
-//! not — session methods returned `ene_store::SessionMeta`,
-//! `ene_store::ExportedMessage`, and `ene_store::EneMemoryError` directly,
-//! double-nested inside `Result<Result<T, E>, ActorDead>`. This module
-//! now mirrors the event-side pattern for those methods. As of #408 the
+//! The event side ([`PublicChatEvent::from_ene_event`]) and the
+//! command/response side of `EneHandle` are symmetric: session methods
+//! mirror results into `Public*` DTOs rather than returning `ene_store`
+//! types double-nested inside `Result<Result<T, E>, ActorDead>`. The
 //! actor-control and diagnostics methods likewise report a dead actor as
 //! [`PublicApiError::ActorDead`] rather than a dedicated error type.
 
@@ -98,13 +96,13 @@ pub struct PublicPerfCue {
     pub source: String,
 }
 
-/// API v1 mirror of a stored session's metadata (#176, #269).
+/// API v1 mirror of a stored session's metadata.
 ///
 /// Returned by [`crate::EneHandle::list_sessions`]. Field-for-field
 /// equivalent to `ene_store::SessionMeta` (never renamed or reshaped without
-/// a doc-only reason). As of #408 this DTO is also the canonical type the
-/// desktop UI renders directly — embedders no longer convert it back to the
-/// `ene_store` shape.
+/// a doc-only reason). This DTO is also the canonical type the desktop UI
+/// renders directly — embedders do not convert it back to the `ene_store`
+/// shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicSessionMeta {
     /// Row id.
@@ -140,7 +138,7 @@ impl From<ene_store::SessionMeta> for PublicSessionMeta {
     }
 }
 
-/// API v1 mirror of a single exported conversation message (#176, #269).
+/// API v1 mirror of a single exported conversation message.
 ///
 /// Returned (paired with a session id) by
 /// [`crate::EneHandle::search_sessions`]. Message content has already been
@@ -165,14 +163,14 @@ impl From<ene_store::ExportedMessage> for PublicExportedMessage {
     }
 }
 
-/// Stable error categories for API v1 request/response methods (#269).
+/// Stable error categories for API v1 request/response methods.
 ///
 /// Internal error enums (`ene_store::EneMemoryError`) project into one of
 /// these categories via the `From` impls below, so a new internal error
 /// variant does not change this type — see the `API_VERSION` bump-policy doc
 /// above. The actor-control methods on [`crate::EneHandle`] (permissions,
 /// undo, user input, feature updates) and the diagnostics / vision handles
-/// report a dead actor directly as [`PublicApiError::ActorDead`] (#408) —
+/// report a dead actor directly as [`PublicApiError::ActorDead`] —
 /// there is no separate actor-dead error type. `#[non_exhaustive]` so a
 /// future category addition is itself non-breaking for match arms in client
 /// code.
@@ -211,7 +209,7 @@ pub enum PublicApiError {
 
 impl From<ene_store::EneMemoryError> for PublicApiError {
     /// Projects every current `EneMemoryError` variant into a stable
-    /// category. `EneMemoryError` is `#[non_exhaustive]` (#269), so this
+    /// category. `EneMemoryError` is `#[non_exhaustive]`, so this
     /// match requires — and keeps — a trailing wildcard arm; new upstream
     /// variants fall through to `Internal` until this mapping is revisited,
     /// rather than failing to compile.
@@ -251,14 +249,14 @@ impl From<ene_store::EneMemoryError> for PublicApiError {
     }
 }
 
-/// Stable JSON mirror of the chat [`EneEvent`] bus (#189).
+/// Stable JSON mirror of the chat [`EneEvent`] bus.
 ///
 /// Tagged with `type` in `snake_case`, aligned with the CLI JSONL schema and
 /// extended with fields the host contract documents (`origin`, gates).
 /// Prefer this type over serializing [`EneEvent`] directly when exposing
 /// events outside the process. Turn-independent lifecycle notifications
 /// (`StatusChanged`, `PendingCandidateAvailable`, `ToolBackgroundCompleted`)
-/// are not part of this type — see [`PublicLifecycleEvent`] (#272).
+/// are not part of this type — see [`PublicLifecycleEvent`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicChatEvent {
@@ -361,12 +359,12 @@ pub enum PublicChatEvent {
     },
 }
 
-/// Stable JSON mirror of the lifecycle [`LifecycleEvent`] bus (#272).
+/// Stable JSON mirror of the lifecycle [`LifecycleEvent`] bus.
 ///
 /// Tagged with `type` in `snake_case`, mirroring [`PublicChatEvent`]'s
-/// conventions. Covers the turn-independent notifications that used to live
-/// on [`PublicChatEvent`] before the event bus was split by traffic class:
-/// `StatusChanged`, `PendingCandidateAvailable`, `ToolBackgroundCompleted`.
+/// conventions. Covers the turn-independent notifications kept off
+/// [`PublicChatEvent`]: `StatusChanged`, `PendingCandidateAvailable`,
+/// `ToolBackgroundCompleted`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicLifecycleEvent {
@@ -375,7 +373,7 @@ pub enum PublicLifecycleEvent {
         /// `idle`, `running`, or `error`.
         status: String,
     },
-    /// One or more pending memory candidates became available for review (#174).
+    /// One or more pending memory candidates became available for review.
     PendingCandidatesAvailable {
         /// Number of pending candidates currently awaiting review.
         count: usize,
@@ -509,8 +507,7 @@ impl PublicChatEvent {
 }
 
 impl PublicLifecycleEvent {
-    /// Convert an internal lifecycle event into the stable public mirror
-    /// (#272).
+    /// Convert an internal lifecycle event into the stable public mirror.
     #[must_use]
     pub fn from_lifecycle_event(event: &LifecycleEvent) -> Self {
         match event {
@@ -582,7 +579,7 @@ mod tests {
         assert_eq!(API_VERSION, "1");
     }
 
-    /// API-stability regression check (#269).
+    /// API-stability regression check.
     ///
     /// Every `Public*` type's fields are constructed here using only
     /// primitives, `String`, `bool`, and `chrono::DateTime<Utc>` — never an
@@ -619,7 +616,6 @@ mod tests {
         };
         assert_eq!(cue.kind, "expression");
 
-        // Every PublicApiError variant, likewise built from primitives only.
         let errors = [
             PublicApiError::ActorDead,
             PublicApiError::NotFound {
@@ -754,8 +750,8 @@ mod tests {
 
     #[test]
     fn pending_candidate_available_maps_to_dedicated_event() {
-        // #272: PendingCandidateAvailable lives on the lifecycle bus, not
-        // the chat bus, so it mirrors through PublicLifecycleEvent now.
+        // PendingCandidateAvailable lives on the lifecycle bus, not the
+        // chat bus, so it mirrors through PublicLifecycleEvent.
         let event = LifecycleEvent::PendingCandidateAvailable { count: 3 };
         let public = PublicLifecycleEvent::from_lifecycle_event(&event);
         let PublicLifecycleEvent::PendingCandidatesAvailable { count } = public else {
@@ -769,9 +765,9 @@ mod tests {
         assert_eq!(value["count"], 3);
     }
 
-    /// #272: `ToolBackgroundCompleted` moved off `PublicChatEvent` onto the
-    /// dedicated `PublicLifecycleEvent` mirror, since it fires asynchronously
-    /// after the originating turn has already completed.
+    /// `ToolBackgroundCompleted` mirrors on the dedicated
+    /// `PublicLifecycleEvent` rather than `PublicChatEvent`, since it fires
+    /// asynchronously after the originating turn has already completed.
     #[test]
     fn tool_background_completed_maps_to_lifecycle_event() {
         let event = LifecycleEvent::ToolBackgroundCompleted {

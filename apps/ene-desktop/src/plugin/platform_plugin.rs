@@ -2,9 +2,9 @@
 //!
 //! Owns the per-frame Linux display-server integration
 //! systems plus the cross-platform `should_render_debug`
-//! gate. Phase 6 lifted the Linux fields out of
-//! `state::PlatformState` into per-handle bevy `Resource`s;
-//! this plugin wires up the systems that consume them.
+//! gate. The per-handle Linux display-server state lives in
+//! bevy `Resource`s; this plugin wires up the systems that
+//! consume them.
 //!
 //! On non-Linux builds the Linux-only resources + systems
 //! are skipped; the cross-platform

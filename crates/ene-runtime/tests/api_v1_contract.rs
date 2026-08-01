@@ -1,4 +1,4 @@
-//! API v1 contract tests for the ready-handle facade (#111).
+//! API v1 contract tests for the ready-handle facade.
 
 #![expect(
     clippy::unwrap_used,
@@ -154,7 +154,6 @@ async fn memory_enabled_without_embedder_fails_closed_on_open() {
 
 #[tokio::test]
 async fn marker_tokens_become_performance_not_text() {
-    // Unit-level: special token splitter used by stream path.
     let mut carry = String::new();
     let (text, tokens) =
         ene_mind::split_text_and_special_tokens(&mut carry, "Hi <|perf:expr=happy|> there");
@@ -327,7 +326,7 @@ fn api_version_constant_is_one() {
 
 #[tokio::test]
 async fn list_sessions_with_store_disabled_returns_public_api_error() {
-    // #269: EneHandle::list_sessions returns Result<Vec<PublicSessionMeta>,
+    // `EneHandle::list_sessions` returns Result<Vec<PublicSessionMeta>,
     // PublicApiError> — a single Result of API v1 DTO types, not
     // Result<Result<Vec<ene_store::SessionMeta>, ene_store::EneMemoryError>,
     // PublicApiError>. The type annotation below is a compile-time proof of

@@ -1,9 +1,10 @@
-//! Cleanup and index migration for `memory_embeddings` (issues #419 / #421).
+//! Cleanup and index migration for `memory_embeddings`.
 //!
-//! Due to #419, `PRAGMA foreign_keys` was only applied to one of eight
-//! pooled connections, so `ON DELETE CASCADE` never fired on most
-//! connections. This left orphan rows in `memory_embeddings` whose
-//! parent `typed_memories` row was already deleted. This migration:
+//! `PRAGMA` settings are per-connection: with a pooled connection,
+//! applying `PRAGMA foreign_keys` once after connect only affects the
+//! connection that ran it, so `ON DELETE CASCADE` can silently never
+//! fire. That left orphan rows in `memory_embeddings` whose parent
+//! `typed_memories` row was already deleted. This migration:
 //!
 //! 1. Deletes orphan rows whose `memory_item_id` has no matching
 //!    `typed_memories.id`.
@@ -35,7 +36,7 @@ impl MigrationTrait for EmbeddingsCleanupIndexMigration {
         let db = manager.get_connection();
 
         // Remove orphan embeddings whose parent typed_memories row is
-        // gone. These accumulated while FK enforcement was broken (#419).
+        // gone. These accumulated while FK enforcement was broken.
         // Deleting from the child table is safe with foreign_keys=ON.
         db.execute_unprepared(
             "DELETE FROM memory_embeddings WHERE memory_item_id NOT IN \

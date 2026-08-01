@@ -1,12 +1,5 @@
 //! # Settings UI plugin
 //!
-//! Phase 5 lifts the legacy
-//! `apps/ene-desktop/src/settings_ui::SettingsUi` struct into bevy
-//! components. The `SettingsAction` dispatcher in
-//! [`crate::settings_ui::widgets`] is refactored to read / write
-//! bevy components, but stays as a single function — Phase 6+
-//! splits the 40+ variants into per-action systems.
-//!
 //! This plugin is responsible for:
 //!
 //! 1. Adding the [`SettingsActionEvent`](crate::event::ui_action::SettingsActionEvent)
@@ -16,8 +9,8 @@
 //!    entity during `Startup` so the page render functions can
 //!    read / write components through `World::get` and
 //!    `World::get_mut`.
-//! 3. Providing the empty `apply_settings_action_system` as a
-//!    placeholder for Phase 6+ when the per-action systems land.
+//! 3. Providing the `apply_settings_action_system` drain so the
+//!    message queue does not accumulate unread events.
 use bevy_app::{App, Plugin, Startup, Update};
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::IntoScheduleConfigs;
@@ -42,9 +35,9 @@ impl Plugin for UiPlugin {
 }
 
 /// Spawn the single settings-window entity. The entity is queried
-/// by the legacy `SettingsUi::render` function (still in
-/// `runtime.rs`) and by the `apply_settings_action_system` that
-/// consumes `SettingsActionEvent` messages.
+/// by `SettingsUi::render` (via `runtime.rs`) and by the
+/// `apply_settings_action_system` that consumes
+/// `SettingsActionEvent` messages.
 fn spawn_settings_ui_window(mut commands: Commands) {
     commands.spawn(SettingsUiBundle {
         started_at: UiStartedAt(Instant::now()),

@@ -1,6 +1,5 @@
 use enigo::Key;
 
-/// Shared helper to parse key names into Enigo Key enums.
 pub fn parse_key(name: &str) -> Option<Key> {
     match name.to_lowercase().as_str() {
         "ctrl" | "control" => Some(Key::Control),

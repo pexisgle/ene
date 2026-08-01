@@ -54,7 +54,6 @@ fn spec_llm_facing_only() {
 #[test]
 fn spec_parameters_is_json_schema() {
     let s = ReadArgs::spec();
-    // The schema should be a JSON Schema object.
     let obj = s
         .parameters
         .as_object()

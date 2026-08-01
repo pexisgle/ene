@@ -1,8 +1,8 @@
 //! Input messages emitted by the winit event pump.
 //!
-//! These are independent of the legacy `AppEvent` bus. The
-//! `pump_window_events` system (added in Phase 3) writes them; the
-//! input / drag / look-at systems consume them.
+//! These are independent of the `AppEvent` bus. The
+//! `pump_window_events` system writes them; the input / drag /
+//! look-at systems consume them.
 use bevy_ecs::prelude::*;
 
 /// Logical pointer move inside the character window's coordinate

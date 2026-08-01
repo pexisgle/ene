@@ -1,4 +1,4 @@
-//! Topic-boundary detection via a topic centroid and a composite score (#367).
+//! Topic-boundary detection via a topic centroid and a composite score.
 //!
 //! A naive "cosine similarity between two consecutive utterances" fails for
 //! three reasons: backchannels ("うん", "そうだね") are dissimilar to the
@@ -19,14 +19,14 @@
 //! scoring and centroid updates so a backchannel cannot corrupt the centroid.
 //!
 //! This module only *detects* a boundary and produces a [`TopicBoundarySignal`].
-//! Acting on the signal — retrospective compression (#368) and session splitting
-//! (#369) — is the responsibility of later stages.
+//! Acting on the signal — retrospective compression and session splitting — is
+//! the responsibility of later stages.
 
 use crate::config::TopicBoundaryConfig;
 use chrono::{DateTime, Utc};
 use ene_ai::cosine_similarity;
 
-/// Running state of the topic-boundary detector for a single session (#367).
+/// Running state of the topic-boundary detector for a single session.
 ///
 /// Stored on the session so it survives across turns (the streaming path
 /// commits the session back to the actor at the end of every turn). The
@@ -35,20 +35,16 @@ use ene_ai::cosine_similarity;
 /// since the topic last reset and drives the over-long-topic signal.
 #[derive(Clone, Debug, Default)]
 pub struct TopicBoundaryTracker {
-    /// Centroid (moving average) of the current topic's embeddings.
     centroid: Option<Vec<f32>>,
-    /// Completed turns accumulated under the current topic.
     turns_in_topic: usize,
-    /// When the most recent qualifying utterance arrived, used to measure the
-    /// silence elapsed since it.
     last_utterance_at: Option<DateTime<Utc>>,
 }
 
-/// The outcome of scoring one completed turn against the topic centroid (#367).
+/// The outcome of scoring one completed turn against the topic centroid.
 ///
 /// `score` is the composite boundary score in `0.0..=1.0`; `boundary` is true
-/// once it reaches the configured threshold. Compression (#368) consumes the
-/// score directly; session split (#369) does not use topic boundaries.
+/// once it reaches the configured threshold. Compression consumes the
+/// score directly; session split does not use topic boundaries.
 #[derive(Clone, Debug)]
 pub struct TopicBoundarySignal {
     /// Composite boundary score, clamped to `0.0..=1.0`.
@@ -66,7 +62,7 @@ pub struct TopicBoundarySignal {
 impl TopicBoundarySignal {
     /// A neutral signal: no boundary, zero score. Returned when detection is
     /// disabled, the turn has no usable embedding, or the utterance is a
-    /// backchannel below the length floor (#367).
+    /// backchannel below the length floor.
     #[must_use]
     pub const fn none() -> Self {
         Self {
@@ -102,18 +98,18 @@ impl TopicBoundaryTracker {
         self.centroid.is_some()
     }
 
-    /// Discards the centroid and turn count, starting a fresh topic (#367).
+    /// Discards the centroid and turn count, starting a fresh topic.
     ///
-    /// Called when a session split commits (#369) or when a boundary is
-    /// confirmed and the new topic begins. Compression (#368) must **not**
-    /// call this: compression is a physical operation, not a topic boundary,
-    /// so the centroid survives it.
+    /// Called when a session split commits or when a boundary is confirmed and
+    /// the new topic begins. Compression must **not** call this: compression
+    /// is a physical operation, not a topic boundary, so the centroid survives
+    /// it.
     pub fn reset_topic(&mut self) {
         self.centroid = None;
         self.turns_in_topic = 0;
     }
 
-    /// Scores one completed turn and updates the running topic state (#367).
+    /// Scores one completed turn and updates the running topic state.
     ///
     /// `embedding` is the turn's input embedding (the session's
     /// `last_input_embedding`, consumed here), `utterance_chars` is the length
@@ -179,7 +175,7 @@ impl TopicBoundaryTracker {
         }
     }
 
-    /// Starts a fresh topic seeded from `embedding` (#367).
+    /// Starts a fresh topic seeded from `embedding`.
     fn seed_new_topic(&mut self, embedding: &[f32], now: DateTime<Utc>) {
         self.centroid = Some(embedding.to_vec());
         self.turns_in_topic = 1;
@@ -364,7 +360,7 @@ mod tests {
         // A perfectly coherent topic: identical utterances, no silence. The
         // turn-count term saturates at the soft cap, but with
         // `weight_topic_length < boundary_threshold` (the documented invariant)
-        // it can never cross the threshold on its own (#367).
+        // it can never cross the threshold on its own.
         let mut seen = 0;
         for _ in 0..=cfg.max_topic_turns.saturating_mul(2) {
             let signal = tracker.observe_turn(&cfg, &topic, 40, t0());

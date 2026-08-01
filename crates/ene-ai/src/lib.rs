@@ -27,7 +27,7 @@
 pub mod config;
 /// Effective context-window computation: reconciling the provider-advertised
 /// and user-configured windows, then reserving headroom for the response and
-/// for token-estimation error (#364).
+/// for token-estimation error.
 pub mod context_window;
 /// Blanket async-provider adapters over `ene-infer::EngineHandle`
 /// (`LocalLlmEngine`, `LocalTtsEngine`, `LocalSttEngine`), plus
@@ -102,7 +102,7 @@ pub use traits::{
     cosine_similarity, embed, embed_query,
 };
 
-/// Token usage accounting for LLM responses (#365).
+/// Token usage accounting for LLM responses.
 ///
 /// Re-exported from `ene-plugin-proto` (the wire-ABI crate every provider
 /// layer depends on) so in-process providers, the plugin IPC bridge, and the

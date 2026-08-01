@@ -30,7 +30,7 @@ const fn default_parallel_tool_calls_max() -> usize {
     4
 }
 
-/// Default per-plugin DB storage quota, in MiB (#424).
+/// Default per-plugin DB storage quota, in MiB.
 ///
 /// `256` is deliberately generous: every built-in stateful plugin (`fs`,
 /// `utility`, `browser`) stores kilobytes-to-low-megabytes of bookkeeping, so
@@ -88,11 +88,11 @@ pub struct PluginEntry {
     /// variables are cleared for security (`env_clear()`).
     ///
     /// This is an interim mechanism until a proper credential service
-    /// is implemented (#412/#413).
+    /// is implemented.
     #[serde(default)]
     pub env_passthrough: Vec<String>,
     /// Per-plugin cap on how much of the shared `memory.db` this plugin's
-    /// tables may occupy, in mebibytes (#424).
+    /// tables may occupy, in mebibytes.
     ///
     /// Writes (`Insert`/`Upsert`) that would push the plugin's measured
     /// footprint past this cap are rejected with a `QuotaExceeded` error;
@@ -121,10 +121,9 @@ impl Default for PluginEntry {
     }
 }
 
-// Re-register the `fs` sandbox tool schema that was previously emitted by
-// `define_tool_config!` inside `ene-plugin-proto`. The proto crate is wire-ABI
-// only and no longer depends on `ene-config`, so the host crate (which links
-// both) takes over the registration.
+// Register the `fs` sandbox tool schema from the host crate: the proto crate
+// is wire-ABI only and must not depend on `ene-config`, so the host crate
+// (which links both) takes over the registration.
 const _: () = {
     /// # Safety
     ///
@@ -163,7 +162,7 @@ ene_config::define_config!(
         #[serde(default = "default_timeout_ms")]
         pub timeout_ms: u64 = default_timeout_ms(),
         /// How long the runtime waits for a consumer to answer a tool
-        /// *permission* prompt before failing safe (#401).
+        /// *permission* prompt before failing safe.
         ///
         /// The wait is bounded by this timeout **and** selected against the
         /// turn's cancel token, so a consumer that never responds (a lost
@@ -179,7 +178,7 @@ ene_config::define_config!(
         #[serde(default = "default_permission_prompt_timeout_ms")]
         pub permission_prompt_timeout_ms: u64 = default_permission_prompt_timeout_ms(),
         /// How long the runtime waits for a consumer to answer an interactive
-        /// *user-input* prompt before failing safe (#401).
+        /// *user-input* prompt before failing safe.
         ///
         /// Same fail-safe semantics as `permission_prompt_timeout_ms`. Typing
         /// an answer takes longer than clicking approve/deny, so this defaults
@@ -192,7 +191,7 @@ ene_config::define_config!(
         #[serde(default = "default_user_input_prompt_timeout_ms")]
         pub user_input_prompt_timeout_ms: u64 = default_user_input_prompt_timeout_ms(),
         /// Maximum number of side-effect-free tool calls executed concurrently
-        /// in a single round (#400).
+        /// in a single round.
         ///
         /// When the LLM returns multiple tool calls, those that declare
         /// themselves read-only (`SideEffects::ReadOnly`) are run in a bounded

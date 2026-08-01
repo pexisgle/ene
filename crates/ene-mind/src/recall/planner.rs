@@ -98,7 +98,7 @@ impl RecallPlanner {
     /// Convert a recall plan into a store [`Query`] for one primary query.
     ///
     /// Maps [`RecallSearchHints`] and scope fields onto [`Query`], filling
-    /// hybrid weights / commitment boost from [`MindMemoryConfig`] (#123).
+    /// hybrid weights / commitment boost from [`MindMemoryConfig`].
     /// Multi-query expansion and `required_kinds` filtering remain the
     /// responsibility of downstream recall execution.
     pub fn to_query<'a>(
@@ -130,13 +130,13 @@ impl RecallPlanner {
             recent_fallback_limit: memory.recent_fallback_limit,
             time_range: None,
             // Reflection memories are a scoring signal applied separately by
-            // the self-reflection pipeline (#347), never ordinary recall
+            // the self-reflection pipeline, never ordinary recall
             // results — when the pipeline is enabled they are excluded from
             // every gather path so they cannot compete with normal memories or
             // leak into the LLM context. With the pipeline disabled the
-            // exclusion is off too: reflections then behave exactly as they
-            // did before this feature (ordinary recall results), so enabling
-            // the pipeline is the only observable behavior change.
+            // exclusion is off too: reflections behave as ordinary recall
+            // results, so enabling the pipeline is the only switch in their
+            // treatment.
             exclude_kinds: if memory.reflection.enabled {
                 vec![MemoryKind::Reflection]
             } else {
@@ -447,7 +447,7 @@ mod tests {
 
         // With the pipeline disabled the exclusion must be off too: reflections
         // keep behaving as ordinary recall results, so enabling the pipeline is
-        // the only observable behavior change (#347).
+        // the only observable behavior change.
         let disabled_memory = MindMemoryConfig {
             reflection: crate::config::ReflectionConfig {
                 enabled: false,

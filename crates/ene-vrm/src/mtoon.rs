@@ -447,8 +447,7 @@ pub const fn texture_flags(mat: &MToonMaterial, has_base_color: bool) -> u32 {
 /// Per-material uniform layout for the WGSL shader. Must match
 /// the `MToonUniform` struct in `mtoon_full.wgsl`.
 ///
-/// The struct is 256 bytes (4 × `vec4<f32>` rows of params + the
-/// time + flags). Aligned to 256 bytes for the uniform buffer.
+/// The struct is 144 bytes (9 × `vec4<f32>` rows).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MToonUniform {

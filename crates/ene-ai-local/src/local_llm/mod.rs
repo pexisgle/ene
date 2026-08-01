@@ -1,4 +1,4 @@
-//! In-process llama-cpp-4 provider for proactive decisions (#165 / #171).
+//! In-process llama-cpp-4 provider for proactive decisions.
 
 mod model;
 mod routing;
@@ -169,8 +169,7 @@ impl LocalLlamaCppProvider {
         })
     }
 
-    /// This engine's declared capabilities — replaces the old
-    /// `supports_vision()` inherent bool with the same
+    /// This engine's declared capabilities — the same
     /// [`ene_ai::CapabilitySet`] the blanket `LlmProvider` adapter already
     /// uses internally to gate vision input, so both call sites agree by
     /// construction instead of duplicating the check.
@@ -237,7 +236,7 @@ impl LocalLlamaCppProvider {
             .map_err(map_engine_error)
     }
 
-    /// No-op for API compatibility with the former subprocess provider.
+    /// No-op kept for [`ProactiveLlmHandles::shutdown`] API compatibility.
     #[expect(
         clippy::unused_async,
         reason = "async kept for ProactiveLlmHandles::shutdown API"
@@ -262,11 +261,7 @@ impl LlmProvider for LocalLlamaCppProvider {
         // `StreamingLocalLlmEngine::create_chat_stream` already rejects
         // non-empty `tools` when `Capability::Tools` is not declared — this
         // engine's descriptor never declares it (the local decision provider
-        // has never allowed tool calls), so that rejection reproduces the
-        // old hand-written check without duplicating it here. Unlike before
-        // this stage, this now delivers real token-by-token chunks (see
-        // `model::LlamaChatModel`'s `StreamingLocalModel` impl), not a
-        // single item wrapping the whole reply.
+        // does not allow tool calls), so the rejection comes from the adapter.
         self.engine.create_chat_stream(messages, tools).await
     }
 

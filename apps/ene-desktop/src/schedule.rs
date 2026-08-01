@@ -8,12 +8,10 @@
 //!
 //! ## Why `bevy_ecs`
 //!
-//! The codebase previously embedded a single `hecs::World` to hold a
-//! [`Transform`](crate::character::Transform) and a
-//! [`UiState`](crate::settings::UiState) component, but the bulk of the
-//! per-frame logic lived in a single `Runtime::about_to_wait` method.
-//! `bevy_ecs` brings a `Schedule` / `SystemSet` / `Message` / `Resource`
-//! toolbox that lets us express that logic as small, composable systems.
+//! `bevy_ecs` provides a `Schedule` / `SystemSet` / `Message` /
+//! `Resource` toolbox so the per-frame logic runs as small,
+//! composable systems instead of one monolithic
+//! `Runtime::about_to_wait` method.
 //!
 //! ## Stages
 //!
@@ -57,9 +55,9 @@ pub enum AppSet {
     Present,
 }
 
-/// Registers the per-stage ordering of the [`AppSet`] markers and
-/// Phase 2 pump systems. The schedule runs once per frame via
-/// [`App::update`] from `Runtime::about_to_wait`.
+/// Registers the per-stage ordering of the [`AppSet`] markers and the
+/// event pump. The schedule runs once per frame via [`App::update`]
+/// from `Runtime::about_to_wait`.
 pub fn configure_schedule(app: &mut App) {
     app.configure_sets(First, AppSet::EventDispatch);
     app.configure_sets(
@@ -69,7 +67,6 @@ pub fn configure_schedule(app: &mut App) {
     app.configure_sets(PostUpdate, AppSet::Render);
     app.configure_sets(Last, (AppSet::Render, AppSet::Present).chain());
 
-    // First: drain the legacy `AppEvent` bus and emit typed Messages.
     app.add_systems(First, pump_legacy_events.in_set(AppSet::EventDispatch));
 }
 

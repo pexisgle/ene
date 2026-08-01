@@ -1,9 +1,4 @@
 //! Author's Note: depth-based instruction injection for roleplay.
-//!
-//! An author's note is a persistent instruction injected at a specific depth
-//! in the conversation history. Unlike the system prompt, this sits within
-//! the history at depth N (e.g., 3–5 turns back), keeping the main system
-//! prompt clean while enforcing late-session behavior.
 
 use ene_ai::Role;
 use serde::{Deserialize, Serialize};
@@ -72,7 +67,6 @@ pub fn apply_authors_note(history: &mut Vec<HistoryEntry>, note: &AuthorsNote) {
         return;
     }
 
-    // Insert depth + 1 positions from the end (before the Nth-to-last message)
     let insert_at = if history.len() > note.depth + 1 {
         history.len() - note.depth - 1
     } else {
@@ -137,10 +131,8 @@ mod tests {
         // depth=1 means insert 2 positions from end (before reply2)
         apply_authors_note(&mut history, &note);
         assert_eq!(history.len(), 5);
-        // The note should be at index 2 (before msg2)
         assert_eq!(history[2].role, Role::User);
         assert!(history[2].content.contains("Stay in character."));
-        // Verify the ordering is preserved for the rest
         assert_eq!(history[3].content, "msg2");
         assert_eq!(history[4].content, "reply2");
     }
@@ -158,7 +150,6 @@ mod tests {
                 content: "hi".into(),
             },
         ];
-        // Depth exceeds history, should insert at beginning
         apply_authors_note(&mut history, &note);
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].role, Role::User);

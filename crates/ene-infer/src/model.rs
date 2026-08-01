@@ -83,7 +83,7 @@ pub trait LocalModel: Send + 'static {
 /// Additive by design: implementing this trait changes nothing about an
 /// existing [`LocalModel`] impl, and a model with no incremental output
 /// (whisper, Kokoro, GGUF embedding, ...) simply never implements it — every
-/// existing `LocalModel` keeps compiling and behaving exactly as before.
+/// existing `LocalModel` keeps compiling and behaving unchanged.
 /// [`crate::EngineHandle::submit_stream`] is only available for `M:
 /// StreamingLocalModel`, via a second, separate `impl` block (see that
 /// method's docs); [`crate::EngineHandle::submit`] keeps working for every

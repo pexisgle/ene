@@ -1,16 +1,8 @@
 //! Cursor state resource.
 //!
-//! Replaces the `Runtime::last_cursor_physical` field that the
-//! winit event handler wrote and the per-frame hit-test read.
-//! Phase 6 lifts it into a bevy `Resource` so the
+//! Holds the per-frame window-local cursor position so the
 //! `apply_linux_click_through_system` and the raycast hit-test
-//! system can both read it without touching the legacy
-//! `AppState`.
-//!
-//! The `update_cursor_state_system` (in
-//! `system/platform/cursor.rs`) writes this from the
-//! `PointerMoved` message stream on every frame where a cursor
-//! move was observed.
+//! can both read it without touching `AppState`.
 use bevy_ecs::prelude::Resource;
 use winit::dpi::PhysicalPosition;
 

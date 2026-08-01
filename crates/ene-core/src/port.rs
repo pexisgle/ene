@@ -1,5 +1,5 @@
 //! `MemoryPort` — the trait boundary between `ene-mind`'s cognitive logic
-//! and whichever concrete store backs it (#270).
+//! and whichever concrete store backs it.
 //!
 //! Defined in `ene-core` (rather than `ene-mind` or `ene-store`) so that both
 //! crates can depend on it without introducing a cycle: `ene-store` depends
@@ -7,14 +7,10 @@
 //! depends on `ene-core` to call `&dyn MemoryPort` instead of the concrete
 //! `ene_store::MemoryStore`. Placing the trait in either `ene-store` or
 //! `ene-mind` directly would force the other to depend on it, recreating the
-//! very layering violation this issue fixes.
+//! very layering violation this port exists to prevent.
 //!
-//! The method set here is intentionally narrow: it covers exactly the store
-//! operations called by the cognitive-logic modules that were converted to
-//! use this trait (`ene-mind`'s recall runner, memory arbiter, forgetting
-//! lifecycle, character CCv3/style sync, memory journal, self-reflection,
-//! lorebook boost, and the commitment ledger's `list_active`). It is not a
-//! full mirror of `MemoryStore`'s API surface.
+//! The method set here is intentionally narrow — it is not a full mirror of
+//! `MemoryStore`'s API surface.
 
 use std::collections::HashSet;
 
@@ -101,7 +97,7 @@ pub trait MemoryPort: Send + Sync {
         keep_refs: &HashSet<String>,
     ) -> Result<usize, MemoryPortError>;
 
-    /// Gather typed-memory candidates with explainable hybrid scoring (#123, #302).
+    /// Gather typed-memory candidates with explainable hybrid scoring.
     ///
     /// Returns *gathered* candidates (vector/lexical/commitment/recent sources
     /// merged by memory id) **without** applying the weighted scoring policy —
@@ -119,7 +115,7 @@ pub trait MemoryPort: Send + Sync {
     /// Bump the access count and last-accessed timestamp for a typed memory.
     async fn bump_typed_memory_access(&self, id: i64) -> Result<bool, MemoryPortError>;
 
-    /// Transition a typed memory with lifecycle edge validation (#76).
+    /// Transition a typed memory with lifecycle edge validation.
     async fn set_memory_status(
         &self,
         id: i64,
@@ -146,17 +142,17 @@ pub trait MemoryPort: Send + Sync {
         embedding: &[f32],
     ) -> Result<(), MemoryPortError>;
 
-    /// Insert a candidate into the user-confirmation queue (#174).
+    /// Insert a candidate into the user-confirmation queue.
     ///
     /// Async because the reference implementation persists the queue to the
-    /// `pending_candidates` table (#420) so candidates survive restarts and
-    /// are shared across `MemoryStore` instances on the same database.
+    /// `pending_candidates` table so candidates survive restarts and are
+    /// shared across `MemoryStore` instances on the same database.
     async fn insert_pending_candidate(
         &self,
         candidate: PendingCandidate,
     ) -> Result<i64, MemoryPortError>;
 
-    /// Enforce the pending-candidate retention policy for a character (#420).
+    /// Enforce the pending-candidate retention policy for a character.
     ///
     /// Deletes candidates older than `max_age_days` (across all statuses) and
     /// trims the live `pending` queue down to `max_per_character` rows,
@@ -184,8 +180,6 @@ pub trait MemoryPort: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Commitment>, MemoryPortError>;
 
-    // ── Affect state (#309) ────────────────────────────────────────────────
-
     /// Load affect state for a character.
     async fn get_affect_state(&self, character_id: &str) -> Result<AffectState, MemoryPortError>;
 
@@ -198,8 +192,6 @@ pub trait MemoryPort: Send + Sync {
         character_id: &str,
         user_name: &str,
     ) -> Result<Option<PendingAffectProposal>, MemoryPortError>;
-
-    // ── Commitment CRUD (#309) ─────────────────────────────────────────────
 
     /// Insert a new commitment ledger row and return its assigned ID.
     async fn insert_commitment(&self, new: &NewCommitment) -> Result<i64, MemoryPortError>;
@@ -221,9 +213,7 @@ pub trait MemoryPort: Send + Sync {
     /// Mark overdue active commitments as stale; returns the count updated.
     async fn mark_stale_commitments(&self, now: DateTime<Utc>) -> Result<usize, MemoryPortError>;
 
-    // ── Pending memory writes (#309) ───────────────────────────────────────
-
-    /// Enqueue a failed memory write for later retry (#240).
+    /// Enqueue a failed memory write for later retry.
     async fn enqueue_pending_memory_write(
         &self,
         character_id: &str,
@@ -241,14 +231,12 @@ pub trait MemoryPort: Send + Sync {
     /// Mark a pending write as completed (deletes the row).
     async fn complete_pending_memory_write(&self, id: i64) -> Result<(), MemoryPortError>;
 
-    /// Record another failed attempt; may transition to permanent (#240).
+    /// Record another failed attempt; may transition to permanent.
     async fn fail_pending_memory_write(
         &self,
         id: i64,
         error_message: String,
     ) -> Result<PendingMemoryWrite, MemoryPortError>;
-
-    // ── Memory spans / compression (#309) ──────────────────────────────────
 
     /// Insert a new compressed memory span.
     async fn insert_memory_span(&self, span: &NewMemorySpan) -> Result<i64, MemoryPortError>;
@@ -267,7 +255,7 @@ pub trait MemoryPort: Send + Sync {
     ) -> Result<Vec<NewMemorySpan>, MemoryPortError>;
 }
 
-/// A stored tool-embedding field row (#302).
+/// A stored tool-embedding field row.
 ///
 /// Plain data vocabulary for the tool-embedding index so the RAG layer
 /// (`ene-rag`) can read cached embeddings through [`EmbeddingStorePort`]
@@ -290,7 +278,7 @@ pub struct ToolEmbeddingFieldRow {
     pub source_text: String,
 }
 
-/// Error type for [`EmbeddingStorePort`] operations (#302).
+/// Error type for [`EmbeddingStorePort`] operations.
 #[derive(Debug, Error)]
 pub enum EmbeddingStorePortError {
     /// The backing store rejected or failed an operation.
@@ -298,14 +286,14 @@ pub enum EmbeddingStorePortError {
     Backend(String),
 }
 
-/// Persistence abstraction for the tool-embedding index (#302).
+/// Persistence abstraction for the tool-embedding index.
 ///
-/// `ene-tool-rag` (now absorbed into `ene-rag`) historically called
-/// store-specific methods (`list_tool_embedding_hashes`,
-/// `list_tool_embedding_fields`, `upsert_tool_embedding_field`) on the
-/// concrete `MemoryStore`. Cutting this port lets `ene-rag` depend only on
-/// `ene-core`, keeping the "no `ene-rag → ene-store` edge" guarantee that
-/// makes a dependency cycle compile-time impossible.
+/// Without this port, `ene-rag` would call store-specific methods
+/// (`list_tool_embedding_hashes`, `list_tool_embedding_fields`,
+/// `upsert_tool_embedding_field`) on the concrete `MemoryStore`. The port
+/// lets `ene-rag` depend only on `ene-core`, keeping the "no
+/// `ene-rag → ene-store` edge" guarantee that makes a dependency cycle
+/// compile-time impossible.
 #[async_trait]
 pub trait EmbeddingStorePort: Send + Sync {
     /// Returns `(tool_name, field, field_key, version_hash, model_name)` for
@@ -332,7 +320,7 @@ pub trait EmbeddingStorePort: Send + Sync {
     ) -> Result<(), EmbeddingStorePortError>;
 }
 
-/// Error type for [`ToolFailureSignalPort`] operations (#349).
+/// Error type for [`ToolFailureSignalPort`] operations.
 #[derive(Debug, Error)]
 pub enum ToolFailureSignalPortError {
     /// The backing store rejected or failed an operation.
@@ -340,7 +328,7 @@ pub enum ToolFailureSignalPortError {
     Backend(String),
 }
 
-/// Read-only access to recent tool-failure signals for tool selection (#349).
+/// Read-only access to recent tool-failure signals for tool selection.
 ///
 /// Tool-grounding memories (`tool failure:{tool}`) record that a tool failed
 /// for a character. The tool-selection RAG pipeline (`ene-rag`) reads these
@@ -348,7 +336,7 @@ pub enum ToolFailureSignalPortError {
 /// learning "this tool failed for this use" without `ene-rag` depending on
 /// `ene-mind` or `ene-store`. The dependency points the safe way: `ene-rag`
 /// depends on `ene-core` (this trait), and `ene-store` implements it — the
-/// same arrangement as [`EmbeddingStorePort`] (#302), which keeps a cycle
+/// same arrangement as [`EmbeddingStorePort`], which keeps a cycle
 /// compile-time impossible.
 #[async_trait]
 pub trait ToolFailureSignalPort: Send + Sync {

@@ -1,7 +1,7 @@
-//! Pending deferred memory-write queue (#240).
+//! Pending deferred memory-write queue.
 //!
 //! Domain DTOs (`PendingMemoryWrite`, `PendingMemoryWriteStatus`) live in
-//! `ene-core` (#309); this module owns only the `SeaORM` entity and the
+//! `ene-core`; this module owns only the `SeaORM` entity and the
 //! model-to-DTO conversion.
 
 use chrono::{DateTime, Utc};

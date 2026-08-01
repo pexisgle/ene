@@ -182,7 +182,7 @@ pub struct OpenAiProvider {
     chat_max_tokens: Option<u32>,
     /// Disable `MiMo` / reasoning-model thinking so JSON lands in `content`.
     thinking_disabled: bool,
-    /// Retry policy for transient failures (#237).
+    /// Retry policy for transient failures.
     retry_policy: RetryPolicy,
 }
 
@@ -280,8 +280,8 @@ fn merge_request_body(
         ));
     };
     if stream {
-        // Ask the provider to append a `usage` object to the final SSE chunk
-        // (#365). Providers that do not recognize the option ignore it; those
+        // Ask the provider to append a `usage` object to the final SSE chunk.
+        // Providers that do not recognize the option ignore it; those
         // that do report token counts there, which `run_direct_sse_stream`
         // picks up. Without this, streaming responses carry no usage at all.
         obj.insert(
@@ -355,7 +355,7 @@ fn retry_after_secs(response: &reqwest::Response) -> Option<u64> {
 /// a plain POST matches the reliable direct-HTTP path used in classifier benchmarks.
 ///
 /// Returns the parsed JSON body plus an optional `Retry-After` hint (seconds)
-/// captured from a 429 response, so callers can honor it in backoff (#237).
+/// captured from a 429 response, so callers can honor it in backoff.
 async fn post_chat_byot_via_http(
     api_base: &str,
     api_key: &str,
@@ -652,7 +652,7 @@ impl LlmProviderFactory for OpenAiProviderFactory {
             .get_section::<AiConfig>()
             .map_err(|e| LlmProviderError::Provider(format!("Failed to parse AI config: {e}")))?;
         // Honor the task's own model / max_tokens overrides rather than always
-        // resolving the `tasks.chat` defaults (#C1).
+        // resolving the `tasks.chat` defaults.
         let resolved = ai_config.resolve_chat_task(Some(task))?;
         let provider = create_chat_provider_from_resolved(&resolved)
             .with_retry_policy(ai_config.retry.to_policy());
@@ -676,7 +676,7 @@ pub fn create_chat_provider_from_resolved(resolved: &ResolvedChat) -> OpenAiProv
 ///
 /// OpenAI-compatible providers resolve to the native HTTP client. Any other
 /// provider kind (e.g. plugin-provided `"anthropic"`) falls back to the global
-/// [`LlmProviderRegistry`], which routes to a plugin-registered factory (#247).
+/// [`LlmProviderRegistry`], which routes to a plugin-registered factory.
 pub fn create_task_chat_provider(
     config: &ene_config::EneConfig,
     task: AiTaskKind,
@@ -700,9 +700,9 @@ pub fn create_task_chat_provider(
     };
 
     // Non-OpenAI-compatible kinds (plugin providers) resolve via the global
-    // registry instead of the OpenAI HTTP path (#247). The task's own
+    // registry instead of the OpenAI HTTP path. The task's own
     // model / max_tokens overrides are forwarded so plugin providers honor
-    // task-specific config instead of the `tasks.chat` defaults (#C1).
+    // task-specific config instead of the `tasks.chat` defaults.
     if !crate::config::AiConfig::is_local_provider(&task_ref.provider)
         && let Ok(resolved_ref) = ai_config.resolve_task_ref(task_ref)
         && !resolved_ref.provider.is_openai_compatible()
@@ -727,7 +727,7 @@ pub struct CloudEmbeddingProvider {
     embedding_dimensions: usize,
     query_prefix: Option<String>,
     hyde_model: Option<String>,
-    /// Retry policy for transient failures (#237).
+    /// Retry policy for transient failures.
     retry_policy: RetryPolicy,
 }
 
@@ -862,8 +862,8 @@ impl EmbeddingProvider for CloudEmbeddingProvider {
             .await?;
 
         // OpenAI returns embeddings in input order. Fail loudly if the count
-        // is wrong rather than silently truncating (which used to mask
-        // server-side batching bugs).
+        // is wrong rather than silently truncating, which would mask
+        // server-side batching bugs.
         let result: Vec<Vec<f32>> = response.data.into_iter().map(|d| d.embedding).collect();
         if result.len() != items.len() {
             return Err(EmbeddingError::DimensionMismatch(format!(
@@ -994,7 +994,7 @@ async fn run_direct_sse_stream(
         let mut tool_calls_delta = None;
         // Usage arrives only on the final SSE chunk (and only when the
         // provider is asked for it via `stream_options.include_usage`); every
-        // other chunk leaves it `None` (#365).
+        // other chunk leaves it `None`.
         let usage = usage_from_json_value(chunk.get("usage"));
 
         if let Some(choices) = chunk.get("choices").and_then(serde_json::Value::as_array)
@@ -1077,17 +1077,13 @@ mod tests {
         assert_eq!(out, "hello");
     }
 
-    /// Regression for #34: `embed_query` was prepending the query prefix
-    /// here, then calling `embed` which prepended it again. Asserting the
-    /// single-source-of-truth helper applies the prefix exactly once per
-    /// call is enough — the bug surfaces as "double prefix" only when the
-    /// helper is invoked twice. The test makes the contract explicit.
+    /// Guards the prefix contract: `embed_query` routes through `embed`, so
+    /// the prefix must be applied exactly once per call. Asserting the
+    /// single-source-of-truth helper applies it exactly once makes the
+    /// contract explicit — a double prefix would surface as `"Q:Q:hello"`.
     #[test]
     fn embed_query_does_not_double_prefix() {
         let once = apply_kind_prefix("hello", EmbeddingKind::Query, Some("Q:"));
-        // If a caller re-prepended the prefix (the original bug), the result
-        // would be "Q:Q:hello". After the fix, only the helper applies the
-        // prefix, and `embed_query` calls `embed` exactly once.
         assert_ne!(once, "Q:Q:hello");
         assert_eq!(once, "Q:hello");
     }

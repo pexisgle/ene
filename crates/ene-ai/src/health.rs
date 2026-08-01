@@ -1,4 +1,4 @@
-//! Provider health checks and failover monitoring (#175).
+//! Provider health checks and failover monitoring.
 //!
 //! Health checks probe a provider's `/models` endpoint with a short timeout
 //! and **never** send user data. Results are cached in a [`ProviderHealthMonitor`]
@@ -45,7 +45,7 @@ impl ProviderHealthStatus {
         matches!(self, Self::Healthy | Self::Degraded { .. } | Self::Unknown)
     }
 
-    /// Stable English status code for the diagnostics contract (#175).
+    /// Stable English status code for the diagnostics contract.
     #[must_use]
     pub const fn status_code(&self) -> &'static str {
         match self {
@@ -178,7 +178,7 @@ pub struct FallbackRecord {
     pub at: Instant,
 }
 
-/// In-memory health monitor with TTL caching and fallback history (#175).
+/// In-memory health monitor with TTL caching and fallback history.
 ///
 /// Thread-safe via `Arc<Mutex<..>>`. The runtime actor holds one instance
 /// and shares it with the diagnostics facade for `/doctor` queries.
@@ -292,7 +292,7 @@ pub struct FailoverSelection {
     pub fell_back: bool,
 }
 
-/// Select the first healthy chat candidate in priority order (#175).
+/// Select the first healthy chat candidate in priority order.
 ///
 /// Probes each candidate's `/models` endpoint (using the monitor's TTL cache
 /// to avoid redundant probes) and returns the first one whose health status is
@@ -312,7 +312,6 @@ pub async fn select_healthy_chat(
     let mut skipped = Vec::new();
 
     for (index, candidate) in candidates.iter().enumerate() {
-        // Use a fresh cached report if available, otherwise probe.
         let report = if let Some(cached) = monitor.get_fresh(&candidate.provider) {
             cached
         } else {

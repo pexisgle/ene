@@ -1,4 +1,4 @@
-//! Non-interactive subcommand execution for CI / scripting use (#186).
+//! Non-interactive subcommand execution for CI / scripting use.
 //!
 //! Each subcommand runs a single operation against the runtime and returns a
 //! process exit code. Structured output (JSON / JSONL) goes to stdout; logs
@@ -20,7 +20,6 @@ use crate::output::{
     self, EXIT_OK, EXIT_RUNTIME, ErrorCode, OutputError, OutputFormat, PerfCue, StreamEvent,
 };
 
-/// Execute a non-interactive subcommand and return the process exit code.
 pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
     let result = match cmd {
         Command::Run {
@@ -77,7 +76,6 @@ pub async fn execute(cmd: &Command, ctx: &mut AppContext) -> i32 {
     }
 }
 
-/// Print an [`OutputError`] to stdout (structured) or stderr (human).
 fn emit_error(err: &OutputError, format: OutputFormat) {
     if format.is_structured() {
         println!("{}", err.to_json());
@@ -87,14 +85,12 @@ fn emit_error(err: &OutputError, format: OutputFormat) {
 
 // ── run ─────────────────────────────────────────────────────────────────────
 
-/// A single tool call recorded for the JSON summary output.
 #[derive(Debug, Serialize)]
 struct ToolCallRecord {
     name: String,
     result: String,
 }
 
-/// Aggregate result of a non-interactive run (JSON mode).
 #[derive(Debug, Serialize)]
 struct RunSummary {
     turn: String,
@@ -105,7 +101,6 @@ struct RunSummary {
     tool_calls: Vec<ToolCallRecord>,
 }
 
-/// Run a single prompt non-interactively and stream the response.
 async fn run_prompt(
     ctx: &mut AppContext,
     prompt_args: &[String],
@@ -151,7 +146,6 @@ async fn run_prompt(
     }
 }
 
-/// Resolve the prompt text from CLI args or stdin.
 fn resolve_prompt(prompt_args: &[String]) -> Result<String, OutputError> {
     if !prompt_args.is_empty() {
         return Ok(prompt_args.join(" "));
@@ -163,7 +157,6 @@ fn resolve_prompt(prompt_args: &[String]) -> Result<String, OutputError> {
     Ok(buf)
 }
 
-/// Map a [`RunError`] to a structured [`OutputError`].
 fn run_error_to_output(err: &RunError) -> OutputError {
     match err {
         RunError::Busy => OutputError::new(ErrorCode::Busy, err.to_string()),
@@ -171,12 +164,9 @@ fn run_error_to_output(err: &RunError) -> OutputError {
     }
 }
 
-/// Drive the event loop for a single turn, returning the exit code.
-///
-/// Emits JSONL events (streaming), accumulates a JSON summary, or prints plain
-/// text depending on `format`. Permission gates are auto-approved when `yes`
-/// is set and denied otherwise; user-input gates are always cancelled because
-/// no interactive prompt is available.
+/// Permission gates are auto-approved when `yes` is set and denied
+/// otherwise; user-input gates are always cancelled because no interactive
+/// prompt is available.
 async fn process_turn(
     handle: &EneHandle,
     rx: &mut EneEventReceiver,
@@ -396,7 +386,6 @@ async fn process_turn(
     Ok(exit_code)
 }
 
-/// Print a text delta to stdout for plain-text mode (no color, stable stream).
 fn print_text_delta(delta: &str) {
     use std::io::Write;
     let stdout = std::io::stdout();
@@ -428,7 +417,6 @@ const fn cue_source_label(source: CueSource) -> &'static str {
 
 // ── tool ────────────────────────────────────────────────────────────────────
 
-/// A tool call result for JSON output.
 #[derive(Debug, Serialize)]
 struct ToolCallOutput {
     name: String,

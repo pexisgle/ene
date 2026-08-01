@@ -1,4 +1,4 @@
-//! Token usage accounting for LLM responses (#365).
+//! Token usage accounting for LLM responses.
 //!
 //! This is wire ABI: the same [`TokenUsage`] value travels over the plugin IPC
 //! (inside [`PluginIpcResponse::ChatCompletionResult`](crate::PluginIpcResponse)
@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Token usage reported by an LLM provider for a single completion (#365).
+/// Token usage reported by an LLM provider for a single completion.
 ///
 /// Every field is optional because providers report usage inconsistently: some
 /// return all three counts, some only a total, some only the completion
@@ -50,8 +50,8 @@ impl TokenUsage {
     /// — it keeps a prompt under the model's real window rather than past it.
     const CHARS_PER_TOKEN: usize = 3;
 
-    /// A character-based estimate of the usage for a prompt/completion pair
-    /// (#365), for providers that report no usage of their own.
+    /// A character-based estimate of the usage for a prompt/completion pair,
+    /// for providers that report no usage of their own.
     ///
     /// Every field is populated (the estimate is self-consistent: total is the
     /// sum of the two parts) so a consumer can treat it like a reported usage,
@@ -99,8 +99,8 @@ mod tests {
 
     #[test]
     fn missing_fields_deserialize_to_none() {
-        // Load-bearing contract: an older peer that predates #365 omits the
-        // usage fields entirely; they must default to `None`, not error.
+        // Load-bearing contract: an older peer omits the usage fields
+        // entirely; they must default to `None`, not error.
         let usage: TokenUsage = serde_json::from_str("{}").unwrap();
         assert_eq!(usage, TokenUsage::default());
     }

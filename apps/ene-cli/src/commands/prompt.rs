@@ -93,7 +93,7 @@ impl CliCommand for PromptCommand {
             .unwrap_or_default();
 
         // Delegate to the exact builder the runtime uses so this view cannot
-        // drift from the real packet (#342). The example-message condition,
+        // drift from the real packet. The example-message condition,
         // the emotion-aware output contract, and the message ordering all come
         // from `build_messages` rather than being re-implemented here.
         let build_ctx = MessageBuildContext {

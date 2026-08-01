@@ -2,9 +2,7 @@
 //!
 //! Holds the `tokio::sync::mpsc` halves used to communicate between
 //! async subsystems (AI bridge, tray event pump) and the winit event
-//! loop. During Phase 2 the `pump_legacy_events` system drains the
-//! `rx`; in later phases `rx` will be replaced by typed
-//! `bevy_ecs::message::Message` channels.
+//! loop; `pump_legacy_events` drains the `rx`.
 use bevy_ecs::prelude::*;
 
 use crate::events::{AppEventReceiver, AppEventSender};

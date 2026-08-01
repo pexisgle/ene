@@ -221,7 +221,6 @@ impl PostProcessor {
             ],
         });
 
-        // Initialise the uniforms with the current size.
         queue.write_buffer(
             &uniform_buffer,
             0,

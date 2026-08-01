@@ -11,7 +11,7 @@
 //!   without re-allocating.
 //! - A global [`BTreeMap<ExpressionName, f32>`] of weights
 //!   describes the current facial state. The runtime writes into
-//!   it from the `EmotionQueue` (this struct) and the renderer reads it
+//!   it from the `EmotionQueue` and the renderer reads it
 //!   when it builds the per-primitive `weights` uniform each
 //!   frame.
 //! - All expressions across the whole model are flattened into a
@@ -20,7 +20,7 @@
 //!   stores them lower-case) but kept as the raw string for
 //!   round-trip with the AI bridge (`happy`, `sad`, …).
 //!
-//! Deliberately leaves the following to follow-up PRs:
+//! Deliberately left for follow-up:
 //!
 //! - Normal / tangent morph displacements (position only).
 //! - Multi-target blend shapes (e.g. `blink_l` + `blink_r` driven
@@ -29,10 +29,10 @@
 //!   shape; layering the multiplier graph on top of this storage
 //!   layout is a task.
 //! - Mouth-shape / look-at expression mode: the look-at cursor
-//!   projection (this struct) writes the four lookLeft / lookRight /
+//!   projection writes the four lookLeft / lookRight /
 //!   lookUp / lookDown expressions directly into the weights map.
-//!   This PR only writes `set_expression` from
-//!   `CharacterRenderer::apply_emotions`.
+//!   Currently only `set_expression` from
+//!   `CharacterRenderer::apply_emotions` writes to it.
 //!
 //! ## GPU layout (see also `shaders/mtoon_lite.wgsl`)
 //!
@@ -292,10 +292,8 @@ impl ExpressionLayer {
     /// model are **not** stored in `weights`; the call returns
     /// `false` so the caller can detect the miss. Names that
     /// exist on at least one primitive return `true` and have
-    /// the clamped weight inserted.
-    ///
-    /// the previous implementation stored the weight
-    /// regardless, which let a misspelled AI token like `joy`
+    /// the clamped weight inserted. Storing the weight
+    /// regardless would let a misspelled AI token like `joy`
     /// (vs. the model's `happy`) silently accumulate in the
     /// weight map and never be cleared.
     pub fn set_expression(&mut self, name: &ExpressionName, weight: f32) -> bool {
@@ -424,7 +422,6 @@ mod tests {
         // silently accumulate across frames and never reach the
         // GPU).
         assert!(!layer.weights.contains_key(&"joy".into()));
-        // The known expression still works.
         assert!(layer.set_expression(&"happy".into(), 0.5));
         assert_eq!(layer.weights.get(&"happy".into()), Some(&0.5));
     }
@@ -541,8 +538,8 @@ mod tests {
         );
         assert_eq!(MAX_MORPH_TARGETS_PER_PRIMITIVE, 64);
         // A `Vec` of more targets than the cap must be safe to
-        // truncate with `.take(MAX_MORPH_TARGETS_PER_PRIMITIVE)`
-        // — the loader does exactly this on both the
+        // truncate with `.take(MAX_MORPH_TARGETS_PER_PRIMITIVE)`,
+        // which is exactly how the loader caps the list.
         let capped: Vec<u32> = (0..(MAX_MORPH_TARGETS_PER_PRIMITIVE as u32 + 10))
             .take(MAX_MORPH_TARGETS_PER_PRIMITIVE)
             .collect();

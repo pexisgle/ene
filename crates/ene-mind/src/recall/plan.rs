@@ -31,9 +31,9 @@ pub struct RecallScopeFilter {
 
 /// Budget hints for recalled-memory prompt sections.
 ///
-/// The per-section token budgets were removed in #370: prompt packing now
-/// fills the model's effective context window (#364) in priority order, so the
-/// only recall-side limit that remains is how many memories to gather.
+/// Prompt packing fills the model's effective context window in priority
+/// order, so the only recall-side limit that remains is how many memories to
+/// gather.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecallBudgetHints {
     /// Maximum number of memory results requested by the plan.

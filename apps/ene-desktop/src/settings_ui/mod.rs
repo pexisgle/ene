@@ -1,5 +1,4 @@
-//! Settings UI — the tabbed window that mirrors the legacy
-//! Bevy `apps/ene-desktop/src/settings_ui/`.
+//! Settings UI — the tabbed settings window.
 //!
 //! The runtime owns a single [`SettingsUi`] per `UiWindow`. Each
 //! frame the `UiWindow` calls [`SettingsUi::render`] with the live
@@ -32,7 +31,7 @@ use bevy_ecs::world::World;
 pub enum PageKind {
     #[default]
     Character,
-    /// Character Card (`CCv3`) editor (#218).
+    /// Character Card (`CCv3`) editor.
     CharacterEditor,
     Graphics,
     Ai,
@@ -192,7 +191,6 @@ impl SettingsUi {
             return;
         };
 
-        // First-run onboarding panel (#241).
         let mut open_ai = false;
         let mut dismiss = false;
         let show_onboarding = world
@@ -247,14 +245,13 @@ impl SettingsUi {
             self.current_page = PageKind::Ai;
         }
 
-        // Consume a one-shot page focus request from tray / onboarding (#241).
+        // Consume a one-shot page focus request from tray / onboarding.
         if let Some(mut state) = world.get_mut::<crate::component::ui::UiStateComponent>(ui_entity)
             && let Some(page) = state.0.focused_page.take()
         {
             self.current_page = page;
         }
 
-        // Top-level page tab strip.
         ui.horizontal(|ui| {
             for page in [
                 PageKind::Character,
@@ -388,9 +385,8 @@ pub fn apply_egui_fonts(ctx: &egui::Context) {
     }
 }
 
-/// Apply the legacy dark theme tokens. The v1 Bevy build uses
-/// these exact RGB values; v2 keeps the visual identity stable so
-/// screenshots and docs that reference the colors stay valid.
+/// Apply the dark theme tokens. Keep these RGB values stable —
+/// screenshots and docs reference them.
 pub fn apply_egui_visuals(ctx: &egui::Context) {
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = egui::Color32::from_rgb(26, 28, 33);

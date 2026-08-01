@@ -16,7 +16,7 @@ fn log_row_to_message(row: entities::conversation_logs::Model) -> crate::export:
 }
 
 /// Escapes SQL `LIKE` metacharacters so `query` matches as a literal
-/// substring rather than a pattern (#422).
+/// substring rather than a pattern.
 ///
 /// `%` and `_` are `LIKE` wildcards (match-any and match-one), and `\` is
 /// the escape character declared by the `ESCAPE '\'` clause in
@@ -37,8 +37,6 @@ fn escape_like_pattern(query: &str) -> String {
 }
 
 impl MemoryStore {
-    // ── Conversation Logs ─────────────────────────────────────────────────────
-
     /// Inserts a conversation log entry.
     pub async fn insert_log(
         &self,
@@ -149,8 +147,6 @@ impl MemoryStore {
             })
             .collect())
     }
-
-    // ── Sessions & Export/Import (#176) ─────────────────────────────────────
 
     /// Inserts a session metadata row, or refreshes `updated_at` if the
     /// `session_id` already exists.
@@ -290,7 +286,7 @@ impl MemoryStore {
     /// concatenated into SQL), so it is injection-safe. `LIKE` metacharacters
     /// (`%`, `_`, `\`) in `query` are escaped and matched literally via an
     /// explicit `ESCAPE '\'` clause, so searching for e.g. `50%` or `a_b`
-    /// finds those exact substrings instead of acting as wildcards (#422).
+    /// finds those exact substrings instead of acting as wildcards.
     /// An empty query returns an empty result set.
     ///
     /// # Performance
@@ -301,7 +297,7 @@ impl MemoryStore {
     /// `idx_log_created_at` index (see the `conversation_logs_search_index`
     /// migration), which lets `SQLite` walk rows newest-first and stop after
     /// enough matches instead of sorting the entire table. Full-index
-    /// substring search requires FTS5, tracked separately (#424).
+    /// substring search requires FTS5, tracked separately.
     pub async fn search_messages(
         &self,
         query: &str,
@@ -342,7 +338,7 @@ impl MemoryStore {
     ///
     /// Message content is passed through [`crate::export::redact_secrets`] so
     /// obvious credentials never leave the store in the clear. Tool-audit
-    /// logs are filtered by `session_id` (#426); their arguments were already
+    /// logs are filtered by `session_id`; their arguments were already
     /// redacted by [`crate::audit::redact_arguments`] at write time, so no
     /// secret material is re-exposed here. Rows with a `NULL` `session_id`
     /// (pre-migration or out-of-band diagnostics calls) are never included.

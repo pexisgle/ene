@@ -45,7 +45,6 @@ pub(crate) fn to_anthropic_messages(messages: &[Value]) -> (Option<String>, Vec<
                     "tool_use_id": msg.get("tool_call_id").and_then(Value::as_str).unwrap_or(""),
                     "content": msg.get("content").and_then(Value::as_str).unwrap_or(""),
                 });
-                // Merge consecutive tool results into a single user message.
                 if let Some(last) = anthropic_messages.last_mut() {
                     let is_user = last.get("role").and_then(Value::as_str) == Some("user");
                     if is_user
@@ -100,7 +99,6 @@ fn convert_user_content(msg: &Value) -> Vec<Value> {
         }
     }
 
-    // Fallback: plain string content.
     if blocks.is_empty()
         && let Some(content) = msg.get("content").and_then(Value::as_str)
     {
@@ -110,7 +108,6 @@ fn convert_user_content(msg: &Value) -> Vec<Value> {
     blocks
 }
 
-/// Converts an assistant message to Anthropic content blocks (text + `tool_use`).
 fn convert_assistant_content(msg: &Value) -> Vec<Value> {
     let mut blocks = Vec::new();
 
@@ -331,7 +328,6 @@ mod tests {
         ];
         let (_, msgs) = to_anthropic_messages(&messages);
         assert_eq!(msgs.len(), 3);
-        // Tool result becomes a user message.
         assert_eq!(msgs[2]["role"], "user");
         let content = msgs[2]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_result");
@@ -355,7 +351,6 @@ mod tests {
             json!({"role": "tool", "tool_call_id": "call_2", "content": "result 2"}),
         ];
         let (_, msgs) = to_anthropic_messages(&messages);
-        // user, assistant, user (with 2 tool_results merged)
         assert_eq!(msgs.len(), 3);
         let content = msgs[2]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);

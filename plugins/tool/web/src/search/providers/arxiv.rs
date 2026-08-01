@@ -36,7 +36,6 @@ struct ArxivFeed {
     entries: Vec<ArxivEntry>,
 }
 
-/// `ArXiv` API provider.
 #[derive(Debug)]
 pub struct ArxivProvider {
     client: reqwest::Client,

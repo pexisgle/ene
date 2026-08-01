@@ -1,26 +1,21 @@
 //! # ene-rag
 //!
 //! RAG (Retrieval-Augmented Generation) **policy** layer for the ene AI
-//! companion (#302).
+//! companion.
 //!
 //! ## Why this crate exists
 //!
-//! Before this crate existed, RAG policy was scattered across two crates:
+//! RAG policy — pure scoring, decay, and tool selection — is a distinct
+//! layer from persistence, and keeping it here is what makes "the store is
+//! only about persistence" hold: the scoring functions (`score_candidate`,
+//! `recency_score`, ...) and decay policy (`decay_score`,
+//! `FADE_THRESHOLD`, ...) touch no database, and a tool-selection pipeline
+//! that reached for the concrete `ene_store::MemoryStore` directly would
+//! make a future dependency cycle possible.
 //!
-//! - `ene-store` — the persistence crate — hosted pure scoring functions
-//!   (`search.rs`: `score_candidate`, `recency_score`, ...) and decay policy
-//!   (`forgetting.rs`: `decay_score`, `FADE_THRESHOLD`, ...), even though none
-//!   of them touch the database.
-//! - `ene-tool-rag` — a standalone crate for tool selection — depended directly
-//!   on the concrete `ene_store::MemoryStore` for embedding persistence.
-//!
-//! Both violated the "store is only about persistence" principle, and the tool
-//! RAG's direct store dependency made a future dependency cycle possible.
-//!
-//! `ene-rag` consolidates the policy layer and depends on `ene-core` **only**
-//! (plus generic deps) for its scoring/decay core. Because the
-//! `ene-rag → ene-store` edge does not exist, a cycle is compile-time
-//! impossible.
+//! `ene-rag` depends on `ene-core` **only** (plus generic deps) for its
+//! scoring/decay core. Because the `ene-rag → ene-store` edge does not
+//! exist, a cycle is compile-time impossible.
 //!
 //! The tool-selection pipeline (the [`tool`] module) is behind the `tool`
 //! Cargo feature because it needs embedding/LLM machinery (`ene-ai`).
@@ -44,8 +39,8 @@
 //! - [`scoring`] — hybrid memory scoring (`score_candidate` and its component
 //!   functions) plus [`score_and_rank`](scoring::score_and_rank), the
 //!   gather→score composition entry point.
-//! - [`tool`] *(feature = `tool`)* — the tool-selection RAG pipeline (absorbed
-//!   from `ene-tool-rag`): multi-vector embedding, weighted field similarity,
+//! - [`tool`] *(feature = `tool`)* — the tool-selection RAG pipeline:
+//!   multi-vector embedding, weighted field similarity,
 //!   rerank, per-category limits. Persistence goes through
 //!   [`ene_core::EmbeddingStorePort`].
 //!
@@ -58,12 +53,10 @@
 //!
 //! ## Scope note
 //!
-//! This crate is a **structural** separation (#302). On top of that structure,
-//! the hybrid-score combination was redesigned from an additive weighted sum to
-//! a relevance-driven multiplicative form (#346), and the tool-selection score
-//! from an unnormalized field sum to a normalized, field-count-independent
-//! weighted average with a negative-example gate (#436). Both policies live
-//! here so the memory and tool sides cannot diverge again.
+//! This crate is a **structural** separation. The hybrid-score combination is
+//! a relevance-driven multiplicative form, and the tool-selection score is a
+//! normalized, field-count-independent weighted average with a negative-example
+//! gate. Both policies live here so the memory and tool sides cannot diverge.
 #![warn(missing_docs)]
 #![cfg_attr(
     test,
@@ -74,7 +67,7 @@
 pub mod decay;
 /// Hybrid memory search scoring.
 pub mod scoring;
-/// Tool-selection RAG pipeline (absorbed from `ene-tool-rag`).
+/// Tool-selection RAG pipeline.
 #[cfg(feature = "tool")]
 pub mod tool;
 

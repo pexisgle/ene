@@ -1,5 +1,5 @@
 //! Expression Compositor: merges character-card expression weights
-//! with runtime expression overrides (#132).
+//! with runtime expression overrides.
 //!
 //! ## Data flow
 //!

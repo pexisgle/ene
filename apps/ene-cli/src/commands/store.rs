@@ -1,4 +1,4 @@
-//! Store backup / integrity diagnostic commands (#239).
+//! Store backup / integrity diagnostic commands.
 
 use crate::commands::{CliCommand, CliError, CommandOutcome};
 use crate::context::AppContext;
@@ -6,7 +6,6 @@ use crate::style;
 use async_trait::async_trait;
 use ene_store::{list_backups, restore_database};
 
-/// `/store` command — backup, list, restore, integrity.
 pub struct StoreCommand;
 
 #[async_trait]

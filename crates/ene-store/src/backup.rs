@@ -1,4 +1,4 @@
-//! File-level `SQLite` backup, restore, and integrity helpers (#239).
+//! File-level `SQLite` backup, restore, and integrity helpers.
 //!
 //! Migration recovery uses **pre-migration file copies** rather than
 //! `Migrator::down()`. `SQLite` + SeaORM cannot safely roll a half-applied
@@ -18,7 +18,7 @@ use crate::error::EneMemoryError;
 /// Given `memory.db`, backups look like `memory.db.bak.1710000000`.
 pub const BACKUP_SUFFIX: &str = ".bak.";
 
-/// Options controlling open-time backup / integrity behaviour (#239).
+/// Options controlling open-time backup / integrity behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OpenOptions {
     /// Create a file backup before applying pending migrations.
@@ -127,7 +127,7 @@ pub fn prune_backups(db_path: &Path, max_backups: usize) -> Result<(), EneMemory
 /// any committed WAL frames — into a fresh, self-contained file atomically.
 /// This closes the race in the old checkpoint-then-`fs::copy` approach, where
 /// a concurrent writer between the `PRAGMA wal_checkpoint(TRUNCATE)` and the
-/// copy could tear the backup (#427).
+/// copy could tear the backup.
 ///
 /// When `conn` is `None` there is no connection to serialize through, so the
 /// function falls back to a plain file copy (plus `-wal`/`-shm` sidecars).
@@ -170,7 +170,7 @@ async fn vacuum_into(db: &DatabaseConnection, dest: &Path) -> Result<(), EneMemo
     Ok(())
 }
 
-/// Best-effort file copy used only when no connection is available (#427).
+/// Best-effort file copy used only when no connection is available.
 fn copy_database_file(db_path: &Path, dest: &Path) -> Result<(), EneMemoryError> {
     fs::copy(db_path, dest).map_err(|e| {
         EneMemoryError::BackupError(format!(

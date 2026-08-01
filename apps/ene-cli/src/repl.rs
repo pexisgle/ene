@@ -10,17 +10,13 @@ use std::future::Future;
 use std::pin::Pin;
 use tokio::sync::broadcast::error::RecvError;
 
-/// Read a single line of REPL input on a blocking thread. Returns
-/// `None` if stdin reaches EOF (Ctrl-D in a TTY, or the input stream
-/// was closed).
 async fn read_line() -> Option<String> {
     TerminalUi::global().read_line().await
 }
 
-/// Drains the actor and returns the exit code. Used on both `/quit`
-/// and Ctrl-C paths so the process does not abort with
-/// `std::process::exit(0)` while pending memory writes, session
-/// splits, and tool processes are still in flight.
+/// Shut the actor down before returning, so the process does not abort with
+/// `std::process::exit(0)` while pending memory writes, session splits, and
+/// tool processes are still in flight.
 async fn drain_and_exit(ctx: &AppContext, code: i32) -> i32 {
     match ctx.handle.shutdown(SHUTDOWN_TIMEOUT).await {
         Ok(()) => {}
@@ -35,18 +31,15 @@ async fn drain_and_exit(ctx: &AppContext, code: i32) -> i32 {
     code
 }
 
-/// Discard any text the user had typed into the in-flight line editor
-/// and return the terminal to a clean state before a proactive turn
-/// renders. The raw-mode editor owns the terminal while it runs, so it
-/// must be cancelled and awaited to completion before the stream writes
-/// to stderr; otherwise the two would fight over the same lines.
+/// The raw-mode editor owns the terminal while it runs, so it must be
+/// cancelled and awaited to completion before the stream writes to stderr;
+/// otherwise the two would fight over the same lines.
 async fn cancel_editor(editor: &mut Pin<Box<impl Future<Output = Option<String>>>>) {
     terminal_ui::request_read_cancel();
     let _ = editor.as_mut().await;
     terminal_ui::clear_read_cancel();
 }
 
-/// Restart the line editor after a proactive turn finished rendering.
 #[must_use = "the returned future must be polled to drive the editor"]
 fn restart_editor() -> Pin<Box<impl Future<Output = Option<String>>>> {
     Box::pin(read_line())
@@ -56,11 +49,11 @@ fn restart_editor() -> Pin<Box<impl Future<Output = Option<String>>>> {
 /// (which borrow the editor and the event receiver) can run *after* the
 /// `select!` completes and releases its borrows.
 enum ReplStep {
-    /// Ctrl-C: shut down with the interrupted exit code.
+    /// Shut down with the interrupted exit code.
     Interrupt,
-    /// The chat bus closed: the runtime is gone, so drain and exit.
+    /// The runtime is gone; drain and exit.
     Disconnected,
-    /// A proactive (spontaneous) turn started while idle (#402).
+    /// A proactive (spontaneous) turn started while idle.
     Proactive(TurnId),
     /// The line editor produced input (or `None` on EOF).
     Input(Option<String>),
@@ -68,10 +61,8 @@ enum ReplStep {
     Skip,
 }
 
-/// Poll the REPL's three input sources for one iteration.
-///
-/// Extracted from `run` so the arm ordering can be locked down in unit
-/// tests. The `biased` order is deliberate: Ctrl-C first, then the line
+/// Extracted from `run` so the arm ordering can be locked down in unit tests.
+/// The `biased` order is deliberate: Ctrl-C first, then the line
 /// editor, then the chat bus. If a ready `TurnStarted::Proactive` were
 /// polled before a *completed* editor, the proactive arm would win,
 /// `cancel_editor` would await the already-finished future and drop the
@@ -91,9 +82,8 @@ where
     tokio::select! {
         biased;
 
-        // Ctrl-C: clean shutdown path. tokio::signal::ctrl_c()
-        // resolves on the first SIGINT, including the one a TTY
-        // forwards when the user presses Ctrl-C while
+        // tokio::signal::ctrl_c() resolves on the first SIGINT, including
+        // the one a TTY forwards when the user presses Ctrl-C while
         // line editing is blocked.
         ctrl_c_result = tokio::signal::ctrl_c() => {
             if let Err(e) = ctrl_c_result {
@@ -104,18 +94,13 @@ where
             ReplStep::Interrupt
         }
 
-        // Normal REPL line input, polled before the chat bus so a
-        // completed edit always beats a concurrently buffered proactive
-        // event. The blocking editor runs on a worker thread; we await
-        // its result here.
+        // Polled before the chat bus so a completed edit always beats a
+        // concurrently buffered proactive event.
         maybe_input = editor.as_mut() => ReplStep::Input(maybe_input),
 
-        // Continuous chat-bus subscription (#402): surface proactive
-        // (spontaneous) turns that start while the REPL is idle at
-        // the prompt. User-initiated turns are rendered by
-        // `process_stream` inside the `Input` handling below, so a
-        // `TurnStarted` observed here is necessarily proactive (the
-        // host is single-flight).
+        // User-initiated turns are rendered by `process_stream` inside the
+        // `Input` handling below, so a `TurnStarted` observed here is
+        // necessarily proactive (the host is single-flight).
         event = bus => {
             match event {
                 Ok(EneEvent::TurnStarted {
@@ -176,13 +161,10 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
         }
     }
 
-    // Subscribe to the chat bus once, before the loop, and keep the
-    // receiver alive for the whole session (#402). The desktop app
-    // subscribes continuously (`ai_bridge`); the CLI used to subscribe
-    // only for the duration of a turn, so while idle at the prompt the
-    // broadcast channel had zero subscribers and proactive (spontaneous)
-    // speech was silently dropped by `broadcast::Sender::send`. Holding
-    // the receiver here also satisfies the "subscribe before `run`"
+    // A broadcast channel silently drops `send` calls when it has no
+    // subscribers, so proactive (spontaneous) turns arriving while the REPL
+    // is idle at the prompt would be lost without a standing subscription.
+    // Holding the receiver here also satisfies the "subscribe before `run`"
     // ordering naturally.
     let mut rx = ctx.handle.subscribe();
 
@@ -221,7 +203,7 @@ pub async fn run(ctx: &mut AppContext) -> i32 {
                 // fallback read blocks on `read_line` and cannot observe
                 // `request_read_cancel`, so `cancel_editor` would hang
                 // until the next input line. Skip the cancel/render dance;
-                // proactive turns are an interactive-mode feature (#477).
+                // proactive turns are an interactive-mode feature.
             }
             ReplStep::Input(maybe_input) => {
                 let Some(input) = maybe_input else {
@@ -289,12 +271,9 @@ mod tests {
         }
     }
 
-    /// Regression test for #477: when the line editor has already
-    /// completed (the user pressed Enter) at the same iteration a
-    /// proactive `TurnStarted` is buffered, the editor arm is polled
-    /// first (`biased`), so the submitted input wins over the chat bus.
-    /// The earlier ordering let the proactive arm win and drop the user's
-    /// message via `cancel_editor`.
+    /// A completed editor is polled (`biased`) before a buffered proactive
+    /// `TurnStarted`, so the submitted input wins; without the biased order
+    /// the proactive arm would drop the user's message via `cancel_editor`.
     #[tokio::test]
     async fn completed_editor_beats_buffered_proactive_turn() {
         let mut editor = Box::pin(ready(Some("hello".to_string())));
@@ -302,9 +281,9 @@ mod tests {
         assert!(matches!(step, ReplStep::Input(Some(line)) if line == "hello"));
     }
 
-    /// A *pending* editor yields on its first poll, so the chat-bus arm
-    /// is still reached: a proactive turn buffered while the user is
-    /// mid-edit surfaces immediately rather than being starved.
+    /// A *pending* editor yields on its first poll, so the chat-bus arm is
+    /// still reached: a proactive turn buffered while the user is mid-edit
+    /// surfaces immediately rather than being starved.
     #[tokio::test]
     async fn pending_editor_does_not_starve_chat_bus() {
         let mut editor = Box::pin(pending::<Option<String>>());

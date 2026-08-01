@@ -1,6 +1,6 @@
 //! `OpenSettings` / AI consumer systems.
 //!
-//! Chat-related consumers target the [`ChatWindow`] entity (#109).
+//! Chat-related consumers target the [`ChatWindow`] entity.
 //! Settings visibility is handled separately via [`UiWindow`].
 use bevy_ecs::prelude::*;
 
@@ -121,8 +121,8 @@ pub fn apply_ai_permission_system(
 }
 
 /// Accumulates pending tool-permission approvals into the settings
-/// `UiState` so the Permission Center page can list and answer them
-/// (#177). Runs alongside [`apply_ai_permission_system`], which keeps
+/// `UiState` so the Permission Center page can list and answer them.
+/// Runs alongside [`apply_ai_permission_system`], which keeps
 /// the chat-window dialog; the two are independent surfaces over the
 /// same `decide_permission` call. Duplicate `request_id`s are ignored
 /// so a re-broadcast never double-lists a request.
@@ -205,7 +205,7 @@ pub fn apply_emote_tokens_system(
     }
 }
 
-/// Feeds [`ExpressionCommand`] messages into the [`EmotionPipelineState`] (#132).
+/// Feeds [`ExpressionCommand`] messages into the [`EmotionPipelineState`].
 pub fn apply_expression_commands_system(
     mut events: MessageReader<ExpressionCommand>,
     mut pipeline: ResMut<EmotionPipelineState>,
@@ -225,7 +225,7 @@ pub fn apply_expression_commands_system(
 ///
 /// `ene-vrm` is rendering-only and cannot depend on `ene-config`, and the
 /// orphan rule blocks a cross-crate `From` impl, so the desktop bridges the
-/// two mirrors here by matching variants directly (#133).
+/// two mirrors here by matching variants directly.
 fn to_vrm_layer(layer: ene_config::MotionLayer) -> ene_vrm::MotionLayer {
     match layer {
         ene_config::MotionLayer::Upper => ene_vrm::MotionLayer::Upper,
@@ -234,7 +234,7 @@ fn to_vrm_layer(layer: ene_config::MotionLayer) -> ene_vrm::MotionLayer {
     }
 }
 
-/// Applies [`CancelCommand`] to clear expression or motion state (#132).
+/// Applies [`CancelCommand`] to clear expression or motion state.
 pub fn apply_cancel_system(
     mut events: MessageReader<CancelCommand>,
     mut pipeline: ResMut<EmotionPipelineState>,
@@ -256,8 +256,7 @@ pub fn apply_cancel_system(
             }
             scope if scope.starts_with("motion:") => {
                 let label = scope.strip_prefix("motion:").unwrap_or_default();
-                // Unknown layer labels fall back to `Full` (preempts
-                // everything), matching the pre-typing behavior.
+                // Unknown layer labels fall back to `Full` (preempts everything).
                 let layer = ene_config::MotionLayer::from_label(label)
                     .unwrap_or(ene_config::MotionLayer::Full);
                 state.cancel_motion(to_vrm_layer(layer));
@@ -273,7 +272,7 @@ pub fn apply_cancel_system(
     }
 }
 
-/// Feeds [`MotionCommand`] messages into the [`MotionLayerState`] (#133).
+/// Feeds [`MotionCommand`] messages into the [`MotionLayerState`].
 ///
 /// Converts the canonical [`ene_config::MotionLayer`] carried on the command
 /// into the rendering-side [`ene_vrm::MotionLayer`] via [`to_vrm_layer`] — no
@@ -293,7 +292,7 @@ pub fn apply_motion_commands_system(
 }
 
 /// Updates the pending-candidates badge in `UiState` when new candidates
-/// are available (#223).
+/// are available.
 pub fn apply_pending_candidates_count_system(
     mut events: MessageReader<PendingCandidatesCount>,
     mut ui_query: Query<&mut UiStateComponent, With<UiWindow>>,

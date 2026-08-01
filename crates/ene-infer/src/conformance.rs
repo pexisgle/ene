@@ -184,8 +184,6 @@ async fn concurrency_is_serialized_and_busy_past_capacity<M>(
     // Yield the queue-filling job a moment to actually execute its
     // `try_send` before we check that the queue is full.
     tokio::time::sleep(Duration::from_millis(20)).await;
-    // The queue slot is occupied by `second`; this one must be rejected
-    // outright rather than wait.
     let third = engine
         .submit(
             M::Request::scripted(Duration::ZERO, false),
@@ -613,7 +611,7 @@ async fn backpressure_blocks_a_fast_producer_against_a_slow_consumer<M>(
 // A trivial in-crate mock model, used both to self-test `run_all` above
 // and by this crate's own unit tests (see `src/tests.rs`). `#[cfg(test)]`
 // because nothing outside test builds ever constructs one — downstream
-// crates bring their own mock for their own migrated engine.
+// crates bring their own mock for their own engine.
 // ---------------------------------------------------------------------
 
 /// A scripted request for [`MockModel`].
@@ -787,9 +785,6 @@ impl StreamingLocalModel for MockModel {
                 std::thread::sleep(req.stream_pause);
             }
             if sink.send(i, ctx).is_err() {
-                // `should_stop` fired (or the channel closed) while trying
-                // to deliver this chunk — stop exactly like a real model
-                // would on any other cooperative stop signal.
                 return Err(MockError);
             }
             if req.stream_fail_after == Some(i + 1) {

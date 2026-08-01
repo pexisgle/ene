@@ -10,9 +10,9 @@ const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 /// Current IPC protocol version.
 ///
 /// v2 adds the `Ping`/`Pong` liveness probe used by the host's periodic
-/// health check and hang detection (#238), and the deferred-call
-/// messages (`CallTool.deferred` / `DeferredAccepted`) that power
-/// background tool execution (#196).
+/// health check and hang detection, and the deferred-call messages
+/// (`CallTool.deferred` / `DeferredAccepted`) that power background tool
+/// execution.
 pub const IPC_PROTOCOL_VERSION: u32 = 2;
 
 /// IPC request — core → host
@@ -31,9 +31,9 @@ pub enum IpcRequest {
     },
     /// List all available tool specs.
     ListTools,
-    /// List host/RAG metadata profiles for indexed tools (#137).
+    /// List host/RAG metadata profiles for indexed tools.
     ListRagProfiles,
-    /// Request the tool's config JSON Schema (documented exception, #150).
+    /// Request the tool's config JSON Schema (documented exception).
     GetConfigSchema,
     /// Execute a tool by name with JSON arguments.
     CallTool {
@@ -41,7 +41,7 @@ pub enum IpcRequest {
         name: String,
         /// JSON-encoded arguments.
         arguments: String,
-        /// When `true`, request deferred (background) execution (#196).
+        /// When `true`, request deferred (background) execution.
         ///
         /// A background-capable tool should start the work asynchronously
         /// and reply with [`IpcResponse::DeferredAccepted`] carrying a
@@ -60,8 +60,7 @@ pub enum IpcRequest {
     },
     /// Set the call context (conversation + turn identifiers).
     ///
-    /// Supersedes removed `SetSessionId`; tool-side session scoping should
-    /// derive from `conversation_id`.
+    /// Tool-side session scoping derives from `conversation_id`.
     SetCallContext {
         /// Conversation-level identifier (session ID).
         conversation_id: String,
@@ -80,7 +79,7 @@ pub enum IpcRequest {
         /// Target glob pattern.
         target_pattern: String,
     },
-    /// Revoke a previously granted session-wide permission allow pattern (#177).
+    /// Revoke a previously granted session-wide permission allow pattern.
     RevokePattern {
         /// Action pattern to revoke.
         action: String,
@@ -91,16 +90,16 @@ pub enum IpcRequest {
     Shutdown,
     /// Liveness probe. The server must reply with [`IpcResponse::Pong`]
     /// promptly; a hung tool that fails to answer within the probe timeout
-    /// is considered unhealthy and restarted by the host (#238).
+    /// is considered unhealthy and restarted by the host.
     Ping,
-    /// Poll the status of a deferred (background) task by id (#196).
+    /// Poll the status of a deferred (background) task by id.
     ///
     /// The server replies with [`IpcResponse::DeferredStatus`].
     PollDeferred {
         /// The `task_id` returned by a prior [`IpcResponse::DeferredAccepted`].
         task_id: String,
     },
-    /// Cancel a deferred (background) task by id (#196).
+    /// Cancel a deferred (background) task by id.
     ///
     /// The server replies with [`IpcResponse::Ack`].
     CancelDeferred {
@@ -124,7 +123,7 @@ pub enum IpcResponse {
         /// The structured tool specs.
         tools: Vec<ToolSpec>,
     },
-    /// Host/RAG metadata profiles (#137).
+    /// Host/RAG metadata profiles.
     RagProfiles {
         /// Per-tool RAG profiles matching `Tools`.
         profiles: Vec<ToolRagProfile>,
@@ -139,7 +138,7 @@ pub enum IpcResponse {
         /// The result, or an error.
         result: Result<String, ToolError>,
     },
-    /// Acknowledgment of a deferred (background) tool call (#196).
+    /// Acknowledgment of a deferred (background) tool call.
     ///
     /// Returned instead of [`IpcResponse::CallResult`] when a
     /// background-capable tool accepts a deferred request. The actual
@@ -154,9 +153,9 @@ pub enum IpcResponse {
         /// Error description.
         message: String,
     },
-    /// Reply to a [`IpcRequest::Ping`] liveness probe (#238).
+    /// Reply to a [`IpcRequest::Ping`] liveness probe.
     Pong,
-    /// Status of a deferred (background) task (#196).
+    /// Status of a deferred (background) task.
     ///
     /// Returned in response to [`IpcRequest::PollDeferred`].
     DeferredStatus {
@@ -167,7 +166,7 @@ pub enum IpcResponse {
     },
 }
 
-/// Status of a deferred (background) tool task (#196).
+/// Status of a deferred (background) tool task.
 ///
 /// Reported by [`IpcResponse::DeferredStatus`] in response to a
 /// [`IpcRequest::PollDeferred`] probe. The host/runtime polls a
@@ -228,11 +227,10 @@ impl ToolConfigAccessor {
     }
 
     /// Returns a [`ToolError::InvalidArguments`] when the stored JSON
-    /// does not deserialize into `T` — the previous implementation
-    /// returned `T::default()` on a deserialize failure, which silently
-    /// masked config corruption and confused callers into thinking the
-    /// default was a real value. A typed error gives the host a chance
-    /// to log the bad payload and fail the request.
+    /// does not deserialize into `T`. A silent `T::default()` fallback would
+    /// mask config corruption and make callers mistake the default for a real
+    /// value; the typed error lets the host log the bad payload and fail the
+    /// request.
     pub async fn get<T: serde::de::DeserializeOwned>(&self) -> Result<T, ToolError> {
         let guard = self.config.read().await;
         serde_json::from_value(guard.clone()).map_err(|e| ToolError::InvalidArguments {
@@ -587,8 +585,6 @@ mod tests {
         assert_eq!(result.unwrap(), big_content);
     }
 
-    // ── ToolConfigAccessor tests ────────────────────────────────────
-
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
     struct SampleConfig {
         threshold: u32,
@@ -683,7 +679,6 @@ mod tests {
         writer_handle.await.unwrap();
         reader_handle.await.unwrap();
 
-        // Final value must be the last written.
         let final_cfg: SampleConfig = accessor.get().await.unwrap();
         assert_eq!(final_cfg.threshold, 49);
         assert_eq!(final_cfg.label, "iter-49");

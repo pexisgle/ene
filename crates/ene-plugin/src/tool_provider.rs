@@ -644,8 +644,6 @@ mod tests {
         );
     }
 
-    // ── SingleActionProvider tests ─────────────────────────────────
-
     #[tokio::test]
     async fn single_action_provider_dispatches_by_name() {
         let provider = SingleActionProvider::new(Box::new(EchoAction));

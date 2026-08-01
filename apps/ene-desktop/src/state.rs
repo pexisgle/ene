@@ -9,14 +9,13 @@
 //! are passed to producers at construction time so they can push
 //! without holding a reference to the state.
 //!
-//! TODO(#dual-source-of-truth): `runtime_startup_error`,
-//! `runtime_disconnected`, and `reconnect_attempted` are duplicated
-//! between `AppState` and `UiStateComponent` (in `component/ui.rs`).
-//! `AppState::sync_runtime_health_to_ui` / `pull_runtime_health_from_ui`
-//! manually copy these fields back and forth every frame. This is
-//! fragile and error-prone. A future refactor should pick a single
-//! source of truth (likely the bevy `UiStateComponent`) and have
-//! `AppState` read/write through it exclusively.
+//! TODO: deduplicate `runtime_startup_error`, `runtime_disconnected`,
+//! and `reconnect_attempted`, which are copied between `AppState` and
+//! `UiStateComponent` (in `component/ui.rs`) every frame by
+//! `sync_runtime_health_to_ui` / `pull_runtime_health_from_ui`. Once
+//! both consumers settle, pick a single source of truth (likely the
+//! bevy `UiStateComponent`) and have `AppState` read/write through it
+//! exclusively.
 use std::sync::Arc;
 
 use bevy_app::App;
@@ -48,26 +47,28 @@ pub struct AppState {
     pub gpu: GpuContext,
     pub settings: CharacterSettings,
     pub ai: Option<Arc<AiBridge>>,
-    /// Localized startup failure when [`AiBridge::try_new`] fails (#242).
-    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.runtime_startup_error`
+    /// Localized startup failure when [`AiBridge::try_new`] fails.
+    /// TODO: deduplicate with `UiStateComponent.runtime_startup_error` once
+    /// `AppState` adopts a single source of truth.
     pub runtime_startup_error: Option<String>,
     /// Actor broadcast channel closed; chat is disabled until reconnect.
-    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.runtime_disconnected`
+    /// TODO: deduplicate with `UiStateComponent.runtime_disconnected` once
+    /// `AppState` adopts a single source of truth.
     pub runtime_disconnected: bool,
     /// Whether the single automatic reconnect has already been attempted.
-    /// TODO(#dual-source-of-truth): duplicated in `UiStateComponent.reconnect_attempted`
+    /// TODO: deduplicate with `UiStateComponent.reconnect_attempted` once
+    /// `AppState` adopts a single source of truth.
     pub reconnect_attempted: bool,
     pub tray: Option<TrayHandle>,
     /// Character renderer (depth texture + default VRM).
     pub character: CharacterRenderer,
     /// Rapier collider registration produced by
     /// [`crate::physics::PhysicsWorld::register_character_colliders`]
-    /// during `Runtime::resumed`. Held in legacy `AppState` so the
+    /// during `Runtime::resumed`. Held on `AppState` so the
     /// per-frame `update_character_bone_positions` and the cast-ray
     /// reverse-lookup can use it without going through the bevy
     /// `World`. `None` until `resumed` runs.
     pub character_physics_registration: Option<crate::physics::CharacterColliderRegistration>,
-    /// Debug overlay state (raycast hit + line-list renderer).
     pub debug: DebugState,
     /// The new `bevy_ecs` [`App`]. Its schedule is run by
     /// [`crate::runtime::Runtime::about_to_wait`] on every frame.
@@ -248,16 +249,14 @@ impl AppState {
     }
 
     /// Borrow the bevy `World` mutably for UI render / action
-    /// dispatch sites. Phase 5+ reads / writes UI components
-    /// through this handle.
+    /// dispatch sites.
     #[expect(dead_code, reason = "Inline-resolved in runtime.rs")]
     pub fn ui_bevy_world(&mut self) -> &mut bevy_ecs::world::World {
         self.app.world_mut()
     }
 
     /// Borrow the per-UI-entity [`UiStateComponent`](crate::component::ui::UiStateComponent)
-    /// mutably. Replaces the legacy
-    /// The first call to
+    /// mutably. The first call to
     /// `app.update()` must have happened for the entity to exist.
     pub fn ui_bevy_state_mut(
         &mut self,
@@ -285,15 +284,8 @@ impl AppState {
     }
 
     /// Borrow the Rapier [`PhysicsWorld`](crate::physics::PhysicsWorld)
-    /// immutably from the bevy [`PhysicsWorldResource`].
-    ///
-    /// Returns a `&PhysicsWorld` with a lifetime tied to `&self` —
-    /// the call sites in `Runtime::resumed` /
-    /// `Runtime::about_to_wait` were the only consumers and are
-    /// replaced by the Phase 8.3 `step_physics_windows_system`
-    /// which takes `ResMut<PhysicsWorldResource>` directly. This
-    /// helper is kept for the small amount of Windows-specific
-    /// registration code that still runs once in `resumed`.
+    /// immutably from the bevy [`PhysicsWorldResource`]. Kept for the
+    /// Windows-specific collider registration and ray-cast call sites.
     #[cfg(target_os = "windows")]
     pub fn physics_world(&self) -> &crate::physics::PhysicsWorld {
         &self
@@ -413,7 +405,7 @@ impl AppState {
         }
     }
 
-    /// Attempt a single runtime reconnect after actor death (#242).
+    /// Attempt a single runtime reconnect after actor death.
     pub fn reconnect_runtime(
         &mut self,
         event_tx: &AppEventSender,

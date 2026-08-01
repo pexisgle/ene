@@ -1,12 +1,9 @@
-//! Plain-data runtime settings (the v2 analog of Bevy
-//! `CharacterSettings`).
+//! Plain-data runtime settings.
 //!
 //! `CharacterSettings` is owned directly by the
 //! [`Runtime`](crate::runtime::Runtime) — no global registry, no
 //! lock around the outer struct. The only field that is shared
 //! across threads (`store`) sits behind a [`parking_lot::RwLock`].
-//!
-//! Methods mirror the legacy `app_config.rs` shape 1:1.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +12,7 @@ use ene_config::serde::{Deserialize, Serialize};
 use glam::Vec3;
 use parking_lot::RwLock;
 
-// ── Persisted section (matches `DesktopSection` in legacy) ──
+// ── Persisted section ──
 
 ene_config::define_label_enum!(
     pub enum ShadowQuality {
@@ -94,7 +91,6 @@ pub struct GraphicsSection {
 }
 
 impl GraphicsSection {
-    /// Resolves the quality preset into concrete renderer knobs.
     #[must_use]
     pub fn resolved(&self) -> GraphicsResolved {
         self.quality.resolved()
@@ -204,7 +200,7 @@ fn cycle_choice<T: Copy + PartialEq>(choices: &[T], current: T, step: isize) -> 
 // ── CLI parsing ──
 
 /// Read optional VRM and VRMA overrides from the first two CLI
-/// arguments. Mirrors the legacy `read_cli_paths` exactly.
+/// arguments.
 pub fn read_cli_paths() -> (String, String) {
     let vrm = std::env::args()
         .nth(1)
@@ -272,128 +268,99 @@ impl Default for CharacterState {
 }
 
 #[derive(Clone, Debug, Default)]
-// TODO(M2): Decompose UiState into per-page sub-structs (MemoryJournalState,
-// PermissionState, SessionState, etc.) to reduce the flat 40+ field struct.
+// TODO: decompose UiState into per-page sub-structs (MemoryJournalState,
+// PermissionState, SessionState, etc.) when the flat 40+ field struct
+// grows unwieldy.
 pub struct UiState {
     pub settings_window_visible: bool,
     /// Page the settings window should jump to when it next
     /// becomes visible. `Some(_)` is set by the per-action
-    /// consumer systems (Phase 6) and consumed by the runtime
-    /// on the next `show_settings_window` call. `None` keeps
-    /// the currently-focused page.
+    /// consumer systems and consumed by the runtime on the next
+    /// `show_settings_window` call. `None` keeps the currently-focused
+    /// page.
     pub focused_page: Option<crate::settings_ui::PageKind>,
     /// Toggle the Linux-only Wayland / X11 mask capture rectangle
     /// overlay. When `true` and [`Self::show_collider_debug`] is
     /// also `true`, the character window's debug overlay draws the
-    /// downsampled mask rectangles as purple wireframes. Defaults
-    /// to `false`; toggled by the "Linux mask overlay (debug)"
-    /// checkbox on the Character settings page.
+    /// downsampled mask rectangles as purple wireframes. Toggled by
+    /// the "Linux mask overlay (debug)" checkbox on the Character
+    /// settings page.
     pub debug_overlay_visible: bool,
     /// Toggle the per-bone collider wireframe + raycast hit-point
     /// overlay on the character window. Bound to the F3 hotkey
     /// and the "Show raycast colliders (debug)" checkbox on the
-    /// Character page. Not persisted — defaults to
-    /// `false` on every launch so the user starts with a clean
-    /// view.
+    /// Character page. Not persisted — defaults to `false` on every
+    /// launch so the user starts with a clean view.
     pub show_collider_debug: bool,
     /// Toggle the input-region debug overlay (F9).
     pub show_input_region_debug: bool,
-    /// The name of the bone collider currently hovered, if any.
     pub hovered_bone_name: Option<String>,
-    /// Cached memory-journal rows for desktop debug UX (#93).
     pub memory_journal_rows: Vec<MemoryJournalRow>,
-    /// Cached active commitments for desktop debug UX (#93).
     pub memory_journal_commitments: Vec<String>,
-    /// Cached structured commitment data for the commitments tab (#223).
     pub memory_journal_commitments_cache: Vec<ene_store::Commitment>,
-    /// Cached pending memory candidates for the approval tab (#223).
     pub memory_journal_pending_candidates: Vec<ene_runtime::handle::PendingCandidateSummary>,
-    /// Cached affect-state snapshot for memory journal UX (#93).
     pub memory_journal_affect: MemoryJournalAffect,
-    /// Last journal operation status/error message.
     pub memory_journal_message: Option<String>,
-    /// Whether user-deleted memories should be shown in the journal list.
     pub memory_journal_show_deleted: bool,
-    /// Whether archived memories should be shown in the journal list.
     pub memory_journal_show_archived: bool,
-    /// Whether superseded memories should be shown in the journal list.
     pub memory_journal_show_superseded: bool,
-    /// Browse vs recall-debug mode for the memory journal.
     pub memory_journal_recall_debug: bool,
-    /// Tab mode for the memory journal page (#223).
     pub memory_journal_mode: MemoryPageMode,
-    /// Number of pending candidates awaiting user approval (#223).
     pub memory_journal_pending_count: usize,
-    /// Commitment list filter (#223).
     pub memory_journal_commitment_filter: CommitmentFilter,
-    /// Recall-debug query text.
     pub memory_journal_recall_query: String,
-    /// Cached recall-debug rows.
     pub memory_journal_recall_rows: Vec<MemoryJournalRecallRow>,
-    /// Pending deferred memory-write retries (#240).
     pub memory_journal_pending_writes: usize,
-    /// Permanent deferred memory-write failures (#240).
     pub memory_journal_permanent_writes: usize,
-    /// Pending tool-permission approvals awaiting a user decision
-    /// (#177). Accumulated by the permission-center consumer system
+    /// Pending tool-permission approvals awaiting a user decision.
+    /// Accumulated by the permission-center consumer system
     /// from `AiPermissionRequested` messages; a request is removed
     /// once the user answers it from the Permission Center page.
     pub permission_requests: Vec<PendingPermission>,
-    /// Standing session-wide permission grants listed from the actor
-    /// (#177). Refreshed after every decision / revocation.
+    /// Standing session-wide permission grants listed from the actor.
+    /// Refreshed after every decision / revocation.
     pub permission_grants: Vec<ene_runtime::PermissionScope>,
-    /// Last permission-center operation status/error message.
     pub permission_message: Option<String>,
-    /// Cached session metadata rows for the sessions page (#176).
+    /// Cached session metadata rows for the sessions page.
     /// Lazy-loaded the first time the page is shown and refreshed
     /// after every archive / import action. Rendered directly from the
-    /// API v1 [`ene_runtime::PublicSessionMeta`] DTO (#408).
+    /// API v1 [`ene_runtime::PublicSessionMeta`] DTO.
     pub session_rows: Vec<ene_runtime::PublicSessionMeta>,
     /// Whether `session_rows` has been populated at least once, so an
     /// empty store is not mistaken for "not yet loaded".
     pub sessions_loaded: bool,
-    /// Search query text for the sessions page (#176).
     pub session_search_query: String,
-    /// Cached search-result rows for the sessions page (#176).
     pub session_search_rows: Vec<SessionSearchRow>,
-    /// File path typed for a session import (#176).
     pub session_import_path: String,
-    /// Whether archived sessions are included in the list (#176).
+    /// Whether archived sessions are included in the list.
     /// Defaults to `false`, matching the initial lazy load.
     pub session_show_archived: bool,
-    /// Last sessions-page operation status/error message.
     pub session_message: Option<String>,
-    /// First-run onboarding banner when the chat API key is missing (#241).
+    /// First-run onboarding banner when the chat API key is missing.
     pub show_onboarding: bool,
-    /// Localized startup failure when the runtime actor could not open (#242).
+    /// Localized startup failure when the runtime actor could not open.
     pub runtime_startup_error: Option<String>,
-    /// Actor broadcast channel closed; show reconnect banner (#242).
+    /// Actor broadcast channel closed; show reconnect banner.
     pub runtime_disconnected: bool,
-    /// Whether the single reconnect attempt has already been used (#242).
     pub reconnect_attempted: bool,
-    /// Set by the reconnect banner; consumed by the winit runtime (#242).
+    /// Set by the reconnect banner; consumed by the winit runtime.
     pub reconnect_requested: bool,
-    /// Dismiss the fatal startup dialog until the next failure (#242).
     pub fatal_startup_dismissed: bool,
 
-    // ── Spotlight quick launcher (#218) ──
+    // ── Spotlight quick launcher ──
     /// Whether the spotlight (Alt+Space) command palette is visible.
     pub spotlight_visible: bool,
-    /// Current search text typed into the spotlight input.
     pub spotlight_input: String,
-    /// Index of the currently highlighted spotlight action.
     pub spotlight_selection: usize,
 
-    // ── Floating caption overlay (#218) ──
-    /// Whether the floating caption overlay is visible.
+    // ── Floating caption overlay ──
     pub caption_visible: bool,
-    /// Text shown inside the caption overlay.
     pub caption_text: String,
     /// Top-left position (logical points) of the caption window; the
     /// overlay persists the user's drag position here.
     pub caption_position: (f32, f32),
 
-    // ── Character card editor (#218) ──
+    // ── Character card editor ──
     /// Whether the editor has loaded the on-disk card into the buffers
     /// at least once since the page was opened.
     pub character_editor_loaded: bool,
@@ -419,14 +386,11 @@ pub struct UiState {
     pub character_editor_post_history: String,
 }
 
-/// A single session message search hit shown on the sessions page (#176).
+/// A single session message search hit shown on the sessions page.
 #[derive(Clone, Debug)]
 pub struct SessionSearchRow {
-    /// Logical session key the message belongs to.
     pub session_id: String,
-    /// Role that produced the message (e.g. `user`, `assistant`).
     pub role: String,
-    /// Message content, truncated for display.
     pub content: String,
 }
 
@@ -485,31 +449,23 @@ pub struct MemoryJournalAffect {
     pub trust: f32,
 }
 
-/// Tab mode for the memory journal page (#223).
+/// Tab mode for the memory journal page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryPageMode {
-    /// Browse cached memories.
     #[default]
     Browse,
-    /// Recall-debug search mode.
     RecallSearch,
-    /// Pending memory candidate approval.
     PendingApproval,
-    /// Active commitment management.
     Commitments,
 }
 
-/// Filter for commitment list display (#223).
+/// Filter for commitment list display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CommitmentFilter {
-    /// Only active commitments.
     #[default]
     Active,
-    /// All commitments regardless of status.
     All,
-    /// Only completed commitments.
     Completed,
-    /// Only cancelled commitments.
     Cancelled,
 }
 
@@ -532,9 +488,6 @@ impl std::fmt::Debug for CharacterSettings {
     }
 }
 
-/// `CharacterSettings` methods are kept identical in shape to the
-/// legacy Bevy `app_config.rs` so the unused methods can be
-/// imported and called.
 impl CharacterSettings {
     /// Build the initial settings: discover characters on disk,
     /// load the persisted JSON, clamp runtime values.
@@ -643,7 +596,6 @@ impl CharacterSettings {
         self.store.read().config()
     }
 
-    /// Returns a new `EneConfig` by value. Use this where a move/clone is needed.
     pub fn config_clone(&self) -> ene_config::EneConfig {
         self.store.read().config()
     }
@@ -733,9 +685,8 @@ impl CharacterSettings {
         );
         self.character_state.model_scale = per.model_scale;
         self.character_state.look_at_strength = per.look_at_strength;
-        // An empty string on disk (the legacy Bevy 0.18 default)
-        // is treated as "neutral" so a model that has never been
-        // customized gets a sane starting pose.
+        // An empty string on disk is treated as "neutral" so a model
+        // that has never been customized gets a sane starting pose.
         self.character_state.default_expression = if per.default_expression.is_empty() {
             "neutral".to_string()
         } else {
@@ -1046,23 +997,15 @@ fn read_character_json_meta(
 mod tests {
     use super::*;
 
-    /// `CharacterState` defaults to `"neutral"`. A fresh install
-    /// must not surprise the user with an arbitrary expression.
     #[test]
     fn character_state_defaults_to_neutral_expression() {
         let s = CharacterState::default();
         assert_eq!(s.default_expression, "neutral");
     }
 
-    /// When `select_character` is called with an out-of-range or
-    /// same-character index, it returns `None` and does not push
-    /// a default expression — "no switch → no expression" so the
-    /// renderer's `EmotionQueue` stays untouched. The runtime
-    /// paths in `page_character::render` and the WASD hotkey
-    /// are the integration tests; this test pins the
-    /// out-of-range branch via the `cycle_index` math used at
-    /// call sites (the runtime guards on `len > 0` before
-    /// calling `select_character`).
+    /// Pins the `cycle_index` math used at the `select_character` call
+    /// sites so an out-of-range or same-character index resolves to a
+    /// no-op (`None`) without pushing an expression.
     #[test]
     fn select_character_no_op_returns_none() {
         let len = 0_usize;
@@ -1073,9 +1016,8 @@ mod tests {
     }
 
     /// An empty `default_expression` on disk is treated as
-    /// `"neutral"`. The legacy Bevy 0.18 default wrote the empty
-    /// string, so this branch covers the migration path for
-    /// users upgrading from a pre-release build.
+    /// `"neutral"` so a model that was never customized gets a
+    /// sane starting pose.
     #[test]
     fn load_per_character_settings_treats_empty_as_neutral() {
         let raw = "";
@@ -1084,7 +1026,7 @@ mod tests {
     }
 
     /// The `PendingPermission` / `PendingUserInput` /
-    /// `QuestionDraft` types are now consumed by the dialog
+    /// `QuestionDraft` types are consumed by the dialog
     /// renderer in `page_ai.rs`. A future refactor that
     /// accidentally drops one of the fields would lose the
     /// dialog data, so this test pins the public surface.

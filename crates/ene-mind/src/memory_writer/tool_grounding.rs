@@ -1,4 +1,4 @@
-//! Tool-result grounding helpers for Phase 8 (#92).
+//! Tool-result grounding helpers.
 
 use crate::config::ToolGroundingConfig;
 use crate::memory_writer::candidate::{MemoryCandidate, ToolResultSummary};

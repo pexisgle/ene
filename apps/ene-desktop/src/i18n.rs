@@ -14,7 +14,6 @@ pub fn loader() -> &'static FluentLanguageLoader {
     static LOADER: OnceLock<FluentLanguageLoader> = OnceLock::new();
     LOADER.get_or_init(|| {
         let loader = fluent_language_loader!();
-        // Load default fallback language
         drop(loader.load_languages(&Localizations, &[loader.fallback_language().clone()]));
         loader
     })

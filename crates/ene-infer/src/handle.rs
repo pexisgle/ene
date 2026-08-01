@@ -241,7 +241,7 @@ impl<M: LocalModel> EngineHandle<M> {
     /// [`EngineConfig::job_timeout`] is enforced only inside the worker,
     /// starting when the job begins executing.
     ///
-    /// If [`EngineConfig::stall_timeout`] previously confirmed a wedged
+    /// If [`EngineConfig::stall_timeout`] has confirmed a wedged
     /// worker (a suspected stall that persisted to the escalation
     /// threshold), this returns [`EngineError::EngineDown`] immediately
     /// rather than [`EngineError::Busy`] — a permanently stuck worker
@@ -436,9 +436,8 @@ fn respond<T: Send>(reply: oneshot::Sender<T>, value: T) {
 /// the trait object to the *reference's* lifetime rather than `'static`,
 /// which silently breaks `downcast_ref` (it always returns `None`, since
 /// the payload really is `Any + 'static` and the two no longer type-match
-/// the way they appear to). Confirmed with a standalone repro before fixing
-/// this — see the regression test in `src/tests.rs` that pins the actual
-/// message surviving into `EngineError::EngineDown`.
+/// the way they appear to). See the regression test in `src/tests.rs` that
+/// pins the actual message surviving into `EngineError::EngineDown`.
 fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()

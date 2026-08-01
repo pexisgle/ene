@@ -1,7 +1,4 @@
 //! Companion commitment ledger domain model.
-//!
-//! Moved from `ene-store` (#270) — pure domain vocabulary for tracked
-//! promises/tasks. `ene-store` owns the `SeaORM` row conversions.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

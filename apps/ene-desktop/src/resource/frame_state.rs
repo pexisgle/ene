@@ -3,10 +3,7 @@ use std::time::Instant;
 
 use bevy_ecs::prelude::*;
 
-/// Per-frame timing snapshot updated by the `First`-stage frame system
-/// (added in Phase 2; for now the field is read by
-/// [`crate::runtime::Runtime::about_to_wait`] once we wire the
-/// schedule output back into the legacy state).
+/// Per-frame timing snapshot.
 ///
 /// The fields are read by any system that needs `delta` (animation
 /// blending, drag integration, FPS counter) or `elapsed` (AI bridge
@@ -25,14 +22,11 @@ pub struct FrameState {
 }
 
 impl FrameState {
-    /// Returns the previous tick's [`Instant`], if any.
     #[expect(dead_code, reason = "yet to be wired to frame system")]
     pub const fn last_instant(&self) -> Option<Instant> {
         self.last_instant
     }
 
-    /// Records a new `last_instant` value. Called by the frame system
-    /// added in Phase 2.
     #[expect(dead_code, reason = "yet to be wired to frame system")]
     pub const fn set_last_instant(&mut self, instant: Instant) {
         self.last_instant = Some(instant);

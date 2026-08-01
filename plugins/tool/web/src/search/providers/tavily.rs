@@ -30,7 +30,6 @@ struct TavilyRequest {
     max_results: u32,
 }
 
-/// Tavily Search API provider.
 #[derive(Debug)]
 pub struct TavilyProvider {
     api_key: String,

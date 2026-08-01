@@ -7,13 +7,13 @@
 //! ## Concurrency
 //!
 //! A single reader task per connection demultiplexes every incoming response
-//! by `request_id`/variant into per-request waiters and stream channels (H-12).
+//! by `request_id`/variant into per-request waiters and stream channels.
 //! The connection is shared as a plain `Arc<IpcPluginConnection>` with **no
 //! external lock**: every request-path method takes `&self`, and the socket
 //! write half is guarded by its own short-lived lock released *before* the
-//! response is awaited (#431). Stream chunks arrive on a dedicated channel
+//! response is awaited. Stream chunks arrive on a dedicated channel
 //! routed by the reader, so tool calls and other requests are never serialized
-//! behind a long-running LLM stream (#D2). The stream's translation task
+//! behind a long-running LLM stream. The stream's translation task
 //! [`JoinHandle`] is tracked and aborted when the stream is dropped, ensuring
 //! prompt cleanup on cancellation.
 //!
@@ -21,7 +21,7 @@
 //!
 //! Transient failures (transport errors) on `chat_completion` and stream
 //! establishment are retried according to the [`RetryPolicy`] supplied by the
-//! factory, matching the OpenAI provider's behavior (#C2).
+//! factory, matching the OpenAI provider's behavior.
 //!
 //! ## Concurrency admission control
 //!
@@ -155,7 +155,7 @@ pub struct IpcLlmProvider {
     /// Context window the plugin advertised for this provider kind
     /// (`LlmProviderSpec.context_window`), surfaced through
     /// [`LlmProvider::context_window`] so prompt packing can budget against the
-    /// model's real limit (#364, #370). `None` when the plugin declared none.
+    /// model's real limit. `None` when the plugin declared none.
     context_window: Option<u32>,
     /// Shared with every other `IpcLlmProvider` instance created by the same
     /// factory for the same (plugin, kind) pair, so the concurrency bound
@@ -210,12 +210,12 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
 ///
 /// Wraps the per-request [`ReceiverStream`] and the reader's [`JoinHandle`].
 /// Dropping the stream (e.g. user cancellation) aborts the reader, releasing
-/// the connection for other requests (#D2).
+/// the connection for other requests.
 ///
 /// When the stream is dropped *before* it reached a natural terminal message
 /// (`completed == false`), the drop handler also sends a best-effort
 /// `CancelStream` IPC request so the plugin stops generating the abandoned
-/// stream server-side (Cr-4). Natural completion sets `completed` to avoid a
+/// stream server-side. Natural completion sets `completed` to avoid a
 /// pointless cancel round-trip after `StreamEnd`/`StreamError`.
 ///
 /// `_permit` holds this stream's [`ConcurrencyLimiter`] slot for as long as
@@ -245,7 +245,7 @@ impl Drop for IpcChatStream {
         // It unregisters the per-request stream channel from the router and,
         // when the stream did not finish naturally, sends a best-effort
         // `CancelStream` so the plugin stops generating the abandoned stream
-        // server-side (Cr-4). Natural completion sets `completed` to avoid a
+        // server-side. Natural completion sets `completed` to avoid a
         // pointless cancel round-trip after `StreamEnd`/`StreamError`.
         tokio::spawn(async move {
             conn.close_chat_stream(&request_id);
@@ -301,7 +301,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
 
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        // Admission control (#stage6): acquire this provider's concurrency
+        // Admission control: acquire this provider's concurrency
         // slot *before* establishing the stream and *before* the retry loop,
         // so retries never re-acquire while already holding a permit (which
         // would deadlock a max_in_flight=1 provider against itself). The
@@ -310,9 +310,9 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         let permit = self.limiter.acquire(&self.kind).await?;
 
         // Establish the stream with retry on transient (transport) failures,
-        // matching the OpenAI provider's `establish_sse_connection` (#C2).
+        // matching the OpenAI provider's `establish_sse_connection`.
         // `send_create_chat_stream` takes `&self` and holds the writer lock
-        // only for the duration of the write (#431).
+        // only for the duration of the write.
         let mut stream_rx = self
             .retry_policy
             .run_with_retry_after(
@@ -365,7 +365,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
 
         // Spawn a translation task that reads from the router-provided receiver
         // and converts `PluginIpcResponse` stream messages into
-        // `LlmResponseChunk`. The single reader task (H-12) routes all
+        // `LlmResponseChunk`. The single reader task routes all
         // `StreamChunk` / `StreamEnd` / `StreamError` for this `request_id`
         // into `stream_rx`, so no separate connection lock is needed here.
         let rid = request_id.clone();
@@ -459,7 +459,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
             .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
             .collect();
 
-        // Admission control (#stage6): held for the entire call below,
+        // Admission control: held for the entire call below,
         // including all retry attempts, so a retry never re-acquires while
         // already holding a permit (which would deadlock a
         // max_in_flight=1 provider against itself). Released when this
@@ -468,7 +468,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
         let _permit = self.limiter.acquire(&self.kind).await?;
 
         // Retry transient (transport) failures with the same policy as the
-        // OpenAI path (#C2). The connection's own `do_request` already
+        // OpenAI path. The connection's own `do_request` already
         // reconnects once on transport failure; this outer policy adds
         // backoff and additional attempts for persistent transient errors.
         self.retry_policy
@@ -615,7 +615,6 @@ mod concurrency_limiter_tests {
         }));
         let _permit = limiter.acquire("test").await.unwrap();
 
-        // One caller fills the single queue slot.
         let queued_limiter = std::sync::Arc::clone(&limiter);
         let queued = tokio::spawn(async move { queued_limiter.acquire("test").await });
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -640,7 +639,6 @@ mod concurrency_limiter_tests {
         });
         let permit = limiter.acquire("test").await.unwrap();
 
-        // While held, no other caller can get in (fail-fast, no queue depth).
         assert!(limiter.acquire("test").await.is_err());
 
         // Drop simulates `IpcChatStream`'s `_permit` field being dropped when
@@ -648,7 +646,6 @@ mod concurrency_limiter_tests {
         // on natural `StreamEnd`/`StreamError` completion.
         drop(permit);
 
-        // The slot is immediately available again.
         assert!(limiter.acquire("test").await.is_ok());
     }
 }

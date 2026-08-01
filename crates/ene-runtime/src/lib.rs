@@ -41,19 +41,19 @@ pub mod error;
 pub mod handle;
 /// System prompt and message assembly helpers.
 ///
-/// Not part of the stable public API v1 contract (#189). Kept visible for the
+/// Not part of the stable public API v1 contract. Kept visible for the
 /// CLI `/prompt` debug command and integration tests.
 #[doc(hidden)]
 pub mod message_builder;
 mod proactive;
-/// Stable public API v1 facade: version, JSON event mirrors, redaction (#189).
+/// Stable public API v1 facade: version, JSON event mirrors, redaction.
 pub mod public_api;
 /// Read-only session and pending-candidate query handles that bypass the
-/// turn-execution actor mailbox entirely (#271).
+/// turn-execution actor mailbox entirely.
 pub mod query;
 /// Permission types and streaming engine internals.
 ///
-/// Not part of the stable public API v1 contract (#189). Prefer [`EneHandle`].
+/// Not part of the stable public API v1 contract. Prefer [`EneHandle`].
 #[doc(hidden)]
 pub mod streaming;
 mod streaming_cognitive;
@@ -62,20 +62,18 @@ mod streaming_cognitive;
 pub mod task_config;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
-/// Actor-native undo stack and metadata (#178).
+/// Actor-native undo stack and metadata.
 pub mod undo;
 /// Screen-image vision summarization handle, bypasses the turn-execution
-/// actor mailbox entirely (#271).
+/// actor mailbox entirely.
 pub mod vision;
 
-// ── Bootstrap helpers ──
 /// Host helpers for `ConfigStore` → card → [`EneHandle::open`].
 pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 
-// ── Actor types ──
 /// Actor handle, events, status, and state snapshot.
 ///
-/// The event bus is split into three channels (#272): [`EneEvent`] /
+/// The event bus is split into three channels: [`EneEvent`] /
 /// [`EneEventReceiver`] (chat bus, via [`EneHandle::subscribe`]),
 /// [`AudioChunk`] / [`AudioStreamReceiver`] (audio channel, via
 /// [`EneHandle::take_audio_stream`]), and [`LifecycleEvent`] /
@@ -87,7 +85,6 @@ pub use handle::{
     ShutdownTimeout, TerminalReason,
 };
 
-// ── Read-only query / vision handles (#271) ──
 /// Pending memory-candidate approval handle and its summary DTO.
 pub use query::candidates::{MemoryCandidateHandle, PendingCandidateSummary};
 /// Read-only session query handle (list / export / import / search / archive).
@@ -95,30 +92,25 @@ pub use query::sessions::SessionQueryHandle;
 /// Screen-image vision summarization handle.
 pub use vision::VisionHandle;
 
-// ── Diagnostics ──
 /// Diagnostics facade and memory query handle.
 pub use diagnostics::{
     DiagnosticEvent, DiagnosticEventReceiver, EneDiagnostics, MemoryQueryHandle,
 };
 
-// ── Public API v1 ──
 /// Public API version constant, JSON chat/lifecycle-event mirrors, session
-/// DTOs, and the unified [`public_api::PublicApiError`] category (#269,
-/// #272).
+/// DTOs, and the unified [`public_api::PublicApiError`] category.
 pub use public_api::{
     API_VERSION, PublicApiError, PublicChatEvent, PublicExportedMessage, PublicLifecycleEvent,
     PublicPerfCue, PublicSessionMeta, redact_text, redact_tool_arguments,
     redact_tool_arguments_json,
 };
 
-// ── Config types ──
 /// Top-level application configuration (re-exported from `ene-config`).
 #[doc(no_inline)]
 pub use ene_config::EneConfig;
 /// Bounded-task admission caps for the turn actor (`tools.*`, Stage 8).
 pub use task_config::ToolRuntimeConfig;
 
-// ── Provider types ──
 /// AI provider registry and task routing config.
 #[doc(no_inline)]
 pub use ene_ai::AiConfig;
@@ -129,12 +121,10 @@ pub use ene_ai::LlmMessage;
 #[doc(no_inline)]
 pub use ene_ai::LlmProvider;
 
-// ── Memory types ──
 /// Memory configuration (re-exported from `ene-store`).
 #[doc(no_inline)]
 pub use ene_store::StoreConfig;
 
-// ── Session / history ──
 /// Role enum for conversation history (re-exported from `ene-ai`).
 #[doc(no_inline)]
 pub use ene_ai::Role;
@@ -147,7 +137,7 @@ pub use ene_mind::CardName;
 /// Unified history entry (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::HistoryEntry;
-/// Host observation DTO for proactive speech (#103).
+/// Host observation DTO for proactive speech.
 #[doc(no_inline)]
 pub use ene_mind::ProactiveObservation;
 /// Unique session identifier (re-exported from `ene-mind`).
@@ -161,28 +151,24 @@ pub use types::RequestId;
 /// Turn identity, origin, and run/cancel errors.
 pub use types::{CancelError, RunError, TurnId, TurnOrigin};
 
-// ── Tool types ──
 /// `ToolSpec` type (re-exported from `ene-tool-proto`).
 #[doc(no_inline)]
 pub use ene_plugin_proto::ToolSpec;
 
-// ── Core error ──
 /// Runtime error type.
 pub use error::EneRuntimeError;
 
-// ── Stream types ──
 /// A single answer in a multi-question interactive prompt (re-exported from `ene-tool-proto`).
 pub use streaming::MultiAnswer;
 /// Permission decision type.
 pub use streaming::PermissionDecision;
 /// User's response to an interactive tool's input request.
 pub use streaming::UserInputResponse;
-/// Permission grant scope and lifetime (#177).
+/// Permission grant scope and lifetime.
 pub use streaming::{GrantType, PermissionScope};
-/// Undo report returned by [`EneHandle::undo`] (#178).
+/// Undo report returned by [`EneHandle::undo`].
 pub use undo::UndoReport;
 
-// ── Prompt builder ──
 /// Message build context struct.
 pub use message_builder::MessageBuildContext;
 /// Build messages for LLM completion request.

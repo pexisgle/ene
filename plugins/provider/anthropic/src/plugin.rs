@@ -23,21 +23,16 @@ use crate::convert;
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
-/// Name of the synthetic tool used to force structured output.
 const STRUCTURED_OUTPUT_TOOL: &str = "structured_output";
-/// Timeout for establishing an HTTP connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Total timeout for a single HTTP request (covers streamed bodies).
 const REQUEST_TIMEOUT: Duration = Duration::from_mins(2);
 
-/// Shared HTTP client, built once with timeouts and reused for all requests.
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Anthropic Claude plugin providing streaming and non-streaming chat
 /// completions via the Anthropic Messages API.
 pub(crate) struct AnthropicPlugin;
 
-/// Returns the shared HTTP client, building it on first use.
 fn http_client() -> Result<&'static reqwest::Client, PluginError> {
     if let Some(client) = HTTP_CLIENT.get() {
         return Ok(client);
@@ -103,8 +98,6 @@ fn resolve_api_key(config: &Value) -> Result<String, PluginError> {
     })
 }
 
-/// Builds the Anthropic Messages API request body.
-///
 /// When `forced_tool` is `Some`, the synthetic tool is appended to the tool
 /// list and `tool_choice` forces the model to call it (structured output).
 fn build_request_body(
@@ -183,7 +176,6 @@ fn schema_to_forced_tool(schema: &Value) -> Result<Value, PluginError> {
     }))
 }
 
-/// Extracts concatenated text content from a non-streaming Anthropic response.
 fn extract_text_content(body: &Value) -> Result<String, PluginError> {
     let content = body
         .get("content")
@@ -200,8 +192,6 @@ fn extract_text_content(body: &Value) -> Result<String, PluginError> {
     Ok(text)
 }
 
-/// Extracts the serialized `input` of the first `tool_use` content block from
-/// a non-streaming response (used for schema-forced structured output).
 fn extract_tool_input(body: &Value) -> Result<String, PluginError> {
     let content = body
         .get("content")
@@ -240,7 +230,7 @@ impl LlmPlugin for AnthropicPlugin {
                 max_in_flight: 8,
                 queue_depth: 16,
             },
-            // Claude models expose a 200k-token context window (#364).
+            // Claude models expose a 200k-token context window.
             context_window: Some(200_000),
         }]
     }
@@ -345,8 +335,6 @@ impl LlmPlugin for AnthropicPlugin {
     }
 }
 
-/// Extract [`TokenUsage`] from an Anthropic message response body (#365).
-///
 /// Anthropic reports `usage.input_tokens` and `usage.output_tokens` (it has no
 /// single `total` field, so the total is derived as their sum). Returns `None`
 /// when the body carries no `usage` object.
@@ -381,7 +369,6 @@ fn usage_from_anthropic_body(body: &Value) -> Option<TokenUsage> {
 struct ToolCallState {
     /// Content-block index → dense tool-call index.
     block_to_tool: HashMap<u64, u64>,
-    /// Next dense tool-call index to assign.
     next_tool_index: u64,
 }
 
@@ -546,7 +533,7 @@ fn process_sse_event(
         }
         "message_delta" => {
             // Anthropic reports the cumulative output token count on the final
-            // `message_delta` event (#365); emit it as a usage-only chunk so
+            // `message_delta` event; emit it as a usage-only chunk so
             // the host can attach it to the stream's final chunk.
             let usage = parsed.get("usage")?;
             let output = usage.get("output_tokens").and_then(Value::as_u64)?;
@@ -620,11 +607,9 @@ mod tests {
     fn resolve_api_key_inline_empty_falls_through() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(PoisonError::into_inner);
         let config = json!({"api_key": {"source": "inline", "inline": ""}});
-        // Should fall through to ANTHROPIC_API_KEY (which may or may not be set).
-        let result = resolve_api_key(&config);
         // We can't assert success/failure without controlling the env, but
         // it should not return the empty string.
-        if let Ok(key) = result {
+        if let Ok(key) = resolve_api_key(&config) {
             assert!(!key.is_empty());
         }
     }
@@ -656,7 +641,6 @@ mod tests {
 
         let config = json!({"api_key": {"source": "auto"}});
         assert_eq!(resolve_api_key(&config).unwrap(), "sk-ant-auto-000");
-        // A missing api_key entry also falls back to the environment.
         assert_eq!(resolve_api_key(&json!({})).unwrap(), "sk-ant-auto-000");
 
         if let Some(value) = original {

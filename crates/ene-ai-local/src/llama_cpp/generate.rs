@@ -24,7 +24,7 @@ const MAX_DECISION_TOKENS: i32 = 320;
 const MAX_VISION_TOKENS: i32 = 256;
 
 /// The text a local llama.cpp generation produced, plus the exact token
-/// counts the engine observed while producing it (#365).
+/// counts the engine observed while producing it.
 ///
 /// llama.cpp knows both numbers precisely — the prompt length in tokens at
 /// decode time and the number of tokens it sampled — so a local model reports
@@ -44,7 +44,7 @@ pub(crate) struct Generated {
 }
 
 impl Generated {
-    /// The exact token usage this generation observed (#365).
+    /// The exact token usage this generation observed.
     pub(crate) fn usage(&self) -> ene_ai::TokenUsage {
         ene_ai::TokenUsage::new(
             self.prompt_tokens,
@@ -54,10 +54,10 @@ impl Generated {
     }
 }
 
-/// One incremental unit a streaming llama.cpp chat job hands back (#365).
+/// One incremental unit a streaming llama.cpp chat job hands back.
 ///
-/// Mostly detokenized text pieces — exactly what [`sample_tokens`] already
-/// produced per token before this type existed — plus a single trailing
+/// Mostly detokenized text pieces — exactly what [`sample_tokens`] produces
+/// per token — plus a single trailing
 /// [`LlamaStreamChunk::Usage`] carrying the generation's exact token counts,
 /// so [`ene_ai::StreamingLocalLlmEngine`]'s stream ends on a chunk whose
 /// `usage` is populated. That mirrors how remote providers report usage on
@@ -213,7 +213,7 @@ fn generate_chat_text(
 }
 
 /// Pushes the generation's exact token usage through `sink` as a single
-/// trailing [`LlamaStreamChunk::Usage`] (#365), so a streaming consumer sees
+/// trailing [`LlamaStreamChunk::Usage`], so a streaming consumer sees
 /// usage on its final chunk exactly as it would from a remote provider. A
 /// `None` sink (the one-shot `run` path) does nothing. A stop condition while
 /// sending is surfaced like any other, so the caller returns promptly.
@@ -331,7 +331,7 @@ fn generate_chat_vision_with_bitmaps(
 }
 
 /// The output of [`sample_tokens`]: the accumulated text plus how many tokens
-/// were sampled to produce it (#365).
+/// were sampled to produce it.
 struct Sampled {
     text: String,
     completion_tokens: u32,
@@ -341,11 +341,9 @@ struct Sampled {
 /// `max_tokens` is reached, always returning the full accumulated text.
 ///
 /// `sink`, when `Some`, additionally receives each non-empty detokenized
-/// piece as it is produced — this is the only change this stage makes to a
-/// loop that already checked `should_stop`/called `tick` per token; a
-/// caller passing `None` (every existing call site via
-/// [`crate::local_llm::model::LlamaChatModel::run`]) sees no behavior change
-/// at all. `ChunkSink::send` reports a stop condition (deadline,
+/// piece as it is produced; a caller passing `None` (every call site via
+/// [`crate::local_llm::model::LlamaChatModel::run`]) gets the plain one-shot
+/// behavior. `ChunkSink::send` reports a stop condition (deadline,
 /// cancellation, or a dropped consumer) the exact same way `should_stop`
 /// does elsewhere in this loop, so it is handled identically: give up and
 /// return promptly.

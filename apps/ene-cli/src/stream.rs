@@ -14,10 +14,10 @@ use crate::terminal_ui::TerminalUi;
 ///
 /// The caller owns the subscription and decides which turn to render: the
 /// REPL renders a user turn it just started, or a proactive turn it observed
-/// via `TurnStarted` (#402). Turn discovery no longer happens here.
+/// via `TurnStarted`.
 ///
 /// On a chat-bus lag (`RecvError::Lagged`) the stream follows the runtime's
-/// documented recovery (#403): it cancels the still-in-flight turn reported
+/// documented recovery: it cancels the still-in-flight turn reported
 /// by [`ene_runtime::EneHandle::active_turn`] so the single-flight gate is
 /// released, then returns. A closed channel (`RecvError::Closed`) means the
 /// actor is gone and also returns, without a cancel.
@@ -257,7 +257,7 @@ pub async fn process_stream(rx: &mut EneEventReceiver, handle: &EneHandle, activ
                 // (`EneHandle::active_turn`): if a turn is still in flight,
                 // cancel it so the actor emits a fresh `Terminal` and releases
                 // the single-flight gate. Without this the gate stays held and
-                // the next `run` fails with `RunError::Busy` (#403). Mirrors
+                // the next `run` fails with `RunError::Busy`. Mirrors
                 // the desktop `ai_bridge` recovery.
                 tracing::warn!(
                     skipped,

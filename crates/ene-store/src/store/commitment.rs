@@ -30,8 +30,6 @@ fn model_to_commitment(
 }
 
 impl MemoryStore {
-    // ── Companion Commitments ─────────────────────────────────────────────────
-
     /// Insert a new commitment row and return its assigned ID.
     pub async fn insert_commitment(
         &self,

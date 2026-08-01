@@ -1,4 +1,4 @@
-//! Types for the Expression Arbiter (#89).
+//! Types for the Expression Arbiter.
 
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ pub enum ExpressionSource {
 }
 
 impl ExpressionSource {
-    /// Debug string for event emission (#91).
+    /// Debug string for event emission.
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::AffectMapping => "affect",

@@ -35,7 +35,7 @@ pub struct ConversationLogEntry {
     pub created_at: DateTime<Utc>,
 }
 
-/// A row of tool embedding data with all fields (domain type from `ene-core`, #302).
+/// A row of tool embedding data with all fields (domain type from `ene-core`).
 pub use ene_core::ToolEmbeddingFieldRow;
 
 /// Registers the sqlite-vec extension globally for the process.
@@ -67,7 +67,7 @@ pub fn init_sqlite_vec() {
 }
 
 /// Creates the `vec0` ANN index tables and sync triggers if they do not
-/// already exist (#304).
+/// already exist.
 ///
 /// Called during store initialization after migrations. For databases
 /// upgraded from a pre-vec0 schema the migration
@@ -152,7 +152,6 @@ pub(crate) async fn ensure_vec0_index(
             .await?;
     }
 
-    // ── vec_memory_embeddings ──
     // character_id is denormalized from typed_memories so the KNN query
     // can scope to a single character via a vec0 metadata filter.
     db.execute_unprepared(&format!(
@@ -166,7 +165,6 @@ pub(crate) async fn ensure_vec0_index(
     ))
     .await?;
 
-    // ── vec_tool_embeddings ──
     db.execute_unprepared(&format!(
         "CREATE VIRTUAL TABLE IF NOT EXISTS vec_tool_embeddings USING vec0( \
              tool_embedding_id integer primary key, \
@@ -208,11 +206,10 @@ pub(crate) async fn ensure_vec0_index(
         );
     }
 
-    // ── Sync triggers: memory_embeddings → vec_memory_embeddings ──
-    // Note: vec0 returns SQLITE_ERROR (not SQLITE_CONSTRAINT) on duplicate
-    // PKs, so INSERT OR REPLACE does not work. The update trigger uses
-    // DELETE + INSERT instead. character_id is resolved from typed_memories
-    // via a correlated SELECT in the trigger body.
+    // vec0 returns SQLITE_ERROR (not SQLITE_CONSTRAINT) on duplicate PKs, so
+    // INSERT OR REPLACE does not work. The update trigger uses DELETE + INSERT
+    // instead. character_id is resolved from typed_memories via a correlated
+    // SELECT in the trigger body.
     db.execute_unprepared(
         "CREATE TRIGGER IF NOT EXISTS trg_vec_mem_ai AFTER INSERT ON memory_embeddings BEGIN \
              INSERT INTO vec_memory_embeddings(memory_embedding_id, embedding, character_id, model_name, field) \
@@ -239,7 +236,6 @@ pub(crate) async fn ensure_vec0_index(
     )
     .await?;
 
-    // ── Sync triggers: tool_embedding_index → vec_tool_embeddings ──
     db.execute_unprepared(
         "CREATE TRIGGER IF NOT EXISTS trg_vec_tool_ai AFTER INSERT ON tool_embedding_index BEGIN \
              INSERT INTO vec_tool_embeddings(tool_embedding_id, embedding, tool_name) \
@@ -286,14 +282,14 @@ pub(crate) fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
 #[cfg(test)]
 pub(crate) const COSINE_SIMILARITY_SQL: &str = "1.0 - vec_distance_cosine";
 
-/// An embedding column that cosine-similarity SQL may reference (#427).
+/// An embedding column that cosine-similarity SQL may reference.
 ///
-/// This used to be a `&str` guarded by an allowlist and an `assert!`, which
-/// left a panic path in the code (`clippy::panic` does not catch `assert!`)
-/// and relied on a runtime check to uphold the "only these columns" invariant.
-/// Modelling the two permitted columns as an enum makes any other value
-/// unrepresentable: the SQL fragment is derived from the variant, so there is
-/// nothing to validate and no way to reach an unexpected column.
+/// A `&str` guarded by an allowlist and an `assert!` would leave a panic path
+/// in the code (`clippy::panic` does not catch `assert!`) and rely on a
+/// runtime check to uphold the "only these columns" invariant. Modelling the
+/// two permitted columns as an enum makes any other value unrepresentable: the
+/// SQL fragment is derived from the variant, so there is nothing to validate
+/// and no way to reach an unexpected column.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EmbeddingCol {
@@ -376,8 +372,6 @@ pub(crate) fn validate_embedding(
 }
 
 /// SQLite-backed long-term memory store with vector similarity search.
-///
-/// Uses `SeaORM` for async database connection management and `sqlite-vec` for cosine-similarity queries.
 pub struct MemoryStore {
     db: DatabaseConnection,
     embedding_dim: usize,
@@ -388,12 +382,11 @@ pub struct MemoryStore {
 /// Applies the required `SQLite` PRAGMAs to the `sqlx` connect options
 /// so that **every** new connection in the pool receives them.
 ///
-/// This is the fix for #419: the previous approach called
-/// `execute_unprepared` on the pool handle once after
-/// `Database::connect`, which only reached one of the pooled
-/// connections. `SqliteConnectOptions::pragma` bakes the PRAGMAs into
-/// the connection establishment path, so all eight (or one, for
-/// `:memory:`) connections receive the same settings.
+/// `PRAGMA` settings are per-connection: executing them once on the pool
+/// handle after `Database::connect` only reaches whichever connection ran
+/// the statement, leaving the rest with defaults. `SqliteConnectOptions::pragma`
+/// bakes the PRAGMAs into the connection establishment path, so all pooled
+/// connections receive the same settings.
 ///
 /// * `journal_mode=WAL` lets readers proceed concurrently with a
 ///   writer. WAL is a no-op for in-memory databases (`SQLite` returns
@@ -494,12 +487,12 @@ impl MemoryStore {
     ///
     /// When pending migrations exist and `backup_on_migrate` is enabled, a
     /// file backup is taken first; on migration failure the backup is
-    /// restored (#239).
+    /// restored.
     pub async fn open(path: &Path, embedding_dim: usize) -> Result<Self, EneMemoryError> {
         Self::open_with_options(path, embedding_dim, &crate::backup::OpenOptions::default()).await
     }
 
-    /// Opens a persistent memory store with explicit backup / integrity options (#239).
+    /// Opens a persistent memory store with explicit backup / integrity options.
     pub async fn open_with_options(
         path: &Path,
         embedding_dim: usize,
@@ -605,12 +598,12 @@ impl MemoryStore {
         Ok(Self::init(db, embedding_dim, None))
     }
 
-    /// Run `PRAGMA integrity_check` on the open connection (#239).
+    /// Run `PRAGMA integrity_check` on the open connection.
     pub async fn check_integrity(&self) -> Result<(), EneMemoryError> {
         crate::backup::check_integrity(&self.db).await
     }
 
-    /// Create a timestamped file backup of this store's database (#239).
+    /// Create a timestamped file backup of this store's database.
     ///
     /// Returns an error when the store is in-memory (no path).
     pub async fn backup(&self) -> Result<std::path::PathBuf, EneMemoryError> {
@@ -620,11 +613,9 @@ impl MemoryStore {
         crate::backup::backup_database(path, Some(&self.db)).await
     }
 
-    // ── Pending candidate CRUD (#174, #420) ──
-
     /// Insert a new pending candidate and return its assigned id.
     ///
-    /// The candidate is persisted to the `pending_candidates` table (#420) so
+    /// The candidate is persisted to the `pending_candidates` table so
     /// it survives restarts and is shared across every [`MemoryStore`]
     /// instance opened on the same database. The stored status is forced to
     /// [`PendingCandidateStatus::Pending`] regardless of the value supplied;
@@ -659,8 +650,7 @@ impl MemoryStore {
     ///
     /// When `status_filter` is `None`, candidates of every status are
     /// returned, oldest first. Rows whose stored status label is unrecognized
-    /// are excluded (fail closed) rather than surfaced as `Pending` (#420
-    /// review).
+    /// are excluded (fail closed) rather than surfaced as `Pending`.
     pub async fn list_pending_candidates(
         &self,
         character_id: &str,
@@ -683,7 +673,7 @@ impl MemoryStore {
 
     /// Approve a pending candidate, persisting it to typed memory as active.
     ///
-    /// Race-safe (#420 review): the stored status is flipped to
+    /// Race-safe: the stored status is flipped to
     /// [`PendingCandidateStatus::Approved`] with a *conditional* update
     /// (`WHERE id = ? AND status = 'pending'`) **before** the typed memory is
     /// inserted, and the insert only proceeds if this call won the flip.
@@ -694,7 +684,6 @@ impl MemoryStore {
     /// typed memory. Returns an error when the candidate is not found or has
     /// already been resolved.
     pub async fn approve_pending_candidate(&self, id: i64) -> Result<i64, EneMemoryError> {
-        // Claim the row first; only the winner proceeds to insert.
         let claimed = self
             .claim_pending_candidate(id, PendingCandidateStatus::Approved)
             .await?;
@@ -738,7 +727,7 @@ impl MemoryStore {
     /// (see [`Self::approve_pending_candidate`]); when `false`, its status is
     /// set to [`PendingCandidateStatus::Rejected`]. Both paths claim the row
     /// with a conditional status flip first, so concurrent resolvers cannot
-    /// double-apply (#420 review).
+    /// double-apply.
     pub async fn resolve_pending_candidate(
         &self,
         id: i64,
@@ -759,7 +748,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Enforce the pending-candidate retention policy for a character (#420).
+    /// Enforce the pending-candidate retention policy for a character.
     ///
     /// Two independent limits, either of which may be disabled with `0`:
     ///
@@ -793,8 +782,6 @@ impl MemoryStore {
             ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
         };
 
-        // Visibility condition shared by both passes: the character plus, when
-        // a user is given, that user's rows and character-shared rows.
         let scope = pending_candidate_scope(character_id, user_id);
 
         let mut removed = 0usize;
@@ -824,7 +811,6 @@ impl MemoryStore {
 
             if pending_count > max_per_character {
                 let overflow = pending_count - max_per_character;
-                // Ids of the oldest `overflow` pending rows.
                 let drop_ids: Vec<i64> = Entity::find()
                     .filter(scope)
                     .filter(Column::Status.eq(PendingCandidateStatus::Pending.as_str()))
@@ -862,7 +848,7 @@ impl MemoryStore {
         Ok(removed)
     }
 
-    /// Load a single pending candidate row by id (#420).
+    /// Load a single pending candidate row by id.
     ///
     /// Errors when the row is missing or carries an unrecognized status label
     /// (fail closed, matching [`Self::list_pending_candidates`]).
@@ -880,7 +866,7 @@ impl MemoryStore {
     }
 
     /// Atomically claim a pending candidate by flipping its status from
-    /// [`PendingCandidateStatus::Pending`] to `target` (#420 review).
+    /// [`PendingCandidateStatus::Pending`] to `target`.
     ///
     /// Implemented as a single conditional `UPDATE ... WHERE id = ? AND status
     /// = 'pending'`, so it doubles as a compare-and-swap: returns `true` only
@@ -908,7 +894,7 @@ impl MemoryStore {
         Ok(res.rows_affected > 0)
     }
 
-    /// Backdate a pending candidate's `created_at` for retention tests (#420).
+    /// Backdate a pending candidate's `created_at` for retention tests.
     #[doc(hidden)]
     pub async fn test_backdate_pending_candidate(
         &self,
@@ -931,7 +917,7 @@ impl MemoryStore {
     }
 }
 
-/// Visibility condition for pending-candidate retention queries (#420 review).
+/// Visibility condition for pending-candidate retention queries.
 ///
 /// Scopes to `character_id` and, when `user_id` is `Some`, to that user's rows
 /// plus character-shared rows (`user_id = ""`) — mirroring

@@ -5,19 +5,18 @@
 //! (turn execution, permissions, undo, tool calls, character/config control)
 //! and delegates read-only session/candidate queries and screen-image vision
 //! summarization to dedicated handles that bypass the actor mailbox entirely
-//! (#271) — see [`EneHandle::sessions`], [`EneHandle::candidates`], and
+//! — see [`EneHandle::sessions`], [`EneHandle::candidates`], and
 //! [`EneHandle::vision`].
 //!
-//! ## Module layout (#271)
+//! ## Module layout
 //!
-//! - [`command`] — [`EneCommand`] (now solely turn-execution / control-plane
-//!   commands; the session/candidate/vision-payload variants are gone).
+//! - [`command`] — [`EneCommand`] (turn-execution / control-plane commands).
 //! - [`event`] — [`EneEvent`] (chat bus), [`AudioChunk`] (audio channel),
 //!   [`LifecycleEvent`] (lifecycle bus), [`TerminalReason`], [`EneStatus`],
 //!   [`EneEventReceiver`], [`AudioStreamReceiver`], [`LifecycleReceiver`],
 //!   [`EneStateSnapshot`]. See the module doc there for the three-channel
-//!   event bus design (#272).
-//! - [`actor`] — [`actor::TurnActor`] (formerly `EneActor`) and its
+//!   event bus design.
+//! - [`actor`] — [`actor::TurnActor`] and its
 //!   supporting free functions.
 //! - [`crate::query::sessions`] / [`crate::query::candidates`] — read-only
 //!   session and pending-candidate handles.
@@ -27,9 +26,9 @@ mod actor;
 mod command;
 mod event;
 
-/// Re-exported so `ene_runtime::handle::PendingCandidateSummary` (the
-/// pre-#271 path some embedders imported) keeps resolving after the type
-/// moved to [`crate::query::candidates`].
+/// Re-exported so `ene_runtime::handle::PendingCandidateSummary` (the path
+/// some embedders import) keeps resolving; the type lives in
+/// [`crate::query::candidates`].
 pub use crate::query::candidates::PendingCandidateSummary;
 pub use command::{DeferredToolTask, EneCommand, FeatureSettingsUpdate};
 pub use event::{
@@ -51,7 +50,7 @@ use ene_rag::ToolRagConfig;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-/// Bounded capacity for the dedicated audio (PCM) channel (#272).
+/// Bounded capacity for the dedicated audio (PCM) channel.
 ///
 /// Chosen to buffer several seconds of TTS chunks (each chunk is roughly one
 /// sentence of synthesized speech) ahead of a real-time playback consumer
@@ -60,7 +59,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// policy applied when this fills up.
 const AUDIO_CHANNEL_CAPACITY: usize = 64;
 
-/// Small broadcast capacity for the lifecycle bus (#272).
+/// Small broadcast capacity for the lifecycle bus.
 ///
 /// Lifecycle notifications (`StatusChanged`, `PendingCandidateAvailable`,
 /// `ToolBackgroundCompleted`) are low-frequency and turn-independent, so a
@@ -117,10 +116,10 @@ impl TurnGate {
 /// [`EneCommand::Shutdown`] and spawns async plugin-host shutdown on the
 /// current tokio runtime.
 ///
-/// This replaces the previous approach of checking
-/// `Arc::strong_count(&cmd_tx) == 1`, which was unreachable because
-/// `EneHandle` internally holds three independent `Arc` clones of `cmd_tx`
-/// (self, diagnostics, vision).
+/// This guard exists because the `Arc::strong_count(&cmd_tx) == 1`
+/// approach is unreliable: `EneHandle` internally holds three independent
+/// `Arc` clones of `cmd_tx` (self, diagnostics, vision), so the count never
+/// reaches 1 while the handle is alive.
 ///
 /// ## Drop shutdown is best-effort
 ///
@@ -183,7 +182,7 @@ impl Drop for HandleShutdownGuard {
             drop(guard);
 
             // Abort the health → diagnostics bridge so it does not
-            // outlive the host whose events it forwards (#238).
+            // outlive the host whose events it forwards.
             let mut bridge = health_bridge_handle.lock().await;
             if let Some(handle) = bridge.take() {
                 handle.abort();
@@ -212,17 +211,17 @@ impl Drop for HandleShutdownGuard {
 /// dropped the underlying `mpsc` channel closes and the actor exits.
 pub struct EneHandle {
     /// Command mailbox sender. Deliberately an *unbounded* `mpsc` — see the
-    /// rationale at the channel's construction in [`EneHandle::open`] (#404):
+    /// rationale at the channel's construction in [`EneHandle::open`]:
     /// it is shared with the actor's internal feedback path and the
     /// drop-guard `Shutdown`, neither of which may be dropped by backpressure.
     /// Expensive work is bounded at `JoinSet` admission, not here.
     cmd_tx: Arc<mpsc::UnboundedSender<EneCommand>>,
     event_tx: broadcast::Sender<EneEvent>,
-    /// Lifecycle bus sender (#272): `StatusChanged` / `PendingCandidateAvailable`
+    /// Lifecycle bus sender: `StatusChanged` / `PendingCandidateAvailable`
     /// / `ToolBackgroundCompleted`. Separate broadcast channel from `event_tx`
     /// so lifecycle traffic never shares a buffer with chat events.
     lifecycle_tx: broadcast::Sender<LifecycleEvent>,
-    /// Audio channel sender (#272): bounded `mpsc`, single-consumer. The
+    /// Audio channel sender: bounded `mpsc`, single-consumer. The
     /// paired receiver lives in `audio_rx` until [`EneHandle::take_audio_stream`]
     /// transfers it out.
     audio_tx: mpsc::Sender<AudioChunk>,
@@ -242,19 +241,19 @@ pub struct EneHandle {
     /// Plugin host manager (process supervision for v3 plugin binaries).
     ///
     /// Shared across handle clones; the last clone to drop triggers a
-    /// graceful plugin shutdown (#247). `None` when plugin startup failed
+    /// graceful plugin shutdown. `None` when plugin startup failed
     /// or no plugins were discovered.
     plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
-    /// Join handle for the plugin health → diagnostics bridge task (#238).
+    /// Join handle for the plugin health → diagnostics bridge task.
     ///
     /// Shared across handle clones. Aborted during plugin host shutdown so
     /// the bridge does not outlive the host whose events it forwards.
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    /// Read-only session query handle, bypasses the actor mailbox (#271).
+    /// Read-only session query handle, bypasses the actor mailbox.
     sessions: crate::query::sessions::SessionQueryHandle,
-    /// Pending memory-candidate approval handle, bypasses the actor mailbox (#271).
+    /// Pending memory-candidate approval handle, bypasses the actor mailbox.
     candidates: crate::query::candidates::MemoryCandidateHandle,
-    /// Screen-image vision summarization handle, bypasses the actor mailbox (#271).
+    /// Screen-image vision summarization handle, bypasses the actor mailbox.
     vision: crate::vision::VisionHandle,
     /// RAII guard that triggers graceful shutdown when the last handle clone
     /// drops. Shared via `Arc` across all handle clones so the guard's `Drop`
@@ -310,7 +309,7 @@ impl EneHandle {
     /// memory warmup **before** returning `Ok`. Config file I/O stays in the
     /// host / `ene-config` — pass an already-loaded config and card.
     pub async fn open(config: EneConfig, card: CharacterCardV3) -> Result<Self, EneRuntimeError> {
-        // The command mailbox is deliberately an *unbounded* `mpsc` (#404).
+        // The command mailbox is deliberately an *unbounded* `mpsc`.
         //
         // Stage 8 bounded the five background `JoinSet`s (admission control),
         // but the channel feeding them was left unbounded. Bounding it here
@@ -350,17 +349,16 @@ impl EneHandle {
         // `ene_ai::AudioProviderRegistry` before anything below (this
         // function's own TTS provider resolution, or a later
         // caller-initiated STT/VAD lookup such as the desktop app's mic
-        // toggle) can look one up by name. Previously each factory
-        // registered itself via a `#[ctor::ctor]` that ran before `main`
-        // and before `tracing` was initialized; doing it here, after
-        // `tracing` is up, makes registration observable.
+        // toggle) can look one up by name. Doing it here, after `tracing`
+        // is up, makes registration observable (a `#[ctor::ctor]` would
+        // run before `main` and before `tracing` was initialized).
         ene_voice::register_providers();
 
         let mind = config.get_section::<ene_mind::MindConfig>()?;
 
-        // Startup validation (#366): warn when a configured context window is
+        // Startup validation: warn when a configured context window is
         // too small for the prompt budget plus output reserve, since prompt
-        // sections would otherwise be silently dropped every turn. Since #370,
+        // sections would otherwise be silently dropped every turn.
         // `max_prompt_tokens` is an *optional* operator cap: with no cap the
         // prompt auto-follows the model's effective window, so there is no
         // fixed budget to validate against and nothing to warn about.
@@ -376,7 +374,6 @@ impl EneHandle {
         let rag_config = config.get_section::<ToolRagConfig>()?;
         let needs_embedder = mem_config.enabled || (plugin_config.enabled && rag_config.enabled);
 
-        // Prefetch configured GGUF weights in parallel before backends load them.
         {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
             let needs_decision = mind.proactive.enabled;
@@ -426,12 +423,11 @@ impl EneHandle {
             None
         };
 
-        // Generate DB tokens and spawn DB IPC servers for tool plugins.
         let db_tokens = actor::spawn_db_ipc_servers(&config, memory_store.as_ref())?;
 
         // Start the plugin host (discovers and launches v3 plugin binaries).
         // Non-fatal: on failure we log and continue with no plugin-provided
-        // providers/tools, mirroring the tool host's empty-set fallback (#247).
+        // providers/tools, mirroring the tool host's empty-set fallback.
         let mut plugin_host =
             match ene_plugin_host::PluginHostManager::start(&config, db_tokens).await {
                 Ok(host) => {
@@ -461,7 +457,7 @@ impl EneHandle {
                 }
             };
 
-        // Bridge plugin health events into the diagnostics channel (#238).
+        // Bridge plugin health events into the diagnostics channel.
         // The task's `JoinHandle` is retained so it can be aborted during
         // plugin host shutdown rather than leaking past the host's lifetime.
         let mut health_bridge_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -502,7 +498,6 @@ impl EneHandle {
             }
         }
 
-        // Warmup character memories before returning Ok.
         let warmup_hash = actor::warmup_character_memories_ready(&config, &session).await;
 
         if let Some(hash) = warmup_hash {
@@ -516,14 +511,12 @@ impl EneHandle {
             mind_memory,
         );
 
-        // Provider health monitor for failover diagnostics (#175).
         let fallback_cfg = config.get_section::<ene_ai::AiConfig>()?.fallback;
         let health_monitor = ene_ai::ProviderHealthMonitor::new(
             std::time::Duration::from_millis(fallback_cfg.cache_ttl_ms),
             fallback_cfg.max_history,
         );
 
-        // Resolve TTS provider from config (None when provider is "none").
         let tts_provider = {
             let ai_config = config.get_section::<ene_ai::AiConfig>()?;
 
@@ -591,7 +584,7 @@ impl EneHandle {
         let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
 
         // Current character-card name, shared with `MemoryCandidateHandle` so
-        // pending-candidate queries never need a mailbox round-trip (#271).
+        // pending-candidate queries never need a mailbox round-trip.
         let card_name = Arc::new(parking_lot::Mutex::new(
             card.data.get_character_name().to_string(),
         ));
@@ -661,7 +654,7 @@ impl EneHandle {
         }
     }
 
-    /// Subscribe to the lifecycle event stream (#272): `StatusChanged`,
+    /// Subscribe to the lifecycle event stream: `StatusChanged`,
     /// `PendingCandidateAvailable`, `ToolBackgroundCompleted`.
     ///
     /// Separate from [`EneHandle::subscribe`] (the chat bus) — lifecycle
@@ -674,7 +667,7 @@ impl EneHandle {
         }
     }
 
-    /// Take ownership of the audio (PCM) stream (#272).
+    /// Take ownership of the audio (PCM) stream.
     ///
     /// Returns `Some` exactly once across every clone of this `EneHandle` —
     /// the audio channel is single-consumer by construction, modeling the
@@ -693,7 +686,7 @@ impl EneHandle {
     }
 
     /// Read-only session query handle (list / export / import / search /
-    /// archive), bypassing the turn-execution actor mailbox entirely (#271).
+    /// archive), bypassing the turn-execution actor mailbox entirely.
     ///
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn sessions(&self) -> crate::query::sessions::SessionQueryHandle {
@@ -701,7 +694,7 @@ impl EneHandle {
     }
 
     /// Pending memory-candidate approval handle (list / approve / reject),
-    /// bypassing the turn-execution actor mailbox entirely (#271).
+    /// bypassing the turn-execution actor mailbox entirely.
     ///
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn candidates(&self) -> crate::query::candidates::MemoryCandidateHandle {
@@ -709,7 +702,7 @@ impl EneHandle {
     }
 
     /// Screen-image vision summarization handle, bypassing the
-    /// turn-execution actor mailbox entirely (#271).
+    /// turn-execution actor mailbox entirely.
     ///
     /// Cheap to call repeatedly; the returned handle is a small `Clone`.
     pub fn vision(&self) -> crate::vision::VisionHandle {
@@ -721,14 +714,14 @@ impl EneHandle {
     ///
     /// A dead actor is reported as [`RunError::ActorDead`] rather than
     /// [`RunError::Busy`]: the closed-channel check runs *before* the
-    /// single-flight gate (#404). Previously the gate was consulted first, so
-    /// a `run()` racing the actor's shutdown could see a gate the dying actor
-    /// still held and report `Busy` even though the actor was gone.
+    /// single-flight gate, so a `run()` racing the actor's shutdown never
+    /// sees a gate the dying actor still holds and reports `Busy` for an
+    /// actor that is gone.
     #[must_use = "the returned TurnId is needed for cancellation"]
     pub fn run(&self, input: impl Into<String>) -> Result<TurnId, RunError> {
         // Dead-actor check first: the command channel closes when the actor
         // task exits, so a closed channel is the authoritative "actor is
-        // gone" signal and must win over a stale single-flight gate (#404).
+        // gone" signal and must win over a stale single-flight gate.
         if self.cmd_tx.is_closed() {
             return Err(RunError::ActorDead);
         }
@@ -762,7 +755,7 @@ impl EneHandle {
     }
 
     /// The id of the turn currently in flight, or `None` when the actor is
-    /// idle (#403).
+    /// idle.
     ///
     /// This is the lightweight resynchronization query consumers use after a
     /// broadcast lag. It reads the single-flight [`TurnGate`] directly — one
@@ -836,14 +829,14 @@ impl EneHandle {
         }
     }
 
-    /// Gracefully shuts down the plugin host if it is still alive (#247).
+    /// Gracefully shuts down the plugin host if it is still alive.
     ///
     /// Called from [`EneHandle::shutdown`] after the actor drains. The
     /// [`HandleShutdownGuard`] performs an equivalent shutdown on last-handle
     /// drop; both paths `.take()` from the same `Arc<Mutex<Option<…>>>`, so
     /// only the first caller performs the shutdown — subsequent calls are
     /// no-ops. Also aborts the plugin health → diagnostics bridge task so it
-    /// does not outlive the host whose events it forwards (#238).
+    /// does not outlive the host whose events it forwards.
     async fn shutdown_plugin_host(&self) {
         let mut guard = self.plugin_host.lock().await;
         if let Some(mut host) = guard.take() {
@@ -871,7 +864,7 @@ impl EneHandle {
             .map_err(|_| PublicApiError::ActorDead)
     }
 
-    /// List all session-wide permission grants (#177).
+    /// List all session-wide permission grants.
     pub async fn list_permissions(
         &self,
     ) -> Result<Vec<crate::streaming::PermissionScope>, PublicApiError> {
@@ -882,7 +875,7 @@ impl EneHandle {
         rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
-    /// Revoke a single session-wide permission grant by id (#177).
+    /// Revoke a single session-wide permission grant by id.
     pub async fn revoke_permission(&self, id: u64) -> Result<bool, PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
@@ -891,7 +884,7 @@ impl EneHandle {
         rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
-    /// Revoke all session-wide permission grants (#177).
+    /// Revoke all session-wide permission grants.
     pub async fn reset_all_permissions(&self) -> Result<usize, PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
@@ -900,7 +893,7 @@ impl EneHandle {
         rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
-    /// Undo the most recent reversible tool operation (#178).
+    /// Undo the most recent reversible tool operation.
     pub async fn undo(&self) -> Result<crate::undo::UndoReport, PublicApiError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
@@ -923,7 +916,7 @@ impl EneHandle {
             .map_err(|_| PublicApiError::ActorDead)
     }
 
-    /// Push a privacy-safe proactive observation from the host (#166 / #168).
+    /// Push a privacy-safe proactive observation from the host.
     pub fn update_proactive_observation(
         &self,
         observation: ene_mind::ProactiveObservation,
@@ -964,7 +957,7 @@ impl EneHandle {
 }
 
 /// Maps a [`PluginHealthEvent`] to a [`DiagnosticEvent::ToolHealth`]
-/// with a stable English status contract (#238).
+/// with a stable English status contract.
 ///
 /// Duplicated (small) from `actor::plugin_health_event_to_diag` because that
 /// one is private to the `actor` module and this bootstrap-time bridge runs
@@ -1047,8 +1040,6 @@ mod tests {
         CharacterCardV3::default()
     }
 
-    /// Unwraps a [`DiagnosticEvent::ToolHealth`] into its `(tool, status,
-    /// detail)` parts for assertion.
     fn tool_health_parts(event: DiagnosticEvent) -> (String, String, Option<String>) {
         match event {
             DiagnosticEvent::ToolHealth {
@@ -1061,7 +1052,7 @@ mod tests {
     }
 
     /// The bootstrap-time bridge maps [`DisabledReason`] to its detail string
-    /// via an exhaustive match (#429), keeping the `"disabled"` status contract
+    /// via an exhaustive match, keeping the `"disabled"` status contract
     /// stable. Kept in lockstep with the actor-side mapper's test.
     #[test]
     fn disabled_reason_maps_to_detail_string() {
@@ -1093,11 +1084,9 @@ mod tests {
             .await
             .expect("open initializes handle");
 
-        // Test event_tx buffer overflow (capacity is 1024)
         let mut event_rx = handle.subscribe();
         let mut diag_rx = handle.diagnostics().subscribe();
 
-        // Send 1025 events to exceed the buffer capacity of 1024
         for i in 0..1025 {
             drop(handle.event_tx.send(EneEvent::TextDelta {
                 turn: TurnId::new(),
@@ -1106,7 +1095,6 @@ mod tests {
             }));
         }
 
-        // Try to receive and it should return RecvError::Lagged
         let res = event_rx.recv().await;
         assert!(
             matches!(
@@ -1129,10 +1117,8 @@ mod tests {
             "expected DiagnosticEvent::Lagged after event lag"
         );
 
-        // Test diag_tx buffer overflow (capacity is 256)
         let mut diag_rx = handle.diagnostics().subscribe();
 
-        // Send 257 events to exceed the buffer capacity of 256
         for i in 0..257 {
             drop(
                 handle
@@ -1144,7 +1130,6 @@ mod tests {
             );
         }
 
-        // Try to receive and it should return RecvError::Lagged
         let res = diag_rx.recv().await;
         assert!(
             matches!(
@@ -1177,8 +1162,8 @@ mod tests {
         (config, hanging)
     }
 
-    /// `active_turn()` is a lock-only read of the shared single-flight gate
-    /// (#403): `None` while idle, `Some(id)` once `run` has claimed the gate,
+    /// `active_turn()` is a lock-only read of the shared single-flight gate:
+    /// `None` while idle, `Some(id)` once `run` has claimed the gate,
     /// and `None` again after the gate is released. No mailbox round-trip is
     /// involved, which is what makes it usable as a lag-recovery probe.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1203,8 +1188,6 @@ mod tests {
             "active_turn() must report the in-flight turn id"
         );
 
-        // Release the gate the same way the actor does at end-of-turn and
-        // confirm the probe observes it immediately.
         handle.turn_gate.end();
         assert!(
             handle.active_turn().is_none(),
@@ -1215,14 +1198,14 @@ mod tests {
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 
-    /// End-to-end lag recovery (#403): after the chat bus overflows and the
+    /// End-to-end lag recovery: after the chat bus overflows and the
     /// consumer observes `RecvError::Lagged`, the documented resync path —
     /// `active_turn()` then `cancel()` — restores a consistent view: the
     /// in-flight turn is still discoverable through the lightweight probe
     /// (not the stale, gap-ridden stream), cancellation succeeds, and the
     /// actor emits a fresh `Terminal` so the gate is released. Also asserts
     /// the lag surfaced exactly one `DiagnosticEvent::Lagged` and no
-    /// `ResyncNeeded` (that redundant variant was removed).
+    /// `ResyncNeeded`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn resync_after_chat_bus_lag_restores_consistent_view() {
         // Keep the turn in flight deterministically (see the helper's doc):
@@ -1238,7 +1221,6 @@ mod tests {
 
         let turn = handle.run("hello").expect("run claims the gate");
 
-        // Overflow the chat ring (capacity 1024) so the subscriber lags.
         for i in 0..1025 {
             drop(handle.event_tx.send(EneEvent::TextDelta {
                 turn: TurnId::new(),
@@ -1247,8 +1229,6 @@ mod tests {
             }));
         }
 
-        // The consumer sees the gap synchronously, exactly as the CLI and
-        // desktop loops do.
         let res = event_rx.recv().await;
         assert!(
             matches!(
@@ -1302,7 +1282,7 @@ mod tests {
 
         // The lag surfaced as exactly the observability twin of the recv
         // error: a Lagged diagnostic for the events channel, and no
-        // ResyncNeeded (the redundant variant was removed in #403).
+        // ResyncNeeded.
         let mut saw_lagged = false;
         while let Ok(ev) = diag_rx.try_recv() {
             match ev {
@@ -1328,10 +1308,10 @@ mod tests {
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 
-    /// Regression test for #396: the old `Drop` for `EneHandle` gated
-    /// shutdown on `Arc::strong_count(&cmd_tx) == 1`, which was never true
-    /// because a single handle holds three independent `Arc` clones of
-    /// `cmd_tx` (self, diagnostics, vision). The [`HandleShutdownGuard`]
+    /// Regression test: the `Drop` for `EneHandle` must not gate shutdown
+    /// on `Arc::strong_count(&cmd_tx) == 1`, which never holds because a
+    /// single handle holds three independent `Arc` clones of `cmd_tx`
+    /// (self, diagnostics, vision). The [`HandleShutdownGuard`]
     /// is shared via one `Arc` across all handle clones, so its `Drop` must
     /// fire exactly once — when the *last* clone is released. Dropping an
     /// intermediate clone must leave the actor alive; dropping the last
@@ -1342,9 +1322,9 @@ mod tests {
             .await
             .expect("open initializes handle");
 
-        // Probe sender held outside the handle: the guard no longer depends
+        // Probe sender held outside the handle: the guard does not depend
         // on `cmd_tx`'s strong count, so an extra sender clone must not
-        // defer shutdown (the exact #396 trap the old code fell into).
+        // defer shutdown.
         let probe = Arc::clone(&handle.cmd_tx);
 
         let clone = handle.clone();
@@ -1380,7 +1360,7 @@ mod tests {
         }
     }
 
-    /// Regression test for #396: an explicit [`EneHandle::shutdown`] before
+    /// Regression test: an explicit [`EneHandle::shutdown`] before
     /// drop must leave the guard's `Drop` a silent no-op — the command
     /// channel is closed and the shutdown mutexes already emptied, so no
     /// double shutdown or panic occurs.
@@ -1402,7 +1382,7 @@ mod tests {
         drop(handle);
     }
 
-    /// Regression test for #396: explicit shutdown on one clone while a
+    /// Regression test: explicit shutdown on one clone while a
     /// sibling clone is still live. The shared guard fires only when the
     /// last clone releases it — by which point every resource it touches
     /// has already been consumed by the explicit shutdown.
@@ -1443,7 +1423,6 @@ mod tests {
         let message = result.expect_err("panic must be contained, not propagated");
         assert!(message.contains("boom"), "unexpected message: {message}");
 
-        // The supervisor must surface the panic as a diagnostic event.
         let mut saw_panic = false;
         while let Ok(ev) = diag_rx.try_recv() {
             if let crate::diagnostics::DiagnosticEvent::ActorPanic { component, .. } = ev {
@@ -1454,22 +1433,19 @@ mod tests {
         assert!(saw_panic, "expected ActorPanic diagnostic event");
     }
 
-    /// Regression test for #268: with `panic = "abort"` removed from the
-    /// release profile, `catch_unwind`-based isolation in
-    /// `run_command_isolated` is finally live in release builds (it always
-    /// unwound in debug/test, which is why this couldn't be caught by simply
-    /// running the test suite before the profile fix — the risk was release
-    /// builds specifically). This drives a full mailbox round trip through a
+    /// Regression test: `catch_unwind`-based isolation in
+    /// `run_command_isolated` must keep the actor usable after a command
+    /// panics. This drives a full mailbox round trip through a
     /// live actor (unlike `isolate_panic_contains_panic_and_emits_diagnostic`,
     /// which calls the bare `isolate_panic` helper directly) and asserts all
-    /// four properties #268 requires:
+    /// four properties:
     ///   (a) the panic is caught, not propagated out of the actor task,
     ///   (b) the actor survives and keeps processing commands afterward,
     ///   (c) a `DiagnosticEvent::ActorPanic { component: "command", .. }` fires,
     ///   (d) `pending_permissions`, `permission_scopes`, and `undo_stack` —
-    ///       the three fields #268 flagged for audit — are left in a
-    ///       consistent, still-usable state: the mutations recorded just
-    ///       before the panic are fully present, not torn or lost, and the
+    ///       the three shared-state fields a panicking command can mutate — are
+    ///       left in a consistent, still-usable state: the mutations recorded
+    ///       just before the panic are fully present, not torn or lost, and the
     ///       (non-poisoning) locks guarding them are not stuck.
     #[tokio::test]
     async fn actor_survives_command_panic_and_audited_state_stays_consistent() {
@@ -1569,10 +1545,8 @@ mod tests {
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 
-    /// Regression test for #271: a read-only session query must not queue
-    /// behind an in-flight `Run` turn. Before the split, `ListSessions` was
-    /// an `EneCommand` variant handled by the same single-threaded actor
-    /// mailbox as `Run`, so a slow/long turn would starve session queries.
+    /// Regression test: a read-only session query must not queue
+    /// behind an in-flight `Run` turn.
     /// `SessionQueryHandle` talks to `MemoryStore` directly and must return
     /// promptly even while a turn is streaming.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1611,14 +1585,14 @@ mod tests {
         drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
     }
 
-    /// Regression test for #404 (item 5): after the actor has shut down, a
+    /// Regression test: after the actor has shut down, a
     /// subsequent `run()` must report [`RunError::ActorDead`], never
     /// [`RunError::Busy`].
     ///
-    /// Before the fix, `run()` consulted the single-flight gate *before* the
-    /// command channel, so a gate the dying actor still held could surface as
-    /// `Busy` even though the actor was gone. The fix checks the closed
-    /// channel first and releases the gate on `Shutdown`, so a dead actor is
+    /// A `run()` that consults the single-flight gate *before* the command
+    /// channel could surface `Busy` from a gate the dying actor still holds
+    /// even though the actor is gone. The code checks the closed channel
+    /// first and releases the gate on `Shutdown`, so a dead actor is
     /// reported as dead.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn run_after_shutdown_reports_actor_dead_not_busy() {
@@ -1685,7 +1659,7 @@ mod tests {
 
     /// Like [`build_bare_actor`] but also hands back the lifecycle-bus
     /// receiver, so admission tests can assert on
-    /// [`LifecycleEvent::PendingCandidateAvailable`] (#398). The registry is
+    /// [`LifecycleEvent::PendingCandidateAvailable`]. The registry is
     /// taken explicitly (same signature as [`build_bare_actor`]); callers
     /// that do not care about tool behavior pass `Arc::new(EmptyRegistry)`.
     fn build_bare_actor_with_lifecycle(
@@ -1702,7 +1676,7 @@ mod tests {
 
     /// Like [`build_bare_actor_with_lifecycle`] but also hands back the shared
     /// [`TurnGate`], so tests can assert on single-flight gate state — e.g.
-    /// that `Shutdown` releases it (#404). `pub(super)` so `actor::tests` can
+    /// that `Shutdown` releases it. `pub(super)` so `actor::tests` can
     /// reuse it.
     pub(super) fn build_bare_actor_with_gate(
         registry: Arc<dyn ene_plugin_host::ToolRegistry>,
@@ -1762,8 +1736,8 @@ mod tests {
         let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
         // Placeholder tasks must stay in-flight (not complete) so they are
-        // still counted when `admit_task` reaps before its capacity check
-        // (#404); an `async {}` body would finish instantly and be reaped
+        // still counted when `admit_task` reaps before its capacity check;
+        // an `async {}` body would finish instantly and be reaped
         // away, so the cap would never be reached.
         assert!(actor::admit_task(&mut set, 2, "TestSet", None, &diag_tx));
         set.spawn(async {
@@ -1798,7 +1772,7 @@ mod tests {
         }
     }
 
-    /// Regression test for #404 (item 1): `admit_task` must reap
+    /// Regression test: `admit_task` must reap
     /// completed-but-unjoined tasks *before* checking the cap, so a burst
     /// that finished during the actor's `select!` block does not cause a
     /// spurious `EneRuntimeError::Busy`.
@@ -1810,7 +1784,6 @@ mod tests {
         let (diag_tx, _diag_rx) = broadcast::channel(16);
         let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-        // A task that stays in-flight until we release it.
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
         let release_task = std::sync::Arc::clone(&release);
         assert!(actor::admit_task(&mut set, 1, "TestSet", None, &diag_tx));
@@ -1831,9 +1804,9 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Before #404 this saw the stale `len() == 1` and rejected
-        // spuriously. The fix reaps the finished task first, freeing the
-        // slot so admission succeeds.
+        // Without reaping first, a completed-but-unjoined task keeps
+        // `len() == 1` and admission would reject spuriously; reaping frees
+        // the slot so admission succeeds.
         assert!(
             actor::admit_task(&mut set, 1, "TestSet", None, &diag_tx),
             "a completed-but-unjoined task must not count against the cap (#404)"
@@ -1841,15 +1814,14 @@ mod tests {
         assert_eq!(set.len(), 0, "the finished task should have been reaped");
     }
 
-    /// Regression test for #398: a memory-writer handle rejected by the
+    /// Regression test: a memory-writer handle rejected by the
     /// Stage 8 cap must still have its outcome consumed, so
     /// [`LifecycleEvent::PendingCandidateAvailable`] reaches the lifecycle
     /// bus instead of being silently dropped.
     ///
     /// `memory_writer_cap` is set to 0 so *every* drained handle is
     /// rejected purely by the cap (no placeholder task needed to fill the
-    /// `JoinSet`). Before the fix, the rejected `JoinHandle` was dropped
-    /// unread and the event never fired.
+    /// `JoinSet`).
     #[tokio::test]
     async fn rejected_memory_writer_still_emits_pending_candidate() {
         let task_caps = crate::task_config::ToolRuntimeConfig {
@@ -1890,7 +1862,7 @@ mod tests {
         );
     }
 
-    /// Companion to the test above for the failure path (#398): a rejected
+    /// Companion to the test above for the failure path: a rejected
     /// memory-writer whose write failed must still emit
     /// [`DiagnosticEvent::MemoryWrite`]. With no store configured the
     /// pending/permanent counts are `None` and the status is `"failed"`.
@@ -1945,7 +1917,7 @@ mod tests {
         );
     }
 
-    /// Mixed admission scenario (#398): with `memory_writer_cap` set to 1,
+    /// Mixed admission scenario: with `memory_writer_cap` set to 1,
     /// the first drained handle is admitted into `memory_writer_tasks` while
     /// the second is rejected by the cap — yet *both* must still emit
     /// [`LifecycleEvent::PendingCandidateAvailable`]. Guards the
@@ -2009,7 +1981,7 @@ mod tests {
         );
     }
 
-    /// Regression test for #398 on the `Err(e)` arm of
+    /// Regression test on the `Err(e)` arm of
     /// [`actor::consume_memory_write_outcome`]: a memory-writer `JoinHandle`
     /// whose task panicked resolves to `Err`, and the rejected/detached
     /// consumer must still surface the failure as a
@@ -2192,12 +2164,12 @@ mod tests {
         );
     }
 
-    // ── #397: no head-of-line blocking in the command loop ──
+    // ── No head-of-line blocking in the command loop ──
 
-    /// Regression test for #397: a heavy command whose work has been moved
+    /// Regression test: a heavy command whose work has been moved
     /// off the actor loop into `bg_command_tasks` must not block subsequent
-    /// commands. Before the fix, handlers such as the GGUF model load and
-    /// the plugin-host restart awaited their heavy I/O *inline*, stalling the
+    /// commands. A handler awaiting heavy I/O *inline* (GGUF model load,
+    /// plugin-host restart) would stall the
     /// entire mailbox (including `Cancel`) for the duration.
     ///
     /// This drives a live actor through its real `run()` loop: it occupies a

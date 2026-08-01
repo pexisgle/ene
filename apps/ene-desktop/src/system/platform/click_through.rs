@@ -168,8 +168,7 @@ mod imp {
             // the platform function only emits a full-window rect
             // when the cursor is over the silhouette or the user
             // is dragging. With no mask capture the rects are
-            // empty. (Mirrors the original `platform_runtime.rs`
-            // semantics: opaque + idle + no mask = empty.)
+            // empty (opaque + idle + no mask = empty).
             let mut world = empty_world();
             world.insert_resource(TransparentWindow(false));
             world.insert_resource(ShouldRenderDebug(true));

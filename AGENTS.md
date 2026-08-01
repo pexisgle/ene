@@ -57,6 +57,39 @@ build failures.
 - Keep deps in root `[workspace.dependencies]` and reference them as `{ workspace = true }`.
   Don't bump versions as a side effect of unrelated work.
 
+## Comments
+
+The default is **no comment**. A comment earns its place only by carrying information the
+code cannot express: why this way, what breaks otherwise, where a value came from. Rustdoc
+on public items is the exception — it states the contract, not the mechanism.
+
+- **Never restate the code.** If a comment paraphrases the line below it, delete it and fix
+  the naming instead. Aim for the smallest number of comments that keeps the code
+  maintainable, not for coverage.
+- **Write the *why*.** Worth a comment: invariants a caller must uphold, non-obvious
+  ordering/locking requirements, why the obvious simpler version fails, the origin of a
+  magic value (spec, protocol version, upstream bug, measured limit).
+- **Self-contained — no own-repo references.** A comment must be fully understandable from
+  the repo alone. No issue/PR numbers (`(#240)`, `TODO(#218)`), no links to this repo's
+  GitHub/Slack/CI, no "see the review thread". If the context lives in a ticket, summarize
+  its substance in one line; if it isn't worth that line, it isn't worth a comment. Existing
+  `(#nnn)` markers are legacy — drop or rewrite them when you touch the line.
+- **External specs are the exception.** Links to the standards a value or format comes from
+  (VRM spec, Character Card Spec, glTF, library docs) document provenance the code cannot
+  express — keep them. Only *this repo's* issue/PR/CI references are banned.
+- **When in doubt, leave it out.** Re-read every comment against these rules: one that
+  restates code or adds colour is deleted, not kept. The default answer to "should this
+  comment exist?" is no.
+- **No changelog in comments.** "Moved from `ene-store`", "previously used X", "changed in
+  v2" describe a diff, not the code. `git log` and the generated changelog own that.
+- `TODO:` states *what* and *under which condition*, never a ticket:
+  `// TODO: drop the fallback once every plugin negotiates IPC v4`.
+- `// SAFETY:` is mandatory on every `unsafe` block and must name the invariant that makes it
+  sound (see `crates/ene-ai-local/src/local_llm/model.rs`).
+- Commented-out code is deleted, not parked.
+- Comments and rustdoc are **English only**, regardless of the working language — the
+  bilingual rule applies to `docs/` and i18n strings, not to source.
+
 ## Architecture boundaries
 
 Violating these is the most common way to break this repo:

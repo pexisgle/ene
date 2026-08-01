@@ -1,9 +1,8 @@
 //! Scene graph transforms.
 //!
 //! Minimal `Transform` / `GlobalTransform` pair used by the
-//! `propagate_transforms` system (added in Phase 4 alongside
-//! physics). Kept as plain-data components so the entity can be
-//! moved without reaching for the legacy `physics::Transform`.
+//! `propagate_transforms` system. Kept as plain-data components so the
+//! entity can be moved without reaching for `physics::Transform`.
 use bevy_ecs::prelude::*;
 use glam::{Mat4, Quat, Vec3};
 

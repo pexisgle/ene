@@ -40,7 +40,6 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // conversation_logs
         manager
             .create_table(
                 Table::create()
@@ -89,7 +88,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // tool_embedding_index
         manager
             .create_table(
                 Table::create()
@@ -196,7 +194,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // __tool_schemas
         manager
             .create_table(
                 Table::create()
@@ -215,7 +212,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // typed_memories
         manager
             .create_table(
                 Table::create()
@@ -359,7 +355,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // memory_embeddings
         manager
             .create_table(
                 Table::create()
@@ -423,7 +418,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // memory_links
         manager
             .create_table(
                 Table::create()
@@ -485,7 +479,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // memory_spans
         manager
             .create_table(
                 Table::create()
@@ -529,7 +522,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // affect_states
         manager
             .create_table(
                 Table::create()
@@ -618,7 +610,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // commitments
         manager
             .create_table(
                 Table::create()
@@ -668,7 +659,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // audit_log
         manager
             .create_table(
                 Table::create()
@@ -745,7 +735,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // sessions
         manager
             .create_table(
                 Table::create()
@@ -813,7 +802,6 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        // pending_affect_proposals
         manager
             .create_table(
                 Table::create()
@@ -1081,7 +1069,7 @@ enum Sessions {
     TurnCount,
 }
 
-/// Adds the deferred memory-write retry queue (#240).
+/// Adds the deferred memory-write retry queue.
 pub struct PendingMemoryWritesMigration;
 
 impl MigrationName for PendingMemoryWritesMigration {
@@ -1236,7 +1224,7 @@ impl MigrationTrait for SourceRefIndexMigration {
     }
 }
 
-/// Adds a nullable `session_id` column and index to `audit_log` (#426).
+/// Adds a nullable `session_id` column and index to `audit_log`.
 ///
 /// Existing rows keep `NULL`, so audit entries written before this
 /// migration are never misattributed to a session. New rows record the

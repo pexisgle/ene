@@ -1,20 +1,16 @@
 //! Per-frame "should the debug overlay update this frame?" gate.
 //!
-//! Replaces the inline `last_debug_update` FPS throttle in
-//! `Runtime::about_to_wait`. The system reads the character
-//! drag state from the bevy `DragState` resource (written by
-//! the winit event handler on every mouse-down/up) and writes
-//! a [`ShouldRenderDebug`] marker that the per-frame cursor
-//! hittest can read to short-circuit when the rate limit is in
-//! effect.
+//! The system reads the [`DragActive`] resource (written by the winit
+//! event handler on every mouse-down/up) and writes a
+//! [`ShouldRenderDebug`] marker that the per-frame cursor hittest can
+//! read to short-circuit when the rate limit is in effect.
 use std::time::{Duration, Instant};
 
 use bevy_ecs::prelude::*;
 
 /// Latest "is the user currently dragging the character?"
-/// signal. Mirrors the legacy `CharacterDragState::is_dragging`
-/// result, but lifted into a bevy `Resource` so the per-frame
-/// gate can run as a system.
+/// signal, exposed as a bevy `Resource` so the per-frame gate
+/// can run as a system.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DragActive(pub bool);
 

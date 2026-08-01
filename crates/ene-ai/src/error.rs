@@ -71,7 +71,7 @@ pub enum LlmProviderError {
     #[error("provider error: {0}")]
     Provider(String),
 
-    /// Local llama.cpp load / inference failure (#165 / #171).
+    /// Local llama.cpp load / inference failure.
     #[error("local LLM error: {0}")]
     LocalLlm(String),
 
@@ -79,7 +79,7 @@ pub enum LlmProviderError {
     /// (`ene_infer::EngineError::Busy`). Enqueue contention only — the
     /// engine itself is fine.
     ///
-    /// Also used by plugin-supplied providers (#stage6) when the plugin's
+    /// Also used by plugin-supplied providers when the plugin's
     /// declared `ConcurrencyHint` admission control rejects a request:
     /// `queue_depth` is the plugin's configured queue depth in that case.
     #[error("engine busy: queue depth {queue_depth} exceeded")]
@@ -134,7 +134,7 @@ impl LlmProviderError {
     }
 }
 
-/// Single public error type for the `ene-ai` crate boundary (API v1 / #118).
+/// Single public error type for the `ene-ai` crate boundary (API v1).
 ///
 /// Domain-specific [`LlmProviderError`] and [`EmbeddingError`] remain available
 /// as nested payloads for typed matching via `AiError` variants.
@@ -146,13 +146,13 @@ pub enum AiError {
     /// Embedding provider failure.
     #[error(transparent)]
     Embedding(#[from] crate::traits::EmbeddingError),
-    /// API key is missing or empty (#237).
+    /// API key is missing or empty.
     #[error("API key not configured: {0}")]
     MissingApiKey(String),
-    /// Provider base URL is missing (#241).
+    /// Provider base URL is missing.
     #[error("base URL not configured: {0}")]
     MissingBaseUrl(String),
-    /// Provider base URL failed format checks (#241).
+    /// Provider base URL failed format checks.
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(String),
 }

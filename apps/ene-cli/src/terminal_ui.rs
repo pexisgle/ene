@@ -88,7 +88,6 @@ pub trait TerminalBackend: Send {
     fn is_interactive(&self) -> bool;
 }
 
-/// Records operations for unit tests (no TTY).
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub struct CaptureBackend {
@@ -330,7 +329,6 @@ impl TerminalUi {
         inner.backend.flush_all();
     }
 
-    /// Resume after [`Self::pause_for_external_prompt`].
     pub fn resume_after_external_prompt(&self) {
         let mut inner = self.inner.lock();
         inner.mode = UiMode::Idle;
@@ -343,14 +341,13 @@ impl TerminalUi {
     /// a blocking `stdin::read_line` that cannot observe
     /// `request_read_cancel`; callers that must interrupt an in-flight read
     /// (the proactive-turn path in the REPL) check this first so they don't
-    /// hang until the next input line or EOF (#477).
+    /// hang until the next input line or EOF.
     #[must_use]
     pub fn is_interactive(&self) -> bool {
         let inner = self.inner.lock();
         inner.backend.is_interactive() || io::stdin().is_terminal()
     }
 
-    /// Async REPL line read (blocking editor on a worker thread).
     pub async fn read_line(&self) -> Option<String> {
         clear_read_cancel();
         let ui = self.clone();
@@ -596,7 +593,6 @@ mod tests {
 
         let cap = capture.lock();
         assert!(cap.stderr.contains("post-turn log"));
-        // Final prompt redraw must still show the in-progress input.
         assert!(
             cap.stderr.ends_with(">: hello") || cap.stderr.contains(">: hello"),
             "stderr={:?}",

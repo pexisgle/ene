@@ -1,11 +1,11 @@
-//! Hybrid memory search scoring (pure functions, #302, #346).
+//! Hybrid memory search scoring (pure functions).
 //!
-//! Moved from `ene-store::search` — combines vector similarity, lexical
-//! overlap, recency, salience, affect, relationship, and access signals into
-//! an explainable score breakdown. No DB I/O lives here; `ene-store` gathers
-//! candidates and this layer scores them.
+//! Combines vector similarity, lexical overlap, recency, salience, affect,
+//! relationship, and access signals into an explainable score breakdown.
+//! No DB I/O lives here; `ene-store` gathers candidates and this layer
+//! scores them.
 //!
-//! ## Score structure (#346)
+//! ## Score structure
 //!
 //! The combination is *relevance-driven*, not additive:
 //!
@@ -23,11 +23,11 @@
 //! - `penalty_multiplier` (`(0, 1]`) applies contradiction/stale penalties as a
 //!   scale-invariant fraction rather than an absolute subtraction.
 //!
-//! This replaces the previous weighted sum, in which the quality components
-//! collectively outweighed relevance roughly 2:1 and could push an unrelated
-//! memory above a strongly relevant one.
+//! An additive weighted sum would let the quality components collectively
+//! outweigh relevance and push an unrelated memory above a strongly relevant
+//! one; the multiplicative form prevents that.
 //!
-//! ## Access boost is time-decayed (#345)
+//! ## Access boost is time-decayed
 //!
 //! The access component of [`quality_factor`] still rewards frequently-used
 //! memories, but the reward now fades with the age of the most recent access
@@ -45,7 +45,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::decay::recency_score;
 
-/// Half-life in days for the access-boost recency decay (#345).
+/// Half-life in days for the access-boost recency decay.
 ///
 /// Access history fades on this timescale so that old accesses stop boosting a
 /// memory's recall score. Chosen shorter than the typical content-forgetting
@@ -123,8 +123,8 @@ fn flush_cjk(run: &mut Vec<char>, tokens: &mut HashSet<String>) {
 ///   unigram.
 ///
 /// This restores the lexical (term-overlap) component of hybrid search for
-/// Japanese, which the previous whitespace/ASCII splitter reduced to a single
-/// opaque token per sentence (#303). Bigram tokenization is deliberately
+/// Japanese, which a whitespace/ASCII splitter would reduce to a single
+/// opaque token per sentence. Bigram tokenization is deliberately
 /// dictionary-free (no MeCab/lindera) so it adds no native build dependency or
 /// dictionary download to CI; the trade-off is that single-character queries
 /// only match documents where that character appears alone.
@@ -154,7 +154,7 @@ pub fn tokenize(text: &str) -> HashSet<String> {
 
 /// Jaccard similarity between two memory documents (title + content tokens).
 ///
-/// Used for duplicate clustering and MMR pairwise diversity (#78).
+/// Used for duplicate clustering and MMR pairwise diversity.
 pub fn document_lexical_similarity(
     title_a: &str,
     content_a: &str,
@@ -225,17 +225,17 @@ pub fn relationship_score(impact: f32) -> f32 {
     }
 }
 
-/// Diminishing-returns access boost that decays with time since last access (#345).
+/// Diminishing-returns access boost that decays with time since last access.
 ///
-/// The count contribution is the same saturating curve as before
-/// (`1 − exp(−count·0.25)`, ~0.92 at ten accesses), but it is multiplied by a
-/// half-life decay on the *age* of the most recent access. Old accesses stop
-/// mattering: a memory recalled ten times a year ago no longer carries a near
-/// full boost, so access history cannot lock a memory into the top of the
-/// ranking forever. When no access time is recorded (`last_accessed_at` is
-/// `None`), the decay anchor falls back to `updated_at`, mirroring
-/// [`recency_score`] — a legacy count without a timestamp still contributes
-/// rather than silently zeroing a previously rewarded row.
+/// The count contribution is a saturating curve (`1 − exp(−count·0.25)`,
+/// ~0.92 at ten accesses), multiplied by a half-life decay on the *age* of
+/// the most recent access. Old accesses stop mattering: a memory recalled ten
+/// times a year ago no longer carries a near-full boost, so access history
+/// cannot lock a memory into the top of the ranking forever. When no access
+/// time is recorded (`last_accessed_at` is `None`), the decay anchor falls
+/// back to `updated_at`, mirroring [`recency_score`] — a count without a
+/// timestamp still contributes rather than silently zeroing a row that had
+/// earned a boost.
 pub fn access_boost_score(
     access_count: i64,
     last_accessed_at: Option<DateTime<Utc>>,
@@ -282,7 +282,7 @@ pub fn stale_penalty(
     penalty
 }
 
-/// Combined query-relevance signal in `[0, 1]` (#346).
+/// Combined query-relevance signal in `[0, 1]`.
 ///
 /// Blends vector cosine similarity and lexical overlap with their relevance
 /// weights. This is the score *base*: it decides whether a memory is a
@@ -308,14 +308,13 @@ pub fn relevance_score(vector_similarity: f32, lexical: f32, weights: HybridSear
     (vector * vector_weight + lexical * lexical_weight) / total_weight
 }
 
-/// Multiplicative quality factor `>= 1.0` (#346).
+/// Multiplicative quality factor `>= 1.0`.
 ///
 /// Combines the memory's intrinsic quality signals — recency, salience,
 /// confidence, affect match, relationship, and access history — into
 /// `1 + Σ(component × weight)`. It rescales the relevance base rather than
 /// competing with it, so a high-quality memory can outrank a similarly
-/// relevant one but can never overtake a much more relevant memory (the
-/// additive-structure bug in #346).
+/// relevant one but can never overtake a much more relevant memory.
 pub fn quality_factor(
     recency: f32,
     salience: f32,
@@ -340,12 +339,12 @@ pub fn quality_factor(
         + component(access, weights.access_boost)
 }
 
-/// Scale-invariant penalty multiplier in `(0, 1]` (#346).
+/// Scale-invariant penalty multiplier in `(0, 1]`.
 ///
 /// Converts the absolute contradiction and stale penalties into a single
 /// multiplicative retention factor `1 / (1 + Σpenalty)`, so a penalty removes
-/// the same *fraction* of a score regardless of its magnitude. The old
-/// additive subtraction was asymmetric — near-fatal for weak candidates and
+/// the same *fraction* of a score regardless of its magnitude — an additive
+/// subtraction would be asymmetric, near-fatal for weak candidates and
 /// negligible for strong ones.
 pub fn penalty_multiplier(contradiction: f32, stale: f32) -> f32 {
     let contradiction = if contradiction.is_nan() {
@@ -357,7 +356,7 @@ pub fn penalty_multiplier(contradiction: f32, stale: f32) -> f32 {
     1.0 / (1.0 + contradiction + stale)
 }
 
-/// Compute the hybrid score breakdown for a gathered candidate (#346).
+/// Compute the hybrid score breakdown for a gathered candidate.
 ///
 /// Total is `(relevance × quality_factor + commitment_boost) × penalty_multiplier`,
 /// clamped to be non-negative. Relevance (vector similarity plus lexical overlap)
@@ -433,11 +432,10 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
 
 /// Score, filter, sort, and truncate gathered candidates into ranked results.
 ///
-/// Reproduces the post-gather pipeline that `MemoryStore::search` used to run
-/// inline (#302): score every candidate, drop rows below `query.min_score`,
-/// order by total (then vector similarity, then recency), and cap at
-/// `query.limit`. Time-range filtering is applied here too so callers get the
-/// same result set the store previously returned.
+/// This is the single post-gather pipeline: score every candidate, drop rows
+/// below `query.min_score`, order by total (then vector similarity, then
+/// recency), and cap at `query.limit`. Time-range filtering is applied here
+/// too, so every caller observes the same result set.
 ///
 /// Recent-fallback candidates are exempt from the `min_score` gate: they are
 /// deliberately injected conversational context (bounded by
@@ -582,8 +580,6 @@ mod tests {
 
     #[test]
     fn tokenize_splits_japanese_into_bigrams() {
-        // The whole point of #303: a Japanese sentence must not collapse into a
-        // single opaque token.
         let tokens = tokenize("今日は良い天気ですね");
         assert!(
             tokens.len() > 1,
@@ -625,7 +621,7 @@ mod tests {
     fn tokenize_keeps_iteration_mark_in_bigrams() {
         // The ideographic iteration mark `々` (category Lm) is alphanumeric, so it
         // must be classified as CJK or it would split words like 人々/時々 into
-        // lone unigrams (Bugbot regression guard).
+        // lone unigrams.
         let tokens = tokenize("人々時々色々");
         assert!(tokens.contains("人々"));
         assert!(tokens.contains("時々"));
@@ -655,7 +651,6 @@ mod tests {
 
     #[test]
     fn lexical_overlap_scores_japanese() {
-        // Before #303 this returned 0.0 for Japanese queries.
         let score = lexical_overlap_score("良い天気", "天気予報", "今日は良い天気ですね");
         assert!(
             score > 0.0,
@@ -791,10 +786,8 @@ mod tests {
         let before = Utc.with_ymd_and_hms(2026, 7, 1, 0, 0, 0).unwrap();
         let after = Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0).unwrap();
 
-        // No range => always included.
         assert!(within_time_range(None, created));
 
-        // Inclusive bounds.
         let range = TimeRange {
             start: Some(before),
             end: Some(after),
@@ -803,13 +796,11 @@ mod tests {
         assert!(within_time_range(Some(&range), before));
         assert!(within_time_range(Some(&range), after));
 
-        // Out of range on both sides.
         let too_early = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
         let too_late = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
         assert!(!within_time_range(Some(&range), too_early));
         assert!(!within_time_range(Some(&range), too_late));
 
-        // Open-ended bounds.
         let start_only = TimeRange {
             start: Some(before),
             end: None,
@@ -885,8 +876,6 @@ mod tests {
 
     #[test]
     fn quality_cannot_override_relevance() {
-        // Regression for #346: a barely-relevant memory with maximal quality
-        // must not outrank a strongly-relevant memory with low quality.
         let now = Utc::now();
         let options = sample_query(now);
 
@@ -973,9 +962,9 @@ mod tests {
 
     #[test]
     fn penalty_is_scale_invariant() {
-        // Regression for #346: penalties remove a constant *fraction* of the
-        // score, so a disputed strong candidate keeps its lead over a disputed
-        // weak one (the old absolute subtraction hit weak candidates hardest).
+        // Penalties remove a constant *fraction* of the score, so a disputed
+        // strong candidate keeps its lead over a disputed weak one (an
+        // absolute subtraction would hit weak candidates hardest).
         let now = Utc::now();
         let options = sample_query(now);
 
@@ -1018,7 +1007,6 @@ mod tests {
         let strong_retained = strong_disputed.total / strong_clean.total;
         let weak_retained = weak_disputed.total / weak_clean.total;
         assert!((strong_retained - weak_retained).abs() < 1e-4);
-        // The strong candidate still beats the weak one once both are disputed.
         assert!(strong_disputed.total > weak_disputed.total);
     }
 
@@ -1051,8 +1039,7 @@ mod tests {
 
     #[test]
     fn access_boost_without_access_time_decays_from_updated_at() {
-        // #345 regression: legacy rows with `access_count > 0` but no
-        // `last_accessed_at` used to score zero. They now anchor on
+        // Rows with `access_count > 0` but no `last_accessed_at` anchor on
         // `updated_at`, so a recently-updated memory still earns its boost
         // while an old one has decayed away.
         let now = Utc::now();
@@ -1070,8 +1057,6 @@ mod tests {
 
     #[test]
     fn access_boost_fades_with_age_of_last_access() {
-        // #345 regression: the same access count must not lock in a permanent
-        // boost — an access from long ago fades toward zero.
         let now = Utc::now();
         let recent = now - chrono::Duration::days(1);
         let stale = now - chrono::Duration::days(365);

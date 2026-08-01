@@ -41,12 +41,12 @@ fn next_request_id() -> String {
 /// their end.
 const CANCEL_STREAM_MIN_VERSION: u32 = 4;
 
-/// Shared routing state for the single reader task (H-12).
+/// Shared routing state for the single reader task.
 ///
 /// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
 /// *before* any request/response correlation, so push messages
 /// ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted)) and stream
-/// messages can never be stolen by an unrelated in-flight request (Cr-5).
+/// messages can never be stolen by an unrelated in-flight request.
 ///
 /// All internal locks are `parking_lot::Mutex` because they are held only for
 /// the duration of a map lookup/insert — never across an `.await`.
@@ -59,7 +59,7 @@ struct Router {
     ///
     /// Populated by the reader task when a `DeferredCompleted` push arrives;
     /// drained by [`IpcPluginConnection::poll_deferred`] so a completion that
-    /// arrived while the connection was idle is still delivered (Cr-5).
+    /// arrived while the connection was idle is still delivered.
     deferred: parking_lot::Mutex<HashMap<String, Result<ToolResult, ToolError>>>,
 }
 
@@ -75,7 +75,7 @@ impl Router {
     /// Routes a single response to its destination.
     ///
     /// Push and stream messages are matched by variant *first*, so they can
-    /// never fall through to request/response correlation (Cr-5).
+    /// never fall through to request/response correlation.
     fn dispatch(&self, resp: PluginIpcResponse) {
         match &resp {
             // Push: cache the deferred completion for later retrieval.
@@ -139,7 +139,7 @@ fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
     }
 }
 
-/// The single reader task for a connection (H-12).
+/// The single reader task for a connection.
 ///
 /// Reads responses from the socket in a loop and dispatches each one through
 /// the [`Router`]. Exits on EOF or read error, then fails all pending waiters
@@ -176,9 +176,9 @@ async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>) {
 /// is guarded by its own short-lived [`Mutex`] (released *before* awaiting the
 /// response), and responses are correlated by `request_id` through the shared
 /// [`Router`]. Callers therefore share a plain `Arc<IpcPluginConnection>` and
-/// need no external lock to multiplex requests (#431).
+/// need no external lock to multiplex requests.
 ///
-/// ## Request multiplexing (#431)
+/// ## Request multiplexing
 ///
 /// [`request_once`](Self::request_once) registers a oneshot waiter and writes
 /// the request atomically under the brief writer lock, releases that lock, and
@@ -187,7 +187,7 @@ async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>) {
 /// to its waiter by `request_id`. A connection-level [`Semaphore`] bounds the
 /// number of concurrent in-flight requests (see [`connect`](Self::connect)).
 ///
-/// ## Single reader task (H-12)
+/// ## Single reader task
 ///
 /// A dedicated reader task reads all responses from the socket and dispatches
 /// them through a [`Router`] that routes by `request_id`/variant *before*
@@ -227,7 +227,7 @@ pub struct IpcPluginConnection {
     /// (re)connect. Lets the request path coalesce concurrent reconnects: when
     /// a shared transport failure fails many in-flight requests at once, only
     /// the first one actually reconnects and the rest observe the advanced
-    /// generation and simply retry on the fresh connection (#431). Without
+    /// generation and simply retry on the fresh connection. Without
     /// this, each failed request would tear down the connection its sibling
     /// just re-established.
     ///
@@ -239,7 +239,7 @@ pub struct IpcPluginConnection {
     /// the advanced generation and returns without reconnecting.
     generation: AtomicU64,
     /// Bounds the number of concurrent in-flight requests against this
-    /// connection (#431 / #435). A permit is acquired in
+    /// connection. A permit is acquired in
     /// [`request_once`](Self::request_once) and held for the round-trip, so the
     /// plugin is protected from unbounded host fan-out. Sized from
     /// `PluginConfig::max_concurrent` at [`connect`](Self::connect) time.
@@ -252,7 +252,7 @@ impl IpcPluginConnection {
     /// the advertised capabilities.
     ///
     /// `max_concurrent` bounds the number of concurrent in-flight requests
-    /// against this connection (#431 / #435); it is clamped to the semaphore's
+    /// against this connection; it is clamped to the semaphore's
     /// valid range (`1..=Semaphore::MAX_PERMITS`) and is normally sourced from
     /// `PluginConfig::max_concurrent`.
     ///
@@ -592,9 +592,8 @@ impl IpcPluginConnection {
     /// Checks the local completion cache first (populated by the reader task
     /// when a `DeferredCompleted` push arrives) before issuing a `PollDeferred`
     /// request. This ensures a completion that arrived while the connection
-    /// was idle is delivered promptly (Cr-5).
+    /// was idle is delivered promptly.
     pub async fn poll_deferred(&self, task_id: &str) -> Result<DeferredStatus, PluginHostError> {
-        // Check the push cache first (Cr-5 idle delivery).
         if let Some(result) = self.router.deferred.lock().remove(task_id) {
             return Ok(match result {
                 Ok(value) => DeferredStatus::Completed { result: value },
@@ -663,7 +662,7 @@ impl IpcPluginConnection {
     /// A per-request channel is registered with the [`Router`] *before* the
     /// request is written, so the single reader task routes every
     /// `StreamChunk` / `StreamEnd` / `StreamError` for this `request_id` into
-    /// the returned receiver (H-12). The receiver yields responses until a
+    /// the returned receiver. The receiver yields responses until a
     /// terminal `StreamEnd`/`StreamError` is observed or the channel closes
     /// (connection failure or stream cancellation).
     pub async fn send_create_chat_stream(
@@ -709,8 +708,8 @@ impl IpcPluginConnection {
 
     /// Sends a `ChatCompletion` request and awaits the result.
     ///
-    /// Returns the assistant text plus any token usage the plugin reported
-    /// (#365); `usage` is `None` when the plugin does not report it (including
+    /// Returns the assistant text plus any token usage the plugin reported;
+    /// `usage` is `None` when the plugin does not report it (including
     /// older plugins that omit the field on the wire).
     pub async fn chat_completion(
         &self,
@@ -768,8 +767,7 @@ impl IpcPluginConnection {
     /// `seen_generation` is the generation the caller observed before its
     /// request failed. If the current generation differs, another request
     /// already re-established the connection and this call returns `Ok(())`
-    /// without touching it — the caller simply retries on the fresh connection
-    /// (#431).
+    /// without touching it — the caller simply retries on the fresh connection.
     ///
     /// Aborts the old reader task and spawns a new one on the fresh stream.
     /// The aborted reader task is dropped at its suspension point inside
@@ -783,8 +781,8 @@ impl IpcPluginConnection {
     /// whole swap, so the generation re-check, the `fail_all()`, and the
     /// stream replacement are atomic with respect to a concurrent
     /// [`request_once`](Self::request_once): a request can neither write to a
-    /// half-replaced stream nor register a waiter that survives the swap
-    /// (#431). On a failed reconnect attempt the writer stays `None` (the
+    /// half-replaced stream nor register a waiter that survives the swap.
+    /// On a failed reconnect attempt the writer stays `None` (the
     /// stale stream is already gone) and every request fails with
     /// "not connected" until a later reconnect succeeds.
     pub async fn reconnect_from(&self, seen_generation: u64) -> Result<(), PluginHostError> {
@@ -802,7 +800,7 @@ impl IpcPluginConnection {
         // same stale connection may have reconnected while we waited for the
         // lock. If so, its reconnect already failed the stale waiters and
         // installed a fresh stream — tearing it down again would fail the
-        // siblings that already retried onto it (#431).
+        // siblings that already retried onto it.
         if self.generation.load(Ordering::Acquire) != seen_generation {
             return Ok(());
         }
@@ -888,7 +886,6 @@ impl IpcPluginConnection {
             }
         }
 
-        // Spawn a new reader task on the fresh stream.
         let (reader, writer) = tokio::io::split(stream);
         let reader_task = tokio::spawn(reader_loop(reader, Arc::clone(&self.router)));
         *writer_guard = Some(writer);
@@ -980,7 +977,7 @@ impl IpcPluginConnection {
     /// and [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no
     /// `request_id`; they are routed separately by the single reader task and
     /// never reach request/response correlation, so they are accepted here
-    /// without a match (Cr-5).
+    /// without a match.
     fn verify_request_id(resp: &PluginIpcResponse, expected: &str) -> Result<(), PluginHostError> {
         let Some(actual) = response_request_id(resp) else {
             return Ok(());
@@ -1081,14 +1078,14 @@ impl IpcPluginConnection {
             rid
         };
 
-        // Bound concurrent in-flight requests against this connection (#431 /
-        // #435). The permit is acquired once and held across the whole logical
+        // Bound concurrent in-flight requests against this connection. The
+        // permit is acquired once and held across the whole logical
         // request — including the single reconnect-and-retry — so a retry never
         // re-acquires and a saturated connection queues rather than fanning
         // out unboundedly. The acquire itself is bounded by the request
         // timeout: a saturated connection must not stall the caller (e.g. a
         // 5 s `Ping` liveness probe) indefinitely waiting for a slot. Each
-        // plugin is supervised by its own task (#432), so a stalled probe delays
+        // plugin is supervised by its own task, so a stalled probe delays
         // only that plugin's supervisor rather than every plugin's. Released
         // on every exit path via drop.
         let permit = tokio::time::timeout(timeout, self.inflight.clone().acquire_owned())
@@ -1105,7 +1102,7 @@ impl IpcPluginConnection {
         // transport fails and a sibling request has already reconnected in the
         // meantime (advancing the generation), this request simply retries on
         // the fresh connection instead of reconnecting a second time and
-        // tearing down the sibling's work (#431).
+        // tearing down the sibling's work.
         let generation_before = self.generation.load(Ordering::Acquire);
 
         match self.request_once(&req, &request_id, timeout, &permit).await {
@@ -1129,7 +1126,7 @@ impl IpcPluginConnection {
                 }
                 // `reconnect_from` re-checks the generation under the writer
                 // lock, so even if two siblings race past the logging branch
-                // above, only the first one actually reconnects (#431).
+                // above, only the first one actually reconnects.
                 self.reconnect_from(generation_before).await?;
                 let resp = self
                     .request_once(&req, &request_id, timeout, &permit)
@@ -1150,7 +1147,7 @@ impl IpcPluginConnection {
     /// **releases that lock**, and only then awaits the waiter with a timeout.
     /// The single reader task routes the response to the waiter by
     /// `request_id`, so the connection is free to carry other in-flight
-    /// requests during the wait (#431).
+    /// requests during the wait.
     ///
     /// `_permit` is this request's slot in the connection-level concurrency
     /// bound, acquired by [`do_request_with_timeout`](Self::do_request_with_timeout);
@@ -1192,7 +1189,7 @@ impl IpcPluginConnection {
     ///
     /// The writer lock is held only for the duration of the frame write, so
     /// concurrent requests serialize their writes (frames never interleave)
-    /// without blocking each other's response waits (#431).
+    /// without blocking each other's response waits.
     ///
     /// A missing stream or a failed write is reported as
     /// [`PluginHostError::TransportFailed`], which the request path treats as
@@ -1213,7 +1210,7 @@ impl IpcPluginConnection {
     /// Registration and the frame write happen inside one writer-lock critical
     /// section so they are atomic with respect to
     /// [`reconnect_from`](Self::reconnect_from), which holds the same lock
-    /// while it fails all waiters and swaps the stream (#431). This closes the
+    /// while it fails all waiters and swaps the stream. This closes the
     /// window where a waiter registered *before* the lock could survive a
     /// reconnect's `fail_all()`, get written to the fresh stream, and then be
     /// replayed by the retry path — double-executing a non-idempotent
@@ -1360,7 +1357,7 @@ mod tests {
     /// `inject_request_id` must write a `request_id` for exactly the variants
     /// that `request_request_id` reports as carrying one. If a future variant
     /// is added to one function but not the other, request/response correlation
-    /// silently breaks (H-9 regression); this test fails in that case.
+    /// silently breaks; this test fails in that case.
     #[test]
     fn inject_and_request_id_arm_sets_agree() {
         const SENTINEL: &str = "injected-id";

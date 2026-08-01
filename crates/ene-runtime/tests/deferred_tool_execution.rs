@@ -1,4 +1,4 @@
-//! Integration test for deferred (background) tool execution (#196).
+//! Integration test for deferred (background) tool execution.
 //!
 //! Verifies that:
 //! 1. Background-capable tools are called with `call_tool_deferred`
@@ -103,12 +103,10 @@ impl LlmProvider for MockLlmWithToolCall {
     }
 }
 
-/// Mock registry with a background-capable tool.
 struct BackgroundRegistry {
     deferred_calls: AtomicUsize,
     poll_count: AtomicUsize,
 }
-
 impl BackgroundRegistry {
     fn new() -> Self {
         Self {
@@ -247,7 +245,6 @@ async fn deferred_tool_execution_emits_completion_event() {
     // Run the streaming loop in a separate task so we can poll events.
     let stream_handle = tokio::spawn(async move { run_stream_cognitive(ctx).await });
 
-    // Collect events until we see Terminal.
     let mut saw_terminal = false;
     let mut saw_tool_call_result = false;
     let mut tool_result_message = String::new();
@@ -271,10 +268,8 @@ async fn deferred_tool_execution_emits_completion_event() {
 
     let _session = stream_handle.await.unwrap();
 
-    // Verify the tool was called via deferred path.
     assert_eq!(registry.deferred_calls.load(Ordering::SeqCst), 1);
 
-    // Verify the LLM received the "Task queued" message.
     assert!(saw_tool_call_result, "expected ToolCallResult event");
     assert!(
         tool_result_message.contains("Task queued for background execution"),
@@ -291,7 +286,7 @@ async fn deferred_tool_execution_emits_completion_event() {
     assert_eq!(task.task_id, "task-456");
 
     // Simulate the actor's polling loop. `ToolBackgroundCompleted` lives on
-    // the lifecycle bus, not the chat bus (#272), since it fires
+    // the lifecycle bus, not the chat bus, since it fires
     // asynchronously after the originating turn has already completed.
     let (lifecycle_tx, mut lifecycle_rx) = broadcast::channel::<LifecycleEvent>(16);
     let poll_registry = registry.clone();
@@ -304,7 +299,6 @@ async fn deferred_tool_execution_emits_completion_event() {
             started_at: chrono::Utc::now(),
         };
 
-        // Poll until completion (max 10 attempts).
         for _ in 0..10 {
             match poll_registry
                 .poll_deferred(&task.tool_name, &task.task_id)
@@ -330,7 +324,6 @@ async fn deferred_tool_execution_emits_completion_event() {
 
     poll_handle.await.unwrap();
 
-    // Verify the completion event was emitted on the lifecycle bus.
     let mut saw_completion = false;
     while let Ok(event) = lifecycle_rx.try_recv() {
         if let LifecycleEvent::ToolBackgroundCompleted {

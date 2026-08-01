@@ -138,7 +138,7 @@ pub enum PluginIpcRequest {
     /// Liveness probe. The plugin must reply with [`PluginIpcResponse::Pong`].
     ///
     /// Carries a `request_id` so the host's single reader task can correlate
-    /// the `Pong` with the originating probe (H-12). Older plugins that omit
+    /// the `Pong` with the originating probe. Older plugins that omit
     /// the field still interoperate because it is `#[serde(default)]`.
     Ping {
         /// Unique request identifier for correlating the `Pong`.
@@ -353,7 +353,7 @@ pub enum PluginIpcResponse {
     /// Reply to a [`PluginIpcRequest::Ping`] liveness probe.
     ///
     /// Echoes the originating probe's `request_id` so the host's single reader
-    /// task can correlate it (H-12). Older plugins that emit a bare `Pong`
+    /// task can correlate it. Older plugins that emit a bare `Pong`
     /// still interoperate because the field is `#[serde(default)]`.
     Pong {
         /// Request identifier correlating this pong to the originating `Ping`.
@@ -432,7 +432,7 @@ pub enum PluginIpcResponse {
         #[serde(default)]
         tool_calls_delta: Vec<serde_json::Value>,
         /// Token usage, carried on the final chunk of the stream when the
-        /// provider reports it (#365). Intermediate chunks leave this `None`;
+        /// provider reports it. Intermediate chunks leave this `None`;
         /// older plugins omit the field entirely and deserialize to `None`.
         #[serde(default)]
         usage: Option<TokenUsage>,
@@ -455,7 +455,7 @@ pub enum PluginIpcResponse {
         request_id: String,
         /// The generated content.
         content: String,
-        /// Token usage reported by the provider, if any (#365). `None` when
+        /// Token usage reported by the provider, if any. `None` when
         /// the provider does not report usage (the host then falls back to a
         /// character-based estimate); older plugins omit the field and
         /// deserialize to `None`.
@@ -927,7 +927,7 @@ mod tests {
     #[tokio::test]
     async fn response_deferred_completed_roundtrip() {
         // `DeferredCompleted` is a push message: it carries a `task_id` and a
-        // structured `ToolResult` but no `request_id` (Cr-5).
+        // structured `ToolResult` but no `request_id`.
         let resp = PluginIpcResponse::DeferredCompleted {
             task_id: "task-xyz".into(),
             result: Ok(ToolResult::text("background done")),
@@ -1243,7 +1243,6 @@ mod tests {
     async fn call_tool_defaults_to_sync_and_no_request_id() {
         let json = r#"{"CallTool":{"name":"read","arguments":"{}"}}"#;
         let req: PluginIpcRequest = serde_json::from_str(json).unwrap();
-        // Without request_id field, it defaults to empty string via serde default.
         assert_eq!(
             req,
             PluginIpcRequest::CallTool {

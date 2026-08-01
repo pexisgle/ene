@@ -9,13 +9,12 @@ use crate::utils::sandbox::Sandbox;
 /// Built-in filesystem tool provider.
 ///
 /// Dispatch is handled by [`ActionSetProvider`]; sandbox / permission state
-/// is threaded through hooks (#135 / #139).
+/// is threaded through hooks.
 pub struct FsToolProvider {
     inner: ActionSetProvider,
 }
 
 impl FsToolProvider {
-    /// Creates a new filesystem tool provider with all FS actions registered.
     pub fn new() -> Self {
         let sandbox: SandboxRef = Arc::new(std::sync::RwLock::new(None));
         let actions: Vec<Box<dyn ToolAction>> = vec![

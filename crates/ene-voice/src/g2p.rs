@@ -1,4 +1,4 @@
-//! Grapheme-to-phoneme conversion and Kokoro phoneme tokenization (C4).
+//! Grapheme-to-phoneme conversion and Kokoro phoneme tokenization.
 //!
 //! The Kokoro ONNX model does not consume raw text or UTF-8 bytes; its
 //! `input_ids` tensor is a flat phoneme vocabulary (`VOCAB_V10`, ~100 IPA-based
@@ -11,7 +11,6 @@
 //! - **Japanese**: a kana → phoneme lookup table (hiragana/katakana → IPA).
 //!
 //! Unknown characters are dropped, matching the reference Kokoro tokenizer.
-/// A single Kokoro vocabulary entry: phoneme character → token id.
 const VOCAB: &[(char, u8)] = &[
     (';', 1),
     (':', 2),
@@ -129,7 +128,6 @@ const VOCAB: &[(char, u8)] = &[
     ('ᵻ', 177),
 ];
 
-/// Look up the Kokoro token id for a phoneme character.
 fn vocab_id(ch: char) -> Option<u8> {
     VOCAB.iter().find(|(c, _)| *c == ch).map(|(_, id)| *id)
 }
@@ -248,13 +246,10 @@ pub fn japanese_to_phonemes(text: &str) -> String {
         } else if ch.is_ascii() {
             out.push_str(&english_to_phonemes(&ch.to_string()));
         }
-        // Non-kana, non-ASCII characters are dropped.
     }
     out
 }
 
-/// Hiragana/katakana → phoneme lookup. Returns the IPA-ish phoneme string for
-/// a single kana, or `None` if the character is not a mapped kana.
 #[expect(
     clippy::match_same_arms,
     reason = "distinct kana intentionally map to the same phoneme (e.g. じ/ぢ -> ʤi)"
@@ -430,10 +425,8 @@ mod tests {
         // Yoon kana map per-character (ゃ -> ja), so きゃ -> ki + ja.
         assert_eq!(japanese_to_phonemes("きゃ"), "kija");
         assert_eq!(japanese_to_phonemes("しゅ"), "ɕijɯ");
-        // Gemination (sokuon) maps to a glottal stop.
         assert_eq!(japanese_to_phonemes("っか"), "ʔka");
         assert_eq!(japanese_to_phonemes("ッカ"), "ʔka");
-        // Long vowel mark (chōonpu) maps to the length marker.
         assert_eq!(japanese_to_phonemes("カー"), "kaː");
     }
 

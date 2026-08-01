@@ -90,7 +90,6 @@ fn main() {
         Some(bin.as_slice())
     };
 
-    // ---- AABB / center / normalize_scale (PR4.18) ----
     let (raw_aabb, center, normalize_scale, per_primitive) = collect_aabb(&gltf, blob);
     let raw_min = raw_aabb.0;
     let raw_max = raw_aabb.1;
@@ -141,7 +140,6 @@ fn main() {
         nextent[1] / nextent[2].max(1e-6)
     );
 
-    // ---- Skin summary (仮説 #1, #2, #3) ----
     println!("\n=== Skin summary (仮説 #1, #2) ===");
     println!("  total skins: {}", gltf.document.skins().count());
     let mut all_skin_joint_indices: Vec<Vec<usize>> = Vec::new();
@@ -166,7 +164,6 @@ fn main() {
         all_skin_joint_indices.push(joints);
     }
 
-    // ---- Primitive -> skin mapping (仮説 #3) ----
     println!("\n=== Primitive -> skin mapping (仮説 #3) ===");
     // glTF 2.0 puts the skin reference on the NODE, not the
     // primitive. We walk every node, find ones that own a
@@ -217,7 +214,6 @@ fn main() {
     println!("  skin ref distribution: {skin_ref_counts:?}");
     println!("  primitives with non-zero JOINTS_0: {nonzero_joint_count}");
 
-    // ---- Humanoid bone -> joint index (仮説 #5) ----
     let humanoid = extract_humanoid_bones(&json);
     println!("\n=== Humanoid bone -> node (仮説 #5) ===");
     println!("  total humanoid bones declared: {}", humanoid.len());
@@ -248,7 +244,6 @@ fn main() {
         println!("  {marker} {bone_name:24} node={node_idx:4}  joint={joint:?}");
     }
 
-    // ---- IBM alignment spot check (仮説 #1) ----
     println!("\n=== IBM alignment spot check (仮説 #1) ===");
     for (skin_idx, skin) in gltf.document.skins().enumerate() {
         let joint_nodes: Vec<_> = skin.joints().collect();
@@ -271,7 +266,6 @@ fn main() {
         }
     }
 
-    // ---- Projected world extents (existing diagnostic) ----
     let view_h = 2.6_f32;
     for &ms in &[0.5_f32, 1.0, 1.5, 2.0, 2.2, 3.0] {
         let world_h = nextent[1] * ms;

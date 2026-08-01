@@ -17,27 +17,18 @@ mod undo;
 use crate::context::AppContext;
 use async_trait::async_trait;
 
-/// Custom subcommand error representations.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    /// Command was called with invalid or missing arguments
     #[error("Usage: {usage}")]
-    UsageError {
-        /// The usage description of the command
-        usage: String,
-    },
-    /// The cognitive actor or runtime state failed
+    UsageError { usage: String },
     #[error("Actor error: {0}")]
     ActorError(String),
-    /// Subcommand execution failed
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
-    /// Config or storage database error
     #[error("Database error: {0}")]
     DatabaseError(String),
 }
 
-/// The return value of a CLI command run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandOutcome {
     /// The REPL should continue to the next prompt.
@@ -46,19 +37,15 @@ pub enum CommandOutcome {
     Exit(i32),
 }
 
-/// Trait that represents an individual CLI command.
 #[async_trait]
 pub trait CliCommand: Send + Sync {
     /// The name of the command, starting with a slash, e.g. "/card"
     fn name(&self) -> &'static str;
 
-    /// Description of the command, shown in help
     fn description(&self) -> &'static str;
 
-    /// Detailed usage information, e.g. "/card `<name>`"
     fn usage(&self) -> &'static str;
 
-    /// Execute the command
     async fn execute(&self, arg: &str, ctx: &mut AppContext) -> Result<CommandOutcome, CliError>;
 }
 
@@ -84,8 +71,6 @@ pub static COMMANDS: &[&dyn CliCommand] = &[
 /// Maximum time the REPL will wait for the actor to drain on shutdown.
 pub const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Global command execution entrypoint.
-/// Dispatches the input string to the appropriate command handler.
 pub async fn execute(input: &str, ctx: &mut AppContext) -> CommandOutcome {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
     let cmd = parts[0];

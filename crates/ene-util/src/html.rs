@@ -11,9 +11,8 @@ const SKIP_TAGS: &[&str] = &[
 ///
 /// If the underlying `htmd` converter fails (e.g. on severely malformed
 /// input), the original HTML is returned as plain text so the caller still
-/// gets a non-empty result instead of an empty string. The previous
-/// `unwrap_or_default()` returned an empty string on every failure, which
-/// silently dropped the page content.
+/// gets a non-empty result instead of an empty string that silently drops
+/// the page content.
 pub fn html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_else(|e| {
         tracing::warn!(component = "html_to_markdown", error = %e, "htmd conversion failed, falling back to raw HTML");
@@ -43,8 +42,6 @@ pub fn extract_html(html: &str, extract: &str, trim: bool) -> String {
 }
 
 /// Extracts and converts a specific region of HTML to Markdown.
-///
-/// Applies `extract_html` first, then converts the result to Markdown.
 ///
 /// # Performance
 ///
@@ -132,7 +129,6 @@ fn normalize_text(text: &str) -> String {
         )]
         regex::Regex::new(r"[ \t]+\n").expect("invalid constant regex")
     });
-    // Collapse 3+ consecutive newlines into a paragraph break.
     let re_excessive_blanks = RE_EXCESSIVE_BLANKS.get_or_init(|| {
         #[expect(
             clippy::expect_used,

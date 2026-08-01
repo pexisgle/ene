@@ -1,9 +1,7 @@
-//! Priority-ordered prompt packing against the model's context window (#370).
+//! Priority-ordered prompt packing against the model's context window.
 //!
-//! #370 abolished the per-section absolute token budgets that used to live
-//! here (some hardcoded, all independent of the model's context size). Packing
-//! now budgets against a single number — the tokens the prompt may occupy once
-//! the response reserve and safety margin are set aside (#364) — and fills it
+//! Packing budgets against a single number — the tokens the prompt may occupy
+//! once the response reserve and safety margin are set aside — and fills it
 //! in priority order: required sections are always kept, and when the prompt
 //! overflows the window the lowest-priority droppable sections are shed first.
 //! Each section's *size* is bounded by its content producer (recall result
@@ -26,11 +24,11 @@ use super::tokens::estimate_tokens;
 
 /// Prompt-packing capacity derived from the model's effective context window.
 ///
-/// The per-section budgets were removed in #370: packing fills this single
-/// window in priority order rather than allocating fixed sub-budgets.
+/// Packing fills this single window in priority order rather than allocating
+/// fixed per-section sub-budgets.
 #[derive(Debug, Clone, Copy)]
 pub struct ContextBudget {
-    /// Total prompt token ceiling: the model's available window (#364).
+    /// Total prompt token ceiling: the model's available window.
     pub total_tokens: usize,
 }
 
@@ -39,7 +37,7 @@ impl ContextBudget {
     ///
     /// `total_tokens` is the effective window's `available` figure — the model
     /// window minus the response reserve and safety margin — optionally capped
-    /// by `mind.context.max_prompt_tokens` (#364, #370).
+    /// by `mind.context.max_prompt_tokens`.
     #[must_use]
     pub const fn with_capacity(total_tokens: usize) -> Self {
         Self { total_tokens }
@@ -60,7 +58,7 @@ pub struct BudgetMeta {
     /// A memory recalled by search may still be dropped by the budget manager
     /// (its whole section dropped, or trimmed within the section). Only the
     /// survivors — the ones actually composed into the packed prompt — should
-    /// have their access counters bumped (#345), so recall does not reinforce
+    /// have their access counters bumped, so recall does not reinforce
     /// memories it never surfaced.
     pub injected_memory_ids: Vec<i64>,
 }
@@ -91,13 +89,13 @@ pub struct PackInput {
     pub commitments: Vec<ActiveCommitmentPrompt>,
     /// Affect summary line.
     pub affect_summary: Option<String>,
-    /// Active scene summary from rolling compression (#79).
+    /// Active scene summary from rolling compression.
     pub scene_summary: Option<String>,
     /// Recent conversation history.
     pub history: Vec<HistoryEntry>,
     /// Expression PHI / output contract block.
     pub output_contract: Option<String>,
-    /// Note about a previously interrupted response (#206).
+    /// Note about a previously interrupted response.
     pub interruption_note: Option<String>,
     /// Author's note: depth-based instruction injection (roleplay enhancement).
     pub authors_note: Option<AuthorsNote>,
@@ -145,7 +143,7 @@ fn render_memory_body(prefix: &str, memories: &[RecalledMemory]) -> String {
 }
 
 /// Recalled-memory survivors per section, kept in lockstep with the rendered
-/// section bodies at every packing stage (#345).
+/// section bodies at every packing stage.
 ///
 /// `build_sections` seeds them with every recalled memory, and the drop loop
 /// clears them when a whole section is dropped — so at any point their IDs are
@@ -176,7 +174,7 @@ fn history_entry_tokens(entry: &HistoryEntry) -> usize {
 
 /// Estimate the total token cost of a history slice (per-entry content
 /// estimate plus per-message overhead). Shared by prompt packing and the
-/// token-based window-pressure compression trigger (#368).
+/// token-based window-pressure compression trigger.
 pub fn estimate_history_tokens(history: &[HistoryEntry]) -> usize {
     history.iter().map(history_entry_tokens).sum()
 }
@@ -273,7 +271,7 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
 
         // The structured persona block shares the section with the recalled
         // profile memories; it is always kept, and whole bullets are shed (low
-        // confidence first) only if the section overflows the window (#370).
+        // confidence first) only if the section overflows the window.
         let persona_block = input
             .user_persona
             .as_ref()
@@ -335,10 +333,10 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
     (sections, survivors)
 }
 
-/// Pack a prompt packet under the model's context window (#370).
+/// Pack a prompt packet under the model's context window.
 ///
 /// Packing is a priority-ordered fill against `budget.total_tokens` (the
-/// effective window's available tokens, #364):
+/// effective window's available tokens):
 ///
 /// 1. required sections (platform contract, identity kernel, output contract,
 ///    user input) are always kept;
@@ -389,7 +387,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
             dropped.push(kind);
             // Keep the survivor vectors in lockstep with the rendered sections:
             // a cleared section renders nothing, so its survivors must not be
-            // reported as injected (#345).
+            // reported as injected.
             survivors.clear_kind(kind);
             total = total.saturating_sub(removed_tokens);
         }
@@ -427,7 +425,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     }
 }
 
-/// IDs of recalled memories that actually survived into the packed prompt (#345).
+/// IDs of recalled memories that actually survived into the packed prompt.
 ///
 /// The survivor vectors are the single source of truth for what was rendered:
 /// `build_sections` seeds them with every recalled memory and the drop loop
@@ -506,7 +504,7 @@ mod tests {
     }
 
     /// Like [`sample_memory`] but with a distinct, settable ID and confidence,
-    /// so tests can assert exactly which memories survive into the prompt (#345).
+    /// so tests can assert exactly which memories survive into the prompt.
     fn sample_memory_with_id(id: i64, kind: MemoryKind, confidence: f32) -> RecalledMemory {
         let mut memory = sample_memory(kind, confidence, &format!("content-{id}"));
         memory.item.id = Some(id);
@@ -542,7 +540,6 @@ mod tests {
 
     #[test]
     fn injected_memory_ids_track_survivors_under_generous_budget() {
-        // #345: with room for everything, every recalled memory is injected.
         let budget = default_test_budget();
         let input = kernel_only_input(vec![
             sample_memory_with_id(1, MemoryKind::Episodic, 0.9),
@@ -557,7 +554,7 @@ mod tests {
 
     #[test]
     fn injected_memory_ids_empty_when_section_dropped() {
-        // #345: a recalled memory whose section is dropped by the budget must
+        // A recalled memory whose section is dropped by the budget must
         // not be reported as injected. A tiny total budget plus a large
         // episodic section guarantees the drop regardless of exact token
         // estimates.
@@ -582,7 +579,7 @@ mod tests {
 
     #[test]
     fn collect_injected_memory_ids_reflects_survivor_vectors() {
-        // Direct, deterministic check of the survivor computation (#345): IDs
+        // Direct, deterministic check of the survivor computation: IDs
         // are collected per kind. A section that is dropped has its survivor
         // vector cleared by the drop loop (`MemorySurvivors::clear_kind`), so
         // an empty vector yields no IDs — mirroring how `pack_prompt` keeps
@@ -610,10 +607,10 @@ mod tests {
 
     #[test]
     fn over_capacity_drops_lowest_priority_section_whole() {
-        // #370: with per-section budgets gone, an over-capacity prompt sheds
-        // whole sections lowest-priority first rather than trimming within a
-        // section. The survivor vectors and the rendered body must agree: a
-        // dropped section's memories are never reported injected.
+        // An over-capacity prompt sheds whole sections lowest-priority first
+        // rather than trimming within a section. The survivor vectors and the
+        // rendered body must agree: a dropped section's memories are never
+        // reported injected.
         //
         // Kernel ("KERNEL" = 2 tokens) + user input ("hello" = 2) = 4 tokens of
         // required overhead. A 10-token window cannot also fit the ~27-token
@@ -653,12 +650,11 @@ mod tests {
 
     #[test]
     fn dropped_section_stays_empty_when_total_still_over_budget() {
-        // #345 regression: when a memory section is dropped but the total is
-        // still over budget (an oversized *required* section keeps it over),
-        // the dropped section must stay empty and its memories must not be
-        // reported injected. Clearing the survivors at drop time keeps the
-        // section's (now empty) survivor vector consistent with the rendered
-        // content.
+        // When a memory section is dropped but the total is still over budget
+        // (an oversized *required* section keeps it over), the dropped section
+        // must stay empty and its memories must not be reported injected.
+        // Clearing the survivors at drop time keeps the section's (now empty)
+        // survivor vector consistent with the rendered content.
         let budget = ContextBudget::with_capacity(10);
         let input = PackInput {
             // The platform contract is required, so packing never drops it;
@@ -681,8 +677,6 @@ mod tests {
             "episodic section should be dropped, dropped={:?}",
             packed.meta.dropped
         );
-        // The oversized required platform contract keeps `total` over budget
-        // even after the drop pass.
         assert!(
             packed.meta.packed_tokens > budget.total_tokens,
             "test requires total to remain over budget, got {}",
@@ -810,7 +804,7 @@ mod tests {
     fn interruption_note_is_dropped_when_over_budget() {
         // The advisory interruption note is not required and has the lowest
         // droppable priority, so a tight budget drops it before the identity
-        // kernel (#M10, #370).
+        // kernel.
         let budget = ContextBudget::with_capacity(30);
         let kernel = IdentityKernel {
             name: "Ene".into(),
@@ -842,7 +836,6 @@ mod tests {
             "interruption note should be dropped under a tight budget, dropped={:?}",
             packed.meta.dropped
         );
-        // The required identity kernel must survive.
         let kernel_section = packed
             .packet
             .section(PromptSectionKind::IdentityKernel)
@@ -863,7 +856,7 @@ mod tests {
 
     #[test]
     fn packing_drops_lowest_priority_sections_first() {
-        // #370: over capacity, packing sheds droppable sections in ascending
+        // Over capacity, packing sheds droppable sections in ascending
         // priority order. StyleExamples (20) outranks InterruptionNote (10) for
         // dropping, so the note goes first; CharacterState (70) outranks both,
         // so it survives a window that still fits it once the note is gone.
@@ -887,7 +880,6 @@ mod tests {
             "the lowest-priority droppable section must drop first, dropped={:?}",
             packed.meta.dropped
         );
-        // The note is dropped before the higher-priority style examples.
         let note_pos = packed
             .meta
             .dropped
@@ -908,7 +900,7 @@ mod tests {
 
     #[test]
     fn required_sections_survive_a_window_smaller_than_the_prompt() {
-        // #370: required sections (platform contract, identity kernel, output
+        // Required sections (platform contract, identity kernel, output
         // contract, user input) are never dropped, even when the window is far
         // smaller than the assembled prompt.
         let budget = ContextBudget::with_capacity(5);
@@ -947,7 +939,6 @@ mod tests {
                 "required section {kind:?} must retain its content"
             );
         }
-        // Every droppable section was shed to make room.
         for kind in [
             PromptSectionKind::BehaviorContract,
             PromptSectionKind::CharacterState,
@@ -965,7 +956,7 @@ mod tests {
 
     #[test]
     fn higher_priority_section_survives_over_lower_priority_one() {
-        // #370: given two droppable sections that cannot both fit, the
+        // Given two droppable sections that cannot both fit, the
         // higher-priority one is kept and the lower-priority one is dropped.
         // ActiveCommitments (60) outranks StyleExamples (20).
         let budget = ContextBudget::with_capacity(30);

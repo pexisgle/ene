@@ -39,7 +39,7 @@ impl ConfigStore {
     /// Uses the standard figment pipeline (defaults → `settings.json` → `ENE_` env vars).
     /// On any extract failure, falls back to `EneConfig::default()` and
     /// logs the error. This is the only call site that preserves the
-    /// pre-#40 silent-default behavior, because the desktop / cli host
+    /// silent-default behavior, because the desktop / cli host
     /// must be able to construct a store before the user can fix the
     /// config file. Use [`Self::try_load`] to surface the error.
     pub fn load() -> Self {
@@ -82,8 +82,6 @@ impl ConfigStore {
         }
     }
 
-    // ── Global config access ──────────────────────────────────────────
-
     /// Returns a clone of the current global config.
     pub fn config(&self) -> EneConfig {
         self.config.read().clone()
@@ -120,8 +118,6 @@ impl ConfigStore {
         }
         self.global_dirty.store(true, Ordering::Release);
     }
-
-    // ── Per-character config access ───────────────────────────────────
 
     /// Returns a clone of the current per-character config.
     pub fn character_config(&self) -> CharacterConfig {
@@ -166,7 +162,7 @@ impl ConfigStore {
     ///
     /// If `config` is equal to the current value, the dirty flag is **not**
     /// set and the method returns early. This prevents spurious disk writes
-    /// when called every frame with an unchanged state (see #325).
+    /// when called every frame with an unchanged state.
     pub fn set_character_config(&self, config: CharacterConfig) {
         let mut guard = self.character_config.write();
         if *guard == config {
@@ -197,8 +193,6 @@ impl ConfigStore {
             }
         });
     }
-
-    // ── Persistence ───────────────────────────────────────────────────
 
     /// Saves the global config to disk if it has been modified.
     /// Saves the per-character config if dirty and `character_name` is given.
@@ -258,9 +252,9 @@ impl ConfigStore {
 mod tests {
     use super::*;
 
-    /// Regression for #325: pushing an unchanged [`CharacterConfig`] (the
-    /// desktop does this every frame) must not flip the dirty flag, or the
-    /// store would rewrite `character_settings.json` on every flush cycle.
+    /// Pushing an unchanged [`CharacterConfig`] (the desktop does this every
+    /// frame) must not flip the dirty flag, or the store would rewrite
+    /// `character_settings.json` on every flush cycle.
     #[test]
     fn set_character_config_unchanged_value_does_not_mark_dirty() {
         let store = ConfigStore::from_config(EneConfig::default());

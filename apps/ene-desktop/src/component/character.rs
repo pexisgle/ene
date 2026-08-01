@@ -1,10 +1,8 @@
 //! Character components.
 //!
 //! Each component is a small plain-data wrapper around one piece of
-//! the legacy [`crate::character::CharacterRenderer`]. Adding a
-//! component to an entity gives the systems the data they need; the
-//! legacy struct becomes a thin read-through cache during the
-//! migration.
+//! [`crate::character::CharacterRenderer`] state; systems read the
+//! data they need from the entity components.
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,9 +30,8 @@ pub struct VrmModelHandle {
     /// this as "render nothing" and only clear the surface.
     pub model: Option<VrmModel>,
     /// Initialised by `CharacterPlugin::finish` once a GPU device
-    /// exists. The legacy code currently constructs the renderer
-    /// inside `CharacterRenderer::init`; Phase 7 moves that to a
-    /// `Last`-stage system using `NonSend<wgpu::Device>`.
+    /// exists; the renderer itself is built inside
+    /// `CharacterRenderer::init`.
     pub renderer: Option<VrmRenderer>,
 }
 
@@ -51,9 +48,7 @@ impl std::fmt::Debug for VrmModelHandle {
 /// triggered yet.
 #[derive(Component, Default)]
 pub struct MotionState {
-    /// Loaded `.vrma` bytes. Re-loaded by `play_motion`.
     pub asset: Option<Arc<VrmaAsset>>,
-    /// Playback machine.
     #[expect(dead_code, reason = "yet to be wired to motion system")]
     pub player: VrmaPlayer,
     /// Path of the current motion file. `None` until first
@@ -84,7 +79,7 @@ impl std::fmt::Debug for SpringBoneState {
 }
 
 /// Orthographic camera for the character window. The fields match
-/// [`OrthographicCamera`] so the legacy `camera_eye` / `camera_target`
+/// [`OrthographicCamera`] so the `camera_eye` / `camera_target`
 /// helpers can be implemented as trivial conversions.
 #[derive(Component, Debug, Clone, Default)]
 pub struct CharacterCamera(
@@ -98,10 +93,9 @@ pub struct LookAt {
     #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub strength: f32,
     /// Smoothed world-space target. Updated each frame by
-    /// `update_look_at` (Phase 3+ system).
+    /// `update_look_at`.
     #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub smoothed_world_target: Vec3,
-    /// Last known logical cursor position.
     #[expect(dead_code, reason = "yet to be wired to look-at system")]
     pub last_cursor_logical: Option<Vec2Wrapper>,
 }
@@ -113,14 +107,12 @@ pub struct Vec2Wrapper(pub Vec3);
 /// Emotion channel: pending queue + active emotion.
 #[derive(Component, Debug, Default)]
 pub struct EmotionChannel {
-    /// Currently-applied emotion, if any.
     #[expect(dead_code, reason = "yet to be wired to emotion system")]
     pub active: Option<ActiveEmotion>,
 }
 
 /// Per-character bone collider spec. Populated by
-/// `build_character_bone_specs` and consumed by the physics
-/// plugin (Phase 4).
+/// `build_character_bone_specs` and consumed by the physics plugin.
 #[derive(Component, Debug, Default, Clone)]
 pub struct BoneColliders(pub Vec<BoneShapeSpec>);
 

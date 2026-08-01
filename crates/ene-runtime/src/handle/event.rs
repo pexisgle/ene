@@ -1,15 +1,14 @@
 //! Events broadcast from the actor to all consumers, plus actor status and
 //! read-only state snapshot types.
 //!
-//! ## Three-channel event bus (#272)
+//! ## Three-channel event bus
 //!
-//! Traffic used to ride a single 1024-capacity `broadcast` channel mixing
-//! three unrelated classes: lightweight ordered chat events, heavyweight
-//! `AudioChunk` PCM payloads, and turn-independent lifecycle notifications.
-//! Because `tokio::sync::broadcast` retains a per-subscriber buffer, a burst
-//! of audio chunks inflated every subscriber's buffer and could `Lagged` a
-//! slow chat subscriber for reasons entirely unrelated to chat volume. The
-//! bus is now split by traffic class:
+//! Chat events, heavyweight `AudioChunk` PCM payloads, and turn-independent
+//! lifecycle notifications ride separate channels because
+//! `tokio::sync::broadcast` retains a per-subscriber buffer: mixing a burst
+//! of audio chunks into the chat channel would inflate every subscriber's
+//! buffer and `Lagged` a slow chat subscriber for reasons entirely
+//! unrelated to chat volume. The bus is split by traffic class:
 //!
 //! - **Chat bus** ([`EneEvent`] / [`EneEventReceiver`]) — `broadcast`,
 //!   capacity 1024. Lightweight, ordered, turn-scoped events. Multiple
@@ -30,7 +29,7 @@ use ene_mind::{CardName, SessionId};
 use tokio::sync::{broadcast, mpsc};
 
 /// Lightweight, ordered, turn-scoped chat events emitted from the actor via
-/// the chat broadcast channel (#272).
+/// the chat broadcast channel.
 ///
 /// Consumers (CLI, Bevy systems, logging) receive these through
 /// [`crate::EneHandle::subscribe`] which returns an [`EneEventReceiver`].
@@ -134,7 +133,7 @@ pub enum EneEvent {
     },
 }
 
-/// A chunk of synthesized PCM audio from the TTS pipeline (#272).
+/// A chunk of synthesized PCM audio from the TTS pipeline.
 ///
 /// Delivered over a dedicated bounded `mpsc` channel — not the chat
 /// broadcast bus — because the PCM payload is heavyweight relative to chat
@@ -156,7 +155,7 @@ pub struct AudioChunk {
 }
 
 /// Turn-independent lifecycle notifications emitted from the actor via the
-/// lifecycle broadcast channel (#272).
+/// lifecycle broadcast channel.
 ///
 /// Consumers receive these through [`crate::EneHandle::subscribe_lifecycle`]
 /// which returns a [`LifecycleReceiver`]. Separated from [`EneEvent`]
@@ -171,12 +170,12 @@ pub enum LifecycleEvent {
         /// New status value.
         status: EneStatus,
     },
-    /// New pending memory candidates are available for review (#174).
+    /// New pending memory candidates are available for review.
     PendingCandidateAvailable {
         /// Number of pending candidates.
         count: usize,
     },
-    /// A deferred (background) tool task has reached a terminal state (#196).
+    /// A deferred (background) tool task has reached a terminal state.
     ///
     /// Emitted asynchronously after the originating turn has completed, once
     /// the background-capable tool reports that the task finished, failed, or
@@ -237,9 +236,9 @@ pub struct EneStateSnapshot {
 /// Status only answers "is a turn running?" — it is deliberately *not* an
 /// error channel. Failures are reported through the turn's
 /// [`EneEvent::Terminal`] with [`TerminalReason::Failed`], so there is no
-/// `Error` status variant: an `Error` member was never emitted anywhere and
-/// its presence invited consumers (e.g. the old `minimal_chat` example) to
-/// wait on a condition that could never fire (#404).
+/// `Error` status variant: nothing emits it, and its presence would invite
+/// consumers (e.g. the `minimal_chat` example) to wait on a condition that
+/// can never fire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EneStatus {
     /// Not currently processing anything.
@@ -253,10 +252,9 @@ pub enum EneStatus {
 /// Wraps the broadcast receiver and provides a ergonomic interface for
 /// consuming events from the actor. On lag, [`Self::recv`] / [`Self::try_recv`]
 /// return [`tokio::sync::broadcast::error::RecvError::Lagged`] and emit
-/// [`crate::diagnostics::DiagnosticEvent::Lagged`] so gaps are never silent
-/// (#189).
+/// [`crate::diagnostics::DiagnosticEvent::Lagged`] so gaps are never silent.
 ///
-/// ## Recovering from a lag (#403)
+/// ## Recovering from a lag
 ///
 /// `Lagged` means one or more chat events — possibly the active turn's
 /// [`EneEvent::Terminal`] — were dropped, so the streamed view of the
@@ -311,7 +309,7 @@ impl EneEventReceiver {
 }
 
 /// Single-consumer receiver for the audio channel, obtained from
-/// [`crate::EneHandle::take_audio_stream`] (#272).
+/// [`crate::EneHandle::take_audio_stream`].
 ///
 /// Wraps a bounded `mpsc::Receiver<AudioChunk>`. Unlike [`EneEventReceiver`]
 /// / [`LifecycleReceiver`] there is no lag/lossiness to report here: the
@@ -343,14 +341,14 @@ impl AudioStreamReceiver {
 }
 
 /// Lifecycle event receiver handle obtained from
-/// [`crate::EneHandle::subscribe_lifecycle`] (#272).
+/// [`crate::EneHandle::subscribe_lifecycle`].
 ///
 /// Mirrors [`EneEventReceiver`]'s lag-reporting behavior on its own
 /// `"lifecycle"` diagnostics channel tag so gaps here are never silent
 /// either, even though lifecycle traffic is low-frequency and unlikely to
 /// ever overflow its small buffer.
 ///
-/// ## Recovering from a lag (#403)
+/// ## Recovering from a lag
 ///
 /// Unlike a chat-bus lag, a lifecycle lag never strands an in-flight turn:
 /// lifecycle notifications are turn-independent, so there is no

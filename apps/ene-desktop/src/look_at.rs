@@ -5,8 +5,8 @@
 //! use it to drive humanoid bone rotations; for now the value is
 //! fed to the orthographic camera so a subtle pan tracks the cursor.
 //!
-//! All numbers match the legacy exactly so screenshots and
-//! regression tests stay comparable: smoothing speed `7.0`,
+//! All numbers are fixed so screenshots and regression tests stay
+//! comparable: smoothing speed `7.0`,
 //! neutral target `(head_x, head_y, head_z + 1.8)`, cursor NDC
 //! scaled by `viewport_height / 2` and `viewport_height / 2 *
 //! aspect`, ray intersected with the plane through the head with
@@ -36,7 +36,6 @@ const NEUTRAL_TARGET_Z: f32 = 1.8;
 /// by `model_scale` instead.
 pub const HEAD_OFFSET_Y: f32 = 1.0;
 
-/// Build the world-space head position from a model's pivot.
 pub fn head_world_for(pivot: Vec3) -> Vec3 {
     pivot + Vec3::new(0.0, HEAD_OFFSET_Y, 0.0)
 }

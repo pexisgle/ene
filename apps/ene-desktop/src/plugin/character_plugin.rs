@@ -1,15 +1,8 @@
 //! Character plugin.
 //!
-//! Phase 3 introduces the data-only components that the legacy
-//! [`crate::character::CharacterRenderer`] will eventually be split
-//! into. The plugin's `Startup` system spawns a single
-//! [`CharacterRoot`] entity and attaches every component with its
-//! `Default` value; later phases add systems that mutate them.
-//!
-//! The legacy `AppState::character` field stays untouched: its
-//! `init` / `play_motion` / `update_motion` / `render` methods
-//! continue to work, but they will read the per-frame values from
-//! the new components via thin adapter methods.
+//! Spawns a single [`CharacterRoot`] entity with every data-only
+//! component at its `Default` value. The actual VRM rendering stays
+//! on [`crate::character::CharacterRenderer`] via `AppState::character`.
 use bevy_app::{App, Plugin, Startup};
 use bevy_ecs::prelude::*;
 
@@ -41,8 +34,8 @@ pub struct CharacterPlugin;
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         // Spawn the character entity on first startup. The actual
-        // VRM data is loaded later by a system that has access to
-        // the wgpu device (Phase 7).
+        // VRM data is loaded later by `Runtime::resumed` once a GPU
+        // device exists.
         app.add_systems(Startup, spawn_character_entity);
     }
 }

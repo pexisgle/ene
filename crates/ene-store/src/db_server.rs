@@ -111,7 +111,7 @@ pub enum DbServerError {
     /// A write was rejected because it would push the plugin's measured
     /// footprint in the shared `memory.db` past its configured quota
     /// (`plugins.list.<name>.db_quota_mb`). Reads and deletes are still
-    /// permitted so the plugin can free space (#424).
+    /// permitted so the plugin can free space.
     #[error("Storage quota exceeded: {0}")]
     QuotaExceeded(String),
     /// An internal server error.
@@ -162,7 +162,7 @@ pub struct DbIpcServer {
     /// tool binary via the `ENE_DB_AUTH_TOKEN` env var.
     auth_token: String,
     /// Per-plugin storage quota in bytes, derived from
-    /// `plugins.list.<name>.db_quota_mb` (#424). `None` disables
+    /// `plugins.list.<name>.db_quota_mb`. `None` disables
     /// enforcement (unbounded storage).
     quota_bytes: Option<u64>,
 }
@@ -176,7 +176,7 @@ impl DbIpcServer {
     /// the same pool that `MemoryStore` uses.
     ///
     /// `quota_bytes` caps how much of the shared `memory.db` this
-    /// tool's tables may occupy; `None` disables enforcement (#424).
+    /// tool's tables may occupy; `None` disables enforcement.
     pub const fn new(
         db: DatabaseConnection,
         socket_path: PathBuf,
@@ -210,8 +210,7 @@ impl DbIpcServer {
         // Restrict the unix socket to the owning user. Without this
         // chmod the socket in /tmp is world-connectable, allowing any
         // local process to connect and issue DeclareSchema on the tool's
-        // behalf (combined with the SQL-injection vector fixed in
-        // #23 this is a privilege escalation). Named pipes use a
+        // behalf — a privilege escalation. Named pipes use a
         // per-handle ACL instead, which the kernel sets when we bind.
         #[cfg(unix)]
         {
@@ -254,10 +253,8 @@ impl DbIpcServer {
                         error = %e,
                         "DB IPC accept failed; backing off and continuing"
                     );
-                    // Exponential backoff capped at 5s.
-                    // The previous behavior was `?`-propagate,
-                    // which killed the server task on a
-                    // single accept failure.
+                    // Exponential backoff capped at 5s: a transient accept
+                    // failure must not kill the server task.
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     continue;
                 }
@@ -384,11 +381,11 @@ impl DbIpcServer {
             }
 
             // Match the actual `Shutdown` request rather
-            // than the response. The previous form closed
-            // the connection on any `DbResponse::Ack`, which
-            // is fragile: if any other request ever returns
-            // `Ack` (or a future response is reused), the
-            // connection would terminate spuriously.
+            // than the response. Closing the connection on
+            // any `DbResponse::Ack` would be fragile: if any
+            // other request ever returns `Ack` (or a future
+            // response is reused), the connection would
+            // terminate spuriously.
             let was_shutdown = matches!(request, DbRequest::Shutdown);
 
             let response = Self::handle_request(
@@ -448,8 +445,6 @@ impl DbIpcServer {
             .await
             .unwrap_or_else(|e| e.to_error_response()),
             DbRequest::Insert { table, row } => {
-                // Synchronous schema validation first, then the async quota
-                // check (which measures current usage against the DB).
                 let gate = Self::validate_table_access(declared_tables, &table)
                     .and_then(|()| Self::validate_row_columns(declared_columns, &table, &row));
                 let gate = match gate {
@@ -462,9 +457,6 @@ impl DbIpcServer {
                 match gate {
                     Ok(()) => match Self::handle_insert(db, &table, row).await {
                         Ok(id) => {
-                            // Record the rowid for the
-                            // connection-scoped
-                            // `LastInsertRowId` lookup.
                             if let Ok(mut guard) = last_rowid.lock() {
                                 *guard = Some(id);
                             }
@@ -681,7 +673,7 @@ impl DbIpcServer {
             // per-plugin quota; the check runs inside the transaction so the
             // footprint reflects the batch's own earlier inserts. Updates and
             // deletes are never gated — a plugin over quota must still be able
-            // to shrink its footprint (#424).
+            // to shrink its footprint.
             let is_growth = matches!(op, DbWriteOp::Insert { .. } | DbWriteOp::Upsert { .. });
             if is_growth {
                 Self::enforce_quota(&txn, tool_name, prefix, declared_tables, quota_bytes)
@@ -759,10 +751,10 @@ impl DbIpcServer {
     }
 
     /// Measures the plugin's current storage footprint in bytes, summing the
-    /// payload size of every cell across the tables it has declared (#424).
+    /// payload size of every cell across the tables it has declared.
     ///
     /// `SQLite` exposes no per-table size API (the `dbstat` virtual table is
-    /// not compiled into the bundled `libsqlite3-sys`, see #350), so this
+    /// not compiled into the bundled `libsqlite3-sys`), so this
     /// sums `length(CAST(col AS BLOB))` per column — the exact byte length of
     /// each stored value — over the plugin's own tables only. It is therefore
     /// scoped to the plugin's prefix rather than scanning the whole shared
@@ -811,7 +803,7 @@ impl DbIpcServer {
     }
 
     /// Rejects a storage-growing write when the plugin's measured footprint
-    /// already meets or exceeds its configured quota (#424).
+    /// already meets or exceeds its configured quota.
     ///
     /// A `None` quota (unbounded) or an empty declaration (nothing to measure
     /// yet) is a no-op. The check is intentionally `>=` rather than a
@@ -893,7 +885,7 @@ impl DbIpcServer {
     }
 
     /// Validates that every column default in a schema declaration can be
-    /// rendered as a `SQLite` literal (#427).
+    /// rendered as a `SQLite` literal.
     ///
     /// Defaults are the one value path that bypasses `sea-query`'s parameter
     /// binding (they are embedded in the DDL), so a value with no valid
@@ -915,12 +907,12 @@ impl DbIpcServer {
     ///
     /// The other five dispatch paths all cross-check the identifiers they
     /// reference against the declared schema; an upsert's `conflict_columns`
-    /// was the one identifier set that skipped this check (#427). The values
-    /// are quoted by `sea-query`'s `Alias`, so this is not an injection hole,
-    /// but it breaks the "only declared columns may be referenced" invariant
-    /// the rest of the server enforces — an undeclared conflict column would
-    /// reach the database and fail there with an opaque error instead of a
-    /// structured `UnknownColumn`.
+    /// is the one identifier set that would otherwise skip this check. The
+    /// values are quoted by `sea-query`'s `Alias`, so this is not an injection
+    /// hole, but it breaks the "only declared columns may be referenced"
+    /// invariant the rest of the server enforces — an undeclared conflict
+    /// column would reach the database and fail there with an opaque error
+    /// instead of a structured `UnknownColumn`.
     fn validate_conflict_columns(
         declared_columns: &HashMap<String, HashSet<String>>,
         table: &str,
@@ -1037,10 +1029,6 @@ impl DbIpcServer {
             }
         }
 
-        // Reject column defaults that cannot be rendered as a SQLite literal
-        // (currently only non-finite floats) before any database write, so a
-        // bad declaration never leaves a stored `__tool_schemas` row ahead of
-        // the physical tables (#427).
         Self::validate_column_defaults(&schema)?;
 
         let known_table_names: HashSet<&str> =
@@ -1055,7 +1043,7 @@ impl DbIpcServer {
             // own namespace. The prefix may appear anywhere in the name — the
             // established convention is `idx_<prefix>...` — so this stays
             // compatible with existing declarations while still rejecting
-            // names that carry no prefix at all (#427).
+            // names that carry no prefix at all.
             if !index.name.contains(prefix) {
                 return Err(DbServerError::PermissionDenied(format!(
                     "Index '{}' does not carry prefix '{}'",
@@ -1084,10 +1072,6 @@ impl DbIpcServer {
 
         let fingerprint = blake3::hash(schema_json.as_bytes()).to_hex().to_string();
 
-        // Compare against the previously stored declaration, if any. The
-        // fingerprint was historically written but never read (#423); it now
-        // gates whether the stored row is rewritten and whether the physical
-        // tables need additive migration.
         let stored = tool_schemas::Entity::find_by_id(prefix)
             .one(db)
             .await
@@ -1327,10 +1311,9 @@ impl DbIpcServer {
                         // A NOT NULL column needs a DEFAULT: SQLite requires a
                         // default to populate pre-existing rows when a
                         // non-nullable column is added via `ALTER TABLE`.
-                        // Silently dropping the constraint (as the previous
-                        // emission logic did) would let validation and storage
-                        // diverge — refuse instead so the author reconciles
-                        // this explicitly.
+                        // Silently dropping the constraint would let validation
+                        // and storage diverge — refuse instead so the author
+                        // reconciles this explicitly.
                         if !column.nullable && column.default.is_none() {
                             return Err(DbServerError::SchemaConflict(format!(
                                 "column '{}.{}' was added NOT NULL without a DEFAULT; SQLite cannot add such a column via ALTER TABLE (existing rows would violate the constraint), so the plugin must either add a DEFAULT or make the column nullable",
@@ -1508,7 +1491,7 @@ impl DbIpcServer {
     /// (`NaN` or infinity) has no valid `SQLite` literal — `f64::to_string`
     /// yields `"NaN"` / `"inf"`, which is a syntax error — so it is rejected
     /// here with [`DbServerError::PermissionDenied`] rather than producing a
-    /// `DeclareSchema` failure with an opaque database error (#427).
+    /// `DeclareSchema` failure with an opaque database error.
     fn db_value_to_sql(value: &DbValue) -> Result<String, DbServerError> {
         match value {
             DbValue::Null => Ok("NULL".to_string()),
@@ -1930,7 +1913,7 @@ impl DbIpcServer {
 }
 
 /// Logs a column whose stored value could not be decoded as the type declared
-/// in the tool's schema (#427).
+/// in the tool's schema.
 ///
 /// `SQLite` is dynamically typed, so a column declared `INTEGER` can hold a
 /// string; `handle_select` reads by the declared type and falls back to
@@ -2045,9 +2028,8 @@ mod tests {
         assert!(sql.contains("body TEXT"));
     }
 
-    /// Regression test for #42: after an Insert, a
-    /// `LastInsertRowId` request must return the rowid of
-    /// that Insert — not 0 (the previous "no prior insert"
+    /// After an Insert, a `LastInsertRowId` request must return the rowid of
+    /// that Insert — not 0 (the "no prior insert"
     /// sentinel) and not the rowid of some other insert
     /// served by a different pooled connection. The
     /// connection-scoped `last_rowid` cell records the
@@ -2088,7 +2070,6 @@ mod tests {
 
         let last_rowid: Arc<std::sync::Mutex<Option<i64>>> = Arc::new(std::sync::Mutex::new(None));
 
-        // Insert a row.
         let insert_resp = DbIpcServer::handle_request(
             &db,
             "fs",
@@ -2112,7 +2093,6 @@ mod tests {
         };
         assert!(first_id > 0);
 
-        // LastInsertRowId must return the rowid we just got.
         let lookup = DbIpcServer::handle_request(
             &db,
             "fs",
@@ -2130,8 +2110,6 @@ mod tests {
         };
         assert_eq!(lookup_id, first_id);
 
-        // Insert a second row; LastInsertRowId now points
-        // at the new row.
         let insert_resp2 = DbIpcServer::handle_request(
             &db,
             "fs",
@@ -2335,7 +2313,6 @@ mod tests {
             ene_plugin_db::DbBatchOpResult::Update { affected: 1 }
         );
 
-        // Both inserts committed.
         assert_eq!(
             count_test_rows(
                 &db,
@@ -2357,7 +2334,6 @@ mod tests {
             setup_batch_fixture().await;
 
         let ops = vec![
-            // Valid insert.
             ene_plugin_db::DbWriteOp::Insert {
                 table: "fs_test".to_string(),
                 row: std::collections::BTreeMap::from([(
@@ -2398,7 +2374,6 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
 
-        // The first (valid) insert must have been rolled back.
         assert_eq!(
             count_test_rows(
                 &db,
@@ -2456,7 +2431,6 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
 
-        // Validation precedes execution, so the valid insert never ran.
         assert_eq!(
             count_test_rows(
                 &db,
@@ -2594,7 +2568,6 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
 
-        // Nothing was persisted.
         assert_eq!(
             count_test_rows(
                 &db,
@@ -2700,7 +2673,6 @@ mod tests {
             ref other => panic!("expected Insert result, got {other:?}"),
         };
 
-        // The upsert must not have clobbered the insert's rowid.
         let lookup = DbIpcServer::handle_request(
             &db,
             "fs",
@@ -2719,7 +2691,7 @@ mod tests {
         assert_eq!(lookup_id, insert_rowid);
     }
 
-    // --- Schema fingerprint / evolution tests (#423) ---
+    // --- Schema fingerprint / evolution tests ---
 
     fn test_column(name: &str, ty: ene_plugin_db::DbType) -> ene_plugin_db::DbColumn {
         ene_plugin_db::DbColumn {
@@ -2839,7 +2811,6 @@ mod tests {
             ["id".to_string(), "path".to_string()]
         );
 
-        // v2 adds a `checksum` column to the existing `fs_undo` table.
         let mut schema_v2 = test_schema_v1();
         schema_v2.tables[0]
             .columns
@@ -2848,7 +2819,6 @@ mod tests {
         let resp = declare(&db, schema_v2.clone()).await;
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
 
-        // The stored declaration was refreshed to the new fingerprint/json.
         let row_v2 = stored_row(&db, "fs_").await.expect("row stored after v2");
         assert_ne!(row_v1.fingerprint, row_v2.fingerprint);
         assert_eq!(
@@ -2856,7 +2826,6 @@ mod tests {
             serde_json::to_string(&schema_v2).unwrap()
         );
 
-        // The physical table gained the column, and existing rows survived.
         assert_eq!(
             table_columns(&db, "fs_undo").await,
             ["id".to_string(), "path".to_string(), "checksum".to_string()]
@@ -2893,7 +2862,6 @@ mod tests {
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
         let before = stored_row(&db, "fs_").await.expect("row stored");
 
-        // v2 changes `path` from TEXT to INTEGER.
         let mut schema_v2 = test_schema_v1();
         schema_v2.tables[0].columns[1].ty = ene_plugin_db::DbType::Integer;
 
@@ -2909,7 +2877,6 @@ mod tests {
             "expected SchemaConflict, got {resp:?}"
         );
 
-        // The stored declaration is untouched after the rejected change.
         let after = stored_row(&db, "fs_").await.expect("row still stored");
         assert_eq!(before.fingerprint, after.fingerprint);
         assert_eq!(before.schema_json, after.schema_json);
@@ -2927,7 +2894,6 @@ mod tests {
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
         let before = stored_row(&db, "fs_").await.expect("row stored");
 
-        // v2 adds a NOT NULL column without a DEFAULT.
         let mut schema_v2 = test_schema_v1();
         let mut col = test_column("checksum", ene_plugin_db::DbType::Text);
         col.nullable = false;
@@ -2945,7 +2911,6 @@ mod tests {
             "expected SchemaConflict, got {resp:?}"
         );
 
-        // The stored declaration is untouched after the rejected change.
         let after = stored_row(&db, "fs_").await.expect("row still stored");
         assert_eq!(before.fingerprint, after.fingerprint);
     }
@@ -2959,7 +2924,6 @@ mod tests {
         let resp = declare(&db, test_schema_v1()).await;
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
 
-        // v2 drops the `fs_undo` table entirely.
         let schema_v2 = ene_plugin_db::DbSchema {
             prefix: "fs_".to_string(),
             tables: Vec::new(),
@@ -2988,7 +2952,6 @@ mod tests {
         let resp = declare(&db, test_schema_v1()).await;
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
 
-        // v2 drops the `path` column from `fs_undo`.
         let mut schema_v2 = test_schema_v1();
         schema_v2.tables[0].columns.pop();
 
@@ -3014,7 +2977,6 @@ mod tests {
         let resp = declare(&db, test_schema_v1()).await;
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
 
-        // v2 adds a UNIQUE column, which ALTER TABLE ADD COLUMN forbids.
         let mut schema_v2 = test_schema_v1();
         let mut unique_col = test_column("slug", ene_plugin_db::DbType::Text);
         unique_col.unique = true;
@@ -3034,7 +2996,7 @@ mod tests {
     }
 
     /// An additive migration preserves existing rows and accepts new data in
-    /// the added column — the exact scenario from #423.
+    /// the added column.
     #[tokio::test]
     async fn additive_migration_preserves_existing_rows() {
         let db = test_db_with_tool_schemas().await;
@@ -3042,7 +3004,6 @@ mod tests {
         let resp = declare(&db, test_schema_v1()).await;
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
 
-        // Insert a row under the v1 schema.
         let declared_tables: HashMap<String, ene_plugin_db::DbTable> = test_schema_v1()
             .tables
             .into_iter()
@@ -3070,7 +3031,6 @@ mod tests {
         .await;
         assert!(matches!(resp, DbResponse::Insert { .. }));
 
-        // Migrate to v2 (adds `checksum`).
         let mut schema_v2 = test_schema_v1();
         schema_v2.tables[0]
             .columns
@@ -3078,7 +3038,6 @@ mod tests {
         let resp = declare(&db, schema_v2).await;
         assert!(matches!(resp, DbResponse::SchemaAccepted { .. }));
 
-        // The existing row survived; the new column reads back as NULL.
         let rows = db
             .query_all_raw(Statement::from_string(
                 DatabaseBackend::Sqlite,
@@ -3127,11 +3086,11 @@ mod tests {
         );
     }
 
-    // --- #427 cleanup regression tests ---
+    // --- Schema validation regression tests ---
 
     /// A standalone upsert whose `conflict_columns` reference an undeclared
     /// column is rejected with a structured `UnknownColumn` error before
-    /// anything reaches the database (#427 item 1).
+    /// anything reaches the database.
     #[tokio::test]
     async fn upsert_with_undeclared_conflict_column_is_rejected() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3167,7 +3126,6 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
 
-        // Nothing was persisted.
         assert_eq!(
             count_test_rows(
                 &db,
@@ -3181,8 +3139,7 @@ mod tests {
     }
 
     /// A batch upsert with an undeclared conflict column is rejected up front
-    /// (before the transaction runs) and names the failing operation (#427
-    /// item 1).
+    /// (before the transaction runs) and names the failing operation.
     #[tokio::test]
     async fn batch_upsert_with_undeclared_conflict_column_is_rejected() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3220,7 +3177,6 @@ mod tests {
             other => panic!("expected Error, got {other:?}"),
         }
 
-        // Nothing was persisted.
         assert_eq!(
             count_test_rows(
                 &db,
@@ -3235,7 +3191,7 @@ mod tests {
 
     /// A declared column whose `DEFAULT` is a non-finite float is rejected
     /// explicitly (`NaN`/`inf` have no valid `SQLite` literal) rather than
-    /// producing an opaque database syntax error (#427 item 3).
+    /// producing an opaque database syntax error.
     #[tokio::test]
     async fn declare_schema_rejects_non_finite_default() {
         let db = test_db_with_tool_schemas().await;
@@ -3266,8 +3222,7 @@ mod tests {
         }
     }
 
-    /// Finite float defaults render valid DDL; non-finite ones are refused
-    /// (#427 item 3).
+    /// Finite float defaults render valid DDL; non-finite ones are refused.
     #[test]
     fn db_value_to_sql_rejects_non_finite_floats() {
         assert!(DbIpcServer::db_value_to_sql(&ene_plugin_db::DbValue::Float(1.5)).is_ok());
@@ -3283,7 +3238,7 @@ mod tests {
 
     /// An index name that does not carry the tool's prefix is rejected, so a
     /// plugin cannot squat a database-global index name a core migration may
-    /// later need (#427 item 4).
+    /// later need.
     #[tokio::test]
     async fn declare_schema_rejects_index_without_prefix() {
         let db = test_db_with_tool_schemas().await;
@@ -3317,7 +3272,7 @@ mod tests {
     }
 
     /// An index name carrying the tool's prefix (the established
-    /// `idx_<prefix>...` convention) is accepted (#427 item 4).
+    /// `idx_<prefix>...` convention) is accepted.
     #[tokio::test]
     async fn declare_schema_accepts_prefixed_index() {
         let db = test_db_with_tool_schemas().await;
@@ -3344,8 +3299,7 @@ mod tests {
     }
 
     /// A column whose stored value does not decode as its declared type reads
-    /// back as `Null` (the pre-existing behaviour), now made observable via a
-    /// warning log (#427 item 8).
+    /// back as `Null`, with the mismatch surfaced via a warning log.
     #[tokio::test]
     async fn select_type_mismatch_reads_back_as_null() {
         use sea_orm::ConnectionTrait;
@@ -3416,12 +3370,10 @@ mod tests {
             other => panic!("expected Select, got {other:?}"),
         };
         assert_eq!(rows.len(), 1);
-        // The mismatched value surfaces as Null rather than an opaque decode
-        // failure; the mismatch is logged (see `log_select_type_mismatch`).
         assert_eq!(rows[0].get("qty"), Some(&ene_plugin_db::DbValue::Null));
     }
 
-    // --- Per-plugin DB storage quota tests (#424) ---
+    // --- Per-plugin DB storage quota tests ---
 
     /// Dispatches a single request against the batch fixture with an explicit
     /// per-plugin quota, so quota tests can exercise the real enforcement path
@@ -3548,8 +3500,8 @@ mod tests {
     /// A quota far above one payload: a single insert always fits.
     const QUOTA_LOOSE: u64 = 1_000_000;
 
-    /// With no quota configured (`None`), writes are never gated — the
-    /// pre-#424 behavior is preserved for plugins that opt out of a cap.
+    /// With no quota configured (`None`), writes are never gated — plugins
+    /// that opt out of a cap are unbounded.
     #[tokio::test]
     async fn insert_succeeds_when_quota_is_unbounded() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3650,7 +3602,6 @@ mod tests {
             other => panic!("expected QuotaExceeded error, got {other:?}"),
         }
 
-        // The rejected write persisted nothing.
         assert_eq!(
             count_blob_rows(
                 &db,
@@ -3664,7 +3615,7 @@ mod tests {
     }
 
     /// A plugin at its quota can still delete rows (to free space) and read —
-    /// only storage-growing writes are gated (#424 acceptance criterion).
+    /// only storage-growing writes are gated.
     #[tokio::test]
     async fn delete_and_select_still_allowed_over_quota() {
         let (db, mut declared_tables, mut declared_columns, last_rowid) =
@@ -3681,7 +3632,6 @@ mod tests {
         .await;
         assert!(matches!(first, DbResponse::Insert { .. }));
 
-        // Reads are never gated, even though the footprint is now at the cap.
         let select = request_with_quota(
             &db,
             &mut declared_tables,
@@ -3702,7 +3652,6 @@ mod tests {
             "select must stay available over quota, got {select:?}"
         );
 
-        // Deleting shrinks the footprint, so it is never gated.
         let delete = request_with_quota(
             &db,
             &mut declared_tables,
@@ -3720,7 +3669,6 @@ mod tests {
             other => panic!("expected Delete, got {other:?}"),
         }
 
-        // Having freed space, a new insert is admitted again.
         let again = request_with_quota(
             &db,
             &mut declared_tables,
@@ -3776,7 +3724,6 @@ mod tests {
             other => panic!("expected QuotaExceeded error, got {other:?}"),
         }
 
-        // The whole batch rolled back — the first (in-quota) insert too.
         assert_eq!(
             count_blob_rows(
                 &db,

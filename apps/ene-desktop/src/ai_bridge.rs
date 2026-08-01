@@ -43,9 +43,7 @@ pub struct AiBridge {
     runtime: tokio::runtime::Handle,
     /// Set on run, cleared on Terminal.
     processing: Arc<AtomicBool>,
-    /// Active turn id for cancel correlation.
     active_turn: Arc<Mutex<Option<TurnId>>>,
-    /// Proactive observation control (#168).
     proactive_observe: ProactiveObserveControl,
 }
 
@@ -54,7 +52,7 @@ pub struct AiBridge {
 const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Errors surfaced by [`AiBridge`]'s `*_blocking` wrapper methods to the
-/// winit/egui UI layer (#274).
+/// winit/egui UI layer.
 ///
 /// This is the desktop app's own thin boundary type, not a second
 /// competing definition of `ene_runtime::PublicApiError` — it wraps that
@@ -64,19 +62,9 @@ const BLOCKING_TIMEOUT: Duration = Duration::from_secs(10);
 /// doesn't belong in `ene-runtime`: a blocking call that exceeded
 /// [`BLOCKING_TIMEOUT`] and was cancelled before the actor replied.
 ///
-/// As of #408 a dead actor reaches this type solely as
+/// A dead actor reaches this type solely as
 /// [`ene_runtime::PublicApiError::ActorDead`] (via the [`AiBridgeError::Api`]
-/// variant): the actor-control methods on `EneHandle` (permissions, undo,
-/// user input, feature updates) and the diagnostics snapshot all return
-/// `PublicApiError` directly, so there is no separate actor-dead error to
-/// fold in here.
-///
-/// UI call sites format this with `{error}` (its `Display` impl, via
-/// `thiserror`) the same way they previously formatted the bare `String`
-/// this type replaces, so this change does not by itself introduce any
-/// new UI copy — see the type-level note in the PR description about
-/// hardcoded English error text still living in these format strings
-/// (a separate i18n concern, out of scope here).
+/// variant), so there is no separate actor-dead error to fold in here.
 #[derive(Debug, thiserror::Error)]
 pub enum AiBridgeError {
     /// The blocking call exceeded [`BLOCKING_TIMEOUT`] and was cancelled.
@@ -90,7 +78,7 @@ pub enum AiBridgeError {
     #[error(transparent)]
     Runtime(#[from] EneRuntimeError),
     /// One of the API v1 contract methods on [`EneHandle`] — or an
-    /// actor-control / diagnostics method that reports a dead actor (#408) —
+    /// actor-control / diagnostics method that reports a dead actor —
     /// returned a stable [`ene_runtime::PublicApiError`] category.
     #[error(transparent)]
     Api(#[from] ene_runtime::PublicApiError),
@@ -115,7 +103,6 @@ impl AiBridge {
     /// `config` must be the same [`EneConfig`] already loaded by
     /// [`crate::settings::CharacterSettings::discover`] so the actor
     /// does not reload settings from disk a second time.
-    /// Open the runtime actor and spawn the background event pump.
     pub fn try_new(
         event_tx: AppEventSender,
         bootstrap_handle: &tokio::runtime::Handle,
@@ -130,7 +117,7 @@ impl AiBridge {
         let lifecycle_receiver = handle.subscribe_lifecycle();
         // Claim the audio channel up front regardless of the `voice` feature
         // or whether a playback sender was supplied: the audio channel is
-        // bounded and single-consumer (#272), so this bridge must always be
+        // bounded and single-consumer, so this bridge must always be
         // the one consumer that drains it, or a sustained TTS stream could
         // eventually stall waiting to deliver a final marker (see
         // `send_audio_chunk` in ene-runtime).
@@ -198,7 +185,6 @@ impl AiBridge {
         }
     }
 
-    /// Forward a cancel command for the active turn.
     pub fn cancel(&self) {
         let turn = self.active_turn.lock().ok().and_then(|g| g.clone());
         let Some(turn) = turn else {
@@ -259,18 +245,16 @@ impl AiBridge {
         Ok(self.handle.decide_permission(request_id, decision)?)
     }
 
-    /// List the standing session-wide permission grants (#177).
-    ///
-    /// Blocks the calling thread on the tokio runtime while the actor
-    /// answers, mirroring [`AiBridge::get_snapshot_blocking`]. Intended
-    /// for the permission-center settings page.
+    /// List the standing session-wide permission grants. Blocks the
+    /// calling thread while the actor answers; intended for the
+    /// permission-center settings page.
     pub fn list_permissions_blocking(
         &self,
     ) -> Result<Vec<ene_runtime::PermissionScope>, AiBridgeError> {
         Ok(self.block_on_timeout(self.handle.list_permissions())??)
     }
 
-    /// Revoke a single standing permission grant by id (#177).
+    /// Revoke a single standing permission grant by id.
     ///
     /// Returns whether a grant was actually removed.
     pub fn revoke_permission_blocking(&self, id: u64) -> Result<bool, AiBridgeError> {
@@ -278,28 +262,21 @@ impl AiBridge {
     }
 
     /// Revoke every standing permission grant, returning the number
-    /// removed (#177).
+    /// removed.
     pub fn reset_all_permissions_blocking(&self) -> Result<usize, AiBridgeError> {
         Ok(self.block_on_timeout(self.handle.reset_all_permissions())??)
     }
 
-    /// Undo the most recent reversible tool operation (#178).
-    ///
-    /// Blocks the calling thread on the tokio runtime while the actor
-    /// answers, mirroring [`AiBridge::reset_all_permissions_blocking`].
+    /// Undo the most recent reversible tool operation. Blocks the
+    /// calling thread while the actor answers.
     pub fn undo_blocking(&self) -> Result<ene_runtime::UndoReport, AiBridgeError> {
         Ok(self.block_on_timeout(self.handle.undo())??)
     }
 
-    /// List stored session metadata (#176).
-    ///
-    /// Blocks the calling thread on the tokio runtime while the actor
-    /// answers, mirroring [`AiBridge::list_permissions_blocking`].
-    /// Intended for the sessions settings page.
-    ///
-    /// Returns the API v1 [`ene_runtime::PublicSessionMeta`] DTO directly —
-    /// the desktop UI renders it as its canonical session type (#408), so
-    /// there is no reverse conversion to `ene_store::SessionMeta`.
+    /// List stored session metadata. Returns the API v1
+    /// [`ene_runtime::PublicSessionMeta`] DTO directly — the desktop UI
+    /// renders it as its canonical session type, so there is no reverse
+    /// conversion to `ene_store::SessionMeta`.
     pub fn list_sessions_blocking(
         &self,
         include_archived: bool,
@@ -308,7 +285,7 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.sessions().list(include_archived, limit))??)
     }
 
-    /// Export a session as a pretty-printed JSON string (#176).
+    /// Export a session as a pretty-printed JSON string.
     pub fn export_session_blocking(
         &self,
         session_id: impl Into<String>,
@@ -318,18 +295,16 @@ impl AiBridge {
     }
 
     /// Import a session from a JSON string, returning the imported
-    /// session's row id (#176).
+    /// session's row id.
     pub fn import_session_blocking(&self, json: impl Into<String>) -> Result<i64, AiBridgeError> {
         let json = json.into();
         Ok(self.block_on_timeout(self.handle.sessions().import(&json))??)
     }
 
     /// Search session messages, returning matching
-    /// `(session_id, message)` pairs (#176).
-    ///
-    /// Messages are the API v1 [`ene_runtime::PublicExportedMessage`] DTO,
-    /// rendered directly by the desktop UI (#408) — no reverse conversion to
-    /// `ene_store::ExportedMessage`.
+    /// `(session_id, message)` pairs. Messages are the API v1
+    /// [`ene_runtime::PublicExportedMessage`] DTO, rendered directly by
+    /// the desktop UI — no reverse conversion to `ene_store::ExportedMessage`.
     pub fn search_sessions_blocking(
         &self,
         query: impl Into<String>,
@@ -341,7 +316,7 @@ impl AiBridge {
     }
 
     /// Archive or unarchive a session, returning whether the archived
-    /// flag actually changed (#176).
+    /// flag actually changed.
     pub fn archive_session_blocking(
         &self,
         session_id: impl Into<String>,
@@ -366,17 +341,17 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.diagnostics().get_snapshot())??)
     }
 
-    /// Snapshot of cached provider health reports for the AI settings page (#175).
+    /// Snapshot of cached provider health reports for the AI settings page.
     pub fn provider_health_reports(&self) -> Vec<ene_ai::ProviderHealthReport> {
         self.handle.diagnostics().provider_health_reports()
     }
 
-    /// Snapshot of recent provider fallback events for the AI settings page (#175).
+    /// Snapshot of recent provider fallback events for the AI settings page.
     pub fn provider_fallback_history(&self) -> Vec<ene_ai::FallbackRecord> {
         self.handle.diagnostics().provider_fallback_history()
     }
 
-    /// Run [`ene_ai::validate_api_key`] on the bridge runtime (#241).
+    /// Run [`ene_ai::validate_api_key`] on the bridge runtime.
     pub fn validate_api_key_blocking(
         &self,
         base_url: &str,
@@ -513,7 +488,7 @@ impl AiBridge {
         Ok(self.block_on_timeout(memory.pin_typed_memory(id, true))??)
     }
 
-    // ── Pending candidate approval (#174 / #223) ──
+    // ── Pending candidate approval ──
 
     /// List pending memory candidates awaiting user approval.
     pub fn fetch_pending_candidates(&self) -> Result<Vec<PendingCandidateSummary>, AiBridgeError> {
@@ -530,7 +505,7 @@ impl AiBridge {
         Ok(self.block_on_timeout(self.handle.candidates().reject(id))??)
     }
 
-    // ── Commitment management (#223) ──
+    // ── Commitment management ──
 
     /// Mark a commitment as done.
     pub fn complete_commitment(&self, id: i64) -> Result<bool, AiBridgeError> {
@@ -611,8 +586,8 @@ async fn recv_audio_chunk(stream: &mut Option<AudioStreamReceiver>) -> Option<Au
     }
 }
 
-/// Forwards one audio chunk to the desktop playback subsystem, applying the
-/// same turn-ownership gate the pre-#272 chat-bus path used (H1).
+/// Forwards one audio chunk to the desktop playback subsystem, applying
+/// the same turn-ownership gate as the chat path.
 ///
 /// Without the `voice` feature there is no playback subsystem, so the
 /// chunk is dropped.
@@ -633,13 +608,13 @@ fn forward_audio_chunk(
         // Track the turn that owns the in-flight TTS audio separately from
         // `active_turn`: the fire-and-forget TTS worker keeps emitting
         // chunks after `Terminal` clears `active_turn`, so filtering on
-        // `active_turn` would drop the tail of the utterance (H1).
+        // `active_turn` would drop the tail of the utterance.
         if !route_audio_chunk(audio_turn, &turn, is_final) {
             return;
         }
         if let Some(tx) = audio_tx {
             // `try_send` avoids blocking the async pump when the bounded
-            // playback channel is full (L10); a full buffer means the sink
+            // playback channel is full; a full buffer means the sink
             // is behind and the dropped chunk is preferable to stalling all
             // event routing. The natural TTS final marker never aborts
             // playback.
@@ -675,12 +650,10 @@ async fn pump_events(
     active_turn: Arc<Mutex<Option<TurnId>>>,
     audio_tx: Option<AudioChunkSender>,
 ) {
-    // Turn that owns the in-flight TTS audio. Tracked separately from
-    // `active_turn` because the fire-and-forget TTS worker keeps emitting
-    // chunks after `Terminal` clears `active_turn` (H1). Only cleared by
-    // the `is_final` marker or a playback reset on broadcast lag (M2).
-    // Always defined (not `#[cfg(feature = "voice")]`) because it is now
-    // threaded through `forward_audio_chunk`'s signature unconditionally.
+    // TTS audio ownership, tracked separately from `active_turn` because
+    // the fire-and-forget TTS worker keeps emitting chunks after
+    // `Terminal` clears `active_turn`. Only cleared by the `is_final`
+    // marker or a playback reset on broadcast lag.
     let mut audio_turn: Option<TurnId> = None;
 
     loop {
@@ -817,7 +790,7 @@ async fn pump_events(
                 clear_active_turn(&active_turn, &turn);
                 processing.store(false, Ordering::Relaxed);
                 // Ensure the playback subsystem releases `tts_playing` even
-                // if the TTS worker never emitted an `is_final` marker (M2).
+                // if the TTS worker never emitted an `is_final` marker.
                 // A cancelled turn is a barge-in: `abort` stops the sink
                 // immediately instead of draining the queued audio.
                 #[cfg(feature = "voice")]
@@ -884,7 +857,7 @@ async fn pump_events(
                 processing.store(false, Ordering::Relaxed);
                 // The `is_final` marker may have been among the dropped
                 // events; send a synthetic final so `tts_playing` does not
-                // stay stuck (M2). Use a blocking send so the marker itself
+                // stay stuck. Use a blocking send so the marker itself
                 // is never dropped (which would re-introduce the stuck flag).
                 #[cfg(feature = "voice")]
                 if audio_turn.take().is_some()
@@ -928,7 +901,7 @@ async fn pump_events(
                 break;
             }
         },
-        // Lifecycle bus (#272): turn-independent, low-frequency. Only
+        // Lifecycle bus: turn-independent, low-frequency. Only
         // `PendingCandidateAvailable` currently drives UI state here;
         // `StatusChanged` / `ToolBackgroundCompleted` are observed
         // elsewhere (diagnostics / background tool UI) or not yet wired.
@@ -945,8 +918,8 @@ async fn pump_events(
                 // handles the shutdown/reconnect flow, so this is a no-op.
             }
         },
-        // Audio channel (#272): bounded mpsc, single-consumer. Chunks are
-        // forwarded regardless of `active_turn` (H1) — see
+        // Audio channel: bounded mpsc, single-consumer. Chunks are
+        // forwarded regardless of `active_turn` — see
         // `forward_audio_chunk`.
         chunk = recv_audio_chunk(&mut audio_stream) => {
             if let Some(chunk) = chunk {
@@ -966,7 +939,7 @@ fn clear_active_turn(active_turn: &Mutex<Option<TurnId>>, turn: &TurnId) {
 }
 
 /// Decide whether an incoming `AudioChunk` should be forwarded to the
-/// playback subsystem, updating the tracked `audio_turn` in place (H1).
+/// playback subsystem, updating the tracked `audio_turn` in place.
 ///
 /// The fire-and-forget TTS worker keeps emitting chunks after `Terminal`
 /// clears `active_turn`, so the audio path tracks its own turn ownership
@@ -1000,7 +973,6 @@ fn route_audio_chunk(audio_turn: &mut Option<TurnId>, turn: &TurnId, is_final: b
 mod tests {
     use super::*;
 
-    /// `AtomicBool` round-trip.
     #[test]
     fn processing_flag_round_trip() {
         let processing = Arc::new(AtomicBool::new(false));
@@ -1010,7 +982,6 @@ mod tests {
         assert!(!processing.load(Ordering::Relaxed));
     }
 
-    /// `Failed` events clear the processing flag.
     #[test]
     fn processing_flag_clears_on_failed() {
         let processing = Arc::new(AtomicBool::new(true));
@@ -1058,7 +1029,6 @@ mod tests {
         let turn_b = TurnId::new();
         route_audio_chunk(&mut audio_turn, &turn_a, false);
         assert!(!route_audio_chunk(&mut audio_turn, &turn_b, false));
-        // Still claims turn_a.
         assert_eq!(audio_turn, Some(turn_a));
     }
 
@@ -1095,18 +1065,17 @@ mod tests {
     #[cfg(feature = "voice")]
     #[test]
     fn route_audio_tail_after_terminal_not_dropped() {
-        // H1 regression: after Terminal clears active_turn, the TTS
-        // worker still emits chunks. The audio_turn tracker keeps them
-        // flowing until is_final arrives.
+        // After `Terminal` clears `active_turn`, the TTS worker still
+        // emits chunks. The audio_turn tracker keeps them flowing
+        // until is_final arrives.
         let mut audio_turn: Option<TurnId> = None;
         let turn = TurnId::new();
-        // First chunk claims the turn.
+        // First chunk claims the turn; then `Terminal` clears
+        // `active_turn` (not `audio_turn`), so the trailing chunks for the
+        // same turn must still be accepted until the final marker.
         assert!(route_audio_chunk(&mut audio_turn, &turn, false));
-        // Simulate Terminal clearing active_turn (not audio_turn).
-        // Subsequent chunks for the same turn must still be accepted.
         assert!(route_audio_chunk(&mut audio_turn, &turn, false));
         assert!(route_audio_chunk(&mut audio_turn, &turn, false));
-        // Final marker clears audio_turn.
         assert!(route_audio_chunk(&mut audio_turn, &turn, true));
         assert_eq!(audio_turn, None);
     }

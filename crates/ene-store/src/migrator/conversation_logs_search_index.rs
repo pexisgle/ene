@@ -1,18 +1,18 @@
-//! Search-ordering index for `conversation_logs` (#422).
+//! Search-ordering index for `conversation_logs`.
 //!
 //! `MemoryStore::search_messages` filters with a leading-wildcard
 //! `LOWER(content) LIKE '%…%'`, which cannot use a B-tree index on
-//! `content` (that needs FTS5, tracked separately in #424). Before this
-//! migration the only index on the table was `idx_log_session`
-//! (`session_id`), so every search also performed an in-memory sort of all
-//! matching rows to satisfy `ORDER BY created_at DESC` + `LIMIT`/`OFFSET`.
+//! `content` (that needs FTS5, tracked separately). The only other index
+//! on the table is `idx_log_session` (`session_id`), so without this
+//! migration every search would perform an in-memory sort of all matching
+//! rows to satisfy `ORDER BY created_at DESC` + `LIMIT`/`OFFSET`.
 //!
 //! This migration adds `idx_log_created_at` on `created_at DESC`. `SQLite` can
 //! walk that index newest-first, evaluating the `LIKE` predicate as it goes
 //! and stopping once `LIMIT`/`OFFSET` are satisfied — no full sort of the
 //! table. The worst-case scan for a query with no matches is unchanged (the
 //! leading-wildcard filter still touches every row), but the common paginated
-//! case no longer materializes and sorts the entire result set.
+//! case is served without materializing and sorting the entire result set.
 
 use sea_orm_migration::prelude::*;
 

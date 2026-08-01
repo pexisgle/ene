@@ -1,7 +1,6 @@
 //! Shared row widgets and action dispatcher for the settings UI.
 //!
-//! Mirrors the legacy `apps/ene-desktop/src/settings_ui/widgets.rs`
-//! shape 1:1. The action enum and `apply_action` dispatcher are the
+//! The action enum and `apply_action` dispatcher are the
 //! single funnel through which buttons, hotkeys, and direct egui
 //! field changes mutate [`CharacterSettings`].
 use crate::ai_bridge::AiBridge;
@@ -55,17 +54,17 @@ pub enum SettingsAction {
     LanguageDown,
     LanguageUp,
     /// Load the character card at `path` into the editor buffers
-    /// (Character Card editor page, #218).
+    /// (Character Card editor page).
     LoadCharacterCard {
         path: String,
     },
     /// Write the editor buffers back to the character card at `path`
-    /// (Character Card editor page, #218).
+    /// (Character Card editor page).
     SaveCharacterCard {
         path: String,
     },
     /// Validate the editor buffers without writing to disk
-    /// (Character Card editor page, #218).
+    /// (Character Card editor page).
     ValidateCharacterCard,
 }
 
@@ -366,9 +365,7 @@ pub fn format_quality_label(lang: crate::settings::Language, quality: GraphicsQu
 /// `EmotionQueue` if both a non-`None` expression and a queue
 /// handle are available. Centralising this branch keeps the
 /// character-cycle arm in [`apply_action`] symmetric for `Prev`
-/// and `Next` and removes the duplicated post-`apply_action`
-/// emotion-push that used to live in `runtime.rs` and
-/// `page_character.rs`.
+/// and `Next`.
 fn push_default_expression(
     default_expression: Option<String>,
     emotion_queue: Option<&mut EmotionQueue>,
@@ -399,7 +396,6 @@ mod tests {
     #[test]
     fn push_default_expression_drops_on_none_queue() {
         let mut expression = None;
-        // even with a queue, no queue handle → no push
         let q = EmotionQueue::default();
         push_default_expression(expression.take(), None, 1.0);
         assert!(q.commands.is_empty());

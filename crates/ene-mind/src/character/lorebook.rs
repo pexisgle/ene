@@ -1,4 +1,4 @@
-//! `CCv3` lorebook → semantic memory compilation (#83).
+//! `CCv3` lorebook → semantic memory compilation.
 
 use std::hash::{Hash, Hasher};
 
@@ -458,7 +458,6 @@ mod tests {
     fn not_key_suppresses_entry() {
         let mut entry = sample_entry(&["sword"], "A shiny sword.", false);
         entry.not_keys = vec!["rusty".to_string()];
-        // NOT key "rusty" matches the scan text, so the entry is suppressed
         assert!(!entry_keys_match(&entry, "There is a rusty sword here"));
         // Without the NOT key, it would match
         assert!(entry_keys_match(&entry, "There is a shiny sword here"));
@@ -468,9 +467,7 @@ mod tests {
     fn selective_and_logic() {
         let mut entry = sample_entry(&["forest", "dark"], "You enter a dark forest.", false);
         entry.selective = Some(true);
-        // Both keys must match
         assert!(entry_keys_match(&entry, "The dark forest is ahead"));
-        // Only one key matches
         assert!(!entry_keys_match(&entry, "The forest is bright"));
         assert!(!entry_keys_match(&entry, "It is dark outside"));
     }
@@ -479,11 +476,8 @@ mod tests {
     fn secondary_keys_require_primary_and_secondary() {
         let mut entry = sample_entry(&["castle"], "Castle lore.", false);
         entry.secondary_keys = Some(vec!["king".to_string(), "queen".to_string()]);
-        // Primary + secondary match
         assert!(entry_keys_match(&entry, "The king lives in the castle"));
-        // Only primary matches
         assert!(!entry_keys_match(&entry, "The castle is empty"));
-        // Only secondary matches
         assert!(!entry_keys_match(&entry, "The king is away"));
     }
 

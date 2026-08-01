@@ -1,9 +1,9 @@
 //! Plugin trait definitions and streaming chunk types.
 //!
-//! Three independent traits replace the old monolithic [`Plugin`] (now removed):
-//! [`ToolPlugin`], [`LlmPlugin`], and [`EmbedPlugin`]. A plugin struct can
-//! implement any subset; the server dispatches requests to the appropriate
-//! trait based on the `PluginDispatch` routing table.
+//! Three independent traits — [`ToolPlugin`], [`LlmPlugin`], and
+//! [`EmbedPlugin`] — let a plugin struct implement any subset; the server
+//! dispatches requests to the appropriate trait based on the `PluginDispatch`
+//! routing table.
 
 use std::pin::Pin;
 
@@ -26,12 +26,12 @@ pub struct PluginStreamChunk {
     /// Incremental tool-call JSON deltas (partial function-call arguments).
     pub tool_calls_delta: Option<Vec<serde_json::Value>>,
     /// Token usage for the whole completion, set on the **final** chunk when
-    /// the provider reports it (#365). Intermediate chunks leave this `None`.
+    /// the provider reports it. Intermediate chunks leave this `None`.
     pub usage: Option<TokenUsage>,
 }
 
 /// A completed (non-streaming) plugin chat response: text plus any token
-/// usage the provider reported (#365).
+/// usage the provider reported.
 ///
 /// Returned by [`LlmPlugin::chat_completion`]; the plugin server maps it onto
 /// [`PluginIpcResponse::ChatCompletionResult`](ene_plugin_proto::PluginIpcResponse).
@@ -71,8 +71,6 @@ pub struct ToolPluginCapabilities {
     /// Number of tools this plugin provides.
     pub tool_count: usize,
 }
-
-// ── ToolPlugin ──────────────────────────────────────────────────────────
 
 /// Plugin trait for tool execution.
 ///
@@ -160,8 +158,6 @@ pub trait ToolPlugin: Send + Sync {
     }
 }
 
-// ── LlmPlugin ──────────────────────────────────────────────────────────
-
 /// Plugin trait for LLM chat completions (streaming and non-streaming).
 #[async_trait]
 pub trait LlmPlugin: Send + Sync {
@@ -188,7 +184,7 @@ pub trait LlmPlugin: Send + Sync {
     /// Performs a non-streaming chat completion.
     ///
     /// Returns a [`PluginCompletion`] carrying the assistant text plus any
-    /// token usage the provider reported (#365). The default returns
+    /// token usage the provider reported. The default returns
     /// [`PluginError::NotSupported`] for plugins that do not provide LLM
     /// completions.
     async fn chat_completion(
@@ -203,8 +199,6 @@ pub trait LlmPlugin: Send + Sync {
         Err(PluginError::not_supported("chat_completion"))
     }
 }
-
-// ── EmbedPlugin ─────────────────────────────────────────────────────────
 
 /// Plugin trait for batch embedding computation.
 #[async_trait]
@@ -235,8 +229,6 @@ pub trait EmbedPlugin: Send + Sync {
     }
 }
 
-// ── TtsPlugin ───────────────────────────────────────────────────────────
-
 /// Plugin trait for Text-to-Speech synthesis.
 #[async_trait]
 pub trait TtsPlugin: Send + Sync {
@@ -258,8 +250,6 @@ pub trait TtsPlugin: Send + Sync {
         Err(PluginError::not_supported("synthesize"))
     }
 }
-
-// ── SttPlugin ───────────────────────────────────────────────────────────
 
 /// Plugin trait for Speech-to-Text transcription.
 #[async_trait]

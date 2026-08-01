@@ -1,4 +1,4 @@
-//! Dedicated chat window UI (#109).
+//! Dedicated chat window UI.
 
 mod dialogs;
 mod render;

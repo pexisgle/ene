@@ -32,8 +32,7 @@
 //! - [`stt::LocalSttEngine`] — blanket [`crate::SttProvider`].
 //! - [`descriptor::EngineDescriptor`] — declared capability, concurrency,
 //!   and resource-class metadata, replacing "call it and see if it errors"
-//!   (e.g. the tools-non-empty runtime check `create_chat_stream` used to
-//!   need) with an upfront query.
+//!   (e.g. a runtime error when `tools` is non-empty) with an upfront query.
 //! - [`resource::ResourceRegistry`] — one shared admission semaphore per
 //!   distinct [`descriptor::ResourceClass`], so independently-constructed
 //!   engines that contend on the same physical resource (most importantly:
@@ -50,14 +49,12 @@
 //! adapter layer — and it is still what [`llm::LocalLlmEngine`] wraps for a
 //! chat model that only implements plain [`ene_infer::LocalModel`].
 //!
-//! The actual gap this section used to describe — a local chat engine
-//! wanting genuine token-by-token delivery had no way to get it without
-//! bypassing this crate's discipline and hand-rolling `spawn_blocking` again
-//! — is closed: [`ene_infer::StreamingLocalModel`] is an additive extension
-//! of [`ene_infer::LocalModel`] (implementing it changes nothing about an
-//! existing model), [`ene_infer::EngineHandle::submit_stream`] delivers
-//! chunks through a bounded channel with the same cooperative
-//! cancellation/deadline/caller-gone handling `submit` already had, and
+//! A local chat engine that wants genuine token-by-token delivery implements
+//! [`ene_infer::StreamingLocalModel`] — an additive extension of
+//! [`ene_infer::LocalModel`] that changes nothing about an existing model.
+//! [`ene_infer::EngineHandle::submit_stream`] delivers chunks through a
+//! bounded channel with the same cooperative
+//! cancellation/deadline/caller-gone handling `submit` has, and
 //! [`llm::StreamingLocalLlmEngine`] is the [`crate::LlmProvider`] adapter
 //! over it. `crates/ene-ai-local`'s `LlamaChatModel` implements
 //! [`ene_infer::StreamingLocalModel`] by pushing each detokenized piece

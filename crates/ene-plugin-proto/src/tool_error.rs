@@ -88,9 +88,8 @@ impl std::fmt::Display for UserInputPrompt {
 
 /// Discriminator for the generic message-only [`ToolError::Generic`] variant.
 ///
-/// Each kind corresponds to a former standalone variant of `ToolError` that
-/// carried only a `message: String` payload. The kinds are serialized in
-/// `snake_case` for use in the wire format.
+/// Each kind corresponds to a message-only tool error category. The kinds are
+/// serialized in `snake_case` for use in the wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
@@ -148,12 +147,12 @@ impl std::fmt::Display for ErrorKind {
 ///
 /// Serializable over IPC and used uniformly across tool crates, core, and host.
 ///
-/// The former message-only variants (`ExecutionFailed`, `SandboxViolation`,
+/// The message-only error categories `ExecutionFailed`, `SandboxViolation`,
 /// `PermissionDenied`, `IoError`, `Timeout`, `Internal`, `IpcTransport`,
-/// `IpcClient`, `Other`) are consolidated into [`Generic`](Self::Generic)
+/// `IpcClient`, and `Other` are represented by [`Generic`](Self::Generic)
 /// with an [`ErrorKind`] discriminator. Serde wire compatibility is
-/// preserved: the serialized JSON still uses the original externally-tagged
-/// variant names (e.g. `{"ExecutionFailed":{"message":"…"}}`).
+/// preserved: the serialized JSON uses the externally-tagged variant names
+/// (e.g. `{"ExecutionFailed":{"message":"…"}}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "ToolErrorWire", from = "ToolErrorWire")]
 pub enum ToolError {
@@ -173,7 +172,7 @@ pub enum ToolError {
     /// Two providers exposed the same public tool name.
     ///
     /// Name collision is a hard error at provider registration
-    /// time — first-wins silent overwrite is not allowed (#135).
+    /// time — first-wins silent overwrite is not allowed.
     DuplicateName {
         /// Colliding tool name.
         tool_name: String,
@@ -184,10 +183,6 @@ pub enum ToolError {
         message: String,
     },
     /// A generic message-only error, discriminated by [`ErrorKind`].
-    ///
-    /// Consolidates the former `ExecutionFailed`, `SandboxViolation`,
-    /// `PermissionDenied`, `IoError`, `Timeout`, `Internal`,
-    /// `IpcTransport`, `IpcClient`, and `Other` variants.
     Generic {
         /// The error category.
         kind: ErrorKind,
@@ -411,11 +406,10 @@ impl From<std::io::Error> for ToolError {
 
 // ── Serde wire compatibility ─────────────────────────────────────────────
 //
-// The public `ToolError` consolidates nine former message-only variants into
-// `Generic { kind, message }`. To preserve the externally-tagged JSON wire
-// format expected by older tool binaries (e.g. `{"ExecutionFailed":{"message":"…"}}`),
-// serialization goes through a private proxy enum that mirrors the historical
-// variant layout.
+// The public `ToolError` carries message-only errors as `Generic { kind, message }`.
+// To preserve the externally-tagged JSON wire format expected by older tool
+// binaries (e.g. `{"ExecutionFailed":{"message":"…"}}`), serialization goes
+// through a private proxy enum that mirrors the original variant layout.
 
 #[derive(Serialize, Deserialize)]
 enum ToolErrorWire {

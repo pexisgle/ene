@@ -1,18 +1,17 @@
 //! `local-tts`-gated Kokoro ONNX provider: the ONNX session, voice
 //! embeddings, and the [`ene_ai::TtsProvider`] wiring.
 //!
-//! # Migration to `ene_infer::LocalModel`
+//! # Why `KokoroModel` owns its session exclusively
 //!
-//! This provider used to hold `Arc<parking_lot::Mutex<ort::session::Session>>`
-//! and run inference inside `tokio::task::spawn_blocking`, guarded only by
-//! that mutex. [`KokoroModel`] replaces it: the `ort::session::Session` is a
-//! plain field owned exclusively by the single worker thread
-//! [`ene_infer::EngineHandle`] spawns for it, with no `Arc`/`Mutex` and no
-//! `spawn_blocking` anywhere in this file. [`ene_ai::LocalTtsEngine`] (Stage
-//! 2) preserves the existing chunked-delivery shape exactly: one batch
-//! inference produces a full PCM buffer, which is then sliced into
-//! [`ene_ai::DEFAULT_CHUNK_SAMPLES`]-sized chunks pushed through an `mpsc`
-//! channel (H10) — this is not, and must not become, true streaming
+//! The `ort::session::Session` is a plain field owned exclusively by the
+//! single worker thread [`ene_infer::EngineHandle`] spawns for it, with no
+//! `Arc`/`Mutex` and no `spawn_blocking` anywhere in this file: a session
+//! shared behind a mutex and invoked from `spawn_blocking` is exactly the
+//! bug class [`ene_infer::LocalModel`] exists to remove.
+//! [`ene_ai::LocalTtsEngine`] preserves the existing chunked-delivery shape
+//! exactly: one batch inference produces a full PCM buffer, which is then
+//! sliced into [`ene_ai::DEFAULT_CHUNK_SAMPLES`]-sized chunks pushed through
+//! an `mpsc` channel — this is not, and must not become, true streaming
 //! synthesis.
 use ene_ai::{
     AudioProviderError, Capability, CapabilitySet, EngineDescriptor, LocalTtsEngine, ResourceClass,
@@ -26,7 +25,7 @@ use super::download::VOICE_DIM;
 const KOKORO_SAMPLE_RATE: u32 = 24_000;
 
 /// Known Kokoro-82M (v1.0) voice names mapped to their stacked index in
-/// `voices.bin` (C5). `voices.bin` is a flat little-endian `f32` array of
+/// `voices.bin`. `voices.bin` is a flat little-endian `f32` array of
 /// `VOICE_DIM`-float vectors concatenated in this order.
 const KOKORO_VOICES: &[(&str, usize)] = &[
     ("af_alloy", 0),
@@ -134,7 +133,8 @@ const TTS_STALL_TIMEOUT: Option<Duration> = None;
 /// The exclusively-owned Kokoro ONNX inference model.
 ///
 /// Owned by exactly one [`ene_infer::EngineHandle`] worker thread for its
-/// entire lifetime — see this module's migration doc comment. Kokoro's
+/// entire lifetime — see the module-level doc comment for why exclusive
+/// ownership matters. Kokoro's
 /// `session.run()` is a stateless batch call (no recurrent/decoder state
 /// carried between requests), so [`ene_infer::LocalModel::reset`] has
 /// nothing to do and is not overridden.
@@ -261,7 +261,6 @@ impl LocalModel for KokoroModel {
         }
         ctx.tick();
 
-        // Convert text to Kokoro phoneme token ids (C4) before inference.
         let tokens = crate::g2p::text_to_tokens(&req.text, self.language.as_deref());
         // `text_to_tokens` always emits BOS/EOS; anything beyond that is audio.
         if tokens.len() <= 2 {
@@ -281,7 +280,6 @@ impl LocalModel for KokoroModel {
     }
 }
 
-/// Look up the stacked `voices.bin` index for a Kokoro voice name.
 fn voice_index(name: &str) -> Option<usize> {
     KOKORO_VOICES
         .iter()
@@ -298,7 +296,7 @@ fn voice_index(name: &str) -> Option<usize> {
 /// # Errors
 ///
 /// Returns [`AudioProviderError::Init`] when the file is missing, its byte
-/// length is not a multiple of four (M16), it is too small for the requested
+/// length is not a multiple of four, it is too small for the requested
 /// voice, or `voice_name` is not a known voice.
 fn load_voice_embedding(
     voices_path: &std::path::Path,
@@ -353,7 +351,7 @@ fn load_voice_embedding(
 /// Load the Kokoro ONNX model and the selected voice embedding, then spawn
 /// its dedicated [`ene_infer::EngineHandle`] worker thread.
 ///
-/// ONNX Runtime is initialized exactly once per process (C3) using
+/// ONNX Runtime is initialized exactly once per process using
 /// `ort_dylib_path` when provided. The voice named by `voice_name` (e.g.
 /// `"af_heart"`) is selected from `voices.bin`; an empty name selects the
 /// first voice.

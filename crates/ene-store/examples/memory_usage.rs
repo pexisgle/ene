@@ -17,10 +17,8 @@ use ene_store::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Open an in-memory store with 4-dimensional embeddings
     let store = MemoryStore::open_in_memory(4).await?;
 
-    // Insert a typed memory (Semantic kind — the modern persistence path).
     let memory = NewMemoryItem {
         scope: MemoryScope::Shared,
         character_id: "Ene".to_string(),
@@ -50,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Inserted typed memory with ID: {id}");
 
     // Gather candidates with a Query (no embedding — lexical/recency-only match),
-    // then score and rank them in the ene-rag policy layer (#302).
+    // then score and rank them in the ene-rag policy layer.
     let query = Query {
         query_text: "Alice loves blue",
         embedding: None,
@@ -83,7 +81,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Mark the memory as faded (lifecycle transition).
     store.set_memory_status(id, MemoryStatus::Faded).await?;
     println!("\nMemory {id} marked as faded.");
 

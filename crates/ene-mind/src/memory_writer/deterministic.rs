@@ -24,7 +24,7 @@ fn nfkc(s: &str) -> String {
 
 /// Interrogative sentence openers (lowercase). A `remember` / `forget`
 /// keyword inside a question is not an instruction — e.g.
-/// "do you remember my birthday" (issue #70 precision guard).
+/// "do you remember my birthday".
 const EN_QUESTION_STARTERS: &[&str] = &[
     "do you",
     "did you",
@@ -69,7 +69,7 @@ fn is_en_question(msg: &str) -> bool {
 /// to ASCII by [`nfkc`]) or ends with the interrogative particle `か`
 /// (covers `〜ますか` / `〜ですか` / `覚えてるか`). This prevents phrasing
 /// like `私の誕生日を覚えてますか` from being captured as a remember
-/// instruction (issue #70 precision guard).
+/// instruction.
 fn is_ja_question(msg: &str) -> bool {
     let trimmed = msg.trim();
     trimmed.contains('?') || trimmed.ends_with('か')
@@ -91,7 +91,7 @@ fn ja_explicit_remember(
     _tool_results: &[ToolResultSummary],
 ) -> Option<MemoryCandidate> {
     // Questions such as `私の誕生日を覚えてますか` are requests, not
-    // instructions, and must not be captured (issue #70 precision guard).
+    // instructions, and must not be captured.
     if is_ja_question(user_msg) {
         return None;
     }
@@ -299,7 +299,6 @@ pub fn extract_with_tool_grounding(
 
     let mut candidates: Vec<MemoryCandidate> = Vec::new();
 
-    // Message matchers
     let matchers = match locale {
         Locale::Ja => JA_MATCHERS,
         Locale::En => EN_MATCHERS,
@@ -316,7 +315,6 @@ pub fn extract_with_tool_grounding(
         tool_grounding_cfg,
     ));
 
-    // Filter by min_confidence and deduplicate by (title, kind)
     let mut seen = std::collections::HashSet::new();
     let filtered: Vec<MemoryCandidate> = candidates
         .into_iter()

@@ -1,7 +1,7 @@
 //! Decision prompt for proactive speech (JSON only; no utterance body).
 //!
 //! The decision context is serialized as a single JSON document rather than
-//! hand-assembled `key: value` text lines (#380). Third-party content — the
+//! hand-assembled `key: value` text lines. Third-party content — the
 //! screen summary, window labels, and conversation history — is thereby
 //! delimited as escaped JSON *values* and cannot masquerade as sibling
 //! control fields (`should_speak`, `confidence`, …) the way it could when
@@ -32,7 +32,7 @@ pub fn build_decision_messages(
     vec![system, user]
 }
 
-/// Serialize the decision context as a single JSON document (#380).
+/// Serialize the decision context as a single JSON document.
 ///
 /// Trusted host telemetry is emitted as structured fields, while third-party
 /// observation data (`screen_summary`, `recent_conversation`, activity
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn affect_survives_round_trip_from_build_proactive_context() {
-        // Locks the producer→parser contract (#380): the parser in
+        // Locks the producer→parser contract: the parser in
         // `affect_value` must keep understanding the exact line that
         // `build_proactive_context` emits, or the affect field would be
         // silently dropped instead of surviving into the JSON context.

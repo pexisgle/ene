@@ -11,7 +11,7 @@ pub struct UtilityState {
     /// Lazily-initialized todo store. Uses `tokio::sync::Mutex` so the
     /// lock can be held across the entire async initialization in
     /// [`ensure_todo_store`](Self::ensure_todo_store), eliminating the
-    /// TOCTOU race that the previous double-checked locking had.
+    /// TOCTOU race inherent in double-checked locking.
     todo_store: Arc<tokio::sync::Mutex<Option<Arc<TodoStore>>>>,
     session_id: Arc<parking_lot::RwLock<String>>,
     db_socket: Arc<parking_lot::RwLock<Option<String>>>,

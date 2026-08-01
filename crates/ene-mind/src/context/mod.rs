@@ -1,4 +1,4 @@
-//! Context budget management and rolling compression (#79, #80, #81).
+//! Context budget management and rolling compression.
 
 mod budget;
 mod compression;
@@ -35,7 +35,7 @@ pub struct ContextManager {
 
 impl ContextManager {
     /// Evaluate whether window-pressure compression should be triggered for the
-    /// current session state (#368: token-based).
+    /// current session state (token-based).
     pub fn evaluate_compression_trigger(
         config: &ContextConfig,
         turn_count: usize,
@@ -60,7 +60,7 @@ impl ContextManager {
     }
 
     /// Evaluate the window-pressure trigger and spawn a background compression
-    /// task if warranted (#368: token-based).
+    /// task if warranted.
     ///
     /// This is the *secondary* trigger — a safety net for a topic that runs
     /// long without a detected boundary (the *primary* trigger is
@@ -113,12 +113,11 @@ impl ContextManager {
         );
     }
 
-    /// Plan and spawn a retroactive compression for a detected topic boundary
-    /// (#368).
+    /// Plan and spawn a retroactive compression for a detected topic boundary.
     ///
-    /// Called from the deferred post-turn slot once #367's detector signals a
-    /// boundary. The span *before* the boundary (the previous topic) is
-    /// summarized into a single scene span; the boundary turn onward is
+    /// Called from the deferred post-turn slot once the topic-boundary detector
+    /// signals a boundary. The span *before* the boundary (the previous topic)
+    /// is summarized into a single scene span; the boundary turn onward is
     /// retained, so the next turn sees "previous-topic summary + recent".
     /// Does nothing if a task is already pending or there is no pre-boundary
     /// span worth compressing.

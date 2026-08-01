@@ -1,8 +1,6 @@
-//! Performance Arbiter: mid-turn cue management with priority-based resolution (#129).
+//! Performance Arbiter: mid-turn cue management with priority-based resolution.
 //!
-//! Accepts [`PerformanceCue`]s arriving during a turn (stream markers, affect mapping)
-//! and resolves the final set of cues at turn-end. Priority ordering:
-//! `LlmCommand > LlmAdvisory > Affect > Hysteresis > Fallback`.
+//! Priority ordering: `LlmCommand > LlmAdvisory > Affect > Hysteresis > Fallback`.
 
 use crate::output::arbiter::affect_to_expression;
 use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
@@ -42,7 +40,7 @@ pub const fn cue_source_priority(source: CueSource) -> u8 {
 /// Buffers incoming [`PerformanceCue`]s from various sources
 /// (stream markers, affect engine, etc.) and resolves the final
 /// set at turn-end. Motion cues are routed to per-layer slots
-/// so that Upper and Lower body motions can coexist (#148).
+/// so that Upper and Lower body motions can coexist.
 #[derive(Debug, Default)]
 pub struct PerformanceArbiter {
     expression: Option<CueSlot>,

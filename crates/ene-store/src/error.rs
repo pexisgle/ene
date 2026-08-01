@@ -3,7 +3,7 @@ use thiserror::Error;
 /// Error types for the memory subsystem.
 ///
 /// Marked `#[non_exhaustive]` so downstream crates (notably `ene-runtime`'s
-/// `public_api::PublicApiError` boundary, #269) cannot exhaustively match
+/// `public_api::PublicApiError` boundary) cannot exhaustively match
 /// this enum without a wildcard arm. That means adding a new variant here
 /// never breaks a downstream crate's compile — new variants silently fall
 /// through any wildcard arm until that crate chooses to special-case them.
@@ -56,15 +56,15 @@ pub enum EneMemoryError {
     #[error("Session export serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
 
-    /// File backup / restore failed (#239).
+    /// File backup / restore failed.
     #[error("Database backup error: {0}")]
     BackupError(String),
 
-    /// `PRAGMA integrity_check` reported corruption (#239).
+    /// `PRAGMA integrity_check` reported corruption.
     #[error("Database integrity check failed: {0}")]
     IntegrityCheckFailed(String),
 
-    /// The on-disk schema is newer than this binary can handle (#239).
+    /// The on-disk schema is newer than this binary can handle.
     ///
     /// Recovery: upgrade the binary, or restore a backup created by a
     /// compatible version (`ene store restore <backup>`).
@@ -76,7 +76,7 @@ pub enum EneMemoryError {
         unknown: String,
     },
 
-    /// A migration failed and the pre-migration backup was restored (#239).
+    /// A migration failed and the pre-migration backup was restored.
     #[error("Migration failed; database restored from backup {backup}: {cause}")]
     MigrationRolledBack {
         /// Path of the backup that was restored.

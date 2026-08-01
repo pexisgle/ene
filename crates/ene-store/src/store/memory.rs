@@ -175,12 +175,12 @@ async fn list_session_ids_for_card_on_conn<C: ConnectionTrait>(
 }
 
 impl MemoryStore {
-    // ── Pending memory writes (#240) ────────────────────────────────────────
+    // ── Pending memory writes ───────────────────────────────────────────────
 
     /// Default maximum retry attempts for a deferred memory write.
     pub const PENDING_MEMORY_WRITE_MAX_ATTEMPTS: i32 = 5;
 
-    /// Enqueue a failed deferred memory write for later retry (#240).
+    /// Enqueue a failed deferred memory write for later retry.
     pub async fn enqueue_pending_memory_write(
         &self,
         character_id: &str,
@@ -212,7 +212,7 @@ impl MemoryStore {
         Ok(res.id)
     }
 
-    /// List pending / permanent memory-write rows for a character (#240).
+    /// List pending / permanent memory-write rows for a character.
     pub async fn list_pending_memory_writes(
         &self,
         character_id: &str,
@@ -230,7 +230,7 @@ impl MemoryStore {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// Count pending (retryable) and permanent failed memory writes (#240).
+    /// Count pending (retryable) and permanent failed memory writes.
     pub async fn count_pending_memory_writes(
         &self,
         character_id: &str,
@@ -251,7 +251,7 @@ impl MemoryStore {
         Ok((pending, permanent))
     }
 
-    /// Force pending rows for a character to be due immediately (#240).
+    /// Force pending rows for a character to be due immediately.
     ///
     /// Used by `/memory retry` so the operator can drain the queue without
     /// waiting for exponential backoff.
@@ -274,7 +274,7 @@ impl MemoryStore {
         Ok(result.rows_affected as usize)
     }
 
-    /// Take due pending memory writes (`status=pending`, `next_retry_at` <= now) (#240).
+    /// Take due pending memory writes (`status=pending`, `next_retry_at` <= now).
     pub async fn take_due_pending_memory_writes(
         &self,
         limit: usize,
@@ -311,7 +311,7 @@ impl MemoryStore {
         Ok(out)
     }
 
-    /// Mark a pending memory write as successfully applied and delete it (#240).
+    /// Mark a pending memory write as successfully applied and delete it.
     pub async fn complete_pending_memory_write(&self, id: i64) -> Result<(), EneMemoryError> {
         use entities::pending_memory_writes::Entity;
         use sea_orm::EntityTrait;
@@ -320,7 +320,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Record another failed attempt; may transition to permanent (#240).
+    /// Record another failed attempt; may transition to permanent.
     pub async fn fail_pending_memory_write(
         &self,
         id: i64,
@@ -449,7 +449,7 @@ impl MemoryStore {
     }
 
     /// List the namespaced tool names with a recent, recallable
-    /// `tool failure:{tool}` reflection memory for a character (#349).
+    /// `tool failure:{tool}` reflection memory for a character.
     ///
     /// Backs [`ene_core::ToolFailureSignalPort`] so the tool-selection RAG
     /// pipeline can down-weight tools that recently failed, without depending
@@ -605,7 +605,7 @@ impl MemoryStore {
         Ok(archived)
     }
 
-    /// Gather typed-memory candidates for explainable hybrid scoring (#123, #302).
+    /// Gather typed-memory candidates for explainable hybrid scoring.
     ///
     /// Sole public typed-memory gather entry. Collects candidates from optional
     /// vector similarity (when `query.embedding` is `Some`), lexical token
@@ -630,7 +630,6 @@ impl MemoryStore {
         let pool = query.candidate_pool_size.max(query.limit);
         let mut gathered: HashMap<i64, ene_core::GatheredCandidate> = HashMap::new();
 
-        // Vector candidates across recallable statuses (skipped when no embedding).
         if let Some(embedding) = query.embedding {
             let vector_hits = self
                 .search_typed_memories_vector(
@@ -655,7 +654,6 @@ impl MemoryStore {
             }
         }
 
-        // Lexical candidates from token-based DB lookup.
         let lexical_candidates = self
             .list_lexical_typed_memory_candidates(
                 query.query_text,
@@ -678,7 +676,7 @@ impl MemoryStore {
             }
         }
 
-        // Active commitment ledger rows are the SoT for Commitment boost (#124).
+        // Active commitment ledger rows are the SoT for Commitment boost.
         // Prefer typed rows linked via commitment_id; otherwise synthesize from ledger.
         let commitments = self
             .list_active_commitments(query.character_id, query.user_id, pool)
@@ -746,7 +744,6 @@ impl MemoryStore {
             );
         }
 
-        // Limited recent fallback for memories not already gathered.
         if query.recent_fallback_limit > 0 {
             let recent_candidates = self
                 .list_recallable_typed_memories(
@@ -807,7 +804,7 @@ impl MemoryStore {
     ///
     /// Uses the `vec0` ANN index (`vec_memory_embeddings`) for candidate
     /// retrieval, then joins back to `typed_memories` for status and
-    /// user-visibility filtering (#304).
+    /// user-visibility filtering.
     pub(crate) async fn search_typed_memories_vector(
         &self,
         query_embedding: &[f32],
@@ -963,7 +960,7 @@ impl MemoryStore {
     }
 
     /// Brute-force vector search (full-row scan) — retained for test
-    /// comparison against the ANN-indexed path (#304).
+    /// comparison against the ANN-indexed path.
     #[cfg(test)]
     pub(crate) async fn search_typed_memories_vector_brute_force(
         &self,
@@ -1128,7 +1125,7 @@ impl MemoryStore {
             .collect::<Result<Vec<_>, _>>()
     }
 
-    /// Fetch typed memories linked to commitment ledger rows (#124).
+    /// Fetch typed memories linked to commitment ledger rows.
     async fn get_typed_memories_by_commitment_ids(
         &self,
         commitment_ids: &[i64],
@@ -1287,7 +1284,7 @@ impl MemoryStore {
         Ok(result.rows_affected > 0)
     }
 
-    /// Transition a typed memory with lifecycle edge validation (#76).
+    /// Transition a typed memory with lifecycle edge validation.
     pub async fn set_memory_status(
         &self,
         id: i64,
@@ -1459,7 +1456,7 @@ impl MemoryStore {
     /// Apply natural decay transitions for recallable memories in a scope.
     ///
     /// Uses a single SQL `UPDATE` per transition edge (active→faded, faded→archived)
-    /// so the pass scales to the full table without a `BATCH_LIMIT` (#350).
+    /// so the pass scales to the full table without a `BATCH_LIMIT`.
     ///
     /// Both statements run inside one transaction because `SELECT changes()`
     /// reports only the count of the *same connection's* last write. The store
@@ -1522,7 +1519,7 @@ impl MemoryStore {
         })
     }
 
-    /// Backdate typed memory timestamps for integration tests (#76).
+    /// Backdate typed memory timestamps for integration tests.
     #[doc(hidden)]
     pub async fn test_backdate_typed_memory(
         &self,

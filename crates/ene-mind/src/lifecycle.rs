@@ -1,4 +1,4 @@
-//! Turn lifecycle input/output types for cognitive runtime integration (#100).
+//! Turn lifecycle input/output types for cognitive runtime integration.
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use crate::memory_writer::candidate::{ToolResultSummary, TurnInput};
 use crate::recall::{RecallPlan, RecallTurn, RecalledMemory};
 use crate::session::InterruptedState;
 
-/// Builds the system-prompt note describing a previously interrupted response (#206).
+/// Builds the system-prompt note describing a previously interrupted response.
 ///
 /// Injected into the next turn so the model can naturally resume or acknowledge
 /// the interruption instead of restarting from scratch.
@@ -70,7 +70,7 @@ pub struct TurnContext<'a> {
     pub llm_provider: Option<Arc<dyn LlmProvider>>,
     /// Prompt tokens the model's context window leaves for this turn.
     ///
-    /// Scales window-relative budgets such as the Identity Kernel (#386).
+    /// Scales window-relative budgets such as the Identity Kernel.
     /// `None` when the window is unknown (tests / legacy callers), in which
     /// case a conservative default window is assumed.
     pub available_window: Option<usize>,
@@ -79,7 +79,7 @@ pub struct TurnContext<'a> {
     /// Optional override for the prompt packing budget (in tokens).
     ///
     /// When `None` (production), the budget is derived from the model's
-    /// effective context window (#364, #370). Tests set this to inject a
+    /// effective context window. Tests set this to inject a
     /// deterministic budget and force drop/trim behaviour without depending on
     /// the global AI config or a live provider.
     pub packing_budget_override: Option<usize>,
@@ -96,7 +96,7 @@ pub struct PreTurnOutput {
     pub recalled: Vec<RecalledMemory>,
     /// Active commitments for prompt injection.
     pub commitments: Vec<ActiveCommitmentPrompt>,
-    /// Classifier expression hint when confidence meets threshold (#88).
+    /// Classifier expression hint when confidence meets threshold.
     pub classifier_expression_hint: Option<String>,
 }
 
@@ -120,7 +120,7 @@ pub struct PromptPacketMeta {
     /// IDs of recalled memories that actually made it into the packed prompt.
     ///
     /// Subset of the recalled set that survived budget trimming. The recall
-    /// access bump is gated on this list (#345): only memories actually
+    /// access bump is gated on this list: only memories actually
     /// composed into the packed prompt get their `access_count` /
     /// `last_accessed_at` updated, so ranking high in search but being dropped
     /// by the budget no longer reinforces a memory.
@@ -147,7 +147,7 @@ pub struct ComposePrefetch {
     /// Prefetched scene summary text (`Some(None)` means no active scene).
     pub scene_summary: Option<Option<String>>,
     /// Context note about a previously interrupted response, injected into the
-    /// system prompt so the model can acknowledge or resume it (#206).
+    /// system prompt so the model can acknowledge or resume it.
     /// `Some(None)` means the caller checked and there is no pending interruption.
     pub interruption_note: Option<Option<String>>,
 }
@@ -163,9 +163,9 @@ pub struct PostTurnInput<'a> {
     pub character_id: &'a str,
     /// User identifier.
     pub user_id: &'a str,
-    /// Whether the turn was interrupted (barge-in / cancel) before completion (#206).
+    /// Whether the turn was interrupted (barge-in / cancel) before completion.
     pub interrupted: bool,
-    /// The partial assistant text produced before interruption, if any (#206).
+    /// The partial assistant text produced before interruption, if any.
     pub spoken_text: Option<&'a str>,
 }
 
@@ -191,10 +191,10 @@ pub struct OwnedPostTurnInput {
     pub character_id: String,
     /// User identifier.
     pub user_id: String,
-    /// Whether the turn was interrupted (barge-in / cancel) before completion (#206).
+    /// Whether the turn was interrupted (barge-in / cancel) before completion.
     #[serde(default)]
     pub interrupted: bool,
-    /// The partial assistant text produced before interruption, if any (#206).
+    /// The partial assistant text produced before interruption, if any.
     #[serde(default)]
     pub spoken_text: Option<String>,
 }

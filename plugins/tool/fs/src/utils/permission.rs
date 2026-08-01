@@ -1,6 +1,5 @@
 use crate::utils::sandbox::SandboxConfig;
 
-/// Permission level
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionLevel {
     Allow,
@@ -8,7 +7,6 @@ pub enum PermissionLevel {
     Deny { reason: String },
 }
 
-/// Permission request
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
     pub id: uuid::Uuid,
@@ -29,7 +27,6 @@ impl PermissionRequest {
     }
 }
 
-/// Types of destructive operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DestructiveAction {
     FileDelete,
@@ -39,7 +36,6 @@ pub enum DestructiveAction {
     AppInteraction,
 }
 
-/// Permission gate based on sandbox configuration
 pub struct PermissionGate {
     auto_approve: bool,
 }
@@ -51,14 +47,11 @@ impl PermissionGate {
 
     /// Build a `PermissionGate` whose behavior reflects the sandbox state.
     ///
-    /// Fail-closed: when the sandbox is disabled, destructive operations
-    /// still require explicit approval. The previous behavior was
-    /// `auto_approve = !sandbox.enabled`, which made a disabled sandbox
-    /// silently auto-approve shell, file delete, and similar destructive
-    /// actions — i.e. fail-open. The whole point of a permission gate is
-    /// to ask the human when the sandbox is *not* there to enforce
-    /// boundaries, so the disabled-sandbox branch now keeps
-    /// `auto_approve = false`.
+    /// Fail-closed: destructive operations still require explicit approval
+    /// when the sandbox is disabled. Auto-approving whenever the sandbox is
+    /// off would silently let shell, file delete, and similar destructive
+    /// actions run without human consent exactly when no other boundary
+    /// enforces them — the gate exists to ask the human in that case.
     ///
     /// The `_sandbox` argument is intentionally unused: keeping it in the
     /// signature preserves the call sites that pass a sandbox handle
@@ -70,7 +63,6 @@ impl PermissionGate {
         }
     }
 
-    /// Checks destructive operations
     pub fn check_destructive(
         &self,
         action: DestructiveAction,
@@ -90,7 +82,7 @@ impl Default for PermissionGate {
     /// Fail-closed default: a `PermissionGate::default()` requires approval
     /// for destructive ops. Callers that intentionally want auto-approval
     /// must opt in via [`PermissionGate::new`] with `true` or
-    /// [`PermissionGate::default_with_sandbox`] (which is now also
+    /// [`PermissionGate::default_with_sandbox`] (which is also
     /// fail-closed — see its rustdoc for rationale).
     fn default() -> Self {
         Self {

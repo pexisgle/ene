@@ -1,4 +1,4 @@
-//! `CCv3` character memory index synchronization (#83 / #84).
+//! `CCv3` character memory index synchronization.
 
 use std::collections::HashSet;
 use std::sync::Arc;

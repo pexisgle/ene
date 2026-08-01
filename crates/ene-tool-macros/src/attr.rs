@@ -7,8 +7,6 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{DeriveInput, Path};
 
-// ── Helpers ──────────────────────────────────────────────────────────
-
 /// Extract a readable string from a `Path` for error messages.
 fn path_ident_str(path: &Path) -> String {
     path.get_ident()
@@ -33,9 +31,7 @@ fn parse_flag(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<bool> {
     }
 }
 
-// ── StringList / SemiList ────────────────────────────────────────────
-
-/// A comma-separated list of strings, parsed from a single `FromMeta` value.
+/// A comma-separated list of strings.
 #[derive(Debug, Clone, Default)]
 pub struct StringList(pub Vec<String>);
 
@@ -50,7 +46,7 @@ impl StringList {
     }
 }
 
-/// A semicolon-separated list of strings, parsed from a single `FromMeta` value.
+/// A semicolon-separated list of strings.
 #[derive(Debug, Clone, Default)]
 pub struct SemiList(pub Vec<String>);
 
@@ -64,8 +60,6 @@ impl SemiList {
         )
     }
 }
-
-// ── ArgAttrs ─────────────────────────────────────────────────────────
 
 /// A field-level `#[arg(...)]` block.
 ///
@@ -170,8 +164,6 @@ impl ArgAttrs {
     }
 }
 
-// ── has_tool_skip ────────────────────────────────────────────────────
-
 /// Check if a field has `#[tool(skip)]`. Recognizes
 /// `#[tool(skip)]` standalone and `#[tool(skip, name = "…")]`
 /// where `skip` is the first path segment.
@@ -190,8 +182,6 @@ pub fn has_tool_skip(field: &syn::Field) -> bool {
     }
     false
 }
-
-// ── ToolSpecAttrs ────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
 pub struct ToolSpecAttrs {
@@ -313,8 +303,6 @@ impl ToolSpecAttrs {
     }
 }
 
-// ── ToolSpecAttrs methods ────────────────────────────────────────────
-
 impl ToolSpecAttrs {
     pub fn full_name(&self) -> String {
         match &self.namespace {
@@ -357,8 +345,7 @@ impl ToolSpecAttrs {
         }
     }
 
-    /// Side effects for the LLM-facing [`ToolSpec`](::ene_plugin_proto::ToolSpec)
-    /// (#400).
+    /// Side effects for the LLM-facing [`ToolSpec`](::ene_plugin_proto::ToolSpec).
     ///
     /// Unlike [`Self::side_effects_path`] (which defaults to `ReadOnly` for the
     /// RAG profile), this returns `None` when the author did not declare side
@@ -438,8 +425,6 @@ impl ToolSpecAttrs {
     }
 }
 
-// ── parse_version ────────────────────────────────────────────────────
-
 fn parse_version(s: &str) -> syn::Result<(u32, u32, u32)> {
     let mut parts = s.split('.');
     let maj: u32 = parts.next().and_then(|p| p.parse().ok()).ok_or_else(|| {
@@ -475,8 +460,6 @@ fn parse_version(s: &str) -> syn::Result<(u32, u32, u32)> {
     Ok((maj, min, pat))
 }
 
-// ── title_case ───────────────────────────────────────────────────────
-
 fn title_case(s: &str) -> String {
     s.split(['_', '.'])
         .filter(|p| !p.is_empty())
@@ -493,8 +476,6 @@ fn title_case(s: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-
-// ── path_token ───────────────────────────────────────────────────────
 
 fn path_token(name: &str, default_module: &str, default_variant: &str) -> TokenStream2 {
     if name.contains("::")

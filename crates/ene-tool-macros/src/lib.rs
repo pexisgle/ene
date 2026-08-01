@@ -40,7 +40,6 @@ use attr::{ArgAttrs, ToolSpecAttrs, has_tool_skip};
 ///    cannot invent fields.
 /// 3. Applies per-field `#[arg(...)]` overrides (hide, `enum_values`,
 ///    default, min/max, alias-in-description).
-/// 4. Fills the `ToolSpec` body from `#[tool(...)]`.
 ///
 /// The name (`TOOL_NAME`), display name, and summary are emitted as
 /// `pub const`s so that the dispatch trait, the spec's `name` field, and
@@ -195,12 +194,8 @@ fn expand_tool_action_derive(ast: &DeriveInput) -> syn::Result<TokenStream2> {
 /// }
 /// ```
 ///
-/// The macro adds two methods to the same impl block:
-/// - `fn name(&self) -> &'static str { <MyArgs>::TOOL_NAME }`
-/// - `fn definition(&self) -> ToolSpec { <MyArgs>::spec() }`
-///
-/// The two drift-prone methods (name, definition) are auto-generated.
-/// The `execute` shim is written by the user.
+/// The drift-prone forwarders (`name`, `definition`, `rag_profile`) are
+/// auto-generated; the `execute` shim is written by the user.
 #[proc_macro_attribute]
 pub fn tool_action(attr: TokenStream, input: TokenStream) -> TokenStream {
     let args_ty: ToolActionAttr = parse_macro_input!(attr as ToolActionAttr);
@@ -231,7 +226,6 @@ impl Parse for ToolActionAttr {
 }
 
 fn expand_tool_action(item: &mut syn::ItemImpl, args_ty: &syn::Type) {
-    // Validate that the impl block is for the ToolAction trait.
     if let Some((trait_path, _)) = &item.trait_ {
         let is_tool_action = trait_path
             .segments
@@ -307,7 +301,6 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
     let examples = struct_attrs.examples_value();
     let args_const_ident = struct_attrs.args_const_ident(ident);
 
-    // Per-field post-processing instructions.
     let field_instrs = collect_field_instructions(fields)?;
 
     let output = quote! {
@@ -328,8 +321,8 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
             /// Emits the LLM-facing fields (`name`, `description`,
             /// `parameters`) plus the host-execution metadata
             /// `background_capable` and `side_effects` (the latter drives the
-            /// parallel tool-call policy, #400). Rich `#[tool(...)]` metadata
-            /// is emitted by [`Self::rag_profile`] for Tool RAG (#137).
+            /// parallel tool-call policy). Rich `#[tool(...)]` metadata
+            /// is emitted by [`Self::rag_profile`] for Tool RAG.
             pub fn spec() -> ::ene_plugin_proto::ToolSpec {
                 use ::ene_plugin_proto::{ToolSpec, ToolName};
                 use ::schemars::JsonSchema as _;
@@ -365,7 +358,7 @@ fn expand_tool_spec(ast: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }
 
-            /// Construct the host/RAG metadata profile for this args type (#137).
+            /// Construct the host/RAG metadata profile for this args type.
             pub fn rag_profile() -> ::ene_plugin_proto::ToolRagProfile {
                 use ::ene_plugin_proto::{
                     KeywordSet, ToolName, ToolRagProfile, ToolVersion,

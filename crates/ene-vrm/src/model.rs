@@ -3,9 +3,9 @@
 //! The loader loads **every primitive of every mesh** in the glTF
 //! document. A VRM 1.0 model like AliciaSolid.vrm has 12 separate
 //! glTF Mesh objects (body, clothes, hair, face, accessories,
-//! etc.) — not one mesh with 12 primitives. Iterating only
-//! `meshes[0]` (this struct) rendered the head/face area only;
-//! the loader fixes this by walking every `Mesh` and every `Primitive`.
+//! etc.) — not one mesh with 12 primitives — so the loader walks
+//! every `Mesh` and every `Primitive` rather than iterating only
+//! `meshes[0]`, which would render the head/face area only.
 use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
@@ -20,14 +20,10 @@ use crate::mtoon::{MToonGpuTextures, MToonMaterial};
 use crate::node_constraint::NodeConstraintRegistry;
 use crate::spring_bone::SpringBoneProperties;
 
-/// A single mesh primitive loaded from the VRM. The loader
-/// extracts every primitive of the first mesh, so the body, the
-/// clothes, the face, etc. all end up here as separate
-/// `VrmPrimitive` entries.
+/// A single mesh primitive loaded from the VRM.
 #[derive(Debug)]
 pub struct VrmPrimitive {
-    /// Per-vertex data: `position (vec3) + uv (vec2) + normal (vec3)`.
-    /// 8 floats = 32 bytes per vertex.
+    /// Per-vertex data (`MeshVertex`, including joints and weights).
     pub vertex_buf: wgpu::Buffer,
     /// Number of vertices in `vertex_buf`.
     pub vertex_count: u32,
@@ -83,7 +79,7 @@ pub enum AlphaMode {
     /// Alpha cutout — depth write enabled, alpha test in shader.
     /// Currently rendered with the same pipeline as
     /// [`AlphaMode::Opaque`] (the alpha-test shader variant is a
-    /// follow-up PR).
+    /// follow-up).
     Mask,
     /// Transparent blend — depth write disabled,
     /// pre-multiplied alpha blending. Drawn after opaque/mask
@@ -105,16 +101,14 @@ impl AlphaMode {
     }
 }
 
-/// A single glTF mesh object, as a list of primitives. loads
-/// every `Mesh` in the glTF document — a VRM 1.0 has ~12 of these
-/// (body, `hair_front`, `hair_back`, face, `clothes_top`, `clothes_bottom`,
-/// etc.), one per body part. Earlier PRs that only loaded
-/// `meshes[0]` therefore rendered the head/face area only.
+/// A single glTF mesh object, as a list of primitives. The
+/// loader walks every `Mesh` in the glTF document — a VRM 1.0 has
+/// ~12 of these (body, `hair_front`, `hair_back`, face,
+/// `clothes_top`, `clothes_bottom`, etc.), one per body part.
+/// Loading only `meshes[0]` would render the head/face area only.
 #[derive(Debug, Default)]
 pub struct VrmMesh {
-    /// All primitives that make up this mesh. The renderer draws
-    /// each one with its own base-color texture (or a flat color
-    /// when `VrmPrimitive::base_color` is `None`).
+    /// All primitives that make up this mesh.
     pub primitives: Vec<VrmPrimitive>,
 }
 
@@ -132,15 +126,14 @@ pub struct VrmTexture {
     pub bind_group: wgpu::BindGroup,
 }
 
-/// Skeleton metadata loaded from the first skin in the glTF.
-///
-/// rendered with **identity** skinning; exposes the full
-/// joint list plus the per-joint `inverse_bind` so the runtime
-/// can build the `mat4x4[]` skin palette via the standard glTF
-/// formula `joint_world * inverse_bind`. The pre-baked
-/// `bind_matrices` field (kept for backward compat) stores
-/// `inverse_bind[i]⁻¹`; the per-frame runtime matrix is
-/// `current_joint_world * inverse_bind[i]` — **not**
+/// Skeleton metadata loaded from the first skin in the glTF. A
+/// model without a skin is rendered with **identity** skinning;
+/// this struct exposes the full joint list plus the per-joint
+/// `inverse_bind` so the runtime can build the `mat4x4[]` skin
+/// palette via the standard glTF formula
+/// `joint_world * inverse_bind`. The pre-baked `bind_matrices`
+/// field stores `inverse_bind[i]⁻¹`; the per-frame runtime matrix
+/// is `current_joint_world * inverse_bind[i]` — **not**
 /// `* bind_matrices[i]`, which would invert the bind transform
 /// and break the rest pose.
 #[derive(Debug, Clone, Default)]
@@ -179,7 +172,7 @@ impl Skeleton {
 ///
 /// The data is computed once from the glTF `Node` transforms
 /// (local rotations / positions + parent indices) and the
-/// resulting world-space values. (this struct) is
+/// resulting world-space values. This struct is
 /// the bridge between `VrmaFrame::bone_rotations` (keyed by
 /// canonical bone name) and the skin palette the GPU reads
 /// every frame.
@@ -265,7 +258,6 @@ impl NodeHierarchy {
         if n == 0 {
             return;
         }
-        // Roots first: parent == -1.
         for i in 0..n {
             let p = self.parents[i];
             if p < 0 {
@@ -285,12 +277,11 @@ impl NodeHierarchy {
 /// the VRM once.
 #[derive(Debug)]
 pub struct VrmModel {
-    /// All glTF meshes in the file. iterates every `Mesh`
-    /// (–3.2 only loaded `meshes[0]`, which is why most of
-    /// the model was missing — VRM 1.0 uses one glTF Mesh per body
-    /// part rather than one Mesh with many primitives).
+    /// All glTF meshes in the file. The loader walks every `Mesh` —
+    /// VRM 1.0 uses one glTF Mesh per body part rather than one
+    /// Mesh with many primitives.
     pub meshes: Vec<VrmMesh>,
-    /// Skeleton metadata. Not consumed by the renderer in.
+    /// Skeleton metadata. Not consumed by the renderer.
     pub skeleton: Skeleton,
     /// Raw glTF AABB `(min, max)` of every vertex, in model-local
     /// space (i.e. the same space the vertex buffer and the bind
@@ -312,23 +303,23 @@ pub struct VrmModel {
     /// vertex buffer, so `inverse_bind` (which was computed
     /// against the raw positions) lines up with the GPU data.
     normalize_scale: f32,
-    /// Expression / blend-shape layer (this struct). `Default` for
+    /// Expression / blend-shape layer. `Default` for
     /// models without morph targets; the renderer treats the
     /// empty layer as a no-op.
     pub expressions: ExpressionLayer,
-    /// Humanoid bone registry (this struct). Built from the
+    /// Humanoid bone registry. Built from the
     /// `VRMC_vrm.humanoid.humanBones` block — empty for
     /// models without humanoid metadata (e.g. legacy
-    /// VRM 0.x). Consumers (#11 `LookAt`, #13 `SpringBone`,
-    /// #14 VRMA, #15 `NodeConstraint`) use this to map bone
+    /// VRM 0.x). Consumers (`LookAt`, `SpringBone`,
+    /// VRMA, `NodeConstraint`) use this to map bone
     /// names to glTF node / Skeleton joint indices.
     pub humanoid: HumanoidBoneRegistry,
-    /// Full glTF node hierarchy (this struct). Captured at
+    /// Full glTF node hierarchy. Captured at
     /// load time so the runtime can recompute per-joint
     /// world transforms when a VRMA bone rotation lands.
     /// Empty for models without glTF nodes (malformed).
     pub nodes: NodeHierarchy,
-    /// Look-at properties (this struct). Parsed from the
+    /// Look-at properties. Parsed from the
     /// `VRMC_vrm.lookAt` block — `None` for models
     /// without the block (e.g. legacy VRM 0.x). The
     /// runtime falls back to [`LookAtProperties::default`]
@@ -336,18 +327,18 @@ pub struct VrmModel {
     /// still gets the spec-default 90→10 range map and
     /// `"bone"` consumer type.
     pub look_at: Option<LookAtProperties>,
-    /// Per-expression override definitions (this struct).
+    /// Per-expression override definitions.
     /// Parsed from the `VRMC_vrm.expressions.{preset,custom}.<name>`
     /// tree — `isBinary`, `overrideMouth`, `overrideBlink`,
     /// `overrideLookAt`. Empty for models without the
     /// `VRMC_vrm.expressions` block, in which case the
     /// override pass is a no-op.
     pub expressions_meta: Vec<ExpressionDefinition>,
-    /// Node constraints (issue #15). Parsed from
+    /// Node constraints. Parsed from
     /// `VRMC_node_constraint` on glTF nodes. Empty for
     /// models without the extension.
     pub node_constraints: NodeConstraintRegistry,
-    /// Spring bone properties (issue #13). Parsed from
+    /// Spring bone properties. Parsed from
     /// `VRMC_springBone`. `None` for models without the
     /// extension. The runtime creates a
     /// [`SpringBoneSimulator`](crate::spring_bone::SpringBoneSimulator)
@@ -485,7 +476,7 @@ impl VrmModel {
     ///    local rotation of `nodes.local_rotations[entry.node]`
     ///    with the VRMA's bone rotation. Bones that aren't
     ///    in the humanoid registry are silently dropped.
-    /// 2. **Apply `LookAt` bone deltas** (this struct): for the
+    /// 3. **Apply `LookAt` bone deltas**: for the
     ///    `head` / `leftEye` / `rightEye` humanoid bones
     ///    whose [`LookAtBoneOutput`] carries a non-identity
     ///    delta, multiply the delta onto the **current** local
@@ -498,14 +489,14 @@ impl VrmModel {
     ///    active. Bones missing from the humanoid registry are
     ///    silently dropped, so the call is a no-op on models
     ///    without humanoid metadata.
-    /// 3. **Walk the hierarchy**: `nodes.compute_world_transforms()`
+    /// 4. **Walk the hierarchy**: `nodes.compute_world_transforms()`
     ///    fills `world_rotations` / `world_positions`.
-    /// 4. **Hips translation**: if the frame carries an
+    /// 5. **Hips translation**: if the frame carries an
     ///    `hips_translation` and the humanoid registry has a
     ///    `hips` entry, add the translation to
     ///    `nodes.world_positions[hips_node]` and re-walk
     ///    descendants.
-    /// 5. **Build the palette**: for every skeleton joint
+    /// 6. **Build the palette**: for every skeleton joint
     ///    `j`, palette\[j\] = `joint_world * inverse_bind[j]`,
     ///    where `joint_world` uses the glTF node index from
     ///    `skeleton.joint_to_node[j]`. A node index of
@@ -527,13 +518,13 @@ impl VrmModel {
     /// helper is re-exported so the runtime can use it once
     /// the per-frame rest-pose comparison is available.
     ///
-    /// **`LookAt` semantics** (this struct): `look_at` is the
+    /// **`LookAt` semantics**: `look_at` is the
     /// [`LookAtBoneOutput`] of the current frame, or `None`
     /// when the model is `"expression"`-type (the `LookAt`
     /// signal then routes into morph weights via
     /// [`crate::expression::ExpressionLayer`], not into bone
     /// rotations) or when no cursor sample has been
-    /// processed yet. `None` makes step 2 a no-op.
+    /// processed yet. `None` makes step 3 a no-op.
     ///
     /// Returns an empty slice when the model has zero
     /// skeleton joints — the renderer's identity palette
@@ -606,7 +597,6 @@ impl VrmModel {
             }
         }
 
-        // 3–5. World walk, optional hips cascade, palette.
         self.rebuild_skin_palette(frame.hips_translation)
     }
 
@@ -674,8 +664,8 @@ impl VrmModel {
 
     /// Cascade a hips translation to every descendant of
     /// `hips_node` in O(n) using a topological walk (parents
-    /// before children). Replaces the previous O(n × h)
-    /// `is_descendant_of` per-node parent-chain walk.
+    /// before children), avoiding the O(n × h) per-node
+    /// ancestor-chain walk.
     fn cascade_hips_descendants(&mut self, hips_node: usize) {
         let n = self.nodes.local_rotations.len();
         // `in_subtree[i]` marks nodes reachable from the hips.
@@ -735,7 +725,6 @@ pub struct MeshVertex {
     /// unchanged.
     pub joints: [u32; 4],
     /// Per-vertex joint weights, `sum(weights) = 1.0` per vertex.
-    /// Used together with `joints` to look up `skin_matrices[]`.
     pub weights: [f32; 4],
 }
 
@@ -1271,13 +1260,13 @@ mod tests {
         assert_eq!(palette[0], bind);
     }
 
-    /// Regression for the "5x taller" bug: the loader was
-    /// assigning `inverse_bind` and `bind_matrices` in the
-    /// opposite order, so `update_skin_palette` computed
-    /// `joint_world * bind_matrix ≈ bind_matrix²` at rest (which
-    /// doubles every joint's translation and stretches the model
-    /// vertically). With `inverse_bind` correctly holding the
-    /// IBM (`bind_matrix.inverse()`), the standard glTF identity
+    /// Guards the ordering of `inverse_bind` / `bind_matrices`:
+    /// if `inverse_bind` held the bind matrix instead of its
+    /// inverse, `update_skin_palette` would compute
+    /// `joint_world * bind_matrix ≈ bind_matrix²` at rest,
+    /// doubling every joint's translation and stretching the model
+    /// vertically. With `inverse_bind` holding the IBM
+    /// (`bind_matrix.inverse()`), the standard glTF identity
     /// `joint_world * inverse_bind` collapses to the identity
     /// matrix at rest.
     #[test]
@@ -1343,7 +1332,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // VrmModel::update_skin_palette — LookAt composition (this struct)
+    // VrmModel::update_skin_palette — LookAt composition
     // -----------------------------------------------------------------
 
     /// A `LookAt` delta on the `head` bone must rotate the
@@ -1498,7 +1487,6 @@ mod tests {
         };
         let palette = model.update_skin_palette(&frame, Some(&look_at));
         assert_eq!(palette.len(), 1);
-        // The hips joint must still be at the rest pose.
         assert_eq!(palette[0], Mat4::IDENTITY);
         // No panic, no partial write — the model's local
         // rotation buffer keeps its rest value.

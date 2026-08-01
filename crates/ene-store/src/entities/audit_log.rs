@@ -15,7 +15,7 @@ pub struct Model {
     pub redacted_args: String,
     pub created_at: DateTime<Utc>,
     /// Session that triggered the call (`None` for rows written before
-    /// the `session_id` column existed, #426).
+    /// the `session_id` column existed).
     pub session_id: Option<String>,
 }
 

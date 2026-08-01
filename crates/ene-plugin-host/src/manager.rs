@@ -42,7 +42,7 @@ const MAX_DELAY_MS: u64 = 30_000;
 /// is purely documentary — it records *how* the checksum came to be pinned so
 /// the non-recoverability of a mismatch is self-explanatory at the type level.
 /// There is deliberately no "no checksum" variant: a supervised plugin always
-/// verifies its binary on restart (no fail-open path, #429).
+/// verifies its binary on restart (no fail-open path).
 enum PinnedChecksum {
     /// User explicitly configured this checksum — mismatch is a hard fail.
     Configured(String),
@@ -74,7 +74,7 @@ struct SupervisedPlugin {
     /// trust-on-first-use checksum recorded at startup
     /// ([`PinnedChecksum::Tofu`]). Restart-time verification is therefore
     /// always active — the binary pinned at startup must still be on disk to
-    /// restart. There is no "no checksum" state, so no fail-open path (#429).
+    /// restart. There is no "no checksum" state, so no fail-open path.
     pinned_checksum: PinnedChecksum,
     /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
@@ -86,7 +86,7 @@ struct SupervisedPlugin {
     /// A plugin that crashes once a day therefore never accumulates budget,
     /// while a genuine crash loop exhausts it and is disabled. Recovery via
     /// the health probe is what makes the budget apply to provider-only
-    /// plugins (which never build a [`PluginToolRegistry`]) too (#433).
+    /// plugins (which never build a [`PluginToolRegistry`]) too.
     restart_count: usize,
     /// Set once the plugin is permanently disabled (restart budget exhausted
     /// or a restart-time checksum mismatch). The per-plugin supervisor task
@@ -131,7 +131,7 @@ impl SupervisedPlugin {
         // On a mismatch we still reap the dead/hung child (kill + wait) and
         // remove its socket before returning the error, so we don't leave a
         // zombie process or a stale socket behind. The mismatch is surfaced
-        // by the caller as a `PluginHealthEvent::Disabled` diagnostic (#429).
+        // by the caller as a `PluginHealthEvent::Disabled` diagnostic.
         //
         // Residual window: `spawn()` below re-opens the binary by path, so
         // an attacker with write access to the plugin directory could swap
@@ -286,8 +286,7 @@ pub(crate) fn apply_hardened_env(cmd: &mut impl EnvCommand, env_passthrough: &[S
         }
     }
 
-    // Per-plugin explicit passthrough (interim until #412/#413),
-    // filtered against the denylist.
+    // Per-plugin explicit passthrough, filtered against the denylist.
     for var in env_passthrough {
         if ENV_PASSTHROUGH_DENYLIST
             .iter()
@@ -547,7 +546,7 @@ pub struct PluginHostManager {
     llm_factory_plugins: HashMap<String, String>,
     /// One supervisor task per supervised plugin. Each task independently
     /// pings and restarts only its own plugin, so one plugin's restart
-    /// backoff or reconnect can never stall monitoring of the others (#432).
+    /// backoff or reconnect can never stall monitoring of the others.
     /// Empty when health probes are disabled or no plugins are supervised.
     health_tasks: Vec<tokio::task::JoinHandle<()>>,
     health_rx: Option<mpsc::UnboundedReceiver<PluginHealthEvent>>,
@@ -629,7 +628,6 @@ impl PluginHostManager {
             }
         })?;
 
-        // Warn about plugin binaries on disk that are NOT listed in config.
         for name in discover_plugins() {
             if !plugin_config.list.contains_key(&name) {
                 tracing::warn!(
@@ -687,7 +685,6 @@ impl PluginHostManager {
 
                     let caps = conn.capabilities();
 
-                    // Route tool capabilities — fetch actual specs via ListTools.
                     if caps.tools > 0 {
                         // Retry once on failure; if it still fails, skip
                         // registering the tool registry (don't silently
@@ -731,7 +728,6 @@ impl PluginHostManager {
                         }
                     }
 
-                    // Route LLM provider capabilities.
                     for spec in &caps.llm_providers {
                         if llm_factories.contains_key(&spec.kind) {
                             tracing::warn!(
@@ -803,7 +799,7 @@ impl PluginHostManager {
         // McpToolRegistry, which is added to the tool registries regardless of
         // whether the connection succeeds (a failed server simply advertises no
         // tools). Server names are used verbatim — no charset validation — so
-        // hyphenated and other names connect identically (#417).
+        // hyphenated and other names connect identically.
         if !plugin_config.mcp_servers.is_empty() {
             for server in &plugin_config.mcp_servers {
                 if !server.enabled {
@@ -812,7 +808,6 @@ impl PluginHostManager {
 
                 let registry = Arc::new(McpToolRegistry::new());
 
-                // Connect the MCP server
                 match &server.transport {
                     McpTransport::Stdio { command, args } => {
                         let args_ref: Vec<&str> =
@@ -871,7 +866,6 @@ impl PluginHostManager {
                     }
                 }
 
-                // Add the registry to tool registries
                 tool_registries.push(registry);
             }
         }
@@ -880,7 +874,7 @@ impl PluginHostManager {
         // [`spawn_supervisors`] helper (tested directly for its
         // one-handle-per-plugin wiring). Each task pings and restarts only its
         // own plugin, so one plugin's restart backoff (up to 30 s) or a slow
-        // reconnect can never stall the monitoring of any other plugin (#432).
+        // reconnect can never stall the monitoring of any other plugin.
         // The task count is proportional to the plugin count — a handful in
         // practice.
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
@@ -1051,7 +1045,7 @@ impl PluginHostManager {
         // The pinned checksum for restart-time verification: the configured
         // checksum when present, otherwise the trust-on-first-use checksum
         // just recorded. Either way the binary that was verified at startup
-        // is pinned and re-verified on every restart (#429).
+        // is pinned and re-verified on every restart.
         let pinned_checksum = match expected_checksum {
             Some(configured) => PinnedChecksum::Configured(configured),
             None => match tofu_checksum.clone() {
@@ -1111,7 +1105,6 @@ fn discover_plugins() -> Vec<String> {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            // Strip the exe suffix for matching.
             let stem = file_name
                 .strip_suffix(exe_suffix)
                 .unwrap_or(&file_name)
@@ -1241,7 +1234,7 @@ fn find_plugin_binary(name: &str) -> Option<PathBuf> {
 ///
 /// Exactly one handle is returned per `(supervised, connection)` pair — the
 /// wiring that keeps one plugin's restart backoff from stalling any other's
-/// monitoring (#432). When `interval` is zero or there are no supervised
+/// monitoring. When `interval` is zero or there are no supervised
 /// plugins, health probing is skipped entirely and an empty list is returned.
 ///
 /// `backoff_sleep` is passed through to [`supervise_plugin`]; production
@@ -1288,11 +1281,11 @@ where
 /// Per-plugin health supervisor: periodically pings a single plugin and
 /// restarts it when dead or unresponsive, emitting health events.
 ///
-/// One of these tasks runs per supervised plugin (#432). Because each task
+/// One of these tasks runs per supervised plugin. Because each task
 /// owns exactly one plugin, its restart backoff (`delay_for_restart`, up to
 /// 30 s) and any slow reconnect delay only *its own* next probe — they can
-/// never stall the monitoring of any other plugin, which the old single
-/// sequential loop did. The task runs until aborted by
+/// never stall the monitoring of any other plugin, as a single shared loop
+/// would. The task runs until aborted by
 /// [`PluginHostManager::shutdown`] or drop — except for permanently disabled
 /// plugins (restart budget exhausted or checksum mismatch), for which the
 /// task exits as soon as it observes `disabled`, releasing its refs.
@@ -1306,7 +1299,7 @@ where
 /// plugin's restart budget via [`SupervisedPlugin::note_healthy`], so the
 /// budget is a sliding measure of recent instability rather than a lifetime
 /// cap — this is what lets provider-only plugins, which have no tool-call
-/// reset path, recover from old crashes too (#433).
+/// reset path, recover from old crashes too.
 async fn supervise_plugin<F>(
     interval: Duration,
     plugin: Arc<Mutex<SupervisedPlugin>>,
@@ -1332,7 +1325,7 @@ async fn supervise_plugin<F>(
 
         // Ping without any connection lock: `ping` takes `&self` and the
         // writer lock is held only for the frame write, so a probe is never
-        // queued behind an in-flight tool call (#431).
+        // queued behind an in-flight tool call.
         let ping_ok = conn.ping().await.is_ok();
         let alive = {
             let mut p = plugin.lock().await;
@@ -1345,7 +1338,7 @@ async fn supervise_plugin<F>(
             // crashes. This is the recovery path that makes the budget
             // apply to provider-only plugins too: they never build a
             // `PluginToolRegistry` (no tools), so a successful tool call
-            // — the only reset path before #433 — never happens for them.
+            // — the only reset path besides probing — never happens for them.
             // Probing is independent of capability routing, so every
             // supervised plugin recovers here. A plugin that responds to
             // pings but fails real work is still contained: the
@@ -1374,7 +1367,6 @@ async fn supervise_plugin<F>(
             "Health probe: plugin unhealthy; restarting"
         );
 
-        // Restart the plugin process and reconnect.
         let mut p = plugin.lock().await;
         if p.restart_count >= MAX_RESTARTS {
             tracing::error!(
@@ -1397,7 +1389,7 @@ async fn supervise_plugin<F>(
         }));
 
         // The backoff sleep delays only this plugin's supervisor; every other
-        // plugin keeps being probed on schedule by its own task (#432).
+        // plugin keeps being probed on schedule by its own task.
         let restart_count = p.restart_count;
         drop(p);
         backoff_sleep(restart_count).await;
@@ -1406,7 +1398,7 @@ async fn supervise_plugin<F>(
         if let Err(e) = p.restart() {
             // A checksum mismatch means the on-disk binary changed since
             // it was last verified. Do NOT silently retry: disable the
-            // plugin and tell the user via a diagnostic (#429).
+            // plugin and tell the user via a diagnostic.
             if matches!(e, PluginHostError::ChecksumMismatch { .. }) {
                 tracing::error!(
                     component = "PluginHostManager",
@@ -1435,8 +1427,8 @@ async fn supervise_plugin<F>(
         // Reconnect the shared connection in place: `reconnect` takes
         // `&self`, re-performs the handshake on the stored socket path, and
         // swaps the writer/reader under their own locks, so every caller
-        // sharing this `Arc` sees the fresh transport (#431). A slow or
-        // failing reconnect delays only this plugin's supervisor (#432).
+        // sharing this `Arc` sees the fresh transport. A slow or
+        // failing reconnect delays only this plugin's supervisor.
         match conn.reconnect().await {
             Ok(()) => {
                 drop(health_tx.send(PluginHealthEvent::Restarted {
@@ -1468,7 +1460,7 @@ async fn supervise_plugin<F>(
 /// The file is hashed in fixed-size 64KiB chunks read directly from the
 /// [`std::fs::File`] so the entire binary is never held in memory at once —
 /// llama-linked plugin binaries can exceed 100MB, and this runs on every
-/// restart (#429). A `BufReader` is deliberately not used: its 8KiB internal
+/// restart. A `BufReader` is deliberately not used: its 8KiB internal
 /// buffer is bypassed when reading into a buffer at least that large, so it
 /// would add a layer without reducing syscalls; a 64KiB buffer keeps the
 /// syscall count low for large binaries.
@@ -1505,7 +1497,7 @@ fn compute_binary_checksum(
 /// Computes the streaming SHA-256 hash of the binary and returns
 /// [`PluginHostError::ChecksumMismatch`] if it doesn't match `expected`.
 /// There is no "no checksum" path: callers always have a pinned checksum
-/// (configured or trust-on-first-use), so verification never fails open (#429).
+/// (configured or trust-on-first-use), so verification never fails open.
 fn verify_plugin_checksum(
     plugin_name: &str,
     path: &std::path::Path,
@@ -1540,7 +1532,6 @@ fn verify_and_record_checksum(
     expected: Option<&str>,
 ) -> Result<Option<String>, PluginHostError> {
     let Some(expected) = expected else {
-        // Trust-on-first-use: record the checksum for future verification.
         let actual = compute_binary_checksum(plugin_name, path)?;
         tracing::info!(
             component = "PluginHostManager",
@@ -1584,7 +1575,6 @@ mod tests {
 
     #[test]
     fn discover_plugins_empty_dirs() {
-        // With no plugin directories present, discovery returns empty.
         let plugins = discover_plugins();
         // We can't assert emptiness in CI (there might be plugins), but
         // the function must not panic.
@@ -1618,7 +1608,7 @@ mod tests {
 
         // An arbitrary binary dropped into the plugins directory must NOT be
         // treated as a built-in: trust comes from the compiled-in list, not
-        // from a file existing on disk (#435 item 6).
+        // from a file existing on disk.
         assert!(!is_builtin_plugin("evil"));
         assert!(!is_builtin_plugin("ene-plugin-evil"));
         assert!(!is_builtin_plugin(""));
@@ -1653,7 +1643,6 @@ mod tests {
             f.write_all(b"fake plugin binary contents").unwrap();
         }
 
-        // Compute the real checksum of the file.
         let mut hasher = sha2::Sha256::new();
         hasher.update(b"fake plugin binary contents");
         let real = hex::encode(hasher.finalize());
@@ -1662,7 +1651,6 @@ mod tests {
         // reference hash (it reads in chunks, never the whole file).
         assert_eq!(compute_binary_checksum("fake", &bin_path).unwrap(), real);
 
-        // Matching checksum passes, no TOFU recording.
         assert!(verify_and_record_checksum("fake", &bin_path, Some(&real)).is_ok());
         assert_eq!(
             verify_and_record_checksum("fake", &bin_path, Some(&real)).unwrap(),
@@ -1673,14 +1661,12 @@ mod tests {
         let upper = real.to_ascii_uppercase();
         assert!(verify_and_record_checksum("fake", &bin_path, Some(&upper)).is_ok());
 
-        // Mismatched checksum is rejected with ChecksumMismatch.
         let result = verify_and_record_checksum("fake", &bin_path, Some("deadbeef"));
         assert!(matches!(
             result,
             Err(PluginHostError::ChecksumMismatch { .. })
         ));
 
-        // No checksum configured → trust-on-first-use, returns computed hash.
         let tofu = verify_and_record_checksum("fake", &bin_path, None).unwrap();
         assert_eq!(tofu, Some(real));
 
@@ -1752,7 +1738,6 @@ mod tests {
         let real = compute_binary_checksum("fake", &binary_path).unwrap();
         let mut plugin = supervised_plugin_with(binary_path.clone(), PinnedChecksum::Tofu(real));
 
-        // Matching checksum: verification passes and the plugin is respawned.
         assert!(plugin.restart().is_ok());
         assert_eq!(plugin.restart_count, 1);
 
@@ -1771,18 +1756,15 @@ mod tests {
         let binary_path = dir.join("ene-plugin-fake");
         std::fs::write(&binary_path, b"original plugin binary contents").unwrap();
 
-        // Pin the checksum of the original binary.
         let real = compute_binary_checksum("fake", &binary_path).unwrap();
         let mut plugin = supervised_plugin_with(binary_path.clone(), PinnedChecksum::Tofu(real));
 
-        // Tamper with the binary on disk after the checksum was recorded.
         {
             let mut f = std::fs::File::create(&binary_path).unwrap();
             f.write_all(b"tampered binary contents that differ from the original")
                 .unwrap();
         }
 
-        // Restart must abort with a checksum mismatch...
         let result = plugin.restart();
         assert!(matches!(
             result,
@@ -1806,11 +1788,8 @@ mod tests {
         let cmd = build_plugin_command(binary, socket, &[]);
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
 
-        // Must contain the IPC socket.
         assert!(envs.contains_key(OsStr::new("ENE_PLUGIN_SOCKET")));
-        // Must contain whitelisted vars (when present in host env).
         assert!(envs.contains_key(OsStr::new("PATH")));
-        // Must NOT contain arbitrary secrets.
         assert!(!envs.contains_key(OsStr::new("ANTHROPIC_API_KEY")));
         assert!(!envs.contains_key(OsStr::new("AWS_SECRET_ACCESS_KEY")));
     }
@@ -1824,14 +1803,12 @@ mod tests {
         let binary = std::path::Path::new("/usr/bin/env");
         let socket = std::path::Path::new("/tmp/test.sock");
 
-        // Set a variable in the current process to verify passthrough.
         unsafe { std::env::set_var("ENE_TEST_PASSTHROUGH_VAR", "hello") };
         let cmd = build_plugin_command(binary, socket, &["ENE_TEST_PASSTHROUGH_VAR".to_string()]);
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
         assert!(envs.contains_key(OsStr::new("ENE_TEST_PASSTHROUGH_VAR")));
         unsafe { std::env::remove_var("ENE_TEST_PASSTHROUGH_VAR") };
 
-        // Without passthrough, the variable must not leak.
         unsafe { std::env::set_var("ENE_TEST_LEAKED_VAR", "secret") };
         let cmd = build_plugin_command(binary, socket, &[]);
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
@@ -1848,7 +1825,6 @@ mod tests {
         let binary = std::path::Path::new("/usr/bin/env");
         let socket = std::path::Path::new("/tmp/test.sock");
 
-        // LD_PRELOAD must not be forwarded even if explicitly requested.
         unsafe { std::env::set_var("LD_PRELOAD", "/tmp/evil.so") };
         let cmd = build_plugin_command(binary, socket, &["LD_PRELOAD".to_string()]);
         let envs: std::collections::HashMap<_, _> = cmd.get_envs().collect();
@@ -1866,7 +1842,7 @@ mod tests {
         );
     }
 
-    // ── Per-plugin supervisor isolation (#432) ────────────────────────────
+    // ── Per-plugin supervisor isolation ──────────────────────────────────
 
     /// A mock plugin that answers the handshake and replies to every `Ping`,
     /// incrementing `pings` on each probe. Accepts connections in a loop so a
@@ -2029,17 +2005,15 @@ mod tests {
 
     /// [`spawn_supervisors`] (the wiring used by `PluginHostManager::start`)
     /// must return exactly one supervisor handle per (supervised, connection)
-    /// pair (#432). The old single sequential loop, or a spawn-wiring bug that
-    /// starts fewer tasks than plugins, would make this assertion fail; a
-    /// `supervise_plugin`-level test cannot catch that because it always
-    /// drives the function with already-paired arguments.
+    /// pair. A spawn-wiring bug that starts fewer tasks than plugins would
+    /// make this assertion fail; a `supervise_plugin`-level test cannot catch
+    /// that because it always drives the function with already-paired
+    /// arguments.
     #[tokio::test]
     #[cfg(unix)]
     async fn spawn_supervisors_returns_one_handle_per_plugin() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // No supervised plugins or a zero interval → no supervisor tasks at
-        // all.
         let (tx, _rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
         assert!(spawn_supervisors(Duration::ZERO, &[], &[], &tx, |_count| async {}).is_empty());
         assert!(
@@ -2047,7 +2021,6 @@ mod tests {
                 .is_empty()
         );
 
-        // Two live (supervised, connection) pairs must yield two handles.
         let temp = tempfile::tempdir().expect("OS allows temp directory creation");
         let pings_a = Arc::new(AtomicUsize::new(0));
         let pings_b = Arc::new(AtomicUsize::new(0));
@@ -2137,16 +2110,15 @@ mod tests {
     }
 
     /// One plugin's restart backoff must not stop another plugin from being
-    /// monitored (#432).
+    /// monitored.
     ///
     /// Two plugins are supervised by independent tasks: `healthy` answers
     /// pings (its probe count is observed server-side), `dead` closes every
     /// connection so each probe fails and drives its supervisor into the
     /// restart path. The restart backoff is injected as a gate the test
     /// controls. While `dead` is parked in that backoff, `healthy` must keep
-    /// being pinged — under the old single sequential loop the shared probe
-    /// would have been stuck behind `dead`'s backoff and `healthy`'s ping
-    /// count would not advance.
+    /// being pinged — with a single shared loop the probe would be stuck
+    /// behind `dead`'s backoff and `healthy`'s ping count would not advance.
     #[tokio::test]
     #[cfg(unix)]
     async fn one_plugin_backoff_does_not_block_another_supervisor() {
@@ -2256,9 +2228,9 @@ mod tests {
         }
 
         // While the dead plugin is parked in its backoff, the healthy plugin
-        // must keep being pinged. Under the old sequential loop the shared
-        // probe would be stuck behind the dead plugin's backoff and this count
-        // would not advance.
+        // must keep being pinged. With a single shared loop the probe would
+        // be stuck behind the dead plugin's backoff and this count would not
+        // advance.
         let before = healthy_pings.load(Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(300)).await;
         let after = healthy_pings.load(Ordering::SeqCst);
@@ -2304,7 +2276,7 @@ mod tests {
     }
 
     /// A healthy probe round-trip (process alive + ping answered) recovers the
-    /// restart budget (#433). Provider-only plugins have no tool-call reset
+    /// restart budget. Provider-only plugins have no tool-call reset
     /// path, so the health probe is their only recovery path: a plugin that
     /// has accumulated a full budget of restarts must return to zero once it
     /// is observed healthy again, rather than staying one crash away from
@@ -2373,7 +2345,7 @@ mod tests {
 
     /// A dead plugin whose budget is already exhausted is disabled (not
     /// restarted) — crash-loop detection is preserved even though healthy
-    /// plugins now recover their budget (#433).
+    /// plugins recover their budget.
     #[tokio::test]
     #[cfg(unix)]
     async fn exhausted_budget_disables_dead_plugin() {

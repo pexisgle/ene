@@ -2,14 +2,10 @@
 //!
 //! `tray_icon::TrayIcon` is not `Send + Sync`, so it cannot
 //! be inserted as a bevy `Resource` (the `Resource` trait
-//! requires `Component`, which requires `Send + Sync`).
-//! Phase 6 keeps the icon on `AppState::tray` as today and
-//! only routes the GTK pump call through the platform
-//! `tick_gtk_system` so the runtime body can shrink.
-//!
-//! The Linux-only `tick_gtk` helper below is invoked from
-//! [`crate::runtime::Runtime::about_to_wait`] directly,
-//! matching the existing call shape.
+//! requires `Component`, which requires `Send + Sync`); the icon
+//! stays on `AppState::tray`. The Linux-only `tick_gtk` helper
+//! below is invoked from
+//! [`crate::runtime::Runtime::about_to_wait`] directly.
 
 /// Linux-only: pump pending GTK events while the tray is
 /// active.

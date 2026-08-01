@@ -93,7 +93,6 @@ async fn full_queue_returns_busy_without_blocking() {
     // that the queue is full.
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    // The one queue slot is now occupied by `second`; this must fail fast.
     let third = engine
         .submit(
             MockRequest::scripted(Duration::ZERO, false),
@@ -195,15 +194,10 @@ async fn panic_in_run_yields_engine_down_and_engine_recovers() {
     );
 }
 
-/// Regression test: earlier, `respond` reclaimed the reply sender via
-/// `Arc::try_unwrap`, which only succeeded if `JobContext` (holding a second
-/// `Arc` clone) had already been dropped. The panic arm of `worker_loop`
-/// didn't drop it first, so `try_unwrap` failed, the real panic message was
-/// silently discarded, and callers saw the generic
-/// "worker thread is not running" fallback instead. The reply channel is no
-/// longer shared (see `Reply<M>`/`respond` in `handle.rs`), which makes this
-/// unrepresentable — this test pins the panic message actually surviving
-/// into `EngineDown`.
+/// Pins that the actual panic message survives into `EngineDown`'s `reason`:
+/// the reply channel is not shared (see `Reply<M>`/`respond` in `handle.rs`),
+/// so the worker's panic arm always delivers the real message instead of the
+/// generic "worker thread is not running" fallback.
 #[tokio::test]
 async fn panic_reason_survives_into_engine_down() {
     let engine = spawn_mock(EngineConfig::new(4, Duration::from_secs(5)));
@@ -292,7 +286,6 @@ async fn false_positive_stall_does_not_permanently_disable_engine() {
     // its suspicion.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // The engine must still accept and complete jobs.
     let next = engine
         .submit(
             MockRequest::scripted(Duration::ZERO, false),
@@ -305,9 +298,8 @@ async fn false_positive_stall_does_not_permanently_disable_engine() {
     );
 }
 
-/// With `escalation_factor=1`, the first detection is immediately final
-/// (the pre-graduated behavior): a stalled job disables the engine as soon
-/// as `stall_timeout` elapses.
+/// With `escalation_factor=1`, the first detection is immediately final: a
+/// stalled job disables the engine as soon as `stall_timeout` elapses.
 #[tokio::test]
 async fn escalation_factor_one_confirms_immediately() {
     let cfg = EngineConfig::new(4, Duration::from_secs(5))

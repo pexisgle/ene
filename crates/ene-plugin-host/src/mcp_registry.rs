@@ -377,9 +377,7 @@ impl McpToolRegistry {
 /// Only IP-literal hosts (and the well-known `localhost` name) are inspected.
 /// A hostname that *resolves* to an internal address (e.g. a DNS-rebinding
 /// attack) is not caught here; a full defense requires validating the resolved
-/// address at connect time. That is out of scope for this validation — it is no
-/// weaker than the previous behavior, which performed no validation on the live
-/// path at all.
+/// address at connect time. That is out of scope for this validation.
 fn validate_http_url(url: &str, allow_insecure: bool) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
 
@@ -621,32 +619,22 @@ mod tests {
         );
     }
 
-    /// H-8: HTTP liveness must use an authoritative `ping` RPC, not just
+    /// HTTP liveness must use an authoritative `ping` RPC, not just
     /// `is_transport_closed`. This test verifies the transport-kind dispatch
     /// contract: `McpTransportKind::Http` and `McpTransportKind::Stdio` are
-    /// distinct variants that drive different liveness strategies in `ping()`.
-    ///
-    /// The `ping()` method (see above) branches on transport kind:
-    /// - `Stdio`: `!client.is_transport_closed()` (cheap, accurate for pipes)
-    /// - `Http`: `!client.is_transport_closed()` **and** a `PingRequest` RPC
-    ///
-    /// This ensures HTTP servers that keep their channel open but become
-    /// unresponsive are detected via the ping RPC, not just channel teardown.
+    /// distinct variants that drive different liveness strategies in `ping()`,
+    /// so HTTP servers that keep their channel open but become unresponsive
+    /// are still detected.
     #[tokio::test]
     async fn http_liveness_requires_ping_rpc_not_just_transport_check() {
-        // The two transport kinds are distinct enum variants.
         assert_ne!(McpTransportKind::Http, McpTransportKind::Stdio);
 
-        // Verify the ping() method is wired up and reachable. A full
-        // integration test would require a live HTTP MCP server; the contract
-        // is enforced here at the type level and by code review of the
-        // ping() branch above.
         let registry = McpToolRegistry::new();
         let result = registry.ping().await;
         assert!(result.is_err());
     }
 
-    // ── SSRF URL validation (#418) ──────────────────────────────────
+    // ── SSRF URL validation ────────────────────────────────────────
 
     #[test]
     fn https_url_is_accepted() {
@@ -717,7 +705,7 @@ mod tests {
 
     #[test]
     fn ipv4_mapped_ipv6_link_local_rejected_even_with_opt_in() {
-        // #1: `::ffff:169.254.169.254` is the IPv4-mapped form of the cloud
+        // `::ffff:169.254.169.254` is the IPv4-mapped form of the cloud
         // metadata endpoint. A dual-stack connect on Linux reaches the IPv4
         // target, so it must be normalized and rejected under both settings.
         for allow in [false, true] {
@@ -729,7 +717,7 @@ mod tests {
 
     #[test]
     fn ipv4_mapped_ipv6_loopback_rejected_by_default() {
-        // #1: `::ffff:127.0.0.1` is the IPv4-mapped loopback; default-deny.
+        // `::ffff:127.0.0.1` is the IPv4-mapped loopback; default-deny.
         let err = validate_http_url("https://[::ffff:127.0.0.1]:8080/sse", false).unwrap_err();
         assert!(err.contains("loopback"), "unexpected: {err}");
         assert!(validate_http_url("https://[::ffff:127.0.0.1]:8080/sse", true).is_ok());
@@ -737,7 +725,7 @@ mod tests {
 
     #[test]
     fn unspecified_addresses_rejected_even_with_opt_in() {
-        // #2: `0.0.0.0` and `[::]` are not loopback, yet on Linux a connect to
+        // `0.0.0.0` and `[::]` are not loopback, yet on Linux a connect to
         // them lands on localhost — so they are refused under both settings.
         for url in ["https://0.0.0.0:8080/sse", "https://[::]:8080/sse"] {
             for allow in [false, true] {
@@ -749,7 +737,7 @@ mod tests {
 
     #[test]
     fn localhost_hostname_rejected_by_default_allowed_with_opt_in() {
-        // #6: `localhost` resolves to loopback, so it follows the loopback
+        // `localhost` resolves to loopback, so it follows the loopback
         // default-deny rule — including `*.localhost` subdomains.
         for url in [
             "https://localhost:8080/sse",
@@ -763,7 +751,7 @@ mod tests {
 
     #[test]
     fn public_hostname_is_not_treated_as_localhost() {
-        // #6: the localhost rule must not over-match unrelated hostnames.
+        // The localhost rule must not over-match unrelated hostnames.
         assert!(validate_http_url("https://notlocalhost.example.com/sse", false).is_ok());
         assert!(validate_http_url("https://example.localhost.evil.com/sse", false).is_ok());
     }
@@ -791,7 +779,7 @@ mod tests {
         assert!(msg.contains("insecure"), "server name missing: {msg}");
     }
 
-    /// #8: a configured auth header with invalid characters must fail closed
+    /// A configured auth header with invalid characters must fail closed
     /// (refuse to connect) rather than silently downgrading to an
     /// unauthenticated connection. This is checked before any network I/O.
     #[tokio::test]

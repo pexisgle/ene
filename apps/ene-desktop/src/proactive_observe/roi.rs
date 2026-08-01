@@ -1,4 +1,4 @@
-//! Region-of-interest cropping around the cursor for high-precision vision (#215).
+//! Region-of-interest cropping around the cursor for high-precision vision.
 //!
 //! When enabled, the proactive observer crops a 512×512 region around the
 //! cursor position at 100% scale before passing the image to the local vision

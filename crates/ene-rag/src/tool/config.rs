@@ -1,4 +1,4 @@
-//! Tool RAG configuration types (#302, moved from `ene-tool-rag`).
+//! Tool RAG configuration types.
 
 use ene_config::{ConfigTarget, HasConfigKey};
 use std::collections::HashMap;
@@ -23,14 +23,14 @@ pub struct ToolRagConfig {
     pub final_n: usize,
     /// Whether to cosine-rerank candidates (embedding similarity; no LLM).
     ///
-    /// Defaults to `false`: the weighted field-similarity score (#436) is
+    /// Defaults to `false`: the weighted field-similarity score is
     /// already normalized and field-count-independent, so the extra
     /// `rerank_candidates` description re-embeddings per query are not worth
     /// their cost by default. Opt in to evaluate reranking on a workload.
     pub use_rerank: bool,
     /// Number of candidates to pass to the reranker.
     pub rerank_candidates: usize,
-    /// Minimum normalized similarity (`[-1, 1]`) for a tool to be considered (#436).
+    /// Minimum normalized similarity (`[-1, 1]`) for a tool to be considered.
     pub min_similarity: f32,
     /// Whether to warm the index at startup in a background task.
     pub background_index_on_startup: bool,
@@ -43,7 +43,7 @@ pub struct ToolRagConfig {
     /// values (e.g. `"Filesystem"`).
     #[serde(default)]
     pub per_category_limits: HashMap<String, usize>,
-    /// Whether to down-weight tools with a recent failure memory (#349).
+    /// Whether to down-weight tools with a recent failure memory.
     ///
     /// When enabled, the pipeline reads recent `tool failure:{tool}` memories
     /// through [`ene_core::ToolFailureSignalPort`] and multiplies the relevance
@@ -52,7 +52,7 @@ pub struct ToolRagConfig {
     /// re-selected. Requires a failure-signal source to be wired in.
     #[serde(default = "default_use_failure_feedback")]
     pub use_failure_feedback: bool,
-    /// Score multiplier applied to a tool with a recent failure (#349).
+    /// Score multiplier applied to a tool with a recent failure.
     ///
     /// Range `[0, 1]`; `1.0` disables the penalty. Only applied when
     /// [`use_failure_feedback`](Self::use_failure_feedback) is enabled and the
@@ -88,7 +88,7 @@ const fn default_failure_penalty() -> f32 {
     0.5
 }
 
-/// Serializable field weights (#436).
+/// Serializable field weights.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FieldWeightsConfig {
@@ -102,12 +102,12 @@ pub struct FieldWeightsConfig {
     pub example: f32,
     /// Deprecated soft-penalty weight for the negative embedding.
     ///
-    /// Negative examples are now an exclusion gate ([`negative_threshold`](Self::negative_threshold))
-    /// rather than a subtracted score; retained for configuration compatibility
-    /// and no longer used in scoring.
+    /// Negative examples are an exclusion gate ([`negative_threshold`](Self::negative_threshold))
+    /// rather than a subtracted score; the field is retained for configuration
+    /// compatibility and is not used in scoring.
     pub negative: f32,
     /// Similarity at or above which a tool's negative-example embedding excludes
-    /// it from selection (#436). Range `[0, 1]`; `1.0` effectively disables the
+    /// it from selection. Range `[0, 1]`; `1.0` effectively disables the
     /// gate. Default `0.70` (a value this high only fires on clearly matching
     /// negative examples).
     #[serde(default = "default_negative_threshold")]
@@ -150,12 +150,12 @@ const _: () = {
 mod tests {
     use super::*;
 
-    /// Regression test for the #438 removal: settings.json files written
-    /// before the `HyDE` knobs were dropped still carry `use_hyde` /
-    /// `weights.hyde` / `weights.hyde_blend`. The backward-compat contract
-    /// (unknown keys ignored, missing fields defaulted — #327) rests on the
-    /// absence of `deny_unknown_fields` plus `#[serde(default)]`; lock it in so
-    /// the legacy payload deserializes cleanly and the defaults hold.
+    /// Locks in the backward-compatibility contract: settings.json files from
+    /// older versions still carry `use_hyde` / `weights.hyde` /
+    /// `weights.hyde_blend` keys that no longer exist. Unknown keys must be
+    /// ignored and missing fields defaulted (no `deny_unknown_fields`, plus
+    /// `#[serde(default)]`), so the legacy payload deserializes cleanly and
+    /// the defaults hold.
     #[test]
     fn legacy_hyde_keys_deserialize_cleanly_and_defaults_hold() {
         let payload = serde_json::json!({
@@ -169,11 +169,8 @@ mod tests {
         });
         let cfg: ToolRagConfig = serde_json::from_value(payload).unwrap();
 
-        // Explicitly-set keys are still honored...
         assert!(cfg.enabled);
         assert_eq!(cfg.top_k, 20);
-        // ...while the removed `HyDE` keys and every other absent field fall
-        // back to the struct defaults.
         assert!(!cfg.use_rerank);
         assert_eq!(
             cfg,
@@ -185,7 +182,6 @@ mod tests {
         );
         assert_eq!(cfg.weights, FieldWeightsConfig::default());
 
-        // A round-trip must not re-introduce the ignored legacy keys.
         let round_tripped = serde_json::to_value(&cfg).unwrap();
         assert!(round_tripped.get("use_hyde").is_none());
         let weights = round_tripped["weights"].as_object().unwrap();

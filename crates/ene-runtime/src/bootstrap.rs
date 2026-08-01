@@ -2,7 +2,7 @@
 //!
 //! Product path: apps load config via [`ene_config::ConfigStore`] and the
 //! character card via [`ene_config::load_character_card`], then call
-//! [`crate::EneHandle::open`]. This module no longer drives multi-step
+//! [`crate::EneHandle::open`]. This module does not drive multi-step
 //! `new` / `reconfigure` / `load_character` on an unready handle.
 
 use ene_config::{CharacterCardV3, ConfigStore, EneConfig, load_character_card};
@@ -14,7 +14,7 @@ use crate::handle::EneHandle;
 ///
 /// Intended for CLI startup.
 pub async fn open_from_disk() -> Result<(EneHandle, EneConfig), EneRuntimeError> {
-    // Write JSON schemas once at startup rather than on every config load (#325).
+    // Write JSON schemas once at startup rather than on every config load.
     ene_config::write_schemas(ene_config::assets_dir());
 
     let store = ConfigStore::try_load()?;
@@ -26,7 +26,7 @@ pub async fn open_from_disk() -> Result<(EneHandle, EneConfig), EneRuntimeError>
 
 /// Open a ready handle from an already-loaded config (desktop).
 pub async fn open_with_config(config: EneConfig) -> Result<EneHandle, EneRuntimeError> {
-    // Write JSON schemas once at startup rather than on every config load (#325).
+    // Write JSON schemas once at startup rather than on every config load.
     ene_config::write_schemas(ene_config::assets_dir());
 
     let card = load_character_card(&config.character)?;

@@ -1,4 +1,4 @@
-//! Self-reflection pipeline (#210, #347).
+//! Self-reflection pipeline.
 //!
 //! Periodically reviews the outcomes of persisted memories (rated by affect
 //! valence) and generates `Reflection`-kind memories summarizing successful
@@ -7,7 +7,7 @@
 //! similar memories — rather than surfacing as ordinary recall results:
 //! the recall path excludes [`MemoryKind::Reflection`] from its search query
 //! and calls [`load_reflection_memories`] + [`apply_reflection_adjustment`]
-//! to close the feedback loop (#347).
+//! to close the feedback loop.
 use crate::config::ReflectionConfig;
 use crate::memory_writer::arbiter::AppliedDecision;
 use ene_core::{
@@ -30,7 +30,7 @@ pub struct OutcomeRecord {
 }
 
 /// Pipeline that accumulates memory outcomes and periodically generates
-/// self-reflection memories (#210).
+/// self-reflection memories.
 #[derive(Debug)]
 pub struct SelfReflectionPipeline {
     config: ReflectionConfig,
@@ -221,7 +221,7 @@ pub async fn load_reflection_memories(
     }
 }
 
-/// Adjust scored memory totals based on reflection strategy matches (#347).
+/// Adjust scored memory totals based on reflection strategy matches.
 ///
 /// Memories whose titles match "Successful strategies" content are boosted by
 /// `success_boost`; those matching "Strategies to avoid" are penalized by

@@ -4,7 +4,7 @@
 //! player (all must stay alive on the thread that created them). The AI
 //! bridge pump forwards [`AudioChunk`](ene_runtime::AudioChunk) payloads
 //! (received from the dedicated audio channel — see
-//! [`ene_runtime::EneHandle::take_audio_stream`], #272) over a
+//! [`ene_runtime::EneHandle::take_audio_stream`]) over a
 //! [`crossbeam_channel`]; the playback thread appends
 //! each chunk to the sink, feeds the same PCM to the shared
 //! [`VisemeState`](super::VisemeState) for lip-sync, and toggles the
@@ -13,7 +13,7 @@
 //! The playback thread exits when the channel closes **or** when the
 //! shared shutdown flag is raised. The flag is necessary because the
 //! channel sender is cloned into the AI bridge pump task, so dropping
-//! the `AppState`'s own sender does not close the channel (H2).
+//! the `AppState`'s own sender does not close the channel.
 //!
 //! Gated behind the `voice` feature; without it the desktop builds a
 //! text-only shell and this module is not compiled.
@@ -93,7 +93,7 @@ fn open_audio_sink() -> Result<AudioSink, String> {
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Maximum number of PCM chunks buffered between the AI bridge pump and
-/// the playback thread (L10). Bounds memory growth when the sink cannot
+/// the playback thread. Bounds memory growth when the sink cannot
 /// keep up; the pump drops the oldest chunk once the buffer is full.
 pub(crate) const PLAYBACK_CHANNEL_CAPACITY: usize = 64;
 
@@ -104,7 +104,7 @@ pub(crate) const PLAYBACK_CHANNEL_CAPACITY: usize = 64;
 /// (channel closed) **or** the shutdown flag is raised — whichever
 /// comes first. The flag is required because a second sender clone
 /// lives in the AI bridge pump task, so the channel may stay open even
-/// after `AppState` drops its own sender (H2).
+/// after `AppState` drops its own sender.
 pub struct AudioPlaybackHandle {
     join: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
@@ -176,7 +176,6 @@ fn playback_loop(
         return;
     };
 
-    // Whether any non-final chunk has been appended for the current turn.
     let mut state = PlaybackState::new();
 
     loop {
@@ -207,7 +206,7 @@ fn playback_loop(
                 viseme.reset();
             }
             PlaybackAction::Audio { first } => {
-                // Queue the PCM for time-aligned viseme analysis (M4). The
+                // Queue the PCM for time-aligned viseme analysis. The
                 // render loop consumes it paced by the playback clock rather
                 // than feeding the whole chunk at enqueue time.
                 viseme.push_chunk(chunk.pcm.clone(), chunk.sample_rate);
@@ -257,9 +256,8 @@ fn drain_until_shutdown(rx: &AudioChunkReceiver, viseme: &VisemeState, shutdown:
 /// Playback state machine tracking whether audio is currently speaking.
 ///
 /// Extracted from [`playback_loop`] so the `tts_playing` transitions can
-/// be unit-tested without a real audio device (M5).
+/// be unit-tested without a real audio device.
 struct PlaybackState {
-    /// Whether any non-final chunk has been appended for the current turn.
     speaking: bool,
 }
 
@@ -268,8 +266,6 @@ impl PlaybackState {
         Self { speaking: false }
     }
 
-    /// Process one chunk, returning whether `tts_playing` should be set
-    /// and whether the viseme state should be reset.
     fn process_chunk(&mut self, chunk: &AudioChunkPayload) -> PlaybackAction {
         if chunk.is_final {
             let was_speaking = self.speaking;
@@ -402,17 +398,14 @@ mod tests {
     #[test]
     fn playback_state_full_lifecycle() {
         let mut state = PlaybackState::new();
-        // Start of utterance.
         assert_eq!(
             state.process_chunk(&chunk(vec![0.1; 100], 24_000, false)),
             PlaybackAction::Audio { first: true }
         );
-        // Middle of utterance.
         assert_eq!(
             state.process_chunk(&chunk(vec![0.2; 100], 24_000, false)),
             PlaybackAction::Audio { first: false }
         );
-        // End of utterance.
         assert_eq!(
             state.process_chunk(&chunk(vec![], 0, true)),
             PlaybackAction::Final {
@@ -420,7 +413,6 @@ mod tests {
                 abort: false
             }
         );
-        // Next utterance starts fresh.
         assert_eq!(
             state.process_chunk(&chunk(vec![0.3; 100], 24_000, false)),
             PlaybackAction::Audio { first: true }

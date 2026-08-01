@@ -39,7 +39,7 @@ pub struct DisplayState {
     pub token_carry: String,
 }
 
-/// Upper bound for the incomplete-marker carry buffer (#391).
+/// Upper bound for the incomplete-marker carry buffer.
 ///
 /// `token_carry` holds text from the moment a `<|` opener is seen until the
 /// matching `|>` closer arrives. If a model emits `<|` and never closes it,
@@ -101,7 +101,7 @@ pub struct SessionState {
     pub last_resolved_expression: String,
     /// When the last expression change occurred.
     pub last_expression_changed_at: Option<DateTime<Utc>>,
-    /// Running state of the topic-boundary detector (#367).
+    /// Running state of the topic-boundary detector.
     pub topic_boundary: super::topic_boundary::TopicBoundaryTracker,
 }
 
@@ -121,7 +121,7 @@ pub struct ConversationSession {
     pub character_card: Option<CharacterCardV3>,
     /// The filesystem path to the current character card.
     current_card_path: String,
-    /// Snapshot of the most recently interrupted turn, if any (#206).
+    /// Snapshot of the most recently interrupted turn, if any.
     interrupted: Option<InterruptedState>,
 }
 
@@ -259,7 +259,7 @@ impl ConversationSession {
         // Guard against unbounded growth from an unterminated marker: if the
         // carry exceeds `MAX_TOKEN_CARRY`, abandon the marker and release the
         // withheld text to the live output stream so it reaches the display and
-        // TTS instead of being held back (or silently dropped) (#391).
+        // TTS instead of being held back (or silently dropped).
         if self.display.token_carry.len() > MAX_TOKEN_CARRY {
             let abandoned = std::mem::take(&mut self.display.token_carry);
             text_deltas.push(abandoned);
@@ -293,7 +293,7 @@ impl ConversationSession {
         self.display.token_carry.clear();
     }
 
-    /// Records that the given turn was interrupted mid-response (#206).
+    /// Records that the given turn was interrupted mid-response.
     ///
     /// `spoken_text` is the portion of the assistant response that had been
     /// produced (and typically spoken via TTS) before the interruption, and
@@ -303,7 +303,7 @@ impl ConversationSession {
     /// The assistant turn count is bumped so user/assistant turn accounting
     /// stays symmetric with the normal completion path, which calls
     /// [`record_assistant_response`](Self::record_assistant_response) after
-    /// committing the full response (#L5).
+    /// committing the full response.
     pub fn mark_interrupted(&mut self, turn_id: &str, spoken_text: &str, spoken_chars: usize) {
         let clamped_chars = spoken_chars.min(spoken_text.chars().count());
         if !spoken_text.is_empty() {
@@ -319,7 +319,7 @@ impl ConversationSession {
         self.record_assistant_response();
     }
 
-    /// Consumes and clears the pending interruption snapshot, if any (#206).
+    /// Consumes and clears the pending interruption snapshot, if any.
     ///
     /// Called when composing the next turn's prompt so the model can
     /// acknowledge or resume the interrupted response exactly once.
@@ -327,7 +327,7 @@ impl ConversationSession {
         self.interrupted.take()
     }
 
-    /// Whether an interruption snapshot is currently pending (#206).
+    /// Whether an interruption snapshot is currently pending.
     pub const fn has_pending_interruption(&self) -> bool {
         self.interrupted.is_some()
     }
@@ -361,15 +361,14 @@ impl ConversationSession {
         self.state.last_input_embedding = Some(embedding);
     }
 
-    /// Runs topic-boundary detection for the just-completed turn (#367).
+    /// Runs topic-boundary detection for the just-completed turn.
     ///
     /// Consumes the stored [`last_input_embedding`](Self::set_last_input_embedding)
     /// as the turn's embedding, scores it against the running topic centroid,
     /// and updates the detector state. `utterance_chars` is the length of the
     /// user utterance in characters (short backchannels are ignored). Returns
     /// `None` when detection is disabled or no embedding is available for the
-    /// turn. Returns `None` when detection is disabled or no embedding is available for the
-    /// turn. Compression (#368) consumes the returned score; session split does not (#369).
+    /// turn. Compression consumes the returned score; session split does not.
     pub fn detect_topic_boundary(
         &mut self,
         config: &crate::config::TopicBoundaryConfig,
@@ -556,13 +555,12 @@ mod tests {
         let mut s = ConversationSession::default();
         // An opener that is never closed, followed by well over the carry cap
         // of plain text. The withheld text must be released to the output
-        // stream rather than buffered without bound (#391).
+        // stream rather than buffered without bound.
         let filler = "a".repeat(MAX_TOKEN_CARRY + 1);
         let chunk = format!("<|{filler}");
         let (text, tokens) = s.process_delta(&chunk);
 
         assert!(tokens.is_empty());
-        // Carry is abandoned, not held.
         assert!(s.display.token_carry.is_empty());
         // The abandoned text reached the live output (display + TTS path).
         assert_eq!(text.concat(), chunk);
@@ -573,7 +571,7 @@ mod tests {
     fn process_delta_unterminated_marker_withholds_at_most_cap() {
         let mut s = ConversationSession::default();
         // Open a marker that is never closed, then keep feeding text. The
-        // carry must never exceed the cap by more than a single chunk (#391).
+        // carry must never exceed the cap by more than a single chunk.
         s.process_delta("<|");
         let mut withheld_max = s.display.token_carry.len();
         for _ in 0..(MAX_TOKEN_CARRY * 4) {

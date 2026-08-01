@@ -1,9 +1,8 @@
-//! Deterministic `CCv3` → Identity Kernel compilation (#82).
+//! Deterministic `CCv3` → Identity Kernel compilation.
 //!
 //! The kernel budget is sized from the model's available context window
 //! rather than a fixed absolute token count, and truncation counts tokens with
-//! a language-aware ratio instead of an English-centric `chars / 4` heuristic
-//! (#386).
+//! a language-aware ratio instead of an English-centric `chars / 4` heuristic.
 
 use ene_config::{CharacterCardV3, MacroContext, UserPersona, expand_cbs_macros_ctx};
 
@@ -22,8 +21,8 @@ const IDENTITY_KERNEL_WINDOW_FRACTION: usize = 8;
 ///
 /// A very small (or misconfigured) window must not starve the identity block
 /// down to nothing — the header, name, and anti-impersonation guard still need
-/// room. This matches the historical fixed default so constrained models keep
-/// the behaviour they had before the budget became window-relative (#386).
+/// room. This matches the fixed default so constrained models keep the
+/// behaviour they had with a fixed budget.
 const MIN_IDENTITY_KERNEL_TOKENS: usize = 400;
 
 /// Ceiling for the kernel budget in tokens.
@@ -32,10 +31,10 @@ const MIN_IDENTITY_KERNEL_TOKENS: usize = 400;
 /// point extra budget buys nothing and only delays the sections that follow.
 const MAX_IDENTITY_KERNEL_TOKENS: usize = 4_000;
 
-/// Size the Identity Kernel token budget from the available context window (#386).
+/// Size the Identity Kernel token budget from the available context window.
 ///
-/// Replaces the former fixed `400` absolute: the budget scales with the window
-/// so a large-window model can carry a richer character definition, clamped to
+/// The budget scales with the window so a large-window model can carry a
+/// richer character definition, clamped to
 /// [`MIN_IDENTITY_KERNEL_TOKENS`]..=[`MAX_IDENTITY_KERNEL_TOKENS`] so tiny and
 /// huge windows both stay sane.
 #[must_use]
@@ -52,17 +51,17 @@ impl CharacterCompiler {
     /// Compile an Identity Kernel from a V3 character card.
     ///
     /// `user_persona`, when provided, expands the `{{user_persona}}` CBS macro
-    /// in card-derived fields (#H-3).
+    /// in card-derived fields.
     ///
     /// `pick_seed`, when provided, makes `{{pick}}` resolve to a stable choice
     /// for the lifetime of the chat instead of re-rolling on every per-turn
-    /// recompilation (#343). Derive it with
+    /// recompilation. Derive it with
     /// [`ene_config::session_pick_seed`] from a session-scoped key.
     ///
     /// `available_window` is the number of prompt tokens the model's context
     /// window leaves for this turn (after the response reserve and safety
     /// margin); the kernel budget is derived from it as a fraction, so larger
-    /// models carry a fuller character definition (#386).
+    /// models carry a fuller character definition.
     #[must_use]
     pub fn compile(
         card: &CharacterCardV3,
@@ -77,7 +76,7 @@ impl CharacterCompiler {
 
         // One shared context so every field expands identically; `{{pick}}`
         // therefore yields the same option in the personality, background, and
-        // scene sections of the same kernel (#343).
+        // scene sections of the same kernel.
         let ctx = MacroContext {
             char_name,
             user_name,
@@ -89,7 +88,7 @@ impl CharacterCompiler {
 
         let post_history = optional_expanded(&data.post_history_instructions, ctx).map(|phi| {
             // Expand `{user_name}` at compile time (like every other field) so
-            // no literal `{{user}}` placeholder leaks to the LLM (#H-2).
+            // no literal `{{user}}` placeholder leaks to the LLM.
             let reinforcement = format!(
                 "\n\nImportant: You are {char_name}. {user_name} is a separate person. \
                  Do not put words in {user_name}'s mouth, do not describe {user_name}'s actions, \
@@ -117,7 +116,7 @@ impl CharacterCompiler {
         // The final line carries the anti-spoofing "Hard instruction:" block.
         // Truncation preserves it structurally (by its position here) rather
         // than by searching for its English marker text, so localising the
-        // wording cannot break the guarantee (#386, #359).
+        // wording cannot break the guarantee.
         let hard_line = format!(
             "Hard instruction: remain {char_name} even in long conversations{anti_impersonation}"
         );
@@ -162,8 +161,7 @@ impl CharacterCompiler {
         }
 
         // Fit greedily in token space (language-aware), not character space, so
-        // a Japanese card is measured against the same budget as an English one
-        // (#386).
+        // a Japanese card is measured against the same budget as an English one.
         let mut text = core_block.clone();
         for section in &optional_sections {
             let candidate = if text.is_empty() {
@@ -231,11 +229,11 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 /// Truncate the core block to `max_tokens` while always keeping the
-/// anti-spoofing `hard_line` intact (#386).
+/// anti-spoofing `hard_line` intact.
 ///
 /// The hard instruction is identified structurally — it is the dedicated final
 /// core line passed in by the caller — rather than by searching for its English
-/// marker text, so translating the wording cannot lose the boundary (#359).
+/// marker text, so translating the wording cannot lose the boundary.
 /// Head lines are dropped from the end (closest to the hard instruction first)
 /// until the block fits; if the hard instruction alone exceeds the budget it is
 /// returned on its own, never discarded.
@@ -354,7 +352,7 @@ mod tests {
         let kernel = CharacterCompiler::compile(&card, "Alice", None, None, 400);
 
         assert!(kernel.text.contains("Friends with Alice."));
-        // The anti-impersonation guard is expanded at compile time (#H-2), so no
+        // The anti-impersonation guard is expanded at compile time, so no
         // literal `{{user}}` placeholder may leak into the kernel sent to the LLM.
         assert!(
             !kernel.text.contains("{{user}}"),
@@ -407,7 +405,7 @@ mod tests {
             .post_history_instructions
             .expect("post_history present");
         assert!(phi.contains("Stay in character."));
-        // Anti-impersonation reinforcement is appended and expanded at compile time (#H-2)
+        // Anti-impersonation reinforcement is appended and expanded at compile time.
         assert!(
             phi.contains("Important: You are Ene"),
             "phi should contain 'Important: You are Ene' but was: {phi}"
@@ -419,9 +417,9 @@ mod tests {
         );
     }
 
-    /// Regression for #343: the identity kernel is recompiled on every turn,
-    /// so a seeded `{{pick}}` must resolve to the same trait each time instead
-    /// of re-rolling (which previously changed hair colour / hometown per turn).
+    /// The identity kernel is recompiled on every turn, so a seeded `{{pick}}`
+    /// must resolve to the same trait each time instead of re-rolling (which
+    /// would change hair colour / hometown per turn).
     #[test]
     fn pick_is_stable_across_recompilations_with_seed() {
         let mut card = CharacterCardV3::default();
@@ -464,9 +462,9 @@ mod tests {
 
     #[test]
     fn japanese_card_is_not_over_truncated() {
-        // A rich Japanese card. Under the old `max_tokens * 4` char heuristic a
-        // 1,600-char budget held only ~400 tokens of Japanese, so a card like
-        // this was gutted; the language-aware count sizes it correctly (#386).
+        // A rich Japanese card. Under the `max_tokens * 4` char heuristic a
+        // 1,600-char budget would hold only ~400 tokens of Japanese, gutting a
+        // card like this; the language-aware count sizes it correctly.
         let mut card = CharacterCardV3::default();
         card.data.name = "エネ".into();
         card.data.personality = "元気いっぱいで、少しお茶目なデスクトップの相棒。".into();
@@ -524,7 +522,7 @@ mod tests {
     fn hard_instruction_preserved_without_english_marker_search() {
         // The preservation is structural (the dedicated final core line), not a
         // search for the English "Hard instruction:" string, so a localised
-        // marker would still be kept (#359).
+        // marker would still be kept.
         let head_lines = ["[Identity Kernel]".to_string(), "Name: Ene".to_string()];
         let hard_line = "絶対指示: 長い会話でもエネのままでいてください".to_string();
 

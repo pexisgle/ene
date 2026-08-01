@@ -1,11 +1,11 @@
 use super::types::SessionId;
 use ene_core::KeyFact;
 
-/// Reasons for starting a **new session** (#369).
+/// Reasons for starting a **new session**.
 ///
-/// Topic changes and context pressure are handled by compression (#368), not
-/// session splits. [`SplitReason::Composite`] from the old design was removed;
-/// topic-boundary detection exposes only a score via [`TopicBoundarySignal`].
+/// Topic changes and context pressure are handled by compression, not session
+/// splits. Topic-boundary detection exposes only a score via
+/// [`TopicBoundarySignal`] and never triggers a split directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SplitReason {
     /// Split due to inactivity timeout.
@@ -31,7 +31,7 @@ impl std::fmt::Display for SplitReason {
     }
 }
 
-/// Outcome of a **session split** that issues a new [`SessionId`] (#369).
+/// Outcome of a **session split** that issues a new [`SessionId`].
 ///
 /// Compression-only operations return [`crate::context::CompressionResult`]
 /// instead; they do not change the session id. [`handle_manual_compression`] in

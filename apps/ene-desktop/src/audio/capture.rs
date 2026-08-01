@@ -6,7 +6,7 @@
 //! utterance with an [`SttProvider`] and feeds the transcript into the
 //! AI bridge as a normal user turn.
 //!
-//! **Echo-aware barge-in** (M3): while [`AudioState::tts_playing`] is
+//! **Echo-aware barge-in**: while [`AudioState::tts_playing`] is
 //! set the callback raises the VAD energy gate instead of hard-muting,
 //! so loud user speech can still trigger a barge-in event that cancels
 //! the current TTS turn. Full acoustic echo cancellation is not
@@ -32,7 +32,7 @@ use ene_ai::{SttProvider, VadEngine, VadEvent};
 /// internally if it needs a different rate.
 const CAPTURE_SAMPLE_RATE: u32 = 16_000;
 
-/// Multiplier applied to the RMS energy gate while TTS is playing (M3).
+/// Multiplier applied to the RMS energy gate while TTS is playing.
 /// Speech must exceed this factor above the normal threshold to be
 /// considered a barge-in, reducing false triggers from speaker bleed.
 const BARGE_IN_ENERGY_FACTOR: f32 = 2.0;
@@ -66,7 +66,6 @@ pub struct MicHandle {
 }
 
 impl MicHandle {
-    /// Stop capture and release the input stream.
     pub fn stop(&mut self) {
         if self.stream.take().is_some() {
             self.mic_active.store(false, Ordering::Relaxed);
@@ -89,9 +88,7 @@ impl Drop for MicHandle {
 /// Carries a fractional input position across callbacks so the output
 /// stream stays continuous.
 struct Resampler {
-    /// Input samples consumed per output sample (`src_rate / dst_rate`).
     ratio: f64,
-    /// Fractional input position carried across buffers.
     pos: f64,
 }
 
@@ -107,7 +104,7 @@ impl Resampler {
     /// Resample `input` (mono, device rate) into 16 kHz, appending to `out`.
     ///
     /// Interpolates between `input[idx]` and `input[idx + 1]` at `frac`
-    /// (standard convention, L9). When `idx + 1` is out of bounds the
+    /// (standard convention). When `idx + 1` is out of bounds the
     /// output is clamped to `input[idx]`.
     fn process(&mut self, input: &[f32], out: &mut Vec<f32>) {
         if input.is_empty() {
@@ -134,13 +131,9 @@ impl Resampler {
 /// Per-callback capture state moved into the `cpal` data closure.
 struct CaptureState {
     resampler: Resampler,
-    /// Resampled audio waiting to be framed into VAD frames.
     resampled: Vec<f32>,
-    /// Accumulated speech PCM for the current utterance.
     speech: Vec<f32>,
-    /// Whether the VAD currently considers the user to be speaking.
     speaking: bool,
-    /// Whether the previous callback was suppressed (self-voice).
     suppressed: bool,
     /// Consecutive VAD inference failures; escalated after a threshold.
     vad_errors: u32,
@@ -153,11 +146,10 @@ struct CaptureState {
 }
 
 impl CaptureState {
-    /// Handle one raw callback buffer of interleaved device audio.
     fn on_data(&mut self, data: &cpal::Data) {
         let tts_active = self.tts_playing.load(Ordering::Relaxed);
 
-        // Echo-aware barge-in (M3): while TTS is playing, apply an
+        // Echo-aware barge-in: while TTS is playing, apply an
         // elevated energy gate instead of hard-muting. If the frame
         // energy exceeds the barge-in threshold, feed it to VAD so
         // genuine user speech can cancel the current turn. Otherwise
@@ -208,8 +200,6 @@ impl CaptureState {
             if rms < SILENCE_RMS * BARGE_IN_ENERGY_FACTOR {
                 return;
             }
-            // Loud frame during TTS: keep the resampled audio, run VAD, and
-            // emit barge-in if speech is detected.
             self.resampled.extend(resampled);
             self.drain_vad_frames();
             return;
@@ -233,7 +223,6 @@ impl CaptureState {
             _ => return,
         };
 
-        // Downmix to mono.
         let mono: Vec<f32> = if self.channels <= 1 {
             interleaved
         } else {
@@ -248,7 +237,6 @@ impl CaptureState {
         self.drain_vad_frames();
     }
 
-    /// Consume buffered resampled audio in engine-sized frames.
     fn drain_vad_frames(&mut self) {
         let frame_size = self.vad.frame_size();
         while self.resampled.len() >= frame_size {
@@ -280,7 +268,6 @@ impl CaptureState {
         }
     }
 
-    /// React to a VAD event, accumulating speech and dispatching on end.
     fn on_vad_event(&mut self, event: VadEvent, frame: &[f32]) {
         match event {
             VadEvent::SpeechStart => {
@@ -288,7 +275,7 @@ impl CaptureState {
                 self.speech.clear();
                 self.speech.extend_from_slice(frame);
                 // Barge-in: if TTS is playing and we detect speech start,
-                // cancel the current turn so the user can speak (M3).
+                // cancel the current turn so the user can speak.
                 if self.tts_playing.load(Ordering::Relaxed) {
                     tracing::info!(
                         component = "MicCapture",
@@ -347,7 +334,6 @@ impl CaptureState {
     }
 }
 
-/// Root-mean-square energy of a PCM buffer.
 fn rms_energy(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -406,7 +392,7 @@ pub fn start_mic_capture(
     let mut state = Some(state);
 
     // Clone state for the error callback so it can clear `mic_active`
-    // and emit a disconnect event (M1).
+    // and emit a disconnect event.
     let err_mic_active = Arc::clone(&audio_state.mic_active);
     let err_event_tx = event_tx.clone();
 
@@ -421,7 +407,7 @@ pub fn start_mic_capture(
             },
             move |err| {
                 tracing::warn!(component = "MicCapture", error = %err, "input stream error");
-                // Device disconnect recovery (M1): clear the active flag
+                // Device disconnect recovery: clear the active flag
                 // and notify the UI so the mic indicator resets.
                 err_mic_active.store(false, Ordering::Relaxed);
                 drop(err_event_tx.send(AppEvent::MicStateChanged { active: false }));
@@ -508,7 +494,7 @@ mod tests {
 
     #[test]
     fn resampler_interpolates_forward() {
-        // L9: verify interpolation uses input[idx] and input[idx+1].
+        // Verify interpolation uses input[idx] and input[idx+1].
         // With ratio 1.5 (24 kHz -> 16 kHz), output positions are
         // 0, 1.5, 3.0 — the second sample interpolates between
         // input[1] and input[2] at frac=0.5.

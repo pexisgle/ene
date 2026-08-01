@@ -181,7 +181,6 @@ mod tests {
         let sem_b = ResourceRegistry::semaphore(b);
         assert_eq!(sem_a.available_permits(), 1);
         assert_eq!(sem_b.available_permits(), 1);
-        // Acquiring from `a` must not affect `b`'s budget.
         let _permit_a = ResourceRegistry::acquire(a).await.expect("acquire a");
         assert_eq!(sem_a.available_permits(), 0);
         assert_eq!(sem_b.available_permits(), 1);
@@ -210,11 +209,9 @@ mod tests {
     #[tokio::test]
     async fn configure_all_after_first_use_is_ignored() {
         let class = ResourceClass::Gpu { device: 105 };
-        // Establish the semaphore at the default (1 permit) first.
         let sem = ResourceRegistry::semaphore(class);
         assert_eq!(sem.available_permits(), 1);
         ResourceRegistry::configure_all(&ResourceBudgets::new().with_permits(class, 9));
-        // Re-fetching returns the same, unresized semaphore.
         let sem_again = ResourceRegistry::semaphore(class);
         assert_eq!(sem_again.available_permits(), 1);
     }

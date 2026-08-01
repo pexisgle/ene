@@ -12,9 +12,8 @@ pub enum TodoStoreError {
     #[error("database error: {0}")]
     Db(#[from] DbError),
 
-    /// No DB auth token was supplied. The DB server requires
-    /// authentication and rejects unauthenticated connections, so
-    /// connecting without a token can never succeed.
+    /// The DB server requires authentication and rejects unauthenticated
+    /// connections, so connecting without a token can never succeed.
     #[error("DB auth token is required: the DB server rejects unauthenticated connections")]
     MissingAuthToken,
 
@@ -265,13 +264,8 @@ impl TodoStore {
             return Err(TodoStoreError::InvalidPriority(p.to_string()));
         }
 
-        // Cycle check before the update. We walk up the
-        // chain of the proposed new parent; if we ever
-        // encounter the todo being updated, the
-        // reparenting would create a cycle. We also bound
-        // the walk at `MAX_ANCESTOR_DEPTH` so a
-        // pre-existing corruption cannot cause this
-        // method to hang.
+        // Walk the proposed parent's chain with a bounded depth so
+        // pre-existing corruption cannot cause this method to hang.
         if let Some(Some(new_parent)) = parent_id {
             if new_parent == id {
                 return Err(TodoStoreError::CycleDetected {
@@ -433,7 +427,6 @@ impl TodoStore {
                 .select("utility_todo_items", &["parent_id"], filter, &[], Some(1))
                 .await?;
             let Some(row) = rows.first() else {
-                // The proposed parent does not exist.
                 return Err(TodoStoreError::ParentNotFound(new_parent));
             };
             match row.get("parent_id") {
@@ -460,9 +453,6 @@ impl TodoStore {
         parent_id: i64,
         visited: &mut std::collections::HashSet<i64>,
     ) -> Result<Vec<TodoItem>, TodoStoreError> {
-        // Cycle guard: if we have already visited this
-        // node on the current DFS path (or in the
-        // general visited set), do not recurse further.
         if !visited.insert(parent_id) {
             return Ok(Vec::new());
         }
@@ -507,7 +497,6 @@ mod tests {
     use std::path::PathBuf;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// Minimal in-memory DB server for testing `TodoStore`.
     struct MockDb {
         rows: Vec<Row>,
         next_id: i64,
@@ -644,7 +633,6 @@ mod tests {
                 let Ok(mut stream) = listener.accept().await else {
                     break;
                 };
-                // Handle requests on this connection until it closes.
                 loop {
                     let Some(req) = read_framed(&mut stream).await else {
                         break;
@@ -655,7 +643,6 @@ mod tests {
             }
         });
 
-        // Wait for the socket to appear.
         for _ in 0..100 {
             if socket_path.exists() {
                 break;
@@ -686,7 +673,6 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, item.id);
 
-        // Different session is isolated.
         let other = store.list("sess2").await.unwrap();
         assert!(other.is_empty());
 
@@ -849,7 +835,6 @@ mod tests {
             assert_eq!(item.status, "completed");
         }
 
-        // Verify via list.
         let all = store.list("s").await.unwrap();
         assert!(all.iter().all(|i| i.status == "completed"));
 
@@ -871,7 +856,6 @@ mod tests {
         let d = store.add("s", Some(b.id), "D", "high").await.unwrap();
 
         let completed = store.complete("s", a.id).await.unwrap();
-        // A, B, C, D — all completed.
         assert_eq!(completed.len(), 4);
         let ids: Vec<i64> = completed.iter().map(|i| i.id).collect();
         assert!(ids.contains(&a.id));

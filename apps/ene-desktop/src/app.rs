@@ -4,14 +4,6 @@
 //! implementations, each owning a slice of resources, components,
 //! messages, and systems. This module just glues them together and exposes
 //! a single [`build_app`] entry point used by `main.rs`.
-//!
-//! ## Phased migration
-//!
-//! During the refactor the legacy `AppState` and the new
-//! `bevy_ecs` `World` coexist. Each plugin below is added once the
-//! corresponding legacy code has been retired; the placeholder comments
-//! inside [`CorePlugin`] reserve a slot in the plugin set so the
-//! [`build_app`] ordering is stable across phases.
 use bevy_app::{App, Plugin, PluginGroup, PluginGroupBuilder};
 
 use crate::event::chat::OpenChat;
@@ -62,10 +54,8 @@ impl PluginGroup for DesktopPlugins {
 }
 
 /// Marks the bare minimum needed for the schedule to be valid: the
-/// `Startup` / `First` / `PreUpdate` / `Update` / `PostUpdate` / `Last`
-/// stages, the empty [`crate::schedule::AppSet`] marker slots, the
-/// Phase 1 singleton resources, and the Phase 2 [`Message`] queue
-/// registrations.
+/// standard `bevy_app` stages and the [`crate::schedule::AppSet`]
+/// marker slots.
 #[derive(Default)]
 pub struct CorePlugin;
 
@@ -76,8 +66,8 @@ impl Plugin for CorePlugin {
     }
 }
 
-/// Builds and returns a fully configured [`App`] with all Phase 1
-/// resources, Phase 2 message queues, and the legacy `EventChannels`
+/// Builds and returns a fully configured [`App`] with the singleton
+/// resources, the [`Message`] queues, and the `EventChannels`
 /// resource inserted. The returned `App` is ready to have its
 /// schedule run from the winit event loop via [`App::update`].
 pub fn build_app(

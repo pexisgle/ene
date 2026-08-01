@@ -1,4 +1,4 @@
-//! Versioned session export format (#176).
+//! Versioned session export format.
 //!
 //! A [`SessionExport`] bundles a session's metadata, conversation messages,
 //! and tool-audit logs into a single serializable document for backup or
@@ -289,8 +289,7 @@ mod tests {
 
     #[test]
     fn redacts_cloud_provider_keys() {
-        // Google, AWS, and GitHub prefixes are redacted like `sk-` keys (#427
-        // item 7).
+        // Google, AWS, and GitHub prefixes are redacted like `sk-` keys.
         for secret in [
             "AIzaSyD-secret-google-key",
             "AKIAIOSFODNN7EXAMPLE",

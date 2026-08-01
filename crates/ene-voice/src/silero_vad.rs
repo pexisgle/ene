@@ -5,14 +5,12 @@
 //! fast with [`AudioProviderError::Init`] so the crate (and the workspace)
 //! keeps compiling without the ONNX Runtime toolchain.
 //!
-//! # Deliberately *not* migrated to `ene_infer::LocalModel`
+//! # Why `SileroVadEngine` is not an `ene_infer::LocalModel`
 //!
-//! Stage 4 migrated `local_stt.rs` (whisper.cpp) and `local_tts.rs` (Kokoro
-//! ONNX) onto [`ene_infer::LocalModel`] because both used to smuggle a
-//! `spawn_blocking`/`block_in_place` call or a mutex take/put-back pattern
-//! past `async fn` — the exact class of bug [`ene_infer`] exists to remove.
-//! [`SileroVadEngine`] was assessed for the same treatment and left alone,
-//! on purpose:
+//! [`ene_infer::LocalModel`] exists to remove a specific bug class from the
+//! whisper and Kokoro providers: a `spawn_blocking`/`block_in_place` call or
+//! a mutex take/put-back pattern smuggled past `async fn`. [`SileroVadEngine`]
+//! does not need that treatment:
 //!
 //! - [`VadEngine::process_chunk`] is already a plain, synchronous `&mut self`
 //!   method (see `ene-ai`'s `traits.rs`) — there is no `async fn` here to
@@ -33,11 +31,9 @@
 //!   inference call, an unbounded queue) that a 512-sample Silero step
 //!   simply does not have.
 //!
-//! In short: this file is the one of the four local providers that never had
-//! the bug class this stage exists to fix, and that is not a coincidence —
-//! its author already gave the model plain synchronous, exclusive ownership
-//! instead of reaching for `Arc<Mutex<_>>` around blocking work. Nothing
-//! here needed migrating; if a future change makes `process_chunk` slow
+//! In short: this is the one local provider that never had the bug class
+//! [`ene_infer`] exists to remove; `process_chunk` is plain synchronous,
+//! exclusive ownership of blocking work. If a future change makes it slow
 //! enough to need a dedicated worker thread and cooperative timeouts, this
 //! doc comment is the note that it stopped being the exception.
 #[cfg(feature = "silero-vad")]
@@ -60,7 +56,7 @@ const VAD_CHUNK_SAMPLES: usize = 512;
 const STATE_LEN: usize = 128;
 
 /// Number of consecutive inference failures before [`SileroVadEngine`]
-/// escalates to a hard error (M13).
+/// escalates to a hard error.
 #[cfg(feature = "silero-vad")]
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
@@ -98,7 +94,7 @@ pub struct SileroVadEngine {
     c: Vec<f32>,
     threshold: f32,
     speaking: bool,
-    /// Count of consecutive inference failures (M13 escalation).
+    /// Count of consecutive inference failures.
     consecutive_failures: u32,
 }
 
@@ -106,7 +102,7 @@ pub struct SileroVadEngine {
 impl SileroVadEngine {
     /// Load the Silero VAD ONNX model.
     ///
-    /// ONNX Runtime is initialized exactly once per process (C3) using
+    /// ONNX Runtime is initialized exactly once per process using
     /// `ort_dylib_path` when provided. The `threshold` is expected to already
     /// be clamped to `[0.0, 1.0]` by the caller (see
     /// [`AiConfig::resolve_vad`](crate::config::AiConfig::resolve_vad)).
@@ -148,7 +144,6 @@ impl SileroVadEngine {
         })
     }
 
-    /// Run a single 512-sample inference step, updating recurrent state.
     fn step(&mut self, chunk: &[f32; VAD_CHUNK_SAMPLES]) -> Result<f32, AudioProviderError> {
         let sr = vec![i64::from(VAD_SAMPLE_RATE)];
         let outputs = self
@@ -212,7 +207,7 @@ impl VadEngine for SileroVadEngine {
     }
 
     fn process_chunk(&mut self, pcm: &[f32]) -> Result<VadEvent, AudioProviderError> {
-        // Enforce the frame-size contract (H11): Silero requires exactly 512
+        // Enforce the frame-size contract: Silero requires exactly 512
         // samples per step.
         if pcm.len() != self.frame_size() {
             return Err(AudioProviderError::Provider(format!(

@@ -188,15 +188,11 @@ impl ModelUniform {
     ///
     /// No rotation is applied: `VRoid` (Alicia) and other VRM 1.0
     /// humanoid models are exported with their **face already at
-    /// `+Z`** (the legacy `apps/ene-desktop` Bevy build used
-    /// `Transform::from_translation(character_position).with_scale(model_scale)`
-    /// with no extra rotation and was rendering the character
-    /// front-facing toward the camera at `+Z`). With culling on
-    /// (`CullMode::Back`, `FrontFace::Ccw`) the camera at `+Z` sees
-    /// the model as front-facing, so it is kept. An earlier
-    /// 180°-around-Y pre-rotation was the wrong direction; it
-    /// showed the back of the character and mirrored `character_state.character_position.x`,
-    /// which was what was making the model appear shifted to the
+    /// `+Z`**, and with culling on (`CullMode::Back`,
+    /// `FrontFace::Ccw`) the camera at `+Z` sees the model as
+    /// front-facing. Adding a 180°-around-Y pre-rotation would
+    /// show the back of the character and mirror
+    /// `character_state.character_position.x`, shifting the model
     /// right and half off-screen.
     pub fn from_position_scale(position: [f32; 3], scale: f32) -> Self {
         let m = Mat4::from_scale_rotation_translation(
@@ -319,9 +315,9 @@ mod tests {
         assert!((s - 2.6).abs() < 1e-4, "expected 2.6, got {s}");
     }
 
-    /// diagnostic: confirm what glam's
+    /// Diagnostic: confirm what glam's
     /// `orthographic(-half_w, half_w, -half_h, half_h, 0.1, 100.0)`
-    /// actually produces, so the-diag log can be
+    /// actually produces, so the diagnostic log can be
     /// interpreted correctly. Just prints the matrix.
     #[test]
     #[expect(

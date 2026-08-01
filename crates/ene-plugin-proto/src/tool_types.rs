@@ -169,7 +169,7 @@ impl std::fmt::Display for ToolVersion {
     }
 }
 
-/// Structured keyword bag, replacing the legacy flat `Vec<String>`.
+/// Structured keyword bag with weighted tiers.
 ///
 /// Each tier is weighted differently during Tool RAG scoring (see
 /// `FieldWeights` in `ene-tool-host::rag`).
@@ -333,7 +333,7 @@ impl ToolCategory {
     }
 }
 
-/// Host/RAG-only metadata for a callable tool (#137).
+/// Host/RAG-only metadata for a callable tool.
 ///
 /// Never passed to the LLM tool list — exchanged via
 /// `IpcResponse::RagProfiles` and consumed by `ene-rag`.
@@ -482,7 +482,7 @@ fn format_keywords(keywords: &KeywordSet) -> String {
     parts.join("; ")
 }
 
-/// Whether a tool operation can be rolled back (#178).
+/// Whether a tool operation can be rolled back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Reversibility {
@@ -492,7 +492,7 @@ pub enum Reversibility {
     Irreversible,
 }
 
-/// Runtime-level undo metadata recorded per tool execution (#178).
+/// Runtime-level undo metadata recorded per tool execution.
 ///
 /// The runtime records one entry per mutating tool call so `/undo` can
 /// surface what a rollback affects and, for reversible operations, drive
@@ -512,13 +512,12 @@ pub struct UndoMetadata {
 
 /// The structured, LLM-facing tool specification.
 ///
-/// Per API v1 / #135 the model-facing surface is limited to `name`,
-/// `description`, and `parameters` (JSON Schema). The remaining fields
-/// (`background_capable`, `side_effects`) are host-execution metadata that
-/// providers strip before serializing tools to a model API; they follow the
-/// same precedent as `background_capable` (#196).
+/// Per API v1 the model-facing surface is limited to `name`, `description`,
+/// and `parameters` (JSON Schema). The remaining fields (`background_capable`,
+/// `side_effects`) are host-execution metadata that providers strip before
+/// serializing tools to a model API.
 ///
-/// RAG metadata lives on [`ToolRagProfile`] (#137), not here.
+/// RAG metadata lives on [`ToolRagProfile`], not here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ToolSpec {
     /// Unique, validated tool name.
@@ -527,7 +526,7 @@ pub struct ToolSpec {
     pub description: String,
     /// JSON Schema (auto-derived by `schemars` from the args struct).
     pub parameters: serde_json::Value,
-    /// Whether this tool supports deferred (background) execution (#196).
+    /// Whether this tool supports deferred (background) execution.
     ///
     /// When `true`, the host may issue a deferred call that returns a
     /// `task_id` immediately instead of blocking on the result; the
@@ -536,7 +535,7 @@ pub struct ToolSpec {
     #[serde(default)]
     pub background_capable: bool,
     /// Declared side effects, used to decide whether a call may run in a
-    /// bounded parallel batch (#400).
+    /// bounded parallel batch.
     ///
     /// `None` means "unknown" and is treated fail-closed: such tools are
     /// never parallelized. Only an explicit [`SideEffects::ReadOnly`] marks a
@@ -551,7 +550,7 @@ impl ToolSpec {
     /// Construct an LLM-facing tool spec.
     ///
     /// `side_effects` defaults to `None` (unknown), which keeps the tool
-    /// sequential under the parallel tool-call policy (#400). Use
+    /// sequential under the parallel tool-call policy. Use
     /// [`Self::side_effects`] to declare a concrete classification.
     #[must_use]
     pub fn new(
@@ -568,14 +567,14 @@ impl ToolSpec {
         }
     }
 
-    /// Mark this spec as capable of deferred (background) execution (#196).
+    /// Mark this spec as capable of deferred (background) execution.
     #[must_use]
     pub const fn background_capable(mut self, capable: bool) -> Self {
         self.background_capable = capable;
         self
     }
 
-    /// Declare the tool's side effects (#400).
+    /// Declare the tool's side effects.
     ///
     /// Only [`SideEffects::ReadOnly`] makes a tool eligible for bounded
     /// parallel execution; any other value (or leaving it unset) keeps the
@@ -586,7 +585,7 @@ impl ToolSpec {
         self
     }
 
-    /// Whether this tool may run in a bounded parallel batch (#400).
+    /// Whether this tool may run in a bounded parallel batch.
     ///
     /// A tool is parallelizable only when it explicitly declares
     /// [`SideEffects::ReadOnly`] and is not background-capable (deferred tools
@@ -675,8 +674,8 @@ impl EmbeddingField {
 
 /// Structured result of a tool execution.
 ///
-/// Replaces the opaque `String` return value with typed content that the
-/// host can route appropriately (text to LLM, images to vision models, etc.).
+/// Carries typed content the host can route appropriately (text to LLM,
+/// images to vision models, etc.) rather than an opaque `String`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ToolResult {
     /// Result content items (text, JSON, images, etc.).
@@ -785,7 +784,7 @@ mod tests {
     #[test]
     fn tool_spec_defaults_to_unknown_side_effects() {
         // `ToolSpec::new` leaves side effects unknown (`None`), which is
-        // fail-closed: the tool is not eligible for parallel execution (#400).
+        // fail-closed: the tool is not eligible for parallel execution.
         let spec = ToolSpec::new(
             ToolName::new("mystery.tool"),
             "Unknown side effects",
@@ -813,7 +812,6 @@ mod tests {
         .side_effects(SideEffects::FileSystem { mutates: true });
         assert!(!mutating.is_parallelizable());
 
-        // Background-capable tools are never parallelized even if read-only.
         let background = ToolSpec::new(
             ToolName::new("background.sleep"),
             "Sleep",
@@ -827,13 +825,12 @@ mod tests {
     #[test]
     fn tool_spec_side_effects_serde_is_optional() {
         // An older plugin binary that omits `side_effects` on the wire must
-        // deserialize to `None` (fail-closed), not an error (#400).
+        // deserialize to `None` (fail-closed), not an error.
         let json = r#"{"name":"legacy.tool","description":"d","parameters":{}}"#;
         let spec: ToolSpec = serde_json::from_str(json).unwrap();
         assert_eq!(spec.side_effects, None);
         assert!(!spec.is_parallelizable());
 
-        // When `None`, the field is omitted from serialization.
         let out = serde_json::to_string(&spec).unwrap();
         assert!(!out.contains("side_effects"));
     }
@@ -967,7 +964,7 @@ mod tests {
     #[test]
     fn tool_result_text_for_llm_image_not_dropped() {
         // Image content must surface as a visible placeholder rather than
-        // being silently flattened to an empty string (WS9).
+        // being silently flattened to an empty string.
         let result = ToolResult {
             content: vec![
                 ToolContent::Text {

@@ -1,12 +1,11 @@
-//! Decay scoring and lifecycle thresholds (#302).
+//! Decay scoring and lifecycle thresholds.
 //!
-//! Consolidates the two independent half-life exponential-decay implementations
-//! that previously lived in `ene-store` (`search::recency_score` for recall
-//! ranking and `forgetting::decay_score` for lifecycle transitions) into a
-//! single [`half_life_decay`] primitive. The two callers keep their distinct
-//! anchors and post-processing; only the shared `exp(-λ·age)` kernel is unified.
+//! Recall recency and lifecycle forgetting share one
+//! [`half_life_decay`] primitive. The two callers keep their distinct
+//! anchors and post-processing; only the shared `exp(-λ·age)` kernel is
+//! unified.
 //!
-//! The anchors are deliberately different (#345): recall recency
+//! The anchors are deliberately different: recall recency
 //! ([`recency_score`]) measures from the last *access* (`last_accessed_at`),
 //! while lifecycle forgetting ([`active_decay_anchor`]) measures from the last
 //! *content update* (`updated_at`). Recall must never push the forgetting
@@ -54,7 +53,7 @@ pub(crate) fn age_in_days(reference: DateTime<Utc>, anchor: DateTime<Utc>) -> f6
 /// recallable rows. This intentionally differs from the forgetting anchor
 /// ([`active_decay_anchor`], which keys off `updated_at` only): recall rewards
 /// memories that were recently *used*, while forgetting measures staleness of
-/// the memory's *content* (#345).
+/// the memory's *content*.
 pub fn recency_score(reference: DateTime<Utc>, item: &MemoryItem, half_life_days: f64) -> f32 {
     let anchor = item.last_accessed_at.unwrap_or(item.updated_at);
     half_life_decay(age_in_days(reference, anchor), half_life_days)
@@ -66,7 +65,7 @@ pub fn emotional_impact(affect: AffectAnnotation) -> f32 {
     (dist / 2.83).clamp(0.0, 1.0)
 }
 
-/// Anchor for active-memory fade decisions: the last *content* update (#345).
+/// Anchor for active-memory fade decisions: the last *content* update.
 ///
 /// Forgetting keys off `updated_at`, deliberately **not** `last_accessed_at`.
 /// Recall bumps `last_accessed_at` on prompt inclusion, but that must not push
@@ -234,7 +233,6 @@ mod tests {
 
     #[test]
     fn active_decay_anchor_ignores_last_accessed_at() {
-        // #345: forgetting keys off content-update time, never recall time.
         let now = Utc::now();
         let mut item = sample_item(MemoryStatus::Active, false, 30);
         item.last_accessed_at = Some(now - chrono::Duration::days(5));
@@ -243,17 +241,12 @@ mod tests {
 
     #[test]
     fn recalled_memory_still_fades_over_time() {
-        // #345 regression: bumping `last_accessed_at` (as recall does) must not
-        // reset the decay anchor, so a frequently-recalled-but-stale memory
-        // still decays and can reach `FADE_THRESHOLD`.
         let now = Utc::now();
         let mut item = sample_item(MemoryStatus::Active, false, 120);
-        // Simulate a recall that happened just now.
         item.last_accessed_at = Some(now);
         let score = decay_score(&item, now, 30.0);
         // 120 days = 4 half-lives of base decay (~0.0625) before retention
-        // factors; a fresh anchor would score ~1.0. The recent access must not
-        // rescue it.
+        // factors; a fresh anchor would score ~1.0.
         assert!(
             score < FADE_THRESHOLD,
             "a stale memory must fade despite a recent recall, got {score}"

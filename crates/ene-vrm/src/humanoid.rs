@@ -35,21 +35,19 @@
 //!
 //! ## Consumers
 //!
-//! This module is the **foundation** for the deferred
-//! follow-up issues:
+//! This module only **builds the registry**; the per-frame
+//! consumers read it from
+//! [`VrmModel::humanoid`](crate::model::VrmModel):
 //!
-//! - #11 (`VRMC_vrm.lookAt`) — uses `head()`, `left_eye()`,
+//! - `VRMC_vrm.lookAt` uses `head()`, `left_eye()`,
 //!   `right_eye()` and the rest rotation to apply the
 //!   `calc_yaw_pitch` quaternion delta.
-//! - #13 (`VRMC_springBone`) — `hips()` is the natural root
-//!   of the main chain, `head()` is a head-bone input.
-//! - #14 (`VRMC_vrm_animation`) — bone-name → node-index
-//!   retarget for humanoid tracks.
-//! - #15 (`VRMC_node_constraint`) — bone-name lookup for
+//! - `VRMC_springBone` uses `hips()` as the natural root
+//!   of the main chain and `head()` as a head-bone input.
+//! - `VRMC_vrm_animation` uses the bone-name → node-index
+//!   mapping for humanoid-track retargeting.
+//! - `VRMC_node_constraint` uses bone-name lookup for
 //!   constraint sources / destinations.
-//!
-//! itself only **builds the registry**; none of the
-//! per-frame consumers land in this commit.
 use std::collections::BTreeMap;
 
 use glam::{Quat, Vec3};
@@ -180,8 +178,8 @@ impl From<String> for VrmBone {
 ///
 /// Scale is intentionally omitted: the loader's
 /// per-vertex `normalize(center, scale)` is the canonical
-/// scale, and per-bone scale is not consumed by any of the
-/// deferred issues. (Add `scale: [f32; 3]` here if a future
+/// scale, and per-bone scale is not consumed by any current
+/// consumer. (Add `scale: [f32; 3]` here if a future
 /// consumer needs it; the loader change is one line.)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoneRestTransform {
@@ -376,9 +374,6 @@ pub fn canonicalize_bone_name(raw: &str) -> Option<VrmBone> {
 pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRegistry {
     let mut registry = HumanoidBoneRegistry::new();
 
-    // 1. Locate the `humanBones` map. The path mirrors
-    //    `resolve_expression_names` so the rest of the
-    //    loader reads extension objects the same way.
     let Some(ext) = gltf.document.extensions() else {
         return registry;
     };
@@ -392,9 +387,6 @@ pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRe
         return registry;
     };
 
-    // 2. Walk every entry. Keys are bone names (lower-case
-    //    per spec, but `canonicalize_bone_name` is
-    //    permissive). Values are `{ "node": <usize> }`.
     for (raw_name, value) in bones {
         let Some(canonical) = canonicalize_bone_name(raw_name) else {
             tracing::warn!(
@@ -415,14 +407,10 @@ pub fn load_humanoid_bones(gltf: &gltf::Gltf, skel: &Skeleton) -> HumanoidBoneRe
             continue;
         };
 
-        // 3. Resolve the joint index by walking the skin's
-        //    joint list. None when the bone is outside the
-        //    skin — legal but rare; we still keep the entry.
+        // None when the bone is outside the skin — legal but rare; keep the entry.
         let joint = skel.joint_to_node.iter().position(|&n| n == node_idx);
 
-        // 4. Capture the local rest transform from the glTF
-        //    node. A missing / out-of-range node is logged
-        //    and we fall back to the identity transform.
+        // A missing / out-of-range node is logged and falls back to the identity transform.
         let rest = if let Some(node) = gltf.document.nodes().nth(node_idx) {
             // gltf 1.4's `Transform` exposes
             // `decomposed() -> ([f32;3], [f32;4], [f32;3])`
@@ -469,14 +457,13 @@ mod tests {
 
     /// The 55-bone set is the canonical contract. A
     /// regression (a bone dropped, a duplicate added) would
-    /// silently break's foundation.
+    /// silently break the humanoid registry's foundation.
     #[test]
     fn bone_name_set_has_55_unique_entries() {
         assert_eq!(HUMANOID_BONE_NAMES.len(), 55);
-        // BTreeSet-style dedup check via a `Vec` of owned
-        // `String`s. There is no `HashSet` in `no_std`-free
-        // `std` we cannot use here; the linear scan is
-        // O(N^2) = 3000 ops, fine for a unit test.
+        // Dedup check via a `Vec` of owned `String`s rather
+        // than a `HashSet`; the linear scan is O(N^2) = 3000
+        // ops, fine for a unit test.
         let mut seen: Vec<&str> = Vec::with_capacity(HUMANOID_BONE_NAMES.len());
         for name in HUMANOID_BONE_NAMES {
             assert!(!seen.contains(name), "duplicate bone name {name}");
@@ -497,30 +484,24 @@ mod tests {
     /// exporters and hand-edited files produce.
     #[test]
     fn canonicalize_bone_name_handles_known_variants() {
-        // Lower-case is the spec form.
         assert_eq!(canonicalize_bone_name("hips").unwrap().0, "hips");
         assert_eq!(canonicalize_bone_name("head").unwrap().0, "head");
         assert_eq!(canonicalize_bone_name("lefteye").unwrap().0, "lefteye");
-        // Upper-case.
         assert_eq!(canonicalize_bone_name("HIPS").unwrap().0, "hips");
-        // Mixed case (VRoid, hand-edited files).
         assert_eq!(canonicalize_bone_name("Hips").unwrap().0, "hips");
         assert_eq!(
             canonicalize_bone_name("LeftUpperArm").unwrap().0,
             "leftupperarm"
         );
         assert_eq!(canonicalize_bone_name("RightEye").unwrap().0, "righteye");
-        // snake_case (tooling exports).
         assert_eq!(
             canonicalize_bone_name("left_upper_arm").unwrap().0,
             "leftupperarm"
         );
-        // kebab-case (some Unity exporters).
         assert_eq!(
             canonicalize_bone_name("left-upper-arm").unwrap().0,
             "leftupperarm"
         );
-        // With surrounding spaces (rare but cheap to accept).
         assert_eq!(canonicalize_bone_name("  hips  ").unwrap().0, "hips");
     }
 
@@ -554,13 +535,10 @@ mod tests {
             },
         };
         assert!(reg.insert(VrmBone("hips".into()), entry.clone()));
-        // Duplicate insert returns false; existing entry kept.
         assert!(!reg.insert(VrmBone("hips".into()), entry));
-        // Typed lookup.
         let got = reg.lookup(&VrmBone("hips".into())).unwrap();
         assert_eq!(got.node, 14);
         assert_eq!(got.joint, Some(0));
-        // Raw lookup with case / separator variants.
         assert!(reg.by_name("Hips").is_some());
         assert!(reg.by_name("hips").is_some());
         assert!(reg.by_name("HIPS").is_some());
@@ -595,7 +573,6 @@ mod tests {
         assert_eq!(reg.jaw().unwrap().node, 15);
         assert_eq!(reg.left_eye().unwrap().node, 22);
         assert_eq!(reg.right_eye().unwrap().node, 23);
-        // Iteration is sorted.
         let names: Vec<String> = reg.names().into_iter().map(|n| n.0).collect();
         assert_eq!(
             names,
@@ -656,7 +633,6 @@ mod tests {
                 },
             );
         }
-        // All five entries registered under their canonical form.
         assert_eq!(reg.len(), 5);
         let names: Vec<String> = reg.names().into_iter().map(|n| n.0).collect();
         assert_eq!(

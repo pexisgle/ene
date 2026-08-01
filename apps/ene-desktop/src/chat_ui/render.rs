@@ -57,8 +57,8 @@ impl ChatUi {
 
         // Mic state read once per frame so the toggle button can reflect it
         // without holding a world borrow inside the egui closure. The
-        // `mic_active` flag is the authoritative "is capture live" state
-        // (L13): the error callback clears it on device unplug even though
+        // `mic_active` flag is the authoritative "is capture live" state:
+        // the error callback clears it on device unplug even though
         // the `!Send` handle may still exist on the chat UI.
         #[cfg(feature = "voice")]
         let mic_active = world

@@ -11,13 +11,12 @@ use crate::llama_cpp::{self, LoadSpec, LoadedModel};
 
 /// One embedding request: text plus the prefix hint
 /// ([`super::GgufEmbeddingProvider`] applies `"Query: "`/`"Document: "`
-/// before submitting, mirroring the pre-migration `embed_internal` helper).
+/// before submitting).
 pub(crate) struct EmbedJob {
     pub(crate) text: String,
     pub(crate) kind: EmbeddingKind,
 }
 
-/// One embedding result.
 pub(crate) struct EmbedResult {
     pub(crate) vector: Vec<f32>,
 }

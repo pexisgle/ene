@@ -1,4 +1,4 @@
-//! Tool-permission audit log domain model (#177).
+//! Tool-permission audit log domain model.
 //!
 //! Every tool invocation is recorded with its permission decision and outcome.
 //! Argument payloads are redacted before persistence so secrets (API keys,
@@ -49,7 +49,7 @@ impl AuditDecision {
 /// Input for recording a single audited tool call.
 #[derive(Debug, Clone)]
 pub struct NewAuditEntry {
-    /// Turn that triggered the call (`None` for out-of-band diagnostics calls).
+    /// Turn that triggered the call.
     pub turn_id: String,
     /// Session that triggered the call (`None` for out-of-band diagnostics calls).
     pub session_id: Option<String>,
@@ -75,7 +75,7 @@ pub struct AuditEntry {
     /// Turn that triggered the call.
     pub turn_id: String,
     /// Session that triggered the call (`None` for rows written before
-    /// the `session_id` column existed, #426).
+    /// the `session_id` column existed).
     pub session_id: Option<String>,
     /// Namespaced tool name.
     pub tool_name: String,

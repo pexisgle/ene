@@ -183,11 +183,10 @@ pub async fn summarize_conversation(
 
 /// Extracts and parses JSON from the LLM response.
 ///
-/// Returns a structured [`EneMemoryError::MemoryStoreConnectionError`] when the response
-/// cannot be parsed. The previous implementation silently stored the raw
-/// LLM text as the summary when JSON parsing failed, which meant a
-/// markdown-wrapped or prose response would be persisted as a "summary" and
-/// surface later in the recalled context as noise.
+/// Returns a [`CognitionError`] when the response cannot be parsed. Silently
+/// storing the raw LLM text as the summary on parse failure would persist a
+/// markdown-wrapped or prose response as a "summary" and surface it later in
+/// the recalled context as noise, so non-JSON responses fail hard.
 fn parse_summary_json(raw: &str) -> Result<ConversationSummaryResult, CognitionError> {
     let cleaned = raw
         .trim()
@@ -261,7 +260,6 @@ mod tests {
             !system.is_empty(),
             "summarizer.system prompt must not be empty"
         );
-        // Verify key structural elements are present
         assert!(system.contains("key_facts"), "should mention key_facts");
         assert!(system.contains("summary"), "should mention summary");
     }

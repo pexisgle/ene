@@ -47,8 +47,6 @@ pub fn render(
             crate::i18n::loader(),
             "audio-tts-section"
         ));
-
-        // Presets card
         ui.group(|ui| {
             ui.label(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -109,7 +107,6 @@ pub fn render(
 
         ui.add_space(4.0);
 
-        // Model Status & Download section for Kokoro
         if ai_cfg.tts.provider == "kokoro" {
             ui.group(|ui| {
                 let model_path = ene_voice::default_kokoro_model_path();
@@ -193,7 +190,6 @@ pub fn render(
             ui.add_space(4.0);
         }
 
-        // Provider dropdown
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -228,10 +224,8 @@ pub fn render(
             }
         });
 
-        // Advanced / detail controls for TTS when enabled
         if ai_cfg.tts.provider != "none" && !ai_cfg.tts.provider.is_empty() {
             ui.indent("tts_details", |ui| {
-                // Voice character selection
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-voice"));
 
@@ -259,7 +253,6 @@ pub fn render(
                         changed = true;
                     }
 
-                    // Free text edit for custom voice name
                     let text_edit = ui
                         .add(egui::TextEdit::singleline(&mut input.tts_voice).desired_width(120.0));
                     if text_edit.changed() {
@@ -268,7 +261,6 @@ pub fn render(
                     }
                 });
 
-                // Speech Speed Slider
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-speed"));
                     let mut speed = ai_cfg.tts.speed;
@@ -281,7 +273,6 @@ pub fn render(
                     }
                 });
 
-                // Language
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(
                         crate::i18n::loader(),
@@ -296,7 +287,6 @@ pub fn render(
                     }
                 });
 
-                // Model name
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-tts-model"));
                     let response = ui
@@ -307,7 +297,6 @@ pub fn render(
                     }
                 });
 
-                // Optional Model Path
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(
                         crate::i18n::loader(),
@@ -326,7 +315,6 @@ pub fn render(
                     }
                 });
 
-                // Optional Voices Path
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(
                         crate::i18n::loader(),
@@ -355,7 +343,6 @@ pub fn render(
             "audio-stt-section"
         ));
 
-        // Provider selection
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -391,7 +378,6 @@ pub fn render(
 
         if ai_cfg.stt.provider != "none" && !ai_cfg.stt.provider.is_empty() {
             ui.indent("stt_details", |ui| {
-                // Model name
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "audio-stt-model"));
                     let response = ui
@@ -402,7 +388,6 @@ pub fn render(
                     }
                 });
 
-                // Language
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(
                         crate::i18n::loader(),
@@ -417,7 +402,6 @@ pub fn render(
                     }
                 });
 
-                // Optional Model Path
                 ui.horizontal(|ui| {
                     ui.label(i18n_embed_fl::fl!(
                         crate::i18n::loader(),
@@ -446,7 +430,6 @@ pub fn render(
             "audio-mic-section"
         ));
 
-        // Microphone device
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
@@ -470,7 +453,6 @@ pub fn render(
             }
         });
 
-        // VAD threshold slider
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(
                 crate::i18n::loader(),
