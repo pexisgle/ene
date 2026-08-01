@@ -33,37 +33,27 @@ impl CliCommand for MemoryCommand {
             .get_snapshot()
             .await
             .map_err(|e| CliError::ActorError(format!("Failed to get actor state: {e}")))?;
+        // The snapshot no longer carries the memory handle (#407); it lives on
+        // the diagnostics facade, which is the documented access path.
         let memory = diag.memory();
 
         match subcmd {
             "search" => handle_search(tail, memory, &snapshot).await,
-            "list" => handle_list(tail, &snapshot).await,
-            "inspect" => handle_inspect(tail, &snapshot).await,
-            "why" => handle_why(tail, &snapshot).await,
-            "pin" => handle_pin(tail, &snapshot).await,
+            "list" => handle_list(tail, memory, &snapshot).await,
+            "inspect" => handle_inspect(tail, memory).await,
+            "why" => handle_why(tail, memory).await,
+            "pin" => handle_pin(tail, memory).await,
             "archive" => {
-                handle_transition(
-                    tail,
-                    &snapshot,
-                    ene_store::MemoryStatus::Archived,
-                    "archive",
-                )
-                .await
+                handle_transition(tail, memory, ene_store::MemoryStatus::Archived, "archive").await
             }
-            "forget" => handle_forget(tail, &snapshot).await,
+            "forget" => handle_forget(tail, memory).await,
             "dispute" => {
-                handle_transition(
-                    tail,
-                    &snapshot,
-                    ene_store::MemoryStatus::Disputed,
-                    "dispute",
-                )
-                .await
+                handle_transition(tail, memory, ene_store::MemoryStatus::Disputed, "dispute").await
             }
-            "restore" => handle_restore(tail, &snapshot).await,
-            "status" => handle_status(&snapshot).await,
-            "pending" => handle_pending(&snapshot).await,
-            "retry" => handle_retry(&snapshot).await,
+            "restore" => handle_restore(tail, memory).await,
+            "status" => handle_status(memory, &snapshot).await,
+            "pending" => handle_pending(memory, &snapshot).await,
+            "retry" => handle_retry(memory, &snapshot).await,
             _ => Err(CliError::UsageError {
                 usage: self.usage().to_string(),
             }),
@@ -126,17 +116,17 @@ async fn handle_search(
 
 async fn handle_list(
     args: &str,
+    memory: &ene_runtime::MemoryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
 ) -> Result<CommandOutcome, CliError> {
-    if !snapshot.memory.is_enabled() {
+    if !memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));
     }
     let card_name = snapshot.card_name.as_str();
     let kind = parse_kind_arg(args)?;
-    let memories = snapshot
-        .memory
+    let memories = memory
         .list_typed_memories(card_name, kind, 50)
         .await
         .map_err(|e| CliError::ExecutionFailed(format!("List error: {e}")))?;
@@ -161,14 +151,14 @@ async fn handle_list(
 
 async fn handle_inspect(
     id_arg: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
+    memory: &ene_runtime::MemoryHandle,
 ) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory inspect <id>".to_string(),
         });
     };
-    match snapshot.memory.inspect_typed_memory(id).await {
+    match memory.inspect_typed_memory(id).await {
         Ok(Some(m)) => {
             println!("id={}", m.id.unwrap_or_default());
             println!("kind={}", m.kind.as_str());
@@ -200,14 +190,14 @@ async fn handle_inspect(
 
 async fn handle_why(
     id_arg: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
+    memory: &ene_runtime::MemoryHandle,
 ) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory why <id>".to_string(),
         });
     };
-    match snapshot.memory.inspect_typed_memory(id).await {
+    match memory.inspect_typed_memory(id).await {
         Ok(Some(m)) => {
             println!(
                 "[Memory] why id={}: status={}, confidence={:.2}, salience={:.2}, source={}, last_accessed={}",
@@ -229,14 +219,14 @@ async fn handle_why(
 
 async fn handle_pin(
     id_arg: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
+    memory: &ene_runtime::MemoryHandle,
 ) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory pin <id>".to_string(),
         });
     };
-    match snapshot.memory.pin_typed_memory(id, true).await {
+    match memory.pin_typed_memory(id, true).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] Pinned id={id}")));
             Ok(CommandOutcome::Continue)
@@ -248,14 +238,14 @@ async fn handle_pin(
 
 async fn handle_forget(
     id_arg: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
+    memory: &ene_runtime::MemoryHandle,
 ) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory forget <id>".to_string(),
         });
     };
-    match snapshot.memory.user_forget_typed_memory(id).await {
+    match memory.user_forget_typed_memory(id).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] forgotten id={id}")));
             Ok(CommandOutcome::Continue)
@@ -267,14 +257,14 @@ async fn handle_forget(
 
 async fn handle_restore(
     id_arg: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
+    memory: &ene_runtime::MemoryHandle,
 ) -> Result<CommandOutcome, CliError> {
     let Some(id) = parse_id(id_arg) else {
         return Err(CliError::UsageError {
             usage: "/memory restore <id>".to_string(),
         });
     };
-    match snapshot.memory.user_restore_typed_memory(id).await {
+    match memory.user_restore_typed_memory(id).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] restored id={id}")));
             Ok(CommandOutcome::Continue)
@@ -286,7 +276,7 @@ async fn handle_restore(
 
 async fn handle_transition(
     id_arg: &str,
-    snapshot: &ene_runtime::EneStateSnapshot,
+    memory: &ene_runtime::MemoryHandle,
     status: ene_store::MemoryStatus,
     label: &str,
 ) -> Result<CommandOutcome, CliError> {
@@ -295,7 +285,7 @@ async fn handle_transition(
             usage: format!("/memory {label} <id>"),
         });
     };
-    match snapshot.memory.set_memory_status(id, status).await {
+    match memory.set_memory_status(id, status).await {
         Ok(true) => {
             println!("{}", style::success(format!("[Memory] {label} id={id}")));
             Ok(CommandOutcome::Continue)
@@ -325,9 +315,10 @@ fn parse_kind_arg(args: &str) -> Result<Option<ene_store::MemoryKind>, CliError>
 }
 
 async fn handle_status(
+    memory: &ene_runtime::MemoryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
 ) -> Result<CommandOutcome, CliError> {
-    if !snapshot.memory.is_enabled() {
+    if !memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));
@@ -335,7 +326,7 @@ async fn handle_status(
     let card_name = snapshot.card_name.as_str();
     println!("--- Memory Status ({card_name}) ---");
     println!("  typed memory store: enabled");
-    match snapshot.memory.count_pending_memory_writes(card_name).await {
+    match memory.count_pending_memory_writes(card_name).await {
         Ok((pending, permanent)) => {
             println!("  pending memory writes: {pending}");
             println!("  permanent write failures: {permanent}");
@@ -347,15 +338,15 @@ async fn handle_status(
 }
 
 async fn handle_pending(
+    memory: &ene_runtime::MemoryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
 ) -> Result<CommandOutcome, CliError> {
-    if !snapshot.memory.is_enabled() {
+    if !memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));
     }
-    let rows = snapshot
-        .memory
+    let rows = memory
         .list_pending_memory_writes(snapshot.card_name.as_str(), 50)
         .await
         .map_err(|e| CliError::ExecutionFailed(format!("List pending error: {e}")))?;
@@ -379,16 +370,16 @@ async fn handle_pending(
 }
 
 async fn handle_retry(
+    memory: &ene_runtime::MemoryHandle,
     snapshot: &ene_runtime::EneStateSnapshot,
 ) -> Result<CommandOutcome, CliError> {
-    if !snapshot.memory.is_enabled() {
+    if !memory.is_enabled() {
         return Err(CliError::ExecutionFailed(
             "Memory is not enabled.".to_string(),
         ));
     }
     let character_id = snapshot.card_name.as_str();
-    let scheduled = snapshot
-        .memory
+    let scheduled = memory
         .schedule_pending_memory_writes_now(character_id)
         .await
         .map_err(|e| CliError::ExecutionFailed(format!("Schedule pending error: {e}")))?;
@@ -402,13 +393,11 @@ async fn handle_retry(
         .unwrap_or_default();
     let llm = ene_ai::create_task_chat_provider(&snapshot.config, ene_ai::AiTaskKind::Chat)
         .map_err(|e| CliError::ExecutionFailed(format!("Chat provider error: {e}")))?;
-    snapshot
-        .memory
+    memory
         .drain_pending_memory_writes(&mind, llm.as_ref(), scheduled.max(1))
         .await
         .map_err(|e| CliError::ExecutionFailed(format!("Drain pending error: {e}")))?;
-    match snapshot
-        .memory
+    match memory
         .count_pending_memory_writes(character_id)
         .await
     {

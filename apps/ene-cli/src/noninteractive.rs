@@ -667,10 +667,9 @@ async fn memory_command(
 
     match action {
         MemoryAction::List { kind } => {
-            require_memory(&snapshot)?;
+            require_memory(memory)?;
             let kind = parse_kind(kind.as_deref())?;
-            let memories = snapshot
-                .memory
+            let memories = memory
                 .list_typed_memories(snapshot.card_name.as_str(), kind, 50)
                 .await
                 .map_err(|e| OutputError::new(ErrorCode::Runtime, format!("list memories: {e}")))?;
@@ -689,7 +688,7 @@ async fn memory_command(
             }
             Ok(EXIT_OK)
         }
-        MemoryAction::Inspect { id } => match snapshot.memory.inspect_typed_memory(*id).await {
+        MemoryAction::Inspect { id } => match memory.inspect_typed_memory(*id).await {
             Ok(Some(m)) => {
                 if json {
                     output::print_json(&m)?;
@@ -712,7 +711,7 @@ async fn memory_command(
             )),
         },
         MemoryAction::Search { query } => {
-            require_memory(&snapshot)?;
+            require_memory(memory)?;
             let results = memory
                 .search_typed_memories_hybrid(
                     snapshot.card_name.as_str(),
@@ -742,8 +741,8 @@ async fn memory_command(
     }
 }
 
-fn require_memory(snapshot: &ene_runtime::EneStateSnapshot) -> Result<(), OutputError> {
-    if snapshot.memory.is_enabled() {
+fn require_memory(memory: &ene_runtime::MemoryHandle) -> Result<(), OutputError> {
+    if memory.is_enabled() {
         Ok(())
     } else {
         Err(OutputError::new(
