@@ -257,10 +257,7 @@ mod tests {
         // Expression markers are not accepted mid-turn; only the end-of-turn
         // resolve result occupies the expression slot.
         let mut arbiter = PerformanceArbiter::default();
-        arbiter.accept(
-            motion_cue("wave", Some(MotionLayer::Upper)),
-            CueSource::Llm,
-        );
+        arbiter.accept(motion_cue("wave", Some(MotionLayer::Upper)), CueSource::Llm);
         arbiter.accept(expr_cue("sad"), CueSource::Affect);
         let result = arbiter.resolve();
         let expr = result
@@ -284,10 +281,7 @@ mod tests {
     fn cancel_all_clears_everything() {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("happy"), CueSource::Llm);
-        arbiter.accept(
-            motion_cue("wave", Some(MotionLayer::Upper)),
-            CueSource::Llm,
-        );
+        arbiter.accept(motion_cue("wave", Some(MotionLayer::Upper)), CueSource::Llm);
         arbiter.accept(PerformanceCue::cancel("all"), CueSource::Llm);
         let result = arbiter.resolve();
         assert!(result.is_empty());
@@ -322,10 +316,7 @@ mod tests {
     fn multiple_kinds_coexist() {
         let mut arbiter = PerformanceArbiter::default();
         arbiter.accept(expr_cue("happy"), CueSource::Llm);
-        arbiter.accept(
-            motion_cue("wave", Some(MotionLayer::Upper)),
-            CueSource::Llm,
-        );
+        arbiter.accept(motion_cue("wave", Some(MotionLayer::Upper)), CueSource::Llm);
         arbiter.accept(PerformanceCue::look_at("user"), CueSource::Llm);
         let result = arbiter.resolve();
         assert_eq!(result.len(), 3);
@@ -352,14 +343,8 @@ mod tests {
     #[test]
     fn upper_and_lower_motion_coexist() {
         let mut arbiter = PerformanceArbiter::default();
-        arbiter.accept(
-            motion_cue("wave", Some(MotionLayer::Upper)),
-            CueSource::Llm,
-        );
-        arbiter.accept(
-            motion_cue("idle", Some(MotionLayer::Lower)),
-            CueSource::Llm,
-        );
+        arbiter.accept(motion_cue("wave", Some(MotionLayer::Upper)), CueSource::Llm);
+        arbiter.accept(motion_cue("idle", Some(MotionLayer::Lower)), CueSource::Llm);
         let result = arbiter.resolve();
         let motion_names: Vec<&str> = result
             .iter()
@@ -374,14 +359,8 @@ mod tests {
     #[test]
     fn cancel_motion_clears_all_layers() {
         let mut arbiter = PerformanceArbiter::default();
-        arbiter.accept(
-            motion_cue("wave", Some(MotionLayer::Upper)),
-            CueSource::Llm,
-        );
-        arbiter.accept(
-            motion_cue("idle", Some(MotionLayer::Lower)),
-            CueSource::Llm,
-        );
+        arbiter.accept(motion_cue("wave", Some(MotionLayer::Upper)), CueSource::Llm);
+        arbiter.accept(motion_cue("idle", Some(MotionLayer::Lower)), CueSource::Llm);
         arbiter.accept(PerformanceCue::cancel("motion"), CueSource::Llm);
         let result = arbiter.resolve();
         assert!(result.is_empty());
