@@ -549,9 +549,34 @@ mod tests {
     #[test]
     fn commitments_block_renders_today_and_tomorrow_terms() {
         // #385: natural relative terms for the same-day and next-day cases.
-        let now = chrono::Utc::now();
-        let today = sample_commitment("t1", "", None, Some(now + chrono::Duration::hours(1)));
-        let tomorrow = sample_commitment("t2", "", None, Some(now + chrono::Duration::days(1)));
+        // Anchor `now` to a fixed instant and derive both due dates from its
+        // calendar date at midday, so a late-evening UTC run cannot roll the
+        // same-day deadline across midnight (which would flip days to 1).
+        let now = chrono::DateTime::<chrono::Utc>::from_timestamp(1_752_537_600, 0)
+            .expect("fixed anchor timestamp is in range");
+        let today = sample_commitment(
+            "t1",
+            "",
+            None,
+            Some(
+                now.date_naive()
+                    .and_hms_opt(12, 0, 0)
+                    .expect("12:00 is valid")
+                    .and_utc(),
+            ),
+        );
+        let tomorrow = sample_commitment(
+            "t2",
+            "",
+            None,
+            Some(
+                now.date_naive()
+                    .and_hms_opt(12, 0, 0)
+                    .expect("12:00 is valid")
+                    .and_utc()
+                    + chrono::Duration::days(1),
+            ),
+        );
         let ja = render_commitments_block(&[today.clone(), tomorrow.clone()], "ja", now);
         assert!(
             ja.contains("（期限: 本日中）"),
