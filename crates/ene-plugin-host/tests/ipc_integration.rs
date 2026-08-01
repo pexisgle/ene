@@ -381,7 +381,7 @@ async fn wait_for_in_flight(in_flight: &AtomicUsize, expected: usize) {
 }
 
 /// A mock plugin server that dispatches each request in its own spawned task,
-/// mirroring the real `ene-plugin` server's concurrent read loop (#431). A
+/// mirroring the real `ene-plugin` server's concurrent read loop. A
 /// dedicated writer lock serializes outgoing frames so concurrent handlers
 /// never interleave bytes on the socket.
 ///
@@ -1159,7 +1159,7 @@ async fn transparent_reconnection_after_transport_failure() {
     cleanup_path(&socket_path);
 }
 
-// ── Test: Request multiplexing (#431) ────────────────────────────────────
+// ── Test: Request multiplexing ────────────────────────────────────
 
 /// Two slow tool calls against the *same* connection must be in flight
 /// concurrently: both reach the plugin (the gate observes two in-flight) before
@@ -1219,7 +1219,7 @@ async fn ping_completes_while_slow_call_pending() {
 /// The connection-level concurrency bound (sourced from `max_concurrent`) caps
 /// in-flight requests: with a bound of 1, a second slow call cannot reach the
 /// plugin until the first completes. This is the host-side protection that
-/// keeps the plugin from being flooded (#431 / #435).
+/// keeps the plugin from being flooded.
 #[tokio::test]
 async fn in_flight_requests_are_bounded_by_max_concurrent() {
     // Bound of 1: strictly serial in-flight.
@@ -1260,8 +1260,7 @@ async fn in_flight_requests_are_bounded_by_max_concurrent() {
 
 /// Dropping the plugin while N calls are in flight must fail every caller
 /// **promptly** — well inside the 2-minute `DEFAULT_TIMEOUT` — rather than
-/// leaving the waiters orphaned until their own timeout (#431 review, items 1
-/// and 3).
+/// leaving the waiters orphaned until their own timeout.
 ///
 /// `reconnect_from` aborts the old reader task, which is suspended inside
 /// `read_plugin_response` and therefore never reaches the trailing `fail_all()`
@@ -1340,8 +1339,7 @@ async fn in_flight_calls_fail_promptly_when_plugin_drops() {
     cleanup_path(&socket_path);
 }
 
-/// Concurrent transport failures must coalesce into a single reconnect (#431
-/// review, item 4).
+/// Concurrent transport failures must coalesce into a single reconnect.
 ///
 /// Two `mock.echo` calls are issued back to back against a plugin whose socket
 /// has been removed, so both writes fail with a transport error and both enter

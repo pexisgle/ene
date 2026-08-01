@@ -170,6 +170,7 @@ Configures context-window packing, hybrid memory recall, emotion decay, characte
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
       "commitment_boost": 0.25,
+      "access_boost_half_life_days": 14.0,
       "commitment_title_similarity_threshold": 0.82,
       "contradiction_title_similarity_threshold": 0.82,
       "min_confidence_to_persist": 0.65,
@@ -212,7 +213,10 @@ near `1.0`; recent/lexical-only candidates land around `0.1–0.5`; unrelated
 noise scores `0.0`. `recall_min_score` (default `0.10`) filters the final
 ranking, `recall_similarity_threshold` (default `0.35`) gates the vector-gather
 step, and `commitment_boost` (default `0.25`) lets active promises surface even
-with zero query relevance.
+with zero query relevance. `access_boost_half_life_days` (default `14.0`, matching
+`ene_rag::ACCESS_BOOST_HALF_LIFE_DAYS`) controls how quickly prior-access boosts
+fade in the quality factor — independent of `default_forgetting_half_life_days`
+(content forgetting / recency).
 
 `mind.emotion.classifier_language` (default `"en"`) selects the prompt-library
 language used for the affect classifier and the cognitive output contract, and

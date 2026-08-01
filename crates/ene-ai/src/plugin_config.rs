@@ -1,5 +1,4 @@
-//! Provider-specific settings sourced from the `plugins.list.<name>` sections
-//! (#313).
+//! Provider-specific settings sourced from the `plugins.list.<name>` sections.
 //!
 //! These settings used to live in `AiConfig` (which `ene-ai` never read
 //! itself) and were consumed only by the in-process local providers

@@ -35,7 +35,7 @@ pub use ene_store::db_server;
 /// Opt-in diagnostics facade (pipeline detail, provider health, memory).
 ///
 /// Strictly observability — control operations (character swap,
-/// compression, tools) live on [`EneHandle`] itself (#406).
+/// compression, tools) live on [`EneHandle`] itself.
 pub mod diagnostics;
 mod empty_response_log;
 /// Core error types.
@@ -44,33 +44,33 @@ pub mod error;
 pub mod handle;
 /// System prompt and message assembly helpers.
 ///
-/// Not part of the stable public API v1 contract (#189). Kept visible for the
+/// Not part of the stable public API v1 contract. Kept visible for the
 /// CLI `/prompt` debug command and integration tests.
 #[doc(hidden)]
 pub mod message_builder;
 mod proactive;
-/// Stable public API v1 facade: version, JSON event mirrors, redaction (#189).
+/// Stable public API v1 facade: version, JSON event mirrors, redaction.
 pub mod public_api;
 /// Read-only session and pending-candidate query handles that bypass the
-/// turn-execution actor mailbox entirely (#271).
+/// turn-execution actor mailbox entirely.
 pub mod query;
 /// Permission types and streaming engine internals.
 ///
-/// Not part of the stable public API v1 contract (#189). Prefer [`EneHandle`].
+/// Not part of the stable public API v1 contract. Prefer [`EneHandle`].
 #[doc(hidden)]
 pub mod streaming;
 mod streaming_cognitive;
 /// Bounded-task admission config for the turn actor's background
 /// `JoinSet`s (Stage 8).
 pub mod task_config;
-/// Tool registry operations handle (list / search / call / invalidate) (#406).
+/// Tool registry operations handle (list / search / call / invalidate).
 pub mod tools;
 /// Type-safe identifiers for runtime concepts.
 pub mod types;
-/// Actor-native undo stack and metadata (#178).
+/// Actor-native undo stack and metadata.
 pub mod undo;
 /// Screen-image vision summarization handle, bypasses the turn-execution
-/// actor mailbox entirely (#271).
+/// actor mailbox entirely.
 pub mod vision;
 
 // ── Bootstrap helpers ──
@@ -80,7 +80,7 @@ pub use bootstrap::{open_from_disk, open_ready, open_with_config};
 // ── Actor types ──
 /// Actor handle, events, status, and state snapshot.
 ///
-/// The event bus is split into three channels (#272): [`EneEvent`] /
+/// The event bus is split into three channels: [`EneEvent`] /
 /// [`EneEventReceiver`] (chat bus, via [`EneHandle::subscribe`]),
 /// [`AudioChunk`] / [`AudioStreamReceiver`] (audio channel, via
 /// [`EneHandle::take_audio_stream`]), and [`LifecycleEvent`] /
@@ -92,7 +92,7 @@ pub use handle::{
     ShutdownTimeout, TerminalReason,
 };
 
-// ── Read-only query / vision handles (#271) ──
+// ── Read-only query / vision handles ──
 /// Pending memory-candidate approval handle and its summary DTO.
 pub use query::candidates::{MemoryCandidateHandle, PendingCandidateSummary};
 /// Read-only session query handle (list / export / import / search / archive).
@@ -110,8 +110,7 @@ pub use tools::ToolHandle;
 
 // ── Public API v1 ──
 /// Public API version constant, JSON chat/lifecycle-event mirrors, session
-/// DTOs, and the unified [`public_api::PublicApiError`] category (#269,
-/// #272).
+/// DTOs, and the unified [`public_api::PublicApiError`] category.
 pub use public_api::{
     API_VERSION, PublicApiError, PublicChatEvent, PublicExportedMessage, PublicLifecycleEvent,
     PublicPerfCue, PublicSessionMeta, redact_text, redact_tool_arguments,
@@ -154,7 +153,7 @@ pub use ene_mind::CardName;
 /// Unified history entry (re-exported from `ene-mind`).
 #[doc(no_inline)]
 pub use ene_mind::HistoryEntry;
-/// Host observation DTO for proactive speech (#103).
+/// Host observation DTO for proactive speech.
 #[doc(no_inline)]
 pub use ene_mind::ProactiveObservation;
 /// Unique session identifier (re-exported from `ene-mind`).
@@ -184,9 +183,9 @@ pub use streaming::MultiAnswer;
 pub use streaming::PermissionDecision;
 /// User's response to an interactive tool's input request.
 pub use streaming::UserInputResponse;
-/// Permission grant scope and lifetime (#177).
+/// Permission grant scope and lifetime.
 pub use streaming::{GrantType, PermissionScope};
-/// Undo report returned by [`EneHandle::undo`] (#178).
+/// Undo report returned by [`EneHandle::undo`].
 pub use undo::UndoReport;
 
 // ── Prompt builder ──

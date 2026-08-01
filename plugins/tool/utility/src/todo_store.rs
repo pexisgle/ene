@@ -614,6 +614,12 @@ mod tests {
     /// Spawns a mock DB server on a temporary Unix socket and returns
     /// the socket path. The server runs until the returned `JoinHandle`
     /// is dropped or the listener is closed.
+    ///
+    /// The listener is bound *before* the accept loop is spawned, so the socket
+    /// is guaranteed to exist by the time this returns. Polling for the socket
+    /// file after spawning would be a race: the poll gave up silently after a
+    /// bounded number of yields, and a connect that lost that race failed with
+    /// a bare `NotFound` far from its cause.
     async fn spawn_mock_db() -> (PathBuf, tokio::task::JoinHandle<()>) {
         let socket_path = std::env::temp_dir().join(format!(
             "ene-utility-test-{}-{}.sock",
@@ -624,10 +630,10 @@ mod tests {
                 .as_nanos()
         ));
         cleanup_path(&socket_path);
-        let path = socket_path.clone();
+
+        let mut listener = IpcListener::bind(&socket_path).unwrap();
 
         let handle = tokio::spawn(async move {
-            let mut listener = IpcListener::bind(&path).unwrap();
             let mut db = MockDb::new();
             loop {
                 let Ok(mut stream) = listener.accept().await else {
@@ -643,12 +649,6 @@ mod tests {
             }
         });
 
-        for _ in 0..100 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
         (socket_path, handle)
     }
 

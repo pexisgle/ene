@@ -377,7 +377,7 @@ pub fn score_candidate(options: &Query<'_>, candidate: &GatheredCandidate) -> Me
         item.last_accessed_at,
         item.updated_at,
         options.now,
-        ACCESS_BOOST_HALF_LIFE_DAYS,
+        options.access_boost_half_life_days,
     );
     let contradiction = contradiction_penalty(item.status);
     let stale = stale_penalty(item.status, options.now, item.valid_until);
@@ -563,6 +563,7 @@ mod tests {
             weights: HybridSearchWeights::default(),
             time_range: None,
             decay_half_life_days: 30.0,
+            access_boost_half_life_days: ACCESS_BOOST_HALF_LIFE_DAYS,
             now,
             min_score: 0.0,
             commitment_boost: 0.25,
@@ -1078,5 +1079,33 @@ mod tests {
         let full = access_boost_score(10, Some(now), now, now, 14.0);
         let half = access_boost_score(10, Some(one_half_life_ago), now, now, 14.0);
         assert!((half - full * 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn score_candidate_uses_access_boost_half_life_from_options() {
+        let now = Utc::now();
+        let accessed = now - chrono::Duration::days(14);
+        let mut item = sample_item(MemoryStatus::Active);
+        item.access_count = 10;
+        item.last_accessed_at = Some(accessed);
+        let candidate = GatheredCandidate {
+            item,
+            vector_similarity: 0.9,
+            sources: vec![MemoryCandidateSource::Vector],
+        };
+
+        let mut short = sample_query(now);
+        short.access_boost_half_life_days = 7.0;
+        let mut long = sample_query(now);
+        long.access_boost_half_life_days = 28.0;
+
+        let short_score = score_candidate(&short, &candidate);
+        let long_score = score_candidate(&long, &candidate);
+        assert!(
+            short_score.access_boost < long_score.access_boost,
+            "shorter half-life must decay access boost faster: short={} long={}",
+            short_score.access_boost,
+            long_score.access_boost
+        );
     }
 }

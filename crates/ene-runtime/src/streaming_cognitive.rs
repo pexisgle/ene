@@ -60,13 +60,13 @@ async fn send_audio_chunk(audio_tx: &tokio::sync::mpsc::Sender<AudioChunk>, chun
                     tracing::error!(
                         component = "TtsPipeline",
                         "audio channel still full after {FINAL_CHUNK_SEND_TIMEOUT:?}; \
-                         dropping final PCM marker (#272)"
+                         dropping final PCM marker"
                     );
                 }
             } else {
                 tracing::warn!(
                     component = "TtsPipeline",
-                    "audio channel full; dropping non-final PCM chunk (#272)"
+                    "audio channel full; dropping non-final PCM chunk"
                 );
             }
         }

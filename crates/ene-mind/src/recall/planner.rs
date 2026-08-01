@@ -124,6 +124,7 @@ impl RecallPlanner {
             query_affect: plan.search.query_affect,
             weights: memory.hybrid_weights,
             decay_half_life_days: plan.search.decay_half_life_days,
+            access_boost_half_life_days: memory.access_boost_half_life_days.max(0.0),
             now,
             min_score: plan.search.min_score,
             commitment_boost: memory.commitment_boost,
@@ -449,7 +450,7 @@ mod tests {
         assert_eq!(
             search.exclude_kinds,
             vec![ene_store::MemoryKind::Reflection],
-            "recall queries must exclude reflection memories while the pipeline is enabled (#347)"
+            "recall queries must exclude reflection memories while the pipeline is enabled"
         );
 
         // With the pipeline disabled the exclusion must be off too: reflections

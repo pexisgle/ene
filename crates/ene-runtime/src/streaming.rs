@@ -186,7 +186,7 @@ pub(crate) async fn await_permission_decision(
                 component = "streaming",
                 request_id = %request_id,
                 timeout_ms,
-                "permission prompt timed out with no consumer response; treating as denied (#401)"
+                "permission prompt timed out with no consumer response; treating as denied"
             );
             None
         }
@@ -239,7 +239,7 @@ pub(crate) async fn await_user_input_response(
                 component = "streaming",
                 request_id = %request_id,
                 timeout_ms,
-                "user-input prompt timed out with no consumer response; treating as cancelled (#401)"
+                "user-input prompt timed out with no consumer response; treating as cancelled"
             );
             None
         }
@@ -430,27 +430,31 @@ pub(crate) async fn select_relevant_tools(
 /// Tool calls the LLM returns in a single round are split by their declared
 /// side effects:
 ///
+/// - [`EneEvent::ToolCallStart`] is emitted when a call actually starts. In a
+///   parallel round every call starts at once, so the whole batch is announced
+///   before dispatch (otherwise the UI would show nothing until all of them
+///   finished). In a sequential round each call is announced as Phase 2 reaches
+///   it, so the event still tracks what is really running.
 /// - When **every** call in the round is side-effect-free
-///   (`SideEffects::ReadOnly`, non-background), they run first, concurrently,
-///   in a bounded batch of at most
+///   (`SideEffects::ReadOnly`, non-background), they then run concurrently in a
+///   bounded batch of at most
 ///   [`ToolExecutionContext::parallel_tool_calls_max`] at once. Only the raw
-///   dispatch runs in parallel — no events are emitted and no permission /
-///   user-input prompts are resolved in this phase.
+///   dispatch runs in parallel — no permission / user-input prompts are
+///   resolved in this phase.
 /// - **Mixed rounds are strictly sequential.** Parallelizing only the
 ///   read-only calls of a mixed round would let a later read overtake an
 ///   earlier write in the same response (the classic read-after-write: the
 ///   model edits a file, then asks to read it back — the read must observe the
 ///   write). The model's edit-then-verify pattern is real, so correctness wins
 ///   over the modest speedup of a mixed round.
-/// - **All** calls are then finalized in the *original* order: each emits
-///   `ToolCallStart`, consumes its precomputed parallel result (or runs
-///   sequentially when the round was mixed), resolves any chained permission /
-///   user-input prompts, records the audit entry and undo checkpoint, and
-///   emits `ToolCallResult`.
+/// - **All** calls are then finalized in the *original* order: each consumes
+///   its precomputed parallel result (or runs sequentially when the round was
+///   mixed), resolves any chained permission / user-input prompts, records the
+///   audit entry and undo checkpoint, and emits `ToolCallResult`.
 ///
 /// Finalizing in order preserves every ordering-sensitive invariant:
-/// `EneEvent::ToolCallStart` / `ToolCallResult` ordering for the UI, the undo
-/// stack order, [`ToolResultSummary`] order, and the `round_messages` order.
+/// `ToolCallResult` ordering for the UI, the undo stack order,
+/// [`ToolResultSummary`] order, and the `round_messages` order.
 /// A read-only tool that unexpectedly returns `PermissionRequired` /
 /// `UserInputRequired` is resolved on the sequential finalize path, so
 /// interactive prompts are never surfaced concurrently.
@@ -486,49 +490,57 @@ pub(crate) async fn perform_tool_executions(
         && tool_calls
             .iter()
             .all(|call| ctx.parallelizable.contains(&call.name));
-    let mut parallel_results = if ctx.parallel_tool_calls_max > 0 && all_parallelizable {
-        let parallel_indices: Vec<usize> = tool_calls
-            .iter()
-            .enumerate()
-            .filter(|(_, call)| ctx.parallelizable.contains(&call.name))
-            .map(|(idx, _)| idx)
-            .collect();
+    let parallel_round = ctx.parallel_tool_calls_max > 0 && all_parallelizable;
 
+    // A parallel round genuinely starts every call at once, so announce them
+    // all before dispatching — otherwise the UI would show nothing until the
+    // whole batch completed. A sequential round announces each call as it is
+    // reached in Phase 2, which is when it actually starts.
+    if parallel_round {
+        for call in &tool_calls {
+            drop(ctx.event_tx.send(EneEvent::ToolCallStart {
+                turn: ctx.turn.clone(),
+                origin: ctx.origin,
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            }));
+        }
+    }
+
+    let mut parallel_results = if parallel_round {
         let mut results: Vec<Option<Result<String, PluginHostError>>> =
             std::iter::repeat_with(|| None)
                 .take(tool_calls.len())
                 .collect();
-        if !parallel_indices.is_empty() {
-            let stream = futures::stream::iter(parallel_indices.into_iter().map(|idx| {
-                let call = tool_calls[idx].clone();
-                let call_ctx = call_ctx.clone();
-                let registry = ctx.registry;
-                let background_capable = ctx.background_capable;
-                let deferred_tool_tx = ctx.deferred_tool_tx;
-                let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
-                async move {
-                    let outcome = dispatch_tool_call(
-                        registry,
-                        background_capable,
-                        deferred_tool_tx,
-                        &call.name,
-                        &call.arguments,
-                        &call_ctx,
-                        tool_timeout,
-                    )
-                    .await;
-                    (idx, outcome)
-                }
-            }));
-            // `buffer_unordered` caps in-flight calls at the configured bound;
-            // `collect` drains them all before Phase 2 starts.
-            let completed: Vec<(usize, Result<String, PluginHostError>)> = stream
-                .buffer_unordered(ctx.parallel_tool_calls_max)
-                .collect()
+        let stream = futures::stream::iter((0..tool_calls.len()).map(|idx| {
+            let call = tool_calls[idx].clone();
+            let call_ctx = call_ctx.clone();
+            let registry = ctx.registry;
+            let background_capable = ctx.background_capable;
+            let deferred_tool_tx = ctx.deferred_tool_tx;
+            let tool_timeout = std::time::Duration::from_millis(ctx.timeout_ms);
+            async move {
+                let outcome = dispatch_tool_call(
+                    registry,
+                    background_capable,
+                    deferred_tool_tx,
+                    &call.name,
+                    &call.arguments,
+                    &call_ctx,
+                    tool_timeout,
+                )
                 .await;
-            for (idx, outcome) in completed {
-                results[idx] = Some(outcome);
+                (idx, outcome)
             }
+        }));
+        // `buffer_unordered` caps in-flight calls at the configured bound;
+        // `collect` drains them all before Phase 2 starts.
+        let completed: Vec<(usize, Result<String, PluginHostError>)> = stream
+            .buffer_unordered(ctx.parallel_tool_calls_max)
+            .collect()
+            .await;
+        for (idx, outcome) in completed {
+            results[idx] = Some(outcome);
         }
         results
     } else {
@@ -543,12 +555,16 @@ pub(crate) async fn perform_tool_executions(
         let name = call.name.clone();
         let args = call.arguments.clone();
 
-        drop(ctx.event_tx.send(EneEvent::ToolCallStart {
-            turn: ctx.turn.clone(),
-            origin: ctx.origin,
-            name: name.clone(),
-            arguments: args.clone(),
-        }));
+        // Sequential rounds announce each call here, where it actually starts;
+        // a parallel round already announced the whole batch before dispatch.
+        if !parallel_round {
+            drop(ctx.event_tx.send(EneEvent::ToolCallStart {
+                turn: ctx.turn.clone(),
+                origin: ctx.origin,
+                name: name.clone(),
+                arguments: args.clone(),
+            }));
+        }
 
         // Warn before executing an irreversible operation. Such
         // actions are never placed on the undo stack, so the user is told
@@ -1854,7 +1870,7 @@ mod tests {
         // suite.
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
             .await
-            .expect("executor hung: unanswered permission prompt was not bounded (#401)");
+            .expect("executor hung: unanswered permission prompt was not bounded");
         let output = result.expect("executor returned error");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -1952,7 +1968,7 @@ mod tests {
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
             .await
-            .expect("executor hung: cancel was not observed by the permission wait (#401)");
+            .expect("executor hung: cancel was not observed by the permission wait");
         drop(canceller.await);
         let output = result.expect("executor returned error");
 
@@ -2042,7 +2058,7 @@ mod tests {
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
             .await
-            .expect("executor hung: unanswered user-input prompt was not bounded (#401)");
+            .expect("executor hung: unanswered user-input prompt was not bounded");
         let output = result.expect("executor returned error");
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);

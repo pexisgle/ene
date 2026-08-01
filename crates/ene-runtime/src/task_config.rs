@@ -33,10 +33,12 @@
 //!   likewise spawned detached by the stream task, but — unlike the
 //!   classifier — its outcome drives user-visible events
 //!   (`LifecycleEvent::PendingCandidateAvailable` and
-//!   `DiagnosticEvent::MemoryWrite`). A rejected admission therefore
-//!   still consumes the outcome via a detached task, so those
-//!   events fire regardless of admission; the only loss is panic
-//!   supervision of that consumer, not the events themselves.
+//!   `DiagnosticEvent::MemoryWrite`). Concurrent outcome consumers are
+//!   limited by a semaphore of this size; waiters remain in the supervised
+//!   `JoinSet` (hard-dropped only when that waiter queue exceeds
+//!   `memory_writer_cap * 4`). `cap == 0` rejects every drain with
+//!   `TaskRejected` but still runs a short-lived supervised consumer so
+//!   those events are not lost.
 //! - `search_cap` — `EneCommand::SearchTools` / tool-search jobs.
 //! - `bg_command_cap` — heavy command-handler work (GGUF model load,
 //!   plugin host restart) spawned off the actor's main loop to prevent
@@ -91,8 +93,13 @@ ene_config::define_config!(
         /// tasks (`ENE_TOOLS__CLASSIFIER_CAP`).
         #[serde(default = "default_classifier_cap")]
         pub classifier_cap: usize = default_classifier_cap(),
-        /// Max concurrently in-flight deferred memory-writer supervisor
-        /// tasks (`ENE_TOOLS__MEMORY_WRITER_CAP`).
+        /// Max concurrently in-flight deferred memory-writer outcome
+        /// consumers (`ENE_TOOLS__MEMORY_WRITER_CAP`). Waiters beyond this
+        /// concurrency stay supervised in the actor `JoinSet` until a permit
+        /// frees; the waiter queue itself is hard-capped at
+        /// `memory_writer_cap * 4`. Zero rejects every drain with
+        /// `TaskRejected` while still consuming the outcome on a short-lived
+        /// supervised task.
         #[serde(default = "default_memory_writer_cap")]
         pub memory_writer_cap: usize = default_memory_writer_cap(),
         /// Max concurrently in-flight tool-search jobs

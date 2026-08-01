@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Relative `$schema` pointer auto-filled into `settings.json` on save (#331).
+/// Relative `$schema` pointer auto-filled into `settings.json` on save.
 ///
 /// Matches the on-disk convention and the `schema/settings.schema.json` layout
 /// produced by [`write_schemas`], so editors resolve completions without the
@@ -159,7 +159,7 @@ pub struct EneConfig {
     ///
     /// Declared first so it always serialises at the top of `settings.json`
     /// (ahead of `version`), and skipped while empty so in-memory defaults
-    /// carry no bogus path. [`save_full_config`] auto-fills it on save (#331).
+    /// carry no bogus path. [`save_full_config`] auto-fills it on save.
     #[serde(rename = "$schema", default, skip_serializing_if = "String::is_empty")]
     pub schema: String,
     /// Schema version number.
@@ -182,7 +182,7 @@ pub struct EneConfig {
     /// Catch-all for provider, tool, and other sub-configurations.
     ///
     /// An [`IndexMap`] so the user's hand-arranged section order is preserved
-    /// across a save and newly added sections append at the end (#331). Its
+    /// across a save and newly added sections append at the end. Its
     /// `PartialEq` is order-insensitive, so the "skip if unchanged" guards keep
     /// their previous behaviour.
     ///
@@ -190,7 +190,7 @@ pub struct EneConfig {
     /// hands this map back in alphabetical order; [`load_full_config_from`]
     /// re-sorts it into the file's original top-level key order immediately
     /// after loading so the user's order survives the load → mutate → save
-    /// cycle (#331).
+    /// cycle.
     pub extra: IndexMap<String, serde_json::Value>,
 }
 
@@ -261,7 +261,7 @@ impl EneConfig {
     /// Serialise and merge a sub-section into the `extra` map using the type's associated path.
     ///
     /// Only the section's *declared* fields are written; unknown *immediate
-    /// child* keys already present at the section path are preserved (#327).
+    /// child* keys already present at the section path are preserved.
     /// The merge is one level deep: declared fields that are themselves objects
     /// (e.g. `plugins.list`, `ai.tasks`) are replaced wholesale, so unknown
     /// keys nested *beneath* them do not survive. This replaces the previous
@@ -269,7 +269,7 @@ impl EneConfig {
     /// such as `tools.rag` when writing `ToolRuntimeConfig`.
     ///
     /// Serialisation goes through [`section_to_value`] to avoid the f32→f64
-    /// widening artefact that `serde_json::to_value` introduces (#329).
+    /// widening artefact that `serde_json::to_value` introduces.
     ///
     /// Refuses types whose `TARGET` is `Character`; those
     /// sections live in `CharacterConfig::extra` and must
@@ -304,12 +304,12 @@ impl EneConfig {
     /// Set a value at a dotted JSON path under `extra` (e.g. `ai.tasks.chat.model`).
     ///
     /// `value` is parsed as JSON when possible; otherwise treated as a string.
-    /// Used by CLI `/config set` (#241).
+    /// Used by CLI `/config set`.
     ///
     /// `$schema` is routed to the declared [`schema`](Self::schema) field
     /// rather than `extra`; writing it into `extra` would put a second
     /// `$schema` key on disk next to the declared field, and the resulting
-    /// duplicate field would fail to reload (#331).
+    /// duplicate field would fail to reload.
     pub fn set_path(&mut self, dotted_path: &str, raw_value: &str) -> Result<(), EneConfigError> {
         let path: Vec<&str> = dotted_path
             .split('.')
@@ -335,7 +335,7 @@ impl EneConfig {
         set_nested(&mut self.extra, &path, value)
     }
 
-    /// Read a value at a dotted JSON path under `extra` (#241).
+    /// Read a value at a dotted JSON path under `extra`.
     ///
     /// Walks the map directly instead of serialising the entire `extra`
     /// map into a JSON `Value` tree. `$schema` reads from the declared
@@ -368,7 +368,7 @@ impl EneConfig {
 /// `serde_json::to_value` routes f32 through `Number::from_f32`, which stores
 /// `f as f64` internally. When the resulting `Value` tree is later written to
 /// disk, ryu formats the *widened* f64, producing 17-digit noise such as
-/// `0.6000000238418579` instead of `0.6` (#329).
+/// `0.6000000238418579` instead of `0.6`.
 ///
 /// The string round-trip avoids this: `serde_json::to_string` calls ryu's
 /// native f32 formatter (shortest representation that round-trips to the same
@@ -407,7 +407,7 @@ pub(crate) fn read_at_path<'a>(
 }
 
 /// Merges a serialised section (`incoming`) over the existing subtree at the
-/// section path (#327).
+/// section path.
 ///
 /// When both sides are JSON objects, the section's declared fields are layered
 /// on top of the existing object so unknown sibling sub-keys survive; the
@@ -523,7 +523,7 @@ pub(crate) fn set_nested(
     Ok(())
 }
 
-/// Applies the user's in-session edits onto the raw on-disk JSON layer (#326).
+/// Applies the user's in-session edits onto the raw on-disk JSON layer.
 ///
 /// This is a three-way merge keyed on `base` — the layered config
 /// (defaults → JSON → env) the loader produced — which is the common ancestor
@@ -611,7 +611,7 @@ fn three_way_merge(
     }
 }
 
-/// Serialises only the JSON layer of `config` for persistence (#326).
+/// Serialises only the JSON layer of `config` for persistence.
 ///
 /// The in-memory [`EneConfig`] is the result of layering defaults → JSON file
 /// → `ENE_` env vars, so serialising it directly would bake transient env
@@ -965,6 +965,7 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
         ))
     })?;
 
+    let from_version = crate::migration::document_version(&doc);
     let migrated = crate::migration::apply_migrations(doc)?;
     let migrated_text = serde_json::to_string_pretty(&migrated)?;
 
@@ -972,6 +973,34 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
     // already-current file is never rewritten (and its mtime/permissions left
     // alone) on every load.
     if migrated_text != raw {
+        // Pre-migration backup so a buggy rewrite is recoverable. Named after
+        // the version being migrated *from*, so a later schema bump keeps its
+        // own snapshot instead of being skipped because an older backup exists.
+        // Written at most once per source version; failure is non-fatal (same
+        // as a failed persist).
+        let backup_path = {
+            let mut os = config_path.as_os_str().to_owned();
+            os.push(format!(".v{from_version}.bak"));
+            PathBuf::from(os)
+        };
+        if !backup_path.exists() {
+            if let Err(e) = std::fs::copy(config_path, &backup_path) {
+                tracing::warn!(
+                    component = "Config",
+                    path = %config_path.display(),
+                    backup = %backup_path.display(),
+                    error = %e,
+                    "could not back up settings.json before migration; continuing"
+                );
+            } else {
+                tracing::info!(
+                    component = "Config",
+                    backup = %backup_path.display(),
+                    "backed up settings.json before migration"
+                );
+            }
+        }
+
         // A read-only filesystem (e.g. a packaged install) must not prevent
         // the app from starting: the migration already ran in memory, so the
         // load can proceed with the migrated document; the write is only a
@@ -1059,8 +1088,8 @@ fn extract_layered_config(config_path: &Path) -> Result<EneConfig, EneConfigErro
     // keeps insertion order) to recover the original top-level key order, then
     // re-sort `extra` into that order right here. Because the app lifecycle is
     // always load → mutate → save, fixing the order at load means the in-memory
-    // `IndexMap` — and therefore every later save — keeps the user's order
-    // (#331). Newly added sections append at the end.
+    // `IndexMap` — and therefore every later save — keeps the user's order.
+    // Newly added sections append at the end.
     restore_top_level_order(&mut config.extra, &read_top_level_order(config_path));
 
     update_global_config(config.clone());
@@ -1088,7 +1117,7 @@ fn read_top_level_order(config_path: &Path) -> Vec<String> {
 /// Guarded by a process-wide [`std::sync::Once`] so the (idempotent but
 /// wasteful) schema regeneration runs exactly once per process, even though
 /// several startup entry points (CLI `init`, desktop `first_launch_setup`,
-/// runtime `open_from_disk`/`open_with_config`) all call it (#325). Each
+/// runtime `open_from_disk`/`open_with_config`) all call it. Each
 /// schema file is written via [`atomic_write`] so a crash mid-write can
 /// never leave a truncated schema behind.
 pub fn write_schemas(assets_dir: &Path) {
@@ -1130,7 +1159,7 @@ fn write_schemas_inner(assets_dir: &Path) {
 /// The rename is atomic on POSIX when source and destination reside on the
 /// same filesystem, which is guaranteed by placing the temp file in the
 /// target's parent directory. This prevents partial or corrupt config files
-/// if the process crashes mid-write (#325).
+/// if the process crashes mid-write.
 ///
 /// The temporary file name embeds the process id and a monotonic counter so
 /// concurrent writers targeting the same path never collide on the temp
@@ -1251,7 +1280,7 @@ fn fsync_dir(dir: &Path) {
     }
 }
 
-/// Reorders `extra` in place so its keys follow `order` (#331).
+/// Reorders `extra` in place so its keys follow `order`.
 ///
 /// Keys listed in `order` come first (in that order); any key absent from
 /// `order` — a section added after load — keeps its existing relative position
@@ -1277,14 +1306,14 @@ fn restore_top_level_order(extra: &mut IndexMap<String, serde_json::Value>, orde
 }
 
 /// Saves the config file in a type-safe manner, using an atomic
-/// temp-file-then-rename strategy to avoid partial writes (#325).
+/// temp-file-then-rename strategy to avoid partial writes.
 ///
 /// Only the JSON layer is persisted: `ENE_` env-var overrides and defaults are
-/// excluded so a transient env override never becomes permanent (#326). See
+/// excluded so a transient env override never becomes permanent. See
 /// [`serialize_json_layer`] for the layer-reconstruction details.
 ///
 /// `$schema` is auto-filled on the serialised copy when empty so the persisted
-/// file always leads with the schema pointer (#331).
+/// file always leads with the schema pointer.
 ///
 /// # Concurrent edits
 ///
@@ -1472,7 +1501,7 @@ mod tests {
 
     /// An old-version `settings.json` is migrated to the current version on
     /// load, the migrated document is persisted back to disk, and the loaded
-    /// [`EneConfig`] reflects the migrated fields (#330).
+    /// [`EneConfig`] reflects the migrated fields.
     #[test]
     fn load_migrates_old_version_and_persists() {
         crate::migration::tests::with_test_version(2, || {
@@ -1511,6 +1540,17 @@ mod tests {
             assert!(
                 on_disk.get("name").is_none(),
                 "old field must be rewritten away"
+            );
+
+            let backup = path.with_file_name("settings.json.v1.bak");
+            let backup_raw = std::fs::read_to_string(&backup).expect("pre-migration backup exists");
+            assert!(
+                backup_raw.contains(r#""name": "Hoshino""#),
+                "backup must preserve the pre-migration document"
+            );
+            assert!(
+                !backup_raw.contains(r#""user_name""#),
+                "backup must not contain post-migration fields"
             );
         });
     }
@@ -1571,7 +1611,7 @@ mod tests {
     /// A current-version `settings.json` is loaded without being rewritten: the
     /// on-disk document is logically identical after the load, and because the
     /// migration is a no-op the file is not re-written (its bytes, mtime, and
-    /// permissions are preserved) (#330).
+    /// permissions are preserved).
     #[test]
     fn load_leaves_current_version_untouched() {
         crate::migration::tests::with_test_version(1, || {
@@ -1596,7 +1636,7 @@ mod tests {
 
     /// A `settings.json` newer than the build supports is rejected with
     /// [`EneConfigError::ConfigVersionTooNew`] and left untouched, so a newer
-    /// build can still read it after a downgrade (#330).
+    /// build can still read it after a downgrade.
     #[test]
     fn load_rejects_newer_version_without_touching_file() {
         crate::migration::tests::with_test_version(1, || {
@@ -1798,7 +1838,7 @@ mod tests {
     }
 
     /// The saved document preserves the raw file's top-level key order, with
-    /// keys added during the session appended at the end (#326 / #331).
+    /// keys added during the session appended at the end.
     #[test]
     fn save_preserves_raw_key_order() {
         let _guard = migration_guard();
@@ -1839,7 +1879,7 @@ mod tests {
     /// values into `settings.json`; the raw JSON layer is written back as-is.
     ///
     /// The one exception is the `version` field, which the config-version
-    /// migration mechanism (#330) stamps explicitly on every document; a file
+    /// migration mechanism stamps explicitly on every document; a file
     /// without it is treated as version 1.
     #[test]
     fn defaults_not_forced_to_disk_on_save() {
@@ -2386,7 +2426,7 @@ mod tests {
 
     /// On Unix, rewriting an existing file whose mode was tightened (e.g.
     /// `0600` for a `settings.json` holding `provider.api_key`) must not
-    /// widen it back to the default `0644` (#325 review finding).
+    /// widen it back to the default `0644`.
     #[cfg(unix)]
     #[test]
     fn atomic_write_preserves_existing_permissions() {
@@ -2409,7 +2449,7 @@ mod tests {
         );
     }
 
-    // ── Float precision regression tests (#329) ──────────────────────
+    // ── Float precision regression tests ──────────────────────
 
     /// A struct with f32 fields, mirroring the shape of real config sections
     /// (e.g. `MindMemoryConfig`, `CharacterConfig`) that flow through

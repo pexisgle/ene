@@ -7,7 +7,7 @@ mod lorebook;
 mod style;
 mod sync;
 
-pub use authors_note::{AuthorsNote, apply_authors_note};
+pub use authors_note::{AuthorsNote, apply_authors_note, render_authors_note};
 pub use compiler::{CharacterCompiler, identity_kernel_budget_tokens};
 pub use kernel::IdentityKernel;
 pub use lorebook::{

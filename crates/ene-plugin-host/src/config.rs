@@ -115,7 +115,7 @@ pub struct PluginEntry {
     /// (e.g. `ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`): figment's env
     /// provider parses values with TOML-like syntax, so a full JSON object in
     /// `ENE_PLUGINS__LIST__<NAME>__CONFIG` is not reliably supported — set
-    /// individual keys instead (#313).
+    /// individual keys instead.
     #[serde(default)]
     pub config: serde_json::Value,
     /// Per-profile plugin configuration (opaque JSON), keyed by profile name.
@@ -123,14 +123,14 @@ pub struct PluginEntry {
     /// One plugin can need different settings per model/profile (e.g.
     /// `plugins.list.kokoro.profiles.<profile>.voices_path`); profile
     /// *selection* is plugin-owned. The whole map is delivered to the plugin
-    /// at handshake time via `ConfigurablePlugin::set_profiles` (#313).
+    /// at handshake time via `ConfigurablePlugin::set_profiles`.
     #[serde(default)]
     pub profiles: HashMap<String, serde_json::Value>,
     /// Unknown entry-level keys (anything beyond the declared fields),
     /// preserved verbatim across load → save so the host never drops keys
     /// it does not understand. At plugin startup these flat keys are folded
     /// into the delivered config blob (explicit `config` keys win) so legacy
-    /// entries keep working (#313).
+    /// entries keep working.
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -292,7 +292,7 @@ mod tests {
 
     /// Round-trip: the nested `config` / `profiles` blobs and unknown
     /// entry-level keys must survive serialize → deserialize verbatim, so the
-    /// host never drops plugin-owned settings it does not understand (#313).
+    /// host never drops plugin-owned settings it does not understand.
     #[test]
     fn plugin_entry_round_trips_config_profiles_and_unknown_keys() {
         let json = serde_json::json!({

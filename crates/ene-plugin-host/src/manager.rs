@@ -8,11 +8,11 @@
 //! configured MCP servers and exposes their tools alongside plugin-provided
 //! tools.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ene_config::EneConfig;
@@ -29,8 +29,10 @@ use crate::mcp_config::McpTransport;
 use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
 
-/// Maximum number of restart attempts before a plugin is disabled.
+/// Maximum restarts allowed inside [`RESTART_WINDOW`] before a plugin is disabled.
 const MAX_RESTARTS: usize = 5;
+/// Rolling window over which [`MAX_RESTARTS`] is counted.
+const RESTART_WINDOW: Duration = Duration::from_mins(5);
 /// Base delay for exponential backoff between restarts.
 const BASE_DELAY_MS: u64 = 500;
 /// Maximum delay cap for exponential backoff.
@@ -78,20 +80,24 @@ struct SupervisedPlugin {
     pinned_checksum: PinnedChecksum,
     /// Environment variable names to copy from the host on restart.
     env_passthrough: Vec<String>,
-    /// Consecutive restart attempts since the plugin last demonstrated it was
-    /// healthy. This is a *recoverable* budget, not a lifetime cap: every
-    /// healthy round-trip — a successful tool call
-    /// ([`PluginToolRegistry::call_tool`]) or a healthy health-probe ping
-    /// ([`supervise_plugin`]) — resets it to `0` via [`Self::note_healthy`].
-    /// A plugin that crashes once a day therefore never accumulates budget,
-    /// while a genuine crash loop exhausts it and is disabled. Recovery via
-    /// the health probe is what makes the budget apply to provider-only
-    /// plugins (which never build a [`PluginToolRegistry`]) too.
-    restart_count: usize,
+    /// Timestamps of restarts inside the rolling [`RESTART_WINDOW`].
+    ///
+    /// Entries older than the window are dropped on each budget check, so a
+    /// plugin that crashes occasionally never exhausts the budget, while a
+    /// crash loop within the window is disabled. Healthy probes and tool
+    /// calls do not clear this window — only time does.
+    restart_times: VecDeque<Instant>,
     /// Set once the plugin is permanently disabled (restart budget exhausted
     /// or a restart-time checksum mismatch). The per-plugin supervisor task
     /// skips disabled plugins so it does not keep restarting or re-emitting
     /// `PluginHealthEvent::Disabled` for them.
+    ///
+    /// Terminal for the life of the host: nothing clears this flag, and the
+    /// supervisor exits its loop on observing it. The rolling
+    /// [`RESTART_WINDOW`] therefore governs only whether the limit is *reached*
+    /// — draining the window afterwards cannot bring a disabled plugin back.
+    /// Recovery is a host restart (or a `plugins.list` reconfiguration, which
+    /// builds a fresh [`SupervisedPlugin`]).
     disabled: bool,
 }
 
@@ -100,27 +106,43 @@ impl SupervisedPlugin {
         matches!(self.child.try_wait(), Ok(None))
     }
 
-    /// Records a healthy round-trip by clearing the restart budget.
-    ///
-    /// Called whenever the plugin demonstrates it is genuinely healthy — a
-    /// successful tool call or a healthy health-probe ping — so a plugin that
-    /// has been running well is not penalized for old crashes. This is the
-    /// only path (besides a fresh [`Self::restart`]) that mutates
-    /// `restart_count`, keeping the budget's semantics in one place.
-    fn note_healthy(&mut self) {
-        self.restart_count = 0;
+    /// Drops restart timestamps older than [`RESTART_WINDOW`] and returns how
+    /// many remain. Sole source of the restart-budget length.
+    fn prune_restart_window(&mut self, now: Instant) -> usize {
+        while self
+            .restart_times
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) > RESTART_WINDOW)
+        {
+            self.restart_times.pop_front();
+        }
+        self.restart_times.len()
     }
 
+    /// Restarts counted inside the current rolling window (after pruning).
+    fn recent_restart_count(&mut self) -> usize {
+        self.prune_restart_window(Instant::now())
+    }
+
+    /// Attempts a restart, recording it against the rolling window budget.
+    ///
+    /// Returns [`PluginHostError::ExecutionFailed`] when [`MAX_RESTARTS`]
+    /// restarts have already occurred inside [`RESTART_WINDOW`]. This is the
+    /// only place the budget limit is enforced; the supervisor treats any
+    /// `Err` (budget or checksum) as a permanent disable.
     fn restart(&mut self) -> Result<(), PluginHostError> {
-        self.restart_count = self.restart_count.saturating_add(1);
-        if self.restart_count > MAX_RESTARTS {
+        let now = Instant::now();
+        let recent = self.prune_restart_window(now);
+        if recent >= MAX_RESTARTS {
             return Err(PluginHostError::ExecutionFailed {
                 message: format!(
-                    "Plugin '{}' exceeded max restarts ({})",
-                    self.name, MAX_RESTARTS
+                    "Plugin '{}' exceeded max restarts ({MAX_RESTARTS} in {RESTART_WINDOW:?})",
+                    self.name
                 ),
             });
         }
+        self.restart_times.push_back(now);
+        let attempt = self.restart_times.len();
 
         // Verify the binary checksum BEFORE killing the running process or
         // spawning a replacement. At this point the process is already dead
@@ -161,7 +183,7 @@ impl SupervisedPlugin {
         tracing::warn!(
             component = "PluginHostManager",
             plugin = %self.name,
-            attempt = self.restart_count,
+            attempt,
             max = MAX_RESTARTS,
             "Restarting plugin"
         );
@@ -342,9 +364,6 @@ struct PluginToolRegistry {
     /// Name of the plugin that owns these tools (used for health events).
     plugin_name: String,
     conn: Arc<IpcPluginConnection>,
-    /// Handle to the supervised process, used to reset the restart budget
-    /// after a successful call (restoring the old `ToolHostManager` behavior).
-    supervised: Arc<Mutex<SupervisedPlugin>>,
     tools: Vec<ene_plugin_proto::ToolSpec>,
     breaker: parking_lot::Mutex<CircuitBreaker>,
     health_tx: Option<mpsc::UnboundedSender<PluginHealthEvent>>,
@@ -383,18 +402,13 @@ impl ToolRegistry for PluginToolRegistry {
         let result = self.conn.call_tool(name, arguments, context.cloned()).await;
 
         if result.is_ok() {
-            {
-                let mut breaker = self.breaker.lock();
-                if breaker.consecutive_failures() != 0 {
-                    self.emit_health(PluginHealthEvent::CircuitClosed {
-                        plugin: self.plugin_name.clone(),
-                    });
-                }
-                breaker.record_success();
+            let mut breaker = self.breaker.lock();
+            if breaker.consecutive_failures() != 0 {
+                self.emit_health(PluginHealthEvent::CircuitClosed {
+                    plugin: self.plugin_name.clone(),
+                });
             }
-            // A healthy round-trip clears the restart budget so a plugin
-            // that has been running well is not penalized for old crashes.
-            self.supervised.lock().await.note_healthy();
+            breaker.record_success();
         } else {
             let mut breaker = self.breaker.lock();
             if breaker.record_failure() {
@@ -773,7 +787,6 @@ impl PluginHostManager {
                             let registry = PluginToolRegistry {
                                 plugin_name: name.clone(),
                                 conn: Arc::clone(&conn),
-                                supervised: Arc::clone(&plugin),
                                 tools,
                                 breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
                                 health_tx: Some(health_tx.clone()),
@@ -1120,7 +1133,7 @@ impl PluginHostManager {
             binary_path: binary_path.clone(),
             pinned_checksum,
             env_passthrough,
-            restart_count: 0,
+            restart_times: VecDeque::new(),
             disabled: false,
         };
 
@@ -1351,11 +1364,10 @@ where
 /// stand-in so the backoff can be observed without real delays. It is generic
 /// over the returned future so no boxing (and no extra dependency) is needed.
 ///
-/// A healthy round-trip (process alive and ping answered) recovers the
-/// plugin's restart budget via [`SupervisedPlugin::note_healthy`], so the
-/// budget is a sliding measure of recent instability rather than a lifetime
-/// cap — this is what lets provider-only plugins, which have no tool-call
-/// reset path, recover from old crashes too.
+/// Restart budget is a rolling window enforced solely inside
+/// [`SupervisedPlugin::restart`]. Healthy probes do not clear that window —
+/// only elapsed time does — so a crash loop that recovers just long enough to
+/// answer a ping still accumulates toward disablement.
 async fn supervise_plugin<F>(
     interval: Duration,
     plugin: Arc<Mutex<SupervisedPlugin>>,
@@ -1389,19 +1401,6 @@ async fn supervise_plugin<F>(
         };
 
         if alive && ping_ok {
-            // A healthy probe round-trip clears the restart budget, so a
-            // plugin that has been running well is not penalized for old
-            // crashes. This is the recovery path that makes the budget
-            // apply to provider-only plugins too: they never build a
-            // `PluginToolRegistry` (no tools), so a successful tool call
-            // — the only reset path besides probing — never happens for them.
-            // Probing is independent of capability routing, so every
-            // supervised plugin recovers here. A plugin that responds to
-            // pings but fails real work is still contained: the
-            // per-registry circuit breaker trips on consecutive call
-            // failures, so ping-based recovery cannot keep a broken
-            // plugin serving traffic indefinitely.
-            plugin.lock().await.note_healthy();
             continue;
         }
 
@@ -1423,58 +1422,65 @@ async fn supervise_plugin<F>(
             "Health probe: plugin unhealthy; restarting"
         );
 
-        let mut p = plugin.lock().await;
-        if p.restart_count >= MAX_RESTARTS {
-            tracing::error!(
-                component = "PluginHostManager",
-                plugin = %name,
-                "Plugin exceeded max restarts; disabled"
-            );
-            p.disabled = true;
-            drop(health_tx.send(PluginHealthEvent::Disabled {
-                plugin: name,
-                reason: crate::health::DisabledReason::RestartBudgetExhausted,
-            }));
-            continue;
-        }
-
-        let attempt = p.restart_count.saturating_add(1);
+        // Backoff from the current window length; the budget limit itself is
+        // enforced only inside `restart()` so there is a single comparison.
+        let recent = {
+            let mut p = plugin.lock().await;
+            p.recent_restart_count()
+        };
         drop(health_tx.send(PluginHealthEvent::Restarting {
             plugin: name.clone(),
-            attempt,
+            attempt: recent.saturating_add(1),
         }));
 
         // The backoff sleep delays only this plugin's supervisor; every other
         // plugin keeps being probed on schedule by its own task.
-        let restart_count = p.restart_count;
-        drop(p);
-        backoff_sleep(restart_count).await;
+        backoff_sleep(recent).await;
 
         let mut p = plugin.lock().await;
         if let Err(e) = p.restart() {
             // A checksum mismatch means the on-disk binary changed since
             // it was last verified. Do NOT silently retry: disable the
             // plugin and tell the user via a diagnostic.
-            if matches!(e, PluginHostError::ChecksumMismatch { .. }) {
-                tracing::error!(
-                    component = "PluginHostManager",
-                    plugin = %name,
-                    error = %e,
-                    "Plugin binary checksum mismatch on restart; \
-                     binary changed since last verification; disabling plugin"
-                );
-                p.disabled = true;
-                drop(health_tx.send(PluginHealthEvent::Disabled {
-                    plugin: name,
-                    reason: crate::health::DisabledReason::ChecksumMismatch,
-                }));
-            } else {
-                tracing::error!(
-                    component = "PluginHostManager",
-                    plugin = %name,
-                    error = %e,
-                    "Failed to restart plugin"
-                );
+            //
+            // `ExecutionFailed` from `restart()` is the rolling-window budget
+            // exhaustion path — the sole limit check lives there.
+            match &e {
+                PluginHostError::ChecksumMismatch { .. } => {
+                    tracing::error!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Plugin binary checksum mismatch on restart; \
+                         binary changed since last verification; disabling plugin"
+                    );
+                    p.disabled = true;
+                    drop(health_tx.send(PluginHealthEvent::Disabled {
+                        plugin: name,
+                        reason: crate::health::DisabledReason::ChecksumMismatch,
+                    }));
+                }
+                PluginHostError::ExecutionFailed { .. } => {
+                    tracing::error!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Plugin exceeded max restarts; disabled"
+                    );
+                    p.disabled = true;
+                    drop(health_tx.send(PluginHealthEvent::Disabled {
+                        plugin: name,
+                        reason: crate::health::DisabledReason::RestartBudgetExhausted,
+                    }));
+                }
+                _ => {
+                    tracing::error!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Failed to restart plugin"
+                    );
+                }
             }
             continue;
         }
@@ -1753,7 +1759,7 @@ mod tests {
             binary_path,
             pinned_checksum,
             env_passthrough: Vec::new(),
-            restart_count: 0,
+            restart_times: VecDeque::new(),
             disabled: false,
         }
     }
@@ -1795,7 +1801,7 @@ mod tests {
         let mut plugin = supervised_plugin_with(binary_path.clone(), PinnedChecksum::Tofu(real));
 
         assert!(plugin.restart().is_ok());
-        assert_eq!(plugin.restart_count, 1);
+        assert_eq!(plugin.recent_restart_count(), 1);
 
         drop(std::fs::remove_dir_all(&dir));
     }
@@ -1829,7 +1835,54 @@ mod tests {
         // ...and the attempt consumed one unit of restart budget. Verification
         // happens before spawning, so the tampered binary was never exec'd; the
         // dead/hung child is reaped on the mismatch path (no zombie left).
-        assert_eq!(plugin.restart_count, 1);
+        assert_eq!(plugin.recent_restart_count(), 1);
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restart_budget_caps_within_window() {
+        let dir = temp_plugin_dir("budget-cap");
+        let binary_path = dir.join("ene-plugin-fake");
+        write_dummy_script(&binary_path);
+
+        let real = compute_binary_checksum("fake", &binary_path).unwrap();
+        let mut plugin = supervised_plugin_with(binary_path, PinnedChecksum::Tofu(real));
+
+        for _ in 0..MAX_RESTARTS {
+            assert!(plugin.restart().is_ok());
+        }
+        assert_eq!(plugin.recent_restart_count(), MAX_RESTARTS);
+        assert!(matches!(
+            plugin.restart(),
+            Err(PluginHostError::ExecutionFailed { .. })
+        ));
+        // Failed budget check must not push another timestamp.
+        assert_eq!(plugin.recent_restart_count(), MAX_RESTARTS);
+
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restart_budget_prunes_expired_entries() {
+        let dir = temp_plugin_dir("budget-prune");
+        let binary_path = dir.join("ene-plugin-fake");
+        write_dummy_script(&binary_path);
+
+        let real = compute_binary_checksum("fake", &binary_path).unwrap();
+        let mut plugin = supervised_plugin_with(binary_path, PinnedChecksum::Tofu(real));
+
+        let expired = Instant::now()
+            .checked_sub(RESTART_WINDOW + Duration::from_secs(1))
+            .expect("restart window fits in Instant");
+        for _ in 0..MAX_RESTARTS {
+            plugin.restart_times.push_back(expired);
+        }
+        assert_eq!(plugin.recent_restart_count(), 0);
+        assert!(plugin.restart().is_ok());
+        assert_eq!(plugin.recent_restart_count(), 1);
 
         drop(std::fs::remove_dir_all(&dir));
     }
@@ -2054,7 +2107,7 @@ mod tests {
             binary_path,
             pinned_checksum: PinnedChecksum::Tofu(real),
             env_passthrough: Vec::new(),
-            restart_count: 0,
+            restart_times: VecDeque::new(),
             disabled: false,
         }
     }
@@ -2317,7 +2370,7 @@ mod tests {
         drop(gate_tx);
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if dead.lock().await.restart_count >= 1 {
+            if dead.lock().await.recent_restart_count() >= 1 {
                 break;
             }
             assert!(
@@ -2335,15 +2388,12 @@ mod tests {
         // removed when the `TempDir` drops at the end of the test.
     }
 
-    /// A healthy probe round-trip (process alive + ping answered) recovers the
-    /// restart budget. Provider-only plugins have no tool-call reset
-    /// path, so the health probe is their only recovery path: a plugin that
-    /// has accumulated a full budget of restarts must return to zero once it
-    /// is observed healthy again, rather than staying one crash away from
-    /// permanent disablement for the rest of the host session.
+    /// A healthy probe round-trip must not clear the rolling restart window.
+    /// Only elapsed time prunes entries — otherwise a crash loop that answers
+    /// one ping between restarts would never hit the budget.
     #[tokio::test]
     #[cfg(unix)]
-    async fn healthy_probe_recovers_restart_budget() {
+    async fn healthy_probe_does_not_clear_restart_window() {
         use std::sync::atomic::AtomicUsize;
 
         let temp = tempfile::tempdir().expect("OS allows temp directory creation");
@@ -2358,8 +2408,14 @@ mod tests {
             sock.clone(),
             true, // stays alive so the probe sees a healthy round-trip
         )));
-        // Simulate a budget accumulated from past crashes.
-        plugin.lock().await.restart_count = MAX_RESTARTS;
+        // Simulate a full window of recent restarts.
+        {
+            let mut p = plugin.lock().await;
+            let now = Instant::now();
+            for _ in 0..MAX_RESTARTS {
+                p.restart_times.push_back(now);
+            }
+        }
 
         let conn = Arc::new(
             IpcPluginConnection::connect(
@@ -2383,18 +2439,26 @@ mod tests {
             |_count| async {},
         ));
 
-        // The first healthy probe must clear the budget back to zero.
+        // Wait until at least one healthy probe has run.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if plugin.lock().await.restart_count == 0 {
+            if pings.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
                 break;
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "a healthy probe round-trip must recover the restart budget"
+                "healthy probe did not run in time"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        // Give the supervisor a moment to process the healthy path.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            plugin.lock().await.recent_restart_count(),
+            MAX_RESTARTS,
+            "a healthy probe must not clear the rolling restart window"
+        );
         assert!(
             !plugin.lock().await.disabled,
             "a healthy plugin must not be disabled"
@@ -2404,9 +2468,8 @@ mod tests {
         server.abort();
     }
 
-    /// A dead plugin whose budget is already exhausted is disabled (not
-    /// restarted) — crash-loop detection is preserved even though healthy
-    /// plugins recover their budget.
+    /// A dead plugin whose rolling window is already full is disabled (not
+    /// restarted) — crash-loop detection is preserved.
     #[tokio::test]
     #[cfg(unix)]
     async fn exhausted_budget_disables_dead_plugin() {
@@ -2421,8 +2484,14 @@ mod tests {
             sock.clone(),
             false, // exits immediately so the probe sees a dead process
         )));
-        // Budget already consumed by prior crash-loop restarts.
-        plugin.lock().await.restart_count = MAX_RESTARTS;
+        // Window already consumed by prior crash-loop restarts.
+        {
+            let mut p = plugin.lock().await;
+            let now = Instant::now();
+            for _ in 0..MAX_RESTARTS {
+                p.restart_times.push_back(now);
+            }
+        }
 
         let conn = Arc::new(
             IpcPluginConnection::connect(
@@ -2447,7 +2516,7 @@ mod tests {
         ));
 
         // The supervisor must observe the dead plugin, see the exhausted
-        // budget, and disable it rather than restarting.
+        // budget inside `restart()`, and disable it rather than restarting.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             if plugin.lock().await.disabled {

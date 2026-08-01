@@ -170,6 +170,7 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
       "recall_min_score": 0.10,
       "recall_similarity_threshold": 0.35,
       "commitment_boost": 0.25,
+      "access_boost_half_life_days": 14.0,
       "commitment_title_similarity_threshold": 0.82,
       "contradiction_title_similarity_threshold": 0.82,
       "min_confidence_to_persist": 0.65,
@@ -211,7 +212,10 @@ SQLite データベースの永続化、整合性チェック、およびバッ�
 ノイズは `0.0` になります。`recall_min_score`（デフォルト `0.10`）は最終ランキングを
 フィルタリングし、`recall_similarity_threshold`（デフォルト `0.35`）はベクトル収集を
 制御し、`commitment_boost`（デフォルト `0.25`）はクエリとの関連性がゼロでもアクティブな
-約束を表面化させます。
+約束を表面化させます。`access_boost_half_life_days`（デフォルト `14.0`、
+`ene_rag::ACCESS_BOOST_HALF_LIFE_DAYS` と同じ）は、品質係数における過去アクセス
+ブーストの減衰半減期を制御します。内容の忘却 / 新近性用の
+`default_forgetting_half_life_days` とは独立です。
 
 `mind.emotion.classifier_language`（デフォルト `"en"`）は、感情分類器と認知出力契約で
 使用されるプロンプトライブラリの言語を選択し、決定論的なパターンパック（忘却正規表現と

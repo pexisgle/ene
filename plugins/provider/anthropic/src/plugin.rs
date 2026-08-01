@@ -430,9 +430,8 @@ fn usage_from_anthropic_body(body: &Value) -> Option<TokenUsage> {
     if input.is_none() && output.is_none() {
         return None;
     }
-    let to_u32 = |v: Option<u64>| v.map(|n| n as u32);
-    let prompt = to_u32(input);
-    let completion = to_u32(output);
+    let prompt = input.and_then(token_count_u32);
+    let completion = output.and_then(token_count_u32);
     let total = match (prompt, completion) {
         (Some(p), Some(c)) => Some(p.saturating_add(c)),
         _ => None,
@@ -442,6 +441,23 @@ fn usage_from_anthropic_body(body: &Value) -> Option<TokenUsage> {
         completion_tokens: completion,
         total_tokens: total,
     })
+}
+
+/// Narrow a provider-reported token count to `u32`.
+///
+/// Values above [`u32::MAX`] are treated as absent rather than silently
+/// truncated — a bad provider sentinel must not enter usage accounting as a
+/// plausible-looking number.
+fn token_count_u32(n: u64) -> Option<u32> {
+    if let Ok(v) = u32::try_from(n) {
+        Some(v)
+    } else {
+        tracing::warn!(
+            tokens = n,
+            "token usage count exceeds u32::MAX; treating as absent"
+        );
+        None
+    }
 }
 
 /// Maps Anthropic content-block indices to dense tool-call indices.
@@ -628,7 +644,7 @@ fn process_sse_event(
                 tool_calls_delta: None,
                 usage: Some(TokenUsage {
                     prompt_tokens: None,
-                    completion_tokens: Some(output as u32),
+                    completion_tokens: token_count_u32(output),
                     total_tokens: None,
                 }),
             }))
@@ -1080,6 +1096,39 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Overloaded"));
+    }
+
+    #[test]
+    fn usage_from_anthropic_body_maps_counts() {
+        let body = json!({"usage": {"input_tokens": 10u64, "output_tokens": 20u64}});
+        let usage = usage_from_anthropic_body(&body).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(10));
+        assert_eq!(usage.completion_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(30));
+    }
+
+    #[test]
+    fn usage_from_anthropic_body_drops_overflowing_counts() {
+        let overflow = u64::from(u32::MAX) + 1;
+        let body = json!({"usage": {"input_tokens": overflow, "output_tokens": 20u64}});
+        let usage = usage_from_anthropic_body(&body).unwrap();
+        assert_eq!(usage.prompt_tokens, None);
+        assert_eq!(usage.completion_tokens, Some(20));
+        assert_eq!(usage.total_tokens, None);
+    }
+
+    #[test]
+    fn sse_message_delta_drops_overflowing_output_tokens() {
+        let mut state = ToolCallState::default();
+        let overflow = u64::from(u32::MAX) + 1;
+        let data = format!(r#"{{"type":"message_delta","usage":{{"output_tokens":{overflow}}}}}"#);
+        let chunk = process_sse_event("message_delta", &data, &mut state)
+            .unwrap()
+            .unwrap();
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.completion_tokens, None);
+        assert_eq!(usage.prompt_tokens, None);
+        assert_eq!(usage.total_tokens, None);
     }
 
     #[test]

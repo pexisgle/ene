@@ -73,7 +73,9 @@ on public items is the exception — it states the contract, not the mechanism.
   the repo alone. No issue/PR numbers (`(#240)`, `TODO(#218)`), no links to this repo's
   GitHub/Slack/CI, no "see the review thread". If the context lives in a ticket, summarize
   its substance in one line; if it isn't worth that line, it isn't worth a comment. Existing
-  `(#nnn)` markers are legacy — drop or rewrite them when you touch the line.
+  `(#nnn)` markers are legacy — drop or rewrite them when you touch the line. The same ban
+  applies to logs, user-facing strings, and assertion / `expect` messages — not only
+  comments and rustdoc.
 - **External specs are the exception.** Links to the standards a value or format comes from
   (VRM spec, Character Card Spec, glTF, library docs) document provenance the code cannot
   express — keep them. Only *this repo's* issue/PR/CI references are banned.

@@ -654,8 +654,7 @@ mod tests {
     #[tokio::test]
     async fn request_handshake_profiles_default_keeps_old_peers_compatible() {
         // A plugin built against protocol v3 sends no `plugin_profiles`; the
-        // field must default to `None` rather than failing deserialization
-        // (#313).
+        // field must default to `None` rather than failing deserialization.
         let json = r#"{
             "Handshake": {
                 "version": {"min": 3, "max": 4},

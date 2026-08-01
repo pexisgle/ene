@@ -72,7 +72,9 @@ pub mod scoring;
 pub mod tool;
 
 pub use decay::{
-    ARCHIVE_THRESHOLD, FADE_THRESHOLD, active_decay_anchor, decay_score, emotional_impact,
+    ARCHIVE_THRESHOLD, DECAY_CONFIDENCE_BIAS, DECAY_CONFIDENCE_WEIGHT, DECAY_EMOTIONAL_BIAS,
+    DECAY_EMOTIONAL_WEIGHT, DECAY_LN2, DECAY_SALIENCE_BIAS, DECAY_SALIENCE_WEIGHT,
+    EMOTIONAL_MAGNITUDE_SCALE, FADE_THRESHOLD, active_decay_anchor, decay_score, emotional_impact,
     faded_decay_anchor, half_life_decay, recency_score, target_status_after_decay,
 };
 pub use scoring::{

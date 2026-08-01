@@ -23,6 +23,27 @@ pub const FADE_THRESHOLD: f32 = 0.40;
 /// Score below which a [`MemoryStatus::Faded`] memory transitions to [`MemoryStatus::Archived`].
 pub const ARCHIVE_THRESHOLD: f32 = 0.15;
 
+/// `ln(2)` factor in the half-life exponential (`exp(-ln2 / H * age)`).
+///
+/// Shared with the `ene-store` SQL decay path so the coefficient cannot drift.
+pub const DECAY_LN2: f64 = std::f64::consts::LN_2;
+
+/// Divisor mapping √(valence² + arousal²) onto `[0, 1]` (unit-square diagonal ≈ 2.83).
+pub const EMOTIONAL_MAGNITUDE_SCALE: f32 = 2.83;
+
+/// Weight on salience inside [`decay_score`] retention (`w * salience + b`).
+pub const DECAY_SALIENCE_WEIGHT: f32 = 0.5;
+/// Bias paired with [`DECAY_SALIENCE_WEIGHT`].
+pub const DECAY_SALIENCE_BIAS: f32 = 0.5;
+/// Weight on confidence inside [`decay_score`] retention.
+pub const DECAY_CONFIDENCE_WEIGHT: f32 = 0.5;
+/// Bias paired with [`DECAY_CONFIDENCE_WEIGHT`].
+pub const DECAY_CONFIDENCE_BIAS: f32 = 0.5;
+/// Weight on emotional impact inside [`decay_score`] retention.
+pub const DECAY_EMOTIONAL_WEIGHT: f32 = 0.3;
+/// Bias paired with [`DECAY_EMOTIONAL_WEIGHT`].
+pub const DECAY_EMOTIONAL_BIAS: f32 = 0.7;
+
 /// Shared half-life exponential-decay kernel in `[0.0, 1.0]`.
 ///
 /// Computes `exp(-(ln 2 / half_life_days) * age_days)`. A non-positive or
@@ -37,7 +58,7 @@ pub fn half_life_decay(age_days: f64, half_life_days: f64) -> f32 {
         return 1.0;
     }
     let age_days = age_days.max(0.0);
-    let lambda = std::f64::consts::LN_2 / half_life_days;
+    let lambda = DECAY_LN2 / half_life_days;
     (-lambda * age_days).exp() as f32
 }
 
@@ -62,7 +83,7 @@ pub fn recency_score(reference: DateTime<Utc>, item: &MemoryItem, half_life_days
 /// Normalize affect magnitude to `[0.0, 1.0]` for decay retention.
 pub fn emotional_impact(affect: AffectAnnotation) -> f32 {
     let dist = affect.valence.hypot(affect.arousal);
-    (dist / 2.83).clamp(0.0, 1.0)
+    (dist / EMOTIONAL_MAGNITUDE_SCALE).clamp(0.0, 1.0)
 }
 
 /// Anchor for active-memory fade decisions: the last *content* update.
@@ -100,9 +121,11 @@ pub fn decay_score(item: &MemoryItem, now: DateTime<Utc>, half_life_days: f64) -
     };
     let base = half_life_decay(age_in_days(now, anchor), half_life_days);
 
-    let salience_factor = 0.5f32.mul_add(item.salience.get(), 0.5);
-    let confidence_factor = 0.5f32.mul_add(item.confidence.get(), 0.5);
-    let emotional_factor = 0.3f32.mul_add(emotional_impact(item.affect), 0.7);
+    let salience_factor = DECAY_SALIENCE_WEIGHT.mul_add(item.salience.get(), DECAY_SALIENCE_BIAS);
+    let confidence_factor =
+        DECAY_CONFIDENCE_WEIGHT.mul_add(item.confidence.get(), DECAY_CONFIDENCE_BIAS);
+    let emotional_factor =
+        DECAY_EMOTIONAL_WEIGHT.mul_add(emotional_impact(item.affect), DECAY_EMOTIONAL_BIAS);
 
     (base * salience_factor * confidence_factor * emotional_factor).clamp(0.0, 1.0)
 }

@@ -319,7 +319,7 @@ async fn tools_call_intercepts_system_search_tool() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
-/// `EneHandle::set_character` (#406) is a public control method (moved off
+/// `EneHandle::set_character` is a public control method (moved off
 /// the diagnostics facade): the card swap must round-trip through the actor
 /// and be observable via the next snapshot.
 #[tokio::test]
@@ -351,7 +351,7 @@ async fn set_character_round_trips_through_public_handle() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
-/// `EneHandle::compress_context` (#406) is a public control method (moved
+/// `EneHandle::compress_context` is a public control method (moved
 /// off the diagnostics facade and renamed from `manual_split`). With no
 /// conversation history the actor's compression path deterministically
 /// returns `SplitNotNeeded` — proving the command round-trips through the
@@ -490,10 +490,10 @@ async fn set_character_updates_shared_sync_state() {
     drop(handle.shutdown(std::time::Duration::from_secs(2)).await);
 }
 
-/// `EneHandle::turn_count()` reads an `Arc<AtomicU32>` the actor publishes
-/// after `record_user_input` — deterministically observable while the turn
-/// is still in flight against a hanging provider (which never lets the
-/// stream complete, so the assistant-side increment never happens).
+/// `EneHandle::turn_count()` reads the shared session snapshot the actor
+/// publishes after `record_user_input` — deterministically observable while
+/// the turn is still in flight against a hanging provider (which never lets
+/// the stream complete, so the assistant-side increment never happens).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_count_reflects_in_flight_turn() {
     let (config, _hanging) = hanging_provider_config().await;

@@ -639,6 +639,14 @@ impl DbIpcServer {
     /// IPC round-trips, so a plugin cannot pin the `SQLite` write lock open, and
     /// a dropped connection cannot leave a half-applied batch (the transaction
     /// either commits before the response is sent or rolls back on drop).
+    ///
+    /// Quota enforcement measures prefix usage once at the start of the batch,
+    /// then gates each growth op against a running estimate (payload bytes of
+    /// each insert/upsert). Before commit the footprint is remeasured so the
+    /// estimate cannot silently drift across a long batch. This is a soft
+    /// limit: a single write whose payload alone exceeds the remaining quota
+    /// can still push usage over the cap (the gate checks the pre-write
+    /// estimate, not the post-write size).
     async fn handle_batch(
         db: &DatabaseConnection,
         tool_name: &str,
@@ -667,17 +675,27 @@ impl DbIpcServer {
 
         let txn = db.begin().await.map_err(DbServerError::Db)?;
 
+        // One full-table measure for the whole batch; growth ops add estimated
+        // payload bytes instead of re-scanning after every insert.
+        let mut estimated_used = if quota_bytes.is_some() && !declared_tables.is_empty() {
+            Self::measure_prefix_usage(&txn, declared_tables).await?
+        } else {
+            0
+        };
+
         let mut results = Vec::with_capacity(ops.len());
         for (idx, op) in ops.into_iter().enumerate() {
             // Writes that grow storage (insert/upsert) are gated by the
-            // per-plugin quota; the check runs inside the transaction so the
-            // footprint reflects the batch's own earlier inserts. Updates and
-            // deletes are never gated — a plugin over quota must still be able
-            // to shrink its footprint.
-            let is_growth = matches!(op, DbWriteOp::Insert { .. } | DbWriteOp::Upsert { .. });
-            if is_growth {
-                Self::enforce_quota(&txn, tool_name, prefix, declared_tables, quota_bytes)
-                    .await
+            // per-plugin quota. Updates and deletes are never gated — a plugin
+            // over quota must still be able to shrink its footprint.
+            let growth_bytes = match &op {
+                DbWriteOp::Insert { row, .. } | DbWriteOp::Upsert { row, .. } => {
+                    Some(Self::estimate_row_bytes(row))
+                }
+                DbWriteOp::Update { .. } | DbWriteOp::Delete { .. } => None,
+            };
+            if growth_bytes.is_some() {
+                Self::reject_if_over_quota(tool_name, prefix, estimated_used, quota_bytes)
                     .map_err(|e| DbServerError::BatchOp {
                         index: idx,
                         source: Box::new(e),
@@ -705,7 +723,12 @@ impl DbIpcServer {
                     .map(|affected| DbBatchOpResult::Delete { affected }),
             };
             match result {
-                Ok(res) => results.push(res),
+                Ok(res) => {
+                    if let Some(bytes) = growth_bytes {
+                        estimated_used = estimated_used.saturating_add(bytes);
+                    }
+                    results.push(res);
+                }
                 Err(e) => {
                     // Explicit rollback for a prompt, deterministic release of
                     // the write lock; dropping `txn` would roll back too.
@@ -722,6 +745,26 @@ impl DbIpcServer {
                         source: Box::new(e),
                     });
                 }
+            }
+        }
+
+        if let Some(quota) = quota_bytes
+            && !declared_tables.is_empty()
+        {
+            // Remeasure so any estimate drift (upsert conflict-update path,
+            // omitted column defaults, integer encoding, …) is corrected
+            // before the transaction becomes durable. Soft limit: overshoot
+            // from a single large write is allowed and only warned.
+            let actual = Self::measure_prefix_usage(&txn, declared_tables).await?;
+            if actual >= quota {
+                warn!(
+                    tool = %tool_name,
+                    prefix = %prefix,
+                    used_bytes = actual,
+                    estimated_bytes = estimated_used,
+                    quota_bytes = quota,
+                    "plugin DB batch committed at or above storage quota (soft limit)"
+                );
             }
         }
 
@@ -809,13 +852,16 @@ impl DbIpcServer {
     /// yet) is a no-op. The check is intentionally `>=` rather than a
     /// prediction of the post-write size: once a plugin is at its cap, every
     /// further insert is refused until it deletes enough to drop back under,
-    /// which is the simplest rule that still keeps the footprint bounded. The
-    /// measurement and the write are not one atomic unit on the standalone
-    /// paths, so under concurrent writers (the shared pool, parallel tool
-    /// calls) a single in-flight write may overshoot the cap; the next write
-    /// is gated again, so growth stays within one write of the cap rather than
-    /// unbounded. Reads and deletes never call this, so a plugin can always
-    /// free space.
+    /// which is the simplest rule that still keeps the footprint bounded.
+    ///
+    /// This is a **soft limit**: the gate inspects usage *before* the write, so
+    /// a single large insert/upsert whose payload alone exceeds the remaining
+    /// quota can still push the footprint over the cap. The measurement and the
+    /// write are not one atomic unit on the standalone paths either, so under
+    /// concurrent writers (the shared pool, parallel tool calls) a single
+    /// in-flight write may overshoot; the next write is gated again, so growth
+    /// stays within one write of the cap rather than unbounded. Reads and
+    /// deletes never call this, so a plugin can always free space.
     async fn enforce_quota(
         db: &impl ConnectionTrait,
         tool_name: &str,
@@ -823,13 +869,23 @@ impl DbIpcServer {
         declared_tables: &HashMap<String, DbTable>,
         quota_bytes: Option<u64>,
     ) -> Result<(), DbServerError> {
-        let Some(quota) = quota_bytes else {
-            return Ok(());
-        };
-        if declared_tables.is_empty() {
+        if quota_bytes.is_none() || declared_tables.is_empty() {
             return Ok(());
         }
         let used = Self::measure_prefix_usage(db, declared_tables).await?;
+        Self::reject_if_over_quota(tool_name, prefix, used, quota_bytes)
+    }
+
+    /// Shared quota gate used by standalone writes and the batch running estimate.
+    fn reject_if_over_quota(
+        tool_name: &str,
+        prefix: &str,
+        used: u64,
+        quota_bytes: Option<u64>,
+    ) -> Result<(), DbServerError> {
+        let Some(quota) = quota_bytes else {
+            return Ok(());
+        };
         if used >= quota {
             warn!(
                 tool = %tool_name,
@@ -844,6 +900,30 @@ impl DbIpcServer {
             )));
         }
         Ok(())
+    }
+
+    /// Estimates the payload bytes a row will contribute to
+    /// [`Self::measure_prefix_usage`] (sum of `length(CAST(col AS BLOB))`).
+    ///
+    /// Text/blob use their byte lengths; integers/floats use the UTF-8 length of
+    /// their decimal rendering (matching `SQLite`'s CAST-via-text path for
+    /// numeric→BLOB); null contributes zero. This is an estimate for batch
+    /// quota gating — commit-time remeasure corrects drift.
+    fn estimate_row_bytes(row: &Row) -> u64 {
+        row.values()
+            .map(Self::estimate_db_value_bytes)
+            .fold(0_u64, u64::saturating_add)
+    }
+
+    fn estimate_db_value_bytes(value: &DbValue) -> u64 {
+        match value {
+            DbValue::Null => 0,
+            DbValue::Bool(_) => 1,
+            DbValue::Int(i) => u64::try_from(i.to_string().len()).unwrap_or(u64::MAX),
+            DbValue::Float(f) => u64::try_from(f.to_string().len()).unwrap_or(u64::MAX),
+            DbValue::Text(s) => u64::try_from(s.len()).unwrap_or(u64::MAX),
+            DbValue::Blob(b) => u64::try_from(b.len()).unwrap_or(u64::MAX),
+        }
     }
 
     fn validate_table_access(

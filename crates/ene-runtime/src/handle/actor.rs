@@ -52,7 +52,7 @@ use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 /// Global monotonic counter used to generate unique DB IPC auth tokens.
@@ -112,6 +112,11 @@ pub(super) struct TurnActor {
     call_tool_tasks: tokio::task::JoinSet<()>,
     classifier_tasks: tokio::task::JoinSet<()>,
     memory_writer_tasks: tokio::task::JoinSet<()>,
+    /// Limits how many memory-writer outcome consumers run at once. Waiting
+    /// consumers remain in [`Self::memory_writer_tasks`] so shutdown can abort
+    /// them; `memory_writer_cap` is the permit count (0 disables admits and
+    /// takes the short-lived reject+consume path).
+    memory_writer_sem: Arc<Semaphore>,
     /// In-flight tool-search jobs; reaped so panics are not lost.
     search_tasks: tokio::task::JoinSet<()>,
     /// In-flight deferred (background) tool tasks. Each task polls
@@ -256,6 +261,7 @@ impl TurnActor {
         let task_caps = config
             .get_section::<crate::task_config::ToolRuntimeConfig>()
             .unwrap_or_default();
+        let memory_writer_sem = Arc::new(Semaphore::new(task_caps.memory_writer_cap));
         Self {
             cmd_rx,
             cmd_tx,
@@ -283,6 +289,7 @@ impl TurnActor {
             call_tool_tasks: tokio::task::JoinSet::new(),
             classifier_tasks: tokio::task::JoinSet::new(),
             memory_writer_tasks: tokio::task::JoinSet::new(),
+            memory_writer_sem,
             search_tasks: tokio::task::JoinSet::new(),
             deferred_tool_tasks: tokio::task::JoinSet::new(),
             bg_command_tasks: tokio::task::JoinSet::new(),
@@ -359,57 +366,72 @@ impl TurnActor {
         }
     }
 
-    /// Drains memory-writer `JoinHandle`s sent from the stream, admitting
-    /// each into `memory_writer_tasks` under the Stage 8 cap.
+    /// Drains memory-writer `JoinHandle`s sent from the stream into
+    /// `memory_writer_tasks`, with concurrency limited by
+    /// [`Self::memory_writer_sem`] (`tools.memory_writer_cap`).
     ///
     /// The memory write itself is already running detached (spawned by the
-    /// stream task before its `JoinHandle` reached us), so admission control
-    /// here only bounds how many *outcome consumers* the actor supervises —
-    /// it never cancels the write. A rejected handle is therefore **not**
-    /// dropped on the floor: its outcome is still consumed by a
-    /// detached `tokio::spawn` task so
-    /// [`LifecycleEvent::PendingCandidateAvailable`] and
-    /// [`DiagnosticEvent::MemoryWrite`] fire exactly as they would for an
-    /// admitted handle.
+    /// stream task before its `JoinHandle` reached us); admission here only
+    /// bounds outcome consumers. Consumers that wait for a semaphore permit
+    /// stay in the supervised `JoinSet` so shutdown can abort them — there is
+    /// no unbounded detached `tokio::spawn` overflow path.
     ///
-    /// Two consequences follow from the rejection path being a detached task
-    /// rather than a supervised `JoinSet` slot:
-    ///
-    /// 1. `memory_writer_cap` bounds only the *supervised* consumer count
-    ///    (the `JoinSet` length that [`admit_task`] checks), not the number
-    ///    of detached consumers — a burst of rejected writes spawns one
-    ///    detached task each with no cap applied.
-    /// 2. On shutdown, [`Self::run`] calls `memory_writer_tasks.abort_all()`,
-    ///    which aborts only *admitted* consumers. Detached consumers keep
-    ///    running and may emit events after teardown; this is benign because
-    ///    their `lifecycle_tx` / `diag_tx` sends fail with a closed-channel
-    ///    error that [`consume_memory_write_outcome`] drops.
-    ///
-    /// The only thing a rejection loses is panic supervision of the consumer
-    /// (the detached task is not reaped), which is a quality degradation, not
-    /// a correctness bug.
+    /// - `cap == 0`: emit [`DiagnosticEvent::TaskRejected`] and still spawn a
+    ///   short-lived supervised consumer so lifecycle / diagnostic events are
+    ///   not lost (the historical contract the Stage 8 tests rely on).
+    /// - `cap > 0`: admit into the `JoinSet` up to
+    ///   [`memory_writer_hard_limit`]; excess handles are hard-dropped (no
+    ///   outcome consumer, `TaskRejected` already emitted by [`admit_task`]).
+    ///   Admitted tasks acquire a semaphore permit before consuming so at most
+    ///   `cap` consumers run concurrently.
     fn drain_memory_writers(&mut self) {
         while let Ok(handle) = self.memory_writer_rx.try_recv() {
             let diag_tx = self.diag_tx.clone();
             let lifecycle_tx = self.lifecycle_tx.clone();
             let store = self.concrete_store.clone();
-            if admit_task(
+            let cap = self.task_caps.memory_writer_cap;
+
+            if cap == 0 {
+                tracing::warn!(
+                    component = "MemoryWriter",
+                    cap,
+                    "background task rejected: memory_writer_cap is 0"
+                );
+                emit_diag(
+                    &self.diag_tx,
+                    DiagnosticEvent::TaskRejected {
+                        component: "MemoryWriter".to_string(),
+                        cap,
+                        detail: None,
+                    },
+                );
+                self.memory_writer_tasks.spawn(async move {
+                    consume_memory_write_outcome(handle, lifecycle_tx, diag_tx, store).await;
+                });
+                continue;
+            }
+
+            let hard_limit = memory_writer_hard_limit(cap);
+            if !admit_task(
                 &mut self.memory_writer_tasks,
-                self.task_caps.memory_writer_cap,
+                hard_limit,
                 "MemoryWriter",
                 None,
                 &self.diag_tx,
             ) {
-                self.memory_writer_tasks.spawn(async move {
-                    consume_memory_write_outcome(handle, lifecycle_tx, diag_tx, store).await;
-                });
-            } else {
-                // Cap reached: keep the outcome consumer alive but detached so
-                // the lifecycle/diagnostic events are not lost.
-                tokio::spawn(async move {
-                    consume_memory_write_outcome(handle, lifecycle_tx, diag_tx, store).await;
-                });
+                // Hard drop: JoinSet waiter queue is full. The write itself
+                // keeps running detached; only the outcome consumer is lost.
+                drop(handle);
+                continue;
             }
+
+            let sem = Arc::clone(&self.memory_writer_sem);
+            self.memory_writer_tasks.spawn(async move {
+                let Ok(_permit) = sem.acquire().await else {
+                    return;
+                };
+                consume_memory_write_outcome(handle, lifecycle_tx, diag_tx, store).await;
+            });
         }
     }
 
@@ -683,13 +705,24 @@ impl TurnActor {
         // teardown aborts them rather than dropping them (which would only
         // detach, not cancel, the worker).
         self.admit_aux_handles();
+        self.abort_all_join_sets();
+        self.drain_pending().await;
+    }
+
+    /// Aborts every background `JoinSet` the actor supervises.
+    ///
+    /// Shared by post-loop teardown and [`EneCommand::Shutdown`] so both paths
+    /// abort the same sets (including `search_tasks` and `deferred_tool_tasks`)
+    /// in the same order. Callers that need aux handles admitted first must
+    /// invoke [`Self::admit_aux_handles`] before this.
+    fn abort_all_join_sets(&mut self) {
         self.classifier_tasks.abort_all();
         self.memory_writer_tasks.abort_all();
         self.call_tool_tasks.abort_all();
         self.search_tasks.abort_all();
+        self.deferred_tool_tasks.abort_all();
         self.bg_command_tasks.abort_all();
         self.aux_tasks.abort_all();
-        self.drain_pending().await;
     }
 
     /// Drops every pending permission and user-input
@@ -1310,15 +1343,11 @@ impl TurnActor {
                 // token (the TTS pipeline) exit gracefully instead of being
                 // force-aborted mid-flight.
                 self.cancel_token.cancel();
-                self.classifier_tasks.abort_all();
-                self.memory_writer_tasks.abort_all();
-                self.call_tool_tasks.abort_all();
-                self.bg_command_tasks.abort_all();
                 // Admit aux handles that arrived after the run loop's last
                 // drain so shutdown aborts them rather than dropping them
                 // (which would only detach, not cancel, the worker).
                 self.admit_aux_handles();
-                self.aux_tasks.abort_all();
+                self.abort_all_join_sets();
                 self.abort_proactive_decision();
                 self.shutdown_proactive_llm_once().await;
                 self.drain_pending().await;
@@ -1698,7 +1727,7 @@ impl TurnActor {
                     "test-turn",
                     vec!["/test/path".to_string()],
                 );
-                panic!("induced panic after mutating shared actor state (#268 regression test)");
+                panic!("induced panic after mutating shared actor state");
             }
             #[cfg(test)]
             EneCommand::TestSpawnSlowBgTask { reply } => {
@@ -1783,7 +1812,7 @@ impl TurnActor {
             self.session.record_user_input();
             self.session.add_user_message(&user_input);
             self.sync_shared_session_state();
-            self.check_and_perform_split(&user_input).await;
+            self.check_and_trigger_compression().await;
         }
 
         // Snapshot whether a rolling-compression summary is still pending for
@@ -2023,18 +2052,16 @@ impl TurnActor {
     }
 
     /// Publishes the current session id / started-at / turn count to the
-    /// mailbox-free shared state. Idempotent; called after a session
-    /// split, after a user input is recorded, and after a stream outcome is
-    /// applied (the stream task records the assistant response on its own
-    /// session clone). The slots are individually consistent, not cross-slot
-    /// atomic: mid-split a reader can observe the new session id with a stale
-    /// turn count. No current consumer reads them as a pair.
+    /// mailbox-free shared state as a single atomic snapshot. Idempotent;
+    /// called after a session split, after a user input is recorded, and after
+    /// a stream outcome is applied (the stream task records the assistant
+    /// response on its own session clone).
     fn sync_shared_session_state(&self) {
-        *self.shared.session_id.lock() = self.session.memory.session_id.clone();
-        *self.shared.session_started_at.lock() = self.session.session_started_at();
-        self.shared
-            .turn_count
-            .store(self.session.current_turn_count() as u32, Ordering::Relaxed);
+        *self.shared.session.write() = super::SharedSessionState {
+            session_id: self.session.memory.session_id.clone(),
+            session_started_at: self.session.session_started_at(),
+            turn_count: self.session.current_turn_count() as u32,
+        };
     }
 
     /// Publishes the current config to the mailbox-free shared state.
@@ -2071,7 +2098,7 @@ impl TurnActor {
             component = "SessionSplit",
             elapsed_minutes,
             new_session_id = %new_id,
-            "Session split due to inactivity timeout (#369)"
+            "Session split due to inactivity timeout"
         );
     }
 
@@ -2108,7 +2135,13 @@ impl TurnActor {
         Ok(result)
     }
 
-    async fn check_and_perform_split(&mut self, _user_input: &str) {
+    /// Evaluate window-pressure compression and spawn it when warranted.
+    ///
+    /// Resolves the chat provider only after
+    /// [`ene_mind::ContextManager::should_trigger_window`] says compression
+    /// would actually start, so a healthy-provider probe does not block the
+    /// actor mailbox on every turn.
+    async fn check_and_trigger_compression(&mut self) {
         let Ok(mem_config) = self.config.get_section::<ene_store::StoreConfig>() else {
             return;
         };
@@ -2121,11 +2154,17 @@ impl TurnActor {
         let Some(store) = self.session.memory.memory_store.clone() else {
             return;
         };
+        let turn_count = self.session.current_turn_count();
+        let history = self.session.history().to_vec();
+        if !self
+            .context
+            .should_trigger_window(&mind.context, turn_count, &history)
+        {
+            return;
+        }
         let Ok(provider) = self.create_provider().await else {
             return;
         };
-        let turn_count = self.session.current_turn_count();
-        let history = self.session.history().to_vec();
         self.context.check_and_trigger(
             &mind.context,
             turn_count,
@@ -2224,11 +2263,17 @@ impl TurnActor {
         let Some(store) = self.session.memory.memory_store.clone() else {
             return;
         };
+        let turn_count = self.session.current_turn_count();
+        let history = self.session.history().to_vec();
+        if !self
+            .context
+            .should_trigger_retroactive(turn_count, &history)
+        {
+            return;
+        }
         let Ok(provider) = self.create_provider().await else {
             return;
         };
-        let turn_count = self.session.current_turn_count();
-        let history = self.session.history().to_vec();
         self.context.check_and_trigger_retroactive(
             &mind.context,
             turn_count,
@@ -2552,9 +2597,9 @@ fn reap_join_set(
 
 /// Consumes a deferred memory-writer outcome and emits its side effects.
 ///
-/// Shared by the admitted path (supervised in `memory_writer_tasks`) and the
-/// rejected path (detached) of [`TurnActor::drain_memory_writers`] so both
-/// produce identical events:
+/// Used by supervised consumers in `memory_writer_tasks` (including the
+/// `cap == 0` short-lived reject+consume path) so every non-hard-dropped
+/// outcome produces identical events:
 ///
 /// - [`ene_mind::MemoryWriteOutcome::Ok`] with pending candidates emits
 ///   [`LifecycleEvent::PendingCandidateAvailable`] on the lifecycle bus.
@@ -2629,6 +2674,14 @@ async fn consume_memory_write_outcome(
             }));
         }
     }
+}
+
+/// Hard ceiling on supervised memory-writer outcome consumers (running +
+/// waiting on the semaphore). Concurrent execution is still limited to
+/// `memory_writer_cap` by the semaphore; this bound only stops the waiter
+/// `JoinSet` from growing without limit under a burst.
+fn memory_writer_hard_limit(cap: usize) -> usize {
+    cap.saturating_mul(4)
 }
 
 /// Checks whether `set` has room for one more task under `cap` (Stage 8).
@@ -3307,7 +3360,7 @@ mod tests {
         assert!(
             gate.active.lock().is_none(),
             "Shutdown must release the single-flight gate so a racing run() \
-             reports ActorDead, not a stale Busy (#404)"
+             reports ActorDead, not a stale Busy"
         );
     }
 
@@ -3331,29 +3384,27 @@ mod tests {
         let (mut actor, _diag_rx, _lifecycle_rx, _gate, shared) =
             build_bare_actor_with_session_and_gate(registry, &task_caps, session, config);
 
-        let old_id = shared.session_id.lock().clone();
-        let old_started_at = *shared.session_started_at.lock();
+        let old_id = shared.session.read().session_id.clone();
+        let old_started_at = shared.session.read().session_started_at;
         assert_eq!(
-            shared.turn_count.load(Ordering::Relaxed),
+            shared.session.read().turn_count,
             1,
             "the injected session's turn count is mirrored into the shared state"
         );
 
         actor.split_session();
 
+        let after = shared.session.read().clone();
         assert_ne!(
-            shared.session_id.lock().clone(),
-            old_id,
+            after.session_id, old_id,
             "a session split must publish the new session id to the shared state"
         );
         assert_ne!(
-            *shared.session_started_at.lock(),
-            old_started_at,
+            after.session_started_at, old_started_at,
             "a session split must publish the new session start time"
         );
         assert_eq!(
-            shared.turn_count.load(Ordering::Relaxed),
-            0,
+            after.turn_count, 0,
             "a session split resets the shared turn count from 1 to zero"
         );
     }
