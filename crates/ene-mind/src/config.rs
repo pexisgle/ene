@@ -144,6 +144,17 @@ pub struct MindMemoryConfig {
     /// decision to user confirmation.
     #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub dispute_confidence_gap: f32,
+    /// Character bigram Jaccard threshold for a relaxed `source_quote` match (#353).
+    ///
+    /// When normalized substring matching fails, the arbiter compares character
+    /// bigrams between the quote and turn text. A score at or above this value
+    /// accepts the quote but applies [`Self::source_quote_ngram_confidence_penalty`].
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub source_quote_ngram_threshold: f32,
+    /// Confidence subtracted when a `source_quote` passes only via the n-gram
+    /// fallback (#353).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub source_quote_ngram_confidence_penalty: f32,
     /// Timeout in seconds for a single LLM memory-extraction call. When the
     /// provider does not respond within this budget the extraction fails and
     /// the pipeline falls back to deterministic candidates (issue #66).
@@ -301,6 +312,8 @@ impl Default for MindMemoryConfig {
             supersede_confidence_delta: 0.05,
             semantic_similarity_threshold: 0.85,
             dispute_confidence_gap: 0.15,
+            source_quote_ngram_threshold: 0.85,
+            source_quote_ngram_confidence_penalty: 0.15,
             extraction_timeout_secs: 30,
             contradiction_title_similarity_threshold: 0.82,
             tool_grounding: ToolGroundingConfig::default(),

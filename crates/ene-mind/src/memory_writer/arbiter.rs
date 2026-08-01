@@ -51,6 +51,10 @@ pub struct ArbiterOptions {
     pub semantic_similarity_threshold: f32,
     /// When confidence gap is below this, mark as disputed instead of superseding.
     pub dispute_confidence_gap: f32,
+    /// Character bigram Jaccard floor for relaxed `source_quote` matching (#353).
+    pub source_quote_ngram_threshold: f32,
+    /// Confidence penalty when the quote passes only via n-gram similarity (#353).
+    pub source_quote_ngram_confidence_penalty: f32,
     /// Minimum title-embedding cosine similarity for two memories to be treated
     /// as sharing a contradiction key (#351). Only consulted on the embedding
     /// path; without an embedder the arbiter falls back to exact normalized-title
@@ -65,6 +69,8 @@ impl Default for ArbiterOptions {
             supersede_confidence_delta: 0.05,
             semantic_similarity_threshold: 0.85,
             dispute_confidence_gap: 0.15,
+            source_quote_ngram_threshold: 0.85,
+            source_quote_ngram_confidence_penalty: 0.15,
             contradiction_title_similarity_threshold: 0.82,
         }
     }
@@ -86,6 +92,10 @@ impl ArbiterOptions {
             supersede_confidence_delta: config.supersede_confidence_delta.clamp(0.0, 1.0),
             semantic_similarity_threshold: config.semantic_similarity_threshold.clamp(0.0, 1.0),
             dispute_confidence_gap: config.dispute_confidence_gap.clamp(0.0, 1.0),
+            source_quote_ngram_threshold: config.source_quote_ngram_threshold.clamp(0.0, 1.0),
+            source_quote_ngram_confidence_penalty: config
+                .source_quote_ngram_confidence_penalty
+                .clamp(0.0, 1.0),
             contradiction_title_similarity_threshold: config
                 .contradiction_title_similarity_threshold,
         }
@@ -362,11 +372,24 @@ impl MemoryArbiter {
         semantic_matches: &[SemanticMatch],
         matcher: &mut TitleMatcher<'_>,
     ) -> CandidateDecision {
-        if !candidate.should_persist {
-            return Self::evaluate_deletion(candidate, existing, ctx);
+        let mut candidate = candidate.clone();
+        if candidate.should_persist
+            && !(candidate.source_quote.trim().is_empty() && is_tool_derived_candidate(&candidate))
+            && let Some(reason) =
+                apply_source_quote_verdict(&mut candidate, &ctx.turn, &ctx.options)
+        {
+            return CandidateDecision {
+                candidate,
+                action: ArbiterAction::Ignore,
+                reason,
+            };
         }
 
-        if let Some(reason) = Self::validate_candidate(candidate, ctx) {
+        if !candidate.should_persist {
+            return Self::evaluate_deletion(&candidate, existing, ctx);
+        }
+
+        if let Some(reason) = Self::validate_candidate(&candidate, ctx) {
             return CandidateDecision {
                 candidate: candidate.clone(),
                 action: ArbiterAction::Ignore,
@@ -374,7 +397,7 @@ impl MemoryArbiter {
             };
         }
 
-        if let Some(existing_id) = find_exact_duplicate(candidate, existing) {
+        if let Some(existing_id) = find_exact_duplicate(&candidate, existing) {
             return CandidateDecision {
                 candidate: candidate.clone(),
                 action: ArbiterAction::Ignore,
@@ -385,21 +408,22 @@ impl MemoryArbiter {
             };
         }
 
-        if let Some(decision) = Self::check_tool_derived(candidate, existing, ctx) {
+        if let Some(decision) = Self::check_tool_derived(&candidate, existing, ctx) {
             return decision;
         }
 
-        if let Some(decision) = Self::check_semantic_matches(candidate, semantic_matches, ctx) {
+        if let Some(decision) = Self::check_semantic_matches(&candidate, semantic_matches, ctx) {
             return decision;
         }
 
-        if let Some(decision) = Self::check_contradiction(candidate, existing, ctx, matcher).await {
+        if let Some(decision) = Self::check_contradiction(&candidate, existing, ctx, matcher).await
+        {
             return decision;
         }
 
-        let new_item = candidate_to_new_item(candidate, ctx);
+        let new_item = candidate_to_new_item(&candidate, ctx);
         CandidateDecision {
-            candidate: candidate.clone(),
+            candidate,
             action: ArbiterAction::Persist(new_item),
             reason: ArbiterReason::new(
                 ArbiterReasonCode::ValidNewMemory,
@@ -413,6 +437,20 @@ impl MemoryArbiter {
         existing: &[MemoryItem],
         ctx: &ArbiterContext<'_>,
     ) -> CandidateDecision {
+        if !candidate.source_quote.trim().is_empty()
+            && verify_source_quote(candidate, &ctx.turn, &ctx.options)
+                == SourceQuoteVerdict::Invalid
+        {
+            return CandidateDecision {
+                candidate: candidate.clone(),
+                action: ArbiterAction::Ignore,
+                reason: ArbiterReason::new(
+                    ArbiterReasonCode::SourceQuoteNotInTurn,
+                    "source_quote not found in turn text",
+                ),
+            };
+        }
+
         if let Some(reason) = Self::validate_candidate(candidate, ctx) {
             return CandidateDecision {
                 candidate: candidate.clone(),
@@ -472,13 +510,6 @@ impl MemoryArbiter {
             return Some(ArbiterReason::new(
                 ArbiterReasonCode::EmptyFields,
                 "title or content is empty",
-            ));
-        }
-
-        if !source_quote_valid(candidate, &ctx.turn) {
-            return Some(ArbiterReason::new(
-                ArbiterReasonCode::SourceQuoteNotInTurn,
-                "source_quote not found in turn text",
             ));
         }
 
@@ -901,37 +932,159 @@ fn passes_validation(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) -> b
 }
 
 fn normalize_text(s: &str) -> String {
-    s.nfkc()
-        .collect::<String>()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    normalize_quote_text(s)
 }
 
 fn dedup_key(candidate: &MemoryCandidate) -> (MemoryKind, String) {
     (candidate.kind, normalize_text(&candidate.title))
 }
 
-fn source_quote_valid(candidate: &MemoryCandidate, turn: &TurnInput<'_>) -> bool {
+/// NFKC + lowercase + punctuation strip + whitespace collapse (#353).
+fn normalize_quote_text(s: &str) -> String {
+    s.nfkc()
+        .collect::<String>()
+        .to_lowercase()
+        .chars()
+        .filter(|c| !is_quote_punctuation(*c) && !c.is_whitespace())
+        .collect()
+}
+
+const fn is_quote_punctuation(c: char) -> bool {
+    c.is_ascii_punctuation()
+        || matches!(
+            c,
+            '。' | '、'
+                | '・'
+                | '！'
+                | '？'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '（'
+                | '）'
+                | '…'
+                | '〜'
+                | 'ー'
+                | '—'
+                | '–'
+                | '．'
+                | '，'
+                | '：'
+                | '；'
+        )
+}
+
+/// Outcome of verifying a `source_quote` against turn text (#353).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceQuoteVerdict {
+    /// Normalized substring match — no confidence change.
+    Exact,
+    /// Character bigram Jaccard passed the relaxed threshold.
+    NgramFallback,
+    /// Quote is not grounded in the turn text.
+    Invalid,
+}
+
+fn apply_source_quote_verdict(
+    candidate: &mut MemoryCandidate,
+    turn: &TurnInput<'_>,
+    options: &ArbiterOptions,
+) -> Option<ArbiterReason> {
+    match verify_source_quote(candidate, turn, options) {
+        SourceQuoteVerdict::Exact => None,
+        SourceQuoteVerdict::NgramFallback => {
+            candidate.confidence = (candidate.confidence
+                - options.source_quote_ngram_confidence_penalty)
+                .clamp(0.0, 1.0);
+            None
+        }
+        SourceQuoteVerdict::Invalid => Some(ArbiterReason::new(
+            ArbiterReasonCode::SourceQuoteNotInTurn,
+            "source_quote not found in turn text",
+        )),
+    }
+}
+
+fn verify_source_quote(
+    candidate: &MemoryCandidate,
+    turn: &TurnInput<'_>,
+    options: &ArbiterOptions,
+) -> SourceQuoteVerdict {
     if candidate.source_quote.trim().is_empty() {
-        return matches!(
+        if is_tool_derived_candidate(candidate) {
+            return if tool_derived_valid(candidate, turn) {
+                SourceQuoteVerdict::Exact
+            } else {
+                SourceQuoteVerdict::Invalid
+            };
+        }
+        return if matches!(
             candidate.kind,
             MemoryKind::Procedure | MemoryKind::Reflection | MemoryKind::Episodic
-        ) && !turn.tool_results.is_empty();
+        ) && !turn.tool_results.is_empty()
+        {
+            SourceQuoteVerdict::Exact
+        } else {
+            SourceQuoteVerdict::Invalid
+        };
     }
 
-    let quote = normalize_text(&candidate.source_quote);
-    let user = normalize_text(turn.user_message);
+    let quote = normalize_quote_text(&candidate.source_quote);
+    if quote.is_empty() {
+        return SourceQuoteVerdict::Invalid;
+    }
+
+    let user = normalize_quote_text(turn.user_message);
     if user.contains(&quote) {
-        return true;
+        return SourceQuoteVerdict::Exact;
     }
-    if let Some(asst) = turn.assistant_message
-        && normalize_text(asst).contains(&quote)
-    {
-        return true;
+    if let Some(asst) = turn.assistant_message {
+        let assistant = normalize_quote_text(asst);
+        if assistant.contains(&quote) {
+            return SourceQuoteVerdict::Exact;
+        }
+        if char_bigram_jaccard(&quote, &assistant) >= options.source_quote_ngram_threshold {
+            return SourceQuoteVerdict::NgramFallback;
+        }
     }
-    false
+
+    if char_bigram_jaccard(&quote, &user) >= options.source_quote_ngram_threshold {
+        return SourceQuoteVerdict::NgramFallback;
+    }
+
+    SourceQuoteVerdict::Invalid
+}
+
+fn char_bigram_jaccard(a: &str, b: &str) -> f32 {
+    let grams_a = char_bigrams(a);
+    let grams_b = char_bigrams(b);
+    if grams_a.is_empty() || grams_b.is_empty() {
+        return 0.0;
+    }
+    let intersection = grams_a.intersection(&grams_b).count();
+    let union = grams_a.union(&grams_b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    intersection as f32 / union as f32
+}
+
+fn char_bigrams(s: &str) -> std::collections::HashSet<(char, char)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut set = std::collections::HashSet::new();
+    if chars.len() < 2 {
+        if let Some(only) = chars.first() {
+            set.insert((*only, '\0'));
+        }
+        return set;
+    }
+    for window in chars.windows(2) {
+        if let [a, b] = window {
+            set.insert((*a, *b));
+        }
+    }
+    set
 }
 
 const fn is_arbitration_visible(status: MemoryStatus) -> bool {
@@ -2940,6 +3093,72 @@ mod tests {
                 .abs()
                 < f32::EPSILON
         );
+    }
+
+    // ── #353: staged source_quote verification ──
+
+    fn quote_candidate(quote: &str) -> MemoryCandidate {
+        MemoryCandidate {
+            kind: MemoryKind::Preference,
+            title: "好きな食べ物".into(),
+            content: "きのこ".into(),
+            source_quote: quote.into(),
+            confidence: 0.9,
+            should_persist: true,
+            deletion_target_key: None,
+            commitment_due: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn source_quote_matches_without_trailing_period() {
+        let turn = TurnInput {
+            user_message: "きのこが嫌い。",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let candidate = quote_candidate("きのこが嫌い");
+        let options = ArbiterOptions::default();
+        assert_eq!(
+            verify_source_quote(&candidate, &turn, &options),
+            SourceQuoteVerdict::Exact
+        );
+    }
+
+    #[test]
+    fn source_quote_rejects_paraphrase_not_in_turn() {
+        let turn = TurnInput {
+            user_message: "犬より猫派",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let candidate = quote_candidate("猫が好き");
+        let options = ArbiterOptions::default();
+        assert_eq!(
+            verify_source_quote(&candidate, &turn, &options),
+            SourceQuoteVerdict::Invalid
+        );
+    }
+
+    #[test]
+    fn source_quote_ngram_fallback_penalizes_confidence() {
+        let turn = TurnInput {
+            user_message: "私は猫が好き",
+            assistant_message: None,
+            tool_results: &[],
+        };
+        let mut candidate = quote_candidate("私は猫が好きです");
+        let options = ArbiterOptions {
+            source_quote_ngram_threshold: 0.6,
+            source_quote_ngram_confidence_penalty: 0.2,
+            ..ArbiterOptions::default()
+        };
+        assert_eq!(
+            apply_source_quote_verdict(&mut candidate, &turn, &options),
+            None
+        );
+        assert!((candidate.confidence - 0.7).abs() < f32::EPSILON);
     }
 
     // ── #351: contradiction-key matching by title embedding similarity ──
