@@ -972,6 +972,31 @@ fn migrate_settings_file(config_path: &Path) -> Result<String, EneConfigError> {
     // already-current file is never rewritten (and its mtime/permissions left
     // alone) on every load.
     if migrated_text != raw {
+        // One-shot pre-migration backup so a buggy rewrite is recoverable.
+        // Created at most once; failure is non-fatal (same as a failed persist).
+        let backup_path = {
+            let mut os = config_path.as_os_str().to_owned();
+            os.push(".v1.bak");
+            PathBuf::from(os)
+        };
+        if !backup_path.exists() {
+            if let Err(e) = std::fs::copy(config_path, &backup_path) {
+                tracing::warn!(
+                    component = "Config",
+                    path = %config_path.display(),
+                    backup = %backup_path.display(),
+                    error = %e,
+                    "could not create settings.json.v1.bak before migration; continuing"
+                );
+            } else {
+                tracing::info!(
+                    component = "Config",
+                    backup = %backup_path.display(),
+                    "backed up settings.json before migration"
+                );
+            }
+        }
+
         // A read-only filesystem (e.g. a packaged install) must not prevent
         // the app from starting: the migration already ran in memory, so the
         // load can proceed with the migrated document; the write is only a
@@ -1511,6 +1536,17 @@ mod tests {
             assert!(
                 on_disk.get("name").is_none(),
                 "old field must be rewritten away"
+            );
+
+            let backup = path.with_file_name("settings.json.v1.bak");
+            let backup_raw = std::fs::read_to_string(&backup).expect("pre-migration backup exists");
+            assert!(
+                backup_raw.contains(r#""name": "Hoshino""#),
+                "backup must preserve the pre-migration document"
+            );
+            assert!(
+                !backup_raw.contains(r#""user_name""#),
+                "backup must not contain post-migration fields"
             );
         });
     }

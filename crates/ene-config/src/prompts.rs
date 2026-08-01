@@ -41,11 +41,16 @@ pub const SUPPORTED_LANGUAGES: &[&str] = &["en", "ja"];
 ///
 /// Matching is case-insensitive and keeps only the primary subtag, so `"ja"`,
 /// `"JA"`, and `"ja-JP"` all resolve to `"ja"`. The legacy alias `"jp"` also
-/// maps to `"ja"`. The result is not validated against the filesystem; the
-/// caller attempts a runtime load and falls back if the pack is absent.
+/// maps to `"ja"`. Empty input and any primary subtag that is not ASCII
+/// alphabetic fall back to `"en"` so the result is safe to join into a path.
+/// The caller still attempts a runtime load and falls back if the pack is
+/// absent.
 pub fn resolve_language_alias(lang: &str) -> String {
     let primary = lang.split(['-', '_']).next().unwrap_or_default();
     let lower = primary.to_ascii_lowercase();
+    if lower.is_empty() || !lower.chars().all(|c| c.is_ascii_alphabetic()) {
+        return "en".to_string();
+    }
     if lower == "jp" {
         "ja".to_string()
     } else {
@@ -1028,6 +1033,18 @@ mod tests {
             let lib = PromptLibrary::load_from(tmp.path(), alias);
             assert_eq!(lib.lang(), "ja", "alias {alias} should resolve to ja");
         }
+    }
+
+    #[test]
+    fn resolve_language_alias_rejects_non_ascii_alphabetic() {
+        assert_eq!(resolve_language_alias(""), "en");
+        assert_eq!(resolve_language_alias("../../../tmp/evil"), "en");
+        assert_eq!(resolve_language_alias("ja/../evil"), "en");
+        assert_eq!(resolve_language_alias("en2"), "en");
+        assert_eq!(resolve_language_alias("日本語"), "en");
+        assert_eq!(resolve_language_alias("ja"), "ja");
+        assert_eq!(resolve_language_alias("jp"), "ja");
+        assert_eq!(resolve_language_alias("en-US"), "en");
     }
 
     #[test]

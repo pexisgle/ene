@@ -318,13 +318,24 @@ where
     Ok(f64::deserialize(deserializer)?.clamp(0.0, 1.0))
 }
 
+/// Clamp a value into the closed unit interval `0.0..=1.0`.
+/// Non-finite values (`NaN` / ±∞) become `0.0` so a bad hand-edit cannot
+/// silently disable comparisons that treat `NaN >= x` as false.
+fn clamp_unit_interval_f32(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 /// Clamp a deserialized `f32` into the closed unit interval `0.0..=1.0`.
 fn deserialize_unit_interval_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where
     D: ::ene_config::serde::Deserializer<'de>,
 {
     use ::ene_config::serde::Deserialize;
-    Ok(f32::deserialize(deserializer)?.clamp(0.0, 1.0))
+    Ok(clamp_unit_interval_f32(f32::deserialize(deserializer)?))
 }
 
 impl Default for MindMemoryConfig {
@@ -591,17 +602,16 @@ impl Default for SessionConfig {
 /// the silence since the previous utterance, and the topic's turn count. A
 /// boundary is signalled once the composite score reaches
 /// [`Self::boundary_threshold`]. The detector only produces a signal/score;
-/// acting on it (compression #368, session split #369) is a later stage.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema, PartialEq)]
+/// acting on it (compression, session split) is a later stage.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema, PartialEq)]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
 pub struct TopicBoundaryConfig {
     /// Master switch for topic-boundary detection.
     pub enabled: bool,
     /// Composite score (`0.0..=1.0`) at or above which a turn is flagged as a
-    /// topic boundary. Session splitting (#369) is expected to use a higher
-    /// threshold than compression (#368).
-    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    /// topic boundary. Session splitting is expected to use a higher threshold
+    /// than compression.
     pub boundary_threshold: f32,
     /// Weight of the centroid-distance term in the composite score.
     pub weight_centroid: f32,
@@ -613,13 +623,13 @@ pub struct TopicBoundaryConfig {
     /// factor saturates at `1.0` once a topic reaches `max_topic_turns`, so a
     /// weight at or above the threshold would fire a boundary on its own —
     /// turning the soft cap into a hard cap that force-splits every coherent
-    /// topic at `max_topic_turns` regardless of drift or silence (#367).
+    /// topic at `max_topic_turns` regardless of drift or silence. Violations are
+    /// clamped on deserialize with a warning.
     pub weight_topic_length: f32,
     /// Moving-average blend factor for the centroid: the fraction of a new
     /// qualifying embedding folded in each turn. A small value keeps the
     /// centroid slow-moving so it represents the topic as a whole rather than
     /// chasing the latest utterance.
-    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
     pub centroid_alpha: f32,
     /// Utterances shorter than this many characters are treated as
     /// backchannels: they neither score a boundary nor update the centroid, so
@@ -647,6 +657,88 @@ impl Default for TopicBoundaryConfig {
             silence_saturation_secs: 300,
             max_topic_turns: 12,
         }
+    }
+}
+
+/// Intermediate deserialize shape for [`TopicBoundaryConfig`].
+///
+/// Applies unit-interval clamping per field, then
+/// [`From<TopicBoundaryConfigDe>`] enforces
+/// `weight_topic_length < boundary_threshold`.
+#[derive(serde::Deserialize)]
+#[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
+struct TopicBoundaryConfigDe {
+    enabled: bool,
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    boundary_threshold: f32,
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    weight_centroid: f32,
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    weight_silence: f32,
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    weight_topic_length: f32,
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    centroid_alpha: f32,
+    min_utterance_chars: usize,
+    silence_saturation_secs: u32,
+    max_topic_turns: usize,
+}
+
+impl Default for TopicBoundaryConfigDe {
+    fn default() -> Self {
+        let d = TopicBoundaryConfig::default();
+        Self {
+            enabled: d.enabled,
+            boundary_threshold: d.boundary_threshold,
+            weight_centroid: d.weight_centroid,
+            weight_silence: d.weight_silence,
+            weight_topic_length: d.weight_topic_length,
+            centroid_alpha: d.centroid_alpha,
+            min_utterance_chars: d.min_utterance_chars,
+            silence_saturation_secs: d.silence_saturation_secs,
+            max_topic_turns: d.max_topic_turns,
+        }
+    }
+}
+
+impl From<TopicBoundaryConfigDe> for TopicBoundaryConfig {
+    fn from(raw: TopicBoundaryConfigDe) -> Self {
+        let mut cfg = Self {
+            enabled: raw.enabled,
+            boundary_threshold: raw.boundary_threshold,
+            weight_centroid: raw.weight_centroid,
+            weight_silence: raw.weight_silence,
+            weight_topic_length: raw.weight_topic_length,
+            centroid_alpha: raw.centroid_alpha,
+            min_utterance_chars: raw.min_utterance_chars,
+            silence_saturation_secs: raw.silence_saturation_secs,
+            max_topic_turns: raw.max_topic_turns,
+        };
+        // Topic-length alone must not be able to trip the boundary: keep the
+        // weight strictly below the threshold (next representable below, floored
+        // at 0.0 when the threshold itself is 0.0).
+        if cfg.weight_topic_length >= cfg.boundary_threshold {
+            let clamped = cfg.boundary_threshold.next_down().max(0.0);
+            tracing::warn!(
+                component = "MindConfig",
+                weight_topic_length = cfg.weight_topic_length,
+                boundary_threshold = cfg.boundary_threshold,
+                clamped,
+                "mind.topic_boundary.weight_topic_length must stay below boundary_threshold; clamping"
+            );
+            cfg.weight_topic_length = clamped;
+        }
+        cfg
+    }
+}
+
+impl<'de> ::ene_config::serde::Deserialize<'de> for TopicBoundaryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: ::ene_config::serde::Deserializer<'de>,
+    {
+        <TopicBoundaryConfigDe as ::ene_config::serde::Deserialize>::deserialize(deserializer)
+            .map(Self::from)
     }
 }
 
@@ -1125,12 +1217,52 @@ mod tests {
         let cfg: TopicBoundaryConfig = serde_json::from_str(
             r#"{
                 "boundary_threshold": 1.7,
-                "centroid_alpha": -0.4
+                "centroid_alpha": -0.4,
+                "weight_centroid": 2.0,
+                "weight_silence": -0.5,
+                "weight_topic_length": 1.5
             }"#,
         )
         .expect("deserialize");
         assert!((cfg.boundary_threshold - 1.0).abs() < f32::EPSILON);
         assert!(cfg.centroid_alpha < f32::EPSILON);
+        assert!((cfg.weight_centroid - 1.0).abs() < f32::EPSILON);
+        assert!(cfg.weight_silence < f32::EPSILON);
+        // weight_topic_length clamps to the unit interval then to < threshold.
+        assert!(cfg.weight_topic_length < cfg.boundary_threshold);
+    }
+
+    #[test]
+    fn topic_boundary_weight_topic_length_stays_below_threshold() {
+        let cfg: TopicBoundaryConfig = serde_json::from_str(
+            r#"{
+                "boundary_threshold": 0.30,
+                "weight_topic_length": 0.50
+            }"#,
+        )
+        .expect("deserialize");
+        assert!(
+            cfg.weight_topic_length < cfg.boundary_threshold,
+            "weight_topic_length={} must be < boundary_threshold={}",
+            cfg.weight_topic_length,
+            cfg.boundary_threshold
+        );
+        assert!(
+            (cfg.weight_topic_length - 0.30f32.next_down().max(0.0)).abs() < f32::EPSILON,
+            "expected clamp to next_down(threshold), got {}",
+            cfg.weight_topic_length
+        );
+    }
+
+    #[test]
+    fn topic_boundary_non_finite_weights_become_zero() {
+        // JSON cannot encode NaN/∞; exercise the unit-interval helper via a
+        // dedicated visitor that feeds raw f32s through the same clamp path.
+        assert!((clamp_unit_interval_f32(f32::NAN)).abs() < f32::EPSILON);
+        assert!((clamp_unit_interval_f32(f32::INFINITY)).abs() < f32::EPSILON);
+        assert!((clamp_unit_interval_f32(f32::NEG_INFINITY)).abs() < f32::EPSILON);
+        assert!((clamp_unit_interval_f32(1.7) - 1.0).abs() < f32::EPSILON);
+        assert!((clamp_unit_interval_f32(-0.2)).abs() < f32::EPSILON);
     }
 
     #[test]
