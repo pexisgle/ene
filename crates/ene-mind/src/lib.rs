@@ -1,20 +1,4 @@
 #![warn(missing_docs)]
-#![expect(
-    clippy::option_if_let_else,
-    reason = "nursery style; match/if-let clarity preferred locally"
-)]
-#![expect(
-    clippy::arithmetic_side_effects,
-    reason = "mind turn pipeline uses intentional turn/score/index arithmetic"
-)]
-#![expect(
-    clippy::indexing_slicing,
-    reason = "history/token helpers index into bounds-checked conversational buffers"
-)]
-#![expect(
-    clippy::string_slice,
-    reason = "special-token and summarizer parsers slice at known ASCII delimiters"
-)]
 #![cfg_attr(
     test,
     expect(
@@ -77,8 +61,6 @@ pub mod memory_journal;
 pub mod memory_writer;
 /// Output arbitration: expression validation and hysteresis management.
 pub mod output;
-/// Pre-turn input analysis and turn intent classification.
-pub mod pre_turn;
 /// Proactive companion speech decision pipeline (#103).
 pub mod proactive;
 /// Sectioned prompt packet composition with budget-aware assembly.

@@ -1,5 +1,10 @@
 //! Deterministic keyword/heuristic appraisal rules (#86).
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; special-token and summarizer parsers slice at known ASCII delimiters"
+)]
 use ene_core::AffectState;
 
 use super::types::{AffectDelta, AffectUpdateReason};

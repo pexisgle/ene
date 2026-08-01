@@ -24,6 +24,11 @@
 )]
 //! - Unknown `kind` fallback to `Semantic`
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; special-token and summarizer parsers slice at known ASCII delimiters"
+)]
 use std::fmt::Write;
 
 use ene_ai::{LlmMessage, LlmProvider, UserMessagePart};
@@ -374,6 +379,10 @@ fn locale_mismatch(text: &str, locale: Locale) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
     use ene_ai::LlmCompletion;
 

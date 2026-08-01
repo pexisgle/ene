@@ -9,6 +9,10 @@
 //! - Forget (deletion request): 0.90
 //! - Tool-grounded procedure/reflection/episodic: 0.60–0.70 (when enabled)
 
+#![expect(
+    clippy::string_slice,
+    reason = "special-token and summarizer parsers slice at known ASCII delimiters"
+)]
 use regex::Regex;
 
 use super::candidate::{Locale, MemoryCandidate, ToolResultSummary, TurnInput};
@@ -345,7 +349,8 @@ pub fn extract_with_tool_grounding(
     test,
     expect(
         clippy::expect_used,
-        reason = "unit/integration tests use unwrap/expect for concise assertions"
+        clippy::indexing_slicing,
+        reason = "unit/integration tests use unwrap/expect and fixed indices for concise assertions"
     )
 )]
 mod tests {

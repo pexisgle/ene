@@ -4,6 +4,10 @@
 //! and resolves the final set of cues at turn-end. Priority ordering:
 //! `LlmCommand > LlmAdvisory > Affect > Hysteresis > Fallback`.
 
+#![expect(
+    clippy::option_if_let_else,
+    reason = "nursery style; match/if-let clarity preferred locally"
+)]
 use crate::output::arbiter::affect_to_expression;
 use crate::output::{CueSource, MotionLayer, PerfKind, PerformanceCue};
 use ene_core::AffectState;
@@ -220,6 +224,10 @@ impl PerformanceArbiter {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "tests index into fixed-size fixture vectors"
+    )]
     use super::*;
 
     fn expr_cue(name: &str) -> PerformanceCue {

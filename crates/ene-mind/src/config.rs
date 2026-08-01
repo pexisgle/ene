@@ -882,7 +882,8 @@ where
     test,
     expect(
         clippy::expect_used,
-        reason = "unit/integration tests use unwrap/expect for concise assertions"
+        clippy::indexing_slicing,
+        reason = "unit/integration tests use unwrap/expect and fixed indices for concise assertions"
     )
 )]
 mod tests {

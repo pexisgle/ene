@@ -1,3 +1,8 @@
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use std::time::Duration;
 
 use chrono::Utc;
@@ -25,8 +30,6 @@ use crate::recall::{ExecuteRecallInput, execute_hybrid_recall};
     reason = "facade fields are constructed and held for sub-component lifecycle; access is through engine methods"
 )]
 pub struct CognitionEngine {
-    /// Pre-turn input analysis.
-    pub(crate) pre_turn: crate::pre_turn::PreTurnAnalyzer,
     /// Context budget and compression management.
     pub(crate) context: ContextManager,
     /// Memory extraction and arbitration.
@@ -77,7 +80,6 @@ impl CognitionEngine {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            pre_turn: crate::pre_turn::PreTurnAnalyzer,
             context: ContextManager::default(),
             memory_writer: MemoryWriter,
             recall: crate::recall::RecallPlanner,

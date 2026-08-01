@@ -100,7 +100,7 @@ pub async fn execute_hybrid_recall(
 
     let mut recalled = RecallResultMapper::map(diversified);
 
-    recalled = maybe_merge_lorebook_recall(config, input, recalled).await?;
+    recalled = maybe_merge_lorebook_recall(input, recalled).await?;
 
     Ok((plan, recalled))
 }
@@ -163,7 +163,6 @@ async fn apply_reflection_to_scored(
 }
 
 async fn maybe_merge_lorebook_recall(
-    _config: &MindConfig,
     input: &ExecuteRecallInput<'_>,
     recalled: Vec<RecalledMemory>,
 ) -> Result<Vec<RecalledMemory>, CognitionError> {

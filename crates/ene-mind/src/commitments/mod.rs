@@ -5,6 +5,10 @@
 //! references (`typed_memories.commitment_id`) and are no longer dual-written
 //! from arbiter persist → sync.
 
+#![expect(
+    clippy::indexing_slicing,
+    reason = "history/token helpers index into bounds-checked conversational buffers"
+)]
 use std::collections::HashMap;
 
 use ene_ai::{EmbeddingKind, EmbeddingProvider, cosine_similarity};

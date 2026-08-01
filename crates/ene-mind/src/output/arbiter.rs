@@ -1,5 +1,10 @@
 //! Expression resolution: affect mapping, LLM hints, hysteresis (#89).
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use ene_core::AffectState;
 
 use super::types::{ExpressionDecision, ExpressionInput, ExpressionSource};

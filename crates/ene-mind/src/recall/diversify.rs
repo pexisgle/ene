@@ -7,6 +7,11 @@
 //! enforces per-kind minimum slots, and rewards source diversity. Hybrid scores
 //! on each [`ScoredMemory`] are preserved unchanged.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use ene_core::{MemoryCandidateSource, MemoryKind, ScoredMemory};
 use ene_rag::document_lexical_similarity;
 

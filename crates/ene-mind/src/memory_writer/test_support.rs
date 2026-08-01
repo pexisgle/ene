@@ -9,7 +9,11 @@
 //! none of the arbiter tests that use this double exercise recall).
 
 #![cfg(test)]
-
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 

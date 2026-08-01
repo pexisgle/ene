@@ -10,6 +10,11 @@
 //! limit, lorebook token budget, identity-kernel cap), not by packing, so
 //! packing only decides *which* sections survive.
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "mind pipeline uses intentional turn/score/index arithmetic; history/token helpers index into bounds-checked conversational buffers"
+)]
 use ene_core::ActiveCommitmentPrompt;
 
 use ene_config::UserPersona;

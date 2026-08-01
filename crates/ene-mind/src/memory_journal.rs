@@ -76,6 +76,11 @@ impl MemoryJournal {
     /// (`recall_similarity_threshold`, `recall_min_score`). This is intentional:
     /// journal search is user-facing diagnostics (broader sweep, lower score
     /// floor), while recall is cognitive (stricter quality for LLM context).
+    ///
+    /// [`Query::query_affect`] is deliberately left `None`: like the thresholds
+    /// above, this keeps journal search a purely diagnostic, broader sweep —
+    /// affect matching stays 0 so cognitive recall remains the only path where
+    /// the `emotional_match` weight (default 0.05) influences scores.
     pub fn to_query<'a>(
         mind_memory: &MindMemoryConfig,
         query_text: &'a str,
