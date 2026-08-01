@@ -2,20 +2,19 @@
 //! for [`MemoryCandidate`] items before they are persisted.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use ene_ai::{EmbeddingKind, EmbeddingProvider, cosine_similarity};
+use ene_ai::EmbeddingProvider;
 use ene_core::{
     AffectAnnotation, MemoryConfidence, MemoryItem, MemoryKind, MemoryPort, MemorySalience,
     MemoryScope, MemorySource, MemoryStatus, NewMemoryItem, PendingCandidate,
     PendingCandidateStatus,
 };
-use tracing::{debug, warn};
-use unicode_normalization::UnicodeNormalization;
+use tracing::debug;
 
 use super::candidate::{MemoryCandidate, TurnInput};
 use crate::config::MindMemoryConfig;
 use crate::error::CognitionError;
+use crate::title_match::{TitleMatchMode, TitleMatcher, normalize_title};
 
 /// Provenance of a memory candidate, used to set [`MemorySource`] on persist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +272,7 @@ impl MemoryArbiter {
         let mut matcher = TitleMatcher::new(
             ctx.embedder,
             ctx.options.contradiction_title_similarity_threshold,
+            "MemoryArbiter",
         );
 
         for (idx, candidate) in candidates.iter().enumerate() {
@@ -959,47 +959,19 @@ fn passes_validation(candidate: &MemoryCandidate, ctx: &ArbiterContext<'_>) -> b
 }
 
 fn normalize_text(s: &str) -> String {
-    normalize_quote_text(s)
+    normalize_title(s)
 }
 
 fn dedup_key(candidate: &MemoryCandidate) -> (MemoryKind, String) {
     (candidate.kind, normalize_text(&candidate.title))
 }
 
-/// NFKC + lowercase + punctuation strip + whitespace collapse.
+/// NFKC + lowercase + punctuation and whitespace strip.
+///
+/// Quote grounding and title matching want the same thing — compare meaning,
+/// not surface formatting — so both use one normalizer.
 fn normalize_quote_text(s: &str) -> String {
-    s.nfkc()
-        .collect::<String>()
-        .to_lowercase()
-        .chars()
-        .filter(|c| !is_quote_punctuation(*c) && !c.is_whitespace())
-        .collect()
-}
-
-const fn is_quote_punctuation(c: char) -> bool {
-    c.is_ascii_punctuation()
-        || matches!(
-            c,
-            '。' | '、'
-                | '・'
-                | '！'
-                | '？'
-                | '「'
-                | '」'
-                | '『'
-                | '』'
-                | '（'
-                | '）'
-                | '…'
-                | '〜'
-                | 'ー'
-                | '—'
-                | '–'
-                | '．'
-                | '，'
-                | '：'
-                | '；'
-        )
+    normalize_title(s)
 }
 
 /// Outcome of verifying a `source_quote` against turn text.
@@ -1199,222 +1171,6 @@ fn same_memory_content(candidate: &MemoryCandidate, mem: &MemoryItem) -> bool {
 /// indexed semantic-similarity pass and exact-content dedup.
 const MAX_CONTRADICTION_SCAN: usize = 512;
 
-/// Decides whether two memory titles refer to the same subject for the purpose
-/// of contradiction checking.
-///
-/// When an [`EmbeddingProvider`] is configured, titles are compared by the
-/// cosine similarity of their embeddings and a pair matches once the similarity
-/// reaches the configured threshold — this is what lets synonymous titles
-/// ("職業" vs "仕事", "住んでいる場所" vs "居住地") collapse into one subject
-/// instead of being treated as unrelated, so matching works in any language
-/// without a hardcoded keyword list.
-/// How [`TitleMatcher`] compares two titles for a single scan.
-///
-/// Pinned at scan start (after prefetch) so a mid-scan embedding failure cannot
-/// mix cosine-similarity matches with exact-title fallback inside one pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TitleMatchMode {
-    /// Compare by title-embedding cosine similarity against the threshold.
-    Embedding,
-    /// Compare by normalized exact title equality.
-    Exact,
-}
-
-/// Decides whether two memory titles refer to the same contradiction subject.
-///
-/// When an [`EmbeddingProvider`] is configured, titles are compared by the
-/// cosine similarity of their embeddings and a pair matches once the similarity
-/// reaches the configured threshold — this is what lets "職業" and "仕事"
-/// collapse into one subject. Without an embedder (or if embedding ever fails)
-/// the matcher degrades to the deterministic exact fallback (NFKC + lowercase +
-/// whitespace-collapsed equality), so contradiction checks never silently stop
-/// running.
-///
-/// Embeddings are cached by title for the lifetime of the matcher, so scanning
-/// every existing memory per candidate does not re-embed repeated titles.
-/// Cache values are [`Arc<[f32]>`] so pairwise similarity only bumps refcounts.
-///
-/// Callers must pin [`TitleMatchMode`] once per scan (via [`Self::match_mode`]
-/// after [`Self::prefetch`]) and pass it to [`Self::is_match_with`]. A mid-scan
-/// degrade sets [`Self::embedding_degraded`] so the caller can redo the whole
-/// scan under [`TitleMatchMode::Exact`] instead of mixing semantics.
-pub(crate) struct TitleMatcher<'a> {
-    embedder: Option<&'a dyn EmbeddingProvider>,
-    threshold: f32,
-    cache: HashMap<String, Arc<[f32]>>,
-    disabled: bool,
-    /// Set when embedding fails and the matcher falls back to exact matching.
-    /// Observable degrade signal for callers (alongside the `warn!` log).
-    degraded: bool,
-}
-
-impl<'a> TitleMatcher<'a> {
-    /// Create a matcher. Embeddings are computed lazily and cached.
-    fn new(embedder: Option<&'a dyn EmbeddingProvider>, threshold: f32) -> Self {
-        Self {
-            embedder,
-            threshold,
-            cache: HashMap::new(),
-            disabled: false,
-            degraded: false,
-        }
-    }
-
-    /// Match semantics to pin for the current scan.
-    fn match_mode(&self) -> TitleMatchMode {
-        if self.use_embedding() {
-            TitleMatchMode::Embedding
-        } else {
-            TitleMatchMode::Exact
-        }
-    }
-
-    /// Whether embedding failed at least once and the matcher degraded to exact.
-    const fn embedding_degraded(&self) -> bool {
-        self.degraded
-    }
-
-    fn note_degraded(&mut self, detail: &str) {
-        warn!(
-            component = "MemoryArbiter",
-            degraded = true,
-            detail = %detail,
-            "contradiction title embedding unavailable; falling back to exact title matching"
-        );
-        self.disabled = true;
-        self.degraded = true;
-    }
-
-    /// Ensure `title` is cached. Returns `false` when embedding is unavailable
-    /// or the provider rejects this title (and marks the matcher degraded).
-    async fn ensure_embedded(&mut self, title: &str) -> bool {
-        if !self.use_embedding() {
-            return false;
-        }
-        if self.cache.contains_key(title) {
-            return true;
-        }
-        self.embed_one(title).await.is_some()
-    }
-
-    async fn embed_one(&mut self, title: &str) -> Option<Arc<[f32]>> {
-        let embedder = self.embedder?;
-        match embedder
-            .embed_batch(&[(title, EmbeddingKind::Summary)])
-            .await
-        {
-            Ok(mut vectors) if vectors.len() == 1 => {
-                let embedding = vectors.swap_remove(0);
-                if embedding.iter().all(|v| *v == 0.0) {
-                    self.note_degraded("zero vector");
-                    return None;
-                }
-                let embedding: Arc<[f32]> = Arc::from(embedding);
-                self.cache.insert(title.to_string(), Arc::clone(&embedding));
-                Some(embedding)
-            }
-            Ok(vectors) => {
-                self.note_degraded(&format!("batch size mismatch (returned {})", vectors.len()));
-                None
-            }
-            Err(error) => {
-                self.note_degraded(&format!("provider error: {error}"));
-                None
-            }
-        }
-    }
-
-    /// Embed every distinct title in `titles` with a single provider call,
-    /// populating the cache so the subsequent per-memory scan hits cache only.
-    ///
-    /// Called once per contradiction scan with all same-kind titles that are
-    /// about to be compared, so the per-turn write path issues a small number
-    /// of `embed_batch` calls instead of one round trip per title. A
-    /// provider failure disables the embedding path for the rest of the batch,
-    /// degrading to exact title matching as documented.
-    async fn prefetch(&mut self, titles: impl IntoIterator<Item = &str>) {
-        if !self.use_embedding() {
-            return;
-        }
-        let missing: Vec<&str> = titles
-            .into_iter()
-            .filter(|title| !self.cache.contains_key(*title))
-            .collect();
-        if missing.is_empty() {
-            return;
-        }
-        let Some(embedder) = self.embedder else {
-            return;
-        };
-        let items: Vec<(&str, EmbeddingKind)> = missing
-            .iter()
-            .map(|t| (*t, EmbeddingKind::Summary))
-            .collect();
-        match embedder.embed_batch(&items).await {
-            Ok(vectors) if vectors.len() == missing.len() => {
-                for (title, vector) in missing.iter().zip(vectors) {
-                    if vector.iter().all(|v| *v == 0.0) {
-                        self.note_degraded("zero vector");
-                        self.cache.clear();
-                        return;
-                    }
-                    self.cache.insert((*title).to_string(), Arc::from(vector));
-                }
-            }
-            Ok(vectors) => {
-                self.note_degraded(&format!(
-                    "batch size mismatch (returned {}, requested {})",
-                    vectors.len(),
-                    missing.len()
-                ));
-            }
-            Err(error) => {
-                self.note_degraded(&format!("provider error: {error}"));
-            }
-        }
-    }
-
-    /// Cosine similarity between two titles' embeddings, embedding on demand.
-    ///
-    /// Uses cached [`Arc<[f32]>`] slices — no full vector clones on cache hits.
-    async fn similarity(&mut self, left: &str, right: &str) -> Option<f32> {
-        if !self.ensure_embedded(left).await || !self.ensure_embedded(right).await {
-            return None;
-        }
-        let left_embedding = self.cache.get(left)?;
-        let right_embedding = self.cache.get(right)?;
-        Some(cosine_similarity(
-            left_embedding.as_ref(),
-            right_embedding.as_ref(),
-        ))
-    }
-
-    /// Whether the embedding path is currently usable.
-    fn use_embedding(&self) -> bool {
-        self.embedder.is_some() && !self.disabled
-    }
-
-    /// Whether `candidate_title` refers to the same subject as `existing_title`
-    /// under the pinned `mode`. Embedding mode never falls back to exact
-    /// mid-call — a failed embed yields no match so the scan stays uniform.
-    async fn is_match_with(
-        &mut self,
-        mode: TitleMatchMode,
-        candidate_title: &str,
-        existing_title: &str,
-    ) -> bool {
-        match mode {
-            TitleMatchMode::Embedding => self
-                .similarity(candidate_title, existing_title)
-                .await
-                .is_some_and(|similarity| similarity >= self.threshold),
-            TitleMatchMode::Exact => {
-                normalize_text(candidate_title) == normalize_text(existing_title)
-            }
-        }
-    }
-}
-
 fn find_exact_duplicate(candidate: &MemoryCandidate, existing: &[MemoryItem]) -> Option<i64> {
     let key = dedup_key(candidate);
     let content_norm = normalize_text(&candidate.content);
@@ -1480,6 +1236,7 @@ mod tests {
     use super::*;
     use crate::memory_writer::candidate::ToolResultSummary;
     use chrono::Utc;
+    use ene_ai::EmbeddingKind;
     use ene_store::MemoryStore;
 
     fn ctx(turn: TurnInput<'_>) -> ArbiterContext<'_> {

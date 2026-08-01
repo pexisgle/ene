@@ -207,6 +207,15 @@ provider is configured, **leaves the local machine**. The levels are:
 Choose `full_title` only with a local model; with a cloud provider the raw title is sent
 off-machine.
 
+`redacted_title` filters the title field by field. It splits on whitespace and on the
+punctuation window titles are built from (`_ - | 、 ・ 【】 「」 ｜ ：` …), so titles that
+carry no spaces — the norm in Japanese and Chinese — are still filtered per field rather
+than passed through as one unrecognizable blob. It deliberately does **not** split on `.`,
+`/`, or ASCII `:`, since those hold paths, URLs, and file extensions together and the
+detectors need them intact. A field with no separator around it (a single run of prose
+containing a name, say) is still kept, so `redacted_title` reduces exposure rather than
+eliminating it; use `app_only` when the title must never leave the machine.
+
 Memory recall uses a hybrid score `(relevance × quality + commitment_boost) × penalty`
 (see `crates/ene-rag/src/scoring.rs`). A fresh, strongly relevant memory scores
 near `1.0`; recent/lexical-only candidates land around `0.1–0.5`; unrelated
