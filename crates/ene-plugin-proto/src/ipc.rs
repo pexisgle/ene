@@ -77,13 +77,15 @@ impl VersionRange {
 ///
 /// v3 extends the tool IPC v2 with:
 /// - `Handshake` gains `plugin_config` (replaces `tool_config` for plugins)
-/// - `Handshake` gains `plugin_profiles` (per-profile plugin configuration,
-///   delivered alongside `plugin_config`; `#[serde(default)]` so older peers
-///   stay wire-compatible without a version bump)
 /// - `HandshakeAck` gains `capabilities: PluginCapabilities`
 /// - Streaming LLM messages (`CreateChatStream`, `StreamChunk`, `StreamEnd`,
 ///   `StreamError`)
 /// - `ChatCompletion` / `EmbedBatch` for non-streaming provider calls
+///
+/// post-v3 (no version bump): `Handshake` gains `plugin_profiles`
+/// (per-profile plugin configuration, delivered alongside `plugin_config`).
+/// The field is `#[serde(default)]`, so older peers stay wire-compatible
+/// without a version bump.
 ///
 /// ## Versioning policy (N-1 backward compatibility)
 ///

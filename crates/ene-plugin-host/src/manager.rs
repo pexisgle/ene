@@ -666,26 +666,45 @@ impl PluginHostManager {
                 continue;
             }
 
-            let entry_config = Some(entry.config.clone())
-                .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()));
+            let entry_config = if entry.extra.is_empty() {
+                Some(entry.config.clone())
+                    .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()))
+            } else {
+                // Legacy flat entry-level keys (from the pre-hierarchy
+                // `#[serde(flatten)]` entries) are folded into the delivered
+                // config blob so existing settings.json files keep working.
+                // Explicit `config` keys win. The fold is in-memory only: the
+                // file on disk keeps the flat keys, so it is stable across
+                // reloads.
+                let mut folded: serde_json::Map<String, serde_json::Value> =
+                    match entry.config.as_object() {
+                        Some(obj) => obj.clone(),
+                        None => serde_json::Map::new(),
+                    };
+                let mut folded_count = 0_usize;
+                for (key, value) in &entry.extra {
+                    if folded.contains_key(key) {
+                        continue;
+                    }
+                    folded.insert(key.clone(), value.clone());
+                    folded_count += 1;
+                }
+                if folded_count > 0 {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        count = folded_count,
+                        "Folding legacy flat config key(s) into the config blob"
+                    );
+                }
+                Some(serde_json::Value::Object(folded))
+            };
             let entry_profiles = (!entry.profiles.is_empty())
                 .then(|| serde_json::Value::Object(entry.profiles.clone().into_iter().collect()));
 
-            // The plugin config blob is opaque to the host; log only a
-            // schema-independent redaction so a secret (e.g. an inline
-            // `api_key`) can never appear in the log stream (#313).
-            if let Some(config) = &entry_config {
-                tracing::debug!(
-                    component = "PluginHostManager",
-                    plugin = %name,
-                    config = %crate::redact::redact_config_unschematized(config),
-                    "Starting plugin with configuration"
-                );
-            }
-
             match Self::start_plugin(
                 name,
-                entry_config,
+                entry_config.clone(),
                 entry_profiles,
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
@@ -698,6 +717,26 @@ impl PluginHostManager {
                 Ok((plugin, conn, tofu_checksum)) => {
                     if let Some(checksum) = tofu_checksum {
                         checksums_to_record.insert(name.clone(), checksum);
+                    }
+
+                    // The plugin config blob is opaque to the host; log only a
+                    // redacted view so a secret (e.g. an inline `api_key`) can
+                    // never appear in the log stream. Redact against the
+                    // plugin's own schema when it advertises one — a custom
+                    // secret key name (`x-ene-secret: true`) is only caught by
+                    // the schema-aware pass — and fall back to the
+                    // schema-independent redaction otherwise.
+                    if let Some(config) = &entry_config {
+                        let redacted = match conn.config_schema().await {
+                            Ok(Some(schema)) => crate::redact::redact_config(config, Some(&schema)),
+                            Ok(None) | Err(_) => crate::redact::redact_config_unschematized(config),
+                        };
+                        tracing::debug!(
+                            component = "PluginHostManager",
+                            plugin = %name,
+                            config = %redacted,
+                            "Starting plugin with configuration"
+                        );
                     }
 
                     let caps = conn.capabilities();

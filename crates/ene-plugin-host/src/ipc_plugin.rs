@@ -436,6 +436,29 @@ impl IpcPluginConnection {
         }
     }
 
+    /// Requests the plugin's config JSON Schema for schema-aware redaction of
+    /// host log output.
+    ///
+    /// Returns `None` when the plugin advertises no schema, or sends `null` or
+    /// an empty object; callers then fall back to the schema-independent
+    /// redaction ([`crate::redact::redact_config_unschematized`]).
+    pub async fn config_schema(&self) -> Result<Option<serde_json::Value>, PluginHostError> {
+        let resp = self
+            .do_request(PluginIpcRequest::GetConfigSchema {
+                request_id: String::new(),
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigSchema { schema, .. } => Ok(schema.filter(|s| {
+                !s.is_null() && !matches!(s, serde_json::Value::Object(o) if o.is_empty())
+            })),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to GetConfigSchema: {other:?}"
+            ))),
+        }
+    }
+
     /// Sends a `Ping` and waits for `Pong` within [`PING_TIMEOUT`].
     pub async fn ping(&self) -> Result<(), PluginHostError> {
         let resp = self

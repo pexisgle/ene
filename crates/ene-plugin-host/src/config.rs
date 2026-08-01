@@ -109,9 +109,13 @@ pub struct PluginEntry {
     ///
     /// The host does **not** interpret this blob: it is stored and
     /// delivered verbatim. Plugin-owned settings live here (e.g.
-    /// `plugins.list.llama-cpp.config.mmproj_url`); the env override path is
-    /// `ENE_PLUGINS__LIST__<NAME>__CONFIG` (a JSON object) or
-    /// `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>` for a single key (#313).
+    /// `plugins.list.llama-cpp.config.mmproj_url`). The environment override
+    /// path is the single-key form
+    /// `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>`
+    /// (e.g. `ENE_PLUGINS__LIST__ANTHROPIC__CONFIG__API_KEY`): figment's env
+    /// provider parses values with TOML-like syntax, so a full JSON object in
+    /// `ENE_PLUGINS__LIST__<NAME>__CONFIG` is not reliably supported — set
+    /// individual keys instead (#313).
     #[serde(default)]
     pub config: serde_json::Value,
     /// Per-profile plugin configuration (opaque JSON), keyed by profile name.
@@ -124,7 +128,9 @@ pub struct PluginEntry {
     pub profiles: HashMap<String, serde_json::Value>,
     /// Unknown entry-level keys (anything beyond the declared fields),
     /// preserved verbatim across load → save so the host never drops keys
-    /// it does not understand (#313).
+    /// it does not understand. At plugin startup these flat keys are folded
+    /// into the delivered config blob (explicit `config` keys win) so legacy
+    /// entries keep working (#313).
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: serde_json::Map<String, serde_json::Value>,
