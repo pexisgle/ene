@@ -1562,8 +1562,8 @@ async fn apply_natural_decay_batch_fades_and_archives() {
             content: "old content".into(),
             source: crate::MemorySource::Conversation,
             source_ref: None,
-            confidence: crate::MemoryConfidence::new(0.2),
-            salience: crate::MemorySalience::new(0.1),
+            confidence: crate::MemoryConfidence::new(0.5),
+            salience: crate::MemorySalience::new(0.5),
             affect: crate::AffectAnnotation::default(),
             relationship_impact: 0.0,
             valid_from: None,
@@ -1577,7 +1577,7 @@ async fn apply_natural_decay_batch_fades_and_archives() {
         .await
         .unwrap();
     store
-        .test_backdate_typed_memory(active_id, 120)
+        .test_backdate_typed_memory(active_id, 30)
         .await
         .unwrap();
 
