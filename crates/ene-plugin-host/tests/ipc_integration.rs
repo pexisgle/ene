@@ -542,6 +542,7 @@ async fn spawn_concurrent_and_connect(
         &socket_path,
         SandboxConfigData::default(),
         None,
+        None,
         TEST_HANDSHAKE_TIMEOUT,
         max_concurrent,
     )
@@ -580,6 +581,7 @@ async fn spawn_and_connect(name: &str) -> (IpcPluginConnection, Arc<Mutex<MockSt
         &socket_path,
         SandboxConfigData::default(),
         Some(serde_json::json!({"test": true})),
+        None,
         TEST_HANDSHAKE_TIMEOUT,
         TEST_MAX_CONCURRENT,
     )
@@ -611,6 +613,7 @@ async fn try_connect_with_plugin_version(
     let result = IpcPluginConnection::connect(
         &socket_path,
         SandboxConfigData::default(),
+        None,
         None,
         TEST_HANDSHAKE_TIMEOUT,
         TEST_MAX_CONCURRENT,
@@ -675,6 +678,7 @@ async fn handshake_times_out_when_plugin_never_responds() {
     let result = IpcPluginConnection::connect(
         &socket_path,
         SandboxConfigData::default(),
+        None,
         None,
         short_timeout,
         TEST_MAX_CONCURRENT,
@@ -1060,6 +1064,7 @@ async fn transparent_reconnection_after_transport_failure() {
         &socket_path,
         SandboxConfigData::default(),
         None,
+        None,
         TEST_HANDSHAKE_TIMEOUT,
         TEST_MAX_CONCURRENT,
     )
@@ -1307,6 +1312,7 @@ async fn concurrent_transport_failures_coalesce_into_one_reconnect() {
         IpcPluginConnection::connect(
             &socket_path,
             SandboxConfigData::default(),
+            None,
             None,
             TEST_HANDSHAKE_TIMEOUT,
             TEST_MAX_CONCURRENT,

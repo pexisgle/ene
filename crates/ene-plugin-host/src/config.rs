@@ -98,15 +98,36 @@ pub struct PluginEntry {
     /// footprint past this cap are rejected with a `QuotaExceeded` error;
     /// reads and deletes remain permitted so the plugin can free space.
     /// Defaults to `Some(256)` — generous enough that no built-in plugin
-    /// comes close, while still bounding a runaway or malicious plugin
+    /// comes close, while still bounding a runaway plugin
     /// before it can exhaust the disk or bloat the database. Set to `null`
     /// (or omit and rely on the default) — `None` disables enforcement for
     /// a plugin that legitimately needs unbounded storage.
     #[serde(default = "default_db_quota_mb")]
     pub db_quota_mb: Option<u64>,
-    /// Plugin-specific configuration (flattened into the parent).
-    #[serde(flatten)]
+    /// Plugin-specific configuration (opaque JSON delivered to the plugin at
+    /// handshake time via `ConfigurablePlugin::set_config`).
+    ///
+    /// The host does **not** interpret this blob: it is stored and
+    /// delivered verbatim. Plugin-owned settings live here (e.g.
+    /// `plugins.list.llama-cpp.config.mmproj_url`); the env override path is
+    /// `ENE_PLUGINS__LIST__<NAME>__CONFIG` (a JSON object) or
+    /// `ENE_PLUGINS__LIST__<NAME>__CONFIG__<KEY>` for a single key (#313).
+    #[serde(default)]
     pub config: serde_json::Value,
+    /// Per-profile plugin configuration (opaque JSON), keyed by profile name.
+    ///
+    /// One plugin can need different settings per model/profile (e.g.
+    /// `plugins.list.kokoro.profiles.<profile>.voices_path`); profile
+    /// *selection* is plugin-owned. The whole map is delivered to the plugin
+    /// at handshake time via `ConfigurablePlugin::set_profiles` (#313).
+    #[serde(default)]
+    pub profiles: HashMap<String, serde_json::Value>,
+    /// Unknown entry-level keys (anything beyond the declared fields),
+    /// preserved verbatim across load → save so the host never drops keys
+    /// it does not understand (#313).
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for PluginEntry {
@@ -117,6 +138,8 @@ impl Default for PluginEntry {
             env_passthrough: Vec::new(),
             db_quota_mb: default_db_quota_mb(),
             config: serde_json::Value::Object(serde_json::Map::default()),
+            profiles: HashMap::new(),
+            extra: serde_json::Map::default(),
         }
     }
 }
@@ -242,6 +265,8 @@ ene_config::define_config!(
     reason = "unit tests use Result::expect for concise assertions"
 )]
 mod tests {
+    use super::*;
+
     /// Smoke-test that the `#[ctor]` registration of the `fs` sandbox schema
     /// does not break schema generation. The full injection into
     /// `ToolConfig.properties.list.properties.fs` requires the complete app
@@ -258,5 +283,78 @@ mod tests {
             value.get("properties").is_some(),
             "settings schema must expose top-level properties"
         );
+    }
+
+    /// Round-trip: the nested `config` / `profiles` blobs and unknown
+    /// entry-level keys must survive serialize → deserialize verbatim, so the
+    /// host never drops plugin-owned settings it does not understand (#313).
+    #[test]
+    fn plugin_entry_round_trips_config_profiles_and_unknown_keys() {
+        let json = serde_json::json!({
+            "enable": true,
+            "checksum": "abc123",
+            "env_passthrough": ["ANTHROPIC_API_KEY"],
+            "db_quota_mb": 512,
+            "config": {
+                "mmproj_url": "https://cdn.example/mmproj.gguf",
+                "api_key": {"source": "env", "env": "ANTHROPIC_API_KEY"},
+                "future_field": {"nested": [1, 2, 3]}
+            },
+            "profiles": {
+                "kokoro": {"voices_path": "/data/voices.bin"}
+            },
+            "future_entry_level_key": "preserved"
+        });
+        let entry: PluginEntry =
+            serde_json::from_value(json.clone()).expect("deserialize plugin entry");
+        assert_eq!(entry.enable, true);
+        assert_eq!(entry.checksum.as_deref(), Some("abc123"));
+        assert_eq!(
+            entry
+                .config
+                .get("mmproj_url")
+                .and_then(serde_json::Value::as_str),
+            Some("https://cdn.example/mmproj.gguf")
+        );
+        assert_eq!(
+            entry.profiles.get("kokoro"),
+            Some(&serde_json::json!({"voices_path": "/data/voices.bin"}))
+        );
+        // Unknown entry-level key lands in the flattened catch-all.
+        assert_eq!(
+            entry
+                .extra
+                .get("future_entry_level_key")
+                .and_then(serde_json::Value::as_str),
+            Some("preserved")
+        );
+
+        let back = serde_json::to_value(&entry).expect("serialize plugin entry");
+        assert_eq!(
+            back.get("config").expect("config field"),
+            &serde_json::json!({
+                "mmproj_url": "https://cdn.example/mmproj.gguf",
+                "api_key": {"source": "env", "env": "ANTHROPIC_API_KEY"},
+                "future_field": {"nested": [1, 2, 3]}
+            })
+        );
+        assert_eq!(
+            back.get("profiles").expect("profiles field"),
+            &serde_json::json!({"kokoro": {"voices_path": "/data/voices.bin"}})
+        );
+        assert_eq!(
+            back.get("future_entry_level_key"),
+            Some(&serde_json::json!("preserved"))
+        );
+    }
+
+    /// The default entry carries an empty `config` object and no profiles, so
+    /// the host's `Some(...).filter(non-empty)` handshake gating skips it.
+    #[test]
+    fn plugin_entry_default_is_empty() {
+        let entry = PluginEntry::default();
+        assert!(entry.config.as_object().is_some_and(|o| o.is_empty()));
+        assert!(entry.profiles.is_empty());
+        assert!(entry.extra.is_empty());
     }
 }

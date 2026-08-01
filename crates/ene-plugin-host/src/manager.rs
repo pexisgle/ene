@@ -668,10 +668,25 @@ impl PluginHostManager {
 
             let entry_config = Some(entry.config.clone())
                 .filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty()));
+            let entry_profiles = (!entry.profiles.is_empty())
+                .then(|| serde_json::Value::Object(entry.profiles.clone().into_iter().collect()));
+
+            // The plugin config blob is opaque to the host; log only a
+            // schema-independent redaction so a secret (e.g. an inline
+            // `api_key`) can never appear in the log stream (#313).
+            if let Some(config) = &entry_config {
+                tracing::debug!(
+                    component = "PluginHostManager",
+                    plugin = %name,
+                    config = %crate::redact::redact_config_unschematized(config),
+                    "Starting plugin with configuration"
+                );
+            }
 
             match Self::start_plugin(
                 name,
                 entry_config,
+                entry_profiles,
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
@@ -969,6 +984,7 @@ impl PluginHostManager {
     async fn start_plugin(
         name: &str,
         plugin_config: Option<serde_json::Value>,
+        plugin_profiles: Option<serde_json::Value>,
         expected_checksum: Option<String>,
         env_passthrough: Vec<String>,
         db_token: Option<String>,
@@ -1029,7 +1045,7 @@ impl PluginHostManager {
             &socket_path,
             sandbox.clone(),
             plugin_config.clone(),
-            None,
+            plugin_profiles,
             handshake_timeout,
             max_concurrent,
         )
@@ -2084,6 +2100,7 @@ mod tests {
                     &sock_a,
                     ene_plugin_proto::SandboxConfigData::default(),
                     None,
+                    None,
                     Duration::from_secs(5),
                     8,
                 )
@@ -2094,6 +2111,7 @@ mod tests {
                 IpcPluginConnection::connect(
                     &sock_b,
                     ene_plugin_proto::SandboxConfigData::default(),
+                    None,
                     None,
                     Duration::from_secs(5),
                     8,
@@ -2186,6 +2204,7 @@ mod tests {
                 &healthy_sock,
                 ene_plugin_proto::SandboxConfigData::default(),
                 None,
+                None,
                 Duration::from_secs(5),
                 8,
             )
@@ -2196,6 +2215,7 @@ mod tests {
             IpcPluginConnection::connect(
                 &dead_sock,
                 ene_plugin_proto::SandboxConfigData::default(),
+                None,
                 None,
                 Duration::from_secs(5),
                 8,
@@ -2335,6 +2355,7 @@ mod tests {
                 &sock,
                 ene_plugin_proto::SandboxConfigData::default(),
                 None,
+                None,
                 Duration::from_secs(5),
                 8,
             )
@@ -2396,6 +2417,7 @@ mod tests {
             IpcPluginConnection::connect(
                 &sock,
                 ene_plugin_proto::SandboxConfigData::default(),
+                None,
                 None,
                 Duration::from_secs(5),
                 8,
