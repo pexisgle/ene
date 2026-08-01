@@ -72,12 +72,22 @@ impl Default for ArbiterOptions {
 
 impl ArbiterOptions {
     /// Build options from [`MindMemoryConfig`].
+    ///
+    /// Every threshold is read from config (#352) rather than falling back to
+    /// [`Self::default`], so all four arbitration parameters — persist gate,
+    /// supersede margin, semantic-duplicate similarity, and dispute gap — are
+    /// tunable from `mind.memory.*`. The float thresholds are clamped into the
+    /// unit interval defensively, mirroring `MemoryDiversifyOptions::from_config`
+    /// (`recall/diversify.rs`); deserialization already clamps, but options may
+    /// be built from a programmatically constructed config.
     pub fn from_config(config: &MindMemoryConfig) -> Self {
         Self {
             min_confidence: config.min_confidence_to_persist as f32,
+            supersede_confidence_delta: config.supersede_confidence_delta.clamp(0.0, 1.0),
+            semantic_similarity_threshold: config.semantic_similarity_threshold.clamp(0.0, 1.0),
+            dispute_confidence_gap: config.dispute_confidence_gap.clamp(0.0, 1.0),
             contradiction_title_similarity_threshold: config
                 .contradiction_title_similarity_threshold,
-            ..Self::default()
         }
     }
 }
@@ -2878,6 +2888,58 @@ mod tests {
     fn append_tags_metadata_empty_tags_is_identity() {
         let content = "plain content";
         assert_eq!(append_tags_metadata(content, &[]), content);
+    }
+
+    // ── #352: every arbiter threshold is wired through config ──
+
+    /// `ArbiterOptions::from_config` reads all four arbitration parameters from
+    /// `MindMemoryConfig` instead of leaving three hardcoded (#352).
+    #[test]
+    fn from_config_wires_all_thresholds() {
+        let config = MindMemoryConfig {
+            min_confidence_to_persist: 0.70,
+            supersede_confidence_delta: 0.12,
+            semantic_similarity_threshold: 0.90,
+            dispute_confidence_gap: 0.20,
+            contradiction_title_similarity_threshold: 0.88,
+            ..MindMemoryConfig::default()
+        };
+
+        let options = ArbiterOptions::from_config(&config);
+        assert!((options.min_confidence - 0.70).abs() < f32::EPSILON);
+        assert!((options.supersede_confidence_delta - 0.12).abs() < f32::EPSILON);
+        assert!((options.semantic_similarity_threshold - 0.90).abs() < f32::EPSILON);
+        assert!((options.dispute_confidence_gap - 0.20).abs() < f32::EPSILON);
+        assert!((options.contradiction_title_similarity_threshold - 0.88).abs() < f32::EPSILON);
+    }
+
+    /// Defaults flow through unchanged, so wiring config keeps the historical
+    /// behaviour identical (#352).
+    #[test]
+    fn from_config_defaults_match_struct_default() {
+        let config = MindMemoryConfig::default();
+        let from_config = ArbiterOptions::from_config(&config);
+        let default = ArbiterOptions::default();
+        assert!((from_config.min_confidence - default.min_confidence).abs() < f32::EPSILON);
+        assert!(
+            (from_config.supersede_confidence_delta - default.supersede_confidence_delta).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (from_config.semantic_similarity_threshold - default.semantic_similarity_threshold)
+                .abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (from_config.dispute_confidence_gap - default.dispute_confidence_gap).abs()
+                < f32::EPSILON
+        );
+        assert!(
+            (from_config.contradiction_title_similarity_threshold
+                - default.contradiction_title_similarity_threshold)
+                .abs()
+                < f32::EPSILON
+        );
     }
 
     // ── #351: contradiction-key matching by title embedding similarity ──

@@ -116,6 +116,34 @@ pub struct MindMemoryConfig {
     /// (issue #95 confidence range guard).
     #[serde(deserialize_with = "deserialize_unit_interval")]
     pub min_confidence_to_persist: f64,
+    /// Minimum confidence margin by which an incoming candidate must exceed an
+    /// existing contradictory memory to *supersede* (replace) it (#352).
+    ///
+    /// One of the four arbiter thresholds (with [`Self::min_confidence_to_persist`],
+    /// [`Self::semantic_similarity_threshold`], and [`Self::dispute_confidence_gap`]).
+    /// When the candidate's confidence exceeds the existing memory's by at least
+    /// this delta the arbiter replaces the old row; a smaller margin falls
+    /// through to dispute / user-confirmation handling.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub supersede_confidence_delta: f32,
+    /// Cosine similarity at or above which two memories are treated as semantic
+    /// duplicates during deduplication (#352).
+    ///
+    /// This value is strongly dependent on the embedding model's similarity
+    /// distribution, so it should be re-tuned when the embedding provider is
+    /// swapped (the provider layer is designed for exactly that, #318).
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub semantic_similarity_threshold: f32,
+    /// Confidence gap below which a contradictory candidate marks the existing
+    /// memory as *disputed* rather than superseding it or escalating to user
+    /// confirmation (#352).
+    ///
+    /// When the candidate's confidence is within this gap of the existing
+    /// memory's (i.e. `candidate − existing > -dispute_confidence_gap`) the
+    /// existing memory is flagged disputed; a larger shortfall defers the
+    /// decision to user confirmation.
+    #[serde(deserialize_with = "deserialize_unit_interval_f32")]
+    pub dispute_confidence_gap: f32,
     /// Timeout in seconds for a single LLM memory-extraction call. When the
     /// provider does not respond within this budget the extraction fails and
     /// the pipeline falls back to deterministic candidates (issue #66).
@@ -270,6 +298,9 @@ impl Default for MindMemoryConfig {
         Self {
             default_forgetting_half_life_days: 30.0,
             min_confidence_to_persist: 0.65,
+            supersede_confidence_delta: 0.05,
+            semantic_similarity_threshold: 0.85,
+            dispute_confidence_gap: 0.15,
             extraction_timeout_secs: 30,
             contradiction_title_similarity_threshold: 0.82,
             tool_grounding: ToolGroundingConfig::default(),
@@ -876,6 +907,45 @@ mod tests {
             serde_json::from_str(r#"{"commitment_title_similarity_threshold": -0.3}"#)
                 .expect("deserialize");
         assert!(low.commitment_title_similarity_threshold < f32::EPSILON);
+    }
+
+    /// The three arbiter thresholds added in #352 clamp out-of-range config
+    /// values into `0.0..=1.0` on load, matching `min_confidence_to_persist`.
+    #[test]
+    fn arbiter_thresholds_out_of_range_are_clamped() {
+        let high: MindMemoryConfig = serde_json::from_str(
+            r#"{
+                "supersede_confidence_delta": 1.7,
+                "semantic_similarity_threshold": 2.5,
+                "dispute_confidence_gap": 3.0
+            }"#,
+        )
+        .expect("deserialize");
+        assert!((high.supersede_confidence_delta - 1.0).abs() < f32::EPSILON);
+        assert!((high.semantic_similarity_threshold - 1.0).abs() < f32::EPSILON);
+        assert!((high.dispute_confidence_gap - 1.0).abs() < f32::EPSILON);
+
+        let low: MindMemoryConfig = serde_json::from_str(
+            r#"{
+                "supersede_confidence_delta": -0.4,
+                "semantic_similarity_threshold": -0.1,
+                "dispute_confidence_gap": -0.9
+            }"#,
+        )
+        .expect("deserialize");
+        assert!(low.supersede_confidence_delta < f32::EPSILON);
+        assert!(low.semantic_similarity_threshold < f32::EPSILON);
+        assert!(low.dispute_confidence_gap < f32::EPSILON);
+    }
+
+    /// The arbiter threshold defaults match `ArbiterOptions::default()` so
+    /// wiring them through config keeps behaviour identical (#352).
+    #[test]
+    fn arbiter_threshold_defaults_match_arbiter_options() {
+        let cfg = MindMemoryConfig::default();
+        assert!((cfg.supersede_confidence_delta - 0.05).abs() < f32::EPSILON);
+        assert!((cfg.semantic_similarity_threshold - 0.85).abs() < f32::EPSILON);
+        assert!((cfg.dispute_confidence_gap - 0.15).abs() < f32::EPSILON);
     }
 
     #[test]

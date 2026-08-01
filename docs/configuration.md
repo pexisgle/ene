@@ -171,7 +171,11 @@ Configures context-window packing, hybrid memory recall, emotion decay, characte
       "recall_similarity_threshold": 0.35,
       "commitment_boost": 0.25,
       "commitment_title_similarity_threshold": 0.82,
-      "contradiction_title_similarity_threshold": 0.82
+      "contradiction_title_similarity_threshold": 0.82,
+      "min_confidence_to_persist": 0.65,
+      "supersede_confidence_delta": 0.05,
+      "semantic_similarity_threshold": 0.85,
+      "dispute_confidence_gap": 0.15
     }
   }
 }
@@ -233,6 +237,24 @@ cosine-similarity cutoff above which synonymous titles ("職業" vs "仕事",
 contradiction, instead of being persisted as unrelated duplicates. With no
 embedding provider configured, the arbiter falls back to exact normalized-title
 matching and this threshold is unused.
+
+The memory arbiter's four decision thresholds are all configurable under
+`mind.memory.*` (#352). Together they decide when an incoming candidate is
+persisted, when it *supersedes* (replaces) an existing contradictory memory,
+when the existing memory is flagged *disputed*, and when the decision is
+deferred to user confirmation:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `min_confidence_to_persist` | `0.65` | Minimum candidate confidence to persist at all. |
+| `supersede_confidence_delta` | `0.05` | Margin by which a candidate must exceed the existing memory's confidence to supersede it. |
+| `semantic_similarity_threshold` | `0.85` | Cosine similarity at/above which two memories are treated as semantic duplicates. |
+| `dispute_confidence_gap` | `0.15` | Confidence gap below which a contradictory candidate marks the existing memory disputed instead of superseding or escalating. |
+
+All four are probabilities/ratios and are clamped into `0.0..=1.0` on load.
+`semantic_similarity_threshold` in particular depends strongly on the embedding
+model's similarity distribution, so re-tune it when the embedding provider is
+swapped.
 
 ### `plugins.*` — IPC Plugins & MCP Server Connections
 
