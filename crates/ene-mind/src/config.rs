@@ -518,13 +518,8 @@ const fn default_classifier_min_confidence() -> f32 {
 )]
 #[serde(crate = "::ene_config::serde", rename_all = "snake_case", default)]
 #[schemars(crate = "::ene_config::schemars")]
+#[derive(Default)]
 pub struct CharacterMemoryConfig {}
-
-impl Default for CharacterMemoryConfig {
-    fn default() -> Self {
-        Self {}
-    }
-}
 
 /// Topic-boundary detection policy (#367).
 ///

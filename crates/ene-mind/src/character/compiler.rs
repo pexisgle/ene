@@ -300,7 +300,9 @@ mod tests {
         // A sizeable scenario that only fits under a generous budget.
         card.data.scenario = "scene detail ".repeat(120);
 
-        let small = CharacterCompiler::compile(&card, "User", None, None, 8_000);
+        // 3_200 → budget floor (400 tokens): core block fills the budget, so the
+        // optional scenario section is dropped; 128K leaves room for it.
+        let small = CharacterCompiler::compile(&card, "User", None, None, 3_200);
         let large = CharacterCompiler::compile(&card, "User", None, None, 128_000);
 
         assert!(
