@@ -119,6 +119,7 @@ impl PromptPacket {
             post_history_included,
             scene_summary_included: self.section_included(PromptSectionKind::SceneState),
             dropped_sections: Vec::new(),
+            history_messages_detached: 0,
             packed_tokens: 0,
             // Populated by the budget packer in the engine; this conversion
             // only renders an already-packed packet and cannot recover IDs.

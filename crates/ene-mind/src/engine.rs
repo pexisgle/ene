@@ -480,6 +480,7 @@ impl CognitionEngine {
             interruption_note,
             authors_note,
             user_persona,
+            compression_pending: ctx.compression_pending,
             user_input: ctx.user_input.to_string(),
         };
 
@@ -537,6 +538,7 @@ impl CognitionEngine {
         let packed = pack_prompt(pack_input, &budget);
         let (messages, mut meta) = packed.packet.to_llm_messages();
         meta.dropped_sections.clone_from(&packed.meta.dropped);
+        meta.history_messages_detached = packed.meta.history_messages_detached;
         meta.packed_tokens = packed.meta.packed_tokens;
         meta.injected_memory_ids
             .clone_from(&packed.meta.injected_memory_ids);
@@ -561,6 +563,7 @@ impl CognitionEngine {
             message_count = messages.len(),
             packed_tokens = meta.packed_tokens,
             dropped_sections = meta.dropped_sections.len(),
+            history_messages_detached = meta.history_messages_detached,
             injected_memory_ids = meta.injected_memory_ids.len(),
             "Prompt packet composed"
         );
@@ -1027,6 +1030,7 @@ mod turn_id_tests {
             llm_provider: None,
             available_window: None,
             post_history_block: None,
+            compression_pending: false,
             packing_budget_override: None,
         };
         let composed = engine

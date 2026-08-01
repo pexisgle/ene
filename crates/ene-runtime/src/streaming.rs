@@ -370,6 +370,13 @@ pub struct StreamContext {
     /// stream task so the actor can recover the partial response if the task
     /// is hard-aborted before it records the interruption itself (#H5).
     pub partial_text: Arc<parking_lot::Mutex<String>>,
+    /// Whether a rolling-compression task is in flight for this session (the
+    /// summary has not been applied yet).
+    ///
+    /// Drives the synchronous history-detachment fallback in prompt packing so
+    /// the section pack survives the async compression gap. Captured by the
+    /// actor from `ContextManager::has_pending()` at turn start.
+    pub compression_pending: bool,
     /// Concrete store for `MemoryStore`-specific operations (conversation
     /// log insertion) not available through `ene_core::MemoryPort` (#309).
     pub concrete_store: Option<Arc<ene_store::MemoryStore>>,

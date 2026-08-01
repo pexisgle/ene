@@ -156,6 +156,7 @@ async fn compose(
         llm_provider: None,
         available_window: None,
         post_history_block: None,
+        compression_pending: false,
         packing_budget_override: Some(packing_budget),
     };
     engine

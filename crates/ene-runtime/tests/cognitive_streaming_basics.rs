@@ -127,6 +127,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         llm_provider: Some(llm.clone()),
         available_window: None,
         post_history_block: None,
+        compression_pending: false,
         packing_budget_override: None,
     };
 
@@ -155,6 +156,7 @@ async fn cognitive_lifecycle_compose_prompt_includes_identity_kernel_and_recall(
         llm_provider: Some(llm),
         available_window: None,
         post_history_block: None,
+        compression_pending: false,
         packing_budget_override: None,
     };
 
@@ -231,6 +233,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         llm_provider: Some(llm.clone()),
         available_window: None,
         post_history_block: phi.as_deref(),
+        compression_pending: false,
         packing_budget_override: None,
     };
     let pre = engine
@@ -252,6 +255,7 @@ async fn cognitive_compose_includes_post_history_phi_block() {
         llm_provider: Some(llm),
         available_window: None,
         post_history_block: phi.as_deref(),
+        compression_pending: false,
         packing_budget_override: None,
     };
     let composed = engine
@@ -311,6 +315,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         llm_provider: Some(llm.clone()),
         available_window: None,
         post_history_block: None,
+        compression_pending: false,
         packing_budget_override: None,
     };
     let pre = engine
@@ -332,6 +337,7 @@ async fn cognitive_compose_includes_active_scene_summary() {
         llm_provider: Some(llm),
         available_window: None,
         post_history_block: None,
+        compression_pending: false,
         packing_budget_override: None,
     };
     let composed = engine

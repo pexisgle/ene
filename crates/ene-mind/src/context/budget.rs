@@ -9,6 +9,10 @@
 //! Each section's *size* is bounded by its content producer (recall result
 //! limit, lorebook token budget, identity-kernel cap), not by packing, so
 //! packing only decides *which* sections survive.
+//!
+//! During the async compression gap [`pack_prompt`] synchronously detaches the
+//! oldest span from the prompt-visible history instead of shedding sections —
+//! see [`PackInput::compression_pending`].
 
 #![expect(
     clippy::arithmetic_side_effects,
@@ -58,6 +62,14 @@ pub struct BudgetMeta {
     pub dropped: Vec<PromptSectionKind>,
     /// Oldest history messages removed to fit the total token ceiling.
     pub history_messages_dropped: usize,
+    /// Oldest history messages *detached* from the prompt while a compression
+    /// summary was pending: the `[0, n)` leading range was dropped from
+    /// the prompt-visible history synchronously, without waiting for the
+    /// summary. Both this and [`Self::history_messages_dropped`] are
+    /// prompt-copy-only operations — neither removes anything from the
+    /// session/DB history; the detached messages stay in the log until a later
+    /// compression covers them.
+    pub history_messages_detached: usize,
     /// Approximate total tokens after packing (sections + history).
     pub packed_tokens: usize,
     /// IDs of recalled memories that actually survived into the packed prompt.
@@ -108,6 +120,23 @@ pub struct PackInput {
     pub authors_note: Option<AuthorsNote>,
     /// Optional structured user persona for `{{user_persona}}` macro expansion.
     pub user_persona: Option<UserPersona>,
+    /// Whether a rolling-compression task is in flight and its summary has not
+    /// yet been applied to the session history.
+    ///
+    /// During this async compression gap the session history has not shrunk,
+    /// so an overflowing prompt would otherwise shed sections (memories, style
+    /// examples, …) while waiting for the summary. When this flag is set,
+    /// packing detaches the oldest span from the prompt-visible history
+    /// synchronously instead, keeping the section pack intact. In the compose
+    /// path the pre-window span is already truncated from the prompt by the
+    /// caller, so the messages detached here are the oldest of the recent
+    /// window, which the pending summary does not cover. They stay in the
+    /// session/DB history until a later compression covers them — comparable
+    /// exposure to the old last-resort trim, up to one exchange coarser
+    /// (detachment sheds two-message chunks, while the trim removes the exact
+    /// minimum). Detachment is a prompt-construction-time operation only:
+    /// nothing is removed from the session or DB history.
+    pub compression_pending: bool,
     /// Current user input.
     pub user_input: String,
 }
@@ -222,6 +251,28 @@ fn trim_history_to_budget(history: &mut Vec<HistoryEntry>, max_tokens: usize) ->
     let drop_count = lo;
     history.drain(0..drop_count);
     drop_count
+}
+
+/// Synchronous fallback for the async compression gap — see
+/// [`PackInput::compression_pending`] for the contract. Sheds up to two
+/// leading messages per pass (one exchange, or a single message for
+/// odd-length histories) from the *prompt-only* history until it fits or the
+/// [`MIN_HISTORY_MESSAGES`] one-exchange floor is reached — below it packing
+/// falls back to section dropping, so the most recent span always survives.
+/// Returns the number of leading messages detached (the `[0, n)` range) for
+/// [`BudgetMeta::history_messages_detached`].
+fn detach_history_spans(history: &mut Vec<HistoryEntry>, max_tokens: usize) -> usize {
+    let mut total = estimate_history_tokens(history);
+    let mut detached = 0usize;
+    while total > max_tokens && history.len() > MIN_HISTORY_MESSAGES {
+        let drop = (history.len() - MIN_HISTORY_MESSAGES).min(2);
+        for entry in &history[..drop] {
+            total = total.saturating_sub(history_entry_tokens(entry));
+        }
+        history.drain(0..drop);
+        detached += drop;
+    }
+    detached
 }
 
 fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
@@ -351,6 +402,10 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
 ///    whole, lowest-[`PromptSectionKind::priority`] first, until it fits;
 /// 3. as a last resort the oldest history messages are trimmed.
 ///
+/// When [`PackInput::compression_pending`] is set, step 2 is preceded by a
+/// synchronous detachment of the oldest span from the prompt-visible history
+/// (see the field's docs for the contract).
+///
 /// Section *sizes* are bounded by their content producers (recall result limit,
 /// lorebook token budget, identity-kernel cap), not here, so packing only
 /// decides *which* sections survive — it never trims within a section.
@@ -366,10 +421,28 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         .map(|s| estimate_tokens(&s.content))
         .collect();
 
+    let mut history = input.history;
+    let mut history_messages_detached = 0usize;
+    let mut history_messages_dropped = 0usize;
+
     let mut total = section_tokens_cache
         .iter()
         .sum::<usize>()
-        .saturating_add(estimate_history_tokens(&input.history));
+        .saturating_add(estimate_history_tokens(&history));
+
+    if total > budget.total_tokens && input.compression_pending {
+        // Synchronous detachment fallback during the async compression gap.
+        // Give history the full remaining budget (keeping every section)
+        // and detach whole spans from the front until the prompt fits or the
+        // one-exchange floor is reached. The detached span is prompt-only —
+        // the session/DB history is untouched; the pre-window span is the one
+        // being summarized and the detached recent-window messages stay in the
+        // log until a later compression covers them.
+        let all_section_tokens: usize = section_tokens_cache.iter().sum();
+        let history_budget = budget.total_tokens.saturating_sub(all_section_tokens);
+        history_messages_detached = detach_history_spans(&mut history, history_budget);
+        total = all_section_tokens.saturating_add(estimate_history_tokens(&history));
+    }
 
     if total > budget.total_tokens {
         // Shed whole droppable sections, lowest priority first. Required
@@ -401,8 +474,6 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
     }
 
     let section_tokens: usize = section_tokens_cache.iter().sum();
-    let mut history = input.history;
-    let mut history_messages_dropped = 0usize;
     if total > budget.total_tokens {
         let history_budget = budget.total_tokens.saturating_sub(section_tokens);
         history_messages_dropped = trim_history_to_budget(&mut history, history_budget);
@@ -426,6 +497,7 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
         meta: BudgetMeta {
             dropped,
             history_messages_dropped,
+            history_messages_detached,
             packed_tokens,
             injected_memory_ids,
         },
@@ -541,6 +613,7 @@ mod tests {
             interruption_note: None,
             authors_note: None,
             user_persona: None,
+            compression_pending: false,
             user_input: "hello".into(),
         }
     }
@@ -735,6 +808,7 @@ mod tests {
             interruption_note: None,
             authors_note: None,
             user_persona: None,
+            compression_pending: false,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -803,6 +877,7 @@ mod tests {
             interruption_note: None,
             authors_note: None,
             user_persona: None,
+            compression_pending: false,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -836,6 +911,7 @@ mod tests {
             interruption_note: Some("your previous reply was cut off mid-sentence".repeat(4)),
             authors_note: None,
             user_persona: None,
+            compression_pending: false,
             user_input: "hello".into(),
         };
         let packed = pack_prompt(input, &budget);
@@ -1000,5 +1076,135 @@ mod tests {
             !commitments.content.is_empty(),
             "the higher-priority commitments section must survive"
         );
+    }
+
+    /// An alternating user/assistant history of `turns` exchanges for the
+    /// detachment tests.
+    fn exchanges(turns: usize) -> Vec<crate::lifecycle::HistoryEntry> {
+        let mut history = Vec::with_capacity(turns * 2);
+        for i in 0..turns {
+            history.push(crate::lifecycle::HistoryEntry {
+                role: ene_ai::Role::User,
+                content: format!("user message {i} ").repeat(4),
+            });
+            history.push(crate::lifecycle::HistoryEntry {
+                role: ene_ai::Role::Assistant,
+                content: format!("assistant reply {i} ").repeat(4),
+            });
+        }
+        history
+    }
+
+    #[test]
+    fn compression_pending_detaches_oldest_span_and_keeps_sections() {
+        // While a compression summary is pending the session history has
+        // not shrunk, so an overflowing prompt must detach the oldest span
+        // from the prompt-visible history synchronously instead of shedding
+        // sections. A memory section that the old ordering would have dropped
+        // must survive, and the window constraint must still hold.
+        let budget = ContextBudget::with_capacity(60);
+        let history = exchanges(5); // 10 long messages: far over budget
+        let input = PackInput {
+            recalled: vec![sample_memory(MemoryKind::Episodic, 0.9, "important memory")],
+            history: history.clone(),
+            compression_pending: true,
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+
+        assert!(
+            packed.meta.history_messages_detached > 0,
+            "oldest span must be detached while the summary is pending"
+        );
+        assert!(
+            packed.meta.history_messages_dropped == 0,
+            "detachment must not fall back to the dropping path"
+        );
+        assert_eq!(
+            packed.meta.history_messages_detached + packed.packet.history.len(),
+            history.len(),
+            "detachment only hides the leading span from the prompt"
+        );
+        assert!(
+            !packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::EpisodicMemories),
+            "the memory section must survive the async gap, dropped={:?}, detached={}, packed_tokens={}, history_len={}",
+            packed.meta.dropped,
+            packed.meta.history_messages_detached,
+            packed.meta.packed_tokens,
+            packed.packet.history.len()
+        );
+        assert!(
+            packed.meta.packed_tokens <= budget.total_tokens,
+            "the window constraint must hold while waiting for the summary"
+        );
+    }
+
+    #[test]
+    fn detach_respects_floor_and_falls_back_to_section_drops() {
+        // Detachment never removes the most recent span. When the history
+        // is already at the one-exchange floor, packing falls back to the
+        // existing section-dropping behavior instead of detaching further.
+        let budget = ContextBudget::with_capacity(15);
+        let history = exchanges(1); // exactly the floor: 2 messages
+        let input = PackInput {
+            recalled: vec![sample_memory(
+                MemoryKind::Episodic,
+                0.9,
+                &"big memory ".repeat(20),
+            )],
+            history,
+            compression_pending: true,
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+
+        assert_eq!(
+            packed.meta.history_messages_detached, 0,
+            "below the floor nothing may be detached"
+        );
+        assert_eq!(
+            packed.packet.history.len(),
+            2,
+            "the most recent span always survives"
+        );
+        assert!(
+            packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::EpisodicMemories),
+            "at the floor the existing section-dropping behavior takes over, dropped={:?}",
+            packed.meta.dropped
+        );
+    }
+
+    #[test]
+    fn detach_is_prompt_only_and_leaves_source_history_intact() {
+        // Detachment is a prompt-construction-time operation. The caller's
+        // history (the session/DB history) is untouched; only the prompt copy
+        // loses the leading span.
+        let budget = ContextBudget::with_capacity(60);
+        let source = exchanges(5);
+        let packed = pack_prompt(
+            PackInput {
+                history: source.clone(),
+                compression_pending: true,
+                ..kernel_only_input(vec![])
+            },
+            &budget,
+        );
+
+        assert!(packed.meta.history_messages_detached > 0);
+        assert_eq!(source.len(), 10, "source history must be unchanged");
+        for (got, want) in packed
+            .packet
+            .history
+            .iter()
+            .zip(source.iter().skip(packed.meta.history_messages_detached))
+        {
+            assert_eq!(got.content, want.content);
+        }
     }
 }
