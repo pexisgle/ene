@@ -35,8 +35,8 @@ fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-async fn query_sqlite_changes(db: &sea_orm::DatabaseConnection) -> Result<usize, sea_orm::DbErr> {
-    use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+async fn query_sqlite_changes(db: &impl ConnectionTrait) -> Result<usize, sea_orm::DbErr> {
+    use sea_orm::{DatabaseBackend, Statement};
     let row = db
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
@@ -1460,6 +1460,13 @@ impl MemoryStore {
     ///
     /// Uses a single SQL `UPDATE` per transition edge (active→faded, faded→archived)
     /// so the pass scales to the full table without a `BATCH_LIMIT` (#350).
+    ///
+    /// Both statements run inside one transaction because `SELECT changes()`
+    /// reports only the count of the *same connection's* last write. The store
+    /// pool has up to eight connections, so issuing `changes()` through the pool
+    /// could land on a different connection and return a wrong (or zero) count;
+    /// pinning the UPDATE and the count to one transaction keeps them on the
+    /// same connection and makes the pass atomic.
     pub async fn apply_natural_decay_batch(
         &self,
         character_id: &str,
@@ -1469,7 +1476,7 @@ impl MemoryStore {
         fade_threshold: f32,
         archive_threshold: f32,
     ) -> Result<NaturalDecayReport, EneMemoryError> {
-        use sea_orm::ConnectionTrait;
+        use sea_orm::{ConnectionTrait, TransactionTrait};
 
         if half_life_days <= 0.0 || half_life_days.is_nan() {
             return Ok(NaturalDecayReport::default());
@@ -1501,11 +1508,13 @@ impl MemoryStore {
             "UPDATE typed_memories SET status = 'archived', updated_at = '{now_text}' WHERE character_id = '{cid}' AND status = 'faded' AND pinned = 0{user_clause} AND ({decay_faded}) < {archive_threshold}"
         );
 
-        self.db.execute_unprepared(&fade_to_faded).await?;
-        let faded_count = query_sqlite_changes(&self.db).await?;
+        let txn = self.db.begin().await?;
+        txn.execute_unprepared(&fade_to_faded).await?;
+        let faded_count = query_sqlite_changes(&txn).await?;
 
-        self.db.execute_unprepared(&faded_to_archived).await?;
-        let archived_count = query_sqlite_changes(&self.db).await?;
+        txn.execute_unprepared(&faded_to_archived).await?;
+        let archived_count = query_sqlite_changes(&txn).await?;
+        txn.commit().await?;
 
         Ok(NaturalDecayReport {
             faded_count,
