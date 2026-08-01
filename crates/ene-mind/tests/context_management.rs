@@ -141,6 +141,7 @@ fn pack_prompt_counts_history_toward_total_budget() {
             compression_pending: false,
             user_input: "hi".into(),
             lang: "en".into(),
+            now: None,
         },
         &budget,
     );

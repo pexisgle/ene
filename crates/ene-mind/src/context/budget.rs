@@ -144,6 +144,11 @@ pub struct PackInput {
     /// used for e.g. commitment deadline expressions (#385). Belongs in a
     /// language pack with #338.
     pub lang: String,
+    /// Reference instant for relative expressions such as commitment
+    /// deadlines (#385). `None` uses a single `Utc::now()` captured per pack,
+    /// shared by every bullet in a block; an explicit value pins the instant
+    /// (tests).
+    pub now: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn sort_memories_for_drop(memories: &mut [RecalledMemory]) {
@@ -348,7 +353,11 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
     if !input.commitments.is_empty() {
         sections.push(PromptSection::new(
             PromptSectionKind::ActiveCommitments,
-            render_commitments_block(&input.commitments, &input.lang, chrono::Utc::now()),
+            render_commitments_block(
+                &input.commitments,
+                &input.lang,
+                input.now.unwrap_or_else(chrono::Utc::now),
+            ),
         ));
     }
 
@@ -621,6 +630,7 @@ mod tests {
             compression_pending: false,
             user_input: "hello".into(),
             lang: "en".into(),
+            now: None,
         }
     }
 
@@ -817,6 +827,7 @@ mod tests {
             compression_pending: false,
             user_input: "hello".into(),
             lang: "en".into(),
+            now: None,
         };
         let packed = pack_prompt(input, &budget);
         let kernel_section = packed
@@ -887,6 +898,7 @@ mod tests {
             compression_pending: false,
             user_input: "hello".into(),
             lang: "en".into(),
+            now: None,
         };
         let packed = pack_prompt(input, &budget);
         assert!(packed.meta.history_messages_dropped > 0);
@@ -922,6 +934,7 @@ mod tests {
             compression_pending: false,
             user_input: "hello".into(),
             lang: "en".into(),
+            now: None,
         };
         let packed = pack_prompt(input, &budget);
         assert!(
@@ -1221,7 +1234,12 @@ mod tests {
     fn commitments_section_renders_deadline_through_packing() {
         // #385: the deadline reaches the packed prompt — `due_at` becomes a
         // relative expression in the configured language, overdue is marked.
-        let now = chrono::Utc::now();
+        // The reference instant is pinned so the calendar-day offsets can
+        // never roll across a UTC-midnight boundary between this test and the
+        // renderer.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-01T12:00:00Z")
+            .expect("fixed instant")
+            .with_timezone(&chrono::Utc);
         let input = PackInput {
             commitments: vec![
                 ActiveCommitmentPrompt {
@@ -1240,6 +1258,7 @@ mod tests {
                 },
             ],
             lang: "ja".into(),
+            now: Some(now),
             ..kernel_only_input(vec![])
         };
         let packed = pack_prompt(input, &default_test_budget());
