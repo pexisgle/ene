@@ -62,7 +62,7 @@ impl MemoryWriter {
     /// When LLM extraction is enabled and returns candidates, those candidates
     /// are the sole conversation judgment (tool grounding remains a hint /
     /// fallback only). Explicit forget patterns are always applied as a safety
-    /// net, even when the LLM owns the turn (#354). Explicit remember requests
+    /// net, even when the LLM owns the turn. Explicit remember requests
     /// are owned by the LLM extractor and have no deterministic fallback. On
     /// LLM failure, empty result, or when disabled, configured tool-grounding
     /// fallbacks reach the arbiter.
@@ -173,8 +173,8 @@ impl MemoryWriter {
         }
 
         // Forget requests are always applied even when LLM owned the turn so
-        // explicit「忘れて」cannot be dropped if the model omits a deletion
-        // (#354). Remember patterns no longer exist — explicit remember is
+        // explicit「忘れて」cannot be dropped if the model omits a deletion.
+        // Remember patterns no longer exist — explicit remember is
         // LLM-owned.
         if !pattern_candidates.is_empty() {
             tracing::debug!(
@@ -483,7 +483,7 @@ fn sanitize_ref(raw: &str) -> String {
 /// Resolves the configured classifier language to a [`candidate::Locale`]
 /// carrying the primary language code (case-insensitive, primary subtag,
 /// `"jp"` → `"ja"`). The deterministic extractor loads forget patterns for the
-/// code and falls back to English patterns when no pack exists for it (#354).
+/// code and falls back to English patterns when no pack exists for it.
 fn locale_from_classifier_language(lang: &str) -> candidate::Locale {
     candidate::Locale::resolve(lang)
 }
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(locale_from_classifier_language("jp").code(), "ja");
         assert_eq!(locale_from_classifier_language("en").code(), "en");
         // Unknown languages resolve to their own code and fall back to English
-        // patterns in the deterministic extractor (#354).
+        // patterns in the deterministic extractor.
         assert_eq!(locale_from_classifier_language("zh").code(), "zh");
     }
 
@@ -716,7 +716,7 @@ mod tests {
     #[tokio::test]
     async fn llm_success_with_candidates_persists_only_llm_items() {
         // The LLM returns its own candidate for an explicit remember request;
-        // remember has no deterministic fallback (#354), so only the LLM item
+        // remember has no deterministic fallback, so only the LLM item
         // should be persisted.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
@@ -773,7 +773,7 @@ mod tests {
     #[tokio::test]
     async fn llm_empty_persists_nothing_without_forget() {
         // An empty LLM result used to fall back to the deterministic remember
-        // pattern; remember is now LLM-owned (#354), so nothing persists when
+        // pattern; remember is now LLM-owned, so nothing persists when
         // the LLM returns no candidates and no forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
@@ -809,7 +809,7 @@ mod tests {
         let count = store.count_typed_memories("ene", None).await.unwrap();
         assert_eq!(
             count, 0,
-            "empty LLM result must not persist an explicit remember (#354)"
+            "empty LLM result must not persist an explicit remember"
         );
     }
 
@@ -910,7 +910,7 @@ mod tests {
     #[tokio::test]
     async fn llm_failure_persists_nothing_without_forget() {
         // LLM failure used to fall back to the deterministic remember pattern;
-        // remember is now LLM-owned (#354), so nothing persists on failure
+        // remember is now LLM-owned, so nothing persists on failure
         // unless a forget was requested.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
@@ -946,7 +946,7 @@ mod tests {
         let count = store.count_typed_memories("ene", None).await.unwrap();
         assert_eq!(
             count, 0,
-            "LLM failure must not persist an explicit remember (#354)"
+            "LLM failure must not persist an explicit remember"
         );
     }
 
@@ -977,7 +977,7 @@ mod tests {
         let count = store.count_typed_memories("ene", None).await.unwrap();
         assert_eq!(
             count, 0,
-            "explicit remember must not persist without an LLM (#354)"
+            "explicit remember must not persist without an LLM"
         );
     }
 
@@ -1047,7 +1047,7 @@ mod tests {
     #[tokio::test]
     async fn zh_classifier_language_falls_back_to_english_forget_patterns() {
         // "zh" has no pattern pack; the deterministic extractor falls back to
-        // English patterns, so forget still works for zh users (#354).
+        // English patterns, so forget still works for zh users.
         let store = MemoryStore::open_in_memory(4).await.unwrap();
         let mut config = MindConfig::default();
         config.emotion.classifier_language = "zh".into();

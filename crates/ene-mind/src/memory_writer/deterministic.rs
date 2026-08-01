@@ -1,7 +1,7 @@
 //! Deterministic memory extractor — minimal pattern safety net.
 //!
 //! Only explicit forget (deletion) instructions are pattern-matched. Explicit
-//! remember requests are owned by the LLM extractor (#354); preferences,
+//! remember requests are owned by the LLM extractor; preferences,
 //! schedules, nicknames, and other soft signals are left to the LLM too.
 //! Tool-result grounding remains a separate, configurable path.
 //!
@@ -32,7 +32,7 @@ fn nfkc(s: &str) -> String {
 }
 
 /// Interrogative sentence openers (lowercase). A `forget` keyword inside a
-/// question is not an instruction — e.g. "did you forget my name?" (issue #70
+/// question is not an instruction — e.g. "did you forget my name?" (a
 /// precision guard).
 const EN_QUESTION_STARTERS: &[&str] = &[
     "do you",
@@ -240,7 +240,7 @@ mod tests {
         }
     }
 
-    // ── Remember is LLM-owned (#354) ──────────────────────────────────
+    // ── Remember is LLM-owned ─────────────────────────────────────────
 
     #[test]
     fn remember_is_no_longer_detected_deterministically() {
@@ -382,6 +382,19 @@ mod tests {
     }
 
     #[test]
+    fn en_forget_question_without_mark_is_skipped() {
+        // The interrogative-opener guard fires without a trailing `?`, so an
+        // opener phrase must not be captured as a forget instruction.
+        let out = extract(
+            &en_turn("did you forget my name"),
+            &Locale::resolve("en"),
+            0.0,
+        )
+        .expect("deterministic extraction always succeeds");
+        assert!(out.is_empty(), "forget question must not match: {out:?}");
+    }
+
+    #[test]
     fn en_soft_signals_are_not_pattern_matched() {
         for msg in [
             "I like mushrooms",
@@ -398,7 +411,7 @@ mod tests {
         }
     }
 
-    // ── Language fallback (#354) ──────────────────────────────────────
+    // ── Language fallback ─────────────────────────────────────────────
 
     #[test]
     fn language_without_pack_falls_back_to_english_patterns() {

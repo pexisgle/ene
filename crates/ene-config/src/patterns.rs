@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn embedded_packs_parse_and_are_complete() {
-        // Language-pack validation (#354): the embedded packs for every
+        // Language-pack validation: the embedded packs for every
         // supported language must parse and contain forget patterns.
         for lang in SUPPORTED_LANGUAGES {
             let lib = PatternLibrary::built_in(lang);

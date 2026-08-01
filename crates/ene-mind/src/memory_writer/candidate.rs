@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Carries a resolved primary language code (e.g. `"ja"`, `"en"`, `"ko"`) so
 /// extraction can select per-language packs at runtime. Languages without a
 /// dedicated pack fall back to English patterns in the deterministic
-/// extractor (#354).
+/// extractor.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Locale {
     /// Resolved primary language code (e.g. `"ja"`, `"en"`).
