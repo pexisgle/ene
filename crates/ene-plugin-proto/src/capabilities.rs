@@ -388,7 +388,7 @@ mod tests {
 /// Wire note: not yet carried on any message. The externally tagged serde
 /// form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`) is the initial
 /// choice; re-confirm it when this type is first wired into a message (the
-/// host-side resource admission work, #319) before it becomes load-bearing.
+/// follow-up host-side resource admission work) before it becomes load-bearing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ResourceClass {
     /// A specific GPU device index, as used by `with_main_gpu(n)` /
