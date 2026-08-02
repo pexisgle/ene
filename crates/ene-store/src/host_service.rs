@@ -65,7 +65,9 @@ impl OpenFailureTracker {
 /// Shared host-service listener that multiplexes passenger services.
 pub struct HostServiceServer {
     socket_path: PathBuf,
-    db: DatabaseConnection,
+    /// `None` when the deployment has no memory storage (and therefore no
+    /// `db` registrations); the `db` service is unreachable then.
+    db: Option<DatabaseConnection>,
     /// Auth token → `db` registration. Identity and prefix isolation are
     /// derived from this map so a shared socket cannot forge another
     /// plugin's namespace.
@@ -79,7 +81,7 @@ pub struct HostServiceServer {
 impl HostServiceServer {
     /// Creates a host-service server bound to `socket_path`.
     pub fn new(
-        db: DatabaseConnection,
+        db: Option<DatabaseConnection>,
         socket_path: PathBuf,
         db_plugins: HashMap<String, DbPluginRegistration>,
         passengers: HashMap<HostServiceId, Arc<dyn HostServicePassenger>>,
@@ -159,7 +161,7 @@ impl HostServiceServer {
 
     async fn handle_connection(
         mut stream: ene_plugin_proto::transport::IpcStream,
-        db: DatabaseConnection,
+        db: Option<DatabaseConnection>,
         db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
         passengers: Arc<HashMap<HostServiceId, Arc<dyn HostServicePassenger>>>,
         failed_opens: Arc<Mutex<OpenFailureTracker>>,
@@ -212,6 +214,21 @@ impl HostServiceServer {
                 return Ok(());
             };
 
+            // A matched token implies a backing store: `db` registrations are
+            // only issued when the service was spawned with one, so `None`
+            // here is unreachable and just a defensive fallback.
+            let Some(db) = db else {
+                write_host_service_response(
+                    &mut stream,
+                    &HostServiceResponse::Error {
+                        code: HostServiceErrorCode::UnknownService,
+                        message: "db service is unavailable (memory storage disabled)".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+
             write_host_service_response(&mut stream, &HostServiceResponse::OpenAck).await?;
             return DbIpcServer::serve_authenticated_connection(
                 stream,
@@ -237,6 +254,17 @@ impl HostServiceServer {
                     &DbResponse::Error {
                         code: DbErrorCode::PermissionDenied,
                         message: "Invalid auth token".to_string(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            };
+            let Some(db) = db else {
+                DbIpcServer::send_response(
+                    &mut stream,
+                    &DbResponse::Error {
+                        code: DbErrorCode::Internal,
+                        message: "db service is unavailable (memory storage disabled)".to_string(),
                     },
                 )
                 .await?;
@@ -406,7 +434,7 @@ mod tests {
         let socket = std::env::temp_dir().join(format!("ene-hs-test-{}", std::process::id()));
         let db = Database::connect("sqlite::memory:").await.expect("open db");
         let server = HostServiceServer::new(
-            db,
+            Some(db),
             socket.clone(),
             test_registration("ene-db-good"),
             test_passengers(),
@@ -437,7 +465,7 @@ mod tests {
         let socket = std::env::temp_dir().join(format!("ene-hs-test2-{}", std::process::id()));
         let db = Database::connect("sqlite::memory:").await.expect("open db");
         let server = HostServiceServer::new(
-            db,
+            Some(db),
             socket.clone(),
             test_registration("ene-db-good"),
             test_passengers(),
@@ -471,11 +499,54 @@ mod tests {
         let socket = std::env::temp_dir().join(format!("ene-hs-test3-{}", std::process::id()));
         let db = Database::connect("sqlite::memory:").await.expect("open db");
         let server = HostServiceServer::new(
-            db,
+            Some(db),
             socket.clone(),
             test_registration("ene-db-good"),
             test_passengers(),
         );
+        let server_task = tokio::spawn(server.run());
+        wait_for_socket(&socket).await;
+
+        let mut client = IpcStream::connect(&socket).await.expect("connect");
+        let open = ene_plugin_proto::HostServiceRequest::Open {
+            service: HostServiceId::Credential,
+            token: "any-token".into(),
+        };
+        ene_plugin_proto::write_host_service_request(&mut client, &open)
+            .await
+            .expect("write open");
+        let ack = ene_plugin_proto::read_host_service_response(&mut client)
+            .await
+            .expect("read ack")
+            .expect("ack frame");
+        assert!(matches!(ack, HostServiceResponse::OpenAck));
+
+        write_credential_request(
+            &mut client,
+            &CredentialRequest::Resolve {
+                id: "anthropic".into(),
+            },
+        )
+        .await
+        .expect("write resolve");
+        let resp = read_credential_response(&mut client)
+            .await
+            .expect("read resolve")
+            .expect("resolve frame");
+
+        server_task.abort();
+        cleanup_path(&socket);
+        assert!(matches!(resp, CredentialResponse::Resolved { .. }));
+    }
+
+    #[tokio::test]
+    async fn credential_service_serves_without_memory_store() {
+        let socket = std::env::temp_dir().join(format!("ene-hs-test5-{}", std::process::id()));
+        // No database backing and no db registrations, exactly what a
+        // store-disabled deployment produces; the credential passenger is
+        // store-independent and must still be openable.
+        let server =
+            HostServiceServer::new(None, socket.clone(), HashMap::new(), test_passengers());
         let server_task = tokio::spawn(server.run());
         wait_for_socket(&socket).await;
 
@@ -519,7 +590,7 @@ mod tests {
         // historical `UnknownService` rejection, and so must the other
         // reserved-but-unimplemented ids.
         let server = HostServiceServer::new(
-            db,
+            Some(db),
             socket.clone(),
             test_registration("ene-db-good"),
             HashMap::new(),
