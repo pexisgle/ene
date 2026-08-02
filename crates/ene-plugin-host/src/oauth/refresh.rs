@@ -190,8 +190,7 @@ impl TokenRefresher for OAuthRefresher {
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "tests use unwrap/panic for concise failure messages"
+    reason = "tests use unwrap for concise failure messages"
 )]
 mod tests {
     use super::*;

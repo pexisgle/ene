@@ -456,8 +456,7 @@ use ene_connector::declaration::ScopeDecision;
 #[expect(
     clippy::expect_used,
     clippy::unwrap_used,
-    clippy::panic,
-    reason = "tests use expect/unwrap/panic for concise failure messages"
+    reason = "tests use expect/unwrap for concise failure messages"
 )]
 mod tests {
     use super::*;

@@ -30,11 +30,6 @@ pub fn s256_challenge(verifier: &str) -> String {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "tests use unwrap/panic for concise failure messages"
-)]
 mod tests {
     use super::*;
 
