@@ -31,15 +31,18 @@ jobs:
     timeout-minutes: 75
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
+        run: |
+          # The runner image leaves ~25GiB free on /, which a full workspace
+          # target dir plus the cargo registry can exhaust. Detached because
+          # nothing before cargo needs the space and a foreground delete costs
+          # 45-90s per job; the paths are unused by every step here, so no
+          # later step can race a half-deleted tree.
+          sudo bash -c 'nohup rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            >/dev/null 2>&1 &'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -72,15 +75,13 @@ jobs:
     timeout-minutes: 75
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
+        run: |
+          sudo bash -c 'nohup rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            >/dev/null 2>&1 &'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native dependencies
@@ -110,15 +111,13 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Free disk space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
+        run: |
+          sudo bash -c 'nohup rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL \
+            >/dev/null 2>&1 &'
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native dependencies
