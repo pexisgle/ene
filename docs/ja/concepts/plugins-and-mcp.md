@@ -317,6 +317,58 @@ MCP stdio サーバーも `plugins.mcp_servers` エントリに同じ `env_passt
 
 `GetConfigSchema` は実行時に再取得できます。外部エンジン接続後に初めて選択肢が分かるプラグインは、`DeferredCompleted` と同様にルーティングされる `ConfigSchemaChanged` を push できます。オプトインの capability フラグにより `ListConfigOptions`（動的 enum）、`ValidateConfig`（フィールド横断エラー）、`MigrateConfig`（`config_version` 自己移行）が有効になります。フラグを省略したピアは静的スキーマ + ホスト側 JSON Schema 検証のみに degrade し、マイグレーションは行いません。これらの API の UI 配線はここでは対象外です。
 
+### 資格情報の宣言 (`x-ene-credentials`)
+
+資格情報（API キー、OAuth2 トークン）が必要なプラグインは、`config_schema()`
+が返すスキーマのトップレベルで、既存の `x-` マーカーと同じ場所に宣言します：
+
+```json
+{
+  "type": "object",
+  "properties": { "voice": { "type": "string" } },
+  "x-ene-credentials": [
+    { "id": "anthropic", "kind": "api_key", "required": true,
+      "header": { "name": "x-api-key", "format": "{value}" },
+      "env_fallback": "ANTHROPIC_API_KEY",
+      "label": "Anthropic API Key",
+      "help_url": "https://console.anthropic.com/settings/keys" },
+    { "id": "google.calendar", "kind": "oauth2",
+      "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
+      "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+      "token_url": "https://oauth2.googleapis.com/token",
+      "label": "Google カレンダー" }
+  ]
+}
+```
+
+両 kind 共通のフィールド: `id` は資格情報の安定 ID、`required`（既定
+`false`）は必須資格情報であることを示し、`shared`（既定 `true`）は名前空間
+共有を制御します（後述）。`label` / `help_url` は設定 UI の生成に使われます。
+ID は `[A-Za-z0-9._-]` を受け付け、先頭・末尾に `.` を置けません —
+`anthropic`、`google.calendar`、`google-calendar` はいずれも有効です。
+
+- `kind: "api_key"` — 静的シークレット。`header`（任意）はクライアントが
+  値を注入する方法を指定します。`format` は `{value}` を含むテンプレート
+  である必要があります（例: `Bearer {value}`）。`env_fallback` は値が保存
+  されていない場合にホストが確認する環境変数名です。
+- `kind: "oauth2"` — ホストが駆動する OAuth2 フロー。`scopes` は同意画面の
+  スコープ一覧、`auth_url` / `token_url` は認可エンドポイントとトークン
+  エンドポイントです。
+
+**共有ポリシー。** 宣言は既定で共有されます。両方のプラグインが `anthropic`
+を宣言していれば同じ保存値を参照するため、プロバイダーを差し替えてもキーを
+再入力する必要がありません。共有は「宣言した者同士でのみ」で、`anthropic`
+を宣言していないプラグインは、vault に値が存在しても拒否されます。
+`"shared": false` を書けばオプトアウトでき、その場合 `<plugin>.<id>` の
+プラグイン専用の名前空間に解決されます。
+
+**検証のタイミング。** 宣言はプラグイン起動時に検証されます。エントリは
+それぞれ独立にチェックされ、不正なエントリは警告のうえ無視されます（プラグイン
+自体は起動します）。同一 id の重複は最初の宣言が採用されます。要求時の強制は
+credential サービス側にあり、要求プラグインの登録済み宣言に対してのみ照合し、
+宣言外の id を拒否します。値の形式検証（例: `sk-ant-` 接頭辞）は保存時に
+プラグイン自身の `ValidateConfig` へ委譲されます。
+
 ### バイナリチェックサム検証 (TOFU)
 
 初回起動時にホストはプラグインバイナリの SHA-256 チェックサムを計算し、
