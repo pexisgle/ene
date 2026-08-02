@@ -13,12 +13,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-use ene_plugin_host::{IpcPluginConnection, PluginHostError};
+use ene_ai::LlmProviderFactory;
+use ene_ai::ResourceRegistry;
+use ene_config::EneConfig;
+use ene_plugin_host::{IpcLlmProviderFactory, IpcPluginConnection, PluginHostError};
 use ene_plugin_proto::{
-    CallContext, DeferredStatus, IpcListener, PLUGIN_IPC_MIN_SUPPORTED_VERSION,
-    PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities, PluginIpcRequest, PluginIpcResponse,
-    SandboxConfigData, ToolError, ToolName, ToolResult, ToolSpec, VersionRange, cleanup_path,
-    read_plugin_request, write_plugin_response,
+    CallContext, ConcurrencyHint, DeferredStatus, IpcListener, LlmProviderSpec,
+    PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION, PluginCapabilities,
+    PluginIpcRequest, PluginIpcResponse, ResourceClass, SandboxConfigData, ToolError, ToolName,
+    ToolResult, ToolSpec, VersionRange, cleanup_path, read_plugin_request, write_plugin_response,
 };
 use tokio::sync::{Mutex, Notify};
 
@@ -1821,4 +1824,529 @@ async fn dynamic_config_degrades_on_n_minus_one_plugin() {
     );
 
     cleanup_path(&socket_path);
+}
+
+// ── Resource admission control ────────────────────────────────────────────
+
+/// State for the LLM-provider admission mock, shared with the tests.
+#[derive(Debug, Default)]
+struct LlmMockState {
+    /// `request_id`s of `ChatCompletion` requests received (in order).
+    chat_completions: Vec<String>,
+    /// `request_id`s of `CreateChatStream` requests received (in order).
+    chat_streams: Vec<String>,
+    /// When `true`, the mock holds every `ChatCompletion` response until the
+    /// companion [`Notify`] fires — keeping a request in flight so its
+    /// resource permit stays held while the test orchestrates the other side.
+    hold_chat: bool,
+}
+
+/// Runs a mock plugin server that serves LLM provider requests.
+///
+/// The handshake declares an LLM provider; `ChatCompletion` and
+/// `CreateChatStream` requests are recorded on `state` so tests can observe
+/// whether (and when) the host actually sent them — the core of the
+/// "don't send until admitted" contract. When `state.hold_chat` is set, the
+/// mock parks each `ChatCompletion` response on `hold` (an [`Arc`]-shared
+/// [`Notify`], deliberately outside the state mutex so waiting never blocks
+/// the test's release path).
+async fn run_llm_mock_server(
+    socket_path: PathBuf,
+    state: Arc<Mutex<LlmMockState>>,
+    hold: Arc<Notify>,
+) {
+    cleanup_path(&socket_path);
+    let mut listener = IpcListener::bind(&socket_path).expect("failed to bind llm mock server");
+
+    loop {
+        let Ok(mut stream) = listener.accept().await else {
+            break;
+        };
+        let state = Arc::clone(&state);
+
+        loop {
+            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+                break;
+            };
+            match req {
+                PluginIpcRequest::Handshake {
+                    version: host_range,
+                    ..
+                } => {
+                    let Some(negotiated) = VersionRange {
+                        min: PLUGIN_IPC_PROTOCOL_VERSION,
+                        max: PLUGIN_IPC_PROTOCOL_VERSION,
+                    }
+                    .negotiate(&host_range) else {
+                        break;
+                    };
+                    let resp = PluginIpcResponse::HandshakeAck {
+                        version: negotiated,
+                        capabilities: PluginCapabilities {
+                            tools: 0,
+                            llm_providers: vec![LlmProviderSpec {
+                                kind: "mock".into(),
+                                supported_models: vec!["mock-model".into()],
+                                supports_streaming: true,
+                                supports_vision: false,
+                                concurrency: ConcurrencyHint {
+                                    max_in_flight: 8,
+                                    queue_depth: 16,
+                                },
+                                // The factory's explicit resource (not the
+                                // handshake spec) drives the admission gate
+                                // under test.
+                                resource: ResourceClass::Network,
+                                context_window: None,
+                            }],
+                            tts_providers: vec![],
+                            stt_providers: vec![],
+                            ..PluginCapabilities::default()
+                        },
+                    };
+                    if write_plugin_response(&mut stream, &resp).await.is_err() {
+                        break;
+                    }
+                }
+                PluginIpcRequest::Ping { request_id } => {
+                    let resp = PluginIpcResponse::Pong { request_id };
+                    if write_plugin_response(&mut stream, &resp).await.is_err() {
+                        break;
+                    }
+                }
+                PluginIpcRequest::ChatCompletion { request_id, .. } => {
+                    state.lock().await.chat_completions.push(request_id.clone());
+                    // Park the response (re-checking the flag) while the test
+                    // holds it to keep the request in flight. Waiting on
+                    // `hold` — an `Arc<Notify>` outside the state mutex —
+                    // never blocks the test's release path.
+                    loop {
+                        if !state.lock().await.hold_chat {
+                            break;
+                        }
+                        hold.notified().await;
+                    }
+                    let resp = PluginIpcResponse::ChatCompletionResult {
+                        request_id,
+                        content: "mock response".into(),
+                        usage: None,
+                    };
+                    if write_plugin_response(&mut stream, &resp).await.is_err() {
+                        break;
+                    }
+                }
+                PluginIpcRequest::CreateChatStream { request_id, .. } => {
+                    state.lock().await.chat_streams.push(request_id.clone());
+                    let resp = PluginIpcResponse::StreamEnd { request_id };
+                    if write_plugin_response(&mut stream, &resp).await.is_err() {
+                        break;
+                    }
+                }
+                PluginIpcRequest::CancelStream { request_id, .. } => {
+                    let resp = PluginIpcResponse::Ack { request_id };
+                    if write_plugin_response(&mut stream, &resp).await.is_err() {
+                        break;
+                    }
+                }
+                _ => {
+                    // Ignore requests this mock does not model.
+                }
+            }
+        }
+    }
+}
+
+/// Runs a mock server that crashes (drops the connection, then exits) as soon
+/// as it has received a `ChatCompletion` — simulating a plugin process that
+/// dies mid-request without ever responding.
+async fn run_crash_mock_server(socket_path: PathBuf, state: Arc<Mutex<LlmMockState>>) {
+    cleanup_path(&socket_path);
+    let mut listener = IpcListener::bind(&socket_path).expect("failed to bind crash mock server");
+    let Ok(mut stream) = listener.accept().await else {
+        return;
+    };
+
+    loop {
+        let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+            break;
+        };
+        match req {
+            PluginIpcRequest::Handshake {
+                version: host_range,
+                ..
+            } => {
+                let Some(negotiated) = VersionRange {
+                    min: PLUGIN_IPC_PROTOCOL_VERSION,
+                    max: PLUGIN_IPC_PROTOCOL_VERSION,
+                }
+                .negotiate(&host_range) else {
+                    break;
+                };
+                let resp = PluginIpcResponse::HandshakeAck {
+                    version: negotiated,
+                    capabilities: PluginCapabilities::default(),
+                };
+                if write_plugin_response(&mut stream, &resp).await.is_err() {
+                    break;
+                }
+            }
+            PluginIpcRequest::ChatCompletion { request_id, .. } => {
+                state.lock().await.chat_completions.push(request_id);
+                // The "crash": drop the connection without a response and
+                // exit, like a plugin process that died.
+                return;
+            }
+            _ => {
+                // Ignore requests this mock does not model.
+            }
+        }
+    }
+}
+
+/// Connects to a fresh `run_llm_mock_server`.
+async fn connect_llm_mock(
+    name: &str,
+) -> (
+    Arc<IpcPluginConnection>,
+    Arc<Mutex<LlmMockState>>,
+    Arc<Notify>,
+    PathBuf,
+) {
+    let socket_path = test_socket_path(name);
+    let state = Arc::new(Mutex::new(LlmMockState::default()));
+    let hold = Arc::new(Notify::new());
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    let server_hold = Arc::clone(&hold);
+    tokio::spawn(async move {
+        run_llm_mock_server(server_path, server_state, server_hold).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("llm mock handshake should succeed");
+
+    (Arc::new(conn), state, hold, socket_path)
+}
+
+/// Connects to a fresh `run_crash_mock_server`.
+async fn connect_crash_mock(
+    name: &str,
+) -> (Arc<IpcPluginConnection>, Arc<Mutex<LlmMockState>>, PathBuf) {
+    let socket_path = test_socket_path(name);
+    let state = Arc::new(Mutex::new(LlmMockState::default()));
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_crash_mock_server(server_path, server_state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("crash mock handshake should succeed");
+
+    (Arc::new(conn), state, socket_path)
+}
+
+/// An `EneConfig` with a fast, single-attempt retry policy so failure-path
+/// tests (crash, transport errors) fail quickly instead of waiting on the
+/// 500 ms-backoff / 2 min-timeout production defaults.
+fn config_with_fast_retry() -> EneConfig {
+    let mut config = EneConfig::default();
+    config.extra.insert(
+        "ai".to_string(),
+        serde_json::json!({
+            "retry": {
+                "max_attempts": 1,
+                "base_delay_ms": 10,
+                "max_delay_ms": 50,
+                "timeout_ms": 2000,
+            }
+        }),
+    );
+    config
+}
+
+/// Builds an `IpcLlmProvider` via the real factory path, declaring `resource`
+/// as the provider's class — the same wiring `manager.rs` uses for a plugin
+/// that declared that class in its `LlmProviderSpec`.
+fn build_provider(
+    conn: Arc<IpcPluginConnection>,
+    plugin_name: &str,
+    resource: ResourceClass,
+    config: &EneConfig,
+) -> Box<dyn ene_ai::LlmProvider> {
+    let factory = IpcLlmProviderFactory::new(
+        "mock".to_string(),
+        conn,
+        plugin_name.to_string(),
+        true,
+        None,
+        ConcurrencyHint {
+            max_in_flight: 8,
+            queue_depth: 16,
+        },
+        resource,
+    );
+    factory
+        .create_provider(config, &ene_ai::TaskRef::default())
+        .expect("provider creation must succeed")
+}
+
+/// Waits (with a generous deadline) until the mock has received `expected`
+/// `ChatCompletion` requests.
+async fn wait_for_chat_completions(state: &Mutex<LlmMockState>, expected: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if state.lock().await.chat_completions.len() >= expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} ChatCompletion request(s) to reach the mock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Waits (with a generous deadline) until the mock has received `expected`
+/// `CreateChatStream` requests.
+async fn wait_for_chat_streams(state: &Mutex<LlmMockState>, expected: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if state.lock().await.chat_streams.len() >= expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} CreateChatStream request(s) to reach the mock"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Waits until `ResourceRegistry` reports `expected` free permits for `class`.
+async fn wait_for_available_permits(class: ResourceClass, expected: usize) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if ResourceRegistry::semaphore(class).available_permits() == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for {expected} available permits on {class:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Acceptance criterion: two *different* plugins that declare the same
+/// [`ResourceClass`] share one admission budget. The host must hold the
+/// second plugin's request on the shared class (never sending it) until the
+/// first plugin's request completes — the "don't send until admitted"
+/// contract, exercised across process boundaries.
+#[tokio::test]
+async fn same_resource_class_serializes_requests_across_plugins() {
+    let class = ResourceClass::Gpu { device: 300 };
+    let config = config_with_fast_retry();
+
+    let (conn_a, state_a, hold_a, path_a) = connect_llm_mock("res-shared-a").await;
+    let (conn_b, state_b, _hold_b, path_b) = connect_llm_mock("res-shared-b").await;
+
+    // Hold A's response so A's request stays in flight (holding the class's
+    // only permit) until the test releases it.
+    state_a.lock().await.hold_chat = true;
+
+    let provider_a = build_provider(Arc::clone(&conn_a), "plugin-a", class, &config);
+    let provider_b = build_provider(Arc::clone(&conn_b), "plugin-b", class, &config);
+
+    let task_a = tokio::spawn(async move {
+        let result = provider_a.chat_completion(&[], None).await;
+        (result, provider_a)
+    });
+
+    // A's request is on the wire: its host-side call now holds the shared
+    // class's only permit.
+    wait_for_chat_completions(&state_a, 1).await;
+    assert_eq!(
+        ResourceRegistry::semaphore(class).available_permits(),
+        0,
+        "A's in-flight request must hold the shared class's only permit"
+    );
+
+    // B's request to a *different* plugin, same declared class: the host must
+    // keep it off the wire until A releases the class.
+    let task_b = tokio::spawn(async move {
+        let result = provider_b.chat_completion(&[], None).await;
+        (result, provider_b)
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        state_b.lock().await.chat_completions.len(),
+        0,
+        "B's request must not be sent while A holds the shared class"
+    );
+
+    // Release A → both requests complete, B's only after the class freed up.
+    state_a.lock().await.hold_chat = false;
+    hold_a.notify_waiters();
+
+    task_a
+        .await
+        .expect("A's task must not panic")
+        .0
+        .expect("A's request completes");
+    task_b
+        .await
+        .expect("B's task must not panic")
+        .0
+        .expect("B's request completes once the class is free");
+
+    assert_eq!(
+        state_b.lock().await.chat_completions.len(),
+        1,
+        "B's request is sent exactly once, after A released the class"
+    );
+
+    cleanup_path(&path_a);
+    cleanup_path(&path_b);
+}
+
+/// Acceptance criterion: dropping a stream mid-flight (cancellation) releases
+/// its resource permit — `_resource_permit` is drop-glue in `IpcChatStream`,
+/// so every end path (natural completion, cancellation, error) frees the
+/// class for the next caller.
+#[tokio::test]
+async fn dropping_a_stream_releases_its_resource_permit() {
+    let class = ResourceClass::Gpu { device: 301 };
+    let config = config_with_fast_retry();
+
+    let (conn, state, _hold, path) = connect_llm_mock("res-stream-drop").await;
+    let provider = build_provider(conn, "plugin", class, &config);
+
+    let stream = provider
+        .create_chat_stream(&[], &[])
+        .await
+        .expect("stream establishment succeeds");
+    // The host sent the request once the resource permit was acquired, and
+    // the live stream now holds the class's only permit.
+    wait_for_chat_streams(&state, 1).await;
+    assert_eq!(
+        ResourceRegistry::semaphore(class).available_permits(),
+        0,
+        "the live stream must hold the class's only permit"
+    );
+
+    // The stream is dropped without having finished naturally — the
+    // cancellation path — and the permit must come back.
+    drop(stream);
+    wait_for_available_permits(class, 1).await;
+
+    cleanup_path(&path);
+}
+
+/// Acceptance criterion: a plugin crash releases the resource permit it held.
+/// The permit lives in the host process (the plugin never touches a
+/// semaphore), so a dead plugin cannot leak it — the host's drop glue frees
+/// the class when the failed call returns.
+#[tokio::test]
+async fn plugin_crash_releases_held_resource_permit() {
+    let class = ResourceClass::Gpu { device: 302 };
+    let config = config_with_fast_retry();
+
+    let (conn, state, path) = connect_crash_mock("res-crash").await;
+    let provider = build_provider(conn, "plugin", class, &config);
+
+    // The request reaches the crashing plugin, so the host holds the permit
+    // while the call is in flight.
+    wait_for_chat_completions(&state, 1).await;
+    assert_eq!(
+        ResourceRegistry::semaphore(class).available_permits(),
+        0,
+        "the permit must be held while the request is in flight"
+    );
+
+    let result = provider.chat_completion(&[], None).await;
+    assert!(
+        result.is_err(),
+        "a plugin that crashed mid-request must fail the call"
+    );
+
+    // The failed call released the class — no leak despite the crash.
+    wait_for_available_permits(class, 1).await;
+
+    cleanup_path(&path);
+}
+
+/// Distinct [`ResourceClass`]es have independent budgets: a request on one
+/// class must never block a request on another, even when both are issued
+/// at the same time.
+#[tokio::test]
+async fn distinct_resource_classes_run_concurrently() {
+    let class_a = ResourceClass::Gpu { device: 303 };
+    let class_b = ResourceClass::Network;
+    let config = config_with_fast_retry();
+
+    let (conn_a, state_a, hold_a, path_a) = connect_llm_mock("res-concurrent-a").await;
+    let (conn_b, state_b, hold_b, path_b) = connect_llm_mock("res-concurrent-b").await;
+
+    // Hold both responses so both requests stay in flight simultaneously.
+    state_a.lock().await.hold_chat = true;
+    state_b.lock().await.hold_chat = true;
+
+    let provider_a = build_provider(Arc::clone(&conn_a), "plugin-a", class_a, &config);
+    let provider_b = build_provider(Arc::clone(&conn_b), "plugin-b", class_b, &config);
+
+    let task_a = tokio::spawn(async move {
+        let result = provider_a.chat_completion(&[], None).await;
+        (result, provider_a)
+    });
+    let task_b = tokio::spawn(async move {
+        let result = provider_b.chat_completion(&[], None).await;
+        (result, provider_b)
+    });
+
+    // Both requests reach their mocks while both are held — independent
+    // classes do not block each other. If the classes shared a budget, the
+    // second request would never be sent (as the same-class test proves).
+    wait_for_chat_completions(&state_a, 1).await;
+    wait_for_chat_completions(&state_b, 1).await;
+
+    state_a.lock().await.hold_chat = false;
+    hold_a.notify_waiters();
+    state_b.lock().await.hold_chat = false;
+    hold_b.notify_waiters();
+
+    task_a
+        .await
+        .expect("A's task must not panic")
+        .0
+        .expect("A's request completes");
+    task_b
+        .await
+        .expect("B's task must not panic")
+        .0
+        .expect("B's request completes");
+
+    cleanup_path(&path_a);
+    cleanup_path(&path_b);
 }
