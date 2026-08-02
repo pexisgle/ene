@@ -391,6 +391,7 @@ fn expression_resolves_from_classifier_hint_without_stream_token() {
         &affect,
         "That sounds great!",
         Some("happy"),
+        false,
         "",
         None,
     );

@@ -776,6 +776,7 @@ impl CognitionEngine {
         affect: &ene_core::AffectState,
         response_text: &str,
         llm_proposal: Option<&str>,
+        explicit_proposal: bool,
         previous_expression: &str,
         elapsed_since_change: Option<Duration>,
     ) -> (crate::output::ExpressionDecision, ene_core::AffectState) {
@@ -787,6 +788,7 @@ impl CognitionEngine {
             affect,
             available: &expressions,
             llm_proposal,
+            explicit_proposal,
             previous_expression,
             elapsed_since_change,
             response_text,

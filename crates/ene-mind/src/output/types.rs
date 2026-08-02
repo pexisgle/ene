@@ -38,6 +38,9 @@ pub struct ExpressionInput<'a> {
     pub available: &'a [ResolvedExpression],
     /// Optional LLM expression proposal from streamed tokens.
     pub llm_proposal: Option<&'a str>,
+    /// True when `llm_proposal` came from an explicit streamed `[expr:...]`
+    /// marker; classifier hints pass `false`.
+    pub explicit_proposal: bool,
     /// Previous resolved expression name.
     pub previous_expression: &'a str,
     /// Elapsed time since the last expression change.

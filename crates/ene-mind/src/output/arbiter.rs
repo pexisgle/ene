@@ -34,8 +34,10 @@ pub fn affect_to_expression(state: &AffectState) -> &'static str {
 ///
 /// An LLM proposal is canonical when present; affect mapping is the fallback
 /// when the model emitted no expression marker. Hysteresis applies to every
-/// source so rapid mid-turn markers cannot flicker the face; speech-timed
-/// expression changes are owned by a separate timing path.
+/// source so rapid mid-turn markers cannot flicker the face, except that an
+/// explicit streamed `[expr:...]` marker bypasses the hold — the model's
+/// explicit instruction wins. Speech-timed expression changes are owned by a
+/// separate timing path.
 pub fn resolve_expression(
     config: &EmotionConfig,
     input: &ExpressionInput<'_>,
@@ -73,9 +75,13 @@ pub fn resolve_expression(
         }
     }
 
-    // Hysteresis gates every source: without it, each streamed LLM marker
-    // would snap the face mid-turn. Speech-aligned timing is a separate concern.
+    // Hysteresis gates every source except explicit streamed markers:
+    // without it, each streamed LLM marker would snap the face mid-turn.
+    // An explicit `[expr:...]` marker is the model's direct instruction and
+    // bypasses the hold; classifier hints and affect sources stay gated.
+    // Speech-aligned timing is a separate concern.
     if !input.irritation_spike
+        && !input.explicit_proposal
         && !input.previous_expression.is_empty()
         && candidate != input.previous_expression
         && let Some(elapsed) = input.elapsed_since_change
@@ -214,6 +220,7 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: None,
+            explicit_proposal: false,
             previous_expression: "sad",
             elapsed_since_change: Some(std::time::Duration::from_secs(1)),
             response_text: "",
@@ -236,6 +243,7 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: Some("angry"),
+            explicit_proposal: false,
             previous_expression: "sad",
             elapsed_since_change: Some(std::time::Duration::from_secs(1)),
             response_text: "",
@@ -244,6 +252,30 @@ mod tests {
         let decision = resolve_expression(&config, &input);
         assert_eq!(decision.expression, "sad");
         assert_eq!(decision.source, ExpressionSource::HysteresisHold);
+    }
+
+    #[test]
+    fn explicit_llm_marker_bypasses_hysteresis() {
+        // An explicit streamed marker is the model's direct instruction and
+        // wins even when the previous expression would otherwise be held.
+        let config = EmotionConfig::default();
+        let mut state = AffectState::neutral("ene");
+        state.valence = 0.6;
+        state.arousal = 0.3;
+        let available = default_available();
+        let input = ExpressionInput {
+            affect: &state,
+            available: &available,
+            llm_proposal: Some("angry"),
+            explicit_proposal: true,
+            previous_expression: "sad",
+            elapsed_since_change: Some(std::time::Duration::from_secs(1)),
+            response_text: "",
+            irritation_spike: false,
+        };
+        let decision = resolve_expression(&config, &input);
+        assert_eq!(decision.expression, "angry");
+        assert_eq!(decision.source, ExpressionSource::Llm);
     }
 
     #[test]
@@ -256,6 +288,7 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: Some("happy"),
+            explicit_proposal: false,
             previous_expression: "",
             elapsed_since_change: None,
             response_text: "",
@@ -276,6 +309,7 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: None,
+            explicit_proposal: false,
             previous_expression: "",
             elapsed_since_change: None,
             response_text: "I understand.",
