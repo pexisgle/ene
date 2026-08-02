@@ -108,7 +108,7 @@ pub struct PackInput {
     pub commitments: Vec<ActiveCommitmentPrompt>,
     /// Affect summary line.
     pub affect_summary: Option<String>,
-    /// Localized instruction appended to the CharacterState section.
+    /// Localized instruction appended to the `CharacterState` section.
     pub character_state_note: Option<String>,
     /// Active scene summary from rolling compression.
     pub scene_summary: Option<String>,
@@ -329,7 +329,7 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
 
     if let Some(text) = &input.affect_summary {
         let mut section = PromptSection::new(PromptSectionKind::CharacterState, text.clone());
-        section.note = input.character_state_note.clone();
+        section.note.clone_from(&input.character_state_note);
         sections.push(section);
     }
 
