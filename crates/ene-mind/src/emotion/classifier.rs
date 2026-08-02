@@ -19,6 +19,11 @@ pub enum ClassifierError {
     #[error("LLM provider error: {0}")]
     Provider(#[from] ene_ai::LlmProviderError),
 
+    /// Configuration error (missing model, unparsable AI section) — not a
+    /// provider/transport failure. Callers may treat it as non-retryable.
+    #[error("{0}")]
+    Config(String),
+
     /// JSON response could not be parsed.
     #[error("{0}")]
     Parse(String),
@@ -65,22 +70,18 @@ pub async fn classify_for_config(
                 None
             });
             let ai_cfg = config.get_section::<ene_ai::AiConfig>().map_err(|e| {
-                ClassifierError::Provider(ene_ai::LlmProviderError::Provider(format!(
-                    "Failed to parse AI config: {e}"
-                )))
+                ClassifierError::Config(format!("Failed to parse AI config: {e}"))
             })?;
             let mut resolved = ai_cfg
                 .resolve_classifier()
-                .map_err(ClassifierError::Provider)?;
+                .map_err(|e| ClassifierError::Config(e.to_string()))?;
             if let Some(override_model) = model_override.as_deref() {
                 resolved.model = override_model.to_string();
             }
             if resolved.model.trim().is_empty() {
-                return Err(ClassifierError::Provider(
-                    ene_ai::LlmProviderError::Provider(
-                        "affect classifier requires a model (set ai.tasks.classifier.model or ai.tasks.chat.model)"
-                            .to_string(),
-                    ),
+                return Err(ClassifierError::Config(
+                    "affect classifier requires a model (set ai.tasks.classifier.model or ai.tasks.chat.model)"
+                        .to_string(),
                 ));
             }
             if let Some(max) = cap {
@@ -113,6 +114,7 @@ const fn classifier_failure_reason(error: &ClassifierError) -> &'static str {
         ClassifierError::TimedOut(_) => "timeout",
         ClassifierError::EmptyResponse => "empty_response",
         ClassifierError::Parse(_) => "json_parse",
+        ClassifierError::Config(_) => "config",
         ClassifierError::Provider(_) => "provider",
     }
 }
@@ -171,6 +173,8 @@ where
     for (attempt_idx, (transport, max_tokens)) in attempts.into_iter().enumerate() {
         let provider = match provider_factory(max_tokens) {
             Ok(provider) => provider,
+            // Configuration errors fail fast: retrying a different transport with the same
+            // broken config cannot succeed, and would only add backoff delay.
             Err(error) => return Err(error),
         };
 
@@ -390,6 +394,9 @@ mod tests {
             ene_ai::LlmProviderError::Provider("boom".into()),
         ));
         assert_eq!(classify_failure_reason(&provider), "provider");
+
+        let config = CognitionError::Classifier(ClassifierError::Config("missing model".into()));
+        assert_eq!(classify_failure_reason(&config), "config");
 
         let empty = CognitionError::Classifier(ClassifierError::EmptyResponse);
         assert_eq!(classify_failure_reason(&empty), "empty_response");
