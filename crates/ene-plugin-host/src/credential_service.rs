@@ -284,10 +284,11 @@ mod tests {
         let server_stream = listener.accept().await.expect("accept");
         drop(listener);
         ene_plugin_proto::transport::cleanup_path(&path);
+        let token = token.to_string();
         tokio::spawn({
             let passenger = Arc::clone(&passenger);
             async move {
-                let _ = passenger.serve(server_stream, token.to_string()).await;
+                let _ = passenger.serve(server_stream, token).await;
             }
         });
         let resp = read_host_service_response(&mut client)
@@ -346,12 +347,11 @@ mod tests {
         let server_stream = listener.accept().await.expect("accept");
         drop(listener);
         ene_plugin_proto::transport::cleanup_path(&path);
+        let bad_token = "ene-cred-bad".to_string();
         tokio::spawn({
             let passenger = Arc::clone(&passenger);
             async move {
-                let _ = passenger
-                    .serve(server_stream, "ene-cred-bad".to_string())
-                    .await;
+                let _ = passenger.serve(server_stream, bad_token).await;
             }
         });
         let resp = read_host_service_response(&mut client)
