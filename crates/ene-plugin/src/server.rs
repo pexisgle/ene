@@ -1445,6 +1445,7 @@ mod tests {
                 supports_streaming: true,
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
+                resource: ene_plugin_proto::ResourceClass::Network,
                 context_window: None,
             }]
         }
@@ -1503,6 +1504,7 @@ mod tests {
                 supports_streaming: true,
                 supports_vision: false,
                 concurrency: ConcurrencyHint::default(),
+                resource: ene_plugin_proto::ResourceClass::Network,
                 context_window: None,
             }]
         }
@@ -1541,6 +1543,7 @@ mod tests {
                 voices: vec!["default".into()],
                 formats: vec!["wav".into()],
                 concurrency: ConcurrencyHint::default(),
+                resource: ene_plugin_proto::ResourceClass::Network,
             }]
         }
 
@@ -1569,6 +1572,7 @@ mod tests {
                 models: vec!["mock-model".into()],
                 formats: vec!["wav".into()],
                 concurrency: ConcurrencyHint::default(),
+                resource: ene_plugin_proto::ResourceClass::Network,
             }]
         }
 

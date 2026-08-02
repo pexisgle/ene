@@ -13,7 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ene_plugin::{
     ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginCompletion, PluginError, PluginStream,
-    PluginStreamChunk, TokenUsage,
+    PluginStreamChunk, ResourceClass, TokenUsage,
 };
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
@@ -313,6 +313,11 @@ impl LlmPlugin for AnthropicPlugin {
                 max_in_flight: 8,
                 queue_depth: 16,
             },
+            // Cloud API over HTTP — does not consume host GPU/CPU capacity,
+            // so it takes the `Network` class's budget. Explicit, per the
+            // `ResourceClass` design: a plugin that offloads to a host GPU
+            // must declare `Gpu { device: N }` instead.
+            resource: ResourceClass::Network,
             // Claude models expose a 200k-token context window.
             context_window: Some(200_000),
         }]
