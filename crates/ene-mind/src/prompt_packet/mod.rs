@@ -1,9 +1,5 @@
 //! Sectioned prompt packet composition.
 
-#![expect(
-    clippy::arithmetic_side_effects,
-    reason = "prompt metadata sums per-bucket recalled-memory counts into PromptPacketMeta"
-)]
 mod section;
 
 pub use section::{PromptSection, PromptSectionKind};
@@ -94,29 +90,16 @@ impl PromptPacket {
             parts: vec![UserMessagePart::Text { text: user_input }],
         });
 
-        let semantic_count = self
-            .section(PromptSectionKind::SemanticContext)
-            .map_or(0, |s| {
-                s.content.lines().filter(|l| l.starts_with("- ")).count()
-            });
-        let profile_count = self.section(PromptSectionKind::UserProfile).map_or(0, |s| {
-            s.content.lines().filter(|l| l.starts_with("- ")).count()
-        });
-        let episodic_count = self
-            .section(PromptSectionKind::EpisodicMemories)
-            .map_or(0, |s| {
-                s.content.lines().filter(|l| l.starts_with("- ")).count()
-            });
+        let section_item_count =
+            |kind: PromptSectionKind| -> usize { self.section(kind).map_or(0, |s| s.item_count) };
+        let recalled_memory_count = section_item_count(PromptSectionKind::SemanticContext)
+            .saturating_add(section_item_count(PromptSectionKind::UserProfile))
+            .saturating_add(section_item_count(PromptSectionKind::EpisodicMemories));
 
         let meta = PromptPacketMeta {
             identity_kernel_included: self.section_included(PromptSectionKind::IdentityKernel),
-            style_example_count: if self.section_included(PromptSectionKind::StyleExamples) {
-                self.section(PromptSectionKind::StyleExamples)
-                    .map_or(0, |s| s.content.split("\n\n").count())
-            } else {
-                0
-            },
-            recalled_memory_count: semantic_count + profile_count + episodic_count,
+            style_example_count: section_item_count(PromptSectionKind::StyleExamples),
+            recalled_memory_count,
             post_history_included,
             scene_summary_included: self.section_included(PromptSectionKind::SceneState),
             dropped_sections: Vec::new(),
@@ -284,23 +267,31 @@ mod tests {
         }
 
         if !semantic.is_empty() {
+            let item_count = semantic.len();
             let body = semantic
                 .iter()
                 .map(|m| format_recalled_content(m))
                 .map(|line| format!("- {line}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            sections.push(PromptSection::new(PromptSectionKind::SemanticContext, body));
+            sections.push(
+                PromptSection::new(PromptSectionKind::SemanticContext, body)
+                    .with_item_count(item_count),
+            );
         }
 
         if !profile.is_empty() {
+            let item_count = profile.len();
             let body = profile
                 .iter()
                 .map(|m| format_recalled_content(m))
                 .map(|line| format!("- {line}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            sections.push(PromptSection::new(PromptSectionKind::UserProfile, body));
+            sections.push(
+                PromptSection::new(PromptSectionKind::UserProfile, body)
+                    .with_item_count(item_count),
+            );
         }
 
         if !commitments.is_empty() {
@@ -311,25 +302,30 @@ mod tests {
         }
 
         if !episodic.is_empty() {
+            let item_count = episodic.len();
             let body = episodic
                 .iter()
                 .map(|m| format_recalled_content(m))
                 .map(|line| format!("- {line}"))
                 .collect::<Vec<_>>()
                 .join("\n");
-            sections.push(PromptSection::new(
-                PromptSectionKind::EpisodicMemories,
-                body,
-            ));
+            sections.push(
+                PromptSection::new(PromptSectionKind::EpisodicMemories, body)
+                    .with_item_count(item_count),
+            );
         }
 
         if !style_examples.is_empty() {
+            let item_count = style_examples.len();
             let body = style_examples
                 .into_iter()
                 .map(|e| e.text)
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            sections.push(PromptSection::new(PromptSectionKind::StyleExamples, body));
+            sections.push(
+                PromptSection::new(PromptSectionKind::StyleExamples, body)
+                    .with_item_count(item_count),
+            );
         }
 
         if let Some(phi) = post_history_block {
@@ -508,6 +504,83 @@ mod tests {
         };
         assert!(content.contains("matcha"));
         assert!(content.contains("User Profile"));
+    }
+
+    #[test]
+    fn recalled_memory_count_ignores_bullets_inside_content() {
+        // Free-form recalled text may contain markdown bullets; meta must
+        // still report the source item count, not a line scan of the render.
+        let kernel = IdentityKernel {
+            name: "Ene".into(),
+            text: "K".into(),
+            post_history_instructions: None,
+        };
+        let recalled = vec![RecalledMemory {
+            item: MemoryItem {
+                id: Some(1),
+                scope: MemoryScope::User,
+                character_id: "ene".into(),
+                user_id: "u".into(),
+                kind: MemoryKind::Episodic,
+                title: "trip".into(),
+                content: "visited shops:\n- cafe\n- bookstore".into(),
+                source: MemorySource::Conversation,
+                source_ref: None,
+                confidence: MemoryConfidence::default(),
+                salience: MemorySalience::default(),
+                affect: AffectAnnotation::default(),
+                relationship_impact: 0.0,
+                access_count: 0,
+                last_accessed_at: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                valid_from: None,
+                valid_until: None,
+                status: MemoryStatus::Active,
+                supersedes_id: None,
+                pinned: false,
+                faded_at: None,
+                commitment_id: None,
+            },
+            reason: crate::recall::RecallReason::SimilarTopic,
+            score_breakdown: MemoryScoreBreakdown {
+                vector_similarity: 0.8,
+                lexical_score: 0.0,
+                recency_score: 0.0,
+                salience: 0.0,
+                confidence: 0.0,
+                emotional_match: 0.0,
+                relationship: 0.0,
+                access_boost: 0.0,
+                relevance: 0.8,
+                quality_factor: 1.0,
+                contradiction_penalty: 0.0,
+                stale_penalty: 0.0,
+                commitment_boost: 0.0,
+                reflection_multiplier: 1.0,
+                total: 0.8,
+            },
+            sources: vec![],
+        }];
+        let packet = compose_test_packet(kernel, vec![], &recalled, &[], None, vec![], None, "hi");
+        let (_messages, meta) = packet.to_llm_messages();
+        assert_eq!(meta.recalled_memory_count, 1);
+    }
+
+    #[test]
+    fn style_example_count_ignores_blank_lines_inside_text() {
+        let kernel = IdentityKernel {
+            name: "Ene".into(),
+            text: "K".into(),
+            post_history_instructions: None,
+        };
+        let styles = vec![StyleExample {
+            text: "line one\n\nline two after blank".into(),
+            intent: StyleIntent::Greeting,
+        }];
+        let packet = compose_test_packet(kernel, styles, &[], &[], None, vec![], None, "hi");
+        let (_messages, meta) = packet.to_llm_messages();
+        assert_eq!(meta.style_example_count, 1);
     }
 
     fn sample_commitment(

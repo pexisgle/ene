@@ -343,9 +343,13 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
         let mut semantic_owned: Vec<RecalledMemory> =
             semantic.iter().map(|m| (*m).clone()).collect();
         sort_memories_for_drop(&mut semantic_owned);
+        let item_count = semantic_owned.len();
         let body = memory_section_body(&semantic_owned);
         survivors.semantic = semantic_owned;
-        sections.push(PromptSection::new(PromptSectionKind::SemanticContext, body));
+        sections.push(
+            PromptSection::new(PromptSectionKind::SemanticContext, body)
+                .with_item_count(item_count),
+        );
     }
 
     if !profile.is_empty() || input.user_persona.is_some() {
@@ -355,6 +359,8 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
         // The structured persona block shares the section with the recalled
         // profile memories; it is always kept, and whole bullets are shed (low
         // confidence first) only if the section overflows the window.
+        // `item_count` tracks recalled memories only — not persona lines.
+        let item_count = profile_owned.len();
         let persona_block = input
             .user_persona
             .as_ref()
@@ -362,7 +368,9 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
             .unwrap_or_default();
         let body = render_memory_body(&persona_block, &profile_owned);
         survivors.profile = profile_owned;
-        sections.push(PromptSection::new(PromptSectionKind::UserProfile, body));
+        sections.push(
+            PromptSection::new(PromptSectionKind::UserProfile, body).with_item_count(item_count),
+        );
     }
 
     if !input.commitments.is_empty() {
@@ -380,22 +388,26 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
         let mut episodic_owned: Vec<RecalledMemory> =
             episodic.iter().map(|m| (*m).clone()).collect();
         sort_memories_for_drop(&mut episodic_owned);
+        let item_count = episodic_owned.len();
         let body = memory_section_body(&episodic_owned);
         survivors.episodic = episodic_owned;
-        sections.push(PromptSection::new(
-            PromptSectionKind::EpisodicMemories,
-            body,
-        ));
+        sections.push(
+            PromptSection::new(PromptSectionKind::EpisodicMemories, body)
+                .with_item_count(item_count),
+        );
     }
 
     if !input.style_examples.is_empty() {
+        let item_count = input.style_examples.len();
         let body = input
             .style_examples
             .iter()
             .map(|e| e.text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
-        sections.push(PromptSection::new(PromptSectionKind::StyleExamples, body));
+        sections.push(
+            PromptSection::new(PromptSectionKind::StyleExamples, body).with_item_count(item_count),
+        );
     }
 
     if let Some(text) = &input.interruption_note {
@@ -503,6 +515,9 @@ pub fn pack_prompt(input: PackInput, budget: &ContextBudget) -> PackedPrompt {
             let kind = sections[idx].kind;
             let removed_tokens = section_tokens_cache[idx];
             sections[idx].content.clear();
+            // Keep item_count in lockstep with the cleared body so meta counts
+            // reflect survivors, not the pre-drop source length.
+            sections[idx].item_count = 0;
             section_tokens_cache[idx] = 0;
             dropped.push(kind);
             // Keep the survivor vectors in lockstep with the rendered sections:
@@ -766,6 +781,72 @@ mod tests {
             "a dropped section must render nothing, body={:?}",
             episodic.content
         );
+        assert_eq!(
+            episodic.item_count, 0,
+            "a dropped section must report zero items"
+        );
+        let (_messages, packet_meta) = packed.packet.to_llm_messages();
+        assert_eq!(
+            packet_meta.recalled_memory_count, 0,
+            "meta counts must exclude dropped memories"
+        );
+    }
+
+    #[test]
+    fn item_count_tracks_source_len_not_rendered_bullets() {
+        let budget = default_test_budget();
+        let mut memory = sample_memory_with_id(1, MemoryKind::Episodic, 0.9);
+        memory.item.content = "notes:\n- first\n- second".into();
+        let input = PackInput {
+            style_examples: vec![StyleExample {
+                text: "example with\n\nan internal blank line".into(),
+                intent: StyleIntent::Greeting,
+            }],
+            recalled: vec![memory],
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+        let episodic = packed
+            .packet
+            .section(PromptSectionKind::EpisodicMemories)
+            .expect("episodic section present");
+        assert_eq!(episodic.item_count, 1);
+        let style = packed
+            .packet
+            .section(PromptSectionKind::StyleExamples)
+            .expect("style section present");
+        assert_eq!(style.item_count, 1);
+        let (_messages, meta) = packed.packet.to_llm_messages();
+        assert_eq!(meta.recalled_memory_count, 1);
+        assert_eq!(meta.style_example_count, 1);
+    }
+
+    #[test]
+    fn dropped_style_examples_zero_item_count() {
+        let budget = ContextBudget::with_capacity(10);
+        let input = PackInput {
+            style_examples: vec![StyleExample {
+                text: "style filler ".repeat(80),
+                intent: StyleIntent::Greeting,
+            }],
+            ..kernel_only_input(vec![])
+        };
+        let packed = pack_prompt(input, &budget);
+        assert!(
+            packed
+                .meta
+                .dropped
+                .contains(&PromptSectionKind::StyleExamples),
+            "style examples should be dropped under a tight budget, dropped={:?}",
+            packed.meta.dropped
+        );
+        let style = packed
+            .packet
+            .section(PromptSectionKind::StyleExamples)
+            .expect("style section present");
+        assert_eq!(style.item_count, 0);
+        let (_messages, meta) = packed.packet.to_llm_messages();
+        assert_eq!(meta.style_example_count, 0);
     }
 
     #[test]
@@ -814,6 +895,7 @@ mod tests {
             episodic.content.is_empty(),
             "a dropped section must render nothing"
         );
+        assert_eq!(episodic.item_count, 0);
     }
 
     #[test]

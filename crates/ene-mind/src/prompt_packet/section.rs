@@ -123,17 +123,29 @@ pub struct PromptSection {
     pub content: String,
     /// Whether the section is required and must not be dropped.
     pub required: bool,
+    /// Authoritative count of discrete items this section carries (recalled
+    /// memories, style examples, …). Set from source data at build time and
+    /// zeroed when packing clears the section — never derived from `content`.
+    pub item_count: usize,
 }
 
 impl PromptSection {
-    /// Create a new section.
+    /// Create a new section with `item_count = 0`.
     pub fn new(kind: PromptSectionKind, content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
             kind,
             required: kind.is_required(),
             content,
+            item_count: 0,
         }
+    }
+
+    /// Set the authoritative item count carried by this section.
+    #[must_use]
+    pub const fn with_item_count(mut self, item_count: usize) -> Self {
+        self.item_count = item_count;
+        self
     }
 
     /// Render the section for the system block (heading + body).
