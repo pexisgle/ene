@@ -35,24 +35,13 @@ pub struct DbPluginRegistration {
 /// Tracks rejected `Open`/handshake attempts so brute-force probing of the
 /// shared socket cannot flood the log while the cumulative count stays
 /// measurable.
+#[derive(Default)]
 struct OpenFailureTracker {
     count: u64,
     last_logged: Option<std::time::Instant>,
 }
 
-impl Default for OpenFailureTracker {
-    fn default() -> Self {
-        Self {
-            count: 0,
-            last_logged: None,
-        }
-    }
-}
-
 impl OpenFailureTracker {
-    fn new() -> Self {
-        Self::default()
-    }
     /// Records one rejection; returns `true` when the caller should log it
     /// (at most once per second).
     fn record(&mut self) -> bool {
@@ -93,7 +82,7 @@ impl HostServiceServer {
             socket_path,
             db,
             db_plugins: Arc::new(db_plugins),
-            failed_opens: Arc::new(Mutex::new(OpenFailureTracker::new())),
+            failed_opens: Arc::new(Mutex::new(OpenFailureTracker::default())),
         }
     }
 
