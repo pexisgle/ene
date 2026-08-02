@@ -58,6 +58,32 @@ pub fn resolve_language_alias(lang: &str) -> String {
     }
 }
 
+/// System-locale default for an unset app-language setting, resolved once and
+/// cached: a primary language code of `ja` selects Japanese, everything else
+/// (including absent locale, `C.UTF-8`, `en-US`, `fr`) falls back to English
+/// so CI stays deterministic.
+static SYSTEM_LANGUAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Resolves the app-wide default language from the OS locale, cached on first
+/// use.
+pub fn system_language() -> &'static str {
+    SYSTEM_LANGUAGE
+        .get_or_init(|| resolve_system_language(sys_locale::get_locale().as_deref()))
+        .as_str()
+}
+
+/// Maps an optional OS locale string to the app-wide default language.
+///
+/// Only a primary subtag of `ja` selects Japanese; every other value keeps the
+/// English default. Kept pure so tests can pin the locale without touching
+/// process-global environment variables.
+pub fn resolve_system_language(locale: Option<&str>) -> String {
+    match locale.map(resolve_language_alias).as_deref() {
+        Some("ja") => "ja".to_string(),
+        _ => "en".to_string(),
+    }
+}
+
 /// Whether `code` has a compile-time embedded pack to fall back to.
 pub(crate) fn is_embedded_language(code: &str) -> bool {
     SUPPORTED_LANGUAGES.contains(&code)
@@ -1045,6 +1071,17 @@ mod tests {
         assert_eq!(resolve_language_alias("ja"), "ja");
         assert_eq!(resolve_language_alias("jp"), "ja");
         assert_eq!(resolve_language_alias("en-US"), "en");
+    }
+
+    #[test]
+    fn resolve_system_language_selects_ja_only_for_japanese_locale() {
+        assert_eq!(resolve_system_language(Some("ja_JP.UTF-8")), "ja");
+        assert_eq!(resolve_system_language(Some("JA")), "ja");
+        assert_eq!(resolve_system_language(Some("ja-JP")), "ja");
+        assert_eq!(resolve_system_language(Some("en-US")), "en");
+        assert_eq!(resolve_system_language(Some("fr_FR.UTF-8")), "en");
+        assert_eq!(resolve_system_language(Some("C.UTF-8")), "en");
+        assert_eq!(resolve_system_language(None), "en");
     }
 
     #[test]

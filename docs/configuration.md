@@ -238,6 +238,9 @@ primary language code is `ja`) is the app-wide language for cognitive prompts
 and deterministic patterns: the affect classifier, cognitive output contract,
 compression summarizer, recall-intent keyword lists, and memory-extraction
 patterns all follow it unless their per-task override is set.
+Existing installs that never set `mind.language` may see prompt and classifier
+language change after upgrading: the default was previously hardcoded English
+and is now derived from the system locale (Japanese systems get `ja`).
 `mind.emotion.classifier_language` and `mind.context.compression_language`
 override it per task; empty (the default) means inherit `mind.language`.
 Memory extraction follows `mind.language` directly and no longer reads the

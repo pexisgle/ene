@@ -52,36 +52,12 @@ ene_config::define_config!(
     }
 );
 
-/// System-locale default for an unset [`MindConfig::language`], resolved once
-/// and cached: a primary language code of `ja` selects Japanese, everything
-/// else (including absent locale, `C.UTF-8`, `en-US`, `fr`) falls back to
-/// English so CI stays deterministic.
-static SYSTEM_LANGUAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-fn system_language() -> &'static str {
-    SYSTEM_LANGUAGE
-        .get_or_init(|| resolve_system_language(sys_locale::get_locale().as_deref()))
-        .as_str()
-}
-
-/// Maps an optional OS locale string to the app-wide default language.
-///
-/// Only a primary subtag of `ja` selects Japanese; every other value keeps the
-/// English default. Kept pure so tests can pin the locale without touching
-/// process-global environment variables.
-fn resolve_system_language(locale: Option<&str>) -> String {
-    match locale.map(ene_config::resolve_language_alias).as_deref() {
-        Some("ja") => "ja".to_string(),
-        _ => "en".to_string(),
-    }
-}
-
 impl MindConfig {
     /// Effective app-wide language: explicit [`MindConfig::language`] when
     /// set, else the system-locale default.
     pub fn resolved_language(&self) -> &str {
         if self.language.is_empty() {
-            system_language()
+            ene_config::system_language()
         } else {
             &self.language
         }
@@ -1506,23 +1482,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_system_language_selects_ja_only_for_japanese_locale() {
-        assert_eq!(resolve_system_language(Some("ja_JP.UTF-8")), "ja");
-        assert_eq!(resolve_system_language(Some("JA")), "ja");
-        assert_eq!(resolve_system_language(Some("ja-JP")), "ja");
-        assert_eq!(resolve_system_language(Some("en-US")), "en");
-        assert_eq!(resolve_system_language(Some("fr_FR.UTF-8")), "en");
-        assert_eq!(resolve_system_language(Some("C.UTF-8")), "en");
-        assert_eq!(resolve_system_language(None), "en");
-    }
-
-    #[test]
     fn mind_language_unset_resolves_from_system_locale() {
         let cfg = MindConfig::default();
         assert!(cfg.language.is_empty());
-        assert_eq!(cfg.resolved_language(), system_language());
-        assert_eq!(cfg.resolved_classifier_language(), system_language());
-        assert_eq!(cfg.resolved_compression_language(), system_language());
+        assert_eq!(cfg.resolved_language(), ene_config::system_language());
+        assert_eq!(
+            cfg.resolved_classifier_language(),
+            ene_config::system_language()
+        );
+        assert_eq!(
+            cfg.resolved_compression_language(),
+            ene_config::system_language()
+        );
     }
 
     #[test]

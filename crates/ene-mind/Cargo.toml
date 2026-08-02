@@ -18,7 +18,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
-sys-locale = { workspace = true }
 
 ene-config = { workspace = true }
 ene-core = { workspace = true }
