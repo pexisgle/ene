@@ -135,11 +135,13 @@ automatically on fresh installs.
 Stateful tool plugins (`ene-plugin-fs`, `ene-plugin-utility`) persist their
 data into the host's `memory.db` through the shared **host-service** socket
 (`ene-host-service.sock` / named pipe). The first framed message opens a
-passenger service with a pre-shared token; today only `db` is implemented
-(`ene-store`'s `host_service` + `db_server`). Reserved ids (`assets`,
-`capability`, `credential`) are rejected until implemented. All plugins share
-this one socket, so namespace isolation rests on the per-plugin auth token
-alone — the per-plugin socket path layer is gone. A plugin never
+passenger service with a pre-shared token. Two passengers are implemented
+today: `db` (authenticated by `ene-store`; `host_service` + `db_server`) and
+`credential` (authenticated by the host's `CredentialPassenger`, see
+[§9](#9-credential-service--secret-brokering)). Reserved ids (`assets`,
+`capability`) are rejected with `UnknownService` until implemented. All
+plugins share this one socket, so namespace isolation rests on the per-plugin
+auth token alone — the per-plugin socket path layer is gone. A plugin never
 issues DDL directly: it
 declares its tables, columns, and indexes with a `DeclareSchema` request, and
 the host creates and owns the physical tables. Every table name must start
@@ -552,3 +554,56 @@ async fn main() {
     }
 }
 ```
+
+---
+
+## 9. Credential Service & Secret Brokering
+
+The `credential` passenger brokers host-held secrets to plugins over the
+shared host-service socket. It exists so plugin binaries never read API keys
+out of configuration themselves: the host resolves, scopes, and audits every
+access, and a revoked or rotated credential can be pushed to connected
+clients.
+
+### Wire protocol
+
+A plugin opens the service with `Open { service: "credential", token }` using
+the `credential_auth_token` from its `SandboxConfigData` (distinct from the
+`db` token so database access never implies credential access). Once open,
+the session speaks `CredentialRequest` / `CredentialResponse` frames
+(`Ping` / `Resolve { id }` / `RequestAuthorization { id }` today). Secrets
+travel in a dedicated wire type whose `Debug`/`Display` always render
+`<redacted>`, so a value that reaches a log or error message is redacted by
+construction.
+
+### Scope enforcement (server-side)
+
+Every credential id a plugin may request is a declared-scope decision. The
+plugin lists them under the provisional `plugins.list.<name>.x-ene-credentials`
+entry key (an array of ids, e.g. `["anthropic"]`); a malformed or absent
+declaration fails closed to nothing allowed. The host matches each requested
+id against that declaration **server-side** — the client is never trusted —
+and denies undeclared ids with `ScopeDenied` while recording the denial in
+the audit trail (plugin, id, outcome only; never the secret).
+
+### Resolution order
+
+For a credential id that names a plugin (e.g. `anthropic`), the host's vault
+resolves the key in this order:
+
+1. `plugins.list.<id>.config.api_key` (plain string or `{"source": ...}`)
+2. `ai.providers.<id>.api_key` (typed `ApiKeyConfig`)
+3. The `{ID}_API_KEY` environment variable (e.g. `ANTHROPIC_API_KEY`)
+
+OAuth-style credentials (`namespace.name` ids such as `google.calendar`)
+arrive with the OAuth flow; until then an expired credential resolves to a
+`RefreshRequired` error.
+
+### Invalidation push
+
+When a credential is updated or revoked, the host can push
+`Invalidated { ids }` on the open session; the client drops its cached copies
+for the ids inside its declared scope.
+
+The plugin-facing client API (`ctx.credentials().api_key(id)` /
+`http_client(id)`) is introduced alongside this service.

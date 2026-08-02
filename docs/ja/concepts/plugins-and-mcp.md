@@ -135,9 +135,10 @@ let handle = EngineHandle::spawn(|| Ok(MyLocalModel::load()?), EngineConfig::def
 ステートフルなツールプラグイン (`ene-plugin-fs`、`ene-plugin-utility`) は、
 共有**ホストサービス**ソケット (`ene-host-service.sock` / named pipe) を
 介してデータをホストの `memory.db` に永続化します。最初のフレームで
-事前共有トークン付きの乗客サービスを開き、現状実装されているのは `db`
-のみです (`ene-store` の `host_service` + `db_server`)。予約 ID
-(`assets` / `capability` / `credential`) は実装まで拒否されます。
+事前共有トークン付きの乗客サービスを開きます。現時点で実装されている
+乗客サービスは `db` (`ene-store` の `host_service` + `db_server` が認証) と
+`credential` (ホストの `CredentialPassenger` が認証、[§9](#9-資格情報サービスと秘密の仲介) 参照) の 2 つです。
+予約 ID (`assets` / `capability`) は実装まで `UnknownService` で拒否されます。
 全プラグインがこの単一ソケットを共有するため、ネームスペースの隔離は
 プラグインごとの認証トークンのみに依存します (プラグインごとのソケット
 パス層は廃止されました)。
@@ -523,3 +524,54 @@ async fn main() {
     }
 }
 ```
+
+---
+
+## 9. 資格情報サービスと秘密の仲介
+
+`credential` 乗客サービスは、共有ホストサービスソケット上でホストが保持する
+秘密をプラグインへ仲介します。プラグインバイナリが自分で設定ファイルから
+API キーを読み出さないようにするための仕組みです。ホストがすべてのアクセスを
+解決・スコープ照合・監査し、失効・ローテーションした資格情報は接続中の
+クライアントへプッシュ通知できます。
+
+### ワイヤプロトコル
+
+プラグインは `Open { service: "credential", token }` を、`SandboxConfigData` の
+`credential_auth_token` (DB トークンとは別。DB アクセスが資格情報アクセスを
+意味しないように分離) を使って開きます。以降は `CredentialRequest` /
+`CredentialResponse` フレーム (`Ping` / `Resolve { id }` /
+`RequestAuthorization { id }`) で会話します。秘密は専用のワイヤ型で運ばれ、
+その `Debug`/`Display` は常に `<redacted>` を出力するため、ログやエラーメッセージに
+到達した値は構造的に伏字になります。
+
+### スコープ強制 (サーバー側)
+
+プラグインが要求できる資格情報 id は宣言スコープで決まります。プラグインは
+暫定的に `plugins.list.<name>.x-ene-credentials` エントリキー (id の配列、
+例: `["anthropic"]`) で宣言します。不正な形式や未宣言は「何も許可しない」に
+フェイルクローズします。ホストは要求された id をその宣言と**サーバー側で**
+照合し (クライアントは信用しない)、未宣言 id は `ScopeDenied` で拒否すると
+同時に監査記録 (プラグイン・id・結果のみ。秘密は含めない) を残します。
+
+### 解決順序
+
+プラグイン名を id とする資格情報 (例: `anthropic`) について、ホストの vault は
+次の順でキーを解決します:
+
+1. `plugins.list.<id>.config.api_key` (素の文字列、または `{"source": ...}`)
+2. `ai.providers.<id>.api_key` (型付き `ApiKeyConfig`)
+3. `{ID}_API_KEY` 環境変数 (例: `ANTHROPIC_API_KEY`)
+
+OAuth 形式の資格情報 (`google.calendar` のような `namespace.name` id) は
+OAuth フローとともに導入されます。それまでは期限切れの資格情報は
+`RefreshRequired` エラーになります。
+
+### 無効化プッシュ
+
+資格情報が更新・失効したとき、ホストは開いているセッションへ
+`Invalidated { ids }` をプッシュできます。クライアントは宣言スコープ内の
+該当 id のキャッシュを破棄します。
+
+プラグイン向けのクライアント API (`ctx.credentials().api_key(id)` /
+`http_client(id)`) は本サービスとともに導入されます。
