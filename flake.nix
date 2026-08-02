@@ -125,10 +125,20 @@
                   export CARGO_TARGET_DIR="$PWD/target"
                   export LIBSQLITE3_FLAGS="-DSQLITE_ENABLE_MATH_FUNCTIONS"
                 ''
-                + lib.optionalString withSccache ''
-                  export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
-                  export SCCACHE_DIR="$HOME/.cache/sccache"
-                '';
+                + (
+                  if withSccache then
+                    ''
+                      export RUSTC_WRAPPER="${pkgs.sccache}/bin/sccache"
+                      export SCCACHE_DIR="$HOME/.cache/sccache"
+                    ''
+                  else
+                    # .cargo/config.toml sets build.rustc-wrapper = "sccache";
+                    # clear it so CI does not require the binary on PATH.
+                    ''
+                      export CARGO_BUILD_RUSTC_WRAPPER=""
+                      unset RUSTC_WRAPPER
+                    ''
+                );
             }
             // lib.optionalAttrs withCrossWindows {
               CC_x86_64_pc_windows_gnu = "${pkgs.pkgsCross.mingwW64.stdenv.cc.targetPrefix}cc";
