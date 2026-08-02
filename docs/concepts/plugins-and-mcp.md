@@ -403,6 +403,66 @@ resolves every request against the requesting plugin's registered
 declarations and denies undeclared ids. Value format validation (e.g. a
 `sk-ant-` prefix) is delegated to the plugin's `ValidateConfig` on save.
 
+### Capability declaration (`x-ene-capabilities`)
+
+Plugins that provide or depend on shared runtime capabilities (a local
+inference engine such as `gguf-runner`, a pipeline component such as
+`g2p/ja`) declare them at the top level of the schema returned by
+`config_schema()`, in the same `x-` marker family:
+
+```json
+{
+  "type": "object",
+  "x-ene-capabilities": {
+    "provides": ["tts/synthesize@1", "gguf-runner@1.2.3"],
+    "requires": ["g2p/ja@^1", "onnx-runner@^1?"]
+  }
+}
+```
+
+- `provides` — capabilities this plugin offers, each `name@version`. The
+  version is a concrete semver version (`1` means `1.0.0`). A **major bump is
+  a compatibility break** for the capability's contract, with the same
+  discipline as the wire ABI, because consumers express dependencies as
+  ranges over it.
+- `requires` — capabilities this plugin needs, each `name@range` where
+  `range` is a semver `VersionReq` (`1`, `^1`, `>=1.2.0, <2`, …). A trailing
+  `?` marks a **soft** requirement (`g2p/ja@^1?`): if unmet, the plugin still
+  starts and is expected to fall back to a built-in implementation.
+
+**Names** accept `[A-Za-z0-9._-]` plus at most one `/` namespace segment:
+`gguf-runner`, `tts/synthesize`, and `g2p/ja` are all valid. The `@` that
+separates name from version is not a name character. **Pre-release and build
+metadata are banned** in both versions and ranges — pre-release spelling would
+collide with the `?` soft marker, and build metadata carries no precedence
+meaning.
+
+**Resolution.** The host resolves every plugin's `requires` against the
+combined `provides` of all plugins that started successfully, exactly once at
+startup. A plugin whose **hard** requirements are unmet is shut down before
+supervision begins, contributes no tools or LLM providers, and emits a
+`PluginHealthEvent::RequirementsUnmet` (status `requirements_unmet`) listing
+the missing capabilities. Soft requirements never block startup. When several
+plugins provide a matching capability, the host picks one deterministically
+(the lexicographically smallest plugin name); the exact order is **not an API
+contract** — callers may rely only on "a matching provider". A user-facing
+provider selection preference is a later slice. Plugins disabled for unmet
+requirements are **not re-evaluated** if a provider appears later in the same
+host session; restart the host.
+
+**Validation timing.** Declarations are validated when the plugin starts.
+Each entry is checked independently — a bad entry is warned about and ignored
+(the plugin itself still starts), and duplicate names keep the first
+occurrence. Capability *calls* (plugin A invoking plugin B's capability
+through the host) are a later slice; this section covers declaration and
+resolution only.
+
+**Not to be confused with** `PluginCapabilities` — the handshake-time
+advertisement of *IPC* capabilities (tool counts, LLM providers,
+dynamic-config flags). That describes a single plugin's IPC surface;
+`x-ene-capabilities` is a *feature-level* contract between plugins about what
+runtime services they share.
+
 ### Binary checksum verification (TOFU)
 
 On first activation, the host computes the SHA-256 checksum of the plugin
