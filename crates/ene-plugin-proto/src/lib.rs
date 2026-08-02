@@ -74,7 +74,8 @@ pub mod usage;
 
 /// Capability and provider spec types.
 pub use capabilities::{
-    ConcurrencyHint, LlmProviderSpec, PluginCapabilities, SttProviderSpec, TtsProviderSpec,
+    ConcurrencyHint, LlmProviderSpec, PluginCapabilities, ResourceClass, SttProviderSpec,
+    TtsProviderSpec,
 };
 /// Plugin error type.
 pub use error::PluginError;

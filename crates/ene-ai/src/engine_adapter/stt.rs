@@ -93,9 +93,7 @@ mod tests {
     use ene_infer::{EngineConfig, JobContext, LocalModel};
 
     use super::{LocalSttEngine, SttTranscribeRequest, map_engine_error};
-    use crate::engine_adapter::descriptor::{
-        Capability, CapabilitySet, EngineDescriptor, ResourceClass,
-    };
+    use crate::engine_adapter::{Capability, CapabilitySet, EngineDescriptor, ResourceClass};
     use crate::traits::{AudioProviderError, SttProvider, SttResult};
 
     #[derive(Debug, thiserror::Error)]

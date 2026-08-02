@@ -168,7 +168,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use super::{LocalTtsEngine, TtsSynthesisRequest, TtsSynthesisResponse, map_engine_error};
-    use crate::engine_adapter::descriptor::{EngineDescriptor, ResourceClass};
+    use crate::engine_adapter::{EngineDescriptor, ResourceClass};
     use crate::traits::{AudioProviderError, TtsProvider};
 
     #[derive(Debug, thiserror::Error)]

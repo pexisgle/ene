@@ -365,3 +365,111 @@ mod tests {
         assert_eq!(hint, deser);
     }
 }
+
+/// The physical resource a provider's jobs contend on, and the key an
+/// admission budget uses to share one semaphore across engines that contend
+/// on the same one.
+///
+/// Two engines that declare `==` `ResourceClass` values are treated as
+/// contending on the same physical device or capacity and share one budget:
+/// adding a new local model that offloads to the same GPU device (for
+/// example) automatically starts sharing that device's budget the moment it
+/// declares [`ResourceClass::Gpu`] with the same device index — no change to
+/// callers or to engines already using that class.
+///
+/// `Cpu` deliberately carries no field — a distinguishing number would make a
+/// capacity question (how many CPU-bound jobs may run at once) masquerade as
+/// an identity question (are these the same resource). Every CPU-bound engine
+/// declares the same `Cpu` value and shares one process-wide budget; how
+/// large that budget is (whether two independent CPU-bound engines may run
+/// concurrently at all) is an admission-layer decision, not part of this
+/// type.
+///
+/// Wire note: not yet carried on any message. The externally tagged serde
+/// form (`"Cpu"` / `{"Gpu":{"device":0}}` / `"Network"`) is the initial
+/// choice; re-confirm it when this type is first wired into a message (the
+/// host-side resource admission work, #319) before it becomes load-bearing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResourceClass {
+    /// A specific GPU device index, as used by `with_main_gpu(n)` /
+    /// CUDA/Vulkan device selection. A real, meaningful identity: two
+    /// engines that declare the same device index genuinely do contend on
+    /// that one physical device.
+    Gpu {
+        /// Device index.
+        device: u32,
+    },
+    /// CPU-bound inference. Shared by every CPU-bound engine — see the
+    /// type-level docs for why this carries no field.
+    Cpu,
+    /// A network-attached engine (e.g. a local sidecar process reached over
+    /// HTTP/gRPC) that does not contend on host GPU/CPU capacity the same
+    /// way.
+    Network,
+}
+
+#[cfg(test)]
+mod resource_class_tests {
+    use super::*;
+
+    #[test]
+    fn resource_class_serde_roundtrip() {
+        for class in [
+            ResourceClass::Gpu { device: 0 },
+            ResourceClass::Gpu { device: 3 },
+            ResourceClass::Cpu,
+            ResourceClass::Network,
+        ] {
+            let json = serde_json::to_string(&class).unwrap();
+            let deser: ResourceClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(class, deser);
+        }
+    }
+
+    #[test]
+    fn resource_class_default_representation() {
+        assert_eq!(
+            serde_json::to_string(&ResourceClass::Cpu).unwrap(),
+            r#""Cpu""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ResourceClass::Gpu { device: 0 }).unwrap(),
+            r#"{"Gpu":{"device":0}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ResourceClass::Network).unwrap(),
+            r#""Network""#
+        );
+    }
+
+    #[test]
+    fn resource_class_equality_and_hash_are_by_value() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let hash_of = |class: ResourceClass| {
+            let mut hasher = DefaultHasher::new();
+            class.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        // Equal values compare equal and hash equal — the contract
+        // `HashMap<ResourceClass, _>` admission budgets rely on.
+        assert_eq!(
+            ResourceClass::Gpu { device: 0 },
+            ResourceClass::Gpu { device: 0 }
+        );
+        assert_eq!(
+            hash_of(ResourceClass::Gpu { device: 0 }),
+            hash_of(ResourceClass::Gpu { device: 0 })
+        );
+        // Distinct device indices are distinct resources.
+        assert_ne!(
+            ResourceClass::Gpu { device: 0 },
+            ResourceClass::Gpu { device: 1 }
+        );
+        // `Cpu` carries no field: every `Cpu` is the one shared value.
+        assert_eq!(ResourceClass::Cpu, ResourceClass::Cpu);
+        assert_ne!(ResourceClass::Cpu, ResourceClass::Gpu { device: 0 });
+    }
+}

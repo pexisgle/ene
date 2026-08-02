@@ -34,7 +34,7 @@
 //!   and resource-class metadata, replacing "call it and see if it errors"
 //!   (e.g. a runtime error when `tools` is non-empty) with an upfront query.
 //! - [`resource::ResourceRegistry`] — one shared admission semaphore per
-//!   distinct [`descriptor::ResourceClass`], so independently-constructed
+//!   distinct [`ResourceClass`], so independently-constructed
 //!   engines that contend on the same physical resource (most importantly:
 //!   the same GPU device) are admission-controlled together instead of each
 //!   having a lock that only protects itself.
@@ -85,10 +85,10 @@ pub mod resource;
 pub mod stt;
 pub mod tts;
 
-pub use descriptor::{
-    Capability, CapabilitySet, ConcurrencyHint, EngineDescriptor, EngineId, ResourceBudgets,
-    ResourceClass,
-};
+pub use descriptor::{Capability, CapabilitySet, EngineDescriptor, EngineId, ResourceBudgets};
+// Canonical in `ene-plugin-proto`; re-exported here so in-process callers
+// keep the `ene_ai::*` path and never define a second copy.
+pub use ene_plugin_proto::{ConcurrencyHint, ResourceClass};
 pub use llm::{
     DEFAULT_CHUNK_BUFFER, LlmChatRequest, LlmChatResponse, LocalLlmEngine, StreamingLocalLlmEngine,
 };

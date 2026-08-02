@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use ene_plugin_proto::{ConcurrencyHint, ResourceClass};
+
 /// Stable identifier for one loaded engine instance (e.g. `"llama-cpp-chat"`,
 /// `"whisper-base"`). Used in tracing spans and error messages; not
 /// interpreted by this crate beyond that.
@@ -116,75 +118,6 @@ const _: () = assert!(
     "CapabilitySet's u16 backing store overflows"
 );
 
-/// How eagerly an engine's worker should be sized.
-///
-/// Advisory metadata, not itself enforced by this crate: a single
-/// [`ene_infer::EngineHandle`] is architecturally single-flight (exactly one
-/// dedicated worker thread), so `max_in_flight` above 1 is a signal for a
-/// *future* orchestration layer that would spawn multiple worker handles for
-/// the same engine and route between them — no such layer exists yet.
-/// `queue_depth` maps directly onto [`ene_infer::EngineConfig::queue_depth`]
-/// when a caller constructs the underlying handle.
-#[derive(Debug, Clone, Copy)]
-pub struct ConcurrencyHint {
-    /// Advisory: how many jobs for this engine should be allowed to run at
-    /// once. Not enforced by a single [`ene_infer::EngineHandle`] today.
-    pub max_in_flight: usize,
-    /// Suggested [`ene_infer::EngineConfig::queue_depth`] for this engine.
-    pub queue_depth: usize,
-}
-
-impl Default for ConcurrencyHint {
-    /// `max_in_flight: 1, queue_depth: 2` — the conservative default for a
-    /// local model whose author has not thought about concurrency at all.
-    fn default() -> Self {
-        Self {
-            max_in_flight: 1,
-            queue_depth: 2,
-        }
-    }
-}
-
-/// The physical resource an engine contends on, and the key
-/// [`crate::engine_adapter::resource::ResourceRegistry`] uses to share an
-/// admission budget across engines that contend on the same one.
-///
-/// Two engines that declare `==` `ResourceClass` values share one semaphore:
-/// adding a new local model that offloads to the same GPU device (for
-/// example) automatically starts sharing that device's budget the moment it
-/// declares `ResourceClass::Gpu { device: 0 }` — no change to callers or to
-/// engines already using that class.
-///
-/// `Cpu` deliberately carries no field — a distinguishing number would make
-/// a capacity question (how many CPU-bound jobs may run at once) masquerade
-/// as an identity question (are these the same resource): every new CPU
-/// engine would have to pick an unused magic number, and retuning an
-/// engine's thread count would silently change what it shares a budget with.
-/// All CPU-bound local engines declare the same `Cpu` value and share one
-/// process-wide budget; how large that budget is (whether two independent
-/// CPU engines may run concurrently at all) is controlled by
-/// [`crate::engine_adapter::resource::default_permits`] /
-/// [`crate::engine_adapter::resource::ResourceRegistry::configure_all`], not
-/// by this type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ResourceClass {
-    /// A specific GPU device index, as used by `with_main_gpu(n)` /
-    /// CUDA/Vulkan device selection. A real, meaningful identity: two
-    /// engines that declare the same device index genuinely do contend on
-    /// that one physical device.
-    Gpu {
-        /// Device index.
-        device: u32,
-    },
-    /// CPU-bound inference. Shared by every CPU-bound local engine — see the
-    /// type-level docs for why this carries no field.
-    Cpu,
-    /// A network-attached engine (e.g. a local sidecar process reached over
-    /// HTTP/gRPC) that does not contend on host GPU/CPU capacity the same
-    /// way.
-    Network,
-}
-
 /// Declared capability, concurrency, and resource metadata for one engine.
 #[derive(Debug, Clone)]
 pub struct EngineDescriptor {
@@ -193,8 +126,19 @@ pub struct EngineDescriptor {
     /// What this engine can do.
     pub capabilities: CapabilitySet,
     /// Advisory concurrency sizing.
+    ///
+    /// Advisory only, not enforced by this crate: a single
+    /// [`ene_infer::EngineHandle`] is architecturally single-flight (exactly
+    /// one dedicated worker thread), so `max_in_flight` above 1 is a signal
+    /// for a *future* orchestration layer that would spawn multiple worker
+    /// handles for the same engine and route between them — no such layer
+    /// exists yet. `queue_depth` maps directly onto
+    /// [`ene_infer::EngineConfig::queue_depth`] when a caller constructs the
+    /// underlying handle.
     pub concurrency: ConcurrencyHint,
-    /// The physical resource this engine's jobs contend on.
+    /// The physical resource this engine's jobs contend on — the key
+    /// [`crate::engine_adapter::resource::ResourceRegistry`] uses to share an
+    /// admission budget across engines that contend on the same one.
     pub resource: ResourceClass,
 }
 
@@ -252,9 +196,7 @@ impl ResourceBudgets {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Capability, CapabilitySet, ConcurrencyHint, EngineDescriptor, EngineId, ResourceClass,
-    };
+    use super::{Capability, CapabilitySet, EngineDescriptor, EngineId, ResourceClass};
 
     #[test]
     fn capability_set_contains_only_added() {
@@ -273,31 +215,6 @@ mod tests {
         assert!(set.contains(Capability::Stt));
         assert!(set.contains(Capability::Streaming));
         assert!(!set.contains(Capability::Tts));
-    }
-
-    #[test]
-    fn concurrency_hint_default_is_conservative() {
-        let hint = ConcurrencyHint::default();
-        assert_eq!(hint.max_in_flight, 1);
-        assert_eq!(hint.queue_depth, 2);
-    }
-
-    #[test]
-    fn resource_class_equality_is_by_value() {
-        assert_eq!(
-            ResourceClass::Gpu { device: 0 },
-            ResourceClass::Gpu { device: 0 }
-        );
-        assert_ne!(
-            ResourceClass::Gpu { device: 0 },
-            ResourceClass::Gpu { device: 1 }
-        );
-        // `Cpu` carries no field: every CPU-bound engine shares this one
-        // value on purpose (see the type docs) rather than picking a
-        // distinguishing number, so there is nothing to assert `!=` here —
-        // this instead pins that two `Cpu` values are always equal.
-        assert_eq!(ResourceClass::Cpu, ResourceClass::Cpu);
-        assert_ne!(ResourceClass::Cpu, ResourceClass::Gpu { device: 0 });
     }
 
     #[test]

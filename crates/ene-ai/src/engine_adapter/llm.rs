@@ -402,9 +402,7 @@ mod tests {
     use super::{
         LlmChatRequest, LlmChatResponse, LocalLlmEngine, StreamingLocalLlmEngine, map_engine_error,
     };
-    use crate::engine_adapter::descriptor::{
-        Capability, CapabilitySet, EngineDescriptor, ResourceClass,
-    };
+    use crate::engine_adapter::{Capability, CapabilitySet, EngineDescriptor, ResourceClass};
     use crate::message::{LlmMessage, UserMessagePart};
     use crate::traits::LlmProvider;
 
