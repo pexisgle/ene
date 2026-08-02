@@ -150,6 +150,9 @@ pub mod prelude {
         };
 
         #[doc(no_inline)]
+        pub use ene_plugin_macros::{LlmPlugin, SttPlugin, TtsPlugin};
+
+        #[doc(no_inline)]
         pub use crate::{
             ConcurrencyHint, ConfigurablePlugin, EmbedPlugin, LlmPlugin, LlmProviderSpec,
             PluginCompletion, PluginDispatch, PluginError, PluginStream, PluginStreamChunk,

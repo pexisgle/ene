@@ -22,6 +22,62 @@
 - **なぜ制御ブロードキャストを並列化し、権限承認をルーティングするのか**: `CompositeToolRegistry` の制御系メソッド (`set_call_context`、`allow_pattern`、`revoke_pattern`、およびフォールバックの `approve_permission`) は独立したプラグイン接続へ扇出するため、`join_all` で並列実行されます — 最悪ケースのレイテンシは全プラグインの合計ではなく、最も遅い 1 つのプラグインに抑えられます。権限承認はさらに踏み込みます: 要求は 1 件のツール呼び出しから発生するため、`approve_permission_for` はブロードキャストではなく所有元のサブレジストリへ 1 往復で直接承認を届けます (#434)。これにより、ユーザーの「許可」が無関係なプラグインの長いツール呼び出しの完了待ちで遅延することを防ぎます。
 - **なぜ単一の逐次ヘルスループではなく、プラグインごとに 1 つの監督タスクを置くのか**: 監視対象の各プラグインは、それぞれ独立したタスクによって監視されます。そのため、あるプラグインの再起動バックオフ (指数関数的に増加し上限 30 秒) や遅い再接続が、他のプラグインのヘルス監視を止めることは決してありません。全プラグインを順番に ping する単一ループでは、1 つの不調なプラグインが全プラグインのプローブ — つまり検知と再起動 — を遅らせてしまいます (#432)。
 
+## プロバイダ機能 derive
+
+静的プロバイダ機能宣言 (`LlmProviderSpec` / `TtsProviderSpec` / `SttProviderSpec`
+の構築) は、`ene-plugin-macros` が単一の `#[provider(...)]` 属性から生成し、
+`ene_plugin::prelude` 経由で再エクスポートされます。derive はプラグイン構造体
+自体に付与します:
+
+```rust
+use ene_plugin::prelude::*;
+
+#[derive(LlmPlugin)]
+#[provider(
+    kind = "anthropic",
+    models = "claude-sonnet-4-20250514, claude-haiku-4-20250514",
+    streaming,
+    vision,
+    concurrency = 8,
+    queue_depth = 16,
+    context_window = 200_000,
+)]
+pub(crate) struct AnthropicPlugin;
+
+impl ConfigurablePlugin for AnthropicPlugin {
+    // config_schema / set_config は手書きのまま（API キー処理は provider 固有）。
+}
+
+#[async_trait]
+impl LlmPlugin for AnthropicPlugin {
+    fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+        vec![Self::llm_spec()]
+    }
+
+    async fn create_chat_stream(/* ... */) -> Result<PluginStream, PluginError> {
+        // ストリーミング処理は手書き
+    }
+}
+```
+
+derive がプラグイン構造体に生成するもの: 内在メソッドの `llm_spec()` /
+`tts_spec()` / `stt_spec()` コンストラクタと、トレイト別の kind 定数
+(`LLM_PROVIDER_KIND` / `TTS_PROVIDER_KIND` / `STT_PROVIDER_KIND`。例:
+非同期ハンドラ内の `if kind != Self::LLM_PROVIDER_KIND` ガード用)。
+`*_capabilities()` トレイトメソッドは作者自身が書く 1 行
+`vec![Self::<trait>_spec()]` です — derive は `impl LlmPlugin` 自体を生成でき
+ません。なぜなら非同期ハンドラは同じトレイト impl 内に置く必要があり、
+Rust は同一型に対する同一トレイトの 2 つ目の `impl` ブロックを拒否するからです
+(E0119)。したがって非同期ハンドラと `ConfigurablePlugin` (`config_schema` を
+含む) は常に手書きです。
+
+対応する属性キー: `kind` (必須)、`models`、`voices`、`formats` (カンマ区切り
+リスト)、`streaming`、`vision` (フラグ)、`concurrency` / `queue_depth`
+(省略時は直列の `ConcurrencyHint` に既定化)、`context_window`。複合プロバイダ
+(`#[derive(LlmPlugin, TtsPlugin)]`) は 1 つの `#[provider(...)]` 属性 — つまり
+1 つの `kind` — を複数トレイトで共有します。`EmbedPlugin` には生成すべき静的
+宣言が存在しない (`embed_batch` がトレイト全体) ため、derive はありません。
+
 ## API リファレンス
 
 構造体・メソッドのシグネチャはここには転記しません — 転記すると必ず陳腐化します。最新かつ正確な API は rustdoc を生成して参照してください:

@@ -11,10 +11,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ene_plugin::{
-    ConcurrencyHint, LlmPlugin, LlmProviderSpec, PluginCompletion, PluginError, PluginStream,
-    PluginStreamChunk, TokenUsage,
-};
+use ene_plugin::prelude::*;
 use serde_json::{Value, json};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -43,6 +40,25 @@ static PLUGIN_CONFIG: Mutex<Option<Value>> = Mutex::new(None);
 
 /// Anthropic Claude plugin providing streaming and non-streaming chat
 /// completions via the Anthropic Messages API.
+///
+/// The static capability data (`llm_spec()` / `LLM_PROVIDER_KIND`) is
+/// generated from the `#[provider(...)]` attribute; the async handlers below
+/// stay hand-written.
+#[derive(LlmPlugin)]
+#[provider(
+    kind = "anthropic",
+    models = "claude-sonnet-4-20250514, claude-haiku-4-20250514, claude-3-5-sonnet-20241022",
+    streaming,
+    vision,
+    // A stateless HTTP proxy to Anthropic's cloud API, not a local model —
+    // safe to run many requests concurrently. Explicit, per the
+    // `ConcurrencyHint` design: opting into more than the serial default
+    // requires stating so, which this does.
+    concurrency = 8,
+    queue_depth = 16,
+    // Claude models expose a 200k-token context window.
+    context_window = 200_000,
+)]
 pub(crate) struct AnthropicPlugin;
 
 impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
@@ -296,26 +312,7 @@ fn extract_tool_input(body: &Value) -> Result<String, PluginError> {
 #[async_trait]
 impl LlmPlugin for AnthropicPlugin {
     fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
-        vec![LlmProviderSpec {
-            kind: "anthropic".to_string(),
-            supported_models: vec![
-                "claude-sonnet-4-20250514".to_string(),
-                "claude-haiku-4-20250514".to_string(),
-                "claude-3-5-sonnet-20241022".to_string(),
-            ],
-            supports_streaming: true,
-            supports_vision: true,
-            // A stateless HTTP proxy to Anthropic's cloud API, not a local
-            // model — safe to run many requests concurrently. Explicit,
-            // per the `ConcurrencyHint` design: opting into more than the
-            // serial default requires stating so, which this does.
-            concurrency: ConcurrencyHint {
-                max_in_flight: 8,
-                queue_depth: 16,
-            },
-            // Claude models expose a 200k-token context window.
-            context_window: Some(200_000),
-        }]
+        vec![Self::llm_spec()]
     }
 
     async fn create_chat_stream(
@@ -327,7 +324,7 @@ impl LlmPlugin for AnthropicPlugin {
         messages: Vec<Value>,
         tools: Vec<Value>,
     ) -> Result<PluginStream, PluginError> {
-        if kind != "anthropic" {
+        if kind != Self::LLM_PROVIDER_KIND {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
 
@@ -366,7 +363,7 @@ impl LlmPlugin for AnthropicPlugin {
         messages: Vec<Value>,
         json_schema: Option<Value>,
     ) -> Result<PluginCompletion, PluginError> {
-        if kind != "anthropic" {
+        if kind != Self::LLM_PROVIDER_KIND {
             return Err(PluginError::not_supported(format!("provider kind: {kind}")));
         }
 

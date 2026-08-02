@@ -22,6 +22,64 @@ This family of crates forms Ene's unified, out-of-process IPC plugin infrastruct
 - **Why control broadcasts are concurrent and permission approvals are routed**: `CompositeToolRegistry` control methods (`set_call_context`, `allow_pattern`, `revoke_pattern`, and the fallback `approve_permission`) fan out to independent plugin connections, so they run concurrently with `join_all` — the worst-case latency is the slowest single plugin, not the sum over every plugin. Permission approvals go further: a request originates from one tool call, so `approve_permission_for` routes the approval directly to the owning sub-registry in a single round-trip instead of broadcasting (#434). This keeps a user's "allow" from being delayed behind an unrelated plugin that is mid-long-tool-call.
 - **Why one supervisor task per plugin instead of a single sequential health loop**: each supervised plugin is monitored by its own independent task, so one plugin's restart backoff (exponential, capped at 30 s) or a slow reconnect can never stall the health monitoring of any other plugin. A single loop that pinged every plugin in turn would let one unhealthy plugin delay probes — and thus detection and restart — for all of them (#432).
 
+## Provider capability derives
+
+Static provider capability declarations (`LlmProviderSpec` / `TtsProviderSpec` /
+`SttProviderSpec` construction) are generated from a single `#[provider(...)]`
+attribute by `ene-plugin-macros`, re-exported through `ene_plugin::prelude`. The
+derive is applied to the plugin struct itself:
+
+```rust
+use ene_plugin::prelude::*;
+
+#[derive(LlmPlugin)]
+#[provider(
+    kind = "anthropic",
+    models = "claude-sonnet-4-20250514, claude-haiku-4-20250514",
+    streaming,
+    vision,
+    concurrency = 8,
+    queue_depth = 16,
+    context_window = 200_000,
+)]
+pub(crate) struct AnthropicPlugin;
+
+impl ConfigurablePlugin for AnthropicPlugin {
+    // config_schema / set_config stay hand-written (API-key handling is
+    // provider-specific).
+}
+
+#[async_trait]
+impl LlmPlugin for AnthropicPlugin {
+    fn llm_capabilities(&self) -> Vec<LlmProviderSpec> {
+        vec![Self::llm_spec()]
+    }
+
+    async fn create_chat_stream(/* ... */) -> Result<PluginStream, PluginError> {
+        // hand-written streaming logic
+    }
+}
+```
+
+What the derive generates on the plugin struct: an inherent `llm_spec()` /
+`tts_spec()` / `stt_spec()` constructor and a per-trait kind const
+(`LLM_PROVIDER_KIND` / `TTS_PROVIDER_KIND` / `STT_PROVIDER_KIND`, e.g. for the
+`if kind != Self::LLM_PROVIDER_KIND` guard in async handlers). The
+`*_capabilities()` trait method is the author's own one-line
+`vec![Self::<trait>_spec()]` — a derive cannot emit the `impl LlmPlugin` itself,
+because the async handlers must live in that same trait impl and Rust rejects a
+second `impl` block for the same trait on the same type (E0119). Async handlers
+and `ConfigurablePlugin` (including `config_schema`) are therefore always
+hand-written.
+
+Supported attribute keys: `kind` (required), `models`, `voices`, `formats`
+(comma-separated lists), `streaming`, `vision` (flags), `concurrency` /
+`queue_depth` (defaults to the serial `ConcurrencyHint` when omitted), and
+`context_window`. A compound provider (`#[derive(LlmPlugin, TtsPlugin)]`) shares
+one `#[provider(...)]` attribute — and therefore one `kind` — across its traits.
+`EmbedPlugin` has no static declaration to generate (`embed_batch` is its entire
+surface), so it has no derive.
+
 ## API reference
 
 Struct and method signatures are not duplicated here — they drift. Generate rustdoc for the authoritative, current API:
