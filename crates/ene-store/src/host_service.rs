@@ -119,12 +119,9 @@ impl HostServiceServer {
         db: DatabaseConnection,
         db_plugins: Arc<HashMap<String, DbPluginRegistration>>,
     ) -> Result<(), DbServerError> {
-        let request = match read_host_service_request(&mut stream).await? {
-            Some(req) => req,
-            None => {
-                debug!("Host service connection closed before Open");
-                return Ok(());
-            }
+        let Some(request) = read_host_service_request(&mut stream).await? else {
+            debug!("Host service connection closed before Open");
+            return Ok(());
         };
 
         let HostServiceRequest::Open { service, token } = request;

@@ -516,6 +516,10 @@ mod tests {
     mod reconnect_auth {
         use super::*;
         use ene_plugin_proto::transport::{IpcListener, IpcStream, cleanup_path};
+        use ene_plugin_proto::{
+            HostServiceId, HostServiceRequest, HostServiceResponse, read_host_service_request,
+            write_host_service_response,
+        };
         use std::path::PathBuf;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -540,12 +544,17 @@ mod tests {
         }
 
         async fn serve_authed_session(stream: &mut IpcStream, expected_token: &str) {
-            match read_framed(stream).await {
-                DbRequest::Handshake { token } => {
-                    assert_eq!(token, expected_token, "handshake token mismatch");
-                    write_framed(stream, &DbResponse::HandshakeAck).await;
+            match read_host_service_request(stream).await.expect("read open") {
+                Some(HostServiceRequest::Open {
+                    service: HostServiceId::Db,
+                    token,
+                }) => {
+                    assert_eq!(token, expected_token, "open token mismatch");
+                    write_host_service_response(stream, &HostServiceResponse::OpenAck)
+                        .await
+                        .expect("write open ack");
                 }
-                other => panic!("expected Handshake, got {other:?}"),
+                other => panic!("expected Open(Db), got {other:?}"),
             }
             match read_framed(stream).await {
                 DbRequest::Ping => write_framed(stream, &DbResponse::Pong).await,
@@ -608,6 +617,10 @@ mod tests {
     mod batch_wire {
         use super::*;
         use ene_plugin_proto::transport::{IpcListener, cleanup_path};
+        use ene_plugin_proto::{
+            HostServiceId, HostServiceRequest, HostServiceResponse, read_host_service_request,
+            write_host_service_response,
+        };
         use std::path::PathBuf;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -648,12 +661,20 @@ mod tests {
                 let mut listener = IpcListener::bind(&path_for_server).expect("bind");
                 let mut stream = listener.accept().await.expect("accept");
 
-                match read_framed(&mut stream).await {
-                    DbRequest::Handshake { token } => {
-                        assert_eq!(token, token_for_server, "handshake token mismatch");
-                        write_framed(&mut stream, &DbResponse::HandshakeAck).await;
+                match read_host_service_request(&mut stream)
+                    .await
+                    .expect("read open")
+                {
+                    Some(HostServiceRequest::Open {
+                        service: HostServiceId::Db,
+                        token,
+                    }) => {
+                        assert_eq!(token, token_for_server, "open token mismatch");
+                        write_host_service_response(&mut stream, &HostServiceResponse::OpenAck)
+                            .await
+                            .expect("write open ack");
                     }
-                    other => panic!("expected Handshake, got {other:?}"),
+                    other => panic!("expected Open(Db), got {other:?}"),
                 }
 
                 match read_framed(&mut stream).await {
