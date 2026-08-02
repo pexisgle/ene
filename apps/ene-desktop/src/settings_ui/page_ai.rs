@@ -73,7 +73,7 @@ pub fn render(
             ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "character-card"));
             ui.add_sized(
                 [220.0, 0.0],
-                egui::Label::new(settings.current_character_card()),
+                egui::Label::new(settings.current_character_card().unwrap_or("—")),
             );
         });
 

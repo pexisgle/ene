@@ -144,6 +144,9 @@ character-pos-y = Character Pos Y
 character-pos-z = Character Pos Z
 reset-position = Reset Position
 manual-expressions = Manual Expressions (Test)
+character-asset-none-selected = No character is available. Add a character folder under characters/.
+character-asset-missing-vrm = This character has no VRM model. Add a .vrm file to the character folder.
+character-asset-missing-motion = This character has no motion clips. Animation will stay in rest pose.
 
 # Character Card Editor (#218)
 character-editor-modified = Unsaved changes

@@ -19,7 +19,14 @@ pub fn render(
     world: &mut World,
     ui_entity: Entity,
 ) {
-    let card_path = resolve_card_path(settings);
+    let Some(card_rel) = settings.current_character_card() else {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 160, 60),
+            i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-none-selected"),
+        );
+        return;
+    };
+    let card_path = settings.assets_dir.join(card_rel);
 
     // ── Auto-load on first render ──
     let needs_load = world
@@ -163,19 +170,20 @@ pub fn render(
                 ))
                 .clicked()
             {
-                let path = resolve_card_path(settings);
-                apply_action(
-                    SettingsAction::SaveCharacterCard {
-                        path: path.to_string_lossy().to_string(),
-                    },
-                    settings,
-                    &mut crate::character_state::AnimationControl::new(),
-                    ai,
-                    world,
-                    ui_entity,
-                    None,
-                    0.0,
-                );
+                if let Some(path) = resolve_card_path(settings) {
+                    apply_action(
+                        SettingsAction::SaveCharacterCard {
+                            path: path.to_string_lossy().to_string(),
+                        },
+                        settings,
+                        &mut crate::character_state::AnimationControl::new(),
+                        ai,
+                        world,
+                        ui_entity,
+                        None,
+                        0.0,
+                    );
+                }
             }
 
             if ui
@@ -196,9 +204,10 @@ pub fn render(
 }
 
 /// Resolve the full on-disk path to the current character's `character.json`.
-fn resolve_card_path(settings: &CharacterSettings) -> PathBuf {
-    let rel = settings.current_entry().card_path.as_str();
-    settings.assets_dir.join(rel)
+fn resolve_card_path(settings: &CharacterSettings) -> Option<PathBuf> {
+    settings
+        .current_character_card()
+        .map(|rel| settings.assets_dir.join(rel))
 }
 
 /// Render a single-line text field bound to a `String` field on [`UiState`].

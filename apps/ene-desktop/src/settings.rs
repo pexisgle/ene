@@ -542,39 +542,65 @@ impl CharacterSettings {
                 initial_config,
             ))),
         };
+        settings.clamp_runtime_values();
         settings.load_from_file();
         settings
     }
 
-    pub fn current_entry(&self) -> &CharacterEntry {
-        &self.characters[self.character_state.selected_character]
+    /// Selected character entry, if the index is in range and the list is non-empty.
+    pub fn current_entry(&self) -> Option<&CharacterEntry> {
+        self.characters.get(self.character_state.selected_character)
     }
 
-    pub fn current_character(&self) -> &str {
-        &self.current_entry().vrm_paths[0]
+    /// Relative path of the first VRM for the selected character, if any.
+    pub fn current_character(&self) -> Option<&str> {
+        self.current_entry()
+            .and_then(|entry| entry.vrm_paths.first())
+            .map(String::as_str)
     }
 
-    pub fn current_motion(&self) -> &str {
+    /// Relative path of the selected (or overridden) motion, if any.
+    pub fn current_motion(&self) -> Option<&str> {
         if let Some(ref override_path) = self.character_state.motion_override {
-            return override_path;
+            return Some(override_path.as_str());
         }
-        &self.current_entry().motion_paths[self.character_state.selected_motion]
+        self.current_entry()
+            .and_then(|entry| entry.motion_paths.get(self.character_state.selected_motion))
+            .map(String::as_str)
     }
 
-    pub fn current_character_card(&self) -> &str {
-        &self.current_entry().card_path
+    /// Relative path of the selected character's card, if any.
+    pub fn current_character_card(&self) -> Option<&str> {
+        self.current_entry().map(|entry| entry.card_path.as_str())
     }
 
     pub fn sync_card_path(&mut self) {
-        let path = format!(
-            "{}/{}",
-            self.assets_dir.display(),
-            self.current_character_card()
-        );
+        let Some(card) = self.current_character_card() else {
+            return;
+        };
+        let path = format!("{}/{}", self.assets_dir.display(), card);
         self.with_config_mut(|c| c.character = path);
     }
 
     pub fn clamp_runtime_values(&mut self) {
+        if self.characters.is_empty() {
+            self.character_state.selected_character = 0;
+            self.character_state.selected_motion = 0;
+        } else {
+            let max_char = self.characters.len() - 1;
+            if self.character_state.selected_character > max_char {
+                self.character_state.selected_character = max_char;
+            }
+            let motion_len = self
+                .characters
+                .get(self.character_state.selected_character)
+                .map_or(0, |e| e.motion_paths.len());
+            if motion_len == 0 {
+                self.character_state.selected_motion = 0;
+            } else if self.character_state.selected_motion >= motion_len {
+                self.character_state.selected_motion = motion_len - 1;
+            }
+        }
         self.character_state.model_scale = self.character_state.model_scale.clamp(0.25, 4.0);
         self.character_state.character_position.x =
             self.character_state.character_position.x.clamp(-3.0, 3.0);
@@ -689,15 +715,17 @@ impl CharacterSettings {
 
     pub fn save_per_character_settings(&self) {
         self.sync_character_state_to_store();
-        let char_name = self.current_entry().name.clone();
+        let char_name = self.current_entry().map(|e| e.name.clone());
         let store = self.store.read();
-        if let Err(e) = store.flush(Some(&char_name)) {
+        if let Err(e) = store.flush(char_name.as_deref()) {
             tracing::warn!("[Config] Failed to save per-character settings: {e}");
         }
     }
 
     pub fn load_per_character_settings(&mut self) {
-        let char_name = self.current_entry().name.clone();
+        let Some(char_name) = self.current_entry().map(|e| e.name.clone()) else {
+            return;
+        };
         let store = self.store.read();
         store.load_character_config(&char_name);
         let per = store.character_config();
@@ -718,11 +746,12 @@ impl CharacterSettings {
             per.default_expression.clone()
         };
         if !per.default_motion.is_empty()
-            && let Some(m) = self
-                .current_entry()
-                .motion_names
-                .iter()
-                .position(|n| n == &per.default_motion)
+            && let Some(m) = self.current_entry().and_then(|entry| {
+                entry
+                    .motion_names
+                    .iter()
+                    .position(|n| n == &per.default_motion)
+            })
         {
             self.character_state.selected_motion = m;
         }
@@ -741,6 +770,7 @@ impl CharacterSettings {
         self.save_per_character_settings();
         self.character_state.selected_character = idx;
         self.character_state.selected_motion = 0;
+        self.clamp_runtime_values();
         self.sync_card_path();
         self.load_per_character_settings();
         self.character_state.needs_respawn = true;
@@ -751,9 +781,9 @@ impl CharacterSettings {
 
     pub fn save(&self) {
         self.sync_character_state_to_store();
-        let char_name = self.current_entry().name.clone();
+        let char_name = self.current_entry().map(|e| e.name.clone());
         let store = self.store.read();
-        if let Err(e) = store.flush(Some(&char_name)) {
+        if let Err(e) = store.flush(char_name.as_deref()) {
             tracing::warn!("[Config] Failed to save config: {e}");
         }
     }
@@ -768,9 +798,9 @@ impl CharacterSettings {
     /// changed since the last flush.
     pub fn flush_if_dirty(&self) {
         self.sync_character_state_to_store();
-        let char_name = self.current_entry().name.clone();
+        let char_name = self.current_entry().map(|e| e.name.clone());
         let store = self.store.read();
-        if let Err(e) = store.flush_if_dirty(Some(&char_name)) {
+        if let Err(e) = store.flush_if_dirty(char_name.as_deref()) {
             tracing::warn!("[Config] Failed to flush dirty config: {e}");
         }
     }
@@ -778,8 +808,10 @@ impl CharacterSettings {
     /// Sync the in-memory character state into the store's per-character
     /// config so it gets flushed to disk on the next save.
     fn sync_character_state_to_store(&self) {
+        let Some(entry) = self.current_entry() else {
+            return;
+        };
         let store = self.store.read();
-        let entry = self.current_entry();
         let default_motion_name = entry
             .motion_names
             .get(self.character_state.selected_motion)
@@ -1022,6 +1054,33 @@ fn read_character_json_meta(
 mod tests {
     use super::*;
 
+    fn empty_settings() -> CharacterSettings {
+        CharacterSettings {
+            assets_dir: PathBuf::from("/tmp/ene-test-assets"),
+            characters: Vec::new(),
+            character_state: CharacterState {
+                selected_character: 3,
+                selected_motion: 5,
+                ..Default::default()
+            },
+            store: Arc::new(RwLock::new(ene_config::ConfigStore::from_config(
+                ene_config::EneConfig::default(),
+            ))),
+        }
+    }
+
+    fn entry_without_assets() -> CharacterEntry {
+        CharacterEntry {
+            name: "ghost".to_string(),
+            folder: "ghost".to_string(),
+            vrm_paths: Vec::new(),
+            motion_paths: Vec::new(),
+            motion_names: Vec::new(),
+            card_path: "characters/ghost/character.json".to_string(),
+            default_motion: None,
+        }
+    }
+
     #[test]
     fn character_state_defaults_to_neutral_expression() {
         let s = CharacterState::default();
@@ -1068,5 +1127,67 @@ mod tests {
             selected: Some("yes".to_string()),
             skipped: false,
         };
+    }
+
+    #[test]
+    fn accessors_return_none_when_characters_empty() {
+        let mut settings = empty_settings();
+        settings.clamp_runtime_values();
+        assert_eq!(settings.character_state.selected_character, 0);
+        assert_eq!(settings.character_state.selected_motion, 0);
+        assert!(settings.current_entry().is_none());
+        assert!(settings.current_character().is_none());
+        assert!(settings.current_motion().is_none());
+        assert!(settings.current_character_card().is_none());
+    }
+
+    #[test]
+    fn accessors_return_none_when_vrm_and_motion_missing() {
+        let mut settings = empty_settings();
+        settings.characters.push(entry_without_assets());
+        settings.character_state.selected_character = 0;
+        settings.character_state.selected_motion = 2;
+        settings.clamp_runtime_values();
+        assert_eq!(settings.character_state.selected_motion, 0);
+        assert!(settings.current_entry().is_some());
+        assert!(settings.current_character().is_none());
+        assert!(settings.current_motion().is_none());
+        assert_eq!(
+            settings.current_character_card(),
+            Some("characters/ghost/character.json")
+        );
+    }
+
+    #[test]
+    fn clamp_runtime_values_clamps_stale_indices() {
+        let mut settings = empty_settings();
+        settings.characters.push(CharacterEntry {
+            name: "a".to_string(),
+            folder: "a".to_string(),
+            vrm_paths: vec!["characters/a/a.vrm".to_string()],
+            motion_paths: vec![
+                "characters/a/m0.vrma".to_string(),
+                "characters/a/m1.vrma".to_string(),
+            ],
+            motion_names: vec!["m0".to_string(), "m1".to_string()],
+            card_path: "characters/a/character.json".to_string(),
+            default_motion: None,
+        });
+        settings.character_state.selected_character = 9;
+        settings.character_state.selected_motion = 9;
+        settings.clamp_runtime_values();
+        assert_eq!(settings.character_state.selected_character, 0);
+        assert_eq!(settings.character_state.selected_motion, 1);
+        assert_eq!(settings.current_character(), Some("characters/a/a.vrm"));
+        assert_eq!(settings.current_motion(), Some("characters/a/m1.vrma"));
+    }
+
+    #[test]
+    fn motion_override_wins_when_list_empty() {
+        let mut settings = empty_settings();
+        settings.characters.push(entry_without_assets());
+        settings.character_state.motion_override = Some("override.vrma".to_string());
+        settings.clamp_runtime_values();
+        assert_eq!(settings.current_motion(), Some("override.vrma"));
     }
 }
