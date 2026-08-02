@@ -46,6 +46,16 @@ const CANCEL_STREAM_MIN_VERSION: u32 = 4;
 /// variant; the host updates its local cache and skips the IPC send.
 const SET_CONFIG_MIN_VERSION: u32 = 5;
 
+/// How a [`IpcPluginConnection::set_config`] call delivers the update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetConfigOutcome {
+    /// `SetConfig` IPC was delivered to the live plugin.
+    Pushed,
+    /// The peer negotiated a protocol below `SetConfig` support; only the
+    /// reconnect cache was updated.
+    CachedOnly,
+}
+
 /// Shared routing state for the single reader task.
 ///
 /// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
@@ -712,12 +722,16 @@ impl IpcPluginConnection {
     /// The local cache is always updated first so a later reconnect
     /// handshake delivers the fresh values even when the peer negotiated a
     /// protocol version below [`supports_set_config`](Self::supports_set_config)
-    /// (in that case the IPC send is skipped with a warning).
+    /// (in that case the IPC send is skipped with a warning and
+    /// [`SetConfigOutcome::CachedOnly`] is returned).
+    ///
+    /// Returns [`SetConfigOutcome::Pushed`] when the live plugin received the
+    /// update.
     pub async fn set_config(
         &self,
         config: Option<serde_json::Value>,
         profiles: Option<serde_json::Value>,
-    ) -> Result<(), PluginHostError> {
+    ) -> Result<SetConfigOutcome, PluginHostError> {
         self.plugin_config.write().clone_from(&config);
         self.plugin_profiles.write().clone_from(&profiles);
 
@@ -728,7 +742,7 @@ impl IpcPluginConnection {
                 "plugin negotiated a version below SetConfig support; \
                  local config cache updated for reconnect, live push skipped"
             );
-            return Ok(());
+            return Ok(SetConfigOutcome::CachedOnly);
         }
 
         let resp = self
@@ -739,7 +753,7 @@ impl IpcPluginConnection {
             })
             .await?;
         match resp {
-            PluginIpcResponse::ConfigApplied { .. } => Ok(()),
+            PluginIpcResponse::ConfigApplied { .. } => Ok(SetConfigOutcome::Pushed),
             PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to SetConfig: {other:?}"

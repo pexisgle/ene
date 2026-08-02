@@ -70,7 +70,7 @@ pub use factory::IpcLlmProviderFactory;
 /// Plugin health events.
 pub use health::{DisabledReason, PluginHealthEvent};
 /// IPC connection to a single plugin binary.
-pub use ipc_plugin::IpcPluginConnection;
+pub use ipc_plugin::{IpcPluginConnection, SetConfigOutcome};
 /// IPC-backed LLM provider.
 pub use ipc_provider::IpcLlmProvider;
 /// Plugin host manager.

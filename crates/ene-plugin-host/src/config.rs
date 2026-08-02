@@ -223,9 +223,9 @@ fn warn_reserved_config_keys(plugin_name: &str, config: &serde_json::Value) {
                 component = "PluginEntry",
                 plugin = %plugin_name,
                 key = %key,
-                "plugin config blob contains host-reserved key '{key}'; \
-                 this name is also a plugins.list.<name> entry field and will \
-                 confuse authors — nest plugin-owned settings under distinct keys"
+                "plugin config blob contains a host-reserved key; the name is \
+                 also a plugins.list.<name> entry field and will confuse \
+                 authors — nest plugin-owned settings under distinct keys"
             );
         }
     }
@@ -450,10 +450,10 @@ mod tests {
     }
 
     #[test]
-    fn delivered_config_warns_on_reserved_keys() {
-        // Acceptance for reserved-key collision: `enable` / `checksum` inside
-        // the nested config blob must be detectable (warn path exercised by
-        // calling `delivered_config`; the blob is still delivered verbatim).
+    fn delivered_config_passes_reserved_keys_through() {
+        // Reserved host keys inside the nested config blob must survive
+        // delivery verbatim: `delivered_config` warns via
+        // `warn_reserved_config_keys` but never strips the keys.
         let entry = PluginEntry {
             config: serde_json::json!({
                 "enable": false,

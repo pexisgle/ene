@@ -555,6 +555,12 @@ pub type LlmFactoriesByPlugin = HashMap<String, Vec<(String, LlmFactoryHandle)>>
 pub struct PluginHostManager {
     supervised: Vec<Arc<Mutex<SupervisedPlugin>>>,
     connections: Vec<Arc<IpcPluginConnection>>,
+    /// Plugin names, index-aligned with `connections` — both vectors are
+    /// pushed together in [`start`](Self::start). Stored separately from
+    /// `supervised` so config pushes can identify a connection without
+    /// locking its `SupervisedPlugin` (a lock a health probe or restart
+    /// may be holding).
+    names: Vec<String>,
     tool_registries: Vec<Arc<dyn ToolRegistry>>,
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     llm_factory_plugins: HashMap<String, String>,
@@ -618,6 +624,7 @@ impl PluginHostManager {
             return Ok(Self {
                 supervised: Vec::new(),
                 connections: Vec::new(),
+                names: Vec::new(),
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
@@ -631,6 +638,7 @@ impl PluginHostManager {
 
         let mut supervised: Vec<Arc<Mutex<SupervisedPlugin>>> = Vec::new();
         let mut connections: Vec<Arc<IpcPluginConnection>> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
         let mut tool_registries: Vec<Arc<dyn ToolRegistry>> = Vec::new();
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
@@ -789,6 +797,7 @@ impl PluginHostManager {
 
                     supervised.push(plugin);
                     connections.push(conn);
+                    names.push(name.clone());
                 }
                 Err(e) => {
                     tracing::error!(
@@ -923,6 +932,7 @@ impl PluginHostManager {
         Ok(Self {
             supervised,
             connections,
+            names,
             tool_registries,
             llm_factories,
             llm_factory_plugins,
@@ -981,8 +991,9 @@ impl PluginHostManager {
     ///
     /// Each connection updates its stored blobs first so a later reconnect
     /// handshake uses the fresh values, then sends `SetConfig` when the
-    /// negotiated protocol version supports it (otherwise warns and no-ops
-    /// the IPC). Failures are logged and do not abort the remaining updates.
+    /// negotiated protocol version supports it (otherwise the connection
+    /// reports [`crate::ipc_plugin::SetConfigOutcome::CachedOnly`]). Failures
+    /// are logged and do not abort the remaining updates.
     pub async fn apply_plugin_configs(
         &self,
         updates: &HashMap<String, (Option<serde_json::Value>, Option<serde_json::Value>)>,
@@ -990,18 +1001,27 @@ impl PluginHostManager {
         if updates.is_empty() {
             return;
         }
-        for (plugin, conn) in self.supervised.iter().zip(self.connections.iter()) {
-            let name = plugin.lock().await.name.clone();
-            let Some((config, profiles)) = updates.get(&name) else {
+        for (name, conn) in self.names.iter().zip(self.connections.iter()) {
+            let Some((config, profiles)) = updates.get(name) else {
                 continue;
             };
-            if let Err(e) = conn.set_config(config.clone(), profiles.clone()).await {
-                tracing::warn!(
-                    component = "PluginHostManager",
-                    plugin = %name,
-                    error = %e,
-                    "Failed to push SetConfig to live plugin"
-                );
+            match conn.set_config(config.clone(), profiles.clone()).await {
+                Ok(outcome) => {
+                    tracing::debug!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        outcome = ?outcome,
+                        "SetConfig delivered"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        component = "PluginHostManager",
+                        plugin = %name,
+                        error = %e,
+                        "Failed to push SetConfig to live plugin"
+                    );
+                }
             }
         }
     }
