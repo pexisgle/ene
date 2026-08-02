@@ -50,8 +50,8 @@ use ene_plugin_db::{
     DbTable, DbType, DbValue, DbWriteOp, Row,
 };
 use ene_plugin_proto::{
-    HostServiceErrorCode, HostServiceId, HostServiceRequest, HostServiceResponse,
-    write_host_service_response,
+    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServiceRequest,
+    HostServiceResponse, write_host_service_response,
 };
 use sea_orm::sea_query::{Alias, Condition, Expr, Query, SqliteQueryBuilder};
 use sea_orm::{
@@ -289,7 +289,7 @@ impl DbIpcServer {
     /// Used by the multiplexed host-service acceptor after
     /// [`HostServiceRequest::Open`] succeeds, and by the standalone
     /// [`Self::run`] path after a legacy or Open handshake.
-    pub async fn serve_authenticated_connection(
+    pub(crate) async fn serve_authenticated_connection(
         mut stream: ene_plugin_proto::transport::IpcStream,
         db: DatabaseConnection,
         tool_name: String,
@@ -327,7 +327,7 @@ impl DbIpcServer {
                     "message length overflow on this platform".to_string(),
                 ));
             };
-            if msg_len > 64 * 1024 * 1024 {
+            if msg_len > HOST_SERVICE_MAX_MESSAGE_SIZE {
                 return Err(DbServerError::Internal(format!(
                     "message too large: {msg_len}"
                 )));
@@ -406,7 +406,7 @@ impl DbIpcServer {
                 "message length overflow on this platform".to_string(),
             ));
         };
-        if msg_len > 64 * 1024 * 1024 {
+        if msg_len > HOST_SERVICE_MAX_MESSAGE_SIZE {
             return Err(DbServerError::Internal(format!(
                 "message too large: {msg_len}"
             )));
@@ -504,7 +504,7 @@ impl DbIpcServer {
         }
     }
 
-    async fn send_response(
+    pub(crate) async fn send_response(
         stream: &mut ene_plugin_proto::transport::IpcStream,
         response: &DbResponse,
     ) -> Result<(), DbServerError> {
