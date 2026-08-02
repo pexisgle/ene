@@ -80,6 +80,70 @@ impl CredentialRegistry {
         self.declarations.read().keys().cloned().collect()
     }
 
+    /// Returns the declaration registered for `plugin` under `id`, if any.
+    #[must_use]
+    pub fn declaration(&self, plugin: &str, id: &str) -> Option<CredentialDeclaration> {
+        self.declarations(plugin)
+            .into_iter()
+            .find(|decl| decl.id.as_str() == id)
+    }
+
+    /// Returns every declaration across all plugins, deduplicated by id
+    /// (first registration wins).
+    #[must_use]
+    pub fn all_declarations(&self) -> Vec<CredentialDeclaration> {
+        let mut plugins: Vec<String> = self.declarations.read().keys().cloned().collect();
+        plugins.sort();
+        let mut seen = std::collections::HashSet::new();
+        let mut all = Vec::new();
+        for plugin in plugins {
+            for decl in self.declarations(&plugin) {
+                if seen.insert(decl.id.to_string()) {
+                    all.push(decl);
+                }
+            }
+        }
+        all
+    }
+
+    /// Returns the first plugin sharing `id` through a `shared` declaration,
+    /// alongside its declaration.
+    ///
+    /// Used by flows started without a requesting plugin (the desktop
+    /// settings page), where any sharer qualifies.
+    #[must_use]
+    pub fn find_shared_declaration(
+        &self,
+        id: &CredentialId,
+    ) -> Option<(CredentialDeclaration, String)> {
+        let mut plugins: Vec<String> = self.declarations.read().keys().cloned().collect();
+        plugins.sort();
+        for plugin in plugins {
+            if let Some(decl) = self.declaration(&plugin, id.as_str())
+                && decl.shared
+            {
+                return Some((decl, plugin));
+            }
+        }
+        None
+    }
+
+    /// Resolves the declaration serving a vault storage key.
+    ///
+    /// Shared keys are plain ids — any plugin declaring the id qualifies.
+    /// Private keys are `<plugin>:<id>` (the `:` is outside the id charset,
+    /// so the split is unambiguous) and resolve to that plugin's own
+    /// declaration. Used by the token refresher, which only sees storage
+    /// keys.
+    #[must_use]
+    pub fn declaration_for_storage_key(&self, storage_key: &str) -> Option<CredentialDeclaration> {
+        if let Some((plugin, id)) = storage_key.split_once(':') {
+            return self.declaration(plugin, id);
+        }
+        let id = CredentialId::try_new(storage_key).ok()?;
+        self.find_shared_declaration(&id).map(|(decl, _)| decl)
+    }
+
     /// Resolves whether `plugin` may access credential `id`, per the
     /// declarations registered for it.
     #[must_use]
@@ -174,7 +238,7 @@ mod tests {
         let schema = json_credentials(&serde_json::json!([
             { "id": "anthropic", "kind": "api_key", "header": { "name": "x-api-key", "format": "{value}" } },
             { "id": "bad id", "kind": "api_key" },
-            { "id": "google.calendar", "kind": "oauth2", "auth_url": "https://a", "token_url": "https://t" },
+            { "id": "google.calendar", "kind": "oauth2", "client_id": "client-id", "auth_url": "https://a", "token_url": "https://t" },
             { "id": "broken.header", "kind": "api_key", "header": { "name": "x-api-key", "format": "no-placeholder" } },
             { "id": "dup", "kind": "api_key" },
             { "id": "dup", "kind": "api_key" }
@@ -268,5 +332,61 @@ mod tests {
             registry.resolve_scope("mock", &id),
             ScopeDecision::Undeclared
         );
+    }
+
+    #[test]
+    fn declaration_for_storage_key_resolves_shared_and_private() {
+        let registry = CredentialRegistry::new();
+        let schema = json_credentials(&serde_json::json!([
+            { "id": "google.calendar", "kind": "oauth2", "client_id": "c", "auth_url": "https://a", "token_url": "https://t" },
+            { "id": "private.key", "kind": "oauth2", "client_id": "c", "auth_url": "https://a", "token_url": "https://t", "shared": false }
+        ]));
+        registry.register_from_schema("plugin-a", Some(&schema));
+
+        let shared = registry
+            .declaration_for_storage_key("google.calendar")
+            .expect("shared storage key resolves");
+        assert_eq!(shared.id.as_str(), "google.calendar");
+
+        let private = registry
+            .declaration_for_storage_key("plugin-a:private.key")
+            .expect("private storage key resolves");
+        assert_eq!(private.id.as_str(), "private.key");
+
+        assert!(registry.declaration_for_storage_key("nope").is_none());
+        assert!(
+            registry
+                .declaration_for_storage_key("other:private.key")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn find_shared_declaration_returns_first_sharer_only() {
+        let registry = CredentialRegistry::new();
+        registry.register_from_schema(
+            "plugin-b",
+            Some(&json_credentials(
+                &serde_json::json!([{ "id": "shared.key", "kind": "api_key" }]),
+            )),
+        );
+        registry.register_from_schema(
+            "plugin-a",
+            Some(&json_credentials(
+                &serde_json::json!([{ "id": "shared.key", "kind": "api_key" }]),
+            )),
+        );
+        registry.register_from_schema(
+            "private-only",
+            Some(&json_credentials(
+                &serde_json::json!([{ "id": "shared.key", "kind": "api_key", "shared": false }]),
+            )),
+        );
+        let id = CredentialId::try_new("shared.key").unwrap();
+        let (decl, plugin) = registry
+            .find_shared_declaration(&id)
+            .expect("shared declaration found");
+        assert_eq!(decl.id, id);
+        assert_eq!(plugin, "plugin-a");
     }
 }

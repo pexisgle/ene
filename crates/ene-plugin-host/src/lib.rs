@@ -56,6 +56,8 @@ pub mod manager;
 pub mod mcp_config;
 /// MCP client for external server connections.
 pub mod mcp_registry;
+/// Host-owned OAuth2 authorization flows and token refresh.
+pub mod oauth;
 /// Redaction of plugin configuration values at the host boundary.
 pub mod redact;
 /// Tool registry trait, composite registry, and deferred call types.
@@ -87,6 +89,11 @@ pub use manager::{LlmFactoriesByPlugin, LlmFactoryHandle, PluginHostManager};
 pub use mcp_config::{McpServerConfig, McpTransport};
 /// MCP client for external servers.
 pub use mcp_registry::McpToolRegistry;
+/// Host-owned OAuth2 authorization flows, token refresh, and persistence.
+pub use oauth::{
+    CredentialInfo, CredentialKindName, CredentialPersister, FileCredentialPersister, FlowError,
+    OAuthFlowManager, OAuthRefresher, PersistError,
+};
 /// Config redaction helpers (see [`redact`]).
 pub use redact::{redact_config, redact_config_unschematized};
 /// Tool registry trait, composite registry, and deferred call types.

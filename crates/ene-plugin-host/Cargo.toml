@@ -36,10 +36,15 @@ schemars = { workspace = true }
 rmcp = { workspace = true }
 http = { workspace = true }
 url = { workspace = true }
+reqwest = { workspace = true, features = ["rustls", "json"] }
+base64 = { workspace = true, features = ["std"] }
+rand = { workspace = true }
+httparse = { workspace = true }
+webbrowser = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "net", "time", "process", "macros", "rt", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "net", "time", "process", "macros", "rt", "rt-multi-thread", "test-util"] }
 tokio-stream = { workspace = true }
 
 [lints]

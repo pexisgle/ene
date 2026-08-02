@@ -29,6 +29,7 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
 use crate::credential_registry::CredentialRegistry;
+use crate::oauth::{FlowError, OAuthFlowManager};
 
 /// Number of buffered invalidation broadcasts per subscriber before the
 /// receiver lags (a slow client then drops its full declared scope).
@@ -100,6 +101,9 @@ pub struct CredentialPassenger {
     registrations: HashMap<String, CredentialPluginRegistration>,
     invalidated_tx: broadcast::Sender<Vec<String>>,
     failed_opens: Mutex<OpenFailureTracker>,
+    /// Authorization-flow driver; `None` when the host serves no plugins
+    /// (`RequestAuthorization` then answers `Unsupported`).
+    oauth_flow: Option<Arc<OAuthFlowManager>>,
 }
 
 impl CredentialPassenger {
@@ -118,6 +122,7 @@ impl CredentialPassenger {
             registrations,
             invalidated_tx,
             failed_opens: Mutex::new(OpenFailureTracker::default()),
+            oauth_flow: None,
         }
     }
 
@@ -135,6 +140,20 @@ impl CredentialPassenger {
         ids.dedup();
         *current = vault;
         drop(self.invalidated_tx.send(ids));
+    }
+
+    /// Installs the OAuth flow driver so `RequestAuthorization` starts real
+    /// browser flows instead of answering `Unsupported`.
+    #[must_use]
+    pub fn with_oauth_flow(mut self, flow: Arc<OAuthFlowManager>) -> Self {
+        self.oauth_flow = Some(flow);
+        self
+    }
+
+    /// The invalidation broadcast channel, shared with the OAuth flow manager
+    /// so flow completion pushes through the same sink as manual revocations.
+    pub fn invalidated_tx(&self) -> broadcast::Sender<Vec<String>> {
+        self.invalidated_tx.clone()
     }
 
     /// Pushes an invalidation notice to every connected client whose declared
@@ -176,7 +195,7 @@ impl CredentialPassenger {
             tokio::select! {
                 request = requests_rx.recv() => {
                     let Some(request) = request else { break };
-                    let response = self.handle_request(plugin, request);
+                    let response = self.handle_request(plugin, request).await;
                     if write_credential_response(&mut write_half, &response).await.is_err() {
                         break;
                     }
@@ -243,19 +262,35 @@ impl CredentialPassenger {
         allowed
     }
 
-    fn handle_request(&self, plugin: &str, request: CredentialRequest) -> CredentialResponse {
+    async fn handle_request(&self, plugin: &str, request: CredentialRequest) -> CredentialResponse {
         match request {
             CredentialRequest::Ping => CredentialResponse::Pong,
-            CredentialRequest::Resolve { id } => self.resolve(plugin, &id),
+            CredentialRequest::Resolve { id } => self.resolve(plugin, &id).await,
             CredentialRequest::RequestAuthorization { id } => {
                 if self.scope_allows(plugin, &id).is_none() {
                     self.vault.read().record_audit(plugin, &id, false);
                     return Self::scope_denied(plugin, &id);
                 }
                 self.vault.read().record_audit(plugin, &id, true);
-                // Stub until the OAuth flow implements the browser/redirect
-                // exchange; the client treats this as "flow started".
-                CredentialResponse::AuthorizationPending
+                let Some(flow) = &self.oauth_flow else {
+                    return CredentialResponse::Error {
+                        code: CredentialErrorCode::Unsupported,
+                        message: "authorization flows are not available in this host".to_string(),
+                    };
+                };
+                match flow.start_authorization(plugin, &id) {
+                    // The flow completes out-of-band; the client waits for
+                    // the invalidation notice and re-resolves.
+                    Ok(()) => CredentialResponse::AuthorizationPending,
+                    Err(FlowError::UnsupportedKind(_)) => CredentialResponse::Error {
+                        code: CredentialErrorCode::Unsupported,
+                        message: format!("credential '{id}' is not an OAuth2 credential"),
+                    },
+                    Err(e) => CredentialResponse::Error {
+                        code: CredentialErrorCode::Internal,
+                        message: e.to_string(),
+                    },
+                }
             }
         }
     }
@@ -288,12 +323,12 @@ impl CredentialPassenger {
             })
     }
 
-    fn resolve(&self, plugin: &str, id: &str) -> CredentialResponse {
+    async fn resolve(&self, plugin: &str, id: &str) -> CredentialResponse {
         let Some(storage_key) = self.scope_allows(plugin, id) else {
             self.vault.read().record_audit(plugin, id, false);
             return Self::scope_denied(plugin, id);
         };
-        match self.vault.read().resolve(&storage_key) {
+        match self.vault.read().resolve(&storage_key).await {
             Ok(store) => {
                 self.vault.read().record_audit(plugin, id, true);
                 if let Some(key) = store.api_key() {
@@ -614,6 +649,89 @@ mod tests {
                 .any(|e| !e.allowed && e.id == "google.calendar"),
             "denial must be audited"
         );
+    }
+
+    #[tokio::test]
+    async fn request_authorization_without_flow_manager_is_unsupported() {
+        let passenger = passenger(vault(), registry(), "ene-cred-good");
+        let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
+        send_request(
+            &mut client,
+            &CredentialRequest::RequestAuthorization {
+                id: "anthropic".into(),
+            },
+        )
+        .await;
+        let resp = read_response(&mut client).await;
+        assert!(matches!(
+            resp,
+            CredentialResponse::Error {
+                code: CredentialErrorCode::Unsupported,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_authorization_starts_flow_and_reports_pending() {
+        use crate::oauth::OAuthFlowManager;
+        let registry = CredentialRegistry::new();
+        registry.register_from_schema(
+            "anthropic",
+            Some(&json!({
+                "x-ene-credentials": [
+                    { "id": "anthropic", "kind": "api_key" },
+                    { "id": "google.calendar", "kind": "oauth2",
+                      "client_id": "client-id",
+                      "auth_url": "https://auth.example.com",
+                      "token_url": "https://token.example.com" }
+                ]
+            })),
+        );
+        let vault = Arc::new(CredentialVault::new(Vec::new()));
+        let passenger = Arc::new(CredentialPassenger::new(
+            Arc::clone(&vault),
+            Arc::clone(&registry),
+            registrations("ene-cred-good"),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let persister = Arc::new(crate::oauth::FileCredentialPersister::new(
+            dir.path().join("credentials.json"),
+        ));
+        let flow = Arc::new(
+            OAuthFlowManager::new(registry, vault, persister, passenger.invalidated_tx())
+                // A browser that never delivers a callback; the spawned flow
+                // is aborted when the test runtime drops.
+                .with_browser(Arc::new(|_| Ok(()))),
+        );
+        let passenger = passenger.with_oauth_flow(flow);
+        let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
+
+        send_request(
+            &mut client,
+            &CredentialRequest::RequestAuthorization {
+                id: "google.calendar".into(),
+            },
+        )
+        .await;
+        let resp = read_response(&mut client).await;
+        assert_eq!(resp, CredentialResponse::AuthorizationPending);
+
+        send_request(
+            &mut client,
+            &CredentialRequest::RequestAuthorization {
+                id: "anthropic".into(),
+            },
+        )
+        .await;
+        let resp = read_response(&mut client).await;
+        assert!(matches!(
+            resp,
+            CredentialResponse::Error {
+                code: CredentialErrorCode::Unsupported,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
