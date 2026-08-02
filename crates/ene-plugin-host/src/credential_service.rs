@@ -24,8 +24,8 @@ use ene_plugin_proto::{
     HostServicePassenger, HostServiceResponse, ResolvedCredential, WireSecret,
     read_credential_request, write_credential_response, write_host_service_response,
 };
-use parking_lot::Mutex;
-use tokio::sync::broadcast;
+use parking_lot::{Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
 use crate::credential_registry::CredentialRegistry;
@@ -33,6 +33,10 @@ use crate::credential_registry::CredentialRegistry;
 /// Number of buffered invalidation broadcasts per subscriber before the
 /// receiver lags (a slow client then drops its full declared scope).
 const INVALIDATED_BUFFER: usize = 64;
+
+/// Bound on in-flight credential requests queued between the session's
+/// reader task and its request loop; the reader blocks when the loop is busy.
+const REQUEST_BUFFER: usize = 64;
 
 /// Minimum interval between `warn`-level logs of rejected credential `Open`
 /// attempts, so brute-force probing of the shared socket cannot flood the log
@@ -81,7 +85,10 @@ pub struct CredentialPluginRegistration {
 
 /// Wire-layer `credential` passenger.
 pub struct CredentialPassenger {
-    vault: Arc<CredentialVault>,
+    /// Swappable vault: the runtime rebuilds it from configuration on change
+    /// and swaps it in atomically, replacing the old snapshot whole rather
+    /// than mutating entries in place.
+    vault: RwLock<Arc<CredentialVault>>,
     /// Declaration registry shared with
     /// [`crate::manager::PluginHostManager`], which
     /// populates it from each plugin's `config_schema()` at startup. The
@@ -106,12 +113,24 @@ impl CredentialPassenger {
     ) -> Self {
         let (invalidated_tx, _) = broadcast::channel(INVALIDATED_BUFFER);
         Self {
-            vault,
+            vault: RwLock::new(vault),
             registry,
             registrations,
             invalidated_tx,
             failed_opens: Mutex::new(OpenFailureTracker::default()),
         }
+    }
+
+    /// Swaps in a freshly rebuilt vault and tells every connected client
+    /// which storage keys it holds, so caches drop stale secrets. The
+    /// broadcast is filtered per client by declared scope in
+    /// `serve_session`. This is the single production path for credential
+    /// rotation/removal: the runtime rebuilds the vault from configuration
+    /// and calls this instead of mutating entries.
+    pub fn replace_vault_and_broadcast(&self, vault: Arc<CredentialVault>) {
+        let ids = vault.storage_keys();
+        *self.vault.write() = vault;
+        drop(self.invalidated_tx.send(ids));
     }
 
     /// Pushes an invalidation notice to every connected client whose declared
@@ -125,19 +144,36 @@ impl CredentialPassenger {
     /// Runs the request/invalidation loop for one authenticated session.
     ///
     /// Single-flight by design: one request is in flight at a time, and the
-    /// invalidation push shares the same stream.
+    /// invalidation push shares the same stream. Framing reads are delegated
+    /// to a dedicated reader task that is never cancelled mid-frame (a
+    /// partially-consumed length-prefixed frame would desynchronize the
+    /// stream), while all writes happen through the single write half the
+    /// session loop owns.
     async fn serve_session(
         &self,
-        stream: &mut IpcStream,
+        stream: IpcStream,
         plugin: &str,
         mut invalidated_rx: broadcast::Receiver<Vec<String>>,
     ) {
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let (requests_tx, mut requests_rx) = mpsc::channel::<CredentialRequest>(REQUEST_BUFFER);
+        let reader = tokio::spawn(async move {
+            let mut read_half = read_half;
+            while let Ok(Some(request)) = read_credential_request(&mut read_half).await {
+                // The send fails only when the session loop exited; the
+                // socket then has nobody left to serve.
+                if requests_tx.send(request).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         loop {
             tokio::select! {
-                frame = read_credential_request(stream) => {
-                    let Ok(Some(request)) = frame else { break };
+                request = requests_rx.recv() => {
+                    let Some(request) = request else { break };
                     let response = self.handle_request(plugin, request);
-                    if write_credential_response(stream, &response).await.is_err() {
+                    if write_credential_response(&mut write_half, &response).await.is_err() {
                         break;
                     }
                 }
@@ -164,7 +200,7 @@ impl CredentialPassenger {
                         continue;
                     }
                     if write_credential_response(
-                        stream,
+                        &mut write_half,
                         &CredentialResponse::Invalidated { ids: allowed },
                     )
                     .await
@@ -175,6 +211,7 @@ impl CredentialPassenger {
                 }
             }
         }
+        reader.abort();
     }
 
     fn handle_request(&self, plugin: &str, request: CredentialRequest) -> CredentialResponse {
@@ -183,10 +220,10 @@ impl CredentialPassenger {
             CredentialRequest::Resolve { id } => self.resolve(plugin, &id),
             CredentialRequest::RequestAuthorization { id } => {
                 if self.scope_allows(plugin, &id).is_none() {
-                    self.vault.record_audit(plugin, &id, false);
+                    self.vault.read().record_audit(plugin, &id, false);
                     return Self::scope_denied(plugin, &id);
                 }
-                self.vault.record_audit(plugin, &id, true);
+                self.vault.read().record_audit(plugin, &id, true);
                 // Stub until the OAuth flow implements the browser/redirect
                 // exchange; the client treats this as "flow started".
                 CredentialResponse::AuthorizationPending
@@ -207,12 +244,12 @@ impl CredentialPassenger {
 
     fn resolve(&self, plugin: &str, id: &str) -> CredentialResponse {
         let Some(storage_key) = self.scope_allows(plugin, id) else {
-            self.vault.record_audit(plugin, id, false);
+            self.vault.read().record_audit(plugin, id, false);
             return Self::scope_denied(plugin, id);
         };
-        match self.vault.resolve(&storage_key) {
+        match self.vault.read().resolve(&storage_key) {
             Ok(store) => {
-                self.vault.record_audit(plugin, id, true);
+                self.vault.read().record_audit(plugin, id, true);
                 if let Some(key) = store.api_key() {
                     return CredentialResponse::Resolved {
                         credential: ResolvedCredential::ApiKey {
@@ -228,7 +265,7 @@ impl CredentialPassenger {
                         },
                     };
                 }
-                self.vault.record_audit(plugin, id, false);
+                self.vault.read().record_audit(plugin, id, false);
                 CredentialResponse::Error {
                     code: CredentialErrorCode::Missing {
                         label: id.to_string(),
@@ -244,21 +281,21 @@ impl CredentialPassenger {
             }) => {
                 // Audit the requested id (what the plugin asked for), which
                 // differs from the storage key for private declarations.
-                self.vault.record_audit(plugin, id, false);
+                self.vault.read().record_audit(plugin, id, false);
                 CredentialResponse::Error {
                     code: CredentialErrorCode::Missing { label, help_url },
                     message: format!("credential '{id}' is not configured"),
                 }
             }
             Err(ConnectorError::RefreshRequired(_)) => {
-                self.vault.record_audit(plugin, id, false);
+                self.vault.read().record_audit(plugin, id, false);
                 CredentialResponse::Error {
                     code: CredentialErrorCode::RefreshRequired,
                     message: format!("credential '{id}' expired and needs re-authorization"),
                 }
             }
             Err(e) => {
-                self.vault.record_audit(plugin, id, false);
+                self.vault.read().record_audit(plugin, id, false);
                 CredentialResponse::Error {
                     code: CredentialErrorCode::Internal,
                     message: e.to_string(),
@@ -319,7 +356,7 @@ impl HostServicePassenger for CredentialPassenger {
             );
             return;
         }
-        self.serve_session(&mut stream, &reg.plugin, invalidated_rx)
+        self.serve_session(stream, &reg.plugin, invalidated_rx)
             .await;
     }
 }
@@ -501,7 +538,7 @@ mod tests {
                 ..
             }
         ));
-        let audit = passenger.vault.drain_audit();
+        let audit = passenger.vault.read().drain_audit();
         assert!(
             audit
                 .iter()
@@ -534,6 +571,42 @@ mod tests {
         send_request(&mut client, &CredentialRequest::Ping).await;
         let resp = read_response(&mut client).await;
         assert_eq!(resp, CredentialResponse::Pong);
+    }
+
+    #[tokio::test]
+    async fn replace_vault_broadcasts_new_keys_and_serves_rotated_value() {
+        let passenger = passenger(vault(), registry(), "ene-cred-good");
+        let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
+
+        let rotated = Arc::new(CredentialVault::new(vec![VaultEntry::new(
+            "anthropic",
+            CredentialStore::from_api_key("rotated-secret"),
+        )]));
+        passenger.replace_vault_and_broadcast(rotated);
+
+        // The swap pushes the new vault's storage keys as an invalidation.
+        let resp = read_response(&mut client).await;
+        assert_eq!(
+            resp,
+            CredentialResponse::Invalidated {
+                ids: vec!["anthropic".to_string()],
+            }
+        );
+        // And the swapped vault is live for the next resolve.
+        send_request(
+            &mut client,
+            &CredentialRequest::Resolve {
+                id: "anthropic".into(),
+            },
+        )
+        .await;
+        let resp = read_response(&mut client).await;
+        match resp {
+            CredentialResponse::Resolved {
+                credential: ResolvedCredential::ApiKey { key },
+            } => assert_eq!(key.expose(), "rotated-secret"),
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -574,7 +647,7 @@ mod tests {
         ));
         let all_frames = format!("{resp:?}");
         assert!(!all_frames.contains(SECRET));
-        let audit = passenger.vault.drain_audit();
+        let audit = passenger.vault.read().drain_audit();
         assert!(
             !format!("{audit:?}").contains(SECRET),
             "audit must never carry the secret"
@@ -626,7 +699,7 @@ mod tests {
         .await;
         read_response(&mut client).await;
 
-        let audit = passenger.vault.drain_audit();
+        let audit = passenger.vault.read().drain_audit();
         assert_eq!(audit.len(), 3, "every resolve outcome must be audited");
         assert!(
             audit

@@ -213,12 +213,21 @@ impl CredentialVault {
     ///
     /// Clients are told to drop their cached copies via the invalidation
     /// notice; the entry is removed so a later resolve re-reads
-    /// configuration or triggers refresh.
+    /// configuration or triggers refresh. Not the production invalidation
+    /// path — the credential passenger's
+    /// `replace_vault_and_broadcast` is — but kept for direct tests.
     pub fn invalidate(&self, ids: &[String]) {
         let mut guard = self.entries.write();
         for id in ids {
             guard.remove(id);
         }
+    }
+
+    /// Returns the storage keys currently held, for invalidation notices
+    /// after a vault swap.
+    #[must_use]
+    pub fn storage_keys(&self) -> Vec<String> {
+        self.entries.read().keys().cloned().collect()
     }
 
     /// Records one credential request in the audit trail.
