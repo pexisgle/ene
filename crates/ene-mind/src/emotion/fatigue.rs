@@ -1,10 +1,5 @@
 //! Long-conversation fatigue (turn-count heuristic, language-agnostic).
 
-#![expect(
-    clippy::arithmetic_side_effects,
-    reason = "fatigue delta is a fixed bounded increment clamped to [0, 1]"
-)]
-
 use ene_core::AffectState;
 
 use super::types::{AffectDelta, AffectUpdateReason};
