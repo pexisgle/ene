@@ -329,13 +329,13 @@ pub fn resolve_scope(
 mod tests {
     use super::*;
 
-    fn parse_declarations(schema: Value) -> CredentialParse {
-        parse_credentials(&schema)
+    fn parse_declarations(schema: &Value) -> CredentialParse {
+        parse_credentials(schema)
     }
 
     #[test]
     fn parses_api_key_declaration() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{
                 "id": "anthropic",
                 "kind": "api_key",
@@ -366,13 +366,13 @@ mod tests {
                 assert_eq!(header.format, "{value}");
                 assert_eq!(env_fallback.as_deref(), Some("ANTHROPIC_API_KEY"));
             }
-            _ => panic!("expected api_key kind"),
+            CredentialKind::OAuth2 { .. } => panic!("expected api_key kind"),
         }
     }
 
     #[test]
     fn parses_oauth2_declaration() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{
                 "id": "google.calendar",
                 "kind": "oauth2",
@@ -400,13 +400,13 @@ mod tests {
                 assert_eq!(auth_url, "https://accounts.google.com/o/oauth2/v2/auth");
                 assert_eq!(token_url, "https://oauth2.googleapis.com/token");
             }
-            _ => panic!("expected oauth2 kind"),
+            CredentialKind::ApiKey { .. } => panic!("expected oauth2 kind"),
         }
     }
 
     #[test]
     fn defaults_are_required_false_and_shared_true() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{ "id": "anthropic", "kind": "api_key" }]
         }));
         assert!(parse.rejected.is_empty());
@@ -423,13 +423,13 @@ mod tests {
                 assert!(header.is_none());
                 assert!(env_fallback.is_none());
             }
-            _ => panic!("expected api_key kind"),
+            CredentialKind::OAuth2 { .. } => panic!("expected api_key kind"),
         }
     }
 
     #[test]
     fn hyphenated_id_is_accepted() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{ "id": "google-calendar", "kind": "api_key" }]
         }));
         assert!(parse.rejected.is_empty());
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_ignored() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{
                 "id": "anthropic",
                 "kind": "api_key",
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn schema_without_credentials_key_yields_empty_parse() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "type": "object",
             "properties": { "voice": { "type": "string" } }
         }));
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn non_array_credentials_key_is_treated_as_absent() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": "not-an-array"
         }));
         assert!(parse.declarations.is_empty());
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn rejects_missing_or_invalid_id() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [
                 { "kind": "api_key" },
                 { "id": "bad id", "kind": "api_key" },
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_kind() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [
                 { "id": "x", "kind": "magic" },
                 { "id": "y" }
@@ -516,7 +516,7 @@ mod tests {
         let mut missing_token = base;
         missing_token["auth_url"] = serde_json::json!("https://a");
 
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [missing_auth, missing_token]
         }));
         assert!(parse.declarations.is_empty());
@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn rejects_header_format_without_placeholder() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{
                 "id": "anthropic",
                 "kind": "api_key",
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn malformed_header_degrades_to_no_injection() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [
                 { "id": "a", "kind": "api_key", "header": { "name": "", "format": "{value}" } },
                 { "id": "b", "kind": "api_key", "header": { "format": "{value}" } },
@@ -572,7 +572,7 @@ mod tests {
 
     #[test]
     fn duplicate_id_keeps_first_occurrence() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [
                 { "id": "anthropic", "kind": "api_key", "shared": false },
                 { "id": "anthropic", "kind": "oauth2", "auth_url": "https://a", "token_url": "https://t" }
@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn resolve_scope_shared_resolves_to_plain_id() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{ "id": "anthropic", "kind": "api_key" }]
         }));
         let id = CredentialId::try_new("anthropic").unwrap();
@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn resolve_scope_private_resolves_to_plugin_prefixed_key() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{ "id": "anthropic", "kind": "api_key", "shared": false }]
         }));
         let id = CredentialId::try_new("anthropic").unwrap();
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn resolve_scope_undeclared_id_is_denied() {
-        let parse = parse_declarations(serde_json::json!({
+        let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [{ "id": "anthropic", "kind": "api_key" }]
         }));
         let other = CredentialId::try_new("openai").unwrap();
