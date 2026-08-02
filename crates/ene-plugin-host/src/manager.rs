@@ -657,7 +657,9 @@ impl PluginHostManager {
     ///
     /// `db_tokens` maps plugin names to pre-shared DB IPC auth tokens; tool
     /// plugins that need database access receive their token via the sandbox
-    /// config during the handshake.
+    /// config during the handshake. `credential_tokens` maps plugin names to
+    /// pre-shared credential-service auth tokens, delivered the same way
+    /// (`SandboxConfigData::credential_auth_token`).
     ///
     /// Respects the `plugins` config section: when `plugins.enabled` is
     /// `false`, no plugins are started. Individual plugins can be disabled
@@ -665,6 +667,7 @@ impl PluginHostManager {
     pub async fn start(
         config: &EneConfig,
         db_tokens: HashMap<String, String>,
+        credential_tokens: HashMap<String, String>,
     ) -> Result<Self, PluginHostError> {
         let plugin_config = config
             .get_section::<crate::config::PluginConfig>()
@@ -755,6 +758,7 @@ impl PluginHostManager {
                 entry.checksum.clone(),
                 entry.env_passthrough.clone(),
                 db_tokens.get(name).cloned(),
+                credential_tokens.get(name).cloned(),
                 Duration::from_millis(plugin_config.handshake_timeout_ms),
                 plugin_config.max_concurrent,
             )
@@ -1168,6 +1172,7 @@ impl PluginHostManager {
         expected_checksum: Option<String>,
         env_passthrough: Vec<String>,
         db_token: Option<String>,
+        credential_token: Option<String>,
         handshake_timeout: Duration,
         max_concurrent: usize,
     ) -> Result<
@@ -1204,6 +1209,9 @@ impl PluginHostManager {
         };
 
         let mut sandbox = ene_plugin_proto::SandboxConfigData::default();
+        if let Some(token) = &credential_token {
+            sandbox.credential_auth_token = Some(token.clone());
+        }
         if let Some(token) = &db_token {
             sandbox.db_auth_token = Some(token.clone());
             let host_socket = {
