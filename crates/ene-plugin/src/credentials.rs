@@ -411,20 +411,16 @@ impl CredentialClient {
                 self.conn.lock().await.take();
                 continue;
             }
-            match tokio::time::timeout(self.response_timeout, rx).await {
-                Ok(Ok(resp)) => {
-                    return Ok((resp, conn.epoch.load(std::sync::atomic::Ordering::Relaxed)));
-                }
-                // Reader exited (sender dropped) or host stalled: discard the
-                // session so the next attempt reconnects instead of retrying
-                // on a dead stream.
-                Ok(Err(_)) | Err(_) => {
-                    drop(flight);
-                    conn.alive
-                        .store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.conn.lock().await.take();
-                }
+            if let Ok(Ok(resp)) = tokio::time::timeout(self.response_timeout, rx).await {
+                return Ok((resp, conn.epoch.load(std::sync::atomic::Ordering::Relaxed)));
             }
+            // Reader exited (sender dropped) or host stalled: discard the
+            // session so the next attempt reconnects instead of retrying on a
+            // dead stream.
+            drop(flight);
+            conn.alive
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            self.conn.lock().await.take();
         }
         Err(PluginError::transport("credential service connection lost"))
     }
@@ -976,7 +972,7 @@ mod tests {
             HostAction::Answer("sk-one"),
             HostAction::Answer("sk-two"),
         ]]);
-        let client = CredentialClient::new();
+        let mut client = CredentialClient::new();
         client.cache_ttl = std::time::Duration::from_millis(100);
         client.set_endpoint(path, token);
 
@@ -1006,7 +1002,7 @@ mod tests {
             vec![HostAction::Stall],
             vec![HostAction::Answer("sk-after-timeout")],
         ]);
-        let client = CredentialClient::new();
+        let mut client = CredentialClient::new();
         client.response_timeout = std::time::Duration::from_millis(100);
         client.set_endpoint(path, token);
 
