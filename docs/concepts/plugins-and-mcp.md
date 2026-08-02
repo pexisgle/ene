@@ -622,3 +622,98 @@ for the ids inside its declared scope.
 
 The plugin-facing client API (`ctx.credentials().api_key(id)` /
 `http_client(id)`) is introduced alongside this service.
+
+---
+
+## 10. Credential Client API for Plugin Authors
+
+Provider plugins resolve host-held secrets through the per-connection
+[`PluginContext`](https://docs.rs/ene-plugin/latest/ene_plugin/struct.PluginContext.html)
+handed to every `LlmPlugin` / `EmbedPlugin` / `TtsPlugin` / `SttPlugin`
+method. Secrets are never read out of configuration by the plugin itself;
+the host resolves, scopes, and audits every access.
+
+### Recommended path — an auth-injected HTTP client
+
+```rust,ignore
+use ene_plugin::prelude::*;
+
+#[async_trait]
+impl LlmPlugin for MyProvider {
+    async fn chat_completion(
+        &self,
+        ctx: &PluginContext,
+        _kind: &str,
+        _config: serde_json::Value,
+        model: String,
+        max_tokens: Option<u32>,
+        messages: Vec<serde_json::Value>,
+        _json_schema: Option<serde_json::Value>,
+    ) -> Result<PluginCompletion, PluginError> {
+        // Auth header already injected (x-api-key / Authorization: Bearer).
+        let client = ctx.credentials().http_client("anthropic").await?;
+        let resp = client
+            .post("https://api.anthropic.com/v1/messages")
+            .json(&body)
+            .send()
+            .await?;
+        // ...
+    }
+}
+```
+
+`http_client(id)` builds a `reqwest::Client` whose default headers carry the
+resolved credential (`x-api-key` for API keys, `Authorization: Bearer` for
+OAuth). Each call re-resolves (subject to the short client-side TTL), so
+calling it again after an OAuth refresh picks up the new token.
+
+### Raw values for SDK handoff
+
+```rust,ignore
+let key: CredentialSecret = ctx.credentials().api_key("anthropic").await?;
+let token: CredentialSecret = ctx.credentials().bearer("google.calendar").await?;
+```
+
+`CredentialSecret` redacts its `Debug` and `Serialize` output by construction
+(`<redacted>`), so a key that reaches a log or diagnostic payload cannot leak.
+Hand the raw value to a third-party SDK via `expose_secret()`.
+
+### Starting an authorization flow
+
+```rust,ignore
+ctx.credentials().request_authorization("google.calendar").await?;
+```
+
+The browser / redirect / token-exchange flow runs host-side; the host answers
+pending immediately and the credential arrives via a later invalidation.
+
+### Custom policies with `http_client_with`
+
+```rust,ignore
+let caller = ctx.credentials().http_client_with("anthropic", ClientOptions {
+    retry: RetryPolicy::new(3, Duration::from_millis(500), Duration::from_secs(30), 2.0)?,
+    rate_limit: Some(RateLimiter::new(10.0, 5.0)?),
+    timeout: TimeoutPolicy::new(Duration::from_secs(60), Duration::from_secs(10)),
+    ..ClientOptions::default()
+}).await?;
+let resp = caller
+    .execute(caller.client().post("https://api.anthropic.com/v1/messages").json(&body))
+    .await?;
+```
+
+`HttpCaller::execute` applies rate limit → retry → timeout. `ClientOptions::auth`
+overrides the default header derivation; `None` (the default) picks `x-api-key`
+or `Bearer` from the resolved credential kind.
+
+### Error mapping
+
+The host's structured error codes surface as typed `PluginError` variants:
+
+- `CredentialMissing { id, label, help_url }` — not configured; `label` /
+  `help_url` guide a settings UI.
+- `CredentialDenied { id }` — outside this plugin's declared scope.
+- `AuthorizationRequired { id }` — expired OAuth credential.
+
+`api_key()` / `bearer()` / `request_authorization()` are available without the
+`http` feature; `http_client` / `http_client_with` require `ene-plugin`'s
+`http` feature so tool-only plugins never link the TLS stack.

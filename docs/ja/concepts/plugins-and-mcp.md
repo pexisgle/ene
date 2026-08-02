@@ -585,3 +585,97 @@ OAuth フローとともに導入されます。それまでは期限切れの�
 
 プラグイン向けのクライアント API (`ctx.credentials().api_key(id)` /
 `http_client(id)`) は本サービスとともに導入されます。
+
+---
+
+## 10. プラグイン作者向け資格情報クライアント API
+
+プロバイダプラグインは、すべての `LlmPlugin` / `EmbedPlugin` / `TtsPlugin` /
+`SttPlugin` メソッドに渡される接続ごとの
+[`PluginContext`](https://docs.rs/ene-plugin/latest/ene_plugin/struct.PluginContext.html)
+経由で、ホストが保持する秘密を解決します。プラグイン自身が設定ファイルから
+秘密を読み出すことはありません。解決・スコープ照合・監査はすべてホスト側です。
+
+### 推奨経路 — 認証ヘッダ注入済みの HTTP クライアント
+
+```rust,ignore
+use ene_plugin::prelude::*;
+
+#[async_trait]
+impl LlmPlugin for MyProvider {
+    async fn chat_completion(
+        &self,
+        ctx: &PluginContext,
+        _kind: &str,
+        _config: serde_json::Value,
+        model: String,
+        max_tokens: Option<u32>,
+        messages: Vec<serde_json::Value>,
+        _json_schema: Option<serde_json::Value>,
+    ) -> Result<PluginCompletion, PluginError> {
+        // 認証ヘッダは解決済み (x-api-key / Authorization: Bearer)。
+        let client = ctx.credentials().http_client("anthropic").await?;
+        let resp = client
+            .post("https://api.anthropic.com/v1/messages")
+            .json(&body)
+            .send()
+            .await?;
+        // ...
+    }
+}
+```
+
+`http_client(id)` は解決した資格情報をデフォルトヘッダに持つ
+`reqwest::Client` を返します (API キーは `x-api-key`、OAuth は
+`Authorization: Bearer`)。呼び出しのたびに再解決されるため (短いクライアント側
+TTL による)、OAuth 更新後にもう一度呼び直すと新しいトークンを取得できます。
+
+### SDK への受け渡しに生値が必要なとき
+
+```rust,ignore
+let key: CredentialSecret = ctx.credentials().api_key("anthropic").await?;
+let token: CredentialSecret = ctx.credentials().bearer("google.calendar").await?;
+```
+
+`CredentialSecret` は `Debug` / `Serialize` を構造的に伏字 (`<redacted>`) に
+するため、ログや診断ペイロードに到達しても漏れません。サードパーティ SDK へは
+`expose_secret()` で生値を渡します。
+
+### 認可フローの開始
+
+```rust,ignore
+ctx.credentials().request_authorization("google.calendar").await?;
+```
+
+ブラウザ起動・リダイレクト受信・トークン交換はホスト側で実行されます。ホストは
+すぐに pending を返し、資格情報は後続の無効化通知を経由して届きます。
+
+### `http_client_with` によるポリシー指定
+
+```rust,ignore
+let caller = ctx.credentials().http_client_with("anthropic", ClientOptions {
+    retry: RetryPolicy::new(3, Duration::from_millis(500), Duration::from_secs(30), 2.0)?,
+    rate_limit: Some(RateLimiter::new(10.0, 5.0)?),
+    timeout: TimeoutPolicy::new(Duration::from_secs(60), Duration::from_secs(10)),
+    ..ClientOptions::default()
+}).await?;
+let resp = caller
+    .execute(caller.client().post("https://api.anthropic.com/v1/messages").json(&body))
+    .await?;
+```
+
+`HttpCaller::execute` はレート制限 → リトライ → タイムアウトを適用します。
+`ClientOptions::auth` はデフォルトのヘッダ導出を上書きします (`None` が既定で、
+解決した資格情報の種類から `x-api-key` / `Bearer` を選びます)。
+
+### エラー対応
+
+ホストの構造化エラーコードは型付き `PluginError` バリアントになります:
+
+- `CredentialMissing { id, label, help_url }` — 未設定。`label` / `help_url` は設定 UI への案内。
+- `CredentialDenied { id }` — このプラグインの宣言スコープ外。
+- `AuthorizationRequired { id }` — OAuth 資格情報の期限切れ。
+
+`api_key()` / `bearer()` / `request_authorization()` は `http` feature なしで
+利用できます。`http_client` / `http_client_with` は `ene-plugin` の `http`
+feature が必要です (ツール専用プラグインが TLS スタックを引き込まないため)。
