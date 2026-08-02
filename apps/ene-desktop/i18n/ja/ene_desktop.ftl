@@ -144,6 +144,9 @@ character-pos-y = キャラクター位置 Y
 character-pos-z = キャラクター位置 Z
 reset-position = 位置をリセット
 manual-expressions = 手動表情テスト
+character-asset-none-selected = 利用可能なキャラクターがありません。characters/ にフォルダを追加してください。
+character-asset-missing-vrm = このキャラクターには VRM モデルがありません。キャラクターフォルダに .vrm を追加してください。
+character-asset-missing-motion = このキャラクターにはモーションがありません。アニメーションはレストポーズのままになります。
 
 # Character Card Editor (#218)
 character-editor-modified = 未保存の変更があります

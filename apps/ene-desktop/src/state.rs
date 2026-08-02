@@ -137,8 +137,10 @@ impl AppState {
                     (None, Some(crate::runtime_error::user_message(&error)))
                 }
             };
-        let character =
-            CharacterRenderer::uninit(&settings.assets_dir, settings.current_character());
+        let character = CharacterRenderer::uninit(
+            &settings.assets_dir,
+            settings.current_character().unwrap_or(""),
+        );
 
         #[cfg(feature = "voice")]
         let mut app = build_app(bootstrap_handle.clone(), rx, tx.clone());

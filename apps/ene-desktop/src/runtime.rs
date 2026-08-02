@@ -362,9 +362,15 @@ impl ApplicationHandler for Runtime {
                     }
                 }
 
-                let motion_rel = self.state.settings.current_motion();
-                let motion_path = self.state.settings.assets_dir.join(motion_rel);
-                self.state.character.play_motion(&motion_path);
+                if let Some(motion_rel) = self.state.settings.current_motion() {
+                    let motion_path = self.state.settings.assets_dir.join(motion_rel);
+                    self.state.character.play_motion(&motion_path);
+                } else {
+                    tracing::warn!(
+                        component = "CharacterWindow",
+                        "No motion asset for the selected character; leaving rest pose"
+                    );
+                }
                 cw.window.request_redraw();
                 self.char_window = Some(cw);
             }
@@ -986,45 +992,60 @@ impl Runtime {
         if settings.character_state.needs_respawn {
             settings.character_state.needs_respawn = false;
 
-            let new_vrm_rel = settings.current_character();
-            let new_vrm_path = settings.assets_dir.join(new_vrm_rel);
-            let current_vrm_path = character.default_vrm_path();
+            if let Some(new_vrm_rel) = settings.current_character() {
+                let new_vrm_path = settings.assets_dir.join(new_vrm_rel);
+                let current_vrm_path = character.default_vrm_path();
 
-            if Some(new_vrm_path.as_path()) != current_vrm_path {
-                character.set_default_vrm(new_vrm_path);
+                if Some(new_vrm_path.as_path()) != current_vrm_path {
+                    character.set_default_vrm(new_vrm_path);
 
-                let format = cw.config.format;
-                #[cfg(target_os = "linux")]
-                let mask_format = Some(crate::platform::wayland_mask_capture::MASK_TARGET_FORMAT);
-                #[cfg(not(target_os = "linux"))]
-                let mask_format = None;
+                    let format = cw.config.format;
+                    #[cfg(target_os = "linux")]
+                    let mask_format =
+                        Some(crate::platform::wayland_mask_capture::MASK_TARGET_FORMAT);
+                    #[cfg(not(target_os = "linux"))]
+                    let mask_format = None;
 
-                character.init(&gpu.device, &gpu.queue, format, mask_format);
+                    character.init(&gpu.device, &gpu.queue, format, mask_format);
 
-                character.resize(
-                    &gpu.device,
-                    (cw.window.inner_size().width, cw.window.inner_size().height),
-                );
+                    character.resize(
+                        &gpu.device,
+                        (cw.window.inner_size().width, cw.window.inner_size().height),
+                    );
 
-                #[cfg(target_os = "windows")]
-                {
-                    *character_physics_registration = None;
-                    let actual_scale = character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN)
-                        * settings.character_state.model_scale;
-                    let specs = character.build_character_bone_specs(actual_scale);
-                    if !specs.is_empty() {
-                        let mut physics_res =
-                            app.world_mut()
-                                .resource_mut::<crate::resource::physics::PhysicsWorldResource>();
-                        let registration = physics_res.world.register_character_colliders(&specs);
-                        *character_physics_registration = Some(registration);
+                    #[cfg(target_os = "windows")]
+                    {
+                        *character_physics_registration = None;
+                        let actual_scale = character.auto_fit_scale(CHARACTER_AUTO_FIT_MARGIN)
+                            * settings.character_state.model_scale;
+                        let specs = character.build_character_bone_specs(actual_scale);
+                        if !specs.is_empty() {
+                            let mut physics_res = app
+                                .world_mut()
+                                .resource_mut::<crate::resource::physics::PhysicsWorldResource>(
+                            );
+                            let registration =
+                                physics_res.world.register_character_colliders(&specs);
+                            *character_physics_registration = Some(registration);
+                        }
                     }
                 }
+            } else {
+                tracing::warn!(
+                    component = "CharacterRespawn",
+                    "Selected character has no VRM; skipping model reload"
+                );
             }
 
-            let motion_rel = settings.current_motion();
-            let motion_path = settings.assets_dir.join(motion_rel);
-            character.play_motion(&motion_path);
+            if let Some(motion_rel) = settings.current_motion() {
+                let motion_path = settings.assets_dir.join(motion_rel);
+                character.play_motion(&motion_path);
+            } else {
+                tracing::warn!(
+                    component = "CharacterRespawn",
+                    "Selected character has no motion; leaving rest pose"
+                );
+            }
         }
 
         // Tick the emotion pipeline early; apply morph weights after
@@ -1074,12 +1095,14 @@ impl Runtime {
                     let should_switch =
                         character.active_motion_name() != Some(motion_name.as_str());
                     if should_switch {
-                        let entry = settings.current_entry();
-                        let resolved = entry
-                            .motion_names
-                            .iter()
-                            .position(|n| n == motion_name.as_str())
-                            .map(|idx| settings.assets_dir.join(&entry.motion_paths[idx]));
+                        let resolved = settings.current_entry().and_then(|entry| {
+                            entry
+                                .motion_names
+                                .iter()
+                                .position(|n| n == motion_name.as_str())
+                                .and_then(|idx| entry.motion_paths.get(idx))
+                                .map(|rel| settings.assets_dir.join(rel))
+                        });
                         if let Some(path) = resolved {
                             character.play_motion(&path);
                         } else if let Err(e) = character.play_motion_by_name(motion_name) {

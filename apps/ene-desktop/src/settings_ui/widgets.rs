@@ -96,21 +96,17 @@ pub fn apply_action(
             push_default_expression(settings.select_character(idx), emotion_queue, now_secs);
         }
         SettingsAction::PrevMotion => {
-            settings.character_state.selected_motion = cycle_index(
-                settings.character_state.selected_motion,
-                settings.current_entry().motion_names.len(),
-                -1,
-            );
+            let motion_len = settings.current_entry().map_or(0, |e| e.motion_names.len());
+            settings.character_state.selected_motion =
+                cycle_index(settings.character_state.selected_motion, motion_len, -1);
             settings.character_state.motion_override = None;
             settings.character_state.needs_respawn = true;
             settings.mark_dirty();
         }
         SettingsAction::NextMotion => {
-            settings.character_state.selected_motion = cycle_index(
-                settings.character_state.selected_motion,
-                settings.current_entry().motion_names.len(),
-                1,
-            );
+            let motion_len = settings.current_entry().map_or(0, |e| e.motion_names.len());
+            settings.character_state.selected_motion =
+                cycle_index(settings.character_state.selected_motion, motion_len, 1);
             settings.character_state.motion_override = None;
             settings.character_state.needs_respawn = true;
             settings.mark_dirty();
