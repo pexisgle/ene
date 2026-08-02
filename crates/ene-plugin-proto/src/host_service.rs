@@ -5,11 +5,14 @@
 //! use that service's own request/response types (for example `DbRequest`
 //! after [`HostServiceId::Db`]).
 
+use crate::frame::{read_framed_json, write_framed_json};
+use crate::transport::IpcStream;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 /// Maximum framed message size on the host-service channel (64 MiB).
-pub const HOST_SERVICE_MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+pub use crate::frame::MAX_FRAMED_MESSAGE_SIZE as HOST_SERVICE_MAX_MESSAGE_SIZE;
 
 /// Identifies a service multiplexed on the host-service socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,7 +24,8 @@ pub enum HostServiceId {
     Assets,
     /// Reserved: capability mediation (not yet implemented).
     Capability,
-    /// Reserved: credential / secret retrieval (not yet implemented).
+    /// Credential / secret retrieval (implemented by the host's
+    /// `CredentialPassenger`; see the `ene-plugin-host` credential service).
     Credential,
 }
 
@@ -68,6 +72,24 @@ pub enum HostServiceErrorCode {
     Internal,
 }
 
+/// A passenger service multiplexed on the host-service socket.
+///
+/// Signature-only abstraction over the services a host can open (`db`,
+/// `credential`, …): the implementor — not the socket acceptor — owns
+/// authentication and the service protocol for its [`HostServiceId`]. The
+/// acceptor selects a passenger after the `Open` frame and hands it the raw
+/// stream plus the presented token; the passenger writes its own `Open`
+/// response and then speaks the service protocol until the connection ends.
+#[async_trait]
+pub trait HostServicePassenger: Send + Sync {
+    /// Serves one connection for this passenger's service.
+    ///
+    /// `token` is the pre-shared token from the `Open` frame. The implementor
+    /// authenticates it, writes the `OpenAck`/`Error` response, and then owns
+    /// `stream` until the session ends.
+    async fn serve(&self, stream: IpcStream, token: String);
+}
+
 /// Writes a length-prefixed JSON [`HostServiceRequest`].
 pub async fn write_host_service_request<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -96,63 +118,6 @@ pub async fn read_host_service_response<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> std::io::Result<Option<HostServiceResponse>> {
     read_framed_json(reader).await
-}
-
-async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> std::io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-    T: Serialize,
-{
-    let json = serde_json::to_vec(value).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("serialize failed: {e}"),
-        )
-    })?;
-    let Ok(len) = u32::try_from(json.len()) else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "message too large to frame",
-        ));
-    };
-    writer.write_all(&len.to_le_bytes()).await?;
-    writer.write_all(&json).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-async fn read_framed_json<R, T>(reader: &mut R) -> std::io::Result<Option<T>>
-where
-    R: AsyncRead + Unpin,
-    T: for<'de> Deserialize<'de>,
-{
-    let mut len_buf = [0u8; 4];
-    match reader.read_exact(&mut len_buf).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
-    }
-    let Ok(msg_len) = usize::try_from(u32::from_le_bytes(len_buf)) else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "message length overflow on this platform",
-        ));
-    };
-    if msg_len > HOST_SERVICE_MAX_MESSAGE_SIZE {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("message too large: {msg_len}"),
-        ));
-    }
-    let mut msg_buf = vec![0u8; msg_len];
-    reader.read_exact(&mut msg_buf).await?;
-    let value = serde_json::from_slice(&msg_buf).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid JSON: {e}"),
-        )
-    })?;
-    Ok(Some(value))
 }
 
 #[cfg(test)]
