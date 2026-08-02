@@ -547,6 +547,7 @@ impl EneHandle {
         let db_tokens = host_services.db_tokens;
         let credential_tokens = host_services.credential_tokens;
         let host_service_handle = host_services.handle;
+        let credential_passenger = host_services.credential_passenger;
 
         // Start the plugin host (discovers and launches v3 plugin binaries).
         // Non-fatal: on failure we log and continue with no plugin-provided
@@ -555,11 +556,18 @@ impl EneHandle {
             &config,
             db_tokens,
             credential_tokens,
-            credential_registry,
+            credential_registry.clone(),
         )
         .await
         {
             Ok(host) => {
+                // `start` populated the registry from the started plugins'
+                // schemas; the interim vault built in spawn_host_services
+                // could only see an empty registry, so rebuild it now (this
+                // is also what surfaces private declarations) and swap it in.
+                if let Some(passenger) = credential_passenger.as_ref() {
+                    actor::refresh_credential_vault(&config, &credential_registry, passenger);
+                }
                 for (kind, factory) in host.llm_factories() {
                     tracing::info!(
                         component = "Bootstrap",
@@ -748,6 +756,8 @@ impl EneHandle {
             Arc::clone(&plugin_host),
             Arc::clone(&health_bridge_handle),
             Arc::clone(&host_service_handle),
+            Some(credential_registry),
+            credential_passenger,
             Arc::clone(&shared),
         );
         let join = tokio::spawn(actor.run());
@@ -2019,6 +2029,8 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
+            None,
+            None,
             Arc::clone(&shared),
         );
         (actor, diag_rx, lifecycle_rx, gate, shared)

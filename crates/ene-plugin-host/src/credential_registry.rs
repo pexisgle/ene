@@ -73,6 +73,13 @@ impl CredentialRegistry {
             .unwrap_or_default()
     }
 
+    /// Returns the names of every plugin that has a registered declaration
+    /// entry.
+    #[must_use]
+    pub fn plugins(&self) -> Vec<String> {
+        self.declarations.read().keys().cloned().collect()
+    }
+
     /// Resolves whether `plugin` may access credential `id`, per the
     /// declarations registered for it.
     #[must_use]
