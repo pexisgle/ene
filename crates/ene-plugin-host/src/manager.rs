@@ -698,7 +698,10 @@ impl PluginHostManager {
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
         let mut llm_factory_plugins: HashMap<String, String> = HashMap::new();
-        let credential_registry = CredentialRegistry::new();
+        // (plugin name, fetched schema) pairs; the schemas are registered after
+        // `Self` exists so the registration step is a `&self` method that unit
+        // tests can drive without a plugin process.
+        let mut credential_schemas: Vec<(String, Option<serde_json::Value>)> = Vec::new();
 
         std::fs::create_dir_all(ene_config::plugin_socket_dir()).map_err(|e| {
             PluginHostError::ExecutionFailed {
@@ -799,11 +802,13 @@ impl PluginHostManager {
                         );
                     }
 
-                    // Register credential declarations parsed from the schema.
-                    // Invalid entries are warned about and dropped here; the
-                    // plugin itself always keeps running (a bad declaration
-                    // only loses that declaration).
-                    credential_registry.register_from_schema(name, schema.as_ref());
+                    // Collect the schema for credential declaration
+                    // registration, applied after the manager is assembled
+                    // (see `register_credential_schema`). Invalid entries are
+                    // warned about and dropped there; the plugin itself always
+                    // keeps running (a bad declaration only loses that
+                    // declaration).
+                    credential_schemas.push((name.clone(), schema));
 
                     let caps = conn.capabilities();
 
@@ -1008,18 +1013,22 @@ impl PluginHostManager {
             backoff_before_restart,
         );
 
-        Ok(Self {
+        let manager = Self {
             supervised,
             connections,
             names,
             tool_registries,
             llm_factories,
             llm_factory_plugins,
-            credential_registry,
+            credential_registry: CredentialRegistry::new(),
             health_tasks,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
-        })
+        };
+        for (plugin, schema) in credential_schemas {
+            manager.register_credential_schema(&plugin, schema.as_ref());
+        }
+        Ok(manager)
     }
 
     /// Returns the tool registries contributed by plugins and MCP servers.
@@ -1058,6 +1067,18 @@ impl PluginHostManager {
     /// calls.
     pub fn take_health_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<PluginHealthEvent>> {
         self.health_rx.take()
+    }
+
+    /// Registers the credential declarations parsed from `schema` for
+    /// `plugin`, replacing any previous registration.
+    ///
+    /// [`start`](Self::start) applies this to every started plugin with the
+    /// schema fetched for config redaction; the credential service reads the
+    /// result via [`Self::resolve_credential_scope`]. Kept as a `&self` method
+    /// so the register→resolve path is testable without a plugin process.
+    fn register_credential_schema(&self, plugin: &str, schema: Option<&serde_json::Value>) {
+        self.credential_registry
+            .register_from_schema(plugin, schema);
     }
 
     /// Returns the credential declarations registered for `plugin`.
@@ -1264,6 +1285,23 @@ impl PluginHostManager {
         };
 
         Ok((Arc::new(Mutex::new(plugin)), Arc::new(conn), tofu_checksum))
+    }
+
+    /// Test-only manager with no plugins and no health bridge.
+    #[cfg(test)]
+    fn test_instance() -> Self {
+        Self {
+            supervised: Vec::new(),
+            connections: Vec::new(),
+            names: Vec::new(),
+            tool_registries: Vec::new(),
+            llm_factories: HashMap::new(),
+            llm_factory_plugins: HashMap::new(),
+            credential_registry: CredentialRegistry::new(),
+            health_tasks: Vec::new(),
+            health_rx: None,
+            shutdown_on_drop: false,
+        }
     }
 }
 
@@ -1817,6 +1855,42 @@ mod tests {
         assert!(!is_valid_plugin_name("foo\\bar"));
         assert!(!is_valid_plugin_name("has space"));
         assert!(!is_valid_plugin_name("semi;colon"));
+    }
+
+    #[test]
+    fn credential_registration_wiring_resolves_scope() {
+        // Drives the exact registration step `start()` applies per plugin
+        // (schema → `register_credential_schema` → `resolve_credential_scope`)
+        // without spawning a plugin process.
+        let manager = PluginHostManager::test_instance();
+        let schema = serde_json::json!({
+            "x-ene-credentials": [
+                { "id": "anthropic", "kind": "api_key" },
+                { "id": "secret.key", "kind": "api_key", "shared": false }
+            ]
+        });
+        manager.register_credential_schema("plugin-a", Some(&schema));
+
+        let anthropic = CredentialId::try_new("anthropic").unwrap();
+        assert_eq!(
+            manager.resolve_credential_scope("plugin-a", &anthropic),
+            ScopeDecision::Allowed {
+                storage_key: "anthropic".to_string()
+            }
+        );
+        let secret = CredentialId::try_new("secret.key").unwrap();
+        assert_eq!(
+            manager.resolve_credential_scope("plugin-a", &secret),
+            ScopeDecision::Allowed {
+                storage_key: "plugin-a:secret.key".to_string()
+            }
+        );
+        // A plugin that never registered is denied even when another declared
+        // the same id.
+        assert_eq!(
+            manager.resolve_credential_scope("plugin-b", &anthropic),
+            ScopeDecision::Undeclared
+        );
     }
 
     #[test]
