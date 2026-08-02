@@ -320,13 +320,15 @@ fn render_asset_warnings(ui: &mut egui::Ui, settings: &CharacterSettings) {
 
 fn format_character_label(settings: &CharacterSettings) -> String {
     let total = settings.characters.len();
-    let (index, name) = settings.current_entry().map_or((0, "—"), |entry| {
-        (
+    match settings.current_entry() {
+        Some(entry) => format!(
+            "[{}/{}] {}",
             settings.character_state.selected_character + 1,
-            entry.name.as_str(),
-        )
-    });
-    format!("[{index}/{total}] {name}")
+            total,
+            entry.name
+        ),
+        None => format!("[0/{total}] —"),
+    }
 }
 
 fn format_motion_label(settings: &CharacterSettings) -> String {
