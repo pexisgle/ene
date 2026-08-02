@@ -352,7 +352,7 @@ mod tests {
     }
 
     /// Registers the anthropic plugin's declarations (shared `anthropic`
-    /// api_key) exactly as the manager would from its `config_schema()`.
+    /// `api_key`) exactly as the manager would from its `config_schema()`.
     fn registry() -> Arc<CredentialRegistry> {
         let registry = CredentialRegistry::new();
         registry.register_from_schema(
