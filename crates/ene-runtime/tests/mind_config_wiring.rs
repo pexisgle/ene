@@ -1,7 +1,7 @@
 //! Integration tests for the mind runtime configuration wiring.
 //!
-//! Public `MindConfig` exposes `emotion`, `proactive`, and `memory`;
-//! `context` / `character` remain code defaults (serde-skipped).
+//! Public `MindConfig` exposes `emotion`, `proactive`, and `memory_limits`;
+//! `context` / `memory` / `character` remain code defaults (serde-skipped).
 //!
 #![expect(
     clippy::expect_used,
@@ -10,7 +10,9 @@
 )]
 
 use ene_config::EneConfig;
-use ene_mind::{ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig};
+use ene_mind::{
+    ContextConfig, EmotionConfig, MindConfig, MindMemoryConfig, MindMemoryLimitsConfig,
+};
 
 #[test]
 fn mind_schema_appears_as_top_level_property_when_ene_mind_is_linked() {
@@ -36,14 +38,14 @@ fn mind_schema_appears_as_top_level_property_when_ene_mind_is_linked() {
         .get("properties")
         .and_then(|p| p.as_object())
         .expect("`mind` property should be a struct with sub-properties");
-    for sub in ["emotion", "proactive", "memory"] {
+    for sub in ["emotion", "proactive", "memory_limits"] {
         assert!(
             mind_properties.contains_key(sub),
             "mind.{sub} should appear in the registered schema; got keys: {:?}",
             mind_properties.keys().cloned().collect::<Vec<_>>()
         );
     }
-    for hidden in ["context", "character", "enabled"] {
+    for hidden in ["context", "memory", "character", "enabled"] {
         assert!(
             !mind_properties.contains_key(hidden),
             "internal/removed mind.{hidden} must not appear in the schema; got keys: {:?}",
@@ -64,7 +66,7 @@ fn mind_public_subtypes_appear_in_schema_definitions() {
         .or_else(|| value.get("definitions"))
         .expect("schema must expose a definitions map");
 
-    for sub_type in ["EmotionConfig", "ProactiveConfig", "MindMemoryConfig"] {
+    for sub_type in ["EmotionConfig", "ProactiveConfig", "MindMemoryLimitsConfig"] {
         assert!(
             defs.get(sub_type).is_some(),
             "expected `{sub_type}` to be registered as a referenced sub-type; got defs keys: {:?}",
@@ -106,6 +108,11 @@ fn mind_section_defaults_match_macro_definition() {
         MindMemoryConfig::default(),
         "mind.memory should equal the code defaults"
     );
+    assert_eq!(
+        mind.memory_limits,
+        MindMemoryLimitsConfig::default(),
+        "mind.memory_limits should equal the code defaults"
+    );
     assert_eq!(mind.context.max_prompt_tokens, None);
     assert!(mind.emotion.enabled);
     assert!(!mind.proactive.enabled);
@@ -121,9 +128,10 @@ fn mind_section_round_trips_public_fields_only() {
     custom.proactive.enabled = true;
     custom.proactive.interval_seconds = 90;
     custom.emotion.enabled = false;
-    custom.memory.commitment_active_match_limit = 128;
+    custom.memory_limits.commitment_active_match_limit = 128;
     // Mutating skipped fields must not survive JSON round-trip.
     custom.context.max_prompt_tokens = Some(16_384);
+    custom.memory.recall_result_limit = 999;
     cfg.set_section(&custom)
         .expect("set_section should succeed for settings-target");
 
@@ -136,7 +144,15 @@ fn mind_section_round_trips_public_fields_only() {
     assert!(loaded.proactive.enabled);
     assert_eq!(loaded.proactive.interval_seconds, 90);
     assert!(!loaded.emotion.enabled);
-    assert_eq!(loaded.memory.commitment_active_match_limit, 128);
+    assert_eq!(
+        loaded.memory_limits.commitment_active_match_limit, 128,
+        "the public memory_limits field must survive the JSON round-trip"
+    );
+    assert_eq!(
+        loaded.memory,
+        MindMemoryConfig::default(),
+        "the hidden memory section stays at code defaults on deserialize"
+    );
     assert_eq!(
         loaded.context.max_prompt_tokens,
         ContextConfig::default().max_prompt_tokens,
@@ -163,8 +179,12 @@ fn mind_section_survives_in_serialised_settings_json() {
         "context must not be serialized"
     );
     assert!(
-        mind.get("memory").is_some(),
-        "memory must be serialized now that it is a public settings section"
+        mind.get("memory").is_none(),
+        "memory must not be serialized — it is a code-defaulted section"
+    );
+    assert!(
+        mind.get("memory_limits").is_some(),
+        "memory_limits must be serialized as the public memory surface"
     );
     assert_eq!(
         mind.get("proactive").and_then(|v| v.get("enabled")),
@@ -189,9 +209,16 @@ fn mind_section_survives_in_serialised_settings_json() {
     assert!(
         schema_mind
             .get("properties")
-            .and_then(|p| p.get("memory"))
+            .and_then(|p| p.get("memory_limits"))
             .is_some(),
-        "schema should report `mind.memory`"
+        "schema should report `mind.memory_limits`"
+    );
+    assert!(
+        schema_mind
+            .get("properties")
+            .and_then(|p| p.get("memory"))
+            .is_none(),
+        "schema must not expose internal `mind.memory`"
     );
     assert!(
         schema_mind
@@ -229,14 +256,14 @@ fn mind_section_is_present_in_written_settings_schema_file() {
         .get("properties")
         .and_then(|p| p.as_object())
         .expect("`mind` property should be a struct with sub-properties");
-    for sub in ["emotion", "proactive", "memory"] {
+    for sub in ["emotion", "proactive", "memory_limits"] {
         assert!(
             mind_properties.contains_key(sub),
             "on-disk schema: `mind.{sub}` should be present; got keys: {:?}",
             mind_properties.keys().cloned().collect::<Vec<_>>()
         );
     }
-    for hidden in ["context", "character"] {
+    for hidden in ["context", "memory", "character"] {
         assert!(
             !mind_properties.contains_key(hidden),
             "on-disk schema must not include internal `mind.{hidden}`"

@@ -67,7 +67,7 @@ pub struct CommitmentSyncContext<'a> {
     pub title_similarity_threshold: f32,
     /// Maximum active ledger rows loaded for title matching in one apply batch.
     ///
-    /// Defaults to [`MindMemoryConfig::commitment_active_match_limit`](crate::config::MindMemoryConfig::commitment_active_match_limit)'s
+    /// Defaults to [`MindMemoryLimitsConfig::commitment_active_match_limit`](crate::config::MindMemoryLimitsConfig::commitment_active_match_limit)'s
     /// default (`4096`).
     pub active_match_limit: usize,
 }
@@ -79,7 +79,8 @@ impl Default for CommitmentSyncContext<'_> {
             user_id: "",
             embedder: None,
             title_similarity_threshold: f32::default(),
-            active_match_limit: 4096,
+            active_match_limit: crate::config::MindMemoryLimitsConfig::default()
+                .commitment_active_match_limit,
         }
     }
 }
@@ -371,8 +372,8 @@ async fn list_active_for_match(
             component = "CommitmentLedger",
             limit,
             "list_active_commitments returned exactly the limit; results may be truncated — \
-             raise mind.memory.commitment_active_match_limit \
-             (or ENE_MIND__MEMORY__COMMITMENT_ACTIVE_MATCH_LIMIT) if matching misses \
+             raise mind.memory_limits.commitment_active_match_limit \
+             (or ENE_MIND__MEMORY_LIMITS__COMMITMENT_ACTIVE_MATCH_LIMIT) if matching misses \
              active commitments"
         );
     }
