@@ -19,7 +19,7 @@ use std::sync::Arc;
 use ene_ai::error::LlmProviderError;
 use ene_ai::traits::{LlmProvider, LlmProviderFactory};
 use ene_ai::{AiProviderDef, TaskRef};
-use ene_plugin_proto::ConcurrencyHint;
+use ene_plugin_proto::{ConcurrencyHint, ResourceClass};
 
 use crate::config::PluginConfig;
 use crate::ipc_plugin::IpcPluginConnection;
@@ -49,6 +49,11 @@ pub struct IpcLlmProviderFactory {
     /// (`create_task_chat_provider`) — see `ipc_provider`'s module docs for
     /// why the limiter must outlive any single provider instance.
     limiter: Arc<ConcurrencyLimiter>,
+    /// The [`ResourceClass`] the plugin declared for this provider kind
+    /// (`LlmProviderSpec.resource`), forwarded to every [`IpcLlmProvider`]
+    /// this factory creates so its requests acquire the right class's budget
+    /// from [`ene_ai::ResourceRegistry`].
+    resource: ResourceClass,
 }
 
 impl IpcLlmProviderFactory {
@@ -63,6 +68,13 @@ impl IpcLlmProviderFactory {
     /// provider kind during the handshake (or the safe serial default if it
     /// declared none); it is built into a single [`ConcurrencyLimiter`]
     /// shared by every provider instance this factory subsequently creates.
+    ///
+    /// `resource` is the [`ResourceClass`] the plugin declared for this
+    /// provider kind during the handshake; every request a created provider
+    /// makes also acquires that class's permit from
+    /// [`ene_ai::ResourceRegistry`] (after the limiter), so plugins and
+    /// local engines contending on the same physical resource share one
+    /// admission budget.
     pub fn new(
         kind: String,
         conn: Arc<IpcPluginConnection>,
@@ -70,6 +82,7 @@ impl IpcLlmProviderFactory {
         builtin: bool,
         context_window: Option<u32>,
         concurrency: ConcurrencyHint,
+        resource: ResourceClass,
     ) -> Self {
         Self {
             kind,
@@ -78,6 +91,7 @@ impl IpcLlmProviderFactory {
             builtin,
             context_window,
             limiter: Arc::new(ConcurrencyLimiter::new(concurrency)),
+            resource,
         }
     }
 
@@ -148,6 +162,7 @@ impl LlmProviderFactory for IpcLlmProviderFactory {
             retry_policy,
             self.context_window,
             Arc::clone(&self.limiter),
+            self.resource,
         );
 
         Ok(Box::new(provider))

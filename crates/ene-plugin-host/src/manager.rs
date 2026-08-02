@@ -833,6 +833,7 @@ impl PluginHostManager {
                             is_builtin_plugin(name),
                             spec.context_window,
                             spec.concurrency,
+                            spec.resource,
                         );
                         llm_factories.insert(
                             spec.kind.clone(),

@@ -44,6 +44,22 @@
 //! held for the duration of `chat_completion`, and for streams it is moved
 //! into [`IpcChatStream`] so `Drop` releases it whether the stream ends
 //! naturally or is cancelled mid-flight (see that type's docs).
+//!
+//! ## Resource admission control
+//!
+//! A second gate sits behind the limiter: [`ene_ai::ResourceRegistry`], the
+//! host process's single admission authority. Every engine — local or
+//! plugin-provided — that declares the same [`ResourceClass`] shares that
+//! class's semaphore, so a plugin offloading to GPU device 0 and a local
+//! llama.cpp model on the same device can no longer oversubscribe it
+//! independently. [`IpcLlmProvider`] acquires the plugin's declared class
+//! (`LlmProviderSpec.resource`) *after* the limiter and *before* any
+//! request is sent; the resource permit lives in the same drop-glue as the
+//! limiter permit, so a plugin crash (which only kills the plugin process,
+//! never the host's permit) releases it the moment the host drops the
+//! stream or finishes the call. The order matters: the limiter's
+//! `queue_depth` fail-fast stays ahead of any resource wait, and resource
+//! waits stay bounded to `max_in_flight + queue_depth` per plugin.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -54,7 +70,7 @@ use async_trait::async_trait;
 use ene_ai::RetryPolicy;
 use ene_ai::error::LlmProviderError;
 use ene_ai::message::{LlmCompletion, LlmMessage, LlmResponseChunk, LlmToolCallChunk};
-use ene_plugin_proto::{ConcurrencyHint, PluginIpcResponse};
+use ene_plugin_proto::{ConcurrencyHint, PluginIpcResponse, ResourceClass};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -163,6 +179,13 @@ pub struct IpcLlmProvider {
     /// `create_task_chat_provider` builds (one per call), not just within a
     /// single instance's lifetime.
     limiter: Arc<ConcurrencyLimiter>,
+    /// The [`ResourceClass`] the plugin declared for this provider kind
+    /// (`LlmProviderSpec.resource`), forwarded from the factory. This is the
+    /// key into [`ene_ai::ResourceRegistry`] — the host-wide admission
+    /// authority — so jobs from *different* plugins (or a plugin and a local
+    /// engine) that declare the same class automatically share that class's
+    /// budget.
+    resource: ResourceClass,
 }
 
 impl IpcLlmProvider {
@@ -171,6 +194,12 @@ impl IpcLlmProvider {
     /// `limiter` should be the same `Arc<ConcurrencyLimiter>` shared by every
     /// provider instance the owning factory creates for this (plugin, kind)
     /// pair — see the module docs.
+    ///
+    /// `resource` is the [`ResourceClass`] the plugin declared for this
+    /// provider kind; every request this provider makes first acquires that
+    /// class's permit from [`ene_ai::ResourceRegistry`] (after the limiter),
+    /// so it competes for the same budget as any other engine on the same
+    /// physical resource.
     pub fn new(
         kind: String,
         conn: Arc<IpcPluginConnection>,
@@ -180,6 +209,7 @@ impl IpcLlmProvider {
         retry_policy: RetryPolicy,
         context_window: Option<u32>,
         limiter: Arc<ConcurrencyLimiter>,
+        resource: ResourceClass,
     ) -> Self {
         Self {
             kind,
@@ -190,6 +220,7 @@ impl IpcLlmProvider {
             retry_policy,
             context_window,
             limiter,
+            resource,
         }
     }
 }
@@ -206,6 +237,41 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
     }
 }
 
+/// Acquires both admission gates for one request, in order: the plugin's
+/// [`ConcurrencyLimiter`] first, then the declared [`ResourceClass`]'s
+/// process-wide budget.
+///
+/// ## Why this order (and why this helper exists)
+///
+/// The limiter's `queue_depth` fail-fast must stay *ahead* of any resource
+/// wait: a caller beyond `max_in_flight + queue_depth` is rejected with
+/// [`LlmProviderError::Busy`] immediately rather than parking on a GPU
+/// semaphore it might hold for a long time. Resource waits are then bounded
+/// to `max_in_flight + queue_depth` per plugin by construction.
+///
+/// Both permits must be acquired *before* any retry loop and held for the
+/// whole request: acquiring inside the loop would re-acquire the same
+/// class's semaphore while already holding its permit, deadlocking a
+/// single-permit class against itself. Callers move the returned permits
+/// into drop-glue (see [`IpcChatStream`]) or keep them for the call's
+/// lifetime, so every exit path — success, error, cancellation, plugin
+/// crash — releases them.
+async fn acquire_admission(
+    limiter: &ConcurrencyLimiter,
+    kind: &str,
+    resource: ResourceClass,
+) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), LlmProviderError> {
+    let permit = limiter.acquire(kind).await?;
+    let resource_permit = ene_ai::ResourceRegistry::acquire(resource)
+        .await
+        .map_err(|_| {
+            LlmProviderError::Provider(format!(
+                "resource registry semaphore for {resource:?} closed"
+            ))
+        })?;
+    Ok((permit, resource_permit))
+}
+
 /// A chat stream that aborts its background reader task when dropped.
 ///
 /// Wraps the per-request [`ReceiverStream`] and the reader's [`JoinHandle`].
@@ -219,17 +285,21 @@ fn map_host_error(e: PluginHostError) -> LlmProviderError {
 /// pointless cancel round-trip after `StreamEnd`/`StreamError`.
 ///
 /// `_permit` holds this stream's [`ConcurrencyLimiter`] slot for as long as
-/// the stream is alive. It is never read — its only purpose is the
-/// `OwnedSemaphorePermit` drop glue, which fires as one of this struct's
-/// field drops regardless of *why* `IpcChatStream` is being dropped (natural
-/// completion or mid-flight cancellation), releasing the slot for the next
-/// queued caller in both cases.
+/// the stream is alive, and `_resource_permit` holds its
+/// [`ResourceClass`](ene_plugin_proto::ResourceClass) budget permit. Neither
+/// is ever read — their only purpose is the `OwnedSemaphorePermit` drop
+/// glue, which fires as one of this struct's field drops regardless of *why*
+/// `IpcChatStream` is being dropped (natural completion or mid-flight
+/// cancellation), releasing both slots for the next queued caller in both
+/// cases. The resource permit is declared *first* so it drops first:
+/// returning the scarce resource before the per-plugin slot.
 struct IpcChatStream {
     rx: ReceiverStream<Result<LlmResponseChunk, LlmProviderError>>,
     reader: Option<JoinHandle<()>>,
     conn: Arc<IpcPluginConnection>,
     request_id: String,
     completed: Arc<std::sync::atomic::AtomicBool>,
+    _resource_permit: OwnedSemaphorePermit,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -301,13 +371,15 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
 
         let request_id = uuid::Uuid::new_v4().to_string();
 
-        // Admission control: acquire this provider's concurrency
-        // slot *before* establishing the stream and *before* the retry loop,
-        // so retries never re-acquire while already holding a permit (which
-        // would deadlock a max_in_flight=1 provider against itself). The
-        // permit moves into `IpcChatStream` below and is held for the
-        // stream's entire lifetime.
-        let permit = self.limiter.acquire(&self.kind).await?;
+        // Admission control: acquire this provider's concurrency slot and
+        // then its declared resource budget *before* establishing the stream
+        // and *before* the retry loop, so retries never re-acquire while
+        // already holding permits (which would deadlock a max_in_flight=1
+        // provider against itself, and a single-permit resource class
+        // against itself). The permits move into `IpcChatStream` below and
+        // are held for the stream's entire lifetime.
+        let (permit, resource_permit) =
+            acquire_admission(&self.limiter, &self.kind, self.resource).await?;
 
         // Establish the stream with retry on transient (transport) failures,
         // matching the OpenAI provider's `establish_sse_connection`.
@@ -445,6 +517,7 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
             conn: Arc::clone(&self.conn),
             request_id: request_id.clone(),
             completed,
+            _resource_permit: resource_permit,
             _permit: permit,
         }))
     }
@@ -461,11 +534,15 @@ impl ene_ai::LlmProvider for IpcLlmProvider {
 
         // Admission control: held for the entire call below,
         // including all retry attempts, so a retry never re-acquires while
-        // already holding a permit (which would deadlock a
-        // max_in_flight=1 provider against itself). Released when this
+        // already holding permits (which would deadlock a
+        // max_in_flight=1 provider against itself, and a single-permit
+        // resource class against itself). Released when this
         // function returns, on every path (success, error, or panic
-        // unwind).
-        let _permit = self.limiter.acquire(&self.kind).await?;
+        // unwind). The limiter permit is acquired before the resource
+        // permit so the limiter's `queue_depth` fail-fast stays ahead of
+        // any resource wait.
+        let (_permit, _resource_permit) =
+            acquire_admission(&self.limiter, &self.kind, self.resource).await?;
 
         // Retry transient (transport) failures with the same policy as the
         // OpenAI path. The connection's own `do_request` already
@@ -647,5 +724,95 @@ mod concurrency_limiter_tests {
         drop(permit);
 
         assert!(limiter.acquire("test").await.is_ok());
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "unit tests use unwrap/expect for concise failure messages"
+)]
+mod admission_gate_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ene_ai::ResourceRegistry;
+    use ene_ai::error::LlmProviderError;
+    use ene_plugin_proto::{ConcurrencyHint, ResourceClass};
+
+    use super::{ConcurrencyLimiter, acquire_admission};
+
+    /// Load-bearing ordering contract: the limiter's `queue_depth` fail-fast
+    /// must fire *before* the resource wait, or a caller beyond
+    /// `max_in_flight + queue_depth` would park on a GPU semaphore instead
+    /// of being rejected immediately.
+    ///
+    /// Proved by exhausting the resource class first: the spawned request
+    /// acquires the limiter permit (observable: the limiter's permit count
+    /// drops) and only then blocks on the resource. A second caller is then
+    /// rejected with `Busy` — which is only possible if the blocked request
+    /// holds the limiter permit, i.e. the limiter gate ran first.
+    #[tokio::test]
+    async fn acquire_admission_takes_limiter_before_resource() {
+        let limiter = Arc::new(ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 0,
+        }));
+        let class = ResourceClass::Gpu { device: 201 };
+        let resource_hold = ResourceRegistry::acquire(class).await.unwrap();
+
+        let task_limiter = Arc::clone(&limiter);
+        let task =
+            tokio::spawn(async move { acquire_admission(&task_limiter, "test", class).await });
+
+        // Wait until the spawned request has taken the limiter permit and is
+        // blocked on the exhausted resource class.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while limiter.semaphore.available_permits() != 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for the request to take the limiter permit"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // The blocked request holds the only limiter permit, so this caller
+        // must fail fast — proving the limiter gate ran before the resource
+        // gate (otherwise the blocked request would not hold it).
+        let err = limiter.acquire("test").await.expect_err("must be rejected");
+        assert!(matches!(err, LlmProviderError::Busy { .. }));
+
+        drop(resource_hold);
+        let (_permit, _resource_permit) = task.await.unwrap().unwrap();
+        drop((_permit, _resource_permit));
+
+        // Both permits are back: the resource class refilled and the limiter
+        // admits a new caller — the drop-glue released both on every path.
+        assert_eq!(ResourceRegistry::semaphore(class).available_permits(), 1);
+        assert!(limiter.acquire("test").await.is_ok());
+    }
+
+    /// Contract: when the limiter rejects, the resource class must be left
+    /// untouched — a `Busy` rejection must not consume (and leak) a scarce
+    /// resource permit.
+    #[tokio::test]
+    async fn acquire_admission_leaves_resource_untouched_when_limiter_rejects() {
+        let limiter = ConcurrencyLimiter::new(ConcurrencyHint {
+            max_in_flight: 1,
+            queue_depth: 0,
+        });
+        let class = ResourceClass::Gpu { device: 202 };
+        let _limiter_hold = limiter.acquire("test").await.unwrap();
+
+        let err = acquire_admission(&limiter, "test", class)
+            .await
+            .expect_err("a saturated limiter must reject before the resource gate");
+        assert!(matches!(err, LlmProviderError::Busy { .. }));
+        assert_eq!(
+            ResourceRegistry::semaphore(class).available_permits(),
+            1,
+            "a Busy rejection must not consume a resource permit"
+        );
     }
 }
