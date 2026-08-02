@@ -21,7 +21,7 @@ use crate::oauth::persist::CredentialPersister;
 /// After a failed refresh, further refresh attempts for the same key are
 /// answered with [`ConnectorError::RefreshRequired`] for this long, so one
 /// revoked refresh token cannot hammer the token endpoint.
-const REFRESH_COOLDOWN: Duration = Duration::from_secs(60);
+const REFRESH_COOLDOWN: Duration = Duration::from_mins(1);
 
 /// Outcome shared with the callers coalesced onto one refresh, made
 /// clone-able because [`ConnectorError`] is not.

@@ -16,7 +16,7 @@ const AUDIT_CAPACITY: usize = 1024;
 
 /// How long before an `OAuth2` access token lapses [`CredentialVault::resolve`]
 /// starts a refresh, so a request never trips over an expiring token.
-pub const REFRESH_LEAD_TIME: Duration = Duration::from_secs(60);
+pub const REFRESH_LEAD_TIME: Duration = Duration::from_mins(1);
 
 /// One credential held by the vault.
 #[derive(Debug, Clone)]
@@ -245,18 +245,16 @@ impl CredentialVault {
     pub async fn resolve(&self, storage_key: &str) -> Result<CredentialStore, ConnectorError> {
         let current = {
             let entries = self.entries.read();
-            match entries.get(storage_key).cloned() {
-                Some(store) => store,
-                None => {
-                    let label = self
-                        .hints
-                        .read()
-                        .get(storage_key)
-                        .cloned()
-                        .unwrap_or_else(|| storage_key.to_string());
-                    return Err(ConnectorError::credential_missing(storage_key, label, None));
-                }
-            }
+            let Some(store) = entries.get(storage_key).cloned() else {
+                let label = self
+                    .hints
+                    .read()
+                    .get(storage_key)
+                    .cloned()
+                    .unwrap_or_else(|| storage_key.to_string());
+                return Err(ConnectorError::credential_missing(storage_key, label, None));
+            };
+            store
         };
         if !current.is_expired() && !current.expires_within(REFRESH_LEAD_TIME) {
             return Ok(current);

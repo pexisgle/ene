@@ -37,7 +37,7 @@ pub use refresh::OAuthRefresher;
 use crate::credential_registry::CredentialRegistry;
 
 /// How long a flow waits for the authorization callback before giving up.
-const FLOW_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const FLOW_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Errors produced by the OAuth authorization flow.
 #[derive(Debug, Error)]

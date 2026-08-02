@@ -3306,7 +3306,9 @@ pub(super) fn spawn_host_services(
             persister,
             passenger.invalidated_tx(),
         ));
-        let passenger = passenger.with_oauth_flow(Arc::clone(&oauth_flow));
+        // Attach the flow to the already-shared passenger so flow completion
+        // and manual revocations push through the same invalidation channel.
+        passenger.set_oauth_flow(Arc::clone(&oauth_flow));
         let mut passengers: HashMap<HostServiceId, Arc<dyn HostServicePassenger>> = HashMap::new();
         passengers.insert(
             HostServiceId::Credential,

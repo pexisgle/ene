@@ -102,8 +102,10 @@ pub struct CredentialPassenger {
     invalidated_tx: broadcast::Sender<Vec<String>>,
     failed_opens: Mutex<OpenFailureTracker>,
     /// Authorization-flow driver; `None` when the host serves no plugins
-    /// (`RequestAuthorization` then answers `Unsupported`).
-    oauth_flow: Option<Arc<OAuthFlowManager>>,
+    /// (`RequestAuthorization` then answers `Unsupported`). Set once after
+    /// construction because the flow manager needs this passenger's
+    /// invalidation channel, which only exists once the passenger does.
+    oauth_flow: Mutex<Option<Arc<OAuthFlowManager>>>,
 }
 
 impl CredentialPassenger {
@@ -122,7 +124,7 @@ impl CredentialPassenger {
             registrations,
             invalidated_tx,
             failed_opens: Mutex::new(OpenFailureTracker::default()),
-            oauth_flow: None,
+            oauth_flow: Mutex::new(None),
         }
     }
 
@@ -144,10 +146,19 @@ impl CredentialPassenger {
 
     /// Installs the OAuth flow driver so `RequestAuthorization` starts real
     /// browser flows instead of answering `Unsupported`.
+    ///
+    /// Only a no-op for a passenger built by [`Self::new`] (which starts
+    /// without a flow); call [`Self::set_oauth_flow`] on a shared passenger
+    /// to attach the flow after construction.
     #[must_use]
     pub fn with_oauth_flow(mut self, flow: Arc<OAuthFlowManager>) -> Self {
-        self.oauth_flow = Some(flow);
+        *self.oauth_flow.get_mut() = Some(flow);
         self
+    }
+
+    /// Attaches the OAuth flow driver to a shared passenger.
+    pub fn set_oauth_flow(&self, flow: Arc<OAuthFlowManager>) {
+        *self.oauth_flow.lock() = Some(flow);
     }
 
     /// The invalidation broadcast channel, shared with the OAuth flow manager
@@ -286,6 +297,8 @@ impl CredentialPassenger {
                         message: "authorization flows are not available in this host".to_string(),
                     };
                 };
+                // `start_authorization` is synchronous (the flow runs in a
+                // spawned task), so the guard above never crosses an await.
                 match flow.start_authorization(plugin, &id) {
                     // The flow completes out-of-band; the client waits for
                     // the invalidation notice and re-resolves.
@@ -712,7 +725,7 @@ mod tests {
                 // is aborted when the test runtime drops.
                 .with_browser(Arc::new(|_| Ok(()))),
         );
-        let passenger = passenger.with_oauth_flow(flow);
+        passenger.set_oauth_flow(flow);
         let mut client = open_session(Arc::clone(&passenger), "ene-cred-good").await;
 
         send_request(
