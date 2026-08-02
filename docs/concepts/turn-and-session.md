@@ -244,7 +244,8 @@ Ene models character emotional state using a PAD-derived (**Pleasure-Arousal-Dom
 
 ### Emotional Dynamics
 - **Natural Decay**: Affect values drift toward baseline over time.
-- **Classification**: Text responses and user input trigger subtle affect shifts via `ene-mind`'s `EmotionEngine`.
+- **Pre-utterance affect in the prompt**: At turn start, `EmotionEngine` applies decay, optional long-conversation fatigue, and any pending classifier proposal from the *previous* turn. The `CharacterState` section documents that this mood does **not** yet reflect the current user utterance — immediate reaction is left to the chat model’s reply.
+- **Post-turn classification**: After the assistant responds, the affect classifier sees both the user utterance and the reply, then parks a proposal for the next turn. There is no deterministic keyword appraisal layer.
 - **Performance Cues**: End-of-turn expression comes from a single
   `resolve_expression` decision (LLM proposal canonical, affect as fallback).
   Motion / look-at markers still accumulate mid-turn via `PerformanceArbiter`.

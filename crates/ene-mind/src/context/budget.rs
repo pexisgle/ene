@@ -108,6 +108,8 @@ pub struct PackInput {
     pub commitments: Vec<ActiveCommitmentPrompt>,
     /// Affect summary line.
     pub affect_summary: Option<String>,
+    /// Localized instruction appended to the `CharacterState` section.
+    pub character_state_note: Option<String>,
     /// Active scene summary from rolling compression.
     pub scene_summary: Option<String>,
     /// Recent conversation history.
@@ -326,10 +328,9 @@ fn build_sections(input: &PackInput) -> (Vec<PromptSection>, MemorySurvivors) {
     }
 
     if let Some(text) = &input.affect_summary {
-        sections.push(PromptSection::new(
-            PromptSectionKind::CharacterState,
-            text.clone(),
-        ));
+        let mut section = PromptSection::new(PromptSectionKind::CharacterState, text.clone());
+        section.note.clone_from(&input.character_state_note);
+        sections.push(section);
     }
 
     if let Some(text) = &input.scene_summary {
@@ -659,6 +660,7 @@ mod tests {
             recalled,
             commitments: vec![],
             affect_summary: None,
+            character_state_note: None,
             scene_summary: None,
             history: vec![],
             output_contract: None,
@@ -919,6 +921,7 @@ mod tests {
             ],
             commitments: vec![],
             affect_summary: Some("mood=calm".into()),
+            character_state_note: None,
             scene_summary: Some("scene".repeat(200)),
             history: vec![],
             output_contract: Some("PHI".into()),
@@ -973,6 +976,7 @@ mod tests {
             recalled: vec![],
             commitments: vec![],
             affect_summary: None,
+            character_state_note: None,
             scene_summary: None,
             history: vec![
                 HistoryEntry {
@@ -1095,6 +1099,7 @@ mod tests {
             recalled: vec![],
             commitments: vec![],
             affect_summary: None,
+            character_state_note: None,
             scene_summary: None,
             history: vec![],
             output_contract: None,

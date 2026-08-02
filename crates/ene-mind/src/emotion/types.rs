@@ -39,7 +39,7 @@ pub struct AffectDelta {
 /// Human-readable reason for an affect change.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AffectUpdateReason {
-    /// Short category label (e.g. `decay`, `gratitude`, `classifier`).
+    /// Short category label (e.g. `decay`, `fatigue`, `classifier`).
     pub category: &'static str,
     /// Detail message for tracing.
     pub detail: String,
@@ -51,8 +51,6 @@ pub struct AffectUpdateReason {
 pub struct TurnAffectInput<'a> {
     /// Mutable affect state to update in place.
     pub state: &'a mut AffectState,
-    /// Current user message text.
-    pub user_message: &'a str,
     /// Elapsed time since the last persisted update.
     pub elapsed_since_update: Duration,
     /// Number of recent conversation turns (for fatigue heuristic).
@@ -61,8 +59,6 @@ pub struct TurnAffectInput<'a> {
     pub classifier_proposal: Option<AffectProposal>,
     /// Minimum confidence to blend classifier absolute estimates.
     pub classifier_min_confidence: f32,
-    /// When true, skip deterministic appraisal (LLM-only mode).
-    pub llm_only: bool,
 }
 
 impl TurnAffectInput<'_> {
