@@ -685,7 +685,7 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind sink");
         let addr = listener.local_addr().expect("addr");
         let header_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let header_seen_clone = Arc::clone(&header_seen);
+        let header_seen_clone = std::sync::Arc::clone(&header_seen);
         std::thread::spawn(move || {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
