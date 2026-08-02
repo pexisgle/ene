@@ -50,6 +50,16 @@ pub fn config_file_path() -> PathBuf {
     assets_dir().join("settings.json")
 }
 
+/// Credential vault persistence file (`app_data_dir()/credentials.json`).
+///
+/// Deliberately separate from `settings.json`: OAuth tokens and stored API
+/// keys never ride the user-editable config. The file is written with
+/// owner-only permissions on Unix; see docs/concepts/credentials.md for the
+/// Windows caveat.
+pub fn credential_file_path() -> PathBuf {
+    app_data_dir().join("credentials.json")
+}
+
 /// Runtime prompt pack for a language within an explicit base assets directory
 /// (`base/lang/{code}/prompts.json`).
 ///

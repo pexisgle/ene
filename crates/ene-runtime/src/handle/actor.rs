@@ -52,6 +52,10 @@ use ene_mind::{
 use ene_mind::{ConversationSession, EneSessionError};
 use ene_plugin_host::CredentialRegistry;
 use ene_plugin_host::credential_service::{CredentialPassenger, CredentialPluginRegistration};
+#[cfg(any(unix, windows))]
+use ene_plugin_host::oauth::{
+    CredentialPersister, FileCredentialPersister, OAuthFlowManager, OAuthRefresher,
+};
 use ene_plugin_host::{
     CompositeToolRegistry, DisabledReason, PluginHealthEvent, PluginHostError, ToolRegistry,
 };
@@ -861,6 +865,56 @@ impl TurnActor {
         });
     }
 
+    /// Lists every stored credential plus every currently declared `OAuth2`
+    /// credential, as non-secret summaries.
+    #[cfg(any(unix, windows))]
+    async fn list_credentials(&self) -> Vec<ene_plugin_host::oauth::CredentialInfo> {
+        let Some(passenger) = &self.credential_passenger else {
+            return Vec::new();
+        };
+        match passenger.oauth_flow() {
+            Some(flow) => flow.list_credentials(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Revokes credentials by storage key: vault entries are dropped, the
+    /// persistence file entry is removed, and clients are invalidated.
+    #[cfg(any(unix, windows))]
+    async fn revoke_credential(&self, ids: &[String]) -> usize {
+        let Some(passenger) = &self.credential_passenger else {
+            return 0;
+        };
+        let Some(flow) = passenger.oauth_flow() else {
+            return 0;
+        };
+        flow.revoke(ids).unwrap_or_else(|e| {
+            tracing::warn!(
+                component = "TurnActor",
+                error = %e,
+                "Credential revocation failed"
+            );
+            0
+        })
+    }
+
+    /// Starts the OAuth authorization flow for `id` (desktop settings page);
+    /// the flow completes out-of-band.
+    #[cfg(any(unix, windows))]
+    async fn authorize_credential(&self, id: &str) -> Result<(), String> {
+        let Some(passenger) = &self.credential_passenger else {
+            return Err("no plugin host is running; cannot start an authorization flow".to_string());
+        };
+        match passenger.oauth_flow() {
+            Some(flow) => flow
+                .start_authorization_by_id(id)
+                .map_err(|e| e.to_string()),
+            None => {
+                Err("no plugin host is running; cannot start an authorization flow".to_string())
+            }
+        }
+    }
+
     /// Kicks off proactive LLM initialization in the background if it has
     /// not already been started.
     ///
@@ -1491,8 +1545,7 @@ impl TurnActor {
                         && let Some(registry) = self.credential_registry.as_ref()
                     {
                         refresh_credential_vault(&self.config, registry, passenger);
-                    }
-                }
+                    }                }
                 true
             }
             EneCommand::PrepareVisionSummary { app_label, reply } => {
@@ -1562,6 +1615,32 @@ impl TurnActor {
                     reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
                 )]
                 let _ = reply.send(found);
+                true
+            }
+            #[cfg(any(unix, windows))]
+            EneCommand::ListCredentials { reply } => {
+                let infos = self.list_credentials().await;
+                drop(reply.send(infos));
+                true
+            }
+            #[cfg(any(unix, windows))]
+            EneCommand::RevokeCredential { ids, reply } => {
+                let removed = self.revoke_credential(&ids).await;
+                // A oneshot send error is `Copy` here (it's just the unsent
+                // `usize`), so `drop()` would itself trip
+                // `clippy::dropping_copy_types`; a dropped receiver just
+                // means the caller stopped waiting.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "oneshot send error is Copy; drop() would trip dropping_copy_types"
+                )]
+                let _ = reply.send(removed);
+                true
+            }
+            #[cfg(any(unix, windows))]
+            EneCommand::AuthorizeCredential { id, reply } => {
+                let result = self.authorize_credential(&id).await;
+                drop(reply.send(result));
                 true
             }
             EneCommand::ResetAllPermissions { reply } => {
@@ -3201,12 +3280,33 @@ pub(super) fn spawn_host_services(
             });
         }
 
-        let vault = Arc::new(build_credential_vault(config, &credential_registry));
+        // The persister is the durable home for OAuth tokens (settings.json
+        // never stores them); the refresher and the flow manager both write
+        // through it. All three share the same registry/declarations.
+        let persister: Arc<dyn CredentialPersister> = Arc::new(FileCredentialPersister::new(
+            ene_config::paths::credential_file_path(),
+        ));
+        let refresher: Arc<dyn ene_connector::vault::TokenRefresher> = Arc::new(
+            OAuthRefresher::new(Arc::clone(&credential_registry), Arc::clone(&persister)),
+        );
+        let vault = Arc::new(build_credential_vault(
+            config,
+            &credential_registry,
+            &*persister,
+            Some(refresher),
+        ));
         let passenger = Arc::new(CredentialPassenger::new(
-            vault,
-            credential_registry,
+            Arc::clone(&vault),
+            Arc::clone(&credential_registry),
             credential_registrations,
         ));
+        let oauth_flow = Arc::new(OAuthFlowManager::new(
+            Arc::clone(&credential_registry),
+            Arc::clone(&vault),
+            persister,
+            passenger.invalidated_tx(),
+        ));
+        let passenger = passenger.with_oauth_flow(Arc::clone(&oauth_flow));
         let mut passengers: HashMap<HostServiceId, Arc<dyn HostServicePassenger>> = HashMap::new();
         passengers.insert(
             HostServiceId::Credential,
@@ -3253,8 +3353,8 @@ fn generate_host_service_token(prefix: &str) -> String {
     format!("{prefix}{token:x}")
 }
 
-/// Builds the credential vault from configuration and the declaration
-/// registry.
+/// Builds the credential vault from configuration, the declaration
+/// registry, and the persistence file.
 ///
 /// Entry keys are the storage keys that request-time scope resolution
 /// produces (see [`ene_connector::declaration::resolve_scope`]): the vault
@@ -3279,11 +3379,22 @@ fn generate_host_service_token(prefix: &str) -> String {
 /// 3. The declaration's `env_fallback`, else the `{ID}_API_KEY` environment
 ///    variable.
 ///
+/// Persisted `OAuth2` credentials are preloaded from `persister` (the
+/// durable home for flow-acquired tokens); a config-derived API key always
+/// wins over a persisted entry for the same key. Stale entries whose plugin
+/// was uninstalled are unreachable regardless — scope enforcement denies any
+/// id the plugin no longer declares.
+///
 /// This mirrors the resolution contract the anthropic plugin previously
 /// implemented in-process; the plugin-side copy is removed with the
 /// credential client API.
 #[cfg(any(unix, windows))]
-fn build_credential_vault(config: &EneConfig, registry: &CredentialRegistry) -> CredentialVault {
+fn build_credential_vault(
+    config: &EneConfig,
+    registry: &CredentialRegistry,
+    persister: &dyn CredentialPersister,
+    refresher: Option<Arc<dyn ene_connector::vault::TokenRefresher>>,
+) -> CredentialVault {
     let plugin_config = config
         .get_section::<ene_plugin_host::PluginConfig>()
         .unwrap_or_default();
@@ -3335,7 +3446,16 @@ fn build_credential_vault(config: &EneConfig, registry: &CredentialRegistry) -> 
         }
     }
 
-    let vault = CredentialVault::new(entries);
+    for (key, data) in persister.load() {
+        let store = CredentialStore::from_exported(data);
+        // Persisted entries are OAuth2 by construction, but guard the
+        // variant so an on-disk anomaly cannot override a config API key.
+        if store.is_oauth2() && !resolved.contains(&key) {
+            entries.push(VaultEntry::new(key, store));
+        }
+    }
+
+    let mut vault = CredentialVault::new(entries);
     for id in &ids {
         // Only ids the vault has nothing for are ever "missing", so the
         // operator sees which configuration path to fill in.
@@ -3359,21 +3479,40 @@ fn build_credential_vault(config: &EneConfig, registry: &CredentialRegistry) -> 
             }
         }
     }
+    if let Some(refresher) = refresher {
+        vault = vault.with_refresher(refresher);
+    }
     vault
 }
 
-/// Rebuilds the credential vault from the current config and the (now
-/// populated) declaration registry, and swaps it into the passenger so
-/// connected clients are told which storage keys changed.
+/// Rebuilds the credential vault from the current config, the (now
+/// populated) declaration registry, and the persisted OAuth tokens, then
+/// swaps it into the passenger so connected clients are told which storage
+/// keys changed. The OAuth flow manager holds the same vault snapshot for
+/// flow completion and revocation, so it is swapped alongside the passenger.
 pub(super) fn refresh_credential_vault(
     config: &EneConfig,
-    registry: &CredentialRegistry,
+    registry: &Arc<CredentialRegistry>,
     passenger: &CredentialPassenger,
 ) {
     #[cfg(any(unix, windows))]
     {
-        let vault = Arc::new(build_credential_vault(config, registry));
-        passenger.replace_vault_and_broadcast(vault);
+        let persister: Arc<dyn CredentialPersister> = Arc::new(FileCredentialPersister::new(
+            ene_config::paths::credential_file_path(),
+        ));
+        let refresher: Arc<dyn ene_connector::vault::TokenRefresher> = Arc::new(
+            OAuthRefresher::new(Arc::clone(registry), Arc::clone(&persister)),
+        );
+        let vault = Arc::new(build_credential_vault(
+            config,
+            registry,
+            &*persister,
+            Some(refresher),
+        ));
+        passenger.replace_vault_and_broadcast(Arc::clone(&vault));
+        if let Some(flow) = passenger.oauth_flow() {
+            flow.swap_vault(vault);
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {

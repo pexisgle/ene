@@ -156,6 +156,14 @@ impl CredentialPassenger {
         self.invalidated_tx.clone()
     }
 
+    /// The attached OAuth flow driver, when this host installs one. The
+    /// runtime reads it to reach flow completion/revocation and to keep the
+    /// flow's vault snapshot in sync with [`Self::replace_vault_and_broadcast`].
+    #[must_use]
+    pub fn oauth_flow(&self) -> Option<Arc<OAuthFlowManager>> {
+        self.oauth_flow.clone()
+    }
+
     /// Pushes an invalidation notice to every connected client whose declared
     /// scope includes any of `ids`. The runtime calls this when a credential
     /// is updated or revoked (live config-change detection lands with the

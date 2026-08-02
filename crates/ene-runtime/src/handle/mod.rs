@@ -1169,6 +1169,46 @@ impl EneHandle {
         rx.await.map_err(|_| PublicApiError::ActorDead)
     }
 
+    /// List stored credentials as non-secret summaries (id, kind, expiry).
+    #[cfg(any(unix, windows))]
+    pub async fn list_credentials(
+        &self,
+    ) -> Result<Vec<ene_plugin_host::oauth::CredentialInfo>, PublicApiError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::ListCredentials { reply })
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
+    }
+
+    /// Revoke stored credentials by storage key.
+    ///
+    /// Returns how many entries were removed from the persistence file.
+    #[cfg(any(unix, windows))]
+    pub async fn revoke_credential(&self, ids: Vec<String>) -> Result<usize, PublicApiError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::RevokeCredential { ids, reply })
+            .map_err(|_| PublicApiError::ActorDead)?;
+        rx.await.map_err(|_| PublicApiError::ActorDead)
+    }
+
+    /// Start the OAuth authorization flow for a credential id.
+    ///
+    /// The flow runs out-of-band in the system browser; the caller observes
+    /// completion through the credentials list.
+    #[cfg(any(unix, windows))]
+    pub async fn authorize_credential(&self, id: String) -> Result<(), PublicApiError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(EneCommand::AuthorizeCredential { id, reply })
+            .map_err(|_| PublicApiError::ActorDead)?;
+        match rx.await.map_err(|_| PublicApiError::ActorDead)? {
+            Ok(()) => Ok(()),
+            Err(message) => Err(PublicApiError::Invalid { message }),
+        }
+    }
+
     /// Revoke all session-wide permission grants.
     pub async fn reset_all_permissions(&self) -> Result<usize, PublicApiError> {
         let (reply, rx) = oneshot::channel();

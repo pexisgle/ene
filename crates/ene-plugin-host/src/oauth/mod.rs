@@ -146,7 +146,11 @@ pub struct CredentialInfo {
 /// browser.
 pub struct OAuthFlowManager {
     registry: Arc<CredentialRegistry>,
-    vault: Arc<CredentialVault>,
+    /// Swappable vault snapshot: the runtime rebuilds the vault from
+    /// configuration and swaps it in via [`Self::swap_vault`], which also
+    /// updates the passenger. The read lock is held only for the duration of
+    /// each call, never across an await point.
+    vault: parking_lot::RwLock<Arc<CredentialVault>>,
     persister: Arc<dyn CredentialPersister>,
     invalidated_tx: broadcast::Sender<Vec<String>>,
     /// storage key → flow deadline; presence means a flow is in flight.
@@ -167,13 +171,22 @@ impl OAuthFlowManager {
     ) -> Self {
         Self {
             registry,
-            vault,
+            vault: parking_lot::RwLock::new(vault),
             persister,
             invalidated_tx,
             pending: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
             browser: Arc::new(|url| webbrowser::open(url).map_err(|e| e.to_string())),
         }
+    }
+
+    /// Swaps in the vault snapshot the runtime rebuilt from configuration.
+    ///
+    /// Called alongside the passenger's `replace_vault_and_broadcast` so a
+    /// flow completing against the old snapshot cannot write its token into
+    /// a vault the credential service no longer serves.
+    pub fn swap_vault(&self, vault: Arc<CredentialVault>) {
+        *self.vault.write() = vault;
     }
 
     /// Overrides the browser opener (tests inject a fake).
@@ -235,7 +248,7 @@ impl OAuthFlowManager {
         if ids.is_empty() {
             return Ok(0);
         }
-        self.vault.invalidate(ids);
+        self.vault.read().invalidate(ids);
         let removed = self.persister.remove(ids)?;
         // Storage keys equal the plugin-visible ids for shared declarations
         // (the common case); private keys (`plugin:id`) never match a client's
@@ -249,7 +262,7 @@ impl OAuthFlowManager {
     /// declaration currently registered, as non-secret summaries.
     #[must_use]
     pub fn list_credentials(&self) -> Vec<CredentialInfo> {
-        let stored = self.vault.list();
+        let stored = self.vault.read().list();
         let mut infos: Vec<CredentialInfo> = stored
             .into_iter()
             .map(|summary| CredentialInfo {
@@ -368,11 +381,11 @@ impl OAuthFlowManager {
             .expires_in
             .map(|secs| Utc::now() + chrono::Duration::seconds(secs));
         let store = CredentialStore::oauth2(tokens.access_token, tokens.refresh_token, expires_at);
-        self.vault.store(storage_key, store.clone());
+        self.vault.read().store(storage_key, store.clone());
         let mut entries = self.persister.load();
         entries.insert(storage_key.to_string(), store.expose_for_persistence());
         self.persister.save(&entries)?;
-        self.vault.record_audit(plugin, id, true);
+        self.vault.read().record_audit(plugin, id, true);
         Ok(())
     }
 

@@ -90,6 +90,29 @@ pub enum EneCommand {
         /// Reply channel carrying the number of revoked scopes.
         reply: oneshot::Sender<usize>,
     },
+    /// List stored credentials as non-secret summaries.
+    #[cfg(any(unix, windows))]
+    ListCredentials {
+        /// Reply channel for the credential summaries.
+        reply: oneshot::Sender<Vec<ene_plugin_host::oauth::CredentialInfo>>,
+    },
+    /// Revoke stored credentials by storage key.
+    #[cfg(any(unix, windows))]
+    RevokeCredential {
+        /// Storage keys to revoke (vault + persistence file + invalidation).
+        ids: Vec<String>,
+        /// Reply channel carrying the number of entries removed from the
+        /// persistence file.
+        reply: oneshot::Sender<usize>,
+    },
+    /// Start the OAuth authorization flow for a credential id, out-of-band.
+    #[cfg(any(unix, windows))]
+    AuthorizeCredential {
+        /// Credential id to authorize.
+        id: String,
+        /// Reply channel reporting whether the flow started.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Undo the most recent reversible tool operation.
     Undo {
         /// Reply channel carrying the undo report.
