@@ -315,7 +315,7 @@ impl DbIpcServer {
         loop {
             let mut len_buf = [0u8; 4];
             match stream.read_exact(&mut len_buf).await {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     debug!(tool = %tool_name, "DB IPC connection closed");
                     break;
@@ -394,7 +394,7 @@ impl DbIpcServer {
     ) -> Result<(), DbServerError> {
         let mut len_buf = [0u8; 4];
         match stream.read_exact(&mut len_buf).await {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 debug!(tool = %tool_name, "DB IPC connection closed before auth");
                 return Ok(());

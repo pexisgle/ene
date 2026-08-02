@@ -128,7 +128,7 @@ where
 {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {
-        Ok(()) => {}
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
