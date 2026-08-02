@@ -39,6 +39,34 @@ pub enum PluginError {
     /// flattening it into a transport error.
     #[error("tool error: {0}")]
     Tool(#[source] ToolError),
+
+    /// A requested credential does not exist on the host.
+    ///
+    /// Carries only non-secret display metadata — the label and help URL
+    /// guide a settings UI. The host sends these so the plugin can surface a
+    /// concrete fix instead of an opaque "no API key" string; no secret ever
+    /// appears in the [`Display`](std::fmt::Display) output.
+    #[error("credential missing: {label}")]
+    CredentialMissing {
+        /// Credential id (e.g. `anthropic`).
+        id: String,
+        /// Non-secret display label for setup UI guidance.
+        label: String,
+        /// Optional URL pointing at setup/help UI.
+        help_url: Option<String>,
+    },
+    /// The requested credential is outside this plugin's declared scope.
+    #[error("credential access denied: {id}")]
+    CredentialDenied {
+        /// Credential id that was refused.
+        id: String,
+    },
+    /// The credential expired and needs re-authorization on the host.
+    #[error("authorization required: {id}")]
+    AuthorizationRequired {
+        /// Credential id that needs re-authorization.
+        id: String,
+    },
 }
 
 impl PluginError {
@@ -65,6 +93,32 @@ impl PluginError {
     /// Creates a [`Timeout`](Self::Timeout) error.
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout(message.into())
+    }
+
+    /// Creates a [`CredentialMissing`](Self::CredentialMissing) error.
+    ///
+    /// `label` is non-secret display metadata; pass the id itself when no
+    /// friendlier label is known.
+    pub fn credential_missing(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        help_url: Option<String>,
+    ) -> Self {
+        Self::CredentialMissing {
+            id: id.into(),
+            label: label.into(),
+            help_url,
+        }
+    }
+
+    /// Creates a [`CredentialDenied`](Self::CredentialDenied) error.
+    pub fn credential_denied(id: impl Into<String>) -> Self {
+        Self::CredentialDenied { id: id.into() }
+    }
+
+    /// Creates an [`AuthorizationRequired`](Self::AuthorizationRequired) error.
+    pub fn authorization_required(id: impl Into<String>) -> Self {
+        Self::AuthorizationRequired { id: id.into() }
     }
 }
 
@@ -112,6 +166,23 @@ mod tests {
     fn plugin_error_display_timeout() {
         let err = PluginError::timeout("30s exceeded");
         assert_eq!(format!("{err}"), "timeout: 30s exceeded");
+    }
+
+    #[test]
+    fn credential_errors_display_metadata_not_secrets() {
+        let missing = PluginError::credential_missing("anthropic", "Anthropic API Key", None);
+        let display = format!("{missing}");
+        assert!(display.contains("Anthropic API Key"));
+        assert!(!display.contains("sk-ant-secret"));
+
+        let denied = PluginError::credential_denied("google.calendar");
+        assert_eq!(
+            format!("{denied}"),
+            "credential access denied: google.calendar"
+        );
+
+        let auth = PluginError::authorization_required("google.calendar");
+        assert_eq!(format!("{auth}"), "authorization required: google.calendar");
     }
 
     #[test]
