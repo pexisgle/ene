@@ -2274,7 +2274,7 @@ async fn capabilities_resolve_across_provider_and_consumer_plugins() {
     let (consumer_conn, consumer_path) = spawn_capabilities_and_connect(
         "capabilities-consumer",
         serde_json::json!({
-            "x-ene-capabilities": { "requires": ["g2p/ja@^1", "onnx-runner@^1?"] }
+            "x-ene-capabilities": { "requires": ["g2p/ja@^2", "onnx-runner@^1?"] }
         }),
     )
     .await;
@@ -2298,7 +2298,7 @@ async fn capabilities_resolve_across_provider_and_consumer_plugins() {
     let gguf = CapabilityId::try_new("gguf-runner").expect("valid capability id");
     // Hard requirement resolves to the provider plugin.
     assert_eq!(
-        registry.resolve(&g2p, &"^1".parse().expect("valid version req")),
+        registry.resolve(&g2p, &"^2".parse().expect("valid version req")),
         Some("provider".to_string())
     );
     assert_eq!(

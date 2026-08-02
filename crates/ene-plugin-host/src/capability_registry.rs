@@ -253,20 +253,20 @@ mod tests {
         );
         registry.register_from_schema(
             "provider-b",
-            Some(&json_capabilities(&["g2p/ja@1.5.0"], &[])),
+            Some(&json_capabilities(&["g2p/ja@2.2.0"], &[])),
         );
 
         let g2p = CapabilityId::try_new("g2p/ja").unwrap();
-        // Both providers match `^1`; the lexicographically smallest plugin
+        // Both providers match `^2`; the lexicographically smallest plugin
         // name wins.
-        assert_eq!(
-            registry.resolve(&g2p, &"^1".parse().unwrap()),
-            Some("provider-a".to_string())
-        );
-        // Only provider-a's 2.1.0 satisfies `^2`.
         assert_eq!(
             registry.resolve(&g2p, &"^2".parse().unwrap()),
             Some("provider-a".to_string())
+        );
+        // Only provider-b's 2.2.0 satisfies `^2.2`.
+        assert_eq!(
+            registry.resolve(&g2p, &"^2.2".parse().unwrap()),
+            Some("provider-b".to_string())
         );
         assert_eq!(registry.resolve(&g2p, &"^3".parse().unwrap()), None);
     }

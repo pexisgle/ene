@@ -715,13 +715,6 @@ impl PluginHostManager {
 
         let (health_tx, health_rx) = mpsc::unbounded_channel::<PluginHealthEvent>();
 
-        let mut supervised: Vec<Arc<Mutex<SupervisedPlugin>>> = Vec::new();
-        let mut connections: Vec<Arc<IpcPluginConnection>> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
-        let mut tool_registries: Vec<Arc<dyn ToolRegistry>> = Vec::new();
-        let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
-            HashMap::new();
-        let mut llm_factory_plugins: HashMap<String, String> = HashMap::new();
         // (plugin name, fetched schema) pairs; the schemas are registered after
         // `Self` exists so the registration step is a `&self` method that unit
         // tests can drive without a plugin process.
@@ -851,6 +844,25 @@ impl PluginHostManager {
             }
         }
 
+        // Construct the manager up front so capability registration runs
+        // through the `register_capability_schema` seam (a `&self` method
+        // unit tests drive without a plugin process) and the gate resolves
+        // against the same registry the manager exposes publicly. Commit
+        // lists stay empty until pass 2 fills them.
+        let mut manager = Self {
+            supervised: Vec::new(),
+            connections: Vec::new(),
+            names: Vec::new(),
+            tool_registries: Vec::new(),
+            llm_factories: HashMap::new(),
+            llm_factory_plugins: HashMap::new(),
+            credential_registry: CredentialRegistry::new(),
+            capability_registry: CapabilityRegistry::new(),
+            health_tasks: Vec::new(),
+            health_rx: Some(health_rx),
+            shutdown_on_drop: true,
+        };
+
         // Pass 2 — capability gate, then commit. Register every declaration
         // first so each plugin's `requires` resolves against all providers
         // (resolution happens exactly once, after all spawn attempts: a
@@ -858,14 +870,13 @@ impl PluginHostManager {
         // whose hard requirements are unmet is shut down gracefully and kept
         // out of supervision and contribution registration, with a health
         // event for diagnostics; soft unmet requirements never gate.
-        let capability_registry = CapabilityRegistry::new();
         for pending_plugin in &pending {
-            capability_registry
-                .register_from_schema(&pending_plugin.name, pending_plugin.schema.as_ref());
+            manager
+                .register_capability_schema(&pending_plugin.name, pending_plugin.schema.as_ref());
         }
         for pending_plugin in pending {
             let name = pending_plugin.name.clone();
-            let unmet = capability_registry.unmet_requires(&name);
+            let unmet = manager.unmet_requires(&name);
             if unmet.iter().any(|r| !r.soft) {
                 // Graceful IPC shutdown first, then drop the child: dropping
                 // the last `Arc` runs `SupervisedPlugin::drop`, which kills,
@@ -939,12 +950,12 @@ impl PluginHostManager {
                         breaker: parking_lot::Mutex::new(CircuitBreaker::default()),
                         health_tx: Some(health_tx.clone()),
                     };
-                    tool_registries.push(Arc::new(registry));
+                    manager.tool_registries.push(Arc::new(registry));
                 }
             }
 
             for spec in &caps.llm_providers {
-                if llm_factories.contains_key(&spec.kind) {
+                if manager.llm_factories.contains_key(&spec.kind) {
                     tracing::warn!(
                         component = "PluginHostManager",
                         plugin = %name,
@@ -961,16 +972,18 @@ impl PluginHostManager {
                     spec.context_window,
                     spec.concurrency,
                 );
-                llm_factories.insert(
+                manager.llm_factories.insert(
                     spec.kind.clone(),
                     Arc::new(factory) as Arc<dyn ene_ai::LlmProviderFactory>,
                 );
-                llm_factory_plugins.insert(spec.kind.clone(), name.clone());
+                manager
+                    .llm_factory_plugins
+                    .insert(spec.kind.clone(), name.clone());
             }
 
-            supervised.push(pending_plugin.plugin);
-            connections.push(pending_plugin.conn);
-            names.push(name);
+            manager.supervised.push(pending_plugin.plugin);
+            manager.connections.push(pending_plugin.conn);
+            manager.names.push(name);
         }
 
         // Batch-persist TOFU checksums recorded during this startup.
@@ -1072,7 +1085,7 @@ impl PluginHostManager {
                     }
                 }
 
-                tool_registries.push(registry);
+                manager.tool_registries.push(registry);
             }
         }
 
@@ -1084,27 +1097,14 @@ impl PluginHostManager {
         // The task count is proportional to the plugin count — a handful in
         // practice.
         let health_interval = Duration::from_millis(plugin_config.health_interval_ms);
-        let health_tasks = spawn_supervisors(
+        manager.health_tasks = spawn_supervisors(
             health_interval,
-            &supervised,
-            &connections,
+            &manager.supervised,
+            &manager.connections,
             &health_tx,
             backoff_before_restart,
         );
 
-        let manager = Self {
-            supervised,
-            connections,
-            names,
-            tool_registries,
-            llm_factories,
-            llm_factory_plugins,
-            credential_registry: CredentialRegistry::new(),
-            capability_registry,
-            health_tasks,
-            health_rx: Some(health_rx),
-            shutdown_on_drop: true,
-        };
         for (plugin, schema) in credential_schemas {
             manager.register_credential_schema(&plugin, schema.as_ref());
         }
@@ -2020,14 +2020,14 @@ mod tests {
             "x-ene-capabilities": { "provides": ["g2p/ja@2.1.0"] }
         });
         let consumer = serde_json::json!({
-            "x-ene-capabilities": { "requires": ["g2p/ja@^1", "tts/synthesize@^1?"] }
+            "x-ene-capabilities": { "requires": ["g2p/ja@^2", "tts/synthesize@^1?"] }
         });
         manager.register_capability_schema("provider", Some(&provider));
         manager.register_capability_schema("consumer", Some(&consumer));
 
         let g2p = CapabilityId::try_new("g2p/ja").unwrap();
         assert_eq!(
-            manager.resolve_capability(&g2p, &"^1".parse::<VersionReq>().unwrap()),
+            manager.resolve_capability(&g2p, &"^2".parse::<VersionReq>().unwrap()),
             Some("provider".to_string())
         );
         // The consumer's `g2p/ja` requirement is satisfied; only the soft
