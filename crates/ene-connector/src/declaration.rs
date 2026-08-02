@@ -575,11 +575,10 @@ mod tests {
 
     #[test]
     fn rejects_oauth2_missing_required_fields() {
-        let mut missing_client_id = serde_json::json!({
+        let missing_client_id = serde_json::json!({
             "id": "google.calendar", "kind": "oauth2",
             "auth_url": "https://a", "token_url": "https://t"
         });
-        missing_client_id["client_id"] = serde_json::json!("1234.apps.googleusercontent.com");
         let parse = parse_declarations(&serde_json::json!({
             "x-ene-credentials": [missing_client_id]
         }));
