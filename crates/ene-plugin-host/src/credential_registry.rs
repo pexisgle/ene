@@ -36,9 +36,10 @@ impl CredentialRegistry {
     /// declaration never affects the rest, and the plugin itself is never
     /// involved. Entries that kept only part of their configuration (e.g. a
     /// `header` missing `name`) are kept but warned about. A `None` schema
-    /// registers nothing.
+    /// clears any previous entry for `plugin`.
     pub fn register_from_schema(&self, plugin: &str, schema: Option<&Value>) {
         let Some(schema) = schema else {
+            self.register(plugin, Vec::new());
             return;
         };
         let parse = parse_credentials(schema);
@@ -239,5 +240,26 @@ mod tests {
         let declarations = registry.declarations("mock");
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].id.as_str(), "b");
+    }
+
+    #[test]
+    fn none_schema_clears_previous_declarations() {
+        let registry = CredentialRegistry::new();
+        let schema = json_credentials(&serde_json::json!([{ "id": "a", "kind": "api_key" }]));
+        registry.register_from_schema("mock", Some(&schema));
+        let id = CredentialId::try_new("a").unwrap();
+        assert_eq!(
+            registry.resolve_scope("mock", &id),
+            ScopeDecision::Allowed {
+                storage_key: "a".to_string()
+            }
+        );
+
+        registry.register_from_schema("mock", None);
+        assert!(registry.declarations("mock").is_empty());
+        assert_eq!(
+            registry.resolve_scope("mock", &id),
+            ScopeDecision::Undeclared
+        );
     }
 }
