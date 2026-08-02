@@ -681,11 +681,12 @@ mod tests {
         let ctx = test_ctx().await;
         let caller = anthropic_http_caller(&ctx).await.expect("build caller");
         // The client carries the resolved key as its x-api-key default header.
-        let header = caller
+        let request = caller
             .client()
             .get(ANTHROPIC_API_URL)
             .build()
-            .expect("build request")
+            .expect("build request");
+        let header = request
             .headers()
             .get("x-api-key")
             .expect("auth header")

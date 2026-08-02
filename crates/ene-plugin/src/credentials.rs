@@ -18,7 +18,8 @@ use ene_plugin_proto::transport::IpcStream;
 use ene_plugin_proto::{
     CredentialErrorCode, CredentialRequest, CredentialResponse, HostServiceErrorCode,
     HostServiceId, HostServiceRequest, HostServiceResponse, PluginError, ResolvedCredential,
-    read_credential_response, read_host_service_response, write_host_service_request,
+    read_credential_response, read_host_service_response, write_credential_request,
+    write_host_service_request,
 };
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
@@ -29,7 +30,7 @@ use crate::policy::{RateLimiter, RetryPolicy, TimeoutPolicy};
 
 /// How long a resolved API key is cached client-side before the next call
 /// re-resolves through the host.
-const API_KEY_CACHE_TTL: Duration = Duration::from_secs(60);
+const API_KEY_CACHE_TTL: Duration = Duration::from_mins(1);
 
 /// A secret returned to plugin code.
 ///
@@ -92,13 +93,18 @@ struct CredentialParams {
 
 /// One live session to the host's `credential` passenger.
 struct CredentialConnection {
-    tx: tokio::sync::mpsc::Sender<CredentialRequest>,
+    /// Write half of the session stream; requests are framed here. The
+    /// single-flight lock below serializes writers.
+    writer: tokio::sync::Mutex<tokio::io::WriteHalf<IpcStream>>,
     /// Serializes requests: the wire protocol is single-flight, so only one
     /// request may be in flight per connection at a time.
     flight: tokio::sync::Mutex<()>,
     /// The pending response slot consumed by the reader task. Single-flight
     /// guarantees at most one occupant.
     pending: Mutex<Option<oneshot::Sender<CredentialResponse>>>,
+    /// Set to `false` when the reader task exits (session died); requests
+    /// then reconnect.
+    alive: std::sync::atomic::AtomicBool,
 }
 
 /// Client for the host's `credential` service.
@@ -333,18 +339,20 @@ impl CredentialClient {
             let flight = conn.flight.lock().await;
             let (tx, rx) = oneshot::channel();
             *conn.pending.lock() = Some(tx);
-            if conn.tx.send(req.clone()).await.is_err() {
+            let write_result = {
+                let mut writer = conn.writer.lock().await;
+                write_credential_request(&mut *writer, req).await
+            };
+            if write_result.is_err() {
                 drop(flight);
                 self.conn.lock().await.take();
                 continue;
             }
-            match rx.await {
-                Ok(resp) => return Ok(resp),
-                Err(_) => {
-                    drop(flight);
-                    self.conn.lock().await.take();
-                }
+            if let Ok(resp) = rx.await {
+                return Ok(resp);
             }
+            drop(flight);
+            self.conn.lock().await.take();
         }
         Err(PluginError::transport("credential service connection lost"))
     }
@@ -354,7 +362,7 @@ impl CredentialClient {
     async fn ensure_connected(&self) -> Result<Arc<CredentialConnection>, PluginError> {
         let mut guard = self.conn.lock().await;
         if let Some(conn) = guard.as_ref()
-            && !conn.tx.is_closed()
+            && conn.alive.load(std::sync::atomic::Ordering::Relaxed)
         {
             return Ok(Arc::clone(conn));
         }
@@ -403,17 +411,18 @@ impl CredentialClient {
                 return Err(PluginError::transport("host closed during credential open"));
             }
         }
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let (reader, writer) = tokio::io::split(stream);
         let conn = Arc::new(CredentialConnection {
-            tx,
+            writer: tokio::sync::Mutex::new(writer),
             flight: tokio::sync::Mutex::new(()),
             pending: Mutex::new(None),
+            alive: std::sync::atomic::AtomicBool::new(true),
         });
         tokio::spawn({
             let conn = Arc::clone(&conn);
             let cache = Arc::clone(&self.cache);
             async move {
-                credential_reader_loop(stream, conn, cache).await;
+                credential_reader_loop(reader, conn, cache).await;
             }
         });
         Ok(conn)
@@ -449,12 +458,12 @@ impl CredentialClient {
 /// Exits when the stream ends (server restart / socket teardown); the next
 /// request then reconnects.
 async fn credential_reader_loop(
-    mut stream: IpcStream,
+    mut reader: tokio::io::ReadHalf<IpcStream>,
     conn: Arc<CredentialConnection>,
     cache: Arc<Mutex<HashMap<String, CachedCredential>>>,
 ) {
     loop {
-        match read_credential_response(&mut stream).await {
+        match read_credential_response(&mut reader).await {
             Ok(Some(CredentialResponse::Invalidated { ids })) => {
                 let mut guard = cache.lock();
                 for id in ids {
@@ -469,6 +478,8 @@ async fn credential_reader_loop(
             Ok(None) | Err(_) => break,
         }
     }
+    conn.alive
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Maps a host error code to the plugin-facing error, keeping secrets out of
@@ -530,9 +541,9 @@ impl fmt::Debug for HttpAuth {
 /// Options for [`CredentialClient::http_client_with`].
 ///
 /// `auth` defaults to `None`, which derives the header from the resolved
-/// credential (api_key → `x-api-key`, oauth → `Authorization: Bearer`).
+/// credential (`api_key` → `x-api-key`, oauth → `Authorization: Bearer`).
 #[cfg(feature = "http")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ClientOptions {
     /// Retry policy applied by [`HttpCaller::execute`].
     pub retry: RetryPolicy,
@@ -542,18 +553,6 @@ pub struct ClientOptions {
     pub timeout: TimeoutPolicy,
     /// Auth header override; `None` derives it from the resolved credential.
     pub auth: Option<HttpAuth>,
-}
-
-#[cfg(feature = "http")]
-impl Default for ClientOptions {
-    fn default() -> Self {
-        Self {
-            retry: RetryPolicy::default(),
-            rate_limit: None,
-            timeout: TimeoutPolicy::default(),
-            auth: None,
-        }
-    }
 }
 
 /// HTTP caller combining a shared client with retry / rate-limit / timeout.

@@ -8,8 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The HTTP client (reqwest) comes from ene-plugin's `http` feature so the
-# plugin never resolves or manages credentials itself.
+# The HTTP client comes from ene-plugin's `http` feature so the plugin
+# never resolves or manages credentials itself; `reqwest` remains only for
+# naming the `Response` type in the SSE parser.
 ene-plugin = { workspace = true, features = ["http"] }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
@@ -17,6 +18,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+reqwest = { workspace = true, features = ["json", "stream", "rustls"] }
+
+[dev-dependencies]
+ene-plugin-proto = { workspace = true }
 
 [lints]
 workspace = true
