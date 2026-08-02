@@ -124,7 +124,7 @@ struct RawPromptLibraryData {
 pub struct SystemPrompts {
     /// Mascot roleplay framing.
     pub mascot_context: String,
-    /// Localized instruction appended to the CharacterState section scaffold.
+    /// Localized instruction appended to the `CharacterState` section scaffold.
     pub affect_pre_utterance_note: String,
     /// Header for rules list.
     pub behavior_rules_header: String,
