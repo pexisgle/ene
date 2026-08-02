@@ -47,6 +47,8 @@ use ene_mind::{
 };
 use ene_mind::{ConversationSession, EneSessionError};
 #[cfg(any(unix, windows))]
+use ene_plugin_host::CredentialRegistry;
+#[cfg(any(unix, windows))]
 use ene_plugin_host::credential_service::{CredentialPassenger, CredentialPluginRegistration};
 use ene_plugin_host::{
     CompositeToolRegistry, DisabledReason, PluginHealthEvent, PluginHostError, ToolRegistry,
@@ -57,16 +59,11 @@ use ene_rag::{ToolRag, ToolRagConfig, ToolRagOptions};
 #[cfg(any(unix, windows))]
 use ene_store::host_service::{DbPluginRegistration, HostServiceServer, host_service_socket_path};
 use once_cell::sync::OnceCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-
-/// Global monotonic counter used to generate unique DB and credential IPC
-/// auth tokens. Intentionally process-global: each `EneHandle::open` call
-/// increments the counter so concurrent handles never share a token.
-static DB_TOKEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(super) struct TurnActor {
     cmd_rx: mpsc::UnboundedReceiver<EneCommand>,
@@ -2463,7 +2460,16 @@ async fn reconfigure_plugin_host_bg(
         handle.abort();
     }
 
-    let (db_tokens, credential_tokens) = match spawn_host_services(&config, memory_store.as_ref()) {
+    // The credential registry is shared between the host-service passenger
+    // and the new host: the passenger is built by spawn_host_services below,
+    // and the new host populates the registry from plugin schemas during
+    // start (before any plugin can open a credential session).
+    let credential_registry = Arc::new(CredentialRegistry::new());
+    let (db_tokens, credential_tokens) = match spawn_host_services(
+        &config,
+        memory_store.as_ref(),
+        Arc::clone(&credential_registry),
+    ) {
         Ok(services) => {
             *host_service_handle.lock().await = services.handle;
             (services.db_tokens, services.credential_tokens)
@@ -2487,6 +2493,7 @@ async fn reconfigure_plugin_host_bg(
         &config,
         db_tokens,
         credential_tokens,
+        credential_registry,
     )
     .await
     {
@@ -3016,6 +3023,10 @@ pub(super) struct HostServices {
 /// binaries via `SandboxConfigData::db_auth_token` /
 /// `credential_auth_token`.
 ///
+/// `credential_registry` is shared with the host manager: the passenger
+/// built here resolves request-time scope through it, and the manager
+/// populates it from plugin schemas during `start`.
+///
 /// Token generation is driven by the **detected plugin set** (the binaries
 /// actually discovered on disk) rather than by `plugins.list` config keys.
 /// The host manager discovers plugins by scanning for `ene-plugin-{name}`
@@ -3031,6 +3042,7 @@ pub(super) struct HostServices {
 pub(super) fn spawn_host_services(
     config: &EneConfig,
     memory_store: Option<&Arc<ene_store::MemoryStore>>,
+    credential_registry: Arc<ene_plugin_host::CredentialRegistry>,
 ) -> Result<HostServices, EneRuntimeError> {
     let mut db_tokens = HashMap::new();
     let mut credential_tokens = HashMap::new();
@@ -3141,7 +3153,11 @@ pub(super) fn spawn_host_services(
         }
 
         let vault = Arc::new(build_credential_vault(config));
-        let passenger = Arc::new(CredentialPassenger::new(vault, credential_registrations));
+        let passenger = Arc::new(CredentialPassenger::new(
+            vault,
+            credential_registry,
+            credential_registrations,
+        ));
         let mut passengers: HashMap<HostServiceId, Arc<dyn HostServicePassenger>> = HashMap::new();
         passengers.insert(HostServiceId::Credential, passenger);
 
@@ -3171,45 +3187,36 @@ pub(super) fn spawn_host_services(
     }
 }
 
-/// Generates a fresh 128-bit pre-shared host-service token.
-///
-/// Uses a 256-bit keystream from blake3 (already a dep) keyed by the current
-/// nanosecond timestamp + a monotonic counter. blake3 is a CSPRNG and the
-/// counter guarantees uniqueness across calls in the same nanosecond.
+/// Generates a fresh 128-bit pre-shared host-service token from the OS
+/// CSPRNG (`rand::rng()`, ChaCha12-backed thread RNG seeded by the OS).
+/// A 128-bit random value is collision-safe for the handful of plugins a
+/// host serves; the `db` and `credential` services both draw from here so
+/// there is a single generation point.
 #[cfg(any(unix, windows))]
 fn generate_host_service_token(prefix: &str) -> String {
-    let counter = DB_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(
-        &chrono::Utc::now()
-            .timestamp_nanos_opt()
-            .unwrap_or(0)
-            .to_le_bytes(),
-    );
-    hasher.update(&counter.to_le_bytes());
-    let mut token_out = [0u8; 16];
-    let mut reader = hasher.finalize_xof();
-    use std::io::Read;
-    drop(reader.read_exact(&mut token_out));
-    format!("{prefix}{:x}", u128::from_le_bytes(token_out))
+    let token: u128 = rand::random();
+    format!("{prefix}{:x}", token)
 }
 
 /// Builds the credential vault from configuration.
 ///
-/// Resolution precedence for each candidate id (every `plugins.list` and
-/// `ai.providers` name, deduplicated):
+/// Entry keys are the storage keys that request-time scope resolution
+/// produces (see [`ene_connector::declaration::resolve_scope`]): the vault
+/// itself never derives them. Candidate ids are every `plugins.list` name (a
+/// plugin that declares its own name as its credential id, e.g. `anthropic`)
+/// plus every `ai.providers` kind (a provider aliased under a different name
+/// still feeds the credential id matching its kind, e.g.
+/// `ai.providers.my-anthropic` with `kind: "anthropic"` feeds `anthropic`).
+///
+/// Resolution precedence per candidate id:
 /// 1. `plugins.list.<id>.config.api_key` (plain string or `{"source": ...}`).
-/// 2. `ai.providers.<id>.api_key` (typed `ApiKeyConfig`).
+/// 2. `ai.providers.<alias>.api_key` for the first provider whose `kind`
+///    equals the id (matched by kind, not alias name).
 /// 3. The `{ID}_API_KEY` environment variable.
 ///
 /// This mirrors the resolution contract the anthropic plugin previously
 /// implemented in-process; the plugin-side copy is removed with the
 /// credential client API.
-///
-/// Each plugin's declared scope comes from the provisional
-/// `x-ene-credentials` entry key (fail-closed: malformed or absent → nothing
-/// allowed). The declaration is a single, replaceable seam — the formal
-/// typed declaration supersedes it.
 #[cfg(any(unix, windows))]
 fn build_credential_vault(config: &EneConfig) -> CredentialVault {
     let plugin_config = config
@@ -3218,39 +3225,67 @@ fn build_credential_vault(config: &EneConfig) -> CredentialVault {
     let ai_config = config.get_section::<ene_ai::AiConfig>().unwrap_or_default();
 
     let mut ids: Vec<String> = plugin_config.list.keys().cloned().collect();
-    ids.extend(ai_config.providers.keys().cloned());
+    ids.extend(ai_config.providers.values().map(|def| def.kind.clone()));
     ids.sort();
     ids.dedup();
 
     let mut entries = Vec::new();
+    let mut resolved: HashSet<String> = HashSet::new();
     for id in &ids {
-        let plugin_entry = plugin_config.list.get(id);
-        let ai_def = ai_config.providers.get(id);
-        let Some(key) = resolve_credential_key(id, plugin_entry, ai_def) else {
+        let Some(key) = resolve_credential_key(id, plugin_config, ai_config) else {
             continue;
         };
         entries.push(VaultEntry::new(
             id.clone(),
             CredentialStore::from_api_key(key),
         ));
+        resolved.insert(id.clone());
     }
 
     let vault = CredentialVault::new(entries);
-    for (name, entry) in &plugin_config.list {
-        vault.declare(name, declared_credential_ids(name, &entry.extra));
+    for id in &ids {
+        // Only ids the vault has nothing for are ever "missing", so the
+        // operator sees which configuration path to fill in.
+        if !resolved.contains(id) {
+            vault.set_hint(id, credential_missing_hint(id, plugin_config, ai_config));
+        }
     }
     vault
+}
+
+#[cfg(any(unix, windows))]
+/// Non-secret setup guidance for a missing credential: the configuration
+/// paths the runtime would consult, naming the concrete `ai.providers`
+/// alias when one matches by kind.
+fn credential_missing_hint(
+    id: &str,
+    plugin_config: &ene_plugin_host::PluginConfig,
+    ai_config: &ene_ai::AiConfig,
+) -> String {
+    let alias = ai_config
+        .providers
+        .iter()
+        .find(|(_, def)| def.kind == id)
+        .map(|(alias, _)| alias.as_str());
+    let kind_path = match alias {
+        Some(alias) => format!("ai.providers.{alias}.api_key (kind: {id})"),
+        None => format!("ai.providers.<alias>.api_key with kind \"{id}\""),
+    };
+    format!(
+        "set plugins.list.{id}.config.api_key, {kind_path}, or the {} environment variable",
+        env_var_for_id(id)
+    )
 }
 
 #[cfg(any(unix, windows))]
 /// Resolves a credential key for `id` across the three configuration sources.
 fn resolve_credential_key(
     id: &str,
-    plugin_entry: Option<&ene_plugin_host::PluginEntry>,
-    ai_def: Option<&ene_ai::AiProviderDef>,
+    plugin_config: &ene_plugin_host::PluginConfig,
+    ai_config: &ene_ai::AiConfig,
 ) -> Option<String> {
     // 1. plugins.list.<id>.config.api_key (anthropic contract).
-    if let Some(entry) = plugin_entry
+    if let Some(entry) = plugin_config.list.get(id)
         && let Some(key) = entry
             .config
             .get("api_key")
@@ -3258,29 +3293,39 @@ fn resolve_credential_key(
     {
         return Some(key);
     }
-    // 2. ai.providers.<id>.api_key (typed ApiKeyConfig).
-    if let Some(def) = ai_def {
-        let cfg = &def.api_key;
-        if cfg.source == "inline" && !cfg.inline.trim().is_empty() {
-            return Some(cfg.inline.trim().to_string());
-        }
-        if cfg.source == "env" {
-            let var = if cfg.env.trim().is_empty() {
-                env_var_for_id(id)
-            } else {
-                cfg.env.clone()
-            };
-            if let Ok(key) = std::env::var(&var)
-                && !key.trim().is_empty()
-            {
-                return Some(key.trim().to_string());
-            }
-        }
+    // 2. ai.providers.<alias>.api_key matched by kind: the alias name is
+    // arbitrary, only the backend kind identifies the credential id.
+    if let Some(def) = ai_config.providers.values().find(|def| def.kind == id)
+        && let Some(key) = resolve_api_key_config(id, &def.api_key)
+    {
+        return Some(key);
     }
     // 3. {ID}_API_KEY environment fallback.
     std::env::var(env_var_for_id(id))
         .ok()
         .filter(|key| !key.trim().is_empty())
+}
+
+#[cfg(any(unix, windows))]
+/// Resolves a typed `ApiKeyConfig` to a key value, or `None` when the config
+/// has no usable value.
+fn resolve_api_key_config(id: &str, cfg: &ene_ai::ApiKeyConfig) -> Option<String> {
+    if cfg.source == "inline" && !cfg.inline.trim().is_empty() {
+        return Some(cfg.inline.trim().to_string());
+    }
+    if cfg.source == "env" {
+        let var = if cfg.env.trim().is_empty() {
+            env_var_for_id(id)
+        } else {
+            cfg.env.clone()
+        };
+        if let Ok(key) = std::env::var(&var)
+            && !key.trim().is_empty()
+        {
+            return Some(key.trim().to_string());
+        }
+    }
+    None
 }
 
 #[cfg(any(unix, windows))]
@@ -3330,32 +3375,6 @@ fn resolve_api_key_value(id: &str, value: &serde_json::Value) -> Option<String> 
 }
 
 #[cfg(any(unix, windows))]
-/// Reads a plugin's declared credential scope from the provisional
-/// `x-ene-credentials` entry key (an array of ids). Malformed or absent
-/// values fail closed to an empty set. The typed declaration (config schema)
-/// replaces this as the single supply seam.
-fn declared_credential_ids(
-    plugin: &str,
-    extra: &serde_json::Map<String, serde_json::Value>,
-) -> Vec<String> {
-    let Some(value) = extra.get("x-ene-credentials") else {
-        return Vec::new();
-    };
-    let Some(ids) = value.as_array() else {
-        tracing::warn!(
-            component = "TurnActor",
-            plugin = %plugin,
-            "plugins.list.<name>.x-ene-credentials must be an array of \
-             credential ids; ignoring"
-        );
-        return Vec::new();
-    };
-    ids.iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_string)
-        .collect()
-}
-
 /// Discovers plugin binary names by scanning the builtin and user plugin
 /// directories for executables following the `ene-plugin-{name}` convention.
 ///

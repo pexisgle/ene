@@ -548,11 +548,11 @@ API キーを読み出さないようにするための仕組みです。ホス�
 ### スコープ強制 (サーバー側)
 
 プラグインが要求できる資格情報 id は宣言スコープで決まります。プラグインは
-暫定的に `plugins.list.<name>.x-ene-credentials` エントリキー (id の配列、
-例: `["anthropic"]`) で宣言します。不正な形式や未宣言は「何も許可しない」に
-フェイルクローズします。ホストは要求された id をその宣言と**サーバー側で**
-照合し (クライアントは信用しない)、未宣言 id は `ScopeDenied` で拒否すると
-同時に監査記録 (プラグイン・id・結果のみ。秘密は含めない) を残します。
+`config_schema()` の `x-ene-credentials` ブロック (§8 参照) で宣言します。
+宣言のないプラグインは「何も許可しない」にフェイルクローズします。ホストは
+要求された id をそのプラグインの登録済み宣言と**サーバー側で**照合し (クライアントは
+信用しない)、未宣言 id は `ScopeDenied` で拒否すると同時に監査記録
+(プラグイン・id・結果のみ。秘密は含めない) を残します。
 
 ### 解決順序
 
@@ -560,7 +560,9 @@ API キーを読み出さないようにするための仕組みです。ホス�
 次の順でキーを解決します:
 
 1. `plugins.list.<id>.config.api_key` (素の文字列、または `{"source": ...}`)
-2. `ai.providers.<id>.api_key` (型付き `ApiKeyConfig`)
+2. `kind` が id と一致する `ai.providers.<alias>.api_key` — エイリアス名は任意で、
+   バックエンドの kind だけが資格情報 id を特定します
+   (例: `kind: "anthropic"` の `ai.providers.my-anthropic` は `anthropic` に供給)
 3. `{ID}_API_KEY` 環境変数 (例: `ANTHROPIC_API_KEY`)
 
 OAuth 形式の資格情報 (`google.calendar` のような `namespace.name` id) は

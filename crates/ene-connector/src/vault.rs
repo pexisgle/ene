@@ -15,8 +15,11 @@ const AUDIT_CAPACITY: usize = 1024;
 /// One credential held by the vault.
 #[derive(Debug, Clone)]
 pub struct VaultEntry {
-    /// Credential id as plugins request it (a plugin name such as `anthropic`
-    /// or a `namespace.name` connector id such as `google.calendar`).
+    /// Storage key as resolved by the plugin's credential declaration
+    /// (shared declarations key on the credential id, private ones on
+    /// `<plugin>:<id>`). The vault treats it as an opaque key: it is
+    /// produced by [`resolve_scope`](crate::declaration::resolve_scope) and
+    /// consumed verbatim by [`CredentialVault::resolve`].
     pub id: String,
     /// The stored credential.
     pub credential: CredentialStore,
@@ -126,14 +129,21 @@ pub trait TokenRefresher: Send + Sync {
 
 /// The host's in-memory credential vault.
 ///
-/// A snapshot built from configuration at startup: entries keyed by
-/// credential id plus each plugin's declared scope (provisionally the
-/// `x-ene-credentials` entry key). Persistence / keychain backing and live
+/// A snapshot built from configuration at startup: entries keyed by the
+/// storage key each plugin's declaration resolves to (see
+/// [`VaultEntry`]). Scope enforcement is **not** the vault's job — the
+/// credential passenger asks the declaration registry
+/// ([`resolve_scope`](crate::declaration::resolve_scope)) and only hands the
+/// vault the resolved storage key. Persistence / keychain backing and live
 /// updates land with the OAuth flow; until then a process restart re-reads
 /// configuration.
 pub struct CredentialVault {
     entries: RwLock<HashMap<String, CredentialStore>>,
-    declared: RwLock<HashMap<String, Vec<String>>>,
+    /// Storage key → non-secret setup guidance shown when the entry is
+    /// missing (which configuration path to fill in). Populated by the
+    /// runtime's config-driven vault builder; the vault only stores and
+    /// re-surfaces the text.
+    hints: RwLock<HashMap<String, String>>,
     refresher: Option<Arc<dyn TokenRefresher>>,
     audit: CredentialAuditLog,
 }
@@ -149,7 +159,7 @@ impl CredentialVault {
                     .map(|entry| (entry.id, entry.credential))
                     .collect(),
             ),
-            declared: RwLock::new(HashMap::new()),
+            hints: RwLock::new(HashMap::new()),
             refresher: None,
             audit: CredentialAuditLog::new(),
         }
@@ -162,38 +172,29 @@ impl CredentialVault {
         self
     }
 
-    /// Registers the set of credential ids a plugin is allowed to request.
+    /// Records non-secret setup guidance for `storage_key`, surfaced as the
+    /// missing-credential label so an operator knows which configuration
+    /// path to fill in.
+    pub fn set_hint(&self, storage_key: &str, hint: String) {
+        self.hints.write().insert(storage_key.to_string(), hint);
+    }
+
+    /// Resolves a credential by storage key, refreshing it when expired and a
+    /// refresher is installed, or failing with
+    /// [`ConnectorError::RefreshRequired`].
     ///
-    /// Callers derive `ids` from the plugin's declared scope; a plugin with
-    /// no declaration is allowed nothing (fail-closed).
-    pub fn declare(&self, plugin: &str, ids: Vec<String>) {
-        self.declared.write().insert(plugin.to_string(), ids);
-    }
-
-    /// All credential ids declared for `plugin` (empty when undeclared).
-    #[must_use]
-    pub fn declared_ids(&self, plugin: &str) -> Vec<String> {
-        self.declared
-            .read()
-            .get(plugin)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Returns `true` when `id` is inside `plugin`'s declared scope.
-    #[must_use]
-    pub fn is_allowed(&self, plugin: &str, id: &str) -> bool {
-        self.declared
-            .read()
-            .get(plugin)
-            .is_some_and(|ids| ids.iter().any(|candidate| candidate == id))
-    }
-
-    /// Resolves a credential, refreshing it when expired and a refresher is
-    /// installed, or failing with [`ConnectorError::RefreshRequired`].
-    pub fn resolve(&self, id: &str) -> Result<CredentialStore, ConnectorError> {
-        let Some(store) = self.entries.read().get(id).cloned() else {
-            return Err(ConnectorError::credential_missing(id, id, None));
+    /// `storage_key` is the key produced by the caller's scope resolution
+    /// ([`resolve_scope`](crate::declaration::resolve_scope)), not the id the
+    /// plugin asked for — the two differ for private declarations.
+    pub fn resolve(&self, storage_key: &str) -> Result<CredentialStore, ConnectorError> {
+        let Some(store) = self.entries.read().get(storage_key).cloned() else {
+            let label = self
+                .hints
+                .read()
+                .get(storage_key)
+                .cloned()
+                .unwrap_or_else(|| storage_key.to_string());
+            return Err(ConnectorError::credential_missing(storage_key, label, None));
         };
         if store.is_expired() {
             let Some(refresher) = &self.refresher else {
@@ -260,21 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn scope_matching_is_fail_closed() {
-        let vault = vault_with(&[("anthropic", "sk-test")]);
-        vault.declare("anthropic", vec!["anthropic".to_string()]);
-        assert!(vault.is_allowed("anthropic", "anthropic"));
-        assert!(!vault.is_allowed("anthropic", "google.calendar"));
-        // Undeclared plugin is allowed nothing.
-        assert!(!vault.is_allowed("fs", "anthropic"));
-        assert!(
-            vault
-                .declared_ids("anthropic")
-                .contains(&"anthropic".to_string())
-        );
-    }
-
-    #[test]
     fn invalidate_drops_entries() {
         let vault = vault_with(&[("anthropic", "sk-test")]);
         vault.invalidate(&["anthropic".to_string()]);
@@ -294,7 +280,6 @@ mod tests {
     #[test]
     fn audit_records_id_and_outcome_only() {
         let vault = vault_with(&[("anthropic", "sk-test")]);
-        vault.declare("anthropic", vec!["anthropic".to_string()]);
         vault.record_audit("anthropic", "anthropic", true);
         vault.record_audit("anthropic", "nope", false);
         let entries = vault.drain_audit();
@@ -312,5 +297,30 @@ mod tests {
             vault.record_audit("plugin", &format!("id-{i}"), true);
         }
         assert_eq!(vault.drain_audit().len(), AUDIT_CAPACITY);
+    }
+
+    #[test]
+    fn storage_key_is_opaque() {
+        // Private-declaration storage keys are `<plugin>:<id>` and must be
+        // addressable verbatim: the vault never splits or re-derives them.
+        let vault = vault_with(&[("my-plugin:anthropic", "sk-test")]);
+        let store = vault.resolve("my-plugin:anthropic").unwrap();
+        assert_eq!(store.api_key(), Some("sk-test"));
+    }
+
+    #[test]
+    fn missing_credential_surfaces_setup_hint() {
+        let vault = vault_with(&[("anthropic", "sk-test")]);
+        vault.set_hint(
+            "anthropic",
+            "set ai.providers.myanth.api_key (kind: anthropic)".to_string(),
+        );
+        let err = vault.resolve("anthropic").unwrap_err();
+        match err {
+            ConnectorError::CredentialMissing { label, .. } => {
+                assert!(label.contains("ai.providers.myanth.api_key"));
+            }
+            other => panic!("expected missing, got {other:?}"),
+        }
     }
 }

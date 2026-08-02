@@ -579,12 +579,13 @@ construction.
 ### Scope enforcement (server-side)
 
 Every credential id a plugin may request is a declared-scope decision. The
-plugin lists them under the provisional `plugins.list.<name>.x-ene-credentials`
-entry key (an array of ids, e.g. `["anthropic"]`); a malformed or absent
-declaration fails closed to nothing allowed. The host matches each requested
-id against that declaration **server-side** — the client is never trusted —
-and denies undeclared ids with `ScopeDenied` while recording the denial in
-the audit trail (plugin, id, outcome only; never the secret).
+plugin lists them in the `x-ene-credentials` block of its `config_schema()`
+(see §8, "Credential declaration (`x-ene-credentials`)"); a plugin with no
+declaration is allowed nothing (fail-closed). The host matches each requested
+id against the plugin's registered declarations **server-side** — the client
+is never trusted — and denies undeclared ids with `ScopeDenied` while
+recording the outcome in the audit trail (plugin, id, outcome only; never
+the secret).
 
 ### Resolution order
 
@@ -592,7 +593,10 @@ For a credential id that names a plugin (e.g. `anthropic`), the host's vault
 resolves the key in this order:
 
 1. `plugins.list.<id>.config.api_key` (plain string or `{"source": ...}`)
-2. `ai.providers.<id>.api_key` (typed `ApiKeyConfig`)
+2. `ai.providers.<alias>.api_key` where `<alias>`'s `kind` equals the id —
+   the alias name is arbitrary, only the backend kind identifies the
+   credential (e.g. `ai.providers.my-anthropic` with `kind: "anthropic"`
+   feeds `anthropic`)
 3. The `{ID}_API_KEY` environment variable (e.g. `ANTHROPIC_API_KEY`)
 
 OAuth-style credentials (`namespace.name` ids such as `google.calendar`)

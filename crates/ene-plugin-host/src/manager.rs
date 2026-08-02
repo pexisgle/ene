@@ -616,8 +616,9 @@ pub struct PluginHostManager {
     /// Credential declarations parsed from each plugin's `x-ene-credentials`
     /// schema block at startup. Populated by [`start`](Self::start) alongside
     /// connection registration; consumed by the credential service for
-    /// request-time scope enforcement.
-    credential_registry: CredentialRegistry,
+    /// request-time scope enforcement. Shared (`Arc`) with the host-service
+    /// `credential` passenger, which is built before the manager starts.
+    credential_registry: Arc<CredentialRegistry>,
     /// One supervisor task per supervised plugin. Each task independently
     /// pings and restarts only its own plugin, so one plugin's restart
     /// backoff or reconnect can never stall monitoring of the others.
@@ -661,6 +662,11 @@ impl PluginHostManager {
     /// pre-shared credential-service auth tokens, delivered the same way
     /// (`SandboxConfigData::credential_auth_token`).
     ///
+    /// `credential_registry` is shared with the host-service `credential`
+    /// passenger: the manager populates it from each plugin's
+    /// `config_schema()` here, and the passenger resolves request-time scope
+    /// against the same data.
+    ///
     /// Respects the `plugins` config section: when `plugins.enabled` is
     /// `false`, no plugins are started. Individual plugins can be disabled
     /// via `plugins.list.<name>.enable = false`.
@@ -668,6 +674,7 @@ impl PluginHostManager {
         config: &EneConfig,
         db_tokens: HashMap<String, String>,
         credential_tokens: HashMap<String, String>,
+        credential_registry: Arc<CredentialRegistry>,
     ) -> Result<Self, PluginHostError> {
         let plugin_config = config
             .get_section::<crate::config::PluginConfig>()
@@ -685,7 +692,7 @@ impl PluginHostManager {
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
-                credential_registry: CredentialRegistry::new(),
+                credential_registry,
                 health_tasks: Vec::new(),
                 health_rx: None,
                 shutdown_on_drop: true,
@@ -1209,30 +1216,33 @@ impl PluginHostManager {
         };
 
         let mut sandbox = ene_plugin_proto::SandboxConfigData::default();
+        // The shared endpoint is served to every plugin that carries any
+        // host-service token (db or credential), so the socket path is set
+        // unconditionally; each service token then gates that service only.
+        let host_socket = {
+            #[cfg(unix)]
+            {
+                ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+            }
+            #[cfg(windows)]
+            {
+                PathBuf::from(r"\\.\pipe\ene-host-service")
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
+            }
+        };
+        let host_socket = host_socket.to_string_lossy().to_string();
+        sandbox.host_service_socket = Some(host_socket.clone());
+        // Compatibility alias: plugins that only read `db_socket` still
+        // reach the shared host-service endpoint.
+        sandbox.db_socket = Some(host_socket);
         if let Some(token) = &credential_token {
             sandbox.credential_auth_token = Some(token.clone());
         }
         if let Some(token) = &db_token {
             sandbox.db_auth_token = Some(token.clone());
-            let host_socket = {
-                #[cfg(unix)]
-                {
-                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
-                }
-                #[cfg(windows)]
-                {
-                    PathBuf::from(r"\\.\pipe\ene-host-service")
-                }
-                #[cfg(not(any(unix, windows)))]
-                {
-                    ene_config::paths::tool_socket_dir().join("ene-host-service.sock")
-                }
-            };
-            let host_socket = host_socket.to_string_lossy().to_string();
-            sandbox.host_service_socket = Some(host_socket.clone());
-            // Compatibility alias: plugins that only read `db_socket` still
-            // reach the shared host-service endpoint.
-            sandbox.db_socket = Some(host_socket);
         }
 
         let mut child = build_plugin_command(&binary_path, &socket_path, &env_passthrough)

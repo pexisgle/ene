@@ -19,8 +19,8 @@
 //! - [`CredentialId`] — stable identifier for a stored credential (no
 //!   namespace required).
 //! - [`CredentialVault`] — the host's in-memory credential snapshot, built
-//!   from configuration at startup, with server-side declared-scope matching
-//!   and a bounded audit trail.
+//!   from configuration at startup and keyed by declaration-resolved storage
+//!   keys, with a bounded audit trail.
 //! - [`PermissionScope`] — an OAuth scope requested by a connector.
 //! - [`ConnectorIdentity`] — display metadata for configuration UIs.
 //! - [`CredentialDeclaration`] / [`resolve_scope`] — parsing of a plugin's
