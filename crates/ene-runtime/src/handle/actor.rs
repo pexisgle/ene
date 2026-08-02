@@ -3245,6 +3245,14 @@ fn plugin_health_event_to_diag(event: PluginHealthEvent) -> DiagnosticEvent {
             };
             (plugin, "disabled", Some(detail.to_string()))
         }
+        PluginHealthEvent::RequirementsUnmet { plugin, unmet } => (
+            plugin,
+            "requirements_unmet",
+            Some(format!(
+                "required capabilities not provided: {}",
+                unmet.join(", ")
+            )),
+        ),
     };
     DiagnosticEvent::ToolHealth {
         tool,
