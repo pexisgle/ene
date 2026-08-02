@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 ene-plugin = { workspace = true }
-ene-plugin-proto = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

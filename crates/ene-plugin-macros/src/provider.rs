@@ -159,20 +159,20 @@ fn parse_u32(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<u32> {
 /// field the author did not set explicitly.
 fn concurrency_expr(max_in_flight: Option<u32>, queue_depth: Option<u32>) -> TokenStream2 {
     match (max_in_flight, queue_depth) {
-        (None, None) => quote! { ::ene_plugin_proto::ConcurrencyHint::default() },
+        (None, None) => quote! { ::ene_plugin::ConcurrencyHint::default() },
         (max, queue) => {
             let max_in_flight = if let Some(n) = max {
                 quote! { #n }
             } else {
-                quote! { ::ene_plugin_proto::ConcurrencyHint::default().max_in_flight }
+                quote! { ::ene_plugin::ConcurrencyHint::default().max_in_flight }
             };
             let queue_depth = if let Some(n) = queue {
                 quote! { #n }
             } else {
-                quote! { ::ene_plugin_proto::ConcurrencyHint::default().queue_depth }
+                quote! { ::ene_plugin::ConcurrencyHint::default().queue_depth }
             };
             quote! {
-                ::ene_plugin_proto::ConcurrencyHint {
+                ::ene_plugin::ConcurrencyHint {
                     max_in_flight: #max_in_flight,
                     queue_depth: #queue_depth,
                 }
@@ -209,8 +209,8 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
                 quote! { ::std::option::Option::None }
             };
             quote! {
-                pub fn #spec_method() -> ::ene_plugin_proto::LlmProviderSpec {
-                    ::ene_plugin_proto::LlmProviderSpec {
+                pub fn #spec_method() -> ::ene_plugin::LlmProviderSpec {
+                    ::ene_plugin::LlmProviderSpec {
                         kind: #kind_str.to_string(),
                         supported_models: ::std::vec![#(#models.to_string()),*],
                         supports_streaming: #streaming,
@@ -226,8 +226,8 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
             let formats = attrs.formats.iter().map(String::as_str);
             let concurrency = concurrency_expr(attrs.max_in_flight, attrs.queue_depth);
             quote! {
-                pub fn #spec_method() -> ::ene_plugin_proto::TtsProviderSpec {
-                    ::ene_plugin_proto::TtsProviderSpec {
+                pub fn #spec_method() -> ::ene_plugin::TtsProviderSpec {
+                    ::ene_plugin::TtsProviderSpec {
                         kind: #kind_str.to_string(),
                         voices: ::std::vec![#(#voices.to_string()),*],
                         formats: ::std::vec![#(#formats.to_string()),*],
@@ -241,8 +241,8 @@ fn expand_plugin_derive(ast: &DeriveInput, kind: ProviderKind) -> syn::Result<To
             let formats = attrs.formats.iter().map(String::as_str);
             let concurrency = concurrency_expr(attrs.max_in_flight, attrs.queue_depth);
             quote! {
-                pub fn #spec_method() -> ::ene_plugin_proto::SttProviderSpec {
-                    ::ene_plugin_proto::SttProviderSpec {
+                pub fn #spec_method() -> ::ene_plugin::SttProviderSpec {
+                    ::ene_plugin::SttProviderSpec {
                         kind: #kind_str.to_string(),
                         models: ::std::vec![#(#models.to_string()),*],
                         formats: ::std::vec![#(#formats.to_string()),*],
