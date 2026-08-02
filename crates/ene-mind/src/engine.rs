@@ -147,10 +147,20 @@ impl CognitionEngine {
                 .filter(|entry| entry.role == ene_ai::Role::User)
                 .count();
 
+            // `get_ene_extension` clones the extension; same per-turn cost as
+            // the existing `expressions` flow.
+            let affect_baseline = ctx
+                .card
+                .data
+                .get_ene_extension()
+                .and_then(|ext| ext.affect_baseline)
+                .unwrap_or_default();
+
             let mut turn_input = TurnAffectInput {
                 state: &mut affect,
                 elapsed_since_update: elapsed,
                 recent_turn_count,
+                baseline: affect_baseline,
                 classifier_proposal: None,
                 classifier_min_confidence: ctx.config.emotion.classifier_min_confidence,
             };

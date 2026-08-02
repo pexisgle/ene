@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use ene_config::AffectBaseline;
 use ene_mind::{AffectProposal, EmotionConfig, EmotionEngine, TurnAffectInput};
 use ene_store::AffectState;
 
@@ -15,6 +16,7 @@ fn turn_without_classifier_leaves_affect_unchanged() {
         state: &mut state,
         elapsed_since_update: Duration::ZERO,
         recent_turn_count: 2,
+        baseline: AffectBaseline::default(),
         classifier_proposal: None,
         classifier_min_confidence: 0.5,
     };
@@ -41,11 +43,34 @@ fn decay_reduces_valence_over_time() {
         state: &mut state,
         elapsed_since_update: Duration::from_mins(30),
         recent_turn_count: 1,
+        baseline: AffectBaseline::default(),
         classifier_proposal: None,
         classifier_min_confidence: 0.5,
     };
     engine.update_turn(&config, &mut input);
     assert!(state.valence < 0.8);
+}
+
+#[test]
+fn decay_converges_toward_card_baseline() {
+    let config = EmotionConfig::default();
+    let engine = EmotionEngine;
+    let mut state = AffectState::neutral("ene");
+    state.valence = 0.8;
+
+    let mut input = TurnAffectInput {
+        state: &mut state,
+        elapsed_since_update: Duration::from_hours(24),
+        recent_turn_count: 1,
+        baseline: AffectBaseline {
+            valence: 0.3,
+            ..AffectBaseline::default()
+        },
+        classifier_proposal: None,
+        classifier_min_confidence: 0.5,
+    };
+    engine.update_turn(&config, &mut input);
+    assert!((state.valence - 0.3).abs() < 0.01, "drifts to baseline");
 }
 
 #[test]
@@ -70,6 +95,7 @@ fn classifier_proposal_merged_when_confident() {
         state: &mut state,
         elapsed_since_update: Duration::ZERO,
         recent_turn_count: 1,
+        baseline: AffectBaseline::default(),
         classifier_proposal: Some(proposal),
         classifier_min_confidence: 0.5,
     };
@@ -100,6 +126,7 @@ fn low_confidence_classifier_ignored() {
         state: &mut state,
         elapsed_since_update: Duration::ZERO,
         recent_turn_count: 1,
+        baseline: AffectBaseline::default(),
         classifier_proposal: Some(proposal),
         classifier_min_confidence: 0.5,
     };
@@ -118,6 +145,7 @@ fn fatigue_triggers_at_sixteen_user_turns_not_messages() {
         state: &mut state,
         elapsed_since_update: Duration::ZERO,
         recent_turn_count: 16,
+        baseline: AffectBaseline::default(),
         classifier_proposal: None,
         classifier_min_confidence: 0.5,
     };
@@ -130,6 +158,7 @@ fn fatigue_triggers_at_sixteen_user_turns_not_messages() {
         state: &mut state2,
         elapsed_since_update: Duration::ZERO,
         recent_turn_count: 15,
+        baseline: AffectBaseline::default(),
         classifier_proposal: None,
         classifier_min_confidence: 0.5,
     };

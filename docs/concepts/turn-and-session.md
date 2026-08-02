@@ -247,7 +247,7 @@ Ene models character emotional state using a PAD-derived (**Pleasure-Arousal-Dom
 - Plus trust, affinity, irritation, curiosity, and fatigue dimensions that extend beyond the classic 3-axis PAD model — see `ene_core::AffectState` (`cargo doc -p ene-core --open`) for the full field list.
 
 ### Emotional Dynamics
-- **Natural Decay**: Affect values drift toward baseline over time.
+- **Natural Decay**: Affect values drift toward baseline over time. The baseline is per-character and defined in the card under `extensions.ene.affect_baseline` (all eight dimensions); cards without it decay toward all zeros, which is the legacy behaviour.
 - **Pre-utterance affect in the prompt**: At turn start, `EmotionEngine` applies decay, optional long-conversation fatigue, and any pending classifier proposal from the *previous* turn. The `CharacterState` section documents that this mood does **not** yet reflect the current user utterance — immediate reaction is left to the chat model’s reply.
 - **Post-turn classification**: After the assistant responds, the affect classifier sees both the user utterance and the reply, then parks a proposal for the next turn. There is no deterministic keyword appraisal layer.
 - **Performance Cues**: End-of-turn expression comes from a single
