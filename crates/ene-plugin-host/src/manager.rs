@@ -21,6 +21,7 @@ use tokio::sync::{Mutex, mpsc};
 use sha2::Digest;
 
 use crate::circuit_breaker::CircuitBreaker;
+use crate::credential_registry::CredentialRegistry;
 use crate::error::PluginHostError;
 use crate::factory::IpcLlmProviderFactory;
 use crate::health::PluginHealthEvent;
@@ -28,6 +29,8 @@ use crate::ipc_plugin::IpcPluginConnection;
 use crate::mcp_config::McpTransport;
 use crate::mcp_registry::{McpToolRegistry, redacted_endpoint};
 use crate::tool_registry::{DeferredCallResult, ToolRegistry};
+use ene_connector::declaration::{CredentialDeclaration, ScopeDecision};
+use ene_connector::identity::CredentialId;
 
 /// Maximum restarts allowed inside [`RESTART_WINDOW`] before a plugin is disabled.
 const MAX_RESTARTS: usize = 5;
@@ -610,6 +613,11 @@ pub struct PluginHostManager {
     tool_registries: Vec<Arc<dyn ToolRegistry>>,
     llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>>,
     llm_factory_plugins: HashMap<String, String>,
+    /// Credential declarations parsed from each plugin's `x-ene-credentials`
+    /// schema block at startup. Populated by [`start`](Self::start) alongside
+    /// connection registration; consumed by the credential service for
+    /// request-time scope enforcement.
+    credential_registry: CredentialRegistry,
     /// One supervisor task per supervised plugin. Each task independently
     /// pings and restarts only its own plugin, so one plugin's restart
     /// backoff or reconnect can never stall monitoring of the others.
@@ -674,6 +682,7 @@ impl PluginHostManager {
                 tool_registries: Vec::new(),
                 llm_factories: HashMap::new(),
                 llm_factory_plugins: HashMap::new(),
+                credential_registry: CredentialRegistry::new(),
                 health_tasks: Vec::new(),
                 health_rx: None,
                 shutdown_on_drop: true,
@@ -689,6 +698,7 @@ impl PluginHostManager {
         let mut llm_factories: HashMap<String, Arc<dyn ene_ai::LlmProviderFactory>> =
             HashMap::new();
         let mut llm_factory_plugins: HashMap<String, String> = HashMap::new();
+        let credential_registry = CredentialRegistry::new();
 
         std::fs::create_dir_all(ene_config::plugin_socket_dir()).map_err(|e| {
             PluginHostError::ExecutionFailed {
@@ -759,10 +769,27 @@ impl PluginHostManager {
                     // secret key name (`x-ene-secret: true`) is only caught by
                     // the schema-aware pass — and fall back to the
                     // schema-independent redaction otherwise.
+                    //
+                    // The schema is fetched exactly once and also feeds the
+                    // credential declaration registration below, so a single
+                    // IPC round-trip serves both.
+                    let schema = match conn.config_schema().await {
+                        Ok(schema) => schema,
+                        Err(e) => {
+                            tracing::warn!(
+                                component = "PluginHostManager",
+                                plugin = %name,
+                                error = %e,
+                                "Failed to fetch config schema"
+                            );
+                            None
+                        }
+                    };
+
                     if let Some(config) = &entry_config {
-                        let redacted = match conn.config_schema().await {
-                            Ok(Some(schema)) => crate::redact::redact_config(config, Some(&schema)),
-                            Ok(None) | Err(_) => crate::redact::redact_config_unschematized(config),
+                        let redacted = match &schema {
+                            Some(schema) => crate::redact::redact_config(config, Some(schema)),
+                            None => crate::redact::redact_config_unschematized(config),
                         };
                         tracing::debug!(
                             component = "PluginHostManager",
@@ -771,6 +798,12 @@ impl PluginHostManager {
                             "Starting plugin with configuration"
                         );
                     }
+
+                    // Register credential declarations parsed from the schema.
+                    // Invalid entries are warned about and dropped here; the
+                    // plugin itself always keeps running (a bad declaration
+                    // only loses that declaration).
+                    credential_registry.register_from_schema(name, schema.as_ref());
 
                     let caps = conn.capabilities();
 
@@ -982,6 +1015,7 @@ impl PluginHostManager {
             tool_registries,
             llm_factories,
             llm_factory_plugins,
+            credential_registry,
             health_tasks,
             health_rx: Some(health_rx),
             shutdown_on_drop: true,
@@ -1024,6 +1058,22 @@ impl PluginHostManager {
     /// calls.
     pub fn take_health_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<PluginHealthEvent>> {
         self.health_rx.take()
+    }
+
+    /// Returns the credential declarations registered for `plugin`.
+    ///
+    /// Empty when the plugin declared none or its schema could not be
+    /// fetched at startup.
+    #[must_use]
+    pub fn credential_declarations(&self, plugin: &str) -> Vec<CredentialDeclaration> {
+        self.credential_registry.declarations(plugin)
+    }
+
+    /// Resolves whether `plugin` may access credential `id`, per the
+    /// declarations registered at startup.
+    #[must_use]
+    pub fn resolve_credential_scope(&self, plugin: &str, id: &CredentialId) -> ScopeDecision {
+        self.credential_registry.resolve_scope(plugin, id)
     }
 
     /// Controls whether Drop attempts best-effort shutdown.
