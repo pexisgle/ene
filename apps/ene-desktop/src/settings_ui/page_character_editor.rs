@@ -169,21 +169,20 @@ pub fn render(
                     "character-editor-save"
                 ))
                 .clicked()
+                && let Some(path) = resolve_card_path(settings)
             {
-                if let Some(path) = resolve_card_path(settings) {
-                    apply_action(
-                        SettingsAction::SaveCharacterCard {
-                            path: path.to_string_lossy().to_string(),
-                        },
-                        settings,
-                        &mut crate::character_state::AnimationControl::new(),
-                        ai,
-                        world,
-                        ui_entity,
-                        None,
-                        0.0,
-                    );
-                }
+                apply_action(
+                    SettingsAction::SaveCharacterCard {
+                        path: path.to_string_lossy().to_string(),
+                    },
+                    settings,
+                    &mut crate::character_state::AnimationControl::new(),
+                    ai,
+                    world,
+                    ui_entity,
+                    None,
+                    0.0,
+                );
             }
 
             if ui
