@@ -3,6 +3,7 @@
 //! Allows viewing and editing the local `character.json` (`CCv3` format)
 //! in a dedicated settings tab. Supports validate, save, and reload.
 
+use super::WARNING_COLOR;
 use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;
 use crate::component::ui::UiStateComponent;
@@ -19,7 +20,14 @@ pub fn render(
     world: &mut World,
     ui_entity: Entity,
 ) {
-    let card_path = resolve_card_path(settings);
+    let Some(card_rel) = settings.current_character_card() else {
+        ui.colored_label(
+            WARNING_COLOR,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-none-selected"),
+        );
+        return;
+    };
+    let card_path = settings.assets_dir.join(card_rel);
 
     // ── Auto-load on first render ──
     let needs_load = world
@@ -162,8 +170,8 @@ pub fn render(
                     "character-editor-save"
                 ))
                 .clicked()
+                && let Some(path) = resolve_card_path(settings)
             {
-                let path = resolve_card_path(settings);
                 apply_action(
                     SettingsAction::SaveCharacterCard {
                         path: path.to_string_lossy().to_string(),
@@ -196,9 +204,10 @@ pub fn render(
 }
 
 /// Resolve the full on-disk path to the current character's `character.json`.
-fn resolve_card_path(settings: &CharacterSettings) -> PathBuf {
-    let rel = settings.current_entry().card_path.as_str();
-    settings.assets_dir.join(rel)
+fn resolve_card_path(settings: &CharacterSettings) -> Option<PathBuf> {
+    settings
+        .current_character_card()
+        .map(|rel| settings.assets_dir.join(rel))
 }
 
 /// Render a single-line text field bound to a `String` field on [`UiState`].

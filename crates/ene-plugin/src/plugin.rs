@@ -12,8 +12,9 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use ene_plugin_proto::{
-    CallContext, DeferredOutcome, DeferredStatus, LlmProviderSpec, PluginError, SandboxConfigData,
-    SttProviderSpec, TokenUsage, ToolError, ToolResult, ToolSpec, TtsProviderSpec,
+    CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, LlmProviderSpec,
+    PluginError, SandboxConfigData, SttProviderSpec, TokenUsage, ToolError, ToolResult, ToolSpec,
+    TtsProviderSpec,
 };
 use tokio_stream::Stream;
 
@@ -89,21 +90,83 @@ pub struct ToolPluginCapabilities {
 /// `x-ene-secret: true` are treated as secrets by the host (masked in logs,
 /// redacted at the host boundary).
 ///
+/// Dynamic config (protocol v5+) is opt-in: override the `supports_*` flags
+/// and the corresponding handlers. Defaults keep older plugins on the static
+/// schema path (host JSON Schema validation, no migration).
+///
 /// Every method has a default no-op implementation so a plugin opts into
 /// exactly the configuration support it needs.
 pub trait ConfigurablePlugin: Send + Sync {
     /// Receives plugin-specific configuration (called once during Handshake).
     fn set_config(&self, _config: &serde_json::Value) {}
 
-    /// Receives per-profile plugin configuration (called once during Handshake
-    /// when `plugins.list.<name>.profiles` is configured).
+    /// Receives per-profile plugin configuration (Handshake when
+    /// `plugins.list.<name>.profiles` is set, and live `SetConfig`).
     ///
     /// The value is the raw `profiles` JSON object (`Map<profile, config>`);
-    /// profile selection is plugin-owned.
+    /// profile selection is plugin-owned. On live `SetConfig`, an empty object
+    /// means profiles were cleared and must replace any previously stored map.
     fn set_profiles(&self, _profiles: &serde_json::Value) {}
 
     /// Returns the JSON Schema for the configuration this plugin accepts.
+    ///
+    /// Safe to call repeatedly — the host may re-fetch after a
+    /// [`ConfigSchemaChanged`](ene_plugin_proto::PluginIpcResponse::ConfigSchemaChanged)
+    /// push or whenever the UI needs a fresh schema.
     fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Current config schema version this plugin expects (`0` = unversioned).
+    fn config_version(&self) -> u32 {
+        0
+    }
+
+    /// Advertise support for [`list_config_options`](Self::list_config_options).
+    fn supports_list_config_options(&self) -> bool {
+        false
+    }
+
+    /// Advertise support for [`validate_config`](Self::validate_config).
+    fn supports_validate_config(&self) -> bool {
+        false
+    }
+
+    /// Advertise support for [`migrate_config`](Self::migrate_config).
+    fn supports_migrate_config(&self) -> bool {
+        false
+    }
+
+    /// List dynamic options for a config path (e.g. `"voice"`).
+    fn list_config_options(&self, _path: &str) -> Vec<ConfigOption> {
+        Vec::new()
+    }
+
+    /// Validate a candidate config value; return field-level errors (empty = ok).
+    fn validate_config(&self, _value: &serde_json::Value) -> Vec<ConfigFieldError> {
+        Vec::new()
+    }
+
+    /// Migrate a stored config blob from `from_version` to the current version.
+    ///
+    /// Returns the migrated value. The server pairs it with
+    /// [`config_version`](Self::config_version) in the IPC response.
+    fn migrate_config(
+        &self,
+        _from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        Ok(value)
+    }
+
+    /// Drain a pending schema-change notification for the host push path.
+    ///
+    /// Return `Some(schema)` once when the runtime schema has changed (e.g.
+    /// after connecting to an external engine). The server pushes
+    /// [`ConfigSchemaChanged`](ene_plugin_proto::PluginIpcResponse::ConfigSchemaChanged)
+    /// and clears the pending state — subsequent drains return `None` until
+    /// the next change.
+    fn drain_config_schema_change(&self) -> Option<serde_json::Value> {
         None
     }
 }

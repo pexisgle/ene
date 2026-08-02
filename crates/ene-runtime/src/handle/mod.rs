@@ -168,6 +168,7 @@ struct HandleShutdownGuard {
     actor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     plugin_host: Arc<tokio::sync::Mutex<Option<ene_plugin_host::PluginHostManager>>>,
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl Drop for HandleShutdownGuard {
@@ -188,6 +189,7 @@ impl Drop for HandleShutdownGuard {
         // as a synchronous backstop regardless.
         let plugin_host = Arc::clone(&self.plugin_host);
         let health_bridge_handle = Arc::clone(&self.health_bridge_handle);
+        let host_service_handle = Arc::clone(&self.host_service_handle);
         let shutdown = async move {
             let mut guard = plugin_host.lock().await;
             if let Some(mut host) = guard.take() {
@@ -199,6 +201,13 @@ impl Drop for HandleShutdownGuard {
             // outlive the host whose events it forwards.
             let mut bridge = health_bridge_handle.lock().await;
             if let Some(handle) = bridge.take() {
+                handle.abort();
+            }
+
+            // Abort the host-service accept loop so it does not outlive the
+            // process that owns its socket.
+            let mut acceptor = host_service_handle.lock().await;
+            if let Some(handle) = acceptor.take() {
                 handle.abort();
             }
         };
@@ -335,6 +344,11 @@ pub struct EneHandle {
     /// Shared across handle clones. Aborted during plugin host shutdown so
     /// the bridge does not outlive the host whose events it forwards.
     health_bridge_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Join handle for the host-service accept loop.
+    ///
+    /// Shared across handle clones. Aborted during shutdown so the accept
+    /// loop does not outlive the process that owns its socket.
+    host_service_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Read-only session query handle, bypasses the actor mailbox.
     sessions: crate::query::sessions::SessionQueryHandle,
     /// Pending memory-candidate approval handle, bypasses the actor mailbox.
@@ -383,6 +397,7 @@ impl Clone for EneHandle {
             actor_handle: Arc::clone(&self.actor_handle),
             plugin_host: Arc::clone(&self.plugin_host),
             health_bridge_handle: Arc::clone(&self.health_bridge_handle),
+            host_service_handle: Arc::clone(&self.host_service_handle),
             sessions: self.sessions.clone(),
             candidates: self.candidates.clone(),
             vision: self.vision.clone(),
@@ -446,6 +461,10 @@ impl EneHandle {
         ene_voice::register_providers();
 
         let mind = config.get_section::<ene_mind::MindConfig>()?;
+
+        // Startup validation: warn on mind-config timing relationships that
+        // are accepted but cannot fire sooner than the next poll tick.
+        ene_mind::warn_on_proactive_interval_issues(&mind.proactive);
 
         // Startup validation: warn when a configured context window is
         // too small for the prompt budget plus output reserve, since prompt
@@ -514,7 +533,8 @@ impl EneHandle {
             None
         };
 
-        let db_tokens = actor::spawn_db_ipc_servers(&config, memory_store.as_ref())?;
+        let (db_tokens, host_service_handle) =
+            actor::spawn_db_ipc_servers(&config, memory_store.as_ref())?;
 
         // Start the plugin host (discovers and launches v3 plugin binaries).
         // Non-fatal: on failure we log and continue with no plugin-provided
@@ -673,6 +693,7 @@ impl EneHandle {
         // (for shutdown) and the actor (for Features-update reconfiguration).
         let plugin_host = Arc::new(tokio::sync::Mutex::new(plugin_host));
         let health_bridge_handle = Arc::new(tokio::sync::Mutex::new(health_bridge_handle));
+        let host_service_handle = Arc::new(tokio::sync::Mutex::new(host_service_handle));
 
         // Mailbox-free shared actor state: card name (shared with
         // `MemoryCandidateHandle` so pending-candidate queries
@@ -708,6 +729,7 @@ impl EneHandle {
             plugin_tool_registries,
             Arc::clone(&plugin_host),
             Arc::clone(&health_bridge_handle),
+            Arc::clone(&host_service_handle),
             Arc::clone(&shared),
         );
         let join = tokio::spawn(actor.run());
@@ -718,6 +740,7 @@ impl EneHandle {
             actor_handle: Arc::clone(&actor_handle),
             plugin_host: Arc::clone(&plugin_host),
             health_bridge_handle: Arc::clone(&health_bridge_handle),
+            host_service_handle: Arc::clone(&host_service_handle),
         });
 
         Ok(Self {
@@ -733,6 +756,7 @@ impl EneHandle {
             actor_handle,
             plugin_host,
             health_bridge_handle,
+            host_service_handle,
             sessions,
             candidates,
             vision,
@@ -1074,6 +1098,11 @@ impl EneHandle {
 
         let mut bridge = self.health_bridge_handle.lock().await;
         if let Some(handle) = bridge.take() {
+            handle.abort();
+        }
+
+        let mut acceptor = self.host_service_handle.lock().await;
+        if let Some(handle) = acceptor.take() {
             handle.abort();
         }
     }
@@ -1969,6 +1998,7 @@ mod tests {
             health_monitor,
             None,
             Vec::new(),
+            Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::new(tokio::sync::Mutex::new(None)),
             Arc::clone(&shared),

@@ -8,8 +8,9 @@
 //! - **Vector similarity search**: Cosine-similarity-based recall of semantically relevant memories
 //! - **Tool RAG**: Embedding-based tool selection (stored in `tool_embedding_index` table, multi-vector per tool)
 //! - **Conversation logging**: Full conversation history in `conversation_logs` for audit and replay
-//! - **Tool DB IPC server**: Per-tool database access over Unix sockets / named pipes
-//!   (`db_server` module), enforcing schema declarations and prefix-based table isolation
+//! - **Host service (`db`)**: Shared host-service socket with a `db` passenger
+//!   (`host_service` + `db_server`), enforcing schema declarations and
+//!   prefix-based table isolation
 //!
 //! ## Crate Boundaries
 //!
@@ -20,7 +21,8 @@
 //!   for the entire workspace. No other crate (`ene-mind`, `ene-runtime`, tool
 //!   binaries) opens its own database connection or issues raw SQL against
 //!   `memory.db`; they call into `MemoryStore` (or, for plugin binaries, the IPC-based
-//!   `ene-plugin-db` client backed by `ene-store`'s `db_server`) instead.
+//!   `ene-plugin-db` client backed by `ene-store`'s host-service `db`
+//!   passenger) instead.
 //! - Depends on: `ene-config`, `ene-core`. The store has no LLM, embedding
 //!   provider, or prompt-assembly dependency; callers supply vectors and the mind
 //!   runtime owns summarization and prompt formatting.
@@ -73,7 +75,7 @@ pub mod backup;
 pub mod commitment;
 /// Store configuration types.
 pub mod config;
-/// Per-tool DB IPC server (Unix socket / named pipe).
+/// Per-tool DB IPC request handler (also used standalone in tests).
 #[cfg(any(unix, windows))]
 pub mod db_server;
 /// `SeaORM` entities representation.
@@ -84,6 +86,9 @@ pub mod error;
 pub mod export;
 /// Memory forgetting lifecycle (decay score and status transitions).
 pub(crate) mod forgetting;
+/// Multiplexed host-service acceptor (`db` passenger today).
+#[cfg(any(unix, windows))]
+pub mod host_service;
 /// `SeaORM` schema migrations.
 pub mod migrator;
 /// `impl MemoryPort for MemoryStore`.

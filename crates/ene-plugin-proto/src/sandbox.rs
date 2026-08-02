@@ -53,13 +53,19 @@ pub struct SandboxConfigData {
     pub max_shell_output_bytes: usize,
     /// Maximum lines in shell output.
     pub max_shell_output_lines: usize,
-    /// Path to the per-plugin DB socket. Plugin binaries connect to this
-    /// Unix socket to access the core DB server for typed CRUD operations.
+    /// Path to the shared host-service socket. Plugin binaries open this
+    /// socket and select a passenger service (currently `db`) with
+    /// [`crate::HostServiceRequest::Open`].
+    #[serde(default)]
+    pub host_service_socket: Option<String>,
+    /// Path to the DB socket. Kept for compatibility with plugins that
+    /// only read this field; the host sets it to the same path as
+    /// [`Self::host_service_socket`].
     pub db_socket: Option<String>,
-    /// Pre-shared auth token for the per-plugin DB IPC server. The
-    /// plugin binary must present this token in a [`ene_plugin_db::DbRequest::Handshake`]
-    /// before any other request. `None` disables DB access for
-    /// this plugin.
+    /// Pre-shared auth token for the host-service `db` passenger. The
+    /// plugin binary must present this token in
+    /// [`crate::HostServiceRequest::Open`] before any DB request. `None`
+    /// disables DB access for this plugin.
     pub db_auth_token: Option<String>,
 }
 
@@ -75,6 +81,7 @@ impl Default for SandboxConfigData {
             shell_timeout_ms: default_shell_timeout_ms(),
             max_shell_output_bytes: default_max_shell_output_bytes(),
             max_shell_output_lines: default_max_shell_output_lines(),
+            host_service_socket: None,
             db_socket: None,
             db_auth_token: None,
         }
@@ -134,7 +141,8 @@ mod tests {
             shell_timeout_ms: 30_000,
             max_shell_output_bytes: 1_000_000,
             max_shell_output_lines: 5000,
-            db_socket: Some("/tmp/db.sock".into()),
+            host_service_socket: Some("/tmp/ene-host-service.sock".into()),
+            db_socket: Some("/tmp/ene-host-service.sock".into()),
             db_auth_token: Some("ene-db-deadbeef".into()),
         };
         let json = serde_json::to_string(&config).unwrap();

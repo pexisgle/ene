@@ -556,14 +556,6 @@ pub struct EmotionConfig {
     )]
     #[schemars(skip)]
     pub llm_can_propose_expression: bool,
-    /// Treat LLM expression proposals as advisory only (not commands).
-    #[serde(
-        skip_deserializing,
-        default = "default_llm_expression_is_advisory",
-        skip_serializing
-    )]
-    #[schemars(skip)]
-    pub llm_expression_is_advisory: bool,
     /// Timeout in seconds for a single LLM affect-classifier call.
     #[serde(
         skip_deserializing,
@@ -591,7 +583,6 @@ impl Default for EmotionConfig {
             decay_half_life_minutes: 30.0,
             expression_hysteresis_seconds: 4.0,
             llm_can_propose_expression: true,
-            llm_expression_is_advisory: true,
             classifier_timeout_secs: crate::emotion::classifier::DEFAULT_CLASSIFIER_TIMEOUT_SECS,
             classifier_min_confidence: 0.5,
             classifier_language: "en".into(),
@@ -608,10 +599,6 @@ const fn default_expression_hysteresis_seconds() -> f64 {
 }
 
 const fn default_llm_can_propose_expression() -> bool {
-    true
-}
-
-const fn default_llm_expression_is_advisory() -> bool {
     true
 }
 
@@ -1007,6 +994,115 @@ impl Default for ProactiveConfig {
     }
 }
 
+/// A proactive timing field shorter than the poll interval.
+///
+/// Produced by [`validate_proactive_intervals`] and surfaced as a startup
+/// warning: the shorter threshold is still accepted, but speech cannot fire
+/// sooner than the next poll tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProactiveIntervalIssue {
+    /// `min_idle_seconds` is shorter than `interval_seconds`.
+    MinIdle {
+        /// Configured minimum idle seconds.
+        min_idle_seconds: u64,
+        /// Configured poll interval seconds.
+        interval_seconds: u64,
+    },
+    /// `cooldown_seconds` is shorter than `interval_seconds`.
+    Cooldown {
+        /// Configured cooldown seconds.
+        cooldown_seconds: u64,
+        /// Configured poll interval seconds.
+        interval_seconds: u64,
+    },
+}
+
+impl ProactiveIntervalIssue {
+    /// Field label, threshold value, and poll interval for structured logs.
+    #[must_use]
+    pub const fn fields(&self) -> (&'static str, u64, u64) {
+        match self {
+            Self::MinIdle {
+                min_idle_seconds,
+                interval_seconds,
+            } => ("min_idle_seconds", *min_idle_seconds, *interval_seconds),
+            Self::Cooldown {
+                cooldown_seconds,
+                interval_seconds,
+            } => ("cooldown_seconds", *cooldown_seconds, *interval_seconds),
+        }
+    }
+
+    /// Stable English message for CLI / UI / logs.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::MinIdle {
+                min_idle_seconds,
+                interval_seconds,
+            } => format!(
+                "min_idle_seconds ({min_idle_seconds}) is shorter than interval_seconds ({interval_seconds}); proactive speech will fire no sooner than the next tick"
+            ),
+            Self::Cooldown {
+                cooldown_seconds,
+                interval_seconds,
+            } => format!(
+                "cooldown_seconds ({cooldown_seconds}) is shorter than interval_seconds ({interval_seconds}); proactive speech will fire no sooner than the next tick"
+            ),
+        }
+    }
+}
+
+/// Validate that proactive idle / cooldown thresholds are not shorter than
+/// the poll interval.
+///
+/// A shorter threshold is not rejected: operators may intentionally poll
+/// infrequently while keeping a low gate. Speech still cannot fire sooner
+/// than the next tick, so the caller should warn. When `enabled` is false
+/// the thresholds are never exercised, so validation is skipped entirely.
+#[must_use]
+pub fn validate_proactive_intervals(config: &ProactiveConfig) -> Vec<ProactiveIntervalIssue> {
+    // Proactive speech is disabled: the thresholds can never be exercised,
+    // so timing relationships cannot matter.
+    if !config.enabled {
+        return Vec::new();
+    }
+    let mut issues = Vec::new();
+    if config.min_idle_seconds < config.interval_seconds {
+        issues.push(ProactiveIntervalIssue::MinIdle {
+            min_idle_seconds: config.min_idle_seconds,
+            interval_seconds: config.interval_seconds,
+        });
+    }
+    if config.cooldown_seconds < config.interval_seconds {
+        issues.push(ProactiveIntervalIssue::Cooldown {
+            cooldown_seconds: config.cooldown_seconds,
+            interval_seconds: config.interval_seconds,
+        });
+    }
+    issues
+}
+
+/// Emit a `tracing::warn!` for each proactive timing threshold shorter than
+/// the poll interval.
+///
+/// Convenience wrapper over [`validate_proactive_intervals`] for startup
+/// paths that only need the side effect. Emits nothing while proactive
+/// speech is disabled.
+pub fn warn_on_proactive_interval_issues(config: &ProactiveConfig) {
+    for issue in validate_proactive_intervals(config) {
+        let (field, value, interval) = issue.fields();
+        tracing::warn!(
+            component = "MindConfig",
+            field = %field,
+            value_secs = value,
+            interval_secs = interval,
+            "{}",
+            issue.message()
+        );
+    }
+}
+
 fn deserialize_positive_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: ::ene_config::serde::Deserializer<'de>,
@@ -1258,6 +1354,113 @@ mod tests {
         let cfg: ProactiveConfig =
             serde_json::from_str(r#"{"interval_seconds": 0}"#).expect("deserialize");
         assert_eq!(cfg.interval_seconds, 1);
+    }
+
+    #[test]
+    fn validate_proactive_intervals_flags_min_idle_shorter_than_interval() {
+        let cfg = ProactiveConfig {
+            enabled: true,
+            interval_seconds: 300,
+            min_idle_seconds: 60,
+            cooldown_seconds: 600,
+            ..ProactiveConfig::default()
+        };
+        let issues = validate_proactive_intervals(&cfg);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0],
+            ProactiveIntervalIssue::MinIdle {
+                min_idle_seconds: 60,
+                interval_seconds: 300,
+            }
+        );
+        let msg = issues[0].message();
+        assert!(msg.contains("60"), "message: {msg}");
+        assert!(msg.contains("300"), "message: {msg}");
+        assert!(
+            msg.contains("no sooner than the next tick"),
+            "message: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_proactive_intervals_flags_cooldown_shorter_than_interval() {
+        let cfg = ProactiveConfig {
+            enabled: true,
+            interval_seconds: 300,
+            min_idle_seconds: 600,
+            cooldown_seconds: 60,
+            ..ProactiveConfig::default()
+        };
+        let issues = validate_proactive_intervals(&cfg);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues[0],
+            ProactiveIntervalIssue::Cooldown {
+                cooldown_seconds: 60,
+                interval_seconds: 300,
+            }
+        );
+        let msg = issues[0].message();
+        assert!(msg.contains("60"), "message: {msg}");
+        assert!(msg.contains("300"), "message: {msg}");
+        assert!(
+            msg.contains("no sooner than the next tick"),
+            "message: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_proactive_intervals_accepts_defaults_without_issues() {
+        assert!(validate_proactive_intervals(&ProactiveConfig::default()).is_empty());
+    }
+
+    #[test]
+    fn validate_proactive_intervals_does_not_reject_inverted_config() {
+        let cfg: ProactiveConfig = serde_json::from_str(
+            r#"{
+                "enabled": true,
+                "interval_seconds": 300,
+                "min_idle_seconds": 60,
+                "cooldown_seconds": 90
+            }"#,
+        )
+        .expect("inverted timing must still deserialize");
+        assert_eq!(cfg.interval_seconds, 300);
+        assert_eq!(cfg.min_idle_seconds, 60);
+        assert_eq!(cfg.cooldown_seconds, 90);
+        assert_eq!(validate_proactive_intervals(&cfg).len(), 2);
+    }
+
+    #[test]
+    fn validate_proactive_intervals_skips_disabled_config() {
+        let cfg: ProactiveConfig = serde_json::from_str(
+            r#"{
+                "enabled": false,
+                "interval_seconds": 300,
+                "min_idle_seconds": 60,
+                "cooldown_seconds": 90
+            }"#,
+        )
+        .expect("inverted timing must still deserialize");
+        assert!(
+            validate_proactive_intervals(&cfg).is_empty(),
+            "disabled proactive speech must not produce interval warnings"
+        );
+    }
+
+    #[test]
+    fn proactive_interval_issue_fields_expose_label_value_interval() {
+        let min_idle = ProactiveIntervalIssue::MinIdle {
+            min_idle_seconds: 60,
+            interval_seconds: 300,
+        };
+        assert_eq!(min_idle.fields(), ("min_idle_seconds", 60, 300));
+        let cooldown = ProactiveIntervalIssue::Cooldown {
+            cooldown_seconds: 90,
+            interval_seconds: 300,
+        };
+        assert_eq!(cooldown.fields(), ("cooldown_seconds", 90, 300));
     }
 
     #[test]

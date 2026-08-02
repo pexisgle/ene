@@ -152,4 +152,7 @@ Ene は PAD (**Pleasure-Arousal-Dominance**) 由来の空間を使用してキ�
 ### 感情の動態
 - **自然減衰**: 時間経過に伴い、感情値は基準値に向かってゆるやかに減衰します。
 - **感情分類**: 応答テキストおよびユーザー入力は `ene-mind` の `EmotionEngine` を介して感情値を微変動させます。
-- **Performance キュー**: `ene-mind` の出力調停が感情状態を `PerformanceCue` (表情・動作) にマッピングし、`EneEvent::Performance` として `ene-desktop`/VRM 再生に送られます。
+- **Performance キュー**: ターン終了時の表情は単一の `resolve_expression` 決定
+  から得ます（LLM 提案が正典、感情マッピングはフォールバック）。モーション /
+  look-at マーカーはターン中に `PerformanceArbiter` で蓄積します。結果は
+  `EneEvent::Performance` として `ene-desktop`/VRM 再生に送られます。

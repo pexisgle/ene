@@ -3,7 +3,7 @@
 //! Host-side plugin process management for the ene unified plugin system.
 //!
 //! This crate provides [`PluginHostManager`], which discovers, spawns, and
-//! supervises plugin binaries (protocol v4), routing their advertised
+//! supervises plugin binaries (protocol v5), routing their advertised
 //! capabilities into the host's tool and LLM provider registries. It also
 //! owns the [`ToolRegistry`] trait and [`CompositeToolRegistry`] that
 //! aggregate plugin-provided and MCP tools.
@@ -25,7 +25,7 @@
 //! ## Relationship to other crates
 //!
 //! - [`ene-plugin-proto`](ene_plugin_proto) — wire protocol definitions
-//!   (tool IPC v2 + plugin protocol v4), framing helpers, and transport layer.
+//!   (tool IPC v2 + plugin protocol v5), framing helpers, and transport layer.
 //! - [`ene-plugin`](ene_plugin) — plugin authoring facade (used by plugin
 //!   binaries, not by the host).
 //! - [`ene-ai`](ene_ai) — `LlmProvider` / `LlmProviderFactory` traits that
@@ -70,7 +70,7 @@ pub use factory::IpcLlmProviderFactory;
 /// Plugin health events.
 pub use health::{DisabledReason, PluginHealthEvent};
 /// IPC connection to a single plugin binary.
-pub use ipc_plugin::IpcPluginConnection;
+pub use ipc_plugin::{IpcPluginConnection, SetConfigOutcome};
 /// IPC-backed LLM provider.
 pub use ipc_provider::IpcLlmProvider;
 /// Plugin host manager.

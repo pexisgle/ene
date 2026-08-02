@@ -172,6 +172,7 @@ async fn dispatch_mock(
                     llm_providers: vec![],
                     tts_providers: vec![],
                     stt_providers: vec![],
+                    ..PluginCapabilities::default()
                 },
             }
         }
@@ -307,10 +308,169 @@ async fn dispatch_mock(
         PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
             request_id: String::new(),
         },
+        PluginIpcRequest::SetConfig {
+            request_id,
+            config,
+            profiles,
+        } => {
+            let mut s = state.lock().await;
+            s.plugin_config = Some(config);
+            // Mirror plugin-server semantics: `None` clears live profiles.
+            s.plugin_profiles = profiles.or_else(|| Some(serde_json::json!({})));
+            PluginIpcResponse::ConfigApplied { request_id }
+        }
+        // Default mock does not advertise dynamic-config capabilities; these
+        // arms exist so a mis-gated host send fails loudly in tests.
+        PluginIpcRequest::ListConfigOptions { request_id, .. }
+        | PluginIpcRequest::ValidateConfig { request_id, .. }
+        | PluginIpcRequest::MigrateConfig { request_id, .. } => PluginIpcResponse::Error {
+            request_id,
+            message: "dynamic config not enabled on default mock".to_string(),
+        },
         _ => PluginIpcResponse::Error {
             request_id: String::new(),
             message: "unsupported request in mock".to_string(),
         },
+    }
+}
+
+/// Mock that advertises and implements the dynamic-config IPC surface.
+async fn run_dynamic_config_mock(socket_path: PathBuf, state: Arc<Mutex<MockState>>) {
+    cleanup_path(&socket_path);
+    let mut listener = IpcListener::bind(&socket_path).expect("failed to bind dynamic mock");
+    let our_range = VersionRange {
+        min: PLUGIN_IPC_PROTOCOL_VERSION,
+        max: PLUGIN_IPC_PROTOCOL_VERSION,
+    };
+
+    loop {
+        let Ok(mut stream) = listener.accept().await else {
+            break;
+        };
+        let state = Arc::clone(&state);
+
+        loop {
+            let Ok(Some(req)) = read_plugin_request(&mut stream).await else {
+                break;
+            };
+
+            // Emit a schema-changed push ahead of ListTools so the host
+            // router cache can be exercised like DeferredCompleted.
+            let emit_schema_push = matches!(&req, PluginIpcRequest::ListTools { .. });
+
+            let resp = match req {
+                PluginIpcRequest::Handshake {
+                    version: host_range,
+                    plugin_config,
+                    plugin_profiles,
+                    ..
+                } => match our_range.negotiate(&host_range) {
+                    None => PluginIpcResponse::Error {
+                        request_id: String::new(),
+                        message: "version mismatch".into(),
+                    },
+                    Some(negotiated) => {
+                        {
+                            let mut s = state.lock().await;
+                            s.plugin_config = plugin_config;
+                            s.plugin_profiles = plugin_profiles;
+                        }
+                        PluginIpcResponse::HandshakeAck {
+                            version: negotiated,
+                            capabilities: PluginCapabilities {
+                                tools: 1,
+                                supports_list_config_options: true,
+                                supports_validate_config: true,
+                                supports_migrate_config: true,
+                                config_version: 2,
+                                ..PluginCapabilities::default()
+                            },
+                        }
+                    }
+                },
+                PluginIpcRequest::ListTools { request_id } => PluginIpcResponse::Tools {
+                    request_id,
+                    tools: vec![ToolSpec::new(
+                        ToolName::new("mock.echo"),
+                        "Echoes arguments back.",
+                        serde_json::json!({}),
+                    )],
+                },
+                PluginIpcRequest::GetConfigSchema { request_id } => {
+                    PluginIpcResponse::ConfigSchema {
+                        request_id,
+                        schema: Some(serde_json::json!({"type": "object"})),
+                        config_version: 2,
+                    }
+                }
+                PluginIpcRequest::ListConfigOptions { request_id, path } => {
+                    let options = if path == "voice" {
+                        vec![ene_plugin_proto::ConfigOption {
+                            value: serde_json::json!("alloy"),
+                            label: "Alloy".into(),
+                            group: None,
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    PluginIpcResponse::ConfigOptions {
+                        request_id,
+                        options,
+                    }
+                }
+                PluginIpcRequest::ValidateConfig { request_id, value } => {
+                    let errors = if value.get("voice").is_none() {
+                        vec![ene_plugin_proto::ConfigFieldError {
+                            field_path: "voice".into(),
+                            message: "required".into(),
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    PluginIpcResponse::ConfigValidated { request_id, errors }
+                }
+                PluginIpcRequest::MigrateConfig {
+                    request_id,
+                    from_version,
+                    value,
+                } => {
+                    let mut migrated = value;
+                    if from_version < 2
+                        && let Some(obj) = migrated.as_object_mut()
+                        && let Some(speaker) = obj.remove("speaker")
+                    {
+                        obj.insert("voice".into(), speaker);
+                    }
+                    PluginIpcResponse::ConfigMigrated {
+                        request_id,
+                        value: migrated,
+                        config_version: 2,
+                    }
+                }
+                PluginIpcRequest::Ping { request_id } => PluginIpcResponse::Pong { request_id },
+                PluginIpcRequest::Shutdown => PluginIpcResponse::Ack {
+                    request_id: String::new(),
+                },
+                other => PluginIpcResponse::Error {
+                    request_id: String::new(),
+                    message: format!("unsupported in dynamic mock: {other:?}"),
+                },
+            };
+
+            if emit_schema_push {
+                let push = PluginIpcResponse::ConfigSchemaChanged {
+                    schema: Some(serde_json::json!({"type": "object", "title": "live"})),
+                    config_version: 2,
+                };
+                if write_plugin_response(&mut stream, &push).await.is_err() {
+                    break;
+                }
+            }
+
+            if write_plugin_response(&mut stream, &resp).await.is_err() {
+                break;
+            }
+        }
     }
 }
 
@@ -465,6 +625,7 @@ async fn dispatch_concurrent_mock(
                     llm_providers: vec![],
                     tts_providers: vec![],
                     stt_providers: vec![],
+                    ..PluginCapabilities::default()
                 },
             }
         }
@@ -651,9 +812,10 @@ async fn handshake_succeeds_and_returns_capabilities() {
 
     // The handshake negotiated the current protocol version (mock and host
     // both advertise it by default), so the negotiated-version accessor and
-    // the v4 `CancelStream` feature gate agree.
+    // the v5 `SetConfig` feature gate agree.
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_PROTOCOL_VERSION);
     assert!(conn.supports_cancel_stream());
+    assert!(conn.supports_set_config());
 
     cleanup_path(&socket_path);
 }
@@ -700,6 +862,126 @@ async fn handshake_delivers_config_and_profiles() {
         s.plugin_profiles,
         Some(profiles),
         "profiles blob must reach the plugin handshake"
+    );
+    drop(s);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn set_config_pushes_to_live_plugin() {
+    let (conn, state, socket_path) = spawn_and_connect("set-config-live").await;
+
+    let updated = serde_json::json!({"api_key": "sk-hot-reload"});
+    let profiles = serde_json::json!({"p": {"v": 2}});
+    conn.set_config(Some(updated.clone()), Some(profiles.clone()))
+        .await
+        .expect("SetConfig should succeed on a v5 plugin");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_config.as_ref(),
+        Some(&updated),
+        "live SetConfig must update the mock's recorded config"
+    );
+    assert_eq!(
+        s.plugin_profiles.as_ref(),
+        Some(&profiles),
+        "live SetConfig must update the mock's recorded profiles"
+    );
+    drop(s);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn set_config_none_profiles_clears_live_plugin_profiles() {
+    let (conn, state, socket_path) = spawn_and_connect("set-config-clear-profiles").await;
+
+    conn.set_config(
+        Some(serde_json::json!({"api_key": "sk"})),
+        Some(serde_json::json!({"p": {"v": 1}})),
+    )
+    .await
+    .expect("initial SetConfig");
+
+    conn.set_config(Some(serde_json::json!({"api_key": "sk"})), None)
+        .await
+        .expect("clearing SetConfig");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_profiles.as_ref(),
+        Some(&serde_json::json!({})),
+        "None profiles on SetConfig must clear, not leave the previous map"
+    );
+    drop(s);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn set_config_updates_cache_used_on_reconnect() {
+    // After a live SetConfig, a transport-driven reconnect must re-handshake
+    // with the updated blob rather than the original connect-time value.
+    let socket_path = test_socket_path("set-config-reconnect");
+    let state = Arc::new(Mutex::new(MockState::default()));
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    let server = tokio::spawn(async move {
+        run_mock_server(server_path, server_state).await;
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let initial = serde_json::json!({"v": 1});
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        Some(initial),
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    let updated = serde_json::json!({"v": 2});
+    conn.set_config(Some(updated.clone()), None)
+        .await
+        .expect("SetConfig should succeed");
+
+    // Kill the server so the next request hits a transport failure and
+    // reconnects; restart it on the same path before the reconnect retries
+    // exhaust.
+    server.abort();
+    cleanup_path(&socket_path);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_mock_server(server_path, server_state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Clear recorded handshake state so we can assert the reconnect payload.
+    {
+        let mut s = state.lock().await;
+        s.plugin_config = None;
+        s.plugin_profiles = None;
+    }
+
+    conn.list_tools()
+        .await
+        .expect("list_tools after reconnect should succeed");
+
+    let s = state.lock().await;
+    assert_eq!(
+        s.plugin_config.as_ref(),
+        Some(&updated),
+        "reconnect handshake must deliver the SetConfig-updated blob"
     );
     drop(s);
 
@@ -787,13 +1069,15 @@ async fn handshake_negotiates_min_supported_version_for_older_plugin() {
     let conn = result.expect("handshake with an N-1 plugin should succeed");
     assert_eq!(conn.negotiated_version(), PLUGIN_IPC_MIN_SUPPORTED_VERSION);
 
-    // The negotiated version predates `CancelStream` (v4), so the feature
-    // gate must report it unsupported and `cancel_stream` must fall back to
-    // a no-op rather than sending a message the plugin cannot deserialize.
-    assert!(!conn.supports_cancel_stream());
-    conn.cancel_stream("some-stream")
+    // N-1 is currently v4, so CancelStream is available, but SetConfig (v5)
+    // is not — the gate must report it unsupported and `set_config` must
+    // update the local cache without sending a message the plugin cannot
+    // deserialize.
+    assert!(conn.supports_cancel_stream());
+    assert!(!conn.supports_set_config());
+    conn.set_config(Some(serde_json::json!({"k": 1})), None)
         .await
-        .expect("cancel_stream must no-op instead of erroring on an old plugin");
+        .expect("set_config must no-op IPC instead of erroring on an old plugin");
 
     cleanup_path(&socket_path);
 }
@@ -1413,6 +1697,127 @@ async fn concurrent_transport_failures_coalesce_into_one_reconnect() {
         r2.expect("call b must succeed after coalesced reconnect")
             .text_for_llm(),
         "b"
+    );
+
+    cleanup_path(&socket_path);
+}
+
+// ── Test: Dynamic config IPC (issue #314) ────────────────────────────────
+
+#[tokio::test]
+async fn dynamic_config_happy_path_and_schema_changed_push() {
+    let socket_path = test_socket_path("dynamic-config");
+    let state = Arc::new(Mutex::new(MockState::default()));
+    let server_path = socket_path.clone();
+    let server_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        run_dynamic_config_mock(server_path, server_state).await;
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let conn = IpcPluginConnection::connect(
+        &socket_path,
+        SandboxConfigData::default(),
+        None,
+        None,
+        TEST_HANDSHAKE_TIMEOUT,
+        TEST_MAX_CONCURRENT,
+    )
+    .await
+    .expect("handshake should succeed");
+
+    assert!(conn.supports_list_config_options());
+    assert!(conn.supports_validate_config());
+    assert!(conn.supports_migrate_config());
+    assert_eq!(conn.capabilities().config_version, 2);
+
+    let options = conn
+        .list_config_options("voice")
+        .await
+        .expect("list_config_options");
+    assert_eq!(options.len(), 1);
+    assert_eq!(options[0].label, "Alloy");
+
+    let errors = conn
+        .validate_config(&serde_json::json!({}))
+        .await
+        .expect("validate_config");
+    assert_eq!(errors.len(), 1);
+
+    let (migrated, version) = conn
+        .migrate_config(1, serde_json::json!({"speaker": "alloy"}))
+        .await
+        .expect("migrate_config");
+    assert_eq!(migrated, serde_json::json!({"voice": "alloy"}));
+    assert_eq!(version, 2);
+
+    // ListTools triggers a ConfigSchemaChanged push ahead of Tools.
+    conn.list_tools().await.expect("list_tools");
+    let (schema, ver) = conn
+        .take_config_schema_changed()
+        .expect("schema change push must be cached");
+    assert_eq!(
+        schema.as_ref().and_then(|s| s.get("title")),
+        Some(&serde_json::json!("live"))
+    );
+    assert_eq!(ver, 2);
+    assert!(conn.take_config_schema_changed().is_none());
+
+    drop(state);
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn dynamic_config_degrades_when_capabilities_absent() {
+    // Default mock negotiates v5 but omits dynamic-config capability flags
+    // (serde defaults) — host must not send the new variants.
+    let (conn, _state, socket_path) = spawn_and_connect("dynamic-degrade-caps").await;
+
+    assert!(conn.supports_set_config());
+    assert!(!conn.supports_list_config_options());
+    assert!(!conn.supports_validate_config());
+    assert!(!conn.supports_migrate_config());
+
+    assert!(
+        conn.list_config_options("voice")
+            .await
+            .expect("degrade list")
+            .is_empty()
+    );
+    assert!(
+        conn.validate_config(&serde_json::json!({"k": 1}))
+            .await
+            .expect("degrade validate")
+            .is_empty()
+    );
+    let (value, ver) = conn
+        .migrate_config(1, serde_json::json!({"k": 1}))
+        .await
+        .expect("degrade migrate");
+    assert_eq!(value, serde_json::json!({"k": 1}));
+    assert_eq!(ver, 1);
+
+    cleanup_path(&socket_path);
+}
+
+#[tokio::test]
+async fn dynamic_config_degrades_on_n_minus_one_plugin() {
+    let old_plugin_range = VersionRange {
+        min: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+        max: PLUGIN_IPC_MIN_SUPPORTED_VERSION,
+    };
+    let (result, socket_path) =
+        try_connect_with_plugin_version("dynamic-old", old_plugin_range).await;
+    let conn = result.expect("N-1 handshake should succeed");
+
+    assert!(!conn.supports_list_config_options());
+    assert!(!conn.supports_validate_config());
+    assert!(!conn.supports_migrate_config());
+    assert!(
+        conn.list_config_options("voice")
+            .await
+            .expect("N-1 list degrade")
+            .is_empty()
     );
 
     cleanup_path(&socket_path);

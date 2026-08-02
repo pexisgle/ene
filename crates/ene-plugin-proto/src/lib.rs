@@ -16,10 +16,12 @@
 //! - [`ToolProvider`] — trait implemented by each tool binary.
 //! - [`IpcRequest`] / [`IpcResponse`] — tool IPC v2 wire messages.
 //! - [`SandboxConfigData`] — sandbox configuration shared across tool processes.
+//! - [`HostServiceId`] / [`HostServiceRequest`] / [`HostServiceResponse`] —
+//!   multiplexed host-service channel (shared socket, passenger services).
 //! - [`IpcStream`] / [`IpcListener`] / [`cleanup_path`] — cross-platform
 //!   transport layer (UDS / Named Pipe).
 //!
-//! ### Plugin types (protocol v4)
+//! ### Plugin types (protocol v5)
 //!
 //! - [`PluginCapabilities`] — advertised during the handshake so the host can
 //!   route tool registrations and provider factories.
@@ -51,6 +53,8 @@
 pub mod capabilities;
 /// Plugin error types.
 pub mod error;
+/// Multiplexed host-service channel wire types.
+pub mod host_service;
 /// Plugin IPC wire protocol (request / response / framing).
 pub mod ipc;
 /// Sandbox configuration types.
@@ -74,10 +78,16 @@ pub use capabilities::{
 };
 /// Plugin error type.
 pub use error::PluginError;
+/// Host-service channel types and framing helpers.
+pub use host_service::{
+    HOST_SERVICE_MAX_MESSAGE_SIZE, HostServiceErrorCode, HostServiceId, HostServiceRequest,
+    HostServiceResponse, read_host_service_request, read_host_service_response,
+    write_host_service_request, write_host_service_response,
+};
 /// Plugin IPC message types, protocol version, and framing helpers.
 pub use ipc::{
-    PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION, PluginIpcRequest,
-    PluginIpcResponse, VersionRange, read_plugin_request, read_plugin_response,
+    ConfigFieldError, ConfigOption, PLUGIN_IPC_MIN_SUPPORTED_VERSION, PLUGIN_IPC_PROTOCOL_VERSION,
+    PluginIpcRequest, PluginIpcResponse, VersionRange, read_plugin_request, read_plugin_response,
     write_plugin_request, write_plugin_response,
 };
 /// Sandbox configuration data sent from the host.

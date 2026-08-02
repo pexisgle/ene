@@ -4,6 +4,7 @@
 //! animation play/pause, four numeric rows for the look-at / scale
 //! / X / Y / Z parameters, six manual expression-test buttons, and
 //! (Linux only) the debug overlay + mask downsample cycle rows.
+use super::WARNING_COLOR;
 use super::input::SettingsInputState;
 use super::widgets::{SettingsAction, apply_action};
 use crate::ai_bridge::AiBridge;
@@ -58,6 +59,8 @@ pub fn render(
                 );
             }
         });
+
+        render_asset_warnings(ui, settings);
 
         ui.horizontal(|ui| {
             ui.label(i18n_embed_fl::fl!(crate::i18n::loader(), "motion"));
@@ -294,28 +297,67 @@ fn render_numeric_row<F, C>(
     });
 }
 
+fn render_asset_warnings(ui: &mut egui::Ui, settings: &CharacterSettings) {
+    let Some(entry) = settings.current_entry() else {
+        ui.colored_label(
+            WARNING_COLOR,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-none-selected"),
+        );
+        return;
+    };
+    if entry.vrm_paths.is_empty() {
+        ui.colored_label(
+            WARNING_COLOR,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-missing-vrm"),
+        );
+    }
+    if entry.motion_paths.is_empty() {
+        ui.colored_label(
+            WARNING_COLOR,
+            i18n_embed_fl::fl!(crate::i18n::loader(), "character-asset-missing-motion"),
+        );
+    }
+}
+
 fn format_character_label(settings: &CharacterSettings) -> String {
-    format!(
-        "[{}/{}] {}",
-        settings.character_state.selected_character + 1,
-        settings.characters.len(),
-        settings.current_entry().name
-    )
+    let total = settings.characters.len();
+    match settings.current_entry() {
+        Some(entry) => format!(
+            "[{}/{}] {}",
+            settings.character_state.selected_character + 1,
+            total,
+            entry.name
+        ),
+        None => {
+            // Only reachable when every entry was removed; an out-of-range
+            // index is clamped before this point, so total > 0 with no entry
+            // is dead.
+            if total == 0 {
+                "[0/0] —".to_string()
+            } else {
+                format!("[0/{total}] —")
+            }
+        }
+    }
 }
 
 fn format_motion_label(settings: &CharacterSettings) -> String {
-    let entry = settings.current_entry();
+    let Some(entry) = settings.current_entry() else {
+        return "[0/0] —".to_string();
+    };
+    let total = entry.motion_names.len();
     let name = entry
         .motion_names
         .get(settings.character_state.selected_motion)
         .cloned()
-        .unwrap_or_else(|| compact_asset_name(settings.current_motion()));
-    format!(
-        "[{}/{}] {}",
-        settings.character_state.selected_motion + 1,
-        entry.motion_names.len(),
-        name
-    )
+        .or_else(|| settings.current_motion().map(compact_asset_name))
+        .unwrap_or_else(|| "—".to_string());
+    let index = if total == 0 {
+        0
+    } else {
+        settings.character_state.selected_motion + 1
+    };
+    format!("[{index}/{total}] {name}")
 }
 
 fn compact_asset_name(path: &str) -> String {

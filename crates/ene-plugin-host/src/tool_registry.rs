@@ -5,7 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::PluginHostError;
-use ene_plugin_proto::{CallContext, DeferredStatus, ToolRagProfile, ToolResult, ToolSpec};
+use ene_plugin_proto::{
+    CallContext, ConfigFieldError, ConfigOption, DeferredStatus, ToolRagProfile, ToolResult,
+    ToolSpec,
+};
 
 /// Result of a deferred (background) tool call.
 ///
@@ -137,6 +140,39 @@ pub trait ToolRegistry: Send + Sync {
 
     /// Returns the JSON Schema for the configuration this tool accepts.
     async fn config_schema(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Lists dynamic config options for `path`, or an empty list when unsupported.
+    async fn list_config_options(&self, _path: &str) -> Result<Vec<ConfigOption>, PluginHostError> {
+        Ok(Vec::new())
+    }
+
+    /// Plugin-delegated config validation. `None` means this registry cannot
+    /// validate (caller should fall back to host JSON Schema validation);
+    /// `Some(errors)` is the plugin-verified result.
+    async fn validate_config(
+        &self,
+        _value: &serde_json::Value,
+    ) -> Result<Option<Vec<ConfigFieldError>>, PluginHostError> {
+        Ok(None)
+    }
+
+    /// Migrates a stored config blob, or returns it unchanged when unsupported.
+    async fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<(serde_json::Value, u32), PluginHostError> {
+        Ok((value, from_version))
+    }
+
+    /// Takes a pending runtime schema-change push, if any.
+    ///
+    /// The returned `String` identifies the source that pushed the change
+    /// (the owning plugin name for a leaf registry), so composite consumers
+    /// can attribute an update without polling every peer first.
+    fn take_config_schema_changed(&self) -> Option<(String, Option<serde_json::Value>, u32)> {
         None
     }
 }
@@ -449,10 +485,49 @@ impl ToolRegistry for CompositeToolRegistry {
     }
 
     async fn config_schema(&self) -> Option<serde_json::Value> {
+        // Config schema is per-plugin. The composite has no single owner, so
+        // callers must use the owning `PluginToolRegistry` (or another
+        // per-plugin handle) rather than first-wins across unrelated peers.
+        tracing::warn!(
+            component = "CompositeToolRegistry",
+            "config_schema() called on a composite; composite has no single config owner — use the per-plugin registry"
+        );
+        None
+    }
+
+    async fn list_config_options(&self, _path: &str) -> Result<Vec<ConfigOption>, PluginHostError> {
+        // Same ownership constraint as [`config_schema`](Self::config_schema).
+        Ok(Vec::new())
+    }
+
+    async fn validate_config(
+        &self,
+        _value: &serde_json::Value,
+    ) -> Result<Option<Vec<ConfigFieldError>>, PluginHostError> {
+        // Must not probe arbitrary sub-registries: a valid blob for plugin A
+        // would otherwise fall through to plugin B and be rejected (or worse,
+        // an empty-errors "unsupported" peer would hide a later real check).
+        Ok(None)
+    }
+
+    async fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<(serde_json::Value, u32), PluginHostError> {
+        // Migration is plugin-owned; `registries.first()` is never the right
+        // target when more than one peer is registered.
+        Ok((value, from_version))
+    }
+
+    fn take_config_schema_changed(&self) -> Option<(String, Option<serde_json::Value>, u32)> {
+        // Push notifications are unkeyed; drain the first pending change so
+        // repeated polls eventually surface every peer's update, each tagged
+        // with its source name.
         let registries = self.with_registries(<[std::sync::Arc<dyn ToolRegistry>]>::to_vec);
         for registry in &registries {
-            if let Some(schema) = registry.config_schema().await {
-                return Some(schema);
+            if let Some(changed) = registry.take_config_schema_changed() {
+                return Some(changed);
             }
         }
         None
@@ -782,6 +857,118 @@ mod tests {
         assert!(names.contains(&"unique"));
         assert!(!names.contains(&"unique2"));
         assert_eq!(names.iter().filter(|n| **n == "shared").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn composite_config_ops_do_not_route_to_arbitrary_peers() {
+        // A sub-registry that would reject/migrate if the composite wrongly
+        // first-wins or registries.first()'d into it.
+        struct StrictConfigRegistry {
+            tools: Vec<ToolSpec>,
+        }
+
+        #[async_trait]
+        impl ToolRegistry for StrictConfigRegistry {
+            fn list_tools(&self) -> Vec<ToolSpec> {
+                self.tools.clone()
+            }
+
+            async fn call_tool(
+                &self,
+                _name: &str,
+                _arguments: &str,
+                _context: Option<&ene_plugin_proto::CallContext>,
+            ) -> Result<ene_plugin_proto::ToolResult, PluginHostError> {
+                Ok(ene_plugin_proto::ToolResult::text("ok"))
+            }
+
+            async fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({"type": "object"}))
+            }
+
+            async fn list_config_options(
+                &self,
+                _path: &str,
+            ) -> Result<Vec<ConfigOption>, PluginHostError> {
+                Ok(vec![ConfigOption {
+                    value: serde_json::json!("trap"),
+                    label: "trap".into(),
+                    group: None,
+                }])
+            }
+
+            async fn validate_config(
+                &self,
+                _value: &serde_json::Value,
+            ) -> Result<Option<Vec<ConfigFieldError>>, PluginHostError> {
+                Ok(Some(vec![ConfigFieldError {
+                    field_path: "trap".into(),
+                    message: "should not reach composite".into(),
+                }]))
+            }
+
+            async fn migrate_config(
+                &self,
+                _from_version: u32,
+                mut value: serde_json::Value,
+            ) -> Result<(serde_json::Value, u32), PluginHostError> {
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("migrated".into(), serde_json::json!(true));
+                }
+                Ok((value, 99))
+            }
+
+            fn take_config_schema_changed(
+                &self,
+            ) -> Option<(String, Option<serde_json::Value>, u32)> {
+                Some((
+                    "trap".into(),
+                    Some(serde_json::json!({"type": "object"})),
+                    7,
+                ))
+            }
+        }
+
+        let composite = CompositeToolRegistry::try_new(vec![
+            Arc::new(StrictConfigRegistry {
+                tools: vec![make_tool("a")],
+            }),
+            Arc::new(StrictConfigRegistry {
+                tools: vec![make_tool("b")],
+            }),
+        ])
+        .unwrap();
+
+        assert!(composite.config_schema().await.is_none());
+        assert!(
+            composite
+                .list_config_options("voice")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            composite
+                .validate_config(&serde_json::json!({}))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let input = serde_json::json!({"k": 1});
+        let (migrated, ver) = composite.migrate_config(1, input.clone()).await.unwrap();
+        assert_eq!(migrated, input);
+        assert_eq!(ver, 1);
+        // The sub-registry tags its schema-change push with its own source
+        // name; the composite must forward it unchanged so consumers can
+        // attribute the update.
+        assert_eq!(
+            composite.take_config_schema_changed(),
+            Some((
+                "trap".to_string(),
+                Some(serde_json::json!({"type": "object"})),
+                7
+            ))
+        );
     }
 
     #[tokio::test]

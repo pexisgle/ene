@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use ene_plugin_proto::{
-    CallContext, DeferredOutcome, DeferredStatus, IpcStream, PluginCapabilities, PluginIpcRequest,
-    PluginIpcResponse, SandboxConfigData, ToolError, ToolResult, VersionRange,
-    read_plugin_response, write_plugin_request,
+    CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, IpcStream,
+    PluginCapabilities, PluginIpcRequest, PluginIpcResponse, SandboxConfigData, ToolError,
+    ToolResult, VersionRange, read_plugin_response, write_plugin_request,
 };
 use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
@@ -41,6 +41,27 @@ fn next_request_id() -> String {
 /// their end.
 const CANCEL_STREAM_MIN_VERSION: u32 = 4;
 
+/// Protocol version at which [`PluginIpcRequest::SetConfig`] was introduced.
+/// Plugins that negotiated an older version do not know this message
+/// variant; the host updates its local cache and skips the IPC send.
+const SET_CONFIG_MIN_VERSION: u32 = 5;
+
+/// How a [`IpcPluginConnection::set_config`] call delivers the update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetConfigOutcome {
+    /// `SetConfig` IPC was delivered to the live plugin.
+    Pushed,
+    /// The peer negotiated a protocol below `SetConfig` support; only the
+    /// reconnect cache was updated.
+    CachedOnly,
+}
+
+/// Protocol version at which the dynamic-config message family was introduced
+/// (same generation as [`SET_CONFIG_MIN_VERSION`]). Hosts still require the
+/// matching [`PluginCapabilities`] flags before sending, so older v5 binaries
+/// that lack the variants are never addressed.
+const DYNAMIC_CONFIG_MIN_VERSION: u32 = 5;
+
 /// Shared routing state for the single reader task.
 ///
 /// Every incoming [`PluginIpcResponse`] is dispatched here by the reader task
@@ -61,6 +82,13 @@ struct Router {
     /// drained by [`IpcPluginConnection::poll_deferred`] so a completion that
     /// arrived while the connection was idle is still delivered.
     deferred: parking_lot::Mutex<HashMap<String, Result<ToolResult, ToolError>>>,
+    /// Latest `ConfigSchemaChanged` push, if any has arrived since the last
+    /// [`IpcPluginConnection::take_config_schema_changed`] call.
+    ///
+    /// The stored value is the LATEST push, not a history — a second
+    /// `ConfigSchemaChanged` before a poll overwrites the first;
+    /// `config_version` is the latest value, not a sequence.
+    schema_changed: parking_lot::Mutex<Option<(Option<serde_json::Value>, u32)>>,
 }
 
 impl Router {
@@ -69,6 +97,7 @@ impl Router {
             waiters: parking_lot::Mutex::new(HashMap::new()),
             streams: parking_lot::Mutex::new(HashMap::new()),
             deferred: parking_lot::Mutex::new(HashMap::new()),
+            schema_changed: parking_lot::Mutex::new(None),
         }
     }
 
@@ -81,6 +110,13 @@ impl Router {
             // Push: cache the deferred completion for later retrieval.
             PluginIpcResponse::DeferredCompleted { task_id, result } => {
                 self.deferred.lock().insert(task_id.clone(), result.clone());
+            }
+            // Push: retain the latest schema change (UI may poll later).
+            PluginIpcResponse::ConfigSchemaChanged {
+                schema,
+                config_version,
+            } => {
+                *self.schema_changed.lock() = Some((schema.clone(), *config_version));
             }
             // Stream: forward to the per-request stream channel.
             PluginIpcResponse::StreamChunk { request_id, .. }
@@ -113,17 +149,22 @@ impl Router {
 
 /// Extracts the `request_id` from a response variant, if it carries one.
 ///
-/// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted))
-/// and [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no
-/// `request_id` and return `None`.
+/// Push messages ([`DeferredCompleted`](PluginIpcResponse::DeferredCompleted),
+/// [`ConfigSchemaChanged`](PluginIpcResponse::ConfigSchemaChanged)) and
+/// [`HandshakeAck`](PluginIpcResponse::HandshakeAck) carry no `request_id`
+/// and return `None`.
 fn response_request_id(resp: &PluginIpcResponse) -> Option<&str> {
     match resp {
-        PluginIpcResponse::HandshakeAck { .. } | PluginIpcResponse::DeferredCompleted { .. } => {
-            None
-        }
+        PluginIpcResponse::HandshakeAck { .. }
+        | PluginIpcResponse::DeferredCompleted { .. }
+        | PluginIpcResponse::ConfigSchemaChanged { .. } => None,
         PluginIpcResponse::Ack { request_id }
         | PluginIpcResponse::Pong { request_id }
         | PluginIpcResponse::ConfigSchema { request_id, .. }
+        | PluginIpcResponse::ConfigApplied { request_id }
+        | PluginIpcResponse::ConfigOptions { request_id, .. }
+        | PluginIpcResponse::ConfigValidated { request_id, .. }
+        | PluginIpcResponse::ConfigMigrated { request_id, .. }
         | PluginIpcResponse::Error { request_id, .. }
         | PluginIpcResponse::Tools { request_id, .. }
         | PluginIpcResponse::CallResult { request_id, .. }
@@ -197,11 +238,14 @@ async fn reader_loop(mut reader: ReadHalf<IpcStream>, router: Arc<Router>) {
 pub struct IpcPluginConnection {
     socket_path: PathBuf,
     sandbox: SandboxConfigData,
-    plugin_config: Option<serde_json::Value>,
+    /// Plugin configuration re-sent on every (re)connect handshake and
+    /// updated by [`set_config`](Self::set_config) before a live `SetConfig`
+    /// IPC push so reconnect always uses the freshest value.
+    plugin_config: parking_lot::RwLock<Option<serde_json::Value>>,
     /// Per-profile plugin configuration (`plugins.list.<name>.profiles`),
     /// re-sent to the plugin on every (re)connect handshake alongside
     /// [`plugin_config`](Self::plugin_config).
-    plugin_profiles: Option<serde_json::Value>,
+    plugin_profiles: parking_lot::RwLock<Option<serde_json::Value>>,
     /// Write half of the IPC stream, behind its own lock so the write is
     /// serialized (frames never interleave) but released before the response
     /// wait. The read half is owned by the reader task. `None` while
@@ -362,8 +406,8 @@ impl IpcPluginConnection {
         Ok(Self {
             socket_path: socket_path.to_path_buf(),
             sandbox,
-            plugin_config,
-            plugin_profiles,
+            plugin_config: parking_lot::RwLock::new(plugin_config),
+            plugin_profiles: parking_lot::RwLock::new(plugin_profiles),
             writer: Mutex::new(Some(writer)),
             capabilities: parking_lot::RwLock::new(capabilities),
             negotiated_version: AtomicU32::new(negotiated_version),
@@ -420,6 +464,39 @@ impl IpcPluginConnection {
         self.negotiated_version() >= CANCEL_STREAM_MIN_VERSION
     }
 
+    /// Returns whether the negotiated protocol version supports live config
+    /// updates via [`PluginIpcRequest::SetConfig`].
+    ///
+    /// `SetConfig` was introduced in protocol v5. A plugin that negotiated
+    /// v4 does not know this message variant, so [`set_config`](Self::set_config)
+    /// updates the local cache (for the next reconnect handshake) and skips
+    /// the IPC send.
+    pub fn supports_set_config(&self) -> bool {
+        self.negotiated_version() >= SET_CONFIG_MIN_VERSION
+    }
+
+    /// Returns whether the peer can handle [`PluginIpcRequest::ListConfigOptions`].
+    ///
+    /// Requires protocol ≥ v5 **and**
+    /// [`PluginCapabilities::supports_list_config_options`]. Older v5 binaries
+    /// that omit the flag (serde default `false`) are never sent the variant.
+    pub fn supports_list_config_options(&self) -> bool {
+        self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
+            && self.capabilities().supports_list_config_options
+    }
+
+    /// Returns whether the peer can handle [`PluginIpcRequest::ValidateConfig`].
+    pub fn supports_validate_config(&self) -> bool {
+        self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
+            && self.capabilities().supports_validate_config
+    }
+
+    /// Returns whether the peer can handle [`PluginIpcRequest::MigrateConfig`].
+    pub fn supports_migrate_config(&self) -> bool {
+        self.negotiated_version() >= DYNAMIC_CONFIG_MIN_VERSION
+            && self.capabilities().supports_migrate_config
+    }
+
     /// Sends a `ListTools` request and returns the actual tool specs.
     pub async fn list_tools(&self) -> Result<Vec<ene_plugin_proto::ToolSpec>, PluginHostError> {
         let resp = self
@@ -439,24 +516,154 @@ impl IpcPluginConnection {
     /// Requests the plugin's config JSON Schema for schema-aware redaction of
     /// host log output.
     ///
-    /// Returns `None` when the plugin advertises no schema, or sends `null` or
-    /// an empty object; callers then fall back to the schema-independent
-    /// redaction ([`crate::redact::redact_config_unschematized`]).
+    /// Safe to call repeatedly (runtime re-fetch). Returns `None` when the
+    /// plugin advertises no schema, or sends `null` or an empty object;
+    /// callers then fall back to the schema-independent redaction
+    /// ([`crate::redact::redact_config_unschematized`]).
     pub async fn config_schema(&self) -> Result<Option<serde_json::Value>, PluginHostError> {
+        Ok(self.config_schema_with_version().await?.0)
+    }
+
+    /// Like [`config_schema`](Self::config_schema), but also returns the
+    /// plugin's current `config_version` (0 when unversioned / omitted).
+    pub async fn config_schema_with_version(
+        &self,
+    ) -> Result<(Option<serde_json::Value>, u32), PluginHostError> {
         let resp = self
             .do_request(PluginIpcRequest::GetConfigSchema {
                 request_id: String::new(),
             })
             .await?;
         match resp {
-            PluginIpcResponse::ConfigSchema { schema, .. } => Ok(schema.filter(|s| {
-                !s.is_null() && !matches!(s, serde_json::Value::Object(o) if o.is_empty())
-            })),
+            PluginIpcResponse::ConfigSchema {
+                schema,
+                config_version,
+                ..
+            } => Ok((
+                schema.filter(|s| {
+                    !s.is_null() && !matches!(s, serde_json::Value::Object(o) if o.is_empty())
+                }),
+                config_version,
+            )),
             PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
             other => Err(PluginHostError::execution(format!(
                 "unexpected response to GetConfigSchema: {other:?}"
             ))),
         }
+    }
+
+    /// Lists dynamic options for a config path, or an empty list when the
+    /// peer does not advertise [`supports_list_config_options`](Self::supports_list_config_options)
+    /// (static-schema degrade path).
+    pub async fn list_config_options(
+        &self,
+        path: &str,
+    ) -> Result<Vec<ConfigOption>, PluginHostError> {
+        if !self.supports_list_config_options() {
+            tracing::debug!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                path,
+                "plugin does not support ListConfigOptions; returning empty options"
+            );
+            return Ok(Vec::new());
+        }
+        let resp = self
+            .do_request(PluginIpcRequest::ListConfigOptions {
+                request_id: String::new(),
+                path: path.to_string(),
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigOptions { options, .. } => Ok(options),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to ListConfigOptions: {other:?}"
+            ))),
+        }
+    }
+
+    /// Validates a config value via the plugin, or returns `Ok(vec![])`
+    /// (no plugin-side errors) when the peer does not advertise
+    /// [`supports_validate_config`](Self::supports_validate_config).
+    ///
+    /// Callers that need schema validation for unsupported peers should run
+    /// host-side JSON Schema validation themselves.
+    pub async fn validate_config(
+        &self,
+        value: &serde_json::Value,
+    ) -> Result<Vec<ConfigFieldError>, PluginHostError> {
+        if !self.supports_validate_config() {
+            tracing::debug!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                "plugin does not support ValidateConfig; host should use JSON Schema"
+            );
+            return Ok(Vec::new());
+        }
+        let resp = self
+            .do_request(PluginIpcRequest::ValidateConfig {
+                request_id: String::new(),
+                value: value.clone(),
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigValidated { errors, .. } => Ok(errors),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to ValidateConfig: {other:?}"
+            ))),
+        }
+    }
+
+    /// Migrates a stored config blob, or returns the input unchanged when the
+    /// peer does not advertise [`supports_migrate_config`](Self::supports_migrate_config).
+    ///
+    /// The returned tuple is `(migrated_value, config_version)`.
+    pub async fn migrate_config(
+        &self,
+        from_version: u32,
+        value: serde_json::Value,
+    ) -> Result<(serde_json::Value, u32), PluginHostError> {
+        if !self.supports_migrate_config() {
+            tracing::debug!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                from_version,
+                "plugin does not support MigrateConfig; returning value unchanged"
+            );
+            return Ok((value, from_version));
+        }
+        let resp = self
+            .do_request(PluginIpcRequest::MigrateConfig {
+                request_id: String::new(),
+                from_version,
+                value,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigMigrated {
+                value,
+                config_version,
+                ..
+            } => Ok((value, config_version)),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to MigrateConfig: {other:?}"
+            ))),
+        }
+    }
+
+    /// Takes the latest [`PluginIpcResponse::ConfigSchemaChanged`] push, if
+    /// any has arrived since the previous take.
+    ///
+    /// Returns `(schema, config_version)`. The stored value is the LATEST
+    /// push, not a history — a second `ConfigSchemaChanged` before a poll
+    /// overwrites the first, so `config_version` is the latest value, not a
+    /// sequence. Analogous to the deferred-completion cache used by
+    /// [`poll_deferred`](Self::poll_deferred).
+    pub fn take_config_schema_changed(&self) -> Option<(Option<serde_json::Value>, u32)> {
+        self.router.schema_changed.lock().take()
     }
 
     /// Sends a `Ping` and waits for `Pong` within [`PING_TIMEOUT`].
@@ -686,6 +893,51 @@ impl IpcPluginConnection {
         Self::expect_ack(resp, "CancelStream")
     }
 
+    /// Updates the stored config/profiles and, when supported, pushes
+    /// [`PluginIpcRequest::SetConfig`] to the live plugin.
+    ///
+    /// The local cache is always updated first so a later reconnect
+    /// handshake delivers the fresh values even when the peer negotiated a
+    /// protocol version below [`supports_set_config`](Self::supports_set_config)
+    /// (in that case the IPC send is skipped with a warning and
+    /// [`SetConfigOutcome::CachedOnly`] is returned).
+    ///
+    /// Returns [`SetConfigOutcome::Pushed`] when the live plugin received the
+    /// update.
+    pub async fn set_config(
+        &self,
+        config: Option<serde_json::Value>,
+        profiles: Option<serde_json::Value>,
+    ) -> Result<SetConfigOutcome, PluginHostError> {
+        self.plugin_config.write().clone_from(&config);
+        self.plugin_profiles.write().clone_from(&profiles);
+
+        if !self.supports_set_config() {
+            tracing::warn!(
+                component = "IpcPluginConnection",
+                negotiated_version = self.negotiated_version(),
+                "plugin negotiated a version below SetConfig support; \
+                 local config cache updated for reconnect, live push skipped"
+            );
+            return Ok(SetConfigOutcome::CachedOnly);
+        }
+
+        let resp = self
+            .do_request(PluginIpcRequest::SetConfig {
+                request_id: String::new(),
+                config: config.unwrap_or_else(|| serde_json::json!({})),
+                profiles,
+            })
+            .await?;
+        match resp {
+            PluginIpcResponse::ConfigApplied { .. } => Ok(SetConfigOutcome::Pushed),
+            PluginIpcResponse::Error { message, .. } => Err(PluginHostError::execution(message)),
+            other => Err(PluginHostError::execution(format!(
+                "unexpected response to SetConfig: {other:?}"
+            ))),
+        }
+    }
+
     /// Sends a `CreateChatStream` request and returns a receiver for the
     /// stream's responses.
     ///
@@ -849,13 +1101,17 @@ impl IpcPluginConnection {
 
         let mut stream = Self::connect_with_retry(&self.socket_path, &name).await?;
 
+        // Clone under the parking_lot guards *before* awaiting so the
+        // non-Send read guards are not held across `.await`.
+        let plugin_config = self.plugin_config.read().clone();
+        let plugin_profiles = self.plugin_profiles.read().clone();
         write_plugin_request(
             &mut stream,
             &PluginIpcRequest::Handshake {
                 version: VersionRange::host_supported(),
                 sandbox: self.sandbox.clone(),
-                plugin_config: self.plugin_config.clone(),
-                plugin_profiles: self.plugin_profiles.clone(),
+                plugin_config,
+                plugin_profiles,
             },
         )
         .await
@@ -994,6 +1250,18 @@ impl IpcPluginConnection {
             | PluginIpcRequest::TranscribeAudio {
                 request_id: rid, ..
             }
+            | PluginIpcRequest::SetConfig {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::ListConfigOptions {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::ValidateConfig {
+                request_id: rid, ..
+            }
+            | PluginIpcRequest::MigrateConfig {
+                request_id: rid, ..
+            }
             | PluginIpcRequest::Ping { request_id: rid } => {
                 *rid = request_id.to_string();
             }
@@ -1070,6 +1338,10 @@ impl IpcPluginConnection {
             | PluginIpcRequest::EmbedBatch { request_id, .. }
             | PluginIpcRequest::SynthesizeSpeech { request_id, .. }
             | PluginIpcRequest::TranscribeAudio { request_id, .. }
+            | PluginIpcRequest::SetConfig { request_id, .. }
+            | PluginIpcRequest::ListConfigOptions { request_id, .. }
+            | PluginIpcRequest::ValidateConfig { request_id, .. }
+            | PluginIpcRequest::MigrateConfig { request_id, .. }
             | PluginIpcRequest::Ping { request_id } => Some(request_id.as_str()),
             PluginIpcRequest::Handshake { .. } | PluginIpcRequest::Shutdown => None,
         }
@@ -1382,6 +1654,24 @@ mod tests {
                 model: "m".into(),
                 dimensions: None,
                 items: Vec::new(),
+            },
+            PluginIpcRequest::SetConfig {
+                request_id: String::new(),
+                config: serde_json::json!({}),
+                profiles: None,
+            },
+            PluginIpcRequest::ListConfigOptions {
+                request_id: String::new(),
+                path: "voice".into(),
+            },
+            PluginIpcRequest::ValidateConfig {
+                request_id: String::new(),
+                value: serde_json::json!({}),
+            },
+            PluginIpcRequest::MigrateConfig {
+                request_id: String::new(),
+                from_version: 0,
+                value: serde_json::json!({}),
             },
         ]
     }

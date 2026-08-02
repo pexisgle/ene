@@ -1,9 +1,13 @@
 //! IPC client used by tool binaries to perform typed CRUD operations against
-//! the core DB server over a length-prefixed JSON Unix socket connection.
+//! the host-service `db` passenger over a length-prefixed JSON connection.
 
 use crate::messages::{DbBatchOpResult, DbErrorCode, DbRequest, DbResponse, DbWriteOp};
 use crate::types::{DbFilter, DbOrderBy, DbSchema, DbValue, Row};
 use ene_plugin_proto::transport::IpcStream;
+use ene_plugin_proto::{
+    HostServiceErrorCode, HostServiceId, HostServiceRequest, HostServiceResponse,
+    read_host_service_response, write_host_service_request,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
@@ -76,6 +80,12 @@ pub enum DbError {
         /// Human-readable error message.
         message: String,
     },
+    /// The requested operation is not implemented by the host.
+    #[error("unsupported: {message}")]
+    Unsupported {
+        /// Human-readable error message.
+        message: String,
+    },
     /// An internal server error occurred.
     #[error("internal server error: {message}")]
     Internal {
@@ -92,7 +102,7 @@ pub enum DbError {
     },
 }
 
-/// Client for communicating with the per-tool DB IPC server.
+/// Client for communicating with the host-service `db` passenger.
 pub struct DbClient {
     stream: IpcStream,
     /// Socket path captured at connect-time so the client can be
@@ -105,11 +115,8 @@ pub struct DbClient {
 }
 
 impl DbClient {
-    /// Connects to the DB IPC server at the given socket path without
-    /// authenticating. The server will close the connection on the
-    /// first non-Handshake request, so this is only useful as the
-    /// first step of [`connect_with_token`](Self::connect_with_token),
-    /// which immediately presents the auth token.
+    /// Connects to the host-service socket without opening a service
+    /// session. Callers must follow with [`Self::open_db_service`].
     pub(crate) async fn connect(socket_path: &Path) -> Result<Self, DbError> {
         let stream = IpcStream::connect(socket_path).await?;
         Ok(Self {
@@ -119,27 +126,14 @@ impl DbClient {
         })
     }
 
-    /// Connects to the DB IPC server and immediately presents the
-    /// pre-shared auth token. Returns an error if the server rejects
-    /// the token.
+    /// Connects to the host-service socket and opens the `db` passenger
+    /// with the pre-shared auth token. Returns an error if the host
+    /// rejects the token or the `db` service is unavailable.
     pub async fn connect_with_token(socket_path: &Path, token: &str) -> Result<Self, DbError> {
         let mut client = Self::connect(socket_path).await?;
-        let resp = client
-            .send_request(&DbRequest::Handshake {
-                token: token.to_string(),
-            })
-            .await?;
-        match resp {
-            DbResponse::HandshakeAck => {
-                client.auth_token = Some(token.to_string());
-                Ok(client)
-            }
-            DbResponse::Error { code, message } => Err(DbError::Auth { code, message }),
-            other => Err(DbError::Transport(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unexpected handshake response: {other:?}"),
-            ))),
-        }
+        client.open_db_service(token).await?;
+        client.auth_token = Some(token.to_string());
+        Ok(client)
     }
 
     /// Path the IPC client connected to.
@@ -155,36 +149,45 @@ impl DbClient {
     /// captured at connect-time, the same client can be brought back online
     /// here.
     ///
-    /// If the new connection succeeds but the handshake fails (e.g. auth
-    /// rejected), the old stream is preserved so subsequent retries don't
-    /// operate on an unauthenticated socket.
+    /// If the new connection succeeds but the host-service open fails
+    /// (e.g. auth rejected), the old stream is preserved so subsequent
+    /// retries don't operate on an unauthenticated socket.
     pub async fn reconnect(&mut self) -> Result<(), DbError> {
         let new_stream = IpcStream::connect(&self.socket_path).await?;
         let old_stream = std::mem::replace(&mut self.stream, new_stream);
         if let Some(token) = self.auth_token.clone() {
-            match self.send_request(&DbRequest::Handshake { token }).await {
-                Ok(DbResponse::HandshakeAck) => Ok(()),
-                Ok(DbResponse::Error { code, message }) => {
-                    // Handshake failed — revert to old stream so the
-                    // client is not left with an unauthenticated socket.
-                    self.stream = old_stream;
-                    Err(DbError::Auth { code, message })
-                }
-                Ok(other) => {
-                    self.stream = old_stream;
-                    Err(DbError::Transport(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("unexpected handshake response: {other:?}"),
-                    )))
-                }
+            match self.open_db_service(&token).await {
+                Ok(()) => Ok(()),
                 Err(e) => {
-                    // Transport error during handshake — revert.
                     self.stream = old_stream;
                     Err(e)
                 }
             }
         } else {
             Ok(())
+        }
+    }
+
+    async fn open_db_service(&mut self, token: &str) -> Result<(), DbError> {
+        write_host_service_request(
+            &mut self.stream,
+            &HostServiceRequest::Open {
+                service: HostServiceId::Db,
+                token: token.to_string(),
+            },
+        )
+        .await?;
+        match read_host_service_response(&mut self.stream).await? {
+            Some(HostServiceResponse::OpenAck) => Ok(()),
+            Some(HostServiceResponse::Error { code, message }) => Err(DbError::Auth {
+                code: match code {
+                    HostServiceErrorCode::UnknownService => DbErrorCode::Unsupported,
+                    HostServiceErrorCode::AuthRejected => DbErrorCode::PermissionDenied,
+                    HostServiceErrorCode::Internal => DbErrorCode::Internal,
+                },
+                message,
+            }),
+            None => Err(DbError::ConnectionClosed),
         }
     }
 
@@ -236,6 +239,7 @@ impl DbClient {
                 DbErrorCode::InvalidFilter => DbError::InvalidFilter { message },
                 DbErrorCode::SchemaConflict => DbError::SchemaConflict { message },
                 DbErrorCode::QuotaExceeded => DbError::QuotaExceeded { message },
+                DbErrorCode::Unsupported => DbError::Unsupported { message },
                 DbErrorCode::Unknown => DbError::Unknown { message },
                 DbErrorCode::Internal => DbError::Internal { message },
             };
@@ -465,6 +469,7 @@ mod tests {
             (DbErrorCode::TypeMismatch, "Type Mismatch message"),
             (DbErrorCode::InvalidFilter, "Invalid Filter message"),
             (DbErrorCode::SchemaConflict, "Schema Conflict message"),
+            (DbErrorCode::Unsupported, "Unsupported message"),
             (DbErrorCode::Internal, "Internal message"),
         ];
 
@@ -494,6 +499,9 @@ mod tests {
                     (DbErrorCode::SchemaConflict, DbError::SchemaConflict { message }) => {
                         assert_eq!(message, "Schema Conflict message");
                     }
+                    (DbErrorCode::Unsupported, DbError::Unsupported { message }) => {
+                        assert_eq!(message, "Unsupported message");
+                    }
                     (DbErrorCode::Internal, DbError::Internal { message }) => {
                         assert_eq!(message, "Internal message");
                     }
@@ -518,6 +526,10 @@ mod tests {
     mod reconnect_auth {
         use super::*;
         use ene_plugin_proto::transport::{IpcListener, IpcStream, cleanup_path};
+        use ene_plugin_proto::{
+            HostServiceId, HostServiceRequest, HostServiceResponse, read_host_service_request,
+            write_host_service_response,
+        };
         use std::path::PathBuf;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -542,12 +554,17 @@ mod tests {
         }
 
         async fn serve_authed_session(stream: &mut IpcStream, expected_token: &str) {
-            match read_framed(stream).await {
-                DbRequest::Handshake { token } => {
-                    assert_eq!(token, expected_token, "handshake token mismatch");
-                    write_framed(stream, &DbResponse::HandshakeAck).await;
+            match read_host_service_request(stream).await.expect("read open") {
+                Some(HostServiceRequest::Open {
+                    service: HostServiceId::Db,
+                    token,
+                }) => {
+                    assert_eq!(token, expected_token, "open token mismatch");
+                    write_host_service_response(stream, &HostServiceResponse::OpenAck)
+                        .await
+                        .expect("write open ack");
                 }
-                other => panic!("expected Handshake, got {other:?}"),
+                other => panic!("expected Open(Db), got {other:?}"),
             }
             match read_framed(stream).await {
                 DbRequest::Ping => write_framed(stream, &DbResponse::Pong).await,
@@ -610,6 +627,10 @@ mod tests {
     mod batch_wire {
         use super::*;
         use ene_plugin_proto::transport::{IpcListener, cleanup_path};
+        use ene_plugin_proto::{
+            HostServiceId, HostServiceRequest, HostServiceResponse, read_host_service_request,
+            write_host_service_response,
+        };
         use std::path::PathBuf;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -650,12 +671,20 @@ mod tests {
                 let mut listener = IpcListener::bind(&path_for_server).expect("bind");
                 let mut stream = listener.accept().await.expect("accept");
 
-                match read_framed(&mut stream).await {
-                    DbRequest::Handshake { token } => {
-                        assert_eq!(token, token_for_server, "handshake token mismatch");
-                        write_framed(&mut stream, &DbResponse::HandshakeAck).await;
+                match read_host_service_request(&mut stream)
+                    .await
+                    .expect("read open")
+                {
+                    Some(HostServiceRequest::Open {
+                        service: HostServiceId::Db,
+                        token,
+                    }) => {
+                        assert_eq!(token, token_for_server, "open token mismatch");
+                        write_host_service_response(&mut stream, &HostServiceResponse::OpenAck)
+                            .await
+                            .expect("write open ack");
                     }
-                    other => panic!("expected Handshake, got {other:?}"),
+                    other => panic!("expected Open(Db), got {other:?}"),
                 }
 
                 match read_framed(&mut stream).await {

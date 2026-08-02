@@ -92,7 +92,7 @@ pub struct PublicPerfCue {
     pub name: String,
     /// Cue kind: `expression`, `motion`, `lookat`, or `cancel`.
     pub kind: String,
-    /// How the cue was chosen (e.g. `affect`, `llm_command`).
+    /// How the cue was chosen (e.g. `affect`, `llm`).
     pub source: String,
 }
 

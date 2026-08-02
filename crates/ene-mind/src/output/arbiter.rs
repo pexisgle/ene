@@ -31,6 +31,13 @@ pub fn affect_to_expression(state: &AffectState) -> &'static str {
 }
 
 /// Resolve the final expression from affect, LLM hints, and constraints.
+///
+/// An LLM proposal is canonical when present; affect mapping is the fallback
+/// when the model emitted no expression marker. Hysteresis applies to every
+/// source so rapid mid-turn markers cannot flicker the face, except that an
+/// explicit streamed `[expr:...]` marker bypasses the hold — the model's
+/// explicit instruction wins. Speech-timed expression changes are owned by a
+/// separate timing path.
 pub fn resolve_expression(
     config: &EmotionConfig,
     input: &ExpressionInput<'_>,
@@ -43,7 +50,7 @@ pub fn resolve_expression(
 
     let affect_candidate = affect_to_expression(input.affect).to_string();
     let mut candidate = normalize_expression(&affect_candidate, &available_names);
-    let mut source = ExpressionSource::AffectMapping;
+    let mut source = ExpressionSource::AffectFallback;
     let mut reason = format!("mapped from affect (mood={})", input.affect.mood_label);
 
     if config.llm_can_propose_expression
@@ -51,32 +58,13 @@ pub fn resolve_expression(
         && !proposal.trim().is_empty()
     {
         let normalized = normalize_expression(&proposal.to_lowercase(), &available_names);
-        if config.llm_expression_is_advisory {
-            // Adopt LLM hint only when affect is neutral or agrees with the proposal.
-            if candidate == "neutral" && normalized != "neutral" {
-                candidate = normalized;
-                source = ExpressionSource::LlmAdvisory;
-                reason = format!("LLM advisory proposal `{proposal}` (affect neutral)");
-            } else if normalized == candidate {
-                source = ExpressionSource::LlmAdvisory;
-                reason = format!("LLM advisory agrees with affect mapping `{candidate}`");
-            } else {
-                tracing::debug!(
-                    component = "OutputArbiter",
-                    affect_candidate = %candidate,
-                    llm_proposal = %normalized,
-                    "Ignoring LLM advisory; affect mapping takes precedence"
-                );
-            }
-        } else {
-            candidate = normalized;
-            source = ExpressionSource::LlmCommand;
-            reason = format!("LLM expression command `{proposal}`");
-        }
+        candidate = normalized;
+        source = ExpressionSource::Llm;
+        reason = format!("LLM expression proposal `{proposal}`");
     }
 
-    // Lightweight response-text sentiment nudge.
-    if matches!(source, ExpressionSource::AffectMapping)
+    // Lightweight response-text sentiment nudge (affect path only).
+    if matches!(source, ExpressionSource::AffectFallback)
         && input.response_text.contains('!')
         && input.affect.valence > 0.0
     {
@@ -87,19 +75,17 @@ pub fn resolve_expression(
         }
     }
 
-    // Hysteresis: hold previous expression unless irritation spike
-    // or the current candidate comes from an authoritative source
-    // (LLM command/advisory). Hysteresis only gates affect-driven
-    // and fallback choices.
+    // Hysteresis gates every source except explicit streamed markers:
+    // without it, each streamed LLM marker would snap the face mid-turn.
+    // An explicit `[expr:...]` marker is the model's direct instruction and
+    // bypasses the hold; classifier hints and affect sources stay gated.
+    // Speech-aligned timing is a separate concern.
     if !input.irritation_spike
+        && !input.explicit_proposal
         && !input.previous_expression.is_empty()
         && candidate != input.previous_expression
         && let Some(elapsed) = input.elapsed_since_change
         && elapsed.as_secs_f64() < config.expression_hysteresis_seconds
-        && matches!(
-            source,
-            ExpressionSource::AffectMapping | ExpressionSource::FallbackNeutral
-        )
     {
         let held = normalize_expression(input.previous_expression, &available_names);
         return ExpressionDecision {
@@ -234,6 +220,7 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: None,
+            explicit_proposal: false,
             previous_expression: "sad",
             elapsed_since_change: Some(std::time::Duration::from_secs(1)),
             response_text: "",
@@ -245,11 +232,9 @@ mod tests {
     }
 
     #[test]
-    fn llm_command_bypasses_hysteresis() {
-        let config = EmotionConfig {
-            llm_expression_is_advisory: false,
-            ..Default::default()
-        };
+    fn hysteresis_holds_even_when_llm_proposes_change() {
+        // Rapid LLM markers would flicker without source-agnostic hysteresis.
+        let config = EmotionConfig::default();
         let mut state = AffectState::neutral("ene");
         state.valence = 0.6;
         state.arousal = 0.3;
@@ -258,28 +243,31 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: Some("angry"),
+            explicit_proposal: false,
             previous_expression: "sad",
             elapsed_since_change: Some(std::time::Duration::from_secs(1)),
             response_text: "",
             irritation_spike: false,
         };
         let decision = resolve_expression(&config, &input);
-        assert_eq!(decision.expression, "angry");
-        assert_eq!(decision.source, ExpressionSource::LlmCommand);
+        assert_eq!(decision.expression, "sad");
+        assert_eq!(decision.source, ExpressionSource::HysteresisHold);
     }
 
     #[test]
-    fn llm_advisory_bypasses_hysteresis() {
-        let config = EmotionConfig {
-            llm_expression_is_advisory: true,
-            ..Default::default()
-        };
-        let state = AffectState::neutral("ene");
+    fn explicit_llm_marker_bypasses_hysteresis() {
+        // An explicit streamed marker is the model's direct instruction and
+        // wins even when the previous expression would otherwise be held.
+        let config = EmotionConfig::default();
+        let mut state = AffectState::neutral("ene");
+        state.valence = 0.6;
+        state.arousal = 0.3;
         let available = default_available();
         let input = ExpressionInput {
             affect: &state,
             available: &available,
             llm_proposal: Some("angry"),
+            explicit_proposal: true,
             previous_expression: "sad",
             elapsed_since_change: Some(std::time::Duration::from_secs(1)),
             response_text: "",
@@ -287,11 +275,11 @@ mod tests {
         };
         let decision = resolve_expression(&config, &input);
         assert_eq!(decision.expression, "angry");
-        assert_eq!(decision.source, ExpressionSource::LlmAdvisory);
+        assert_eq!(decision.source, ExpressionSource::Llm);
     }
 
     #[test]
-    fn advisory_llm_does_not_override_strong_affect() {
+    fn llm_proposal_wins_over_disagreeing_affect() {
         let config = EmotionConfig::default();
         let mut state = AffectState::neutral("ene");
         state.irritation = 0.7;
@@ -300,14 +288,15 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: Some("happy"),
+            explicit_proposal: false,
             previous_expression: "",
             elapsed_since_change: None,
             response_text: "",
             irritation_spike: false,
         };
         let decision = resolve_expression(&config, &input);
-        assert_eq!(decision.expression, "angry");
-        assert_eq!(decision.source, ExpressionSource::AffectMapping);
+        assert_eq!(decision.expression, "happy");
+        assert_eq!(decision.source, ExpressionSource::Llm);
     }
 
     #[test]
@@ -320,6 +309,7 @@ mod tests {
             affect: &state,
             available: &available,
             llm_proposal: None,
+            explicit_proposal: false,
             previous_expression: "",
             elapsed_since_change: None,
             response_text: "I understand.",
@@ -327,6 +317,6 @@ mod tests {
         };
         let decision = resolve_expression(&config, &input);
         assert_eq!(decision.expression, "angry");
-        assert_eq!(decision.source, ExpressionSource::AffectMapping);
+        assert_eq!(decision.source, ExpressionSource::AffectFallback);
     }
 }

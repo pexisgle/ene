@@ -3,9 +3,9 @@
 //! Feature-agnostic typed CRUD database API for plugin binaries.
 //!
 //! Plugins declare their schema via [`DbSchema`], then use the [`DbClient`] to
-//! perform typed CRUD operations over a Unix socket connection to the core
-//! DB server. The core server enforces table-name prefix isolation so that
-//! each plugin can only access its own tables.
+//! perform typed CRUD operations over the host-service `db` passenger. The
+//! host enforces table-name prefix isolation so that each plugin can only
+//! access its own tables.
 //!
 //! Groups of writes that must stand or fall together can be applied atomically
 //! with [`DbClient::batch`]: the server runs the whole [`DbWriteOp`] list in a
@@ -40,7 +40,7 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut client = DbClient::connect_with_token(
-//!     std::path::Path::new("/tmp/db.sock"),
+//!     std::path::Path::new("/tmp/ene-host-service.sock"),
 //!     "pre-shared-token",
 //! ).await?;
 //!

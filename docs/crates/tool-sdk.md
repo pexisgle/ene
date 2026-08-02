@@ -16,7 +16,7 @@ tool discovery lives in `ene-rag` (see [RAG Policy Layer](rag.md)).
 ## Architectural boundaries
 
 - `ene-plugin` owns the tool-authoring surface (`ToolAction`, `ActionSetProvider`, `prelude::tool`). Its only workspace dependencies are `ene-plugin-proto` (wire protocol), `ene-infer` (local-inference discipline), and `ene-tool-macros` (proc-macro derives); everything else is standard async/serialization ecosystem crates (`tokio`, `tokio-stream`, `tokio-util`, `async-trait`, `schemars`, `serde`/`serde_json`, `tracing`, `thiserror`, `parking_lot`, `base64`). It does not depend on `ene-runtime`, `ene-mind`, or `ene-store`.
-- `ene-plugin-db` is the IPC *client* used by stateful tool binaries (e.g. filesystem undo ledger, todo store); it talks to the host's `db_server` (owned by `ene-store`) over a socket rather than opening its own database connection — stateful tool binaries never become a second SQLite writer.
+- `ene-plugin-db` is the IPC *client* used by stateful tool binaries (e.g. filesystem undo ledger, todo store); it opens the host-service `db` passenger (owned by `ene-store`) rather than opening its own database connection — stateful tool binaries never become a second SQLite writer.
 - `ene-tool-macros` is proc-macro only: it generates `ToolSpec`/`ToolAction` boilerplate from `#[tool(...)]`/`#[arg(...)]` attributes at compile time and has no runtime logic of its own. Its generated code references `::ene_plugin::` paths.
 - Retrieval-augmented tool selection is owned by `ene-rag` (the `tool` module), not by these SDK crates; see [RAG Policy Layer](rag.md).
 
