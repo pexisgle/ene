@@ -47,10 +47,16 @@
 
 /// Unified tool action interface.
 pub mod action;
-/// Compatibility adapter for wrapping legacy [`ToolProvider`] as [`ToolPlugin`].
+/// Legacy `ToolProvider` adapter over tool actions.
 pub mod compat;
+/// Per-connection plugin context passed to provider methods.
+pub mod context;
+/// Credential client for the host's `credential` passenger.
+pub mod credentials;
 /// Plugin trait and streaming chunk types.
 pub mod plugin;
+/// Client-side retry / rate-limit / timeout policies.
+pub mod policy;
 /// Plugin IPC server and dispatch loop.
 pub mod server;
 /// `ToolProvider` adapters over `Vec<Box<dyn ToolAction>>` (or a single action).
@@ -58,9 +64,16 @@ pub mod tool_provider;
 
 pub use action::{ToolAction, ToolSpecArgs};
 pub use compat::ToolProviderPlugin;
+pub use context::PluginContext;
+#[cfg(feature = "http")]
+pub use credentials::{ClientOptions, HttpAuth, HttpCaller};
+pub use credentials::{CredentialClient, CredentialSecret};
 pub use plugin::{
     ConfigurablePlugin, EmbedPlugin, LlmPlugin, PluginCompletion, PluginStream, PluginStreamChunk,
     SttPlugin, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
+};
+pub use policy::{
+    PaginationCursor, RateLimitCounter, RateLimiter, RequestTimeout, RetryPolicy, TimeoutPolicy,
 };
 pub use server::{PluginDispatch, run_plugin_server};
 pub use tool_provider::{ActionSetProvider, SingleActionProvider};
@@ -150,11 +163,19 @@ pub mod prelude {
         };
 
         #[doc(no_inline)]
+        pub use crate::policy::{
+            PaginationCursor, RateLimitCounter, RateLimiter, RequestTimeout, RetryPolicy,
+            TimeoutPolicy,
+        };
+        #[cfg(feature = "http")]
+        #[doc(no_inline)]
+        pub use crate::{ClientOptions, HttpAuth, HttpCaller};
+        #[doc(no_inline)]
         pub use crate::{
-            ConcurrencyHint, ConfigurablePlugin, EmbedPlugin, LlmPlugin, LlmProviderSpec,
-            PluginCompletion, PluginDispatch, PluginError, PluginStream, PluginStreamChunk,
-            SttPlugin, SttProviderSpec, TokenUsage, ToolPlugin, ToolPluginCapabilities, TtsPlugin,
-            TtsProviderSpec, run_plugin_server,
+            ConcurrencyHint, ConfigurablePlugin, CredentialClient, CredentialSecret, EmbedPlugin,
+            LlmPlugin, LlmProviderSpec, PluginCompletion, PluginContext, PluginDispatch,
+            PluginError, PluginStream, PluginStreamChunk, SttPlugin, SttProviderSpec, TokenUsage,
+            ToolPlugin, ToolPluginCapabilities, TtsPlugin, TtsProviderSpec, run_plugin_server,
         };
     }
 

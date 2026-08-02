@@ -10,6 +10,7 @@
 
 use std::pin::Pin;
 
+use crate::context::PluginContext;
 use async_trait::async_trait;
 use ene_plugin_proto::{
     CallContext, ConfigFieldError, ConfigOption, DeferredOutcome, DeferredStatus, LlmProviderSpec,
@@ -261,11 +262,16 @@ pub trait LlmPlugin: ConfigurablePlugin + Send + Sync {
 
     /// Creates a streaming chat completion.
     ///
+    /// `ctx` carries per-connection services (credential resolution, and
+    /// later settings/call context); resolve host-held secrets through it
+    /// rather than reading keys out of `config` yourself.
+    ///
     /// Returns a stream of [`PluginStreamChunk`] items. The default returns
     /// [`PluginError::NotSupported`] for plugins that do not provide LLM
     /// streaming.
     async fn create_chat_stream(
         &self,
+        _ctx: &PluginContext,
         _kind: &str,
         _config: serde_json::Value,
         _model: String,
@@ -284,6 +290,7 @@ pub trait LlmPlugin: ConfigurablePlugin + Send + Sync {
     /// completions.
     async fn chat_completion(
         &self,
+        _ctx: &PluginContext,
         _kind: &str,
         _config: serde_json::Value,
         _model: String,
@@ -316,6 +323,7 @@ pub trait EmbedPlugin: ConfigurablePlugin + Send + Sync {
     /// restore `(id, text)` only if a future provider needs per-item metadata.
     async fn embed_batch(
         &self,
+        _ctx: &PluginContext,
         _kind: &str,
         _config: serde_json::Value,
         _model: String,
@@ -340,6 +348,7 @@ pub trait TtsPlugin: ConfigurablePlugin + Send + Sync {
     /// do not provide TTS.
     async fn synthesize(
         &self,
+        _ctx: &PluginContext,
         _kind: &str,
         _config: serde_json::Value,
         _text: String,
@@ -364,6 +373,7 @@ pub trait SttPlugin: ConfigurablePlugin + Send + Sync {
     /// do not provide STT.
     async fn transcribe(
         &self,
+        _ctx: &PluginContext,
         _kind: &str,
         _config: serde_json::Value,
         _audio_data: Vec<u8>,
