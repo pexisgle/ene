@@ -697,10 +697,10 @@ mod tests {
                     header_seen_clone.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
-            let _ = std::io::Write::write_all(
+            drop(std::io::Write::write_all(
                 &mut stream,
                 b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
-            );
+            ));
         });
 
         let caller = anthropic_http_caller(&ctx).await.expect("build caller");
