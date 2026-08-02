@@ -135,8 +135,8 @@ pub fn parse_credentials(schema: &Value) -> CredentialParse {
         };
     };
 
-    let mut declarations = Vec::new();
-    let mut rejected = Vec::new();
+    let mut declarations: Vec<CredentialDeclaration> = Vec::new();
+    let mut rejected: Vec<RejectedCredential> = Vec::new();
 
     for entry in entries {
         let Some(entry) = entry.as_object() else {
