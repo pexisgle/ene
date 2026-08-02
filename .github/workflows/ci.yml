@@ -44,12 +44,12 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
       - uses: Swatinem/rust-cache@v2
         with:
-          cmd-format: "nix develop --command {0}"
+          cmd-format: "nix develop .#ci --command {0}"
           # Failed runs must not persist partial caches.
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run clippy
-        run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+        run: nix develop .#ci --command cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: Tests
@@ -70,11 +70,11 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
       - uses: Swatinem/rust-cache@v2
         with:
-          cmd-format: "nix develop --command {0}"
+          cmd-format: "nix develop .#ci --command {0}"
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
-        run: nix develop --command cargo test --workspace
+        run: nix develop .#ci --command cargo test --workspace
 
   docs:
     name: Doc build
@@ -95,7 +95,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v22
       - uses: Swatinem/rust-cache@v2
         with:
-          cmd-format: "nix develop --command {0}"
+          cmd-format: "nix develop .#ci --command {0}"
           cache-on-failure: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # Not run with RUSTDOCFLAGS=-D warnings: many crates already carry
@@ -104,7 +104,7 @@ jobs:
       # errors here would fail CI on unrelated debt instead of catching new
       # breakage. See the #273 PR description for the follow-up.
       - name: Build docs
-        run: nix develop --command cargo doc --workspace --no-deps
+        run: nix develop .#ci --command cargo doc --workspace --no-deps
 
   # Keep the two newest rust-cache generations per job, run after the
   # caching jobs save theirs.
