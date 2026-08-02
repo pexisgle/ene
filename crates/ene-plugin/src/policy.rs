@@ -503,6 +503,6 @@ mod tests {
         let result = tokio::runtime::Runtime::new()
             .expect("runtime")
             .block_on(timeout.run(async { 42 }));
-        assert_eq!(result, Ok(42));
+        assert!(matches!(result, Ok(42)));
     }
 }

@@ -71,7 +71,7 @@ impl ene_plugin::ConfigurablePlugin for AnthropicPlugin {
 /// Returns a credentialed HTTP caller for the Anthropic API.
 ///
 /// The auth header is injected from the host's `anthropic` credential
-/// (api_key), and the client preserves the plugin's original timeouts.
+/// (`api_key`), and the client preserves the plugin's original timeouts.
 async fn anthropic_http_caller(ctx: &PluginContext) -> Result<ene_plugin::HttpCaller, PluginError> {
     ctx.credentials()
         .http_client_with(

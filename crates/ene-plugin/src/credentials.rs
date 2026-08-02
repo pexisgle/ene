@@ -647,8 +647,7 @@ mod tests {
             let Ok(mut stream) = listener.accept().await else {
                 return;
             };
-            let Ok(Some(req)) = ene_plugin_proto::read_host_service_request(&mut stream).await
-            else {
+            let Ok(Some(req)) = read_host_service_request(&mut stream).await else {
                 return;
             };
             if !matches!(
